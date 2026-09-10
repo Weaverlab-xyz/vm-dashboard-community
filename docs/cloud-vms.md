@@ -627,6 +627,12 @@ This is documented in full — plugin uploads, per-cloud methods, the `adminuser
 the config-key table — in the [Password Safe](integrations/password-safe.md) doc's
 **"Password Safe VM onboarding"** section. Off-boarding is automatic on VM destroy.
 
+With `passwordsafe_vault_sync_enabled` on, the three cloud-native methods additionally
+mirror the VM's rotating SSH key into a **PRA Vault Private Key** account associated to the
+VM's Jump Group, so the key can be checked out in PRA's `/login` and injected into the VM's
+Shell Jump. Password Safe owns the propagation through a `SyncedAccounts` link — see
+[Using the VM's key in PRA](integrations/password-safe.md#using-the-vms-key-in-pra--the-pra-vault-private-key-sync).
+
 ---
 
 ## Layer 3 — Entitle (SSH ephemeral accounts)

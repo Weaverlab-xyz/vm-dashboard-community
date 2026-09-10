@@ -47,6 +47,16 @@ Grant the account permission to manage **Jump Items** and **Jump Groups**, and �
 use the cloud-database or Kubernetes tunnels — read access to **Vault Accounts** (the
 dashboard enumerates account groups to populate the provision form).
 
+The dashboard provisions three kinds of Vault account, all through the `beyondtrust/sra`
+Terraform provider and all associated to a Jump Group for injection: **username/password**
+(cloud-database and Kubernetes tunnels, Web Jumps, the OT cell's admin credential),
+**token** (a cluster's ServiceAccount bearer token), and **SSH private key** (a cloud VM's
+rotating host key — see
+[Password Safe → Using the VM's key in PRA](password-safe.md#using-the-vms-key-in-pra--the-pra-vault-private-key-sync)).
+In every case the value the dashboard writes is a throwaway placeholder that Password Safe
+replaces through a `SyncedAccounts` link, so **managing** Vault accounts is required for
+those features while the real credential never passes through the dashboard.
+
 > If your PRA appliance and Password Safe are the same host, these credentials may be
 > identical to the Password Safe API Registration pair — see
 > [Password Safe → Step 1](password-safe.md#step-1--password-safe-oauth-application-ps-cli).

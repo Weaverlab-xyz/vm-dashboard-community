@@ -627,13 +627,21 @@ def _scrub_tf_state(tf_state_json: str) -> Optional[str]:
     it is stashed in the jobs table (jobs.extra_data is served by the jobs API
     and the MCP get_job tool). The state-driven destroy deletes resources by
     id and does not need the live values. Fails CLOSED: on any parse error
-    return None so the caller stashes nothing rather than a plaintext secret."""
+    return None so the caller stashes nothing rather than a plaintext secret.
+
+    ``private_key`` / ``private_key_passphrase`` are ``sra_vault_ssh_account``
+    attributes and matter as much as the other two: the seeded throwaway key is a
+    real PEM, and Password Safe replaces it with the VM's LIVE key on the first
+    synced rotation — a refresh of this state would then stash a working host key.
+    ps_resource_service._scrub_state has redacted private_key from the outset; this
+    list only became reachable when the Vault SSH account landed."""
     try:
         state = json.loads(tf_state_json)
         for res in state.get("resources", []):
             for inst in res.get("instances", []):
                 attrs = inst.get("attributes") or {}
-                for secret_attr in ("password", "token"):
+                for secret_attr in ("password", "token", "private_key",
+                                    "private_key_passphrase"):
                     if attrs.get(secret_attr):
                         attrs[secret_attr] = _REDACTED
         return json.dumps(state)
@@ -1748,5 +1756,150 @@ async def provision_vault_account(*, name: str, username: str, jump_group_name: 
 
 
 async def remove_vault_account(tf_state_json: str) -> None:
-    """Destroy a standalone Vault account from its stored state."""
+    """Destroy a standalone Vault account from its stored state.
+
+    Type-agnostic: ``_destroy_state_only_sync`` uses a provider-only config, so this
+    serves the username/password account and the SSH account below alike."""
     await asyncio.to_thread(_destroy_state_only_sync, tf_state_json)
+
+
+# ── Standalone Vault SSH (private key) account (cloud-VM key sync) ───────────
+#
+# A cloud VM's Password Safe onboarding (services/ps_vm_hook) creates a managed
+# account whose credential IS an SSH private key, minted and rotated by the
+# cloud-native plugin (AWS Systems Manager / Azure VM SSH Rotation / GCP VM SSH
+# Rotation). Making that key USABLE in PRA — checkout in /login, injection into the
+# VM's Shell Jump — additionally needs a Vault SSH account scoped to the VM's Jump
+# Group. The key seeded here is a throwaway: Password Safe overwrites it through the
+# "PRA Vault Private Key" plugin the first time the SyncedAccounts pair rotates, so
+# the VM's real key never passes through the dashboard.
+
+
+def _throwaway_openssh_key() -> str:
+    """A fresh, never-installed RSA-2048 private key in OpenSSH format.
+
+    ``sra_vault_ssh_account.private_key`` is optional, but leaving it unset has PRA
+    mint its own keypair — and PRA's copy would then be the only place that key
+    exists until the first synced rotation replaced it, which presents as a working
+    account no host accepts. Seeding a throwaway is the same choice
+    ``_provision_vault_account_sync`` makes for its placeholder password. RSA-2048
+    rather than Ed25519 because it is the shape every PRA version parses, and the
+    value's only job is to be replaced."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.OpenSSH,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+
+
+def _generate_vault_ssh_account_hcl(vault_account_name: str, username: str,
+                                    jump_group_name: str,
+                                    vault_account_group_id: Optional[int] = None) -> str:
+    """HCL for one standalone ``sra_vault_ssh_account``, associated to a Jump Group by
+    NAME via ``criteria.shared_jump_groups`` — the same association shape as every
+    other Vault account here, for the same reason (a per-jump-item association is
+    rejected by the PRA backend; see ``_generate_db_tunnel_hcl``). The key rides
+    ``TF_VAR_vault_private_key`` (sensitive), never the HCL; the criteria arrays must
+    all be present (empty) or the API 4xxes."""
+    group_line = (f"  account_group_id = {int(vault_account_group_id)}\n"
+                  if vault_account_group_id else "")
+    return f"""\
+terraform {{
+  required_providers {{
+    sra = {{
+      source  = "beyondtrust/sra"
+      version = "~> 1.0"
+    }}
+  }}
+}}
+
+variable "bt_host"           {{ sensitive = false }}
+variable "bt_client_id"      {{ sensitive = true }}
+variable "bt_client_secret"  {{ sensitive = true }}
+variable "vault_private_key" {{ sensitive = true }}
+
+provider "sra" {{
+  host          = var.bt_host
+  client_id     = var.bt_client_id
+  client_secret = var.bt_client_secret
+}}
+
+data "sra_jump_group_list" "jg" {{
+  name = {json.dumps(jump_group_name)}
+}}
+
+resource "sra_vault_ssh_account" "vm_key" {{
+  name                   = {json.dumps(vault_account_name)}
+  username               = {json.dumps(username)}
+  private_key            = var.vault_private_key
+  private_key_passphrase = ""
+  description = "Auto-provisioned by Infrastructure Management Dashboard (cloud VM key sync)"
+{group_line}  jump_item_association = {{
+    filter_type = "criteria"
+    criteria = {{
+      shared_jump_groups = [tonumber(data.sra_jump_group_list.jg.items[0].id)]
+      host               = []
+      name               = []
+      tag                = []
+      comment            = []
+    }}
+    jump_items = []
+  }}
+}}
+
+output "vault_account_id" {{
+  value = sra_vault_ssh_account.vm_key.id
+}}
+"""
+
+
+def _provision_vault_ssh_account_sync(name, username, jump_group_name,
+                                      vault_account_group_id=None,
+                                      client_secret="") -> dict:
+    extra_env = {"TF_VAR_vault_private_key": _throwaway_openssh_key()}
+    if client_secret:
+        extra_env["TF_VAR_bt_client_secret"] = client_secret
+    with tempfile.TemporaryDirectory(prefix="pra_vault_ssh_tf_") as work_dir:
+        Path(work_dir, "main.tf").write_text(
+            _generate_vault_ssh_account_hcl(name, username, jump_group_name,
+                                            vault_account_group_id))
+        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
+        if init.returncode != 0:
+            raise TerraformPRAError(
+                f"terraform init failed: {init.stderr.strip() or init.stdout.strip()}")
+        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120, extra_env=extra_env)
+        if apply.returncode != 0:
+            _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120,
+                    extra_env=extra_env)
+            raise TerraformPRAError(
+                f"vault SSH account apply failed: "
+                f"{apply.stderr.strip() or apply.stdout.strip()}")
+        out = _run_tf(["output", "-json"], work_dir, timeout=30)
+        vault_account_id: Optional[str] = None
+        if out.returncode == 0 and out.stdout.strip():
+            try:
+                vault_raw = json.loads(out.stdout).get("vault_account_id", {}).get("value", "")
+                vault_account_id = str(vault_raw) if vault_raw else None
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        state_path = Path(work_dir, "terraform.tfstate")
+        tf_state_json = state_path.read_text() if state_path.exists() else None
+        return {
+            "vault_account_id": vault_account_id,
+            "tf_state_json": _scrub_tf_state(tf_state_json) if tf_state_json else None,
+        }
+
+
+async def provision_vault_ssh_account(*, name: str, username: str, jump_group_name: str,
+                                      vault_account_group_id: Optional[int] = None,
+                                      client_secret: str = "") -> dict:
+    """Provision one standalone PRA Vault SSH (private key) account, associated to
+    ``jump_group_name`` for injection and seeded with a throwaway key. Returns
+    ``{vault_account_id, tf_state_json}`` (state scrubbed of the key). Destroy it with
+    :func:`remove_vault_account`."""
+    return await asyncio.to_thread(
+        _provision_vault_ssh_account_sync, name, username, jump_group_name,
+        vault_account_group_id, client_secret)

@@ -127,7 +127,22 @@ k8s_ps_rotator_bootstrap_namespace k8s_ps_rotator_bootstrap_sa
 pra_k8s_namespace pra_k8s_sa_name bt_vault_account_group_id
 ot_ps_pra_checkout_enabled ot_ps_pravault_platform ot_ps_pravault_functional_account
 ot_ps_checkout_converge ot_aws_require_private_subnet ot_purdue_firewall_enabled
+passwordsafe_vault_sync_enabled passwordsafe_vault_sync_converge
+passwordsafe_vault_sync_platform passwordsafe_vault_sync_functional_account
 """.split())
+
+# ADDED since the split, deliberately: the four `passwordsafe_vault_sync_*` keys — the
+# cloud-VM counterpart of the `ot_ps_*` pair above. A VM onboarded with one of the
+# cloud-native SSH-key plugins has its key mirrored into a PRA Vault Private Key account
+# via SyncedAccounts, so it can be checked out and injected in PRA. On the Password Safe
+# panel for the same reason the OT and cloud-DB pravault keys are: they name Password Safe
+# platform and functional-account objects, so turning PRA off must not blank them.
+#
+# `passwordsafe_vault_sync_functional_account` deliberately has NO read-time fallback to
+# its `ot_ps_` / `clouddb_ps_` siblings, unlike the OT pair which falls back to the
+# cloud-DB one. Those functional accounts are on the "PRA Vault Username Password"
+# platform; borrowing one here would land the mirror on a plugin that writes a password
+# field and never a key, and register successfully while syncing nothing into PRA.
 
 # ADDED since the split, deliberately: the three `clouddb_ps_functional_account_mode_*`
 # per-CLOUD overrides (aws/azure/gcp), because the per-engine keys cannot express the
