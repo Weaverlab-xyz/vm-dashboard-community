@@ -36,6 +36,19 @@
 # this module by hand has to do the same. `service_account_id` is the same shape of trap
 # one namespace up: it is unique per PROJECT, so its default only works for one lab at a
 # time, and the caller passes a per-lab id.
+#
+# ── The lifetime is a protobuf Duration, so it is SECONDS ────────────────────
+#
+# `lifetime` reaches the API as a google.protobuf.Duration, which takes a count of seconds
+# with an `s` suffix and nothing else. Terraform's own duration spelling — "87600h" — is
+# a plain string to the provider, so it survives validate and plan and dies at create with
+#
+#   Error 400: Invalid value at 'certificate_authority.lifetime', Illegal duration format;
+#   duration must end with 's'
+#
+# by which point the pool, the service account, its key and the IAM binding all exist, and
+# the pool id is spent for good under the rule above — every retry costs a new one. The
+# variable's `validation` block is what moves that failure back to plan time.
 
 terraform {
   required_providers {
@@ -95,8 +108,13 @@ variable "ca_organization" {
 
 variable "ca_lifetime" {
   type        = string
-  default     = "87600h"
-  description = "Root CA validity, in seconds-with-suffix (87600h = 10 years)"
+  default     = "315360000s"
+  description = "Root CA validity as a protobuf Duration: a count of SECONDS with an `s` suffix (315360000s = 10 years). A Terraform-style unit suffix such as 87600h reaches the API unchanged and fails at create, after the pool exists — see the header"
+
+  validation {
+    condition     = can(regex("^[0-9]+([.][0-9]+)?s$", var.ca_lifetime))
+    error_message = "ca_lifetime must be seconds with an `s` suffix, e.g. 315360000s for 10 years. CAS takes a protobuf Duration and rejects unit spellings like 87600h."
+  }
 }
 
 variable "key_algorithm" {
