@@ -3031,14 +3031,21 @@ async def run_ps_register(db: Session, *, db_id: str, job_id: str,
 
 # Generic terraform line → (pct, message) milestones for the DB job's progress bar
 # (engine-agnostic phrases, since the resource type varies by cloud).
+# Every needle is anchored on the "<address>: " separator terraform prints before the
+# action, and the "still" rows come first. Both matter: "creating..." is a SUBSTRING of
+# "still creating...", so the bare phrase matched every "Still creating" line and won on
+# order, leaving the rows below it dead code -- a multi-minute create sat at the lower pct
+# looking wedged (and a destroy never left it either). k8s_service._MILESTONES dodges this
+# by spelling the resource out; these tables cannot (the resource varies by cloud/engine),
+# so they anchor on the separator instead.
 _DB_MILESTONES = [
-    ("plan:",                20, "Planning…"),
-    ("creating...",          40, "Creating the database…"),
-    ("still creating",       55, "Creating the database (this can take several minutes)…"),
-    ("creation complete",    85, "Database created; brokering access…"),
-    ("destroying...",        40, "Destroying the database…"),
-    ("still destroying",     60, "Destroying the database…"),
-    ("destruction complete", 90, "Cleaning up…"),
+    ("plan:",                  20, "Planning…"),
+    (": still creating",       55, "Creating the database (this can take several minutes)…"),
+    (": creating...",          40, "Creating the database…"),
+    (": creation complete",    85, "Database created; brokering access…"),
+    (": still destroying",     60, "Destroying the database…"),
+    (": destroying...",        40, "Destroying the database…"),
+    (": destruction complete", 90, "Cleaning up…"),
 ]
 
 
@@ -3062,41 +3069,74 @@ def _job_stream(job_id: str, start_pct: int, start_msg: str):
     return on_line
 
 
-async def _reclaim_gcp_create_wait_instance(
+# Apply failures after which GCP may still be finishing (or have already finished) the
+# Cloud SQL instance, leaving it created but ABSENT from Terraform state -- so it can be
+# imported back instead of orphaned. Two distinct ways that happens:
+#   * the create operation-wait error -- the google provider clears the resource id
+#     (``d.SetId("")``) and drops the mid-create instance from state;
+#   * an INTERRUPTED apply -- terraform caught a SIGINT/SIGTERM and shut down with the
+#     create still in flight ("Interrupt received." / "Error: execution halted" /
+#     "Error: Request cancelled"), so it never recorded the instance at all. GCP finishes
+#     the create regardless and bills for it.
+# Matching wide is cheap: the reclaim's first act is one label-guarded GET that returns
+# immediately when the instance is absent or is not ours (see
+# gcp_service._wait_sql_instance_runnable_sync), so a false positive costs a single HTTP
+# call -- and only an instance carrying OUR clouddb-id label is ever adopted.
+_GCP_RECLAIMABLE_APPLY_MARKERS = (
+    "error waiting for create instance",
+    "interrupt received",
+    "execution halted",
+    "request cancelled",
+)
+
+
+async def _reclaim_gcp_sql_instance(
     *, row: CloudDatabase, job_id: str, engine: str, tf_variables: dict, exc: Exception,
 ) -> Optional[dict]:
-    """GCP-only self-heal for the transient Cloud SQL *create-wait* failure. The
-    google provider clears the resource id (``d.SetId("")``) when the create
-    operation-wait errors, so the instance is dropped from Terraform state even
-    though GCP finishes creating it — the apply raises "Error waiting for Create
-    Instance:" and, left alone, orphans a RUNNABLE instance (which
-    :func:`run_decommission` later has to sweep, wasting the instance and blocking
-    the name for ~a week).
+    """GCP-only self-heal for an apply that left a Cloud SQL instance created but out of
+    Terraform state (:data:`_GCP_RECLAIMABLE_APPLY_MARKERS` lists the two ways). Left
+    alone that instance is a billable orphan :func:`run_decommission` has to sweep, and
+    its name is blocked for ~a week.
 
-    Instead: poll GCP for the instance (guarded on our ``clouddb-id`` label) until
-    it is RUNNABLE, ``terraform import`` it back into state, then re-apply to
-    converge (create the database + user, read outputs). Returns the outputs dict
-    on success, or ``None`` when this isn't that failure or the instance can't be
-    reclaimed — the caller then fails the job as before."""
-    if row.cloud != "gcp" or "error waiting for create instance" not in str(exc).lower():
+    Instead: poll GCP for the instance (guarded on our ``clouddb-id`` label) until it is
+    RUNNABLE, ``terraform import`` it back into state, then re-apply to converge (create
+    the database + user, read outputs). Returns the outputs dict on success, or ``None``
+    when this is not a reclaimable failure or the instance cannot be reclaimed — the
+    caller then fails the job as before."""
+    if row.cloud != "gcp":
+        return None
+    low = str(exc).lower()
+    if not any(m in low for m in _GCP_RECLAIMABLE_APPLY_MARKERS):
         return None
     from . import gcp_service
     project = (tf_variables.get("project")
                or _cfg("gcp_project") or _cfg("gcp_project_id"))
     name = tf_variables.get("identifier") or f"clouddb-{row.id[:8]}"
-    logger.warning("clouddb apply: transient GCP create-wait error for %s — checking "
-                   "whether GCP created the instance anyway", name)
+    logger.warning("clouddb apply: GCP apply failed with the create possibly in flight "
+                   "for %s — checking whether GCP created the instance anyway", name)
     body = await gcp_service.wait_sql_instance_runnable(project, name, row.id)
     if not body:
         logger.warning("clouddb apply: %s not reclaimable (absent / not ours / not "
                        "RUNNABLE) — failing the provision", name)
         return None
-    logger.warning("clouddb apply: %s is RUNNABLE despite the create-wait error — "
-                   "importing it into state and re-applying to converge", name)
-    await terraform.import_resource(
-        _deploy_dir(job_id), "google_sql_database_instance.this", f"{project}/{name}",
-        env=terraform_provider_env.provider_env(row.cloud),
-        template_dir=template_dir(engine, row.cloud), variables=tf_variables)
+    logger.warning("clouddb apply: %s is RUNNABLE despite the failed apply — importing "
+                   "it into state and re-applying to converge", name)
+    try:
+        await terraform.import_resource(
+            _deploy_dir(job_id), "google_sql_database_instance.this", f"{project}/{name}",
+            env=terraform_provider_env.provider_env(row.cloud),
+            template_dir=template_dir(engine, row.cloud), variables=tf_variables)
+    except terraform.TerraformError as imp_exc:
+        # An INTERRUPTED apply can have committed the instance to state before it was
+        # stopped (the create-wait error never does — it always clears the id). Terraform
+        # then refuses the import as "Resource already managed by Terraform", which means
+        # state is already correct and the re-apply below is the only part still missing.
+        # Without this the widened trigger would turn a recoverable interrupt into a
+        # second, more confusing failure.
+        if "already managed by terraform" not in str(imp_exc).lower():
+            raise
+        logger.info("clouddb apply: %s is already in state — skipping the import and "
+                    "re-applying to converge", name)
     return await terraform.apply(
         _deploy_dir(job_id), tf_variables, template_dir=template_dir(engine, row.cloud),
         env=terraform_provider_env.provider_env(row.cloud),
@@ -3110,7 +3150,7 @@ async def _reclaim_gcp_create_wait_instance(
 # CapacityNotAvailable ("Capacity is not available in this region/zone"), so the
 # raw TerraformError is hundreds of plan/"Still creating…" lines with the one
 # actionable line at the bottom. GCP is deliberately absent: its create-wait
-# failure mode is handled by _reclaim_gcp_create_wait_instance, and Cloud SQL has
+# failure mode is handled by _reclaim_gcp_sql_instance, and Cloud SQL has
 # no comparable stockout code to key on.
 _DB_CAPACITY_STOCKOUTS = {
     "azure": ("Azure", "CapacityNotAvailable", "sku_name",
@@ -3214,10 +3254,11 @@ async def run_provision_apply(
                 on_line=_job_stream(job_id, 5, "Provisioning the database…"),
             )
         except terraform.TerraformError as exc:
-            # GCP Cloud SQL create-wait self-heal: on the transient "Error waiting for
-            # Create Instance" the google provider drops the (still-created) instance
-            # from state. Try to reclaim it via import + re-apply rather than failing.
-            outputs = await _reclaim_gcp_create_wait_instance(
+            # GCP Cloud SQL self-heal: both the transient "Error waiting for Create
+            # Instance" and an interrupted apply can leave the instance created but out
+            # of state. Try to reclaim it via import + re-apply rather than failing and
+            # leaving a billable orphan.
+            outputs = await _reclaim_gcp_sql_instance(
                 row=row, job_id=job_id, engine=engine, tf_variables=tf_variables, exc=exc)
             if outputs is None:
                 raise

@@ -1283,14 +1283,21 @@ async def run_update_apply(db: Session, *, fn_id: str, job_id: str,
 # Terraform line → (pct, message). GCP dominates this timeline: every deploy runs
 # Cloud Build, so "still creating" is the normal state for a minute or two and the
 # progress bar must not look stuck.
+# Every needle is anchored on the "<address>: " separator terraform prints before the
+# action, and the "still" rows come first. Both matter: "creating..." is a SUBSTRING of
+# "still creating...", so the bare phrase matched every "Still creating" line and won on
+# order, leaving the rows below it dead code -- a multi-minute create sat at the lower pct
+# looking wedged (and a destroy never left it either). k8s_service._MILESTONES dodges this
+# by spelling the resource out; these tables cannot (the resource varies by cloud/engine),
+# so they anchor on the separator instead.
 _FN_MILESTONES = [
     ("plan:", 15, "Planning…"),
-    ("creating...", 35, "Creating the function…"),
-    ("still creating", 55, "Building and deploying (GCP builds a container — 1-2 min)…"),
-    ("creation complete", 85, "Function created; wiring the endpoint…"),
-    ("destroying...", 40, "Destroying the function…"),
-    ("still destroying", 60, "Destroying the function…"),
-    ("destruction complete", 90, "Cleaning up…"),
+    (": still creating", 55, "Building and deploying (GCP builds a container — 1-2 min)…"),
+    (": creating...", 35, "Creating the function…"),
+    (": creation complete", 85, "Function created; wiring the endpoint…"),
+    (": still destroying", 60, "Destroying the function…"),
+    (": destroying...", 40, "Destroying the function…"),
+    (": destruction complete", 90, "Cleaning up…"),
 ]
 
 
