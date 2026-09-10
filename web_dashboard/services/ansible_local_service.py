@@ -53,6 +53,22 @@ _EXT_TYPE: dict[str, str] = {
 # not. Kept as a named var so the wrapper is the same shape for every installer.
 WINPKG_ARGS_VAR = "installer_arguments"
 
+# Where the installer was told to write its own log, so the play can read it back when the
+# install fails. An MSI-backed installer reports failure as a BARE EXIT CODE -- a live
+# Resource Broker install returned `rc: 1603` with `"stdout": ""` and `"stderr": ""`, which
+# is every byte of diagnosis the run produced. 1603 is "fatal error during installation"
+# and nothing more; the log is the only artefact that says which one. Leaving it on the
+# target is not enough either, because reaching a POV guest to read it means RDP through a
+# Gateway that may be what you were installing.
+#
+# Empty by default, and the play skips the read when it is: an asset that names no log is
+# an ordinary case, not a broken one.
+WINPKG_LOG_VAR = "installer_log_path"
+
+# Enough to carry an MSI's error rows and the actions around them, without pasting a
+# 6 MB verbose log into Live Output.
+WINPKG_LOG_TAIL_LINES = 120
+
 
 def _cfg(key: str) -> str:
     from . import config_service
@@ -83,6 +99,45 @@ ASSET_URL_VAR = "asset_source_url"
 # task wants a file on the CONTROLLER rather than on the target, so "download it on the far
 # end" is not a shape they have.
 REMOTE_FETCH_TYPES = ("winpkg", "rpm", "deb")
+
+
+def _winpkg_failure_rescue(base: str) -> str:
+    """The tasks that run when a ``win_package`` install fails: read the installer's own
+    log off the target, print it, and then fail with the exit code.
+
+    **Shared by both winpkg plays on purpose.** They are the embedded and the
+    remote-fetch spelling of one install, and the difference between them is where the
+    file came from -- not what a failure deserves to say.
+
+    Why a ``rescue`` rather than a task with ``when: ... is failed``: a failed task ends
+    the play for that host, so a following task never runs no matter what its condition
+    says. Ansible registers the result of a task that failed, so ``winpkg_result.rc`` is
+    still readable here, and the closing ``fail`` keeps the run red -- reading a log is
+    not the same as tolerating the error.
+    """
+    return f"""\
+      rescue:
+        - name: Read the log {base} left behind
+          ansible.windows.win_shell: |
+            $path = '{{{{ {WINPKG_LOG_VAR} | default('') }}}}'
+            if (Test-Path -LiteralPath $path) {{
+              Get-Content -LiteralPath $path -Tail {WINPKG_LOG_TAIL_LINES}
+            }} else {{
+              "no installer log was written to $path"
+            }}
+          register: winpkg_log
+          when: ({WINPKG_LOG_VAR} | default('')) | length > 0
+          changed_when: false
+          failed_when: false
+
+        - name: The log {base} wrote
+          ansible.builtin.debug:
+            msg: "{{{{ winpkg_log.stdout_lines | default(['this asset names no installer log, so there is nothing to read back']) }}}}"
+
+        - name: Fail with the exit code {base} returned
+          ansible.builtin.fail:
+            msg: "{base} exited {{{{ winpkg_result.rc | default('unknown') }}}}. The log above is the installer's own account of why."
+"""
 
 
 def can_remote_fetch(asset_name: str) -> bool:
@@ -117,7 +172,10 @@ def generate_remote_fetch_playbook_yaml(asset_name: str) -> str:
         # `ansible.windows.win_get_url` to a path under the remote temp dir, then the same
         # `win_package` install the embedded wrapper does — including its exit-code
         # handling, so a 3010 "reboot required" still reads as success. The file is removed
-        # afterwards because it is large and the target did not ask to keep it.
+        # afterwards because it is large and the target did not ask to keep it — from an
+        # `always`, because the removal used to be the task after the install and so was
+        # skipped by exactly the runs that leave a copy behind: the failing ones, which are
+        # also the ones an operator retries.
         # The Windows destination is a SINGLE-quoted YAML scalar, and it has to be: the
         # path puts a backslash before the filename, and inside a double-quoted scalar
         # YAML reads that as an escape sequence -- the '\B' of Bootstrapper.exe is not a
@@ -136,22 +194,25 @@ def generate_remote_fetch_playbook_yaml(asset_name: str) -> str:
         force: yes
       no_log: true
 
-    - name: Install {base}
-      ansible.windows.win_package:
-        path: "{{{{ _asset_dest }}}}"
-        arguments: "{{{{ {WINPKG_ARGS_VAR} | default('') }}}}"
-        state: present
-      register: winpkg_result
+    - block:
+        - name: Install {base}
+          ansible.windows.win_package:
+            path: "{{{{ _asset_dest }}}}"
+            arguments: "{{{{ {WINPKG_ARGS_VAR} | default('') }}}}"
+            state: present
+          register: winpkg_result
 
-    - name: Remove the downloaded {base}
-      ansible.windows.win_file:
-        path: "{{{{ _asset_dest }}}}"
-        state: absent
-      when: not ansible_check_mode
+        - name: Report {base} result
+          ansible.builtin.debug:
+            msg: "rc={{{{ winpkg_result.rc | default('n/a') }}}} reboot_required={{{{ winpkg_result.reboot_required | default(false) }}}}"
 
-    - name: Report {base} result
-      ansible.builtin.debug:
-        msg: "rc={{{{ winpkg_result.rc | default('n/a') }}}} reboot_required={{{{ winpkg_result.reboot_required | default(false) }}}}"
+{_winpkg_failure_rescue(base)}\
+      always:
+        - name: Remove the downloaded {base}
+          ansible.windows.win_file:
+            path: "{{{{ _asset_dest }}}}"
+            state: absent
+          when: not ansible_check_mode
 """
 
     if atype == "rpm":
@@ -251,17 +312,19 @@ def generate_playbook_yaml(asset_name: str) -> str:
         return f"""\
 - hosts: all
   tasks:
-    - name: Install {base}
-      ansible.windows.win_package:
-        path: {container_path}
-        arguments: "{{{{ {WINPKG_ARGS_VAR} | default('') }}}}"
-        state: present
-      register: winpkg_result
+    - block:
+        - name: Install {base}
+          ansible.windows.win_package:
+            path: {container_path}
+            arguments: "{{{{ {WINPKG_ARGS_VAR} | default('') }}}}"
+            state: present
+          register: winpkg_result
 
-    - name: Report {base} result
-      ansible.builtin.debug:
-        msg: "rc={{{{ winpkg_result.rc | default('n/a') }}}} reboot_required={{{{ winpkg_result.reboot_required | default(false) }}}}"
-"""
+        - name: Report {base} result
+          ansible.builtin.debug:
+            msg: "rc={{{{ winpkg_result.rc | default('n/a') }}}} reboot_required={{{{ winpkg_result.reboot_required | default(false) }}}}"
+
+{_winpkg_failure_rescue(base)}"""
 
     if atype == "rpm":
         return f"""\
