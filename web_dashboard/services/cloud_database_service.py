@@ -1766,14 +1766,45 @@ def _observed_iam_db_user(users: list, sa_email: str) -> str:
 
 def _fa_grant_statement(engine: str, *, fa_db_user: str, managed_user: str,
                         managed_host: str) -> str:
-    """The GRANT the functional account needs to rotate ``managed_user``.
+    """The grants the functional account needs to rotate ``managed_user``.
 
-    PostgreSQL 16 — which is the module default, not an edge case — dropped the rule
-    that ``CREATEROLE`` alone lets a role administer another, so this is per-role
-    ``ADMIN OPTION``. That is also the safer grant: a compromised functional account
-    can reset only the accounts Password Safe manages."""
+    PostgreSQL 16 — which is the module default, not an edge case — needs **BOTH** the
+    ``CREATEROLE`` attribute and per-role ``ADMIN OPTION``, and this used to send only
+    the second. The release note everyone quotes says "``CREATEROLE`` alone is no longer
+    sufficient", which reads like ``ADMIN OPTION`` *replaced* it; it did not, it was
+    *added*. ``AlterRole`` in ``src/backend/commands/user.c`` is unambiguous::
+
+        if (dpassword && roleid != currentUserId)
+            ereport(ERROR, errmsg("permission denied to alter role"),
+                    errdetail("To change another role's password, the current user
+                               must have the CREATEROLE attribute and the ADMIN
+                               option on the role."));
+
+    Live 2026-09-10 on ``clouddb-851e80ff``: with ``ADMIN OPTION`` granted and no
+    ``CREATEROLE``, *Change Managed Account* failed as ``pq: permission denied to alter
+    role``. That is the errmsg above — and the Data API does not relay the errdetail
+    that names the missing half, which is why the message looks like the grant simply
+    never landed.
+
+    The least-privilege property survives, just not as stated. ``CREATEROLE`` is
+    cluster-wide and does let the rotator create and drop roles; what it does NOT confer
+    is the right to alter roles it has no ``ADMIN OPTION`` on, so a compromised rotation
+    identity still cannot reset any account except the ``psafe_*`` ones Password Safe
+    manages. Only self-rotation avoids ``CREATEROLE`` altogether ("ordinary roles can
+    only change their own password"), and that is a ``cloud-run`` action.
+
+    One string, two statements, one ``executeSql`` call — deliberately unlike the
+    discovery grant, which is split out. These two are jointly required (neither is
+    useful alone) and they share a prerequisite: the issuing admin needs ``ADMIN
+    OPTION`` on the target, which it has for both roles because ``users.insert``
+    created both. So they succeed together or fail together, and splitting them would
+    buy two failure messages for one cause.
+
+    Ordering matters on a retry: ``ALTER ROLE`` first, so an instance that already has
+    the ``ADMIN OPTION`` from an earlier onboarding still picks up the attribute."""
     if engine == "postgres":
-        return f'GRANT "{managed_user}" TO "{fa_db_user}" WITH ADMIN OPTION;'
+        return (f'ALTER ROLE "{fa_db_user}" WITH CREATEROLE; '
+                f'GRANT "{managed_user}" TO "{fa_db_user}" WITH ADMIN OPTION;')
     if engine == "mysql":
         # No per-user equivalent of ADMIN OPTION here. Do NOT grant UPDATE on mysql.* —
         # Cloud SQL restricts DML on mysql.user.
@@ -1850,8 +1881,8 @@ def _report_fa_db_prereqs(db: Session, log_job_id: str, *, engine: str, fa_db_lo
         if grant:
             job_service.append_job_log(
                 db, log_job_id,
-                f"Password Safe rotation needs one grant on this database, which the "
-                f"dashboard could not issue itself — run it as an admin: {grant}")
+                f"Password Safe rotation needs the following on this database, which "
+                f"the dashboard could not issue itself — run it as an admin: {grant}")
 
 
 def _fa_discovery_grant_statement(engine: str, *, fa_db_user: str,
@@ -2204,8 +2235,8 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase,
         if not applied:
             job_service.append_job_log(
                 db, log_job_id,
-                f"Password Safe rotation needs one grant on this database, which the "
-                f"dashboard could not issue itself — run it as an admin: {grant}")
+                f"Password Safe rotation needs the following on this database, which "
+                f"the dashboard could not issue itself — run it as an admin: {grant}")
 
     # 4b. ACCOUNT DISCOVERY on MySQL needs a SECOND grant, and it is issued as a second
     #     statement rather than appended to the one above. Deliberately: whether Cloud

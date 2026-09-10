@@ -159,8 +159,8 @@ not. §6 is where the consequence lands.
 
 ## 2. The trust anchor is already an output — this is a second consumer, not new work
 
-`terraform/cert_ca/gcp_cas/main.tf:221-224` already emits exactly what targets need to
-trust:
+`terraform/cert_ca/gcp_cas/main.tf`'s `ca_chain_pem` output already emits exactly what
+targets need to trust:
 
 ```hcl
 output "ca_chain_pem" {

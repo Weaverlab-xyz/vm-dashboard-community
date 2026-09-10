@@ -205,6 +205,26 @@ def test_a_signing_failure_surfaces_as_a_bundle_error():
 
 # ── the generated play ────────────────────────────────────────────────────────
 
+def _all_tasks(play):
+    """Every task in a play, descending into `block`/`rescue`/`always`.
+
+    Ansible's own walkers recurse; a list comprehension over `play["tasks"]` does not, and
+    the difference is invisible until someone adds a block -- at which point assertions
+    stop covering the tasks they were written for and keep passing. That is the same trap
+    the repo's no_log sweep documents. Every walker in this file uses this.
+    """
+    out = []
+    def walk(tasks):
+        for task in tasks or []:
+            if any(k in task for k in ("block", "rescue", "always")):
+                for key in ("block", "rescue", "always"):
+                    walk(task.get(key))
+            else:
+                out.append(task)
+    walk(play.get("tasks"))
+    return out
+
+
 def test_every_remote_fetch_play_is_valid_yaml():
     """The Windows path's backslash is an invalid escape in a double-quoted scalar, which
     fails the whole play at parse time. Round-trip rather than eyeball."""
@@ -231,15 +251,17 @@ def test_the_play_names_a_variable_and_never_a_url():
 def test_the_download_task_is_no_log():
     for asset in (BOOTSTRAPPER, "agent.rpm", "agent.deb"):
         plays = yaml.safe_load(als.generate_remote_fetch_playbook_yaml(asset))
-        download = plays[0]["tasks"][0]
+        download = [t for t in _all_tasks(plays[0])
+                    if "ansible.windows.win_get_url" in t
+                    or "ansible.builtin.get_url" in t][0]
         assert download.get("no_log") is True, asset
 
 
 def test_the_downloaded_file_is_removed_afterwards():
     """It is large and the target did not ask to keep it."""
     for asset in (BOOTSTRAPPER, "agent.rpm", "agent.deb"):
-        names = [t["name"] for t in
-                 yaml.safe_load(als.generate_remote_fetch_playbook_yaml(asset))[0]["tasks"]]
+        names = [t.get("name", "") for t in
+                 _all_tasks(yaml.safe_load(als.generate_remote_fetch_playbook_yaml(asset))[0])]
         assert any(n.startswith("Remove the downloaded") for n in names), asset
 
 
@@ -247,14 +269,14 @@ def test_installer_arguments_survive_the_switch_to_downloading():
     """A silent RB install needs INSTALLKEY and ZONE; losing them would turn a working run
     into one that hangs on an interactive prompt."""
     plays = yaml.safe_load(als.generate_remote_fetch_playbook_yaml(BOOTSTRAPPER))
-    install = [t for t in plays[0]["tasks"] if "ansible.windows.win_package" in t][0]
+    install = [t for t in _all_tasks(plays[0]) if "ansible.windows.win_package" in t][0]
     assert als.WINPKG_ARGS_VAR in install["ansible.windows.win_package"]["arguments"]
 
 
 def test_the_windows_play_still_tolerates_a_reboot_required_exit_code():
     """win_package rather than win_command, so 3010 is not read as a failure."""
     plays = yaml.safe_load(als.generate_remote_fetch_playbook_yaml(BOOTSTRAPPER))
-    assert any("ansible.windows.win_package" in t for t in plays[0]["tasks"])
+    assert any("ansible.windows.win_package" in t for t in _all_tasks(plays[0]))
 
 
 def test_a_script_or_playbook_is_refused_by_the_generator_too():
@@ -328,6 +350,48 @@ def test_can_presign_reads_the_same_table_asset_key_does():
     test vacuously pass and call s3 unsignable."""
     for backend in storage_service.BACKENDS:
         assert storage_service.can_presign(backend) ==             (backend in storage_service._ASSET_PREFIX_FN), backend
+
+
+def test_a_failed_install_reads_the_installers_own_log_back():
+    """`rc: 1603` with empty stdout and empty stderr is every byte a live Resource Broker
+    install produced, and 1603 only means "fatal error during installation". The log is
+    the sole record of which one, so the play reads it back rather than leaving it on a
+    guest an operator may have to build a Gateway to reach."""
+    play = yaml.safe_load(als.generate_remote_fetch_playbook_yaml(BOOTSTRAPPER))[0]
+    rescue = [t for t in play["tasks"] if "rescue" in t][0]["rescue"]
+    read = rescue[0]
+    assert als.WINPKG_LOG_VAR in read["ansible.windows.win_shell"]
+    assert read["failed_when"] is False, "reading the log must not mask the install error"
+    assert any("ansible.builtin.fail" in t for t in rescue), (
+        "reading a log is not the same as tolerating the error -- the run stays red")
+
+
+def test_the_rescue_is_skipped_cleanly_when_no_log_was_named():
+    """An asset that names no installer log is an ordinary case. The read is conditional
+    and the report has a default, so the rescue still reaches its `fail`."""
+    play = yaml.safe_load(als.generate_remote_fetch_playbook_yaml(BOOTSTRAPPER))[0]
+    rescue = [t for t in play["tasks"] if "rescue" in t][0]["rescue"]
+    assert als.WINPKG_LOG_VAR in rescue[0]["when"]
+    assert "default(" in rescue[1]["ansible.builtin.debug"]["msg"]
+
+
+def test_the_download_is_removed_even_when_the_install_fails():
+    """The removal used to be the task after the install, so it was skipped by exactly the
+    runs that leave a copy behind -- the failing ones, which are also the ones an operator
+    retries. An `always` covers both."""
+    play = yaml.safe_load(als.generate_remote_fetch_playbook_yaml(BOOTSTRAPPER))[0]
+    always = [t for t in play["tasks"] if "always" in t][0]["always"]
+    assert any(t.get("name", "").startswith("Remove the downloaded") for t in always)
+
+
+def test_both_winpkg_plays_carry_the_same_failure_rescue():
+    """Embedded and remote-fetch are two spellings of one install; where the file came from
+    is not a reason for one of them to explain a failure and the other to shrug."""
+    for yml in (als.generate_playbook_yaml(BOOTSTRAPPER),
+                als.generate_remote_fetch_playbook_yaml(BOOTSTRAPPER)):
+        rescues = [t for t in yaml.safe_load(yml)[0]["tasks"] if "rescue" in t]
+        assert rescues, yml
+        assert als.WINPKG_LOG_VAR in rescues[0]["rescue"][0]["ansible.windows.win_shell"]
 
 
 if __name__ == "__main__":

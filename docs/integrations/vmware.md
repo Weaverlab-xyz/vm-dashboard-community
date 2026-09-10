@@ -66,6 +66,66 @@ curl -u USER:PASS -H "Accept: application/vnd.vmware.vmw.rest-v1+json" http://12
 You should get a JSON list of VM ids and paths. Note that `vmrest` **rejects
 `application/json`** — the vendor media type above is required.
 
+`vmrest -C` is not optional and its absence does not look like an authentication
+problem. Without a stored credential `vmrest` **refuses to listen at all** and exits:
+
+```
+To listen on TCP port, Please use -C to update credential
+Not listening to either Unix Socket or TCP port, exiting
+```
+
+The port is then closed, so the dashboard reports "could not reach vmrest" — the message
+for a network problem — rather than anything about credentials.
+
+### 1a. Keep it running: reboots, logouts, closed windows
+
+`vmrest` is a foreground console program. It stops when its window is closed, it stops
+when you log out, and **a reboot does not bring it back**. The failure that follows is
+confusing rather than obvious: Docker Desktop restarts at logon, the agent container
+comes up healthy and starts leasing jobs, and every Workstation job then fails on a
+closed port.
+
+**The agent cannot start it for you.** It is a Linux container inside Docker Desktop's
+VM — it can dial `vmrest` on the host, but it has no way to launch a Windows process
+there. Autostart belongs to the host, and
+[`scripts\Enable-VmrestAutostart.ps1`](../../scripts/Enable-VmrestAutostart.ps1)
+registers it:
+
+```powershell
+.\scripts\Enable-VmrestAutostart.ps1
+```
+
+Run it once on the Workstation host, from an elevated PowerShell (registering a
+scheduled task needs that; the task itself runs unelevated). It finds `vmrest.exe`, then
+creates one scheduled task, running as you, that:
+
+- starts `vmrest` **at logon** with no console window — the same trigger that starts
+  Docker Desktop and therefore the agent, so the two come back together;
+- **re-checks every 5 minutes** and starts `vmrest` again if the process has gone, which
+  covers a mid-session crash as well as a reboot.
+
+It runs as *you*, interactively, on purpose: `vmrest -C` stores its credential under your
+profile and Workstation's inventory is per-user, so a task running as `SYSTEM` would look
+for a credential it cannot read and enumerate an inventory that is not yours. That also
+means it is tied to your session — which costs nothing here, because Docker Desktop and
+the agent are too.
+
+| | |
+|---|---|
+| `-Arguments '-p','8698'` | extra `vmrest` arguments, passed verbatim. Pass `-Port 8698` too, so `-Status` probes the right port |
+| `-CheckIntervalMinutes 2` | how often to check that it is alive. Default 5 |
+| `-Status` | report the task, the process, the port, the credential and the launcher's log. Changes nothing |
+| `-Unregister` | remove the task. A running `vmrest` is left alone |
+
+The script **refuses to register when it finds no `vmrest` credential**, because of the
+exit above: an autostart for a daemon that cannot listen is a relaunch loop every five
+minutes whose only symptom is a refused port. Run `vmrest -C` first.
+
+The task runs a small generated launcher at
+`%LOCALAPPDATA%\dashboard-agent\Start-Vmrest.ps1`, which logs beside itself to
+`vmrest-autostart.log`. That log is the only place a hidden `vmrest` can say why it
+died, so it is worth knowing about: `-Status` prints its last few lines.
+
 ### 2. Enrol an agent on that host
 
 Follow [remote agents](../remote-agents.md). Then add a **workstation** connection bound
@@ -135,8 +195,22 @@ use **Assign workgroup**.
 **"vmrest rejected the credential"** — set it with `vmrest -C` and check the username in
 the agent's `connections.yaml` matches.
 
-**"could not reach vmrest"** — `vmrest` is not running, or `allow_loopback: true` is
-missing from the connection's `policy.yaml` entry.
+**"could not reach vmrest"** — `vmrest` is not running, or the connection's
+`policy.yaml` entry cannot reach it (see [step 2](#2-enrol-an-agent-on-that-host) for
+which of `host.docker.internal` and `allow_loopback: true` your agent needs).
+
+**It worked yesterday, and after a reboot the page is empty** — this is the common one,
+and it is `vmrest`, not the agent. Docker Desktop restarts at logon and the agent
+container comes back healthy on its own; `vmrest` does not come back at all, so the agent
+is up, leasing jobs, and failing every one of them on a closed port. Fix it once with
+[step 1a](#1a-keep-it-running-reboots-logouts-closed-windows). The same applies to a
+`vmrest` window that was closed, or a logout.
+
+**`vmrest` will not start, and says nothing about credentials** — if it exits immediately
+with `Not listening to either Unix Socket or TCP port`, it has no stored credential. Run
+`vmrest -C`. When the autostart task is what is launching it, that exit is invisible;
+`.\scripts\Enable-VmrestAutostart.ps1 -Status` prints the launcher's log, where it is
+recorded.
 
 **Start/Stop is refused, naming a verb** — the connection's `policy.yaml` entry is
 missing `power_on` / `power_off`. See step 2.

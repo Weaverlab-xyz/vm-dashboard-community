@@ -276,10 +276,28 @@ def test_mysql_grant_is_global_and_avoids_mysql_dml():
     assert "mysql." not in stmt, "Cloud SQL restricts DML on mysql.user"
 
 
-def test_postgres_grant_is_per_role_admin_option():
+def test_postgres_grant_is_createrole_AND_per_role_admin_option():
+    """PostgreSQL 16 needs BOTH, and this test used to assert "CREATEROLE" not in stmt
+    -- the exact misreading that shipped the bug. "CREATEROLE alone is no longer
+    sufficient" means ADMIN OPTION was ADDED to the requirement, not that it replaced
+    it; AlterRole() demands "the CREATEROLE attribute and the ADMIN option on the role".
+
+    Live 2026-09-10, clouddb-851e80ff: ADMIN OPTION alone failed Change Managed Account
+    with "pq: permission denied to alter role", which is that errmsg -- and the Data API
+    drops the errdetail naming the missing attribute, so the symptom looks identical to
+    a grant that never ran."""
     stmt = svc._fa_grant_statement("postgres", fa_db_user="fa", managed_user="psafe_x",
                                    managed_host="")
-    assert "ADMIN OPTION" in stmt and "CREATEROLE" not in stmt
+    assert 'ALTER ROLE "fa" WITH CREATEROLE;' in stmt
+    assert 'GRANT "psafe_x" TO "fa" WITH ADMIN OPTION;' in stmt
+    # ALTER ROLE first: re-onboarding an instance that already carries the ADMIN OPTION
+    # must still pick up the attribute, and executeSql aborts the batch on the first
+    # error.
+    assert stmt.index("ALTER ROLE") < stmt.index("GRANT"), stmt
+    # Per-role, never a blanket one. CREATEROLE lets the rotator CREATE roles; it must
+    # not be able to alter any role it has no ADMIN OPTION on, which is what keeps a
+    # compromised rotation identity scoped to the psafe_* accounts.
+    assert "ALL" not in stmt and "SUPERUSER" not in stmt, stmt
 
 
 # ── the functional account's OWN database login ───────────────────────────────
@@ -405,7 +423,7 @@ def test_the_discovery_grant_is_a_separate_statement_from_the_rotation_grant():
     path = os.path.join(_ROOT, "web_dashboard", "services", "cloud_database_service.py")
     with open(path, encoding="utf-8") as fh:
         src = fh.read()
-    rotation = src.index("f\"Password Safe rotation needs one grant on this database")
+    rotation = src.index("f\"Password Safe rotation needs the following on this database")
     discovery = src.index("discovery_grant = ")
     assert discovery > rotation, ("the discovery grant must be attempted AFTER the "
                                  "rotation grant has been reported either way")
