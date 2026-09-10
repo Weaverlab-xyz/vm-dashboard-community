@@ -325,6 +325,69 @@ Off-boarding is automatic: destroying the VM removes the managed system + accoun
 (Terraform destroy from the stored state). Onboarding failures are **non-fatal** — they are
 recorded on the job (`ps_error`) but never fail the deploy.
 
+### Using the VM's key in PRA — the PRA Vault Private Key sync
+
+The key Password Safe mints and rotates for a VM is governed and audited, but on its own it
+is reachable only through a Password Safe checkout: a rep cannot check it out in PRA's
+`/login`, and PRA cannot inject it into the VM's Shell Jump. Enable **Also sync each VM's
+managed SSH key into a PRA Vault Private Key account** (Settings → Integrations → Password
+Safe) and each onboarded VM additionally gets:
+
+1. a **PRA Vault SSH account** named `<vm>-<account>` (e.g. `web01-adminuser`), associated
+   to the VM's Jump Group so PRA can inject it, seeded with a throwaway key;
+2. a Password Safe **managed system + account on the `PRA Vault Private Key` plugin**, named
+   identically — the plugin resolves its PRA-side target by *name*;
+3. a **`SyncedAccounts` link** making that mirror a *subscriber* of the VM's own managed
+   account, then one Change Password so PRA holds a real key immediately rather than at the
+   next scheduled rotation.
+
+From then on Password Safe owns the propagation, exactly as it does for
+[Kubernetes ServiceAccount tokens](#keeping-the-pra-vault-copy-in-sync) — every rotation of
+the VM's account is applied to the subscriber too, which runs the plugin's write into PRA.
+**No key passes through the dashboard**, and the seeded throwaway is redacted out of the job
+record before it is stored.
+
+This applies to the three cloud-native plugins only (`ssm`, `azurevm`, `gcpvm`), where the
+account's stored credential *is* the key Password Safe minted. The traditional `ssh` method
+is deliberately excluded: there the key came from a cloud secret store the dashboard already
+holds, so mirroring it into PRA would publish an existing key rather than a governed one.
+
+The Jump Group is the deploy's own (the Shell Jump is provisioned before the Password Safe
+step), falling back to `bt_jump_group_name` / the per-cloud override. With no Jump Group
+resolvable the sync is **skipped** rather than half-built — the job records
+`ps_vault_skipped` and the onboarding itself is untouched. Every other failure lands on
+`ps_vault_error` and is likewise non-fatal.
+
+Teardown is automatic and ordered: destroying the VM unlinks the pair, off-boards the mirror,
+destroys the PRA Vault account, and only then off-boards the VM's own managed system.
+
+#### Operator prerequisites
+
+1. Import the **`PRA Vault Private Key`** `.psplugin` and confirm the platform name.
+2. Create a **functional account on that platform** — username = the PRA OAuth client id,
+   password = its secret — and set `passwordsafe_vault_sync_functional_account`. This has
+   **no fallback** to `ot_ps_pravault_functional_account` or
+   `clouddb_ps_pravault_functional_account`: those accounts are on the *PRA Vault Username
+   Password* platform, which writes a password field and never a key, so borrowing one would
+   register a mirror that reports success and syncs nothing. A functional account whose
+   platform does not match `passwordsafe_vault_sync_platform` is refused.
+3. Grant the API identity **Password Safe Account Management (Full control)** — what the sync
+   link needs.
+4. **Leave "Change Password After Release" OFF on *both* accounts.** A credential change on
+   either member of a synced pair re-rotates the pair, so with it on every release of the PRA
+   copy would rotate the VM's real host key.
+5. Optionally set `bt_vault_account_group_id` to place the Vault accounts in a specific
+   account group.
+
+#### Configuration keys — PRA Vault key sync
+
+| Key | Default | Notes |
+|---|---|---|
+| `passwordsafe_vault_sync_enabled` | `false` | Off by default — the plugin is hand-imported, so its platform cannot be assumed to exist |
+| `passwordsafe_vault_sync_platform` | `PRA Vault Private Key` | Mirror platform name; also the platform the functional account is checked against |
+| `passwordsafe_vault_sync_functional_account` | — | Required. Functional account on that platform. No fallback, by design |
+| `passwordsafe_vault_sync_converge` | `true` | One Change Password through the new link, so PRA holds a real key now. **Not** the per-cloud `*_change_password_on_register` flag: that one governs onboarding, and on AWS it defaults off, which would leave PRA serving the throwaway key |
+
 ---
 
 ## Kubernetes ServiceAccount token rotation

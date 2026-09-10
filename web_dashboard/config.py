@@ -500,6 +500,22 @@ class Settings(BaseSettings):
     ot_ps_checkout_converge: bool = True
     ot_ps_pravault_platform: str = ""            # mirror platform name; falls back to clouddb_ps_pravault_platform
     ot_ps_pravault_functional_account: str = ""  # FA on that platform; falls back to clouddb_ps_pravault_functional_account
+    # Cloud VM → PRA Vault key sync. When a VM is onboarded with one of the cloud-native
+    # SSH-key plugins (ssm / azurevm / gcpvm), the wiring also creates a PRA Vault SSH
+    # account (associated to the VM's Jump Group) plus a managed-account mirror on the
+    # "PRA Vault Private Key" plugin, and links the pair with SyncedAccounts — so the key
+    # Password Safe rotates is check-out-able and injectable in PRA. Off by default: the
+    # plugin is a hand-imported .psplugin, so the platform cannot be assumed to exist.
+    passwordsafe_vault_sync_enabled: bool = False
+    # Push one Change Password through the new link. The link is born AFTER the onboarding
+    # mint, so without this PRA holds the throwaway key until some later rotation. NOT the
+    # per-cloud change-on-register flag: that one governs onboarding, this one convergence
+    # (and on AWS it defaults off, so reading it would leave PRA holding the throwaway).
+    passwordsafe_vault_sync_converge: bool = True
+    passwordsafe_vault_sync_platform: str = "PRA Vault Private Key"
+    # No fallback to the OT / cloud-DB pravault FA keys: those accounts are on the "PRA
+    # Vault Username Password" platform, which writes a password field and never a key.
+    passwordsafe_vault_sync_functional_account: str = ""
     bt_api_host: str = ""        # PRA host, used by terraform_pra_service
     bt_client_id: str = ""
     bt_client_secret: str = ""

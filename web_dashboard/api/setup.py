@@ -904,6 +904,12 @@ class PasswordSafeFeatureConfig(BaseModel):
     ot_ps_checkout_converge: bool = True   # one Change through the new link, so PRA holds a real credential now
     ot_ps_pravault_platform: str = ""
     ot_ps_pravault_functional_account: str = ""
+    # Cloud VM → PRA Vault key sync: the key the cloud-native SSH plugins rotate, mirrored
+    # into a PRA Vault Private Key account via SyncedAccounts (docs/integrations/password-safe.md).
+    passwordsafe_vault_sync_enabled: bool = False
+    passwordsafe_vault_sync_converge: bool = True   # one Change through the new link, so PRA holds a real key now
+    passwordsafe_vault_sync_platform: str = "PRA Vault Private Key"
+    passwordsafe_vault_sync_functional_account: str = ""   # no fallback — a Username Password FA writes no key
     # Optional cloud-DATABASE Password Safe onboarding (AWS) — see config.py.
     # The Azure and GCP counterparts follow further down.
     # The two custom plugins + jump-host RSA prep are one-time MANUAL setup.
