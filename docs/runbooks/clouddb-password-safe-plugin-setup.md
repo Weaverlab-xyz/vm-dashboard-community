@@ -130,7 +130,7 @@ picks between them from **Change Password Using Own Credentials** on the *manage
 | Action | What the plugin does | What the functional account needs on the DB |
 |---|---|---|
 | Change Managed Account (**using self**) | `ALTER USER` on itself / `ALTER USER CURRENT_USER()` / `ALTER LOGIN … OLD_PASSWORD` | **nothing** — a login that can authenticate, for *Verify Functional Account* only |
-| Change Managed Account (using Functional Account) | `ALTER USER`/`ALTER LOGIN` on the target | `CREATEROLE` (PG ≤ 15) or admin on the role (PG 16+), `CREATE USER` (MySQL), `ALTER ANY LOGIN` (SQL Server) |
+| Change Managed Account (using Functional Account) | `ALTER USER`/`ALTER LOGIN` on the target | `CREATEROLE` (PG ≤ 15); `CREATEROLE` **and** `ADMIN OPTION` on the role (PG 16+ — both, not either); `CREATE USER` (MySQL), `ALTER ANY LOGIN` (SQL Server) |
 
 **A dashboard-provisioned server has no such privileged login**, so `reference` mode requires
 the self-rotate action. Turn on **Rotate with the account's own credentials**
@@ -505,13 +505,25 @@ The Cloud Run service account is strikingly small — it needs **none** of
 `roles/cloudsql.client`, `roles/cloudsql.instanceUser` or `roles/cloudsql.admin`, because
 it uses neither IAM database authentication nor a Cloud SQL connector.
 
-**The database grant.** The functional account needs rights over each managed principal,
-and the dashboard cannot issue it. The exact statement is printed on the provisioning job
-— run it as an admin:
+**The database grant.** The functional account needs rights over each managed principal.
+On the GCP `data-api` channel the dashboard issues these itself as the built-in admin and
+prints them on the provisioning job only if that fails; everywhere else it can only print
+them — run them as an admin:
 
-- **PostgreSQL 16** (the module default): `GRANT "<managed>" TO "<fa>" WITH ADMIN OPTION;`
-  per role. `CREATEROLE` alone is no longer sufficient, and this is the most likely
-  source of "worked in dev, 403 in production".
+- **PostgreSQL 16** (the module default): **two statements, both required.**
+
+  ```sql
+  ALTER ROLE "<fa>" WITH CREATEROLE;                 -- once per instance
+  GRANT "<managed>" TO "<fa>" WITH ADMIN OPTION;     -- once per managed role
+  ```
+
+  `CREATEROLE` alone is no longer sufficient — but note this means `ADMIN OPTION` was
+  **added** to the requirement, not that it replaced `CREATEROLE`. PostgreSQL's
+  `AlterRole()` wants "the `CREATEROLE` attribute **and** the `ADMIN` option on the
+  role". Hold only one and the rotation fails with `permission denied to alter role`,
+  and because the Data API drops the `errdetail` that names the missing half, that
+  message is identical whichever half you are missing — it reads like the grant never
+  ran. This is the most likely source of "worked in dev, 403 in production".
 - **MySQL:** `GRANT CREATE USER ON *.* TO '<fa>'@'%';`. Do **not** grant `UPDATE ON
   mysql.*` — Cloud SQL restricts DML on `mysql.user`.
 - **MySQL, for Account Discovery only:** `GRANT SELECT ON mysql.user TO '<fa>'@'%';`.
@@ -752,6 +764,7 @@ whose only trace was a `Password Safe onboarding skipped (non-fatal)` log line.)
 | (AWS) `Index was outside the bounds of the array` in the plugin log | a packed field has too few segments for the plugin's fixed-position parse: an address with the wrong per-engine count (5 mssql / 6 psql / 7 mysql), a functional-account username without its `:`, or a password without both `:`s. Systems onboarded before the per-engine formats carry the old six-field address — use the row's **Register in Password Safe** action to rebuild them |
 | `role "psafe_…" already exists` / `CREATE USER` fails on **Register in Password Safe** | a previous attempt created the managed database user before failing later. Onboarding is create-or-reset on every engine, so this is fixed — a build from before 2026-08-27 needs the user dropped by hand, or the newer image |
 | (Azure, SQL Server) `Msg 15025 … The server principal 'psafe_…' already exists` at 25% *Creating the rotatable managed database user* | the create-or-reset guard above read `sys.server_principals`, which **Azure SQL Database does not populate with SQL logins** — so it matched nothing and the create ran anyway. Guards read `sys.sql_logins` from 2026-09-03; on an older build, drop the login by hand (`DROP LOGIN [psafe_…]` in `master`) or take the newer image. AWS and GCP never hit this |
+| (PostgreSQL 16) `pq: permission denied to alter role` on *Change Managed Account*, with the managed system and account onboarded cleanly | the functional account holds only **one** of the two privileges PostgreSQL 16 requires. `ALTER ROLE … PASSWORD` on another role needs the `CREATEROLE` **attribute** *and* `ADMIN OPTION` on that role; before 2026-09-10 the dashboard issued only the `ADMIN OPTION` half, on the reading that PG 16 had *replaced* `CREATEROLE` with it rather than *added* to it. The error text is the same whichever half is missing — the Data API drops the `errdetail` that names it — so this looks identical to a grant that never ran. Check the **provisioning** job (not the registration job) for the `Applied the Password Safe rotation grant` line. On an older build, run `ALTER ROLE "<fa>" WITH CREATEROLE;` as an admin once per instance |
 | (GCP, PostgreSQL) `create user 'bt-rotator@<project>.iam.gserviceaccount.com' … HTTP 400 … User name "…" to be created is too long (max 63)` at 25% *Creating the rotatable managed database user* | the rotator was registered under its **full email**, and a Postgres role name is capped at 63 characters — an ordinary `bt-rotator@<project>.iam.gserviceaccount.com` is 65, so *every* PostgreSQL onboarding failed on length alone while MySQL (which truncates at the `@` itself) was fine. From 2026-09-08 PostgreSQL is registered under Google's documented form, the email minus `.gserviceaccount.com`; on an older build there is no workaround short of the newer image. Nothing is created when this fires — re-run **Register in Password Safe** after rebuilding. A *long local part* can still overflow the 63 even stripped: shorten the service account (§1.7) |
 | (Azure, SQL Server) rotation or *Verify* fails with `Cannot open database "master" requested by the login` | the managed login has no `USER` in `master`, and Azure SQL disables `guest` there — see §0. Fixed at onboarding from 2026-09-03; re-run **Register in Password Safe** on the row to add the user to an existing system |
 | `Bad IP value: '<packed address>' in 'IPAddress' field` | a managed system registered by a build between 2026-08-25 and 2026-08-27, which put the packed address in the IP field. Re-register from the row's **Register in Password Safe** action |
