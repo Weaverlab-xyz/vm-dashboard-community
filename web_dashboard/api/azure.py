@@ -43,7 +43,9 @@ from ..services import (azure_service, azure_listing, deploy_batch, job_service,
                         workgroup_service)
 from ..services.azure_service import AzureError
 from .auth import require_admin, require_permission
+from ..services import vm_suspend_policy
 from . import unmanaged
+from .power_batch import queue_power_batch
 
 router = APIRouter(prefix="/api/azure", tags=["azure"])
 
@@ -1200,48 +1202,131 @@ class PowerOpRequest(BaseModel):
     vm_name: str
 
 
+async def _queue_one(db, current_user, *, op: str, payload: PowerOpRequest,
+                     batch_id=None) -> dict:
+    """Queue ONE Azure power op. The only path that does, single or bulk.
+
+    Returns ``{"job_id", "status", "task", "warning"}``. ``task`` is always None: a
+    cloud power op is a ``azure_power`` row the jobs worker claims, so there is no local work
+    for this process to run and no serial batch walk to arrange — the LIGHT tier's cap
+    is what paces a fan-out, and ``jobs_worker`` says so where it tiers these.
+
+    ``warning`` is prose the operator should read but which must not refuse the request;
+    see the ``stop`` branch below. Empty on ``start``.
+
+    This function exists so that bulk power adds selection and not a second code path.
+    Every gate below applied to one button press before bulk existed and applies
+    unchanged to each VM in a selection; tests/test_cloud_power.py pins that both routes
+    come through here and that neither does its own deploy-row lookup or ownership check.
+    """
+    deploy_job = _find_deploy_job(db, "azure_deploy", "vm_name", payload.vm_name)
+    if deploy_job:
+        rg = deploy_job.metadata_dict.get("resource_group") or _rg()
+        workgroup = deploy_job.workgroup
+    else:
+        # No deploy job: this may be a VM the dashboard did not deploy. The resource
+        # group comes from DISCOVERY and never from the request — guessing it, or
+        # taking it from the caller, deallocates the wrong VM, which is what the
+        # comment that used to sit here was refusing to risk. Discovery removes the
+        # guess rather than the caution: not discovered is still a 404. `unmanaged.find`
+        # is cached per `cache_key`, so a batch costs one fetch rather than one each.
+        row = await unmanaged.find(
+            "azure", payload.vm_name, job_type="azure_deploy",
+            fetch_live=_fetch_unmanaged_live, cache_key="azure_unmanaged_vms")
+        if not row:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No active deployment found for VM '{payload.vm_name}'.")
+        rg = row.get("resource_group") or _rg()
+        workgroup = row.get("workgroup")
+    _assert_can_act(current_user, workgroup, f"VM '{payload.vm_name}'")
+
+    # A stop is reversible; what a stop can BREAK is not. `vm_suspend_policy` refuses to
+    # *schedule* a suspend for three reasons — a VM wired into PRA, Password Safe or
+    # Entitle at a PUBLIC address (which none of the four clouds guarantees across a
+    # stop, and `terraform_pra_service` exposes no repair short of destroy-and-recreate),
+    # an Azure VM whose private address is not pinned, and a VM under Password Safe
+    # auto-management.
+    #
+    # This does NOT refuse. The single button never has — "ownership is the gate here" —
+    # and a bulk route that refused what a row allows would be the under-offering bug the
+    # on-prem toolbar had to fix. It WARNS, because bulk is exactly when nobody is
+    # thinking about any individual VM, and the policy already returns operator-facing
+    # prose for the purpose. An instance with no deploy row has no metadata to judge.
+    warning = ""
+    if op == "stop" and deploy_job is not None:
+        ok, reason = vm_suspend_policy.schedulable(
+            deploy_job.job_type, deploy_job.metadata_dict)
+        if not ok:
+            warning = reason
+
+    job = job_service.create_job(
+        db,
+        job_type="azure_power",
+        created_by=current_user.username,
+        workgroup=workgroup,
+        batch_id=batch_id,
+        metadata={"action": op, "vm_name": payload.vm_name, "resource_group": rg,
+                  "deploy_job_id": deploy_job.id if deploy_job else None,
+                  "unmanaged": deploy_job is None},
+    )
+    job_service.log_audit(db, current_user.username, "azure_power",
+                          details={"action": op, "vm_name": payload.vm_name})
+    return {"job_id": job.id, "status": "pending", "task": None, "warning": warning}
+
+
 def _power_endpoint(op: str):
     async def _handler(
         payload: PowerOpRequest,
         db: Session = Depends(get_db),
         current_user: User = Depends(require_permission("azure", "write")),
     ):
-        deploy_job = _find_deploy_job(db, "azure_deploy", "vm_name", payload.vm_name)
-        if deploy_job:
-            rg = deploy_job.metadata_dict.get("resource_group") or _rg()
-            workgroup = deploy_job.workgroup
-        else:
-            # No deploy job: this may be a VM the dashboard did not deploy. The resource
-            # group comes from DISCOVERY and never from the request — guessing it, or
-            # taking it from the caller, deallocates the wrong VM, which is what the
-            # comment that used to sit here was refusing to risk. Discovery removes the
-            # guess rather than the caution: not discovered is still a 404.
-            row = await unmanaged.find(
-                "azure", payload.vm_name, job_type="azure_deploy",
-                fetch_live=_fetch_unmanaged_live, cache_key="azure_unmanaged_vms")
-            if not row:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"No active deployment found for VM '{payload.vm_name}'.")
-            rg = row.get("resource_group") or _rg()
-            workgroup = row.get("workgroup")
-        _assert_can_act(current_user, workgroup, f"VM '{payload.vm_name}'")
-
-        job = job_service.create_job(
-            db,
-            job_type="azure_power",
-            created_by=current_user.username,
-            workgroup=workgroup,
-            metadata={"action": op, "vm_name": payload.vm_name, "resource_group": rg,
-                      "deploy_job_id": deploy_job.id if deploy_job else None,
-                      "unmanaged": deploy_job is None},
-        )
-        job_service.log_audit(db, current_user.username, "azure_power",
-                              details={"action": op, "vm_name": payload.vm_name})
+        result = await _queue_one(db, current_user, op=op, payload=payload)
         verb = "Start" if op == "start" else "Suspend"
-        return {"job_id": job.id, "status": "pending", "message": f"{verb} queued"}
+        return {"job_id": result["job_id"], "status": result["status"],
+                "message": f"{verb} queued"}
 
     return _handler
+
+
+# Two, and only two: no cloud path here has a shutdown, a restart or a reset, and
+# tests/test_cloud_power.py pins that each router exposes exactly start and stop. So
+# this is the whole set rather than a toolbar decision, unlike the on-prem routers'.
+BULK_OPS = ("start", "stop")
+
+
+class BulkPowerRequest(BaseModel):
+    """One op, many VMs. `targets` carries the same payload the single route takes.
+
+    The op is a FIELD and the identifiers are in the BODY, matching every other
+    `/power/*` route here — `api/oci.py` binds an OCID with a greedy `:path` converter
+    that would swallow a `/power/...` suffix whole, so a path-shaped bulk route could
+    not exist on all four clouds.
+    """
+    op: str
+    targets: List[PowerOpRequest]
+
+
+@router.post("/power/bulk", summary="Power op across a selection of instances")
+async def bulk_power(
+    payload: BulkPowerRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("azure", "write")),
+):
+    """Queue one power op per selected instance, all sharing a ``batch_id``.
+
+    `write`, not `delete`, and no admission gate — the same two decisions the single
+    route makes, for the reasons recorded above it. No `background_tasks`: every target
+    is a worker job, so there is nothing for this process to run.
+    """
+    op = payload.op.strip().lower()
+    return await queue_power_batch(
+        db, kind="azure", op=payload.op, targets=payload.targets,
+        allowed_ops=BULK_OPS,
+        queue_one=lambda target, batch_id: _queue_one(
+            db, current_user, op=op, payload=target, batch_id=batch_id),
+        label_of=lambda target: target.vm_name,
+        created_by=current_user.username)
 
 
 router.add_api_route("/power/start", _power_endpoint("start"), methods=["POST"],

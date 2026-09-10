@@ -97,8 +97,13 @@ async def queue_power_batch(db, *, kind: str, op: str, targets: list, allowed_op
     see :func:`run_power_batch` for why that is this module's decision rather than
     Starlette's.
 
-    Returns ``{batch_id, op, count, jobs, failed}``; raises 400 when nothing queued,
-    because a response saying ``count: 0`` next to a 200 reads as success.
+    Returns ``{batch_id, op, count, jobs, failed, warnings}``; raises 400 when nothing
+    queued, because a response saying ``count: 0`` next to a 200 reads as success.
+
+    ``warnings`` is the third outcome, and it is deliberately not a kind of failure:
+    ``queue_one`` may return a ``warning`` string for a target it queued anyway. A cloud
+    stop uses it for a VM whose BeyondTrust wire-up may not survive the address change —
+    something worth reading, never a reason to refuse what the per-VM button allows.
     """
     op = str(op or "").strip().lower()
     if op not in allowed_ops:
@@ -107,7 +112,10 @@ async def queue_power_batch(db, *, kind: str, op: str, targets: list, allowed_op
         # asking for an op it never offers at all.
         raise HTTPException(
             status_code=400,
-            detail=(f"'{op}' is not a bulk power operation on a {kind} connection. "
+            # "for {kind}", not "on a {kind} connection": a cloud has no connection
+            # row, and the article was wrong for three of the ten kinds anyway
+            # ("a aws"). This string is read on a page whose button just failed.
+            detail=(f"'{op}' is not a bulk power operation for {kind}. "
                     f"Available: {', '.join(sorted(allowed_ops))}."))
     if not targets:
         raise HTTPException(
@@ -138,7 +146,7 @@ async def queue_power_batch(db, *, kind: str, op: str, targets: list, allowed_op
     targets = unique
 
     batch_id = uuid.uuid4().hex[:12]
-    jobs, failed, tasks = [], [], []
+    jobs, failed, tasks, warnings = [], [], [], []
     try:
         for target in targets:
             label = label_of(target)
@@ -152,6 +160,13 @@ async def queue_power_batch(db, *, kind: str, op: str, targets: list, allowed_op
                 continue
             jobs.append({"name": label, "job_id": result["job_id"],
                          "status": result.get("status") or "queued"})
+            # A warning is NOT a refusal — the job was queued. It exists because some
+            # power ops can break something the operator would want to have known
+            # about, and bulk is exactly when nobody is looking at any individual VM.
+            # Kept beside `failed` rather than folded into it so a caller cannot
+            # mistake one for the other, and so `count` stays the number of jobs.
+            if result.get("warning"):
+                warnings.append({"name": label, "reason": result["warning"]})
             if result.get("task") is not None:
                 tasks.append(result["task"])
     finally:
@@ -192,7 +207,8 @@ async def queue_power_batch(db, *, kind: str, op: str, targets: list, allowed_op
         db, created_by, f"{kind}_power_bulk",
         details={"batch_id": batch_id, "op": op, "count": len(jobs),
                  "targets": [j["name"] for j in jobs],
-                 "failed": [f["name"] for f in failed]})
+                 "failed": [f["name"] for f in failed],
+                 "warned": [w["name"] for w in warnings]})
 
     return {"batch_id": batch_id, "op": op, "count": len(jobs),
-            "jobs": jobs, "failed": failed}
+            "jobs": jobs, "failed": failed, "warnings": warnings}
