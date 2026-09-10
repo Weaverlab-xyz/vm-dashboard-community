@@ -163,6 +163,20 @@ def test_the_power_resync_scenario():
     assert len(_syncs(db, cid)) == 1
     _ok("a second power op does not stack a second sync on an open one")
 
+    # An inventory_sync completing must not queue another. That is the loop that would
+    # otherwise run until the agent, the database or the operator gave out.
+    hss.apply_page(db, queued, {"vms": [{"vm_id": "7", "name": "bench-vm",
+                                         "power_state": "poweredOff"}],
+                                "next_cursor": "", "complete": True})
+    job_service.set_completed(db, queued.id, {})
+    nothing, _ = hss.sync_after_power(db, queued)
+    assert nothing is None
+    assert len(_syncs(db, cid)) == 1, "a sync queued a sync"
+    # And the sync it queued is the one that actually moved the row the button acted on.
+    cached = [v for v in hss.list_vms(db, cid) if v["vm_id"] == "7"]
+    assert cached and cached[0]["power_state"] == "poweredOff"
+    _ok("a finished inventory sync queues no successor, and its page reaches the cache")
+
     # ── The same property, as a BATCH ────────────────────────────────────────
     #
     # Above it is an accident of two operators being quick. The bulk power toolbar makes
@@ -204,21 +218,14 @@ def test_the_power_resync_scenario():
         "the batch just changed — the original bug, arriving once per batch instead of "
         "once per button")
     assert len(_syncs(db, cid, status="queued")) == 1
-    _ok("a batch of N power ops queues ONE sync, from the last job to finish")
 
-    # An inventory_sync completing must not queue another. That is the loop that would
-    # otherwise run until the agent, the database or the operator gave out.
-    hss.apply_page(db, queued, {"vms": [{"vm_id": "7", "name": "bench-vm",
-                                         "power_state": "poweredOff"}],
-                                "next_cursor": "", "complete": True})
-    job_service.set_completed(db, queued.id, {})
-    nothing, _ = hss.sync_after_power(db, queued)
-    assert nothing is None
-    assert len(_syncs(db, cid)) == 1, "a sync queued a sync"
-    # And the sync it queued is the one that actually moved the row the button acted on.
-    cached = [v for v in hss.list_vms(db, cid) if v["vm_id"] == "7"]
-    assert cached and cached[0]["power_state"] == "poweredOff"
-    _ok("a finished inventory sync queues no successor, and its page reaches the cache")
+    # Left as found: the steps below assert that a power op DOES queue a sync, which the
+    # in-flight guard would refuse while this batch's own sync is still open. A test that
+    # leaves state behind makes the next assertion fail for a reason that has nothing to
+    # do with what it checks.
+    for sync in _syncs(db, cid, status="queued"):
+        job_service.set_completed(db, sync.id, {"ok": True})
+    _ok("a batch of N power ops queues ONE sync, from the last job to finish")
 
     # A failed power op is the case that matters most: an agent losing the response to a
     # call it did make is indistinguishable, from here, from one that never left — and the
@@ -254,7 +261,7 @@ def test_the_power_resync_scenario():
     _ok("a deactivated connection is a silent no-op")
 
     db.close()
-    assert len(_STEPS) == 11, f"expected 11 checkpoints, ran {len(_STEPS)}"
+    assert len(_STEPS) == 12, f"expected 12 checkpoints, ran {len(_STEPS)}"
 
 
 if __name__ == "__main__":
