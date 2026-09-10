@@ -120,7 +120,7 @@ CAPABILITIES = {
         "idle_suspend": True,          # suspend_on_idle, in seconds, per environment
         "scheduled_suspend": False,    # it has its own timer; see the aws row below
         "bootstrap_injection": "metadata",
-        "share_link": True,            # publish_sets: password + expiration_date
+        "share_link": True,            # publish_sets: password + expiration_date(_tz)
         "stored_credentials": True,    # …/vms/{id}/credentials
         # A cheap authenticated read that proves the credential AND what it can see, so an
         # operator can settle "is Skytap working?" from Settings instead of from a 502 on

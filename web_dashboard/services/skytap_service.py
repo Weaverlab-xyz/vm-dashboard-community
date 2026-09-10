@@ -20,6 +20,7 @@ their approvals allow, and nothing here should notice.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 import httpx
 
@@ -617,10 +618,60 @@ async def stored_credentials(env_id: str, vm_id: str) -> list[dict]:
 # UNVERIFIED against a live Skytap account: the `vm_ref` below is built as
 # `{base_url}/vms/{vm_id}`, which is the absolute-reference form the publish_sets API
 # documents. If a live create returns 422 on `vms`, this is the field to look at first.
+# The expiry half of it was named by a live 400 and rebuilt — see `_expiry_fields`. What
+# is verified there is the *failure*: a successful create with the tz has not been seen
+# from this account yet, and `SHARE_EXPIRY_TZ` is the next field to look at if one 400s.
 
 # What a share-link visitor may do. `run_and_use` is the POV answer — a customer who can
 # see a desktop but not power it on has been handed a screenshot.
 SHARE_ACCESS = "run_and_use"
+
+# The expiry is TWO fields, and sending only the first is a 400.
+#
+# `expiration_date` carries no zone of its own: Skytap reads it in the zone named by
+# `expiration_date_tz`, and a body with the date and no tz is rejected with
+# `{"field":"expiration_date_tz","message":"Expiration date tz is invalid"}` — an error
+# that names a field the caller never set, which is why this took a live create to find.
+# So the two are built together, by `_expiry_fields`, and neither can be sent alone.
+#
+# UTC because the adapter's contract takes a UTC instant and there is nothing here to
+# localise for: a POV's expiry is a deadline, not an appointment, and rendering it in the
+# SE's zone is the UI's job. It is one of Skytap's accepted zone names (they are Rails
+# zone names); if a future account rejects it, that is what the error below points at.
+SHARE_EXPIRY_TZ = "UTC"
+
+# Skytap's own emitted format for a datetime — `%Y/%m/%d %H:%M:%S`, as its environment
+# `suspend_at_time` comes back. Sending back the shape it prints costs nothing and keeps
+# this off the list of things to suspect when a create is refused.
+_SKYTAP_DATETIME = "%Y/%m/%d %H:%M:%S"
+
+
+def _expiry_fields(expires_at: str) -> dict:
+    """The ``expiration_date``/``expiration_date_tz`` pair for one UTC instant.
+
+    ``expires_at`` is the ISO-8601 string ``lab_platforms`` documents. A **naive** one is
+    read as UTC, which is what ``pov_share`` sends (it works in ``utcnow``); an aware one
+    is converted. Both end up as one absolute instant expressed in :data:`SHARE_EXPIRY_TZ`,
+    so the two fields can never disagree.
+
+    An unparseable string is refused here rather than forwarded. Skytap would answer 400
+    naming ``expiration_date_tz`` — the *other* field — and send the next reader to the
+    wrong half of the pair.
+    """
+    raw = str(expires_at or "").strip()
+    if not raw:
+        return {}
+    try:
+        when = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SkytapError(
+            f"a share link expiry must be an ISO-8601 datetime, not {raw!r}") from exc
+    if when.tzinfo is not None:
+        when = when.astimezone(timezone.utc)
+    return {
+        "expiration_date": when.strftime(_SKYTAP_DATETIME),
+        "expiration_date_tz": SHARE_EXPIRY_TZ,
+    }
 
 
 def _vm_ref(vm_id: str) -> str:
@@ -678,11 +729,21 @@ async def create_share(env_id: str, password: str = "",
         "password": str(password),
         "vms": [{"vm_ref": _vm_ref(v["id"]), "access": SHARE_ACCESS} for v in vms],
     }
-    if expires_at:
-        body["expiration_date"] = expires_at
+    body.update(_expiry_fields(expires_at))
 
-    raw = await _client().request("POST", f"/v2/configurations/{env_id}/publish_sets",
-                                  json=body)
+    try:
+        raw = await _client().request("POST", f"/v2/configurations/{env_id}/publish_sets",
+                                      json=body)
+    except SkytapError as exc:
+        if "expiration_date_tz" in str(exc):
+            # The pair is built above and cannot be half-sent, so reaching here means the
+            # account did not accept the zone name itself. Say which one went, because the
+            # message Skytap returns names the field and not the value.
+            raise SkytapError(
+                f"Skytap rejected the share link's expiry timezone "
+                f"({SHARE_EXPIRY_TZ!r}): {exc}. Change SHARE_EXPIRY_TZ in "
+                f"skytap_service to a zone name this account accepts.") from exc
+        raise
     if not isinstance(raw, dict) or not raw.get("id"):
         raise SkytapError(
             f"Skytap accepted the share for environment {env_id} but returned no publish "

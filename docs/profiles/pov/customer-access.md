@@ -248,6 +248,14 @@ Skytap enforces the expiry itself, so an expired link is already dead. The page 
 `expired` rather than clearing the row, because during an evaluation the fact that a link
 *was* shared is worth keeping.
 
+The expiry crosses to Skytap as **two** fields, `expiration_date` and its companion
+`expiration_date_tz`. The date carries no zone of its own and Skytap refuses the pair when
+only the date is sent — with `{"field":"expiration_date_tz","message":"Expiration date tz
+is invalid"}`, an error naming a field nothing set. The dashboard sends the date in UTC and
+the zone as `UTC`, together, and refuses an unparseable expiry before the call rather than
+letting Skytap answer for it. If an account rejects that zone name, the error says which
+one went out and where to change it.
+
 ### Re-sharing replaces; revoking is its own button
 
 **Re-share** revokes the current publish set before creating a new one, and mints a new
@@ -301,3 +309,9 @@ point at these VMs.
 **"this POV has no stored share password".** The link predates the stored password, or the
 password was cleared. Re-share: it publishes a new URL and a new password together, which
 is the only way to get back to a consistent pair.
+
+**"publishing the share link failed: … publish_sets failed (400): …
+`Expiration date tz is invalid`".** Skytap did not accept the expiry's timezone. Before
+this was fixed the dashboard sent no timezone at all and *every* share failed this way; a
+current build sends `UTC`, and the message names the zone it sent. If it recurs, that
+account wants a different one — `SHARE_EXPIRY_TZ` in `services/skytap_service.py`.

@@ -479,6 +479,106 @@ def test_the_adapter_prefers_the_desktops_url_over_the_api_self_reference():
     assert skytap_service._share({"id": "ps-2", "url": "https://api.skytap.com/x"})["url"] == ""
 
 
+# ── the expiry, as Skytap wants it ───────────────────────────────────────────
+
+class _CapturingClient:
+    """Captures the publish-set POST body. The expiry is the one part of that body the
+    dashboard computes rather than copies, so the body is what has to be asserted."""
+
+    def __init__(self, error=""):
+        self.posts = []
+        self.error = error
+
+    async def request(self, method, path, json=None, **_kw):
+        self.posts.append({"method": method, "path": path, "body": json or {}})
+        if self.error:
+            from web_dashboard.services import skytap_service
+            raise skytap_service.SkytapError(self.error)
+        return {"id": "ps-1", "desktops_url": "https://cloud.example/d/1",
+                "expiration_date": "2026/10/09 12:00:00"}
+
+
+def _skytap_with(client):
+    """Point the adapter at a fake client and a one-VM environment. Returns the undo."""
+    from web_dashboard.services import skytap_service as sk
+    originals = (sk._client, sk.get_environment)
+
+    async def _env_stub(_env_id):
+        return {"id": "sky-1", "name": "poc", "vms": [{"id": "vm-1"}]}
+
+    sk._client = lambda: client
+    sk.get_environment = _env_stub
+    return lambda: (setattr(sk, "_client", originals[0]),
+                    setattr(sk, "get_environment", originals[1]))
+
+
+def test_the_expiry_is_sent_as_both_fields_because_the_date_alone_is_a_400():
+    """Skytap reads `expiration_date` in the zone named by `expiration_date_tz`, and
+    refuses the pair when only the date is present — with an error naming the field the
+    caller never set. Sending the date alone published nothing, live."""
+    from web_dashboard.services import skytap_service as sk
+    client = _CapturingClient()
+    undo = _skytap_with(client)
+    try:
+        asyncio.run(sk.create_share("sky-1", "pw", "2026-10-09T12:00:00"))
+    finally:
+        undo()
+    body = client.posts[0]["body"]
+    assert body["expiration_date"], "the share went out with no expiry date"
+    assert body["expiration_date_tz"] == sk.SHARE_EXPIRY_TZ,         "the date is there and the timezone is not — this is the live 400"
+
+
+def test_a_naive_expiry_is_read_as_utc_rather_than_as_local_time():
+    """`pov_share` computes the expiry in `utcnow` and hands over a naive ISO string. Read
+    as local time it would be hours out — and on a machine west of UTC, an expiry the
+    dashboard believes is in fourteen days would reach Skytap as one already closer."""
+    from web_dashboard.services import skytap_service as sk
+    client = _CapturingClient()
+    undo = _skytap_with(client)
+    try:
+        asyncio.run(sk.create_share("sky-1", "pw", "2026-10-09T12:00:00"))
+        asyncio.run(sk.create_share("sky-1", "pw", "2026-10-09T14:00:00+02:00"))
+    finally:
+        undo()
+    naive, aware = (p["body"]["expiration_date"] for p in client.posts)
+    assert "12:00:00" in naive, f"a naive UTC expiry was shifted: {naive}"
+    assert naive == aware, "the same instant reached Skytap as two different times"
+
+
+def test_an_unparseable_expiry_is_refused_before_the_call():
+    """Forwarded, it comes back as a 400 about `expiration_date_tz` — the other half of
+    the pair — and sends the next reader to the wrong field."""
+    from web_dashboard.services import skytap_service as sk
+    client = _CapturingClient()
+    undo = _skytap_with(client)
+    try:
+        asyncio.run(sk.create_share("sky-1", "pw", "14 days"))
+        raise AssertionError("a junk expiry was sent to Skytap")
+    except sk.SkytapError as exc:
+        assert "ISO-8601" in str(exc)
+        assert not client.posts, "the refusal happened after the publish set was created"
+    finally:
+        undo()
+
+
+def test_a_rejected_timezone_names_the_value_that_was_sent():
+    """Skytap's own message names the field and not the value, so an account that does not
+    accept the zone name reads as the bug this replaced."""
+    from web_dashboard.services import skytap_service as sk
+    client = _CapturingClient(
+        error='publish_sets failed (400): {"errors":[{"field":"expiration_date_tz",'
+              '"message":"Expiration date tz is invalid"}]}')
+    undo = _skytap_with(client)
+    try:
+        asyncio.run(sk.create_share("sky-1", "pw", "2026-10-09T12:00:00"))
+        raise AssertionError("a rejected timezone was reported as success")
+    except sk.SkytapError as exc:
+        assert sk.SHARE_EXPIRY_TZ in str(exc), "the error does not say which zone we sent"
+        assert "SHARE_EXPIRY_TZ" in str(exc), "the error does not say what to change"
+    finally:
+        undo()
+
+
 def test_the_write_contract_names_both_halves():
     """A create with no delete is how a link becomes unrevokable."""
     assert "create_share" in lab_platforms.WRITE_CONTRACT
