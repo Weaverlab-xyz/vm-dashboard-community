@@ -341,7 +341,10 @@ async def _fetch_instances(db: Session) -> list:
         # warning that does not block.
         warn = ""
         if job is not None:
-            ok, reason = vm_suspend_policy.schedulable(job.job_type, job.metadata_dict)
+            # The literal, not `job.job_type`: the query above filters on
+            # `ec2_deploy`, so it is known, and `schedulable` returns a FALSE warning
+            # rather than an error for an unrecognised type.
+            ok, reason = vm_suspend_policy.schedulable("ec2_deploy", job.metadata_dict)
             if not ok:
                 warn = reason
         result.append({

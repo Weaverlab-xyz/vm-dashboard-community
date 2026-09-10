@@ -589,7 +589,17 @@ def _deploy_job_meta(db: Session) -> dict:
 
 
 def _suspend_warning(job) -> "str | None":
-    ok, reason = vm_suspend_policy.schedulable(job.job_type, job.metadata_dict)
+    """Why suspending this VM may need repairing afterwards, or None.
+
+    The job type is the LITERAL, not `job.job_type`: the query above filters on
+    `azure_deploy`, so it is already known — and this function is reached from
+    `_deploy_job_meta`, which the DESTROY fan-out also calls. Reading an attribute here
+    made destroy depend on one it never needed, and a row that lacked it 500'd a delete.
+    Passing "" would have been worse than an AttributeError: `schedulable` answers
+    "Only cloud VMs can carry a suspend schedule" for an unknown type, which would have
+    put a false warning on every VM instead of failing loudly.
+    """
+    ok, reason = vm_suspend_policy.schedulable("azure_deploy", job.metadata_dict)
     return None if ok else reason
 
 

@@ -359,7 +359,8 @@ async def _build_gcp_instances(db, project_id: str) -> list:
             # Pure policy, no I/O — the same function the power path warns with and
             # the suspend scheduler refuses with. Read here so the page can name the
             # count in its confirmation BEFORE queueing.
-            _ok, _why = vm_suspend_policy.schedulable(job.job_type, data)
+            # The literal — the query filters on `gce_deploy` already.
+            _ok, _why = vm_suspend_policy.schedulable("gce_deploy", data)
             job_meta[name] = {
                 "job_id": job.id,
                 "deployed_by": job.created_by,

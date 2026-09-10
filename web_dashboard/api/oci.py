@@ -338,7 +338,7 @@ async def _build_oci_instances(db, compartment: str) -> list:
         # prefer the private address and OCI prefers the PUBLIC one, so "does it have a
         # private address?" answers the question for the other three and the wrong
         # question here — which is why the reason is carried rather than re-derived.
-        _ok, _why = vm_suspend_policy.schedulable(job.job_type, meta)
+        _ok, _why = vm_suspend_policy.schedulable("oci_deploy", meta)
         job_meta[ocid] = {
             "job_id": job.id,
             "deployed_by": job.created_by,
