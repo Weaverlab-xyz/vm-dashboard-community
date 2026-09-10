@@ -27,8 +27,9 @@ from .feature_flags import VALID_PROFILES
 
 
 BRAND = "Weaver Lab"
-# Too long for the nav bar, which is why the lockup there is BRAND + product. It belongs
-# on the login page, the one screen with room for it.
+# Too long for the nav bar, which names the instance (the product word) and leaves the
+# parent brand to the flyout drawer's header. It belongs on the login page, the one screen
+# with room for it.
 BRAND_FULL = "Weaver Lab Applications"
 
 # Mark A, "the weave": two warp strands and two weft strands interlacing over/under in a
@@ -73,7 +74,6 @@ _DEMO_PROD = {
     "body_bg": "bg-gray-50",
     "warp": "text-blue-100",
     "weft": "text-blue-400",
-    "slash": "text-blue-400",
     "rail": "",
     "product": "Infrastructure",
     # The edition, not the profile -- see _DEMO_DEV's chip_label below for what this slot
@@ -113,15 +113,14 @@ _DEMO_DEV = dict(
     brand_hover="hover:text-emerald-200",
     warp="text-emerald-100",
     weft="text-emerald-300",
-    slash="text-emerald-300",
     # The lockup's product word already says which profile this is ("Infrastructure" vs
     # "POV"), so the chip carries the one fact the lockup does not: the edition. This is
     # also the pre-brand pill's exact wording, kept rather than reinvented.
     #
-    # It is short on purpose. static/js/app.js:responsiveNav folds the ENTIRE nav into the
-    # flyout drawer when the row overflows, and at a 1280px viewport the demo/community
-    # bar is the widest variant -- measured, "Demo · Community" here left 2px of headroom
-    # and this leaves 61px. tests/test_profile_theme pins the length.
+    # It is short on purpose. The chip sits beside the product word in a 64px bar that
+    # also has to hold the username, the settings cog and the menu toggle, and it is the
+    # first thing that stops fitting: "Demo · Community" left 2px of headroom at 1280px
+    # where this leaves 61px. tests/test_profile_theme pins the length.
     chip_label="Community",
     hex={
         "nav_bg": "#047857",
@@ -137,7 +136,7 @@ _DEMO_DEV = dict(
 # Flat violet, not a gradient: base.html reuses nav_bg on the 288px-wide vertical flyout
 # drawer, where a horizontal gradient reads as a rendering bug rather than a choice.
 #
-# The chip says "Customer tenants" rather than "POV" because the wordmark beside it
+# The chip says "Customer tenants" rather than "POV" because the product word beside it
 # already says POV. The chip's job is to name the consequence, not repeat the label.
 _POV = {
     "nav_bg": "bg-violet-900",
@@ -149,7 +148,6 @@ _POV = {
     "body_bg": "bg-violet-50",
     "warp": "text-violet-100",
     "weft": "text-fuchsia-400",
-    "slash": "text-fuchsia-400",
     "rail": "h-1 bg-fuchsia-500",
     "product": "POV",
     "chip_label": "Customer tenants",

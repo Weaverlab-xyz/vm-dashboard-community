@@ -1,5 +1,9 @@
-{# Shared nav link list. Rendered twice by base.html: once inline in the
-   top bar (wide viewports), once inside the compact-mode flyout drawer.
+{# The nav link list, rendered once by base.html into the flyout drawer behind the bar's
+   ☰ button. This file decides which links EXIST and nothing else: no containers, no
+   refs, no state, and no knowledge of who is looking. Whatever reorders this list later
+   does so by moving DOM nodes, so there is no code path here by which a page could be
+   left out. A test asserts that ignorance rather than trusting it — including that this
+   file never learns the name of whatever is doing the reordering.
    Order per issue #17:
      Dashboard → on-prem hypervisors (Workstation, Proxmox, vSphere, Hyper-V,
      Nutanix, XCP-ng) → AWS → Azure → GCP → Containers → Storage →

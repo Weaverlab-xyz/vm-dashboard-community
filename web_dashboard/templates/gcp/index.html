@@ -9,7 +9,7 @@
      x-init="init()">
 
   <!-- Page header -->
-  <div class="flex items-center justify-between mb-6">
+  <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-6">
     <div>
       <h1 class="text-2xl font-bold text-gray-800">Google Cloud Platform</h1>
       <p class="text-sm text-gray-500 mt-0.5">Compute Engine instances and images in
@@ -52,37 +52,37 @@
 
   <!-- Tab bar -->
   <div class="border-b border-gray-200 mb-6">
-    <nav class="-mb-px flex gap-6">
+    <nav class="-mb-px flex gap-6 overflow-x-auto">
       <button @click="activeTab = 'public'"
               :class="activeTab === 'public' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
-              class="py-3 border-b-2 text-sm font-medium transition-colors">
+              class="py-3 border-b-2 text-sm font-medium transition-colors whitespace-nowrap shrink-0">
         Public Images
         <span x-show="publicImages.length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
               x-text="publicImages.length"></span>
       </button>
       <button @click="switchToCustom()"
               :class="activeTab === 'custom' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
-              class="py-3 border-b-2 text-sm font-medium transition-colors">
+              class="py-3 border-b-2 text-sm font-medium transition-colors whitespace-nowrap shrink-0">
         Custom Images
         <span x-show="customImages.length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
               x-text="customImages.length"></span>
       </button>
       <button @click="switchToInstances()"
               :class="activeTab === 'instances' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
-              class="py-3 border-b-2 text-sm font-medium transition-colors">
+              class="py-3 border-b-2 text-sm font-medium transition-colors whitespace-nowrap shrink-0">
         Compute Instances
         <span x-show="instances.length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
               x-text="instances.length"></span>
       </button>
       <button @click="activeTab = 'build'"
               :class="activeTab === 'build' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
-              class="py-3 border-b-2 text-sm font-medium transition-colors">
+              class="py-3 border-b-2 text-sm font-medium transition-colors whitespace-nowrap shrink-0">
         Build Image
       </button>
       {% if pra_enabled %}
       <button @click="switchToOT()"
               :class="activeTab === 'ot' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
-              class="py-3 border-b-2 text-sm font-medium transition-colors">
+              class="py-3 border-b-2 text-sm font-medium transition-colors whitespace-nowrap shrink-0">
         OT Demo Cell
         <span x-show="otCells.length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
               x-text="otCells.length"></span>
