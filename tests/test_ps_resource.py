@@ -1023,6 +1023,74 @@ def test_dbgcp_self_rotation_is_narrowed_to_the_cloud_run_channel():
     assert j > i, "the guard must run before register_managed_system is called"
 
 
+# ── the provider url ─────────────────────────────────────────────────────────
+#
+# The provider validates `url` before it opens a connection and accepts https only. Its
+# refusal interpolates the SCHEME it parsed, so a URL that has none reads
+#
+#     provider "passwordsafe" { is not support. Use https
+#
+# — an empty space where the offending value belongs. A bare hostname is not an exotic
+# input either: it is what the POV tenant form asks for, and the REST half accepts it,
+# so a POV can resolve its workgroup, create its functional accounts and then fail this
+# way once per VM.
+
+_TENANT_URL_SHAPES = ("acme.ps.beyondtrustcloud.com",
+                      "acme.ps.beyondtrustcloud.com/",
+                      "https://acme.ps.beyondtrustcloud.com",
+                      "https://acme.ps.beyondtrustcloud.com/BeyondTrust/api/public/v3")
+
+
+def test_the_provider_url_matches_the_rest_clients_base_for_every_shape():
+    """Not "is normalised" but "is normalised THE SAME WAY": the value Terraform
+    onboards against and the value the dashboard read the workgroup from have to be the
+    same tenant, and the only way to keep that true is to call the same function."""
+    from web_dashboard.services import ps_api_service
+    for raw in _TENANT_URL_SHAPES:
+        env = ps._tf_env(None, ps.tenant_creds(raw, "cid", "sec", "svc"))
+        assert env["TF_VAR_ps_url"] == ps_api_service.api_base(raw), raw
+        assert env["TF_VAR_ps_url"].startswith("https://"), raw
+        assert env["TF_VAR_ps_url"].endswith("/BeyondTrust/api/public/v3"), raw
+
+
+def test_the_singleton_url_is_normalised_too_not_just_a_tenants():
+    """The Settings field's own placeholder is an origin, so the install-wide path can
+    be handed the same unusable URL as a POV's."""
+    original = ps._cfg
+    ps._cfg = lambda key: {"pscli_api_url": "acme.ps.beyondtrustcloud.com",
+                           "pscli_client_id": "cid", "pscli_client_secret": "sec",
+                           "pscli_api_account_name": "svc"}.get(key, "")
+    try:
+        env = ps._tf_env()
+    finally:
+        ps._cfg = original
+    assert env["TF_VAR_ps_url"] == (
+        "https://acme.ps.beyondtrustcloud.com/BeyondTrust/api/public/v3")
+
+
+def test_an_http_url_is_refused_by_name_rather_than_promoted():
+    """A scheme somebody typed is not one to rewrite — that would claim a TLS connection
+    nobody asked for. The provider refuses it either way; this refusal says which URL."""
+    try:
+        ps._tf_env(None, ps.tenant_creds("http://acme.ps.example", "cid", "sec", "svc"))
+        raise AssertionError("an http provider url was accepted")
+    except ps.PSResourceError as exc:
+        assert "http://acme.ps.example" in str(exc), str(exc)
+        assert "https" in str(exc), str(exc)
+
+
+def test_an_unset_url_is_still_an_absent_tf_var():
+    """Blank is the "Password Safe is not configured" case, which callers detect by the
+    variable being absent. Normalisation must not turn it into a bare "https://"."""
+    original = ps._cfg
+    ps._cfg = lambda key: ""
+    try:
+        env = ps._tf_env()
+    finally:
+        ps._cfg = original
+    assert "TF_VAR_ps_url" not in env
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

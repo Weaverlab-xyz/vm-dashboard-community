@@ -1162,6 +1162,46 @@ def tenant_creds(api_url: str, client_id: str, client_secret: str,
             "pscli_api_account_name": api_account_name}
 
 
+def _provider_url(raw: str) -> str:
+    """The API base the ``passwordsafe`` provider's ``url`` will accept.
+
+    The provider validates its own inputs before it makes a single call
+    (``go-client-library-passwordsafe``, ``api/utils/validator.go:ValidateURL``), and it
+    applies **two** rules, in this order:
+
+    * the scheme must be exactly ``https``, and the refusal interpolates the scheme it
+      parsed — ``fmt.Sprintf("%s is not support. Use https", scheme)``;
+    * the path must contain ``/BeyondTrust/api/public/v``, or "invalid API URL, it must
+      contains /BeyondTrust/api/public/v as part of the path".
+
+    So a bare ``tenant.ps.beyondtrustcloud.com`` — exactly the shape the POV tenant form
+    asks for, and one of the two shapes a ``pscli`` config holds — fails the first with an
+    *empty* scheme, which is how the message ends up reading
+
+        provider "passwordsafe" { is not support. Use https
+
+    with nothing where the offending value should be. It names neither the URL nor the
+    tenant nor the fix, and it arrives once per VM.
+
+    Adding the scheme alone would only move the failure to the second rule, so this
+    applies the whole normalisation the REST half has always done — by CALLING it
+    (``ps_api_service.api_base``) rather than restating it, so a URL the dashboard can
+    read a workgroup from is a URL Terraform can onboard against, permanently.
+
+    An explicit ``http://`` is refused here instead of being rewritten. The operator wrote
+    a scheme on purpose, and silently promoting it would claim a TLS connection nobody
+    asked for; the provider would refuse it anyway, less legibly.
+    """
+    from . import ps_api_service
+    url = ps_api_service.api_base(raw)
+    if url and not url.lower().startswith("https://"):
+        raise PSResourceError(
+            f"the Password Safe API URL {raw!r} is not https. The passwordsafe Terraform "
+            f"provider validates its inputs before connecting and accepts https only, so "
+            f"onboarding would fail on every VM with a message that does not name the URL.")
+    return url
+
+
 def _tf_env(extra_vars: Optional[dict] = None, tenant: Optional[dict] = None) -> dict:
     """Environment for Terraform calls. The provider OAuth credentials + the run-as
     user ride TF_VAR_* (the destroy path needs them too), as do per-apply secrets.
@@ -1189,6 +1229,8 @@ def _tf_env(extra_vars: Optional[dict] = None, tenant: Optional[dict] = None) ->
         ("pscli_api_account_name", "TF_VAR_ps_api_account_name"),
     ):
         val = override.get(cfg_key) if override else _cfg(cfg_key)
+        if cfg_key == "pscli_api_url":
+            val = _provider_url(val)
         if val:
             env[tf_var] = val
     for var, val in (extra_vars or {}).items():
