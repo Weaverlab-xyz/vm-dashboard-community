@@ -69,6 +69,22 @@ ARGS_VAR = ansible_local_service.WINPKG_ARGS_VAR
 # `epml_token_var` does for an EPM-L installation token.
 KEY_VAR = "rb_install_key"
 
+# Where the bootstrapper is told to write its install log.
+#
+# **Absolute, and that is the whole point.** This was `-l "install.log"` -- a RELATIVE
+# path, resolved against whatever working directory `win_package` happened to launch the
+# process with, which is not a directory the play chooses or an operator can predict. So
+# the one artefact that explains a failure was written somewhere nobody could name. A live
+# install returned `rc: 1603` with empty stdout and empty stderr, and 1603 is only "fatal
+# error during installation" -- the log is the sole record of WHICH fatal error.
+#
+# Under `C:\Windows\Temp` rather than the connecting user's `%TEMP%`: the run arrives over
+# WinRM as an administrator whose profile temp resolves to an 8.3 path
+# (`C:\Users\ADMINI~1\AppData\Local\Temp`), and an MSI-backed installer hands its work to
+# msiexec running as SYSTEM. A machine-wide directory is readable by both and by whoever
+# logs on afterwards to look.
+RB_INSTALL_LOG = r"C:\Windows\Temp\beyondtrust-rb-install.log"
+
 # WinRM over HTTP, matching `agent_ansible_meta._DEFAULT_PORT`. The credential reaches the
 # run sealed to a per-fetch key rather than riding WinRM's own transport, which is why 5985
 # is the default here as it is there.
@@ -268,11 +284,14 @@ def installer_arguments(env: PovEnvironment) -> str:
     resolved when the agent fetches the sealed bundle, so what lands in the job row and the
     envelope is a var *name*. The zone is not a secret and goes in as-is.
 
-    ``RESTART`` is absent on purpose — see the module docstring. ``-l`` names a log the
-    installer writes on the target, which is where an operator looks when the exit code
-    alone is not enough.
+    ``RESTART`` is absent on purpose — see the module docstring. ``-l`` names the log the
+    installer writes on the target, at :data:`RB_INSTALL_LOG` — an absolute path, because
+    a relative one is resolved against a working directory this play never chose, and the
+    log is the only thing that turns a bare ``rc: 1603`` into a cause. The play reads it
+    back and prints it when the install fails; see
+    ``ansible_local_service._winpkg_failure_rescue``.
     """
-    return (f'/quiet -l "install.log" '
+    return (f'/quiet -l "{RB_INSTALL_LOG}" '
             f'INSTALLKEY={{{{ {KEY_VAR} }}}} ZONE={zone(env)}')
 
 
@@ -352,8 +371,12 @@ def queue(db: Session, env: PovEnvironment, *, created_by: str = "") -> Job:
         # The var NAME, never the key. Resolved when the agent fetches the bundle.
         secret_vars={KEY_VAR: installer_key_config_key(env.id)},
         # Play data rather than connection configuration, so it is allowed where an
-        # `ansible_*` var is not.
-        extra_vars={ARGS_VAR: installer_arguments(env)},
+        # `ansible_*` var is not. The log path goes over as well as into the arguments:
+        # one tells the installer where to write, the other tells the play where to read
+        # it back from when the install fails, and a bare exit code is all it otherwise
+        # leaves behind.
+        extra_vars={ARGS_VAR: installer_arguments(env),
+                    ansible_local_service.WINPKG_LOG_VAR: RB_INSTALL_LOG},
         # How the bundle assembler knows to fetch this VM's login from the platform. Ids,
         # not credentials — the discipline every other key in RUN_META_KEYS follows.
         pov_environment_id=env.id,

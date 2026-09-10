@@ -140,7 +140,7 @@ Grounded in [Resource Broker How to](https://beyondtrust.atlassian.net/wiki/spac
 | `INSTALLKEY` | **Required for a silent install**, or the user is prompted. The per-tenant key |
 | `ZONE` | **Also required for a silent install.** The resource zone this broker joins |
 | `/quiet` | Makes it silent at all |
-| `-l "install.log"` | The full install log |
+| `-l <path>` | The full install log. **Give it an absolute path** — see below |
 | `INSTALLPATH` | Optional |
 | `RESTART` | Optional — and see §2 before touching it |
 | `USEPROXY` / `PROXYADDRESS` / `PROXYPORT` | Optional; out of scope for this slice |
@@ -148,11 +148,45 @@ Grounded in [Resource Broker How to](https://beyondtrust.atlassian.net/wiki/spac
 So a silent install is:
 
 ```
-BeyondTrust.Agents.Bootstrapper.exe /quiet -l "install.log" INSTALLKEY=<key> ZONE=<zone>
+BeyondTrust.Agents.Bootstrapper.exe /quiet -l "C:\Windows\Temp\beyondtrust-rb-install.log" INSTALLKEY=<key> ZONE=<zone>
 ```
 
 That settles the question this note previously left open: the key is an **argument**, not
 a file the installer expects beside itself. No `win_copy` and no hand-written playbook.
+
+### The log path is absolute, and the play reads it back
+
+This started as `-l "install.log"`. A **relative** path is resolved against whatever
+working directory `win_package` happened to launch the process with — not one this play
+chooses or an operator can predict — so the file landed somewhere nobody could name.
+
+That matters more than it sounds, because an MSI-backed installer reports failure as a
+**bare exit code**. A live install returned:
+
+```
+"rc": 1603, "stdout": "", "stderr": "", "reboot_required": false
+```
+
+`1603` is `ERROR_INSTALL_FAILURE` — "fatal error during installation" and nothing more. It
+is the installer's way of saying *look in the log*, and the log was the one thing the run
+had thrown away.
+
+So: `pov_resource_broker.RB_INSTALL_LOG` is an absolute path under `C:\Windows\Temp`,
+passed **twice** — into `-l` so the installer writes there, and as the
+`installer_log_path` extra var so the play knows where to read it back from. A `rescue:`
+on the install task reads the last 120 lines, prints them to Live Output, and then fails
+with the installer's own exit code. Reading a log is not tolerating the error.
+
+`C:\Windows\Temp` rather than the connecting user's `%TEMP%`: the run arrives over WinRM
+as an administrator whose profile temp resolves to an 8.3 path
+(`C:\Users\ADMINI~1\AppData\Local\Temp`), and an MSI-backed installer hands the real work
+to msiexec running as SYSTEM. A machine-wide directory is readable by both — and by
+whoever logs on afterwards to look, which on a POV may mean going through the very
+Gateway this install was supposed to provide.
+
+**If a run still fails with `1603` and the log says nothing useful**, the log is now on
+the target at that path and survives the run; the downloaded installer no longer does,
+because the cleanup moved into an `always`.
 
 ### The gap
 

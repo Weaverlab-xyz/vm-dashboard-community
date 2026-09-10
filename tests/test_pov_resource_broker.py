@@ -318,6 +318,44 @@ def test_the_key_is_a_var_name_in_the_arguments_never_the_value():
     db.close()
 
 
+def test_the_install_log_is_an_absolute_path():
+    """It was `-l "install.log"`, resolved against whatever working directory
+    `win_package` launched the process with -- so the one artefact that explains a
+    failure was written somewhere nobody could name. A live install returned
+    `rc: 1603` with empty stdout and empty stderr, and 1603 alone is only "fatal
+    error during installation"."""
+    db = d.SessionLocal()
+    env, _a, _v = _ready(db)
+    args = rb.installer_arguments(env)
+    assert rb.RB_INSTALL_LOG in args
+    assert rb.RB_INSTALL_LOG[1:3] == ":\\", rb.RB_INSTALL_LOG
+    assert '-l "install.log"' not in args
+    db.close()
+
+
+def test_the_log_is_written_outside_the_connecting_users_profile():
+    """The run arrives over WinRM as an administrator whose `%TEMP%` resolves to an
+    8.3 path, and an MSI-backed installer hands its work to msiexec running as
+    SYSTEM. A machine-wide directory is readable by both, and by whoever logs on
+    later to look."""
+    assert "\\Users\\" not in rb.RB_INSTALL_LOG
+    assert rb.RB_INSTALL_LOG.lower().startswith(
+        "c:\\windows\\temp\\")
+
+
+def test_the_path_the_installer_writes_is_the_path_the_play_reads():
+    """Two halves of one fact. If they drift, the install still logs and the play
+    still looks, at different files -- and the failure reports "no installer log was
+    written", which reads as the installer being silent rather than as a bug here."""
+    db = d.SessionLocal()
+    env, _a, _v = _ready(db)
+    meta = rb.queue(db, env, created_by="t").metadata_dict
+    told_to_write = meta["extra_vars"][rb.ARGS_VAR]
+    read_back_from = meta["extra_vars"][ansible_local_service.WINPKG_LOG_VAR]
+    assert f'-l "{read_back_from}"' in told_to_write
+    db.close()
+
+
 # ── the asset type ───────────────────────────────────────────────────────────
 
 def test_an_exe_is_a_windows_package_not_a_playbook():
