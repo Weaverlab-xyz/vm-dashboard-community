@@ -578,9 +578,19 @@ def _deploy_job_meta(db: Session) -> dict:
             "resource_group": j.metadata_dict.get("resource_group"),
             "destroyed": j.metadata_dict.get("destroyed", False),
             "workgroup": (j.workgroup or j.metadata_dict.get("workgroup") or "").lower() or None,
+            # Pure policy, no I/O — the same function the power path warns with and the
+            # suspend scheduler refuses with. Read here so the page can name the count
+            # in its confirmation BEFORE queueing, which is the point of a warning that
+            # does not block.
+            "suspend_warning": _suspend_warning(j),
         }
         for j in deploy_jobs if j.metadata_dict.get("vm_name")
     }
+
+
+def _suspend_warning(job) -> "str | None":
+    ok, reason = vm_suspend_policy.schedulable(job.job_type, job.metadata_dict)
+    return None if ok else reason
 
 
 async def _fetch_vms(db: Session) -> list:
@@ -626,6 +636,7 @@ async def _fetch_vms(db: Session) -> list:
             "workgroup": wg,
             "job_id": meta["id"] if meta else None,
             "deployed_by": meta["created_by"] if meta else "unknown",
+            "suspend_warning": (meta or {}).get("suspend_warning"),
         })
     return result
 

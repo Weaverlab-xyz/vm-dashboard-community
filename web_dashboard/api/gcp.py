@@ -356,11 +356,16 @@ async def _build_gcp_instances(db, project_id: str) -> list:
         zone = data.get("zone") or _gcp_zone()
         if name:
             by_zone.setdefault(zone, []).append(name)
+            # Pure policy, no I/O — the same function the power path warns with and
+            # the suspend scheduler refuses with. Read here so the page can name the
+            # count in its confirmation BEFORE queueing.
+            _ok, _why = vm_suspend_policy.schedulable(job.job_type, data)
             job_meta[name] = {
                 "job_id": job.id,
                 "deployed_by": job.created_by,
                 "extra": data,
                 "workgroup": (job.workgroup or data.get("workgroup") or "").lower() or None,
+                "suspend_warning": None if _ok else _why,
             }
 
     instances = []
@@ -372,6 +377,7 @@ async def _build_gcp_instances(db, project_id: str) -> list:
             inst["job_id"] = meta.get("job_id")
             inst["deployed_by"] = meta.get("deployed_by")
             inst["workgroup"] = meta.get("workgroup") or inst.get("workgroup")
+            inst["suspend_warning"] = meta.get("suspend_warning")
             inst["region"] = inst.get("region") or region
             instances.append(inst)
 

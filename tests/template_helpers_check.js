@@ -876,6 +876,99 @@ ok('bulkPowerConfirm: every destructive op has its own sentence',
      planner([], []).bulkPowerConfirm(op, { targets: [1], skipped: 0, total: 1 })
        .length > 20));
 
+// ── Cloud pages: the _bulkPowerState mappings ─────────────────────────────────
+//
+// Each cloud reports power state in its own vocabulary, and one of them cannot be
+// compared with ===. These extract the real seam out of each page and exercise the
+// values the provider actually emits.
+const CLOUD_STATE = {
+  'aws/index.html': {
+    on:    [{state: 'running'}],
+    off:   [{state: 'stopped'}],
+    other: [{state: 'pending'}, {state: 'stopping'}, {state: 'shutting-down'}],
+    // A terminated instance is excluded by the checkbox, so the seam never sees one —
+    // but if it did, 'other' is the honest answer rather than a lie in either direction.
+    unknown: [{}, {state: ''}],
+  },
+  'azure/index.html': {
+    // Azure's `state` is the display_status of the PowerState/* code. NOT "running".
+    on:    [{state: 'VM running'}],
+    off:   [{state: 'VM deallocated'}],
+    // "VM stopped" is a portal-side power-off that was never deallocated: not running,
+    // and STILL BILLING for compute. It must be 'other' so Suspend still reaches it —
+    // mapping it to 'off' would skip exactly the VMs costing money for nothing.
+    other: [{state: 'VM stopped'}, {state: 'VM starting'}, {state: 'VM deallocating'}],
+    // "Unknown" is what the projection emits when instance_view throws. An absence of
+    // knowledge, not a state.
+    unknown: [{}, {state: ''}, {state: 'Unknown'}],
+  },
+  'gcp/index.html': {
+    on:    [{status: 'RUNNING'}],
+    off:   [{status: 'TERMINATED'}],
+    other: [{status: 'STAGING'}, {status: 'STOPPING'}, {status: 'SUSPENDED'}],
+    unknown: [{}, {status: ''}],
+  },
+  'oci/index.html': {
+    on:    [{lifecycle_state: 'RUNNING'}],
+    off:   [{lifecycle_state: 'STOPPED'}],
+    other: [{lifecycle_state: 'PROVISIONING'}, {lifecycle_state: 'STARTING'}],
+    unknown: [{}, {lifecycle_state: ''}],
+  },
+};
+
+for (const [page, cases] of Object.entries(CLOUD_STATE)) {
+  const seam = build(page, '_bulkPowerState', {});
+  for (const [expected, rows] of Object.entries(cases)) {
+    const want = expected === 'unknown' ? null : expected;
+    for (const row of rows) {
+      const got = seam._bulkPowerState(row);
+      ok(`${page} _bulkPowerState(${JSON.stringify(row)}) -> ${want}`, got === want);
+    }
+  }
+}
+
+// The one that would silently break the Azure page: `===` against a value that is
+// never bare. If someone "tidies" the substring match away, every Azure row becomes
+// unknown — eligible for everything, skipping nothing, and the operator loses the
+// already-running/already-stopped filtering entirely.
+ok('azure _bulkPowerState does not compare state with ===',
+   !/vm\.state\s*===\s*'running'/.test(
+     require('fs').readFileSync(T + 'azure/index.html', 'utf8')));
+
+// Eligibility over the cloud states, through the shared mixin, using each page's own
+// seam. Suspend must reach an Azure "VM stopped"; Start must not be offered for a VM
+// that is already on.
+(() => {
+  const azure = build('azure/index.html', '_bulkPowerState', {});
+  const elig = Object.assign(
+    eval('({' + extract(APPJS, 'bulkPowerEligible') + '})'),
+    { bulkGuestOps: GUEST_OPS, _bulkPowerState: azure._bulkPowerState });
+  ok('azure: Suspend reaches a portal-stopped (still billing) VM',
+     elig.bulkPowerEligible({state: 'VM stopped'}, 'stop') === true);
+  ok('azure: Suspend skips an already-deallocated VM',
+     elig.bulkPowerEligible({state: 'VM deallocated'}, 'stop') === false);
+  ok('azure: Start skips an already-running VM',
+     elig.bulkPowerEligible({state: 'VM running'}, 'start') === false);
+  ok('azure: Start reaches a deallocated VM',
+     elig.bulkPowerEligible({state: 'VM deallocated'}, 'start') === true);
+  ok('azure: an Unknown state is eligible for both, never skipped',
+     elig.bulkPowerEligible({state: 'Unknown'}, 'start') === true
+     && elig.bulkPowerEligible({state: 'Unknown'}, 'stop') === true);
+})();
+
+// The warn seam: prose on stop, silence on start, and never a refusal.
+for (const page of ['aws/index.html', 'azure/index.html', 'gcp/index.html',
+                    'oci/index.html']) {
+  const w = build(page, '_bulkPowerWarn', {});
+  ok(`${page} _bulkPowerWarn warns on stop when the row carries a reason`,
+     w._bulkPowerWarn({suspend_warning: 'wired at a public address'}, 'stop')
+       === 'wired at a public address');
+  ok(`${page} _bulkPowerWarn is silent on start`,
+     w._bulkPowerWarn({suspend_warning: 'wired at a public address'}, 'start') === '');
+  ok(`${page} _bulkPowerWarn is silent when the row carries no reason`,
+     w._bulkPowerWarn({}, 'stop') === '');
+}
+
 ociPlacementChecks().then(() => process.exit(fail ? 1 : 0),
                           (e) => { console.log('FAIL ' + OCI + ' placement checks threw: ' + e);
                                    process.exit(1); });

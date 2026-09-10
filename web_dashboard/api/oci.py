@@ -334,10 +334,16 @@ async def _build_oci_instances(db, compartment: str) -> list:
         if not ocid:
             continue
         ocids.append(ocid)
+        # Pure policy, no I/O. OCI is the cloud this matters most on: three runners
+        # prefer the private address and OCI prefers the PUBLIC one, so "does it have a
+        # private address?" answers the question for the other three and the wrong
+        # question here — which is why the reason is carried rather than re-derived.
+        _ok, _why = vm_suspend_policy.schedulable(job.job_type, meta)
         job_meta[ocid] = {
             "job_id": job.id,
             "deployed_by": job.created_by,
             "workgroup": (job.workgroup or meta.get("workgroup") or "").lower() or None,
+            "suspend_warning": None if _ok else _why,
         }
     instances = await oci_service.describe_instances(compartment, ocids)
     for inst in instances:
@@ -345,6 +351,7 @@ async def _build_oci_instances(db, compartment: str) -> list:
         inst["job_id"] = meta.get("job_id")
         inst["deployed_by"] = meta.get("deployed_by")
         inst["workgroup"] = meta.get("workgroup") or inst.get("workgroup")
+        inst["suspend_warning"] = meta.get("suspend_warning")
     full = OCIInstanceListResponse(instances=instances, compartment_ocid=compartment, region=_region())
     await cache_service.set(_cache_key("oci_instances", compartment), full.model_dump(), ttl=60)
     return instances

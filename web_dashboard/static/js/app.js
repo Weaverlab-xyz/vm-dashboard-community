@@ -479,8 +479,15 @@ window.bulkPowerState = function () {
 
         async submitBulkPower(op) {
             if (this.bulkPowerBusy) return;
-            const say = (m, t) => (typeof this.showToast === 'function'
-                ? this.showToast(m, t) : toast(m, t));
+            // Three names, because the pages genuinely use three: five hypervisor
+            // pages own a `showToast`, the OCI page an equivalent `notify`, and the
+            // rest rely on the global `toast` from base.html. Falling straight through
+            // to the global one would work everywhere but would put the toolbar's
+            // messages in a different place from the page's own on two of the ten.
+            const say = (m, t) => (
+                typeof this.showToast === 'function' ? this.showToast(m, t)
+                : typeof this.notify === 'function' ? this.notify(m, t)
+                : toast(m, t));
 
             const plan = this.bulkPowerPlan(op);
             if (plan.targets.length === 0) {

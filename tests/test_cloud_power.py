@@ -22,6 +22,7 @@ Run: python tests/test_cloud_power.py   (or under pytest)
 """
 import ast
 import os
+import re
 import sys
 import tempfile
 
@@ -297,6 +298,128 @@ def test_a_cloud_batch_schedules_no_local_work():
         assert "background_tasks" not in _code(path, "bulk_power"), \
             f"{name}: bulk_power passes background_tasks — every cloud target is a " \
             f"worker job, so there is nothing for this process to run"
+
+
+# ── The pages ─────────────────────────────────────────────────────────────────
+#
+# tests/test_hypervisor_power_routing.py has the equivalent of all of this, but every one
+# of its loops iterates the six ON-PREM kinds. So a cloud page could ship a toolbar with
+# a missing seam, an op its router refuses, or a button its rows do not offer, and nothing
+# would fail. These are the same invariants, keyed off CONSOLES.
+
+_TEMPLATES = {"aws": "aws/index.html", "azure": "azure/index.html",
+              "gcp": "gcp/index.html", "oci": "oci/index.html"}
+
+
+def _page(cloud):
+    return _src(os.path.join("web_dashboard", "templates",
+                             *_TEMPLATES[cloud].split("/")))
+
+
+_TOOLBAR = re.compile(r"bulk_power_buttons\(\s*\[([^\]]*)\]")
+
+
+def test_every_cloud_page_renders_the_shared_toolbar():
+    for cloud in CONSOLES:
+        markup = _page(cloud)
+        assert "...bulkPowerState()" in markup, (
+            f"{cloud} page does not spread bulkPowerState(), so every toolbar binding "
+            f"is an unbound name — which Alpine fails silently on")
+        assert _TOOLBAR.search(markup), f"{cloud} page renders no bulk_power_buttons(...)"
+        assert re.search(r"bulkPowerUrl:\s*'/api/" + cloud + r"/power/bulk'", markup), (
+            f"{cloud} page's bulkPowerUrl does not point at its own bulk route")
+
+
+def test_a_cloud_toolbar_offers_exactly_what_its_router_accepts():
+    """Equality. A superset 400s the whole batch with a message about the op rather than
+    about the VMs; a subset is a route nothing can reach."""
+    for cloud in CONSOLES:
+        match = _TOOLBAR.search(_page(cloud))
+        offered = {v.strip().strip("'\"") for v in match.group(1).split(",") if v.strip()}
+        declared = set(_literal(f"web_dashboard/api/{cloud}.py", "BULK_OPS"))
+        assert offered == declared, (
+            f"{cloud}: toolbar offers {sorted(offered)}, router accepts {sorted(declared)}")
+
+
+def test_every_cloud_page_defines_every_seam_it_binds():
+    """A missing seam is an unbound name inside an Alpine expression: the toolbar
+    renders, the button is live, and pressing it does nothing at all.
+
+    The required list comes from app.js's own header, above its "optional ones" line, so
+    a fifth required seam fails here until all four pages have it.
+    """
+    mixin = _src("web_dashboard/static/js/app.js")
+    header = mixin[mixin.index("// ── Reusable bulk power toolbar"):
+                   mixin.index("window.bulkPowerState = function")]
+    split = header.find("optional ones")
+    seams = set(re.findall(r"^//   (_?bulkPower\w+)",
+                           header if split < 0 else header[:split], re.M))
+    seams.discard("bulkPowerUrl")          # a property, asserted above
+    assert len(seams) >= 3, f"only found {sorted(seams)}"
+
+    for cloud in CONSOLES:
+        markup = _page(cloud)
+        for seam in sorted(seams) + ["_vmKey", "clearSelection", "toggleSelectAll"]:
+            assert re.search(r"\n\s*(async\s+)?" + seam + r"\s*\(", markup), (
+                f"{cloud} page never defines {seam}()")
+
+
+def test_every_bulk_op_a_cloud_page_offers_is_one_its_rows_offer_too():
+    """The house rule: whatever the toolbar can do to fifty machines, the operator must
+    be able to do — and to have already done — to one. These pages had NO power buttons
+    before this feature, so this is the test that stops the toolbar being the only way to
+    reach an operation that acts on many VMs and confirms with a count rather than a name.
+    """
+    for cloud in CONSOLES:
+        markup = _page(cloud)
+        match = _TOOLBAR.search(markup)
+        for op in sorted({v.strip().strip("'\"") for v in match.group(1).split(",")
+                          if v.strip()}):
+            assert re.search(r"power(Instance|Vm)\((inst|vm), '" + op + r"'\)", markup), (
+                f"{cloud}: the toolbar offers a bulk '{op}' but no row on that page has "
+                f"an '{op}' button")
+
+
+def test_no_cloud_page_calls_a_toast_helper_it_does_not_have():
+    """`this.showToast(...)` on a page with no showToast is a silent no-op: the job is
+    queued, the redirect happens, and the operator is told nothing.
+
+    Found the hard way — the Azure page uses the GLOBAL `toast`, the five hypervisor
+    pages own a `showToast`, and the OCI page calls its own `notify`. Three names across
+    ten pages, and nothing else checks which one a page actually has.
+    """
+    for cloud in CONSOLES:
+        markup = _page(cloud)
+        for name in ("showToast", "notify"):
+            called = len(re.findall(r"this\." + name + r"\(", markup))
+            defined = re.search(r"\n\s*" + name + r"\s*\(", markup)
+            assert not called or defined, (
+                f"{cloud} page calls this.{name}() {called}x but never defines it — "
+                f"the call is a silent no-op")
+
+
+def test_the_stop_confirmation_is_rewritten_for_every_cloud():
+    """The shared `stop` sentence says the guests are not asked and unsaved work is lost.
+    That is a Force Off. An Azure deallocate, a GCE stop and an OCI SOFTSTOP are none of
+    those things — SOFTSTOP asks the guest outright.
+
+    `test_every_destructive_bulk_op_has_a_confirmation_sentence` in the on-prem file only
+    checks a sentence EXISTS. Nothing checks one is true, so a cloud page that inherited
+    the default would be lying to the operator with the suite green. This is the closest
+    a test can get: every cloud page must override `stop` and must not describe a power
+    cut."""
+    for cloud in CONSOLES:
+        markup = _page(cloud)
+        # Indent-agnostic: these components nest at different depths — aws, gcp and oci
+        # sit inside a `return {`, azure at the top level of its x-data object.
+        m = re.search(r"bulkPowerConfirmText:\s*\{(.+?)\n\s*\},", markup, re.S)
+        assert m, f"{cloud} page does not override bulkPowerConfirmText"
+        text = m.group(1)
+        assert "stop:" in text, f"{cloud}: no `stop` override"
+        for wrong in ("not asked", "cuts the virtual power", "unsaved work"):
+            assert wrong not in text, (
+                f"{cloud}: the stop confirmation says {wrong!r}, which describes a "
+                f"power cut — this cloud's stop is not one")
 
 
 if __name__ == "__main__":

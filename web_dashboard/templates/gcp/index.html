@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 {% from "partials/secret_picker.html" import secret_picker %}
 
 {% block title %}GCP{% endblock %}
@@ -252,10 +253,36 @@
       </template>
     </div>
 
+    <!-- Bulk power. A card list has no header row, so select-all sits in the toolbar.
+         No workgroup buttons: a GCE instance carries its workgroup as a label, and
+         workgroup_override_service rejects cloud providers, so there is nothing here to
+         admin-gate — `gcp:write` plus the per-VM ownership check is the whole gate. -->
+    <div x-show="!instancesLoading && filteredInstances().length > 0"
+         class="flex items-center justify-between bg-blue-50 border border-blue-200 rounded-xl px-4 py-2 mb-3">
+      <label class="flex items-center gap-2 text-sm text-blue-800">
+        <input type="checkbox" :checked="selectAll"
+               @change="toggleSelectAll($event.target.checked)"
+               class="h-4 w-4 rounded border-gray-300">
+        <span x-show="selectedVmIds.length === 0">Select instances to power</span>
+        <span x-show="selectedVmIds.length > 0" x-cloak>
+          Selected: <strong x-text="selectedVmIds.length"></strong>
+        </span>
+      </label>
+      <div class="flex items-center gap-2" x-show="selectedVmIds.length > 0" x-cloak>
+        {{ bulk_power_buttons(['start', 'stop'], {'stop': 'Suspend'}) }}
+        <button @click="clearSelection()" class="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
+      </div>
+    </div>
+
     <div x-show="!instancesLoading" class="space-y-3">
       <template x-for="inst in filteredInstances()" :key="inst.instance_name + inst.zone">
         <div class="bg-white rounded-xl border border-gray-200 hover:shadow-sm transition p-4">
           <div class="flex items-center gap-4">
+            <!-- Select. A TERMINATED instance is not selectable: it can neither start
+                 nor stop, so every op offered on it is a job that can only fail. -->
+            <input type="checkbox" :value="_vmKey(inst)" x-model="selectedVmIds"
+                   x-show="inst.status !== 'TERMINATED'"
+                   class="h-4 w-4 rounded border-gray-300 flex-shrink-0">
             <!-- Status dot -->
             <span class="flex-shrink-0 w-2.5 h-2.5 rounded-full"
                   :class="{
@@ -279,6 +306,23 @@
             </div>
             <!-- Actions -->
             <div class="flex items-center gap-2 flex-shrink-0">
+              {#- Power, which this page has never had. GCE `status` is an enum, so === is
+                  right here — unlike Azure, whose display_status needs a substring. -#}
+              <button @click="powerInstance(inst, 'start')"
+                      x-show="inst.status === 'TERMINATED'"
+                      :disabled="pendingPower.has(_vmKey(inst))"
+                      class="text-xs bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white px-2.5 py-1.5 rounded-lg transition">
+                <span x-show="!pendingPower.has(_vmKey(inst))">Start</span>
+                <span x-show="pendingPower.has(_vmKey(inst))" x-cloak>Starting…</span>
+              </button>
+              <button @click="powerInstance(inst, 'stop')"
+                      x-show="inst.status === 'RUNNING'"
+                      :disabled="pendingPower.has(_vmKey(inst))"
+                      class="text-xs bg-amber-600 hover:bg-amber-700 disabled:opacity-40 text-white px-2.5 py-1.5 rounded-lg transition"
+                      title="Stop the instance — a suspend would still bill for the preserved RAM">
+                <span x-show="!pendingPower.has(_vmKey(inst))">Suspend</span>
+                <span x-show="pendingPower.has(_vmKey(inst))" x-cloak>Suspending…</span>
+              </button>
               <button @click="openCaptureModal(inst)"
                       class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg transition">
                 Capture Image
@@ -1238,6 +1282,22 @@ function gcpDashboard() {
     publicLoading:   false,
     imagesLoading:   false,
     instancesLoading: false,
+
+    // ── Power: per-row and bulk ────────────────────────────────────────────
+    // Keyed on name+zone, matching the card's own :key — a GCE instance name is unique
+    // per zone, not per project, and /api/gcp/power/* takes both.
+    pendingPower: new Set(),
+    selectedVmIds: [],
+    selectAll: false,
+    ...bulkPowerState(),
+    bulkPowerUrl: '/api/gcp/power/bulk',
+    // A GCE stop is not a power cut, and it is deliberately not a SUSPEND either:
+    // suspend preserves RAM to disk and bills for that storage plus the reserved
+    // resources, while stop lands on TERMINATED where only the disks bill.
+    bulkPowerConfirmText: {
+      stop: 'Suspend the selected instances? Each is STOPPED, not suspended — only its '
+          + 'disks keep billing, and it can be started again later.',
+    },
     filterRegion:    '',
     credError:       '',
     toast:           '',
@@ -1876,6 +1936,73 @@ function gcpDashboard() {
         this.deployError = e.message || 'Deploy failed';
       } finally {
         this.deploying = false;
+      }
+    },
+
+    // ── Power ──────────────────────────────────────────────────────────────
+    _vmKey(inst) {
+      return `${inst.instance_name}/${inst.zone}`;
+    },
+
+    clearSelection() {
+      this.selectedVmIds = [];
+      this.selectAll = false;
+    },
+
+    toggleSelectAll(checked) {
+      this.selectAll = checked;
+      this.selectedVmIds = checked
+        ? this.filteredInstances()
+            .filter(i => i.status !== 'TERMINATED')
+            .map(i => this._vmKey(i))
+        : [];
+    },
+
+    // ── Bulk power seams ───────────────────────────────────────────────────
+    _bulkPowerRows() {
+      return this.filteredInstances();
+    },
+
+    // The same payload the card's own powerInstance posts. The zone travels because a
+    // name alone does not identify an instance in a multi-zone project.
+    _bulkPowerTarget(inst) {
+      return { instance_name: inst.instance_name, zone: inst.zone };
+    },
+
+    // GCE `status` is a real enum, so === is right here — unlike Azure, whose
+    // display_status needs a lowercased substring. STAGING/STOPPING/SUSPENDED are
+    // 'other', so both ops still reach them, which matches an API that queues the call
+    // anyway. TERMINATED is 'off'. An absent status is unknown, and the mixin treats
+    // unknown as eligible rather than silently skipping it.
+    _bulkPowerState(inst) {
+      if (!inst.status) return null;
+      if (inst.status === 'RUNNING') return 'on';
+      if (inst.status === 'TERMINATED') return 'off';
+      return 'other';
+    },
+
+    _bulkPowerWarn(inst, op) {
+      return op === 'stop' ? (inst.suspend_warning || '') : '';
+    },
+
+    async powerInstance(inst, op) {
+      if (op === 'stop' && !confirm(
+            `Suspend ${inst.instance_name}? It is stopped, not suspended — only its `
+            + `disks keep billing.`)) return;
+      const key = this._vmKey(inst);
+      this.pendingPower = new Set([...this.pendingPower, key]);
+      try {
+        const resp = await API.post(`/api/gcp/power/${op}`, {
+          instance_name: inst.instance_name, zone: inst.zone,
+        });
+        this.showToast(`${op === 'start' ? 'Start' : 'Suspend'} queued for `
+                       + `${inst.instance_name}`, 'success');
+        setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
+      } catch (e) {
+        this.showToast(`${op} failed: ${e.message}`, 'error');
+        const next = new Set(this.pendingPower);
+        next.delete(key);
+        this.pendingPower = next;
       }
     },
 

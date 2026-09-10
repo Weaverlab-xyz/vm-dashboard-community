@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 
 {% block title %}OCI{% endblock %}
 
@@ -141,10 +142,35 @@
   <!-- ── Instances ──────────────────────────────────────────────────────── -->
   <div x-show="activeTab === 'instances'">
     <div x-show="instancesLoading" class="text-sm text-gray-400">Loading instances…</div>
+    <!-- Bulk power. A card list has no header row, so select-all sits in the toolbar.
+         No workgroup buttons: an OCI instance carries its workgroup as a freeform tag,
+         and workgroup_override_service rejects cloud providers — `oci:write` plus the
+         per-VM ownership check on the endpoint is the whole gate. -->
+    <div x-show="!instancesLoading && instances.length > 0"
+         class="flex items-center justify-between bg-blue-50 border border-blue-200 rounded-xl px-4 py-2 mb-3">
+      <label class="flex items-center gap-2 text-sm text-blue-800">
+        <input type="checkbox" :checked="selectAll"
+               @change="toggleSelectAll($event.target.checked)"
+               class="h-4 w-4 rounded border-gray-300">
+        <span x-show="selectedVmIds.length === 0">Select instances to power</span>
+        <span x-show="selectedVmIds.length > 0" x-cloak>
+          Selected: <strong x-text="selectedVmIds.length"></strong>
+        </span>
+      </label>
+      <div class="flex items-center gap-2" x-show="selectedVmIds.length > 0" x-cloak>
+        {{ bulk_power_buttons(['start', 'stop'], {'stop': 'Suspend'}) }}
+        <button @click="clearSelection()" class="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
+      </div>
+    </div>
+
     <div x-show="!instancesLoading" class="space-y-3">
       <template x-for="inst in instances" :key="inst.ocid">
         <div class="bg-white rounded-xl border border-gray-200 p-4 flex items-center justify-between gap-4">
-          <div class="min-w-0">
+          <!-- A TERMINATED instance is not selectable: it can neither start nor stop. -->
+          <input type="checkbox" :value="_vmKey(inst)" x-model="selectedVmIds"
+                 x-show="inst.lifecycle_state !== 'TERMINATED'"
+                 class="h-4 w-4 rounded border-gray-300 flex-shrink-0">
+          <div class="min-w-0 flex-1">
             <p class="text-sm font-medium text-gray-900 truncate" x-text="inst.display_name"></p>
             <p class="text-xs text-gray-500 mt-0.5">
               <span class="font-mono" x-text="inst.shape"></span>
@@ -157,6 +183,24 @@
             <span class="text-xs px-2 py-0.5 rounded-full"
                   :class="(inst.lifecycle_state === 'RUNNING') ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-600'"
                   x-text="inst.lifecycle_state"></span>
+            {#- Power, which this page has never had. The agent-side verb is SOFTSTOP,
+                which asks the guest before pulling the cord — so "Suspend" here is a
+                graceful stop, not a power cut. -#}
+            <button @click="powerInstance(inst, 'start')"
+                    x-show="inst.lifecycle_state === 'STOPPED'"
+                    :disabled="pendingPower.has(inst.ocid)"
+                    class="text-xs text-green-600 hover:text-green-800 disabled:opacity-40 font-medium">
+              <span x-show="!pendingPower.has(inst.ocid)">Start</span>
+              <span x-show="pendingPower.has(inst.ocid)" x-cloak>Starting…</span>
+            </button>
+            <button @click="powerInstance(inst, 'stop')"
+                    x-show="inst.lifecycle_state === 'RUNNING'"
+                    :disabled="pendingPower.has(inst.ocid)"
+                    class="text-xs text-amber-600 hover:text-amber-800 disabled:opacity-40 font-medium"
+                    title="Soft-stop the instance — the guest is asked first">
+              <span x-show="!pendingPower.has(inst.ocid)">Suspend</span>
+              <span x-show="pendingPower.has(inst.ocid)" x-cloak>Suspending…</span>
+            </button>
             <button @click="destroyInstance(inst)"
                     class="text-xs text-red-600 hover:text-red-800 font-medium">Terminate</button>
           </div>
@@ -759,6 +803,20 @@ function ociDashboard() {
     region: '',
     imagesLoading: false,
     instancesLoading: false,
+
+    // ── Power: per-row and bulk ────────────────────────────────────────────
+    pendingPower: new Set(),
+    selectedVmIds: [],
+    selectAll: false,
+    ...bulkPowerState(),
+    bulkPowerUrl: '/api/oci/power/bulk',
+    // OCI's stop verb is SOFTSTOP, which asks the guest before pulling the cord — so
+    // this really is a graceful stop, and the shared "the guests are not asked"
+    // sentence would be the opposite of true.
+    bulkPowerConfirmText: {
+      stop: 'Suspend the selected instances? Each guest is asked to shut down first '
+          + '(SOFTSTOP), then the instance stops billing for compute.',
+    },
     credError: '',
     toast: '',
     toastType: 'success',
@@ -894,6 +952,69 @@ function ociDashboard() {
         this.onPackerShapeChange();
       }
       if (window.location.hash === '#build') this.activeTab = 'build';
+    },
+
+    // ── Power ──────────────────────────────────────────────────────────────
+    _vmKey(inst) {
+      return String(inst.ocid || '');
+    },
+
+    clearSelection() {
+      this.selectedVmIds = [];
+      this.selectAll = false;
+    },
+
+    toggleSelectAll(checked) {
+      this.selectAll = checked;
+      this.selectedVmIds = checked
+        ? this.instances
+            .filter(i => i.lifecycle_state !== 'TERMINATED')
+            .map(i => this._vmKey(i))
+        : [];
+    },
+
+    // ── Bulk power seams ───────────────────────────────────────────────────
+    _bulkPowerRows() {
+      // This page renders `instances` directly with no client-side filter, so there is
+      // no filtered collection to prefer — but the seam still exists so the mixin never
+      // has to know which pages filter.
+      return this.instances;
+    },
+
+    // The projection calls it `ocid`; the endpoint's field is `instance_ocid`. Keeping
+    // both names straight is the whole job of this seam.
+    _bulkPowerTarget(inst) {
+      return { instance_ocid: inst.ocid };
+    },
+
+    // `lifecycle_state` is an enum. PROVISIONING/STARTING/STOPPING are 'other', so both
+    // ops still reach them. TERMINATED cannot be selected, so it never arrives here.
+    _bulkPowerState(inst) {
+      if (!inst.lifecycle_state) return null;
+      if (inst.lifecycle_state === 'RUNNING') return 'on';
+      if (inst.lifecycle_state === 'STOPPED') return 'off';
+      return 'other';
+    },
+
+    _bulkPowerWarn(inst, op) {
+      return op === 'stop' ? (inst.suspend_warning || '') : '';
+    },
+
+    async powerInstance(inst, op) {
+      if (op === 'stop' && !confirm(
+            `Suspend ${inst.display_name}? The guest is asked to shut down first.`)) return;
+      this.pendingPower = new Set([...this.pendingPower, inst.ocid]);
+      try {
+        const resp = await API.post(`/api/oci/power/${op}`, { instance_ocid: inst.ocid });
+        this.notify(`${op === 'start' ? 'Start' : 'Suspend'} queued for `
+                    + `${inst.display_name}`);
+        setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
+      } catch (e) {
+        this.notify(`${op} failed: ${e.message}`, 'error');
+        const next = new Set(this.pendingPower);
+        next.delete(inst.ocid);
+        this.pendingPower = next;
+      }
     },
 
     notify(msg, type = 'success') {
