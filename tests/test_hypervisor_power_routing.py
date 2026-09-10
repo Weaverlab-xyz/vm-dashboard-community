@@ -822,6 +822,35 @@ def test_the_bulk_toolbar_greys_through_the_same_helper_the_rows_use():
         "the toolbar and the rows can now disagree about what the agent can express")
 
 
+def test_every_destructive_bulk_op_has_a_confirmation_sentence():
+    """A new bulk op must not arrive with no dialog.
+
+    `bulkPowerConfirm` returns '' for an op it has no sentence for, and an empty string
+    means "do not confirm" — which is correct for `start` and silently wrong for
+    anything else. So adding an op to a router's BULK_OPS and forgetting the sentence
+    gives a button that force-offs a selection with no prompt at all, and nothing else
+    here would notice.
+
+    Read against the union of every router's BULK_OPS, so the op does not have to be on
+    a page yet to be covered.
+    """
+    mixin = _read(os.path.join(_ROOT, "web_dashboard", "static", "js", "app.js"))
+    body = mixin[mixin.index("bulkPowerConfirm(op, plan)"):]
+    body = body[:body.index("async submitBulkPower")]
+
+    every_op = set()
+    for kind in sorted(set(_AGENT_ROUTED) | {"nutanix"}):
+        every_op |= set(_literal(_router(kind), "BULK_OPS"))
+
+    # `start` is the one deliberate omission: it is not destructive, and the per-row
+    # Start does not confirm either. A dialog on the safe op is what teaches an operator
+    # to dismiss the dialog on the unsafe one.
+    for op in sorted(every_op - {"start"}):
+        assert f"{op}:" in body, (
+            f"'{op}' is offered as a bulk power op but bulkPowerConfirm has no sentence "
+            f"for it, so a selection would be {op}-ed with no confirmation")
+
+
 # ── The page greys what the router refuses ────────────────────────────────────
 
 def test_each_page_greys_exactly_the_ops_its_router_refuses():

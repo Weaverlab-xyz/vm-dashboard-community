@@ -470,11 +470,17 @@ window.bulkPowerState = function () {
                 this.selectAll = false;
                 // Lands on the batch, the way a single power op lands on its job —
                 // otherwise the only reference to N jobs disappears with the toast.
-                window.afterDeploy(resp, {
-                    unit: 'VM', message: message,
-                    type: failed.length ? 'error' : 'success',
-                    notify: say,
-                });
+                // afterDeploy returns false when there is no batch_id, which for this
+                // endpoint should not happen; say so rather than clearing the selection
+                // and going quiet, which would read as nothing having been queued.
+                if (!window.afterDeploy(resp, {
+                        unit: 'VM', message: message,
+                        type: failed.length ? 'error' : 'success',
+                        notify: say,
+                    })) {
+                    say(message + ' — but the response carried no batch id, so there is '
+                        + 'no rollup to link to. Check the Jobs page.', 'error');
+                }
             } catch (e) {
                 say('Bulk ' + op + ' failed: ' + (e.message || e), 'error');
             } finally {
