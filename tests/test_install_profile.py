@@ -62,6 +62,15 @@ def _read(path):
         return fh.read()
 
 
+def _rel(path):
+    r"""Repo-relative and forward-slashed, on every platform.
+
+    ``os.path.relpath`` yields ``docs\kubernetes.md`` on Windows, and the paths below are
+    compared against — and printed as — forward-slash literals.
+    """
+    return os.path.relpath(path, _ROOT).replace(os.sep, "/")
+
+
 # ── source shape: one resolver, and both readers use it ──────────────────────
 
 def test_flags_resolves_through_the_masking_reader():
@@ -720,7 +729,7 @@ def test_no_doc_calls_an_install_a_demo_instance():
             low = line.lower()
             for phrase in _NOT_AN_INSTANCE:
                 if phrase in low:
-                    rel = os.path.relpath(path, _ROOT)
+                    rel = _rel(path)
                     hits.append(f"{rel}:{n}: {line.strip()[:100]}")
     assert not hits, (
         "these docs call an install on the default profile a demo. It is a tenancy shape, "
@@ -758,7 +767,7 @@ def test_the_page_header_still_names_the_stored_profile_value():
     header along with it, or the page stops describing anything checkable.
     """
     header = "**Profile:** `demo`"
-    carriers = [os.path.relpath(p, _ROOT) for p in _doc_files() if header in _read(p)]
+    carriers = [_rel(p) for p in _doc_files() if header in _read(p)]
     assert len(carriers) >= 20, (
         f"only {len(carriers)} pages carry {header!r}; the header names the stored "
         f"install_profile value and is not what the prose rename was about")
@@ -797,7 +806,7 @@ def test_no_refusal_message_shows_the_raw_profile_value():
     for path in (_MAIN, _SETUP):
         for n, line in enumerate(_read(path).splitlines(), 1):
             if "install_profile()" in line and ("detail" in line or "'{" in line):
-                offenders.append(f"{os.path.relpath(path, _ROOT)}:{n}: {line.strip()}")
+                offenders.append(f"{_rel(path)}:{n}: {line.strip()}")
     assert not offenders, (
         "these refusals interpolate the stored profile value into a message somebody "
         "reads. Use feature_flags.profile_noun(), which carries its own article:\n"
