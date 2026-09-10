@@ -182,6 +182,12 @@ def _agent_operation(kind: str, verb: str):
 
 
 # ── The button reaches the agent ──────────────────────────────────────────────
+#
+# `_queue_one`, not `_power_endpoint`, is what these read. The two routes a page has —
+# one VM and a whole selection — both delegate to it, and that delegation is the point:
+# a bulk power op that reimplemented any of the gates below would be a second code path
+# through the agent boundary, which is precisely the shape this file exists to prevent.
+# `test_the_single_and_bulk_routes_share_one_queue_function` is what pins it.
 
 def test_every_agent_routed_power_endpoint_calls_agent_power_job():
     """The original regression: api/hyperv.py imported conn_or_error and conn_in_task but
@@ -189,9 +195,9 @@ def test_every_agent_routed_power_endpoint_calls_agent_power_job():
     fail."""
     missing = []
     for kind in _AGENT_ROUTED:
-        handler = _function(_tree(_router(kind)), "_power_endpoint")
+        handler = _function(_tree(_router(kind)), "_queue_one")
         if "agent_power_job" not in _calls(handler):
-            missing.append(f"api/{kind}.py::_power_endpoint")
+            missing.append(f"api/{kind}.py::_queue_one")
     assert not missing, ("power endpoint never offers the connection to the agent:\n  "
                          + "\n  ".join(missing))
 
@@ -208,7 +214,7 @@ def test_the_agent_branch_comes_before_the_direct_call():
     """
     agent_only = set(_literal(_CONNS, "AGENT_ONLY_KINDS"))
     for kind in _AGENT_ROUTED:
-        body = ast.unparse(_function(_tree(_router(kind)), "_power_endpoint"))
+        body = ast.unparse(_function(_tree(_router(kind)), "_queue_one"))
         if "create_job" not in body:
             assert kind in agent_only, (
                 f"{kind}: its power endpoint has no direct path to fall back to, but "
@@ -217,6 +223,119 @@ def test_the_agent_branch_comes_before_the_direct_call():
             assert "agent_power_job" in body, kind
             continue
         assert body.index("agent_power_job") < body.index("create_job"), kind
+
+
+# ── Bulk power is selection, not a second path ────────────────────────────────
+
+def test_the_single_and_bulk_routes_share_one_queue_function():
+    """Both routes delegate to `_queue_one`, and NEITHER reaches the agent itself.
+
+    This is the invariant that replaced "the power endpoint calls agent_power_job" when
+    the bulk route arrived. Every gate that matters — the agent branch, the per-kind
+    op→verb translation, the online/grant/credential preflights, the workgroup check on
+    Workstation — lives in `_queue_one`. A bulk handler that called `agent_power_job`
+    directly would be a second route through all of them, and the first thing to drift
+    would be whichever gate the author did not think to copy.
+
+    Read over every router with a power page, not just the agent-routed ones: Nutanix has
+    no agent branch (see test_nutanix_power_is_still_unimplemented_in_the_agent) but it
+    must still funnel both its routes through one function.
+    """
+    for kind in sorted(set(_AGENT_ROUTED) | {"nutanix"}):
+        tree = _tree(_router(kind))
+        for func in ("_power_endpoint", "bulk_power"):
+            node = _function(tree, func)
+            assert node is not None, f"api/{kind}.py has no {func}"
+            body = ast.unparse(node)
+            assert "_queue_one" in body, (
+                f"api/{kind}.py::{func} does not delegate to _queue_one, so the single "
+                f"and bulk routes can now disagree about how a VM is powered")
+            assert "agent_power_job" not in body, (
+                f"api/{kind}.py::{func} calls agent_power_job itself instead of going "
+                f"through _queue_one — that is the second code path this file exists to "
+                f"prevent")
+
+
+def test_no_bulk_op_is_offered_that_the_single_route_does_not_expose():
+    """`BULK_OPS` is a subset of the page ops, so a toolbar button cannot name an op with
+    no route behind it.
+
+    The toolbar deliberately offers FEWER ops than the rows do — nobody suspends a
+    selection — so this is one-directional. What it rules out is the other direction: a
+    bulk op that reaches `_queue_one` with a string no `/power/<op>` route uses would be
+    translated by `agent_verb`, miss, and 501 every VM in the batch, or on a direct
+    connection reach the service layer with an op its own table does not have.
+    """
+    for kind in sorted(set(_AGENT_ROUTED) | {"nutanix"}):
+        bulk = set(_literal(_router(kind), "BULK_OPS"))
+        assert bulk, f"api/{kind}.py declares no BULK_OPS"
+        extra = bulk - _registered_ops(kind)
+        assert not extra, (
+            f"{kind}: BULK_OPS offers {sorted(extra)}, which no /power/<op> route "
+            f"exposes")
+
+
+def test_a_bulk_op_the_agent_cannot_express_is_still_refused_per_kind():
+    """Every bulk op on an agent-routed kind maps to a verb — checked against PAGE_OPS,
+    not against the router.
+
+    A bulk op absent from PAGE_OPS is not a small problem: `queue_power_batch` admits it
+    (it is in BULK_OPS), then `_queue_one` 501s for every single target and the operator
+    gets a 400 saying "no jobs were queued" with a 501 quoted inside it. That reads as
+    the agent being broken. Better to never offer the button.
+    """
+    for kind in _AGENT_ROUTED:
+        for op in sorted(_literal(_router(kind), "BULK_OPS")):
+            assert ahm.agent_verb(kind, op) is not None, (
+                f"{kind} offers '{op}' in its bulk toolbar but PAGE_OPS maps no verb "
+                f"for it, so every VM in such a batch would 501")
+
+
+def test_a_direct_batch_runs_serially():
+    """One background task for a whole batch, never one per VM.
+
+    `cloud_executor` refuses at pool_size rather than queueing — admission control is
+    deliberate and it is what fixed the 2026-08-12 outage. So N concurrent background
+    tasks would run the first 8 and fail the rest of the batch with "<provider> is
+    saturated (8/8 threads busy)": a real failure, on a request that was fine, blamed on
+    the operator. Nothing else in this suite would notice, because every job row would
+    still have been created correctly.
+
+    Pinned structurally: the routers hand `queue_power_batch` a `background_tasks` and it
+    is `hypervisor_deps.queue_power_batch` — the ONE place that decides — which adds
+    exactly one task, `run_power_batch`, whose body is a bare `for` loop with an `await`
+    in it.
+    """
+    deps = _read(os.path.join(_API, "hypervisor_deps.py"))
+    tree = ast.parse(deps)
+
+    batch = _function(tree, "queue_power_batch")
+    assert batch is not None, "hypervisor_deps.queue_power_batch is gone"
+    adds = re.findall(r"background_tasks\.add_task\(([A-Za-z_][A-Za-z_0-9]*)",
+                      ast.unparse(batch))
+    assert adds == ["run_power_batch"], (
+        f"queue_power_batch schedules {adds or 'nothing'}; it must schedule exactly one "
+        f"run_power_batch for the whole batch")
+
+    walker = _function(tree, "run_power_batch")
+    assert walker is not None, "hypervisor_deps.run_power_batch is gone"
+    loops = [n for n in ast.walk(walker) if isinstance(n, (ast.For, ast.AsyncFor))]
+    assert len(loops) == 1, "run_power_batch must be one loop over the batch"
+    assert any(isinstance(n, ast.Await) for n in ast.walk(loops[0])), (
+        "run_power_batch's loop does not await each task, so the ops would not be "
+        "serialised at all")
+    assert not [n for n in ast.walk(walker)
+                if isinstance(n, ast.Call)
+                and getattr(getattr(n.func, "value", None), "id", "") == "asyncio"], (
+        "run_power_batch reaches for asyncio — gather/create_task here would restore "
+        "exactly the concurrency it exists to remove")
+
+    # And no router may schedule its own per-VM task from a bulk handler.
+    for kind in sorted(set(_AGENT_ROUTED) | {"nutanix"}):
+        body = ast.unparse(_function(_tree(_router(kind)), "bulk_power"))
+        assert "add_task" not in body, (
+            f"api/{kind}.py::bulk_power schedules work itself; the serial walk belongs "
+            f"to queue_power_batch or the batch stops being serial")
 
 
 # ── The promise each button makes ─────────────────────────────────────────────

@@ -62,12 +62,19 @@ def _ok(message):
     _STEPS.append(message)
 
 
-def _syncs(db, connection_id):
-    """Every inventory_sync row for this connection, oldest first."""
+def _syncs(db, connection_id, status=None):
+    """Every inventory_sync row for this connection, oldest first.
+
+    `status` narrows to one status — needed to ask "is one OPEN right now", which is
+    the question `_has_open_job` answers and the batch assertions below turn on.
+    """
     rows = db.query(Job).filter(
         Job.job_type == "agent_hypervisor",
         Job.cloud_resource_id == connection_id).order_by(Job.created_at).all()
-    return [j for j in rows if (j.metadata_dict or {}).get("verb") == "inventory_sync"]
+    rows = [j for j in rows if (j.metadata_dict or {}).get("verb") == "inventory_sync"]
+    if status is not None:
+        rows = [j for j in rows if j.status == status]
+    return rows
 
 
 def test_every_write_verb_is_classified():
@@ -155,6 +162,49 @@ def test_the_power_resync_scenario():
     assert again is None
     assert len(_syncs(db, cid)) == 1
     _ok("a second power op does not stack a second sync on an open one")
+
+    # ── The same property, as a BATCH ────────────────────────────────────────
+    #
+    # Above it is an accident of two operators being quick. The bulk power toolbar makes
+    # it the ordinary case: one click, N jobs on one connection. Written out here because
+    # a burst is now something the UI *produces*, and if the collapse ever broke, a
+    # 20-VM Force Off would queue twenty full inventory reads of the same vCenter —
+    # each of which is minutes of work, and nineteen of which are answering a question
+    # the twentieth already answers better.
+    #
+    # Note what the collapse depends on and what this therefore also pins: every power
+    # job carries `cloud_resource_id == connection_id` (stamped by `agent_power_job`),
+    # because that column is what `_has_open_job` reads. A bulk route that created its
+    # jobs any other way would break this without touching this file's subject.
+    for sync in _syncs(db, cid):
+        job_service.set_completed(db, sync.id, {"ok": True})
+    assert _syncs(db, cid, status="queued") == []
+
+    batch_id = "bulkbatch0001"
+    batch = [agent_power_job(db, conn, op="stop", target_id=str(100 + i),
+                             created_by="alice", description=f"stop vm{i}",
+                             batch_id=batch_id)
+             for i in range(5)]
+    assert {j.batch_id for j in batch} == {batch_id}, "the batch did not share an id"
+    assert {j.cloud_resource_id for j in batch} == {cid}, (
+        "a batch power job is not stamped with its connection, so _has_open_job cannot "
+        "see it and every job in the batch would queue its own sync")
+
+    # Completed one at a time, the way the agent actually executes them.
+    syncs_seen = []
+    for job in batch:
+        job_service.set_completed(db, job.id, {"ok": True})
+        follow, _ = hss.sync_after_power(db, job)
+        syncs_seen.append(follow)
+
+    assert [s is None for s in syncs_seen[:-1]] == [True] * 4, (
+        "an earlier job in the batch queued a sync while later ones were still open")
+    assert syncs_seen[-1] is not None, (
+        "the LAST job in the batch queued no sync, so the page keeps showing the state "
+        "the batch just changed — the original bug, arriving once per batch instead of "
+        "once per button")
+    assert len(_syncs(db, cid, status="queued")) == 1
+    _ok("a batch of N power ops queues ONE sync, from the last job to finish")
 
     # An inventory_sync completing must not queue another. That is the loop that would
     # otherwise run until the agent, the database or the operator gave out.

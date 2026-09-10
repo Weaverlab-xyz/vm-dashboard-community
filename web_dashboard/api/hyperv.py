@@ -5,6 +5,9 @@ All endpoints require authentication.  Power operations are dispatched as
 background jobs so the client gets a job ID immediately and can poll
 /api/jobs/{id} for progress.
 """
+import functools
+from typing import List
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -15,7 +18,8 @@ from ..services import job_service, workgroup_override_service
 from ..services import hyperv_service
 from ..services.hyperv_service import HyperVError
 from ..services import hypervisor_view_service
-from .hypervisor_deps import agent_power_job, conn_in_task, conn_or_error
+from .hypervisor_deps import (agent_power_job, conn_in_task, conn_or_error,
+                              queue_power_batch)
 
 router = APIRouter(prefix="/api/hyperv", tags=["hyperv"])
 
@@ -83,6 +87,58 @@ async def _run_power_op(job_id: str, connection_id: str, vmid: str, name: str, o
         db.close()
 
 
+async def _queue_one(db, current_user, *, op: str, payload: PowerOpRequest,
+                     connection_id: str = "", batch_id=None) -> dict:
+    """Queue ONE Hyper-V power op. The only path that does, single or bulk.
+
+    Returns ``{"job_id", "status", "task"}``. ``task`` is a zero-arg coroutine function
+    for a connection the dashboard dials itself and None for an agent-bound one:
+    deciding *how* that work runs belongs to the caller, and it is the whole difference
+    between the single route (one background task) and the bulk route (one background
+    task for the whole batch, walked serially — see
+    :func:`~web_dashboard.api.hypervisor_deps.run_power_batch`).
+
+    This function exists so that bulk power adds selection and not a second code path.
+    Every gate below applied to one button press before bulk existed and applies
+    unchanged to each VM in a selection; tests/test_hypervisor_power_routing.py pins
+    that both routes come through here and that neither calls `agent_power_job` itself.
+    """
+    label = payload.name or payload.vmid
+    # Resolve now so a bad id is a 404 the caller sees, not a job that fails later,
+    # then carry the ID (never the credential) into the background task.
+    conn = conn_or_error(db, "hyperv", connection_id)
+    # An agent-bound connection is on a network the dashboard cannot dial — there is
+    # no WinRM route to it and no credential for it here — so the button enqueues an
+    # agent job instead of calling the service. `pause`, `resume` and `save` have no
+    # agent verb and are refused with a 501 rather than approximated onto a neighbour,
+    # which for a graceful op would mean a hard power cut. The mapping lives in
+    # agent_hypervisor_meta.PAGE_OPS with the other three products' — it is per kind,
+    # and four private copies is how one of them came to hard-reset a vCenter VM.
+    agent_job = agent_power_job(
+        db, conn, op=op, target_id=payload.vmid,
+        target_scope="", target_type="vm",
+        created_by=current_user.username,
+        description=f"{op} {label} via agent",
+        batch_id=batch_id)
+    if agent_job is not None:
+        return {"job_id": agent_job.id, "status": agent_job.status, "task": None}
+
+    job = job_service.create_job(
+        db,
+        job_type=f"hyperv_{op}",
+        created_by=current_user.username,
+        workgroup="hyperv",
+        batch_id=batch_id,
+        metadata={"vmid": payload.vmid, "vm_name": payload.name, "op": op},
+    )
+    return {
+        "job_id": job.id,
+        "status": "queued",
+        "task": functools.partial(_run_power_op, job.id, conn.id, payload.vmid,
+                                  payload.name, op, label),
+    }
+
+
 def _power_endpoint(op: str):
     async def _handler(
         payload: PowerOpRequest,
@@ -91,40 +147,55 @@ def _power_endpoint(op: str):
         db: Session = Depends(get_db),
         current_user: User = Depends(get_current_user),
     ):
-        label = payload.name or payload.vmid
-        # Resolve now so a bad id is a 404 the caller sees, not a job that fails later,
-        # then carry the ID (never the credential) into the background task.
-        conn = conn_or_error(db, "hyperv", connection_id)
-        # An agent-bound connection is on a network the dashboard cannot dial — there is
-        # no WinRM route to it and no credential for it here — so the button enqueues an
-        # agent job instead of calling the service. Only `start`, `stop` and `restart`
-        # have an agent verb; `shutdown`, `pause`, `resume` and `save` are refused with a
-        # 501 rather than approximated onto a neighbour, which for `shutdown` would mean
-        # a hard power cut. The mapping lives in agent_hypervisor_meta.PAGE_OPS with the
-        # other three products' — it is per kind, and four private copies is how one of
-        # them came to hard-reset a vCenter VM.
-        agent_job = agent_power_job(
-            db, conn, op=op, target_id=payload.vmid,
-            target_scope="", target_type="vm",
-            created_by=current_user.username,
-            description=f"{op} {label} via agent")
-        if agent_job is not None:
-            return {"job_id": agent_job.id, "status": agent_job.status}
-
-        job = job_service.create_job(
-            db,
-            job_type=f"hyperv_{op}",
-            created_by=current_user.username,
-            workgroup="hyperv",
-            metadata={"vmid": payload.vmid, "vm_name": payload.name, "op": op},
-        )
-        background_tasks.add_task(
-            _run_power_op, job.id, conn.id, payload.vmid, payload.name, op, label
-        )
-        return {"job_id": job.id, "status": "queued"}
+        result = await _queue_one(db, current_user, op=op, payload=payload,
+                                  connection_id=connection_id)
+        if result["task"] is not None:
+            background_tasks.add_task(result["task"])
+        return {"job_id": result["job_id"], "status": result["status"]}
 
     _handler.__name__ = f"hyperv_{op}"
     return _handler
+
+
+# The ops the selection toolbar offers. A subset of the per-row buttons on purpose:
+# `pause`, `resume` and `save` are per-VM-state operations nobody applies to a
+# selection, and two of them have no agent verb either. Named here rather than derived
+# from PAGE_OPS because this is a decision about the toolbar, not a statement about what
+# the agent can express — PAGE_OPS still decides that, inside _queue_one.
+BULK_OPS = ("start", "shutdown", "stop", "restart")
+
+
+class BulkPowerRequest(BaseModel):
+    """One op, many VMs. `targets` carries the same payload the single route takes."""
+    op: str
+    targets: List[PowerOpRequest]
+    connection_id: str = ""
+
+
+@router.post("/power/bulk", summary="Power op across a selection of VMs")
+async def bulk_power(
+    payload: BulkPowerRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Queue one power op per selected VM, all sharing a ``batch_id``.
+
+    Auth is deliberately the same as the single route's rather than `require_admin`: a
+    user entitled to power one VM must not be refused for powering ten. The workgroup
+    override endpoints sitting next to this in the same toolbar ARE admin-only, which is
+    why the page gates those two buttons and not these.
+    """
+    op = payload.op.strip().lower()
+    return await queue_power_batch(
+        db, kind="hyperv", op=payload.op, targets=payload.targets,
+        allowed_ops=BULK_OPS,
+        queue_one=lambda target, batch_id: _queue_one(
+            db, current_user, op=op, payload=target,
+            connection_id=payload.connection_id, batch_id=batch_id),
+        label_of=lambda target: target.name or target.vmid,
+        created_by=current_user.username,
+        background_tasks=background_tasks)
 
 
 router.add_api_route(
