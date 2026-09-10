@@ -269,6 +269,53 @@ def test_the_agent_image_is_pulled_even_with_no_policy_images():
     assert "for IMAGE in ; do" not in script
 
 
+def test_every_image_the_policy_names_is_pulled_for_every_target_shape():
+    """The invariant, over the whole matrix rather than the one case someone thought of.
+    A policy that names an image nothing fetched is `"is not present on this host. Pull it
+    first"` on a machine nobody has ever logged into -- the POV broker failed that way on
+    the Gateway image and then again on the Ansible one."""
+    shapes = {
+        "discovery only": (["10.0.0.5"], [], []),
+        "winrm guest": (["10.0.0.1"], ["10.0.0.1"], []),
+        "ssh guest": (["10.0.0.2"], [], ["10.0.0.2"]),
+        "both": (["10.0.0.1", "10.0.0.2"], ["10.0.0.1"], ["10.0.0.2"]),
+        "no targets at all": ([], [], []),
+    }
+    for label, args in shapes.items():
+        policy = pov_broker.render_policy(*args)
+        named = pov_broker.images_named_by(policy)
+        script = pov_broker.render_bootstrap(
+            env_name="poc-01", dashboard_url="https://d", enroll_code="a",
+            policy_yaml=policy, images=named)
+        pulled = set(next(ln for ln in script.splitlines()
+                          if ln.startswith("for IMAGE in ")).replace(";", " ").split())
+        for image in named:
+            assert image in pulled, f"{label}: policy names {image}, nothing pulls it"
+        assert pov_broker.AGENT_IMAGE in pulled, label
+
+
+def test_the_image_list_is_read_out_of_the_policy_not_recomputed():
+    """Two expressions of the same condition drift; one of them being a comment asking the
+    next person to keep them in step is what shipped a policy naming `ansible-winrm` on a
+    host that never fetched it. Adding an image to the policy must be enough."""
+    policy = pov_broker.render_policy(["10.0.0.1"], ["10.0.0.1"], [])
+    assert pov_broker.images_named_by(policy) == (
+        pov_broker.GATEWAY_IMAGE, pov_broker.ANSIBLE_VM_IMAGE)
+
+    invented = policy + "extra:\n  enabled: true\n  image: registry/invented:9\n"
+    assert "registry/invented:9" in pov_broker.images_named_by(invented), (
+        "a future block that names an image must be pulled without anyone remembering to")
+
+
+def test_a_disabled_block_names_no_image_to_pull():
+    """`render_policy` writes the ansible block even when it is off, so an operator reading
+    the file on the broker sees the feature exists. That must not cost a POV with no guest
+    opted in a large image it will never run."""
+    policy = pov_broker.render_policy(["10.0.0.5"], [], [])
+    assert "enabled: false" in policy
+    assert pov_broker.ANSIBLE_VM_IMAGE not in pov_broker.images_named_by(policy)
+
+
 def test_the_ansible_image_is_pulled_only_when_config_management_is_on():
     """`render_policy` names `ansible.vm_image` only when there are targets, so pulling it
     unconditionally would fetch a large image for a POV that may never configure a guest.

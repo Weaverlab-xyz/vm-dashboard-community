@@ -290,12 +290,20 @@ to have reaped it.
 broker was enrolled before this release. Press **Broker** — see
 [upgrading](#upgrading-a-pov-that-predates-this).
 
-**A job fails with an error that a merged fix was supposed to have removed** — the
-canonical one being Config Management refused with *"could not create the Ansible runner
-(400): Range of CPUs is from 0.01 to 1.00"*. The broker is running an older agent than
-the release notes describe. Compare the version on the **Agents** page against the one in
-the build you expect, and press **Broker**; before this release no amount of re-brokering
-would have changed it, because nothing ever re-pulled the agent image.
+**A job fails with an error a merged fix was supposed to have removed, or names an image
+the bootstrap is documented to fetch.** The two live shapes are Config Management refusing
+with *"could not create the Ansible runner (400): Range of CPUs is from 0.01 to 1.00"* and
+with *"the Ansible runner image `chrweav/ansible-winrm:latest` is not present on this host.
+Pull it first"*. Both mean the same thing: **the bootstrap that last ran on this broker
+predates the code you are reading.** The pull list is written by the dashboard, so a
+dashboard image that predates it emits a bootstrap with no pull at all — and the agent
+image is only ever re-fetched by that same pull, so an old agent stays old.
+
+Check the broker's version on the **Agents** page against the build you expect. The order
+that resolves it is **deploy the dashboard → press Broker → re-run the job**; a re-broker
+against a stale dashboard changes nothing. To unblock a POV before that deploy, pull by
+hand on the broker VM — `docker pull chrweav/dashboard-agent:latest` and whichever runner
+image the refusal names — then press **Broker**.
 
 **The Gateway registers online and every tunnel times out.** `privileged` is missing from
 the broker's `gateway:` block, so the container has no `NET_ADMIN`/`/dev/net/tun`. A

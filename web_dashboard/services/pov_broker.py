@@ -45,6 +45,8 @@ import asyncio
 import logging
 from datetime import datetime
 
+import yaml
+
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, RemoteAgent
@@ -327,6 +329,37 @@ def render_policy(targets: list[str], ansible_targets: list[str] | None = None,
 
     lines.append("")
     return "\n".join(lines)
+
+
+def images_named_by(policy_yaml: str) -> tuple:
+    """Every container image the rendered policy names, in the order it names them.
+
+    **Read out of the policy rather than recomputed alongside it.** The bootstrap has to
+    fetch exactly what the policy names, and for two releases those were two separate
+    expressions -- ``render_policy`` decided whether to write ``ansible.vm_image``, and the
+    caller decided whether to append ``ANSIBLE_VM_IMAGE`` to the pull list, under conditions
+    that happened to match. A comment asked the next person to keep them matching. That is
+    the whole drift: a policy that names an image nothing fetches produces *"is not present
+    on this host. Pull it first"* on a machine nobody has ever logged into, which is how
+    this feature failed live twice. Derived from the artifact, the two cannot disagree,
+    and a future block that names an image is pulled without anyone remembering to.
+
+    A block that is not ``enabled`` is skipped: it names no image the agent will run, and
+    ``render_policy`` deliberately still writes the disabled block so an operator reading
+    the file can see the feature exists.
+    """
+    doc = yaml.safe_load(policy_yaml) or {}
+    found = []
+    for section in doc.values() if isinstance(doc, dict) else []:
+        if not isinstance(section, dict) or not section.get("enabled"):
+            continue
+        for key, value in section.items():
+            if (key == "image" or key.endswith("_image")) and isinstance(value, str):
+                if value.strip():
+                    found.append(value.strip())
+    # dict.fromkeys and not a set: two blocks may legitimately name the same image, and the
+    # pull order should stay the order the policy reads in.
+    return tuple(dict.fromkeys(found))
 
 
 def render_bootstrap(*, env_name: str, dashboard_url: str, enroll_code: str,
@@ -643,22 +676,16 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
     # failing as a connection timeout twenty minutes later. What is stored is what was
     # written, which is why it happens here and not in the module that reads it.
     pov_guest_step.record_grant(db, env, win_targets + ssh_targets)
-    # Exactly the images the policy above names, and no others. Computed here for the same
-    # reason the target lists are: `render_policy` and `render_bootstrap` both stay pure,
-    # and the two cannot drift into naming an image the other never fetched.
-    #
-    # The Gateway's is unconditional because its block is (`gateway.enabled: true`, always).
-    # The Ansible one follows the same `if` `render_policy` uses, so a POV with no guest
-    # opted in yet does not pay for an image it may never run -- and when a guest IS opted
-    # in, that takes a re-broker anyway, which is this same code path.
-    images = [GATEWAY_IMAGE]
-    if win_targets or ssh_targets:
-        images.append(ANSIBLE_VM_IMAGE)
+    # Render once, then ask the policy itself what to fetch. This used to be a second
+    # expression of the same conditions, kept in step by a comment; `images_named_by`
+    # explains why that is not good enough. A POV with no guest opted in for configuration
+    # still names no Ansible image, so it still does not pay for one -- that now falls out
+    # of the policy rather than being decided twice.
+    policy_yaml = render_policy(targets, win_targets, ssh_targets)
 
     payload = render_bootstrap(
         env_name=env.name, dashboard_url=dashboard_url, enroll_code=code,
-        policy_yaml=render_policy(targets, win_targets, ssh_targets),
-        images=tuple(images))
+        policy_yaml=policy_yaml, images=images_named_by(policy_yaml))
 
     mod = lab_platforms.adapter(env.platform)
     if mechanism == "metadata":
