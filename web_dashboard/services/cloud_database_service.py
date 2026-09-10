@@ -1394,12 +1394,19 @@ def _managed_user_name(db_id: str) -> str:
     return f"psafe_{db_id.replace('-', '')[:12]}"
 
 
-async def _create_db_managed_user(db: Session, *, row: CloudDatabase, job_id: str,
-                                  engine: str, tf_variables: dict) -> dict:
+async def _create_db_managed_user(db: Session, *, row: CloudDatabase,
+                                  log_job_id: str, engine: str,
+                                  tf_variables: dict) -> dict:
     """Create the dedicated managed DB user from the admin credential by running
     the DB client on the shared Gateway host over AWS SSM. Returns the onboarding
     context (managed user + password, jump host id, region, db name, admin user,
-    client image). Raises on failure so the caller falls back to admin staging."""
+    client image). Raises on failure so the caller falls back to admin staging.
+
+    ``log_job_id`` is named for the only thing any of the three builders does with a
+    job: append operator-facing lines. It is NOT where anything is stashed, and it is
+    deliberately not called ``job_id`` — under that name the post-hoc registration path
+    handed all three the PROVISIONING job (the one it stashes ids on) and every remedy
+    they printed landed on a job nobody reopens."""
     from . import aws_service, jumpoint_host_service
     from . import cloud_db_sql_service as sql
     region = _row_region(row)
@@ -1607,8 +1614,9 @@ def _azure_jump_prep_commands(engine: str = "") -> list:
     return cmds
 
 
-async def _create_db_managed_user_azure(db: Session, *, row: CloudDatabase, job_id: str,
-                                        engine: str, tf_variables: dict) -> dict:
+async def _create_db_managed_user_azure(db: Session, *, row: CloudDatabase,
+                                        log_job_id: str, engine: str,
+                                        tf_variables: dict) -> dict:
     """Azure counterpart of :func:`_create_db_managed_user`: prep the shared
     ``clouddb-jumpoint`` VM for the plugin (native clients + RSA key material) and
     create the dedicated managed DB user from the admin credential by running the DB
@@ -1814,7 +1822,7 @@ def _fa_db_login(*, mode: str, fa_key: str) -> str:
     return (_cfg(fa_key) or "").strip().partition(":")[2].strip()
 
 
-def _report_fa_db_prereqs(db: Session, job_id: str, *, engine: str, fa_db_login: str,
+def _report_fa_db_prereqs(db: Session, log_job_id: str, *, engine: str, fa_db_login: str,
                           managed_user: str, managed_host: str,
                           report_grant: bool) -> None:
     """Report, on the job, the database-side work the dashboard cannot do itself.
@@ -1828,7 +1836,7 @@ def _report_fa_db_prereqs(db: Session, job_id: str, *, engine: str, fa_db_login:
     login_stmt = _fa_login_statement(engine, fa_db_user=fa_db_login)
     if login_stmt:
         job_service.append_job_log(
-            db, job_id,
+            db, log_job_id,
             f"Password Safe's functional account signs in to this database as "
             f"{fa_db_login!r}, which the dashboard cannot create — it does not have that "
             f"password. Create it as an admin, with the password matching the third "
@@ -1841,7 +1849,7 @@ def _report_fa_db_prereqs(db: Session, job_id: str, *, engine: str, fa_db_login:
                                     managed_user=managed_user, managed_host=managed_host)
         if grant:
             job_service.append_job_log(
-                db, job_id,
+                db, log_job_id,
                 f"Password Safe rotation needs one grant on this database, which the "
                 f"dashboard could not issue itself — run it as an admin: {grant}")
 
@@ -1931,7 +1939,7 @@ def _dbgcp_fa_secret_available(row: CloudDatabase) -> bool:
             and (getattr(row, "source", None) or "provisioned") != "registered")
 
 
-async def _stage_fa_secret_gcp(db: Session, *, row: CloudDatabase, job_id: str,
+async def _stage_fa_secret_gcp(db: Session, *, row: CloudDatabase, log_job_id: str,
                                project: str, region: str, password: str) -> str:
     """Mirror the functional account's database password into a REGIONAL secret and
     return the version resource name for ``fasecret=``. ``""`` on failure.
@@ -1957,7 +1965,7 @@ async def _stage_fa_secret_gcp(db: Session, *, row: CloudDatabase, job_id: str,
         logger.warning("clouddb: could not stage the functional-account secret for %s: %s",
                        row.id, exc)
         job_service.append_job_log(
-            db, job_id,
+            db, log_job_id,
             f"Could not stage the functional account's password in a regional Secret "
             f"Manager secret ({exc}) — the data-api SQL Server address needs one "
             f"(fasecret=), so this database cannot be onboarded on that channel. Use "
@@ -1965,7 +1973,7 @@ async def _stage_fa_secret_gcp(db: Session, *, row: CloudDatabase, job_id: str,
             f"clouddb_ps_gcp_fa_secret_version.")
         return ""
     job_service.append_job_log(
-        db, job_id,
+        db, log_job_id,
         f"Mirrored the functional account's password into the regional secret "
         f"{resource_id} ({region}) for the data-api address's fasecret= option. "
         f"NOTE: Password Safe is no longer the sole authority for this credential — "
@@ -1985,7 +1993,7 @@ def _grant_secret_id(row_id: str) -> str:
     return f"clouddb-{row_id}-psgrant"
 
 
-async def _apply_fa_grant_gcp(db: Session, *, row: CloudDatabase, job_id: str,
+async def _apply_fa_grant_gcp(db: Session, *, row: CloudDatabase, log_job_id: str,
                               engine: str, project: str, instance: str, region: str,
                               database: str, admin_username: str, admin_password: str,
                               grant: str, purpose: str = "rotation grant") -> bool:
@@ -2032,7 +2040,7 @@ async def _apply_fa_grant_gcp(db: Session, *, row: CloudDatabase, job_id: str,
         logger.warning("clouddb: could not apply the PS %s on %s db_id=%s: %s",
                        purpose, instance, row.id, exc)
         job_service.append_job_log(
-            db, job_id,
+            db, log_job_id,
             f"Could not apply the Password Safe {purpose} automatically ({exc}) — "
             f"run it as an admin on {database}: {grant}")
         return False
@@ -2041,7 +2049,7 @@ async def _apply_fa_grant_gcp(db: Session, *, row: CloudDatabase, job_id: str,
             await gcp_service.delete_regional_secret(project, region, secret_id)
 
     job_service.append_job_log(
-        db, job_id,
+        db, log_job_id,
         f"Applied the Password Safe {purpose} as {admin_username} on "
         f"{database}: {grant}")
     logger.info("clouddb: applied PS %s on %s db_id=%s engine=%s",
@@ -2049,8 +2057,9 @@ async def _apply_fa_grant_gcp(db: Session, *, row: CloudDatabase, job_id: str,
     return True
 
 
-async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id: str,
-                                      engine: str, tf_variables: dict) -> dict:
+async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase,
+                                      log_job_id: str, engine: str,
+                                      tf_variables: dict) -> dict:
     """GCP counterpart of :func:`_create_db_managed_user`, and much the simplest of the
     three: **there is no jump host.**
 
@@ -2183,7 +2192,7 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
             # issue the grant would change the instance for a channel that will never
             # use it, which is the change that comment declines to make.
             applied = await _apply_fa_grant_gcp(
-                db, row=row, job_id=job_id, engine=engine, project=project,
+                db, row=row, log_job_id=log_job_id, engine=engine, project=project,
                 instance=instance, region=region,
                 # db_name is already connection_db_name's answer, which resolves SQL
                 # Server to master on its own — ALTER SERVER ROLE is server-scoped and
@@ -2194,7 +2203,7 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
                 grant=grant)
         if not applied:
             job_service.append_job_log(
-                db, job_id,
+                db, log_job_id,
                 f"Password Safe rotation needs one grant on this database, which the "
                 f"dashboard could not issue itself — run it as an admin: {grant}")
 
@@ -2212,12 +2221,12 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
         engine, fa_db_user=fa_db_user, fa_host="%")
     if discovery_grant and fa_db_user and channel == "data-api":
         if not await _apply_fa_grant_gcp(
-                db, row=row, job_id=job_id, engine=engine, project=project,
+                db, row=row, log_job_id=log_job_id, engine=engine, project=project,
                 instance=instance, region=region, database=db_name,
                 admin_username=admin_username, admin_password=admin_password,
                 grant=discovery_grant, purpose="account-discovery grant"):
             job_service.append_job_log(
-                db, job_id,
+                db, log_job_id,
                 f"Account Discovery on this MySQL instance needs one further grant, "
                 f"which the dashboard could not issue itself. Rotation and Verify are "
                 f"unaffected and work without it; Discovery returns MySQL 1142 until it "
@@ -2234,7 +2243,7 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase, job_id
         fa_secret_version = _fa_secret_version_configured()
         if not fa_secret_version and _ps_fa_mode(engine, row.cloud) != _FA_MODE_REFERENCE:
             fa_secret_version = await _stage_fa_secret_gcp(
-                db, row=row, job_id=job_id, project=project, region=region,
+                db, row=row, log_job_id=log_job_id, project=project, region=region,
                 password=admin_password)
 
     logger.info("clouddb: managed DB user %r created via Cloud SQL users.insert on %s "
@@ -2507,8 +2516,8 @@ def _stash_on_job(db: Session, job_id: str, update: dict) -> None:
     db.commit()
 
 
-async def _admit_instance_to_dbops(db: Session, *, row: CloudDatabase, job_id: str,
-                                   conn_name: str) -> None:
+async def _admit_instance_to_dbops(db: Session, *, row: CloudDatabase,
+                                   log_job_id: str, conn_name: str) -> None:
     """Add this instance to the region's DB-Ops allowlist, in place.
 
     Applied INLINE rather than queued, for the same reason the adapter pairing drives
@@ -2535,11 +2544,11 @@ async def _admit_instance_to_dbops(db: Session, *, row: CloudDatabase, job_id: s
             db, fn_id=result["fn_id"], job_id=result["job_id"],
             tf_variables=result["tf_variables"])
         job_service.append_job_log(
-            db, job_id, f"Admitted {conn_name} to the DB-Ops service allowlist.")
+            db, log_job_id, f"Admitted {conn_name} to the DB-Ops service allowlist.")
     except Exception as exc:
         logger.warning("clouddb: dbops allowlist update failed for %s: %s", row.id, exc)
         job_service.append_job_log(
-            db, job_id,
+            db, log_job_id,
             f"Could not add {conn_name} to the {row.region} DB-Ops service's allowed "
             f"instances ({exc}). Rotations for this database will be refused by the "
             f"service until you redeploy it from Settings → Password Safe, or add the "
@@ -2547,7 +2556,8 @@ async def _admit_instance_to_dbops(db: Session, *, row: CloudDatabase, job_id: s
 
 
 async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id: str,
-                                      engine: str, tf_variables: dict, ctx: dict) -> None:
+                                      engine: str, tf_variables: dict, ctx: dict,
+                                      log_job_id: Optional[str] = None) -> None:
     """Onboard the DB into Password Safe: a managed system + managed account on the
     cloud-specific DB plugin platform — AWS "{engine} SSM Custom Plugin" (functional
     account = "<EC2|IAM>:<dbAdmin>" packing the AWS SSM credential and the DB admin
@@ -2559,8 +2569,16 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
     "PRA Vault Username Password" platform so Password Safe propagates rotations into
     the vaulted credential the tunnel injects. Ids + teardown state are stashed on the
     provisioning job's metadata the moment each half exists, so whatever a part-way
-    failure created is still tracked for teardown. Failures propagate to the caller."""
+    failure created is still tracked for teardown. Failures propagate to the caller.
+
+    ``job_id`` is where the ids are STASHED — always the provisioning job, because that
+    is the single place :func:`run_decommission` looks for them. ``log_job_id`` is where
+    the operator-facing lines GO, and defaults to the same job. The two are only
+    different on the post-hoc registration path, where they must be: the operator is
+    watching the registration job, and its remedies (the functional account's login
+    statement, a refused DB-Ops allowlist update) belong on the job they are watching."""
     from . import ps_api_service, ps_resource_service
+    log_job_id = log_job_id or job_id
     name = tf_variables.get("identifier") or f"clouddb-{row.id[:8]}"
     workgroup_id = await ps_api_service.get_workgroup_id(
         _cfg("clouddb_ps_workgroup") or _cfg("passwordsafe_workgroup"))
@@ -2641,7 +2659,7 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
             # managed system exists. Doing it after would register a system whose very
             # first rotation is refused by our own service — a failure that reads like
             # a permissions problem and is not.
-            await _admit_instance_to_dbops(db, row=row, job_id=job_id,
+            await _admit_instance_to_dbops(db, row=row, log_job_id=log_job_id,
                                            conn_name=conn_name)
         else:
             # Both control-plane fields are "-": the Cloud SQL APIs are always TLS and
@@ -2811,7 +2829,7 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
     fa_db_login = _fa_db_login(mode=fa_mode, fa_key=fa_key)
     if fa_db_login:
         _report_fa_db_prereqs(
-            db, job_id, engine=engine, fa_db_login=fa_db_login,
+            db, log_job_id, engine=engine, fa_db_login=fa_db_login,
             managed_user=ctx["managed_user"],
             managed_host=ctx.get("managed_user_host") or "%",
             report_grant=(db_method != "dbgcp") and not self_rotate)
@@ -2892,8 +2910,14 @@ async def _ps_onboard_post_hoc(db: Session, *, row: CloudDatabase, job_id: str) 
     built before the feature was configured, or with the provision checkbox cleared.
 
     Everything is recorded on the PROVISIONING job's metadata, not on this action's job,
-    because that is the single place :func:`run_decommission` looks for it. This job
-    carries the progress and the error.
+    because that is the single place :func:`run_decommission` looks for it. The
+    operator-facing LOG lines go the other way — onto this job, the one they are
+    watching. The two used to be the same argument, so a post-hoc registration wrote
+    every remedy it had (the rotation grant it applied, or the statement to run by hand
+    when it could not) into a provisioning job nobody reopens: on 2026-09-10 a
+    PostgreSQL rotation failure was investigated as "the dashboard never issued the
+    grant" when the attempt had in fact been logged, out of sight. This job carries the
+    progress, the substance and the error.
 
     **Re-pointing the tunnel is not optional.** Password Safe rotates the managed user,
     and the "PRA Vault Username Password" mirror pushes each rotation into the vaulted
@@ -2916,13 +2940,13 @@ async def _ps_onboard_post_hoc(db: Session, *, row: CloudDatabase, job_id: str) 
                                 "Creating the rotatable managed database user…")
     if row.cloud == "azure":
         ctx = await _create_db_managed_user_azure(
-            db, row=row, job_id=prov_job.id, engine=engine, tf_variables=tf_variables)
+            db, row=row, log_job_id=job_id, engine=engine, tf_variables=tf_variables)
     elif row.cloud == "gcp":
         ctx = await _create_db_managed_user_gcp(
-            db, row=row, job_id=prov_job.id, engine=engine, tf_variables=tf_variables)
+            db, row=row, log_job_id=job_id, engine=engine, tf_variables=tf_variables)
     else:
         ctx = await _create_db_managed_user(
-            db, row=row, job_id=prov_job.id, engine=engine, tf_variables=tf_variables)
+            db, row=row, log_job_id=job_id, engine=engine, tf_variables=tf_variables)
 
     if _pra_configured():
         job_service.update_progress(db, job_id, 55,
@@ -2957,8 +2981,11 @@ async def _ps_onboard_post_hoc(db: Session, *, row: CloudDatabase, job_id: str) 
 
     job_service.update_progress(db, job_id, 75,
                                 "Registering the Password Safe managed systems…")
+    # job_id=prov_job.id is the STASH target and must stay there; log_job_id is the
+    # only thing that moves.
     await _onboard_ps_managed_systems(db, row=row, job_id=prov_job.id, engine=engine,
-                                      tf_variables=tf_variables, ctx=ctx)
+                                      tf_variables=tf_variables, ctx=ctx,
+                                      log_job_id=job_id)
     if not row.ps_managed_system_id:
         raise CloudDatabaseError("Password Safe returned no managed system id")
 
@@ -3289,13 +3316,16 @@ async def run_provision_apply(
             try:
                 if row.cloud == "azure":
                     onboard_ctx = await _create_db_managed_user_azure(
-                        db, row=row, job_id=job_id, engine=engine, tf_variables=tf_variables)
+                        db, row=row, log_job_id=job_id, engine=engine,
+                        tf_variables=tf_variables)
                 elif row.cloud == "gcp":
                     onboard_ctx = await _create_db_managed_user_gcp(
-                        db, row=row, job_id=job_id, engine=engine, tf_variables=tf_variables)
+                        db, row=row, log_job_id=job_id, engine=engine,
+                        tf_variables=tf_variables)
                 else:
                     onboard_ctx = await _create_db_managed_user(
-                        db, row=row, job_id=job_id, engine=engine, tf_variables=tf_variables)
+                        db, row=row, log_job_id=job_id, engine=engine,
+                        tf_variables=tf_variables)
             except Exception as exc:
                 logger.warning("clouddb: PS managed-user creation failed db_id=%s "
                                "(falling back to admin staging): %s", db_id, exc)
