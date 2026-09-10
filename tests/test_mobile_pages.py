@@ -16,6 +16,15 @@ Four more things followed from the same audit:
 
   * four pages made the whole document scroll sideways (xcpng 512px, hyperv 477px, aws and
     azure 413px), each from one `flex` row that would not wrap;
+    -- and a second pass, measured against the running app at 393px, found the two that
+    survived it: azure at 423px and databases at 408px. Both were the PAGE HEADER, a
+    pattern the first audit had not looked at and which 33 of 38 pages share: an <h1> and
+    its description on one side of a `justify-between` row, the page's buttons on the
+    other. Azure gave the description a ~100px column (six wrapped lines) and overflowed
+    anyway; on databases the buttons ran over the title. Same pass: azure's five-tab
+    underline strip did not scroll, and every toast on every page hung 7px past the right
+    edge. See the three sweeps at the bottom of this file.
+
   * 363 <code>/<pre> elements, 15 of which said anything about wrapping — the rest hold one
     unbroken token (an ARN, a digest, a `docker run` line) and a token with no break
     opportunity sets the page's minimum width;
@@ -144,6 +153,75 @@ def test_the_underline_tab_strips_scroll_rather_than_wrap():
                      ("proxmox/index.html", "flex gap-1 mb-6 border-b border-gray-200 overflow-x-auto")):
         src = _read(os.path.join(_TPL, rel))
         assert f'class="{cls}"' in src, f"{rel} tab strip no longer scrolls: expected {cls!r}"
+
+
+def test_every_underline_tab_strip_scrolls():
+    """The sweep the list above should have been. Azure's five tabs measured 423px in a
+    393px viewport -- the strip did not scroll, so "OT Demo Cell" was off the right edge
+    AND it took the whole document with it. gcp and oci are the same markup one tab
+    shorter, which is the only reason they happened to fit."""
+    offenders, checked = [], 0
+    for rel, src in _pages():
+        for m in re.finditer(r"<nav class=\"([^\"]*-mb-px[^\"]*)\"", src):
+            checked += 1
+            if "overflow-x-auto" not in m.group(1):
+                offenders.append(f"{rel}: {m.group(1)}")
+    assert checked >= 5, f"only {checked} tab strips matched; the pattern stopped matching"
+    assert not offenders, (
+        "these underline tab strips run off the edge with nothing to scroll them:\n  "
+        + "\n  ".join(offenders))
+
+
+def test_a_scrolling_tab_never_wraps_its_own_label():
+    """A strip that scrolls is no use if each tab shrinks and wraps its label inside the
+    strip instead -- azure rendered "Marketplace Images" over two lines in a 46px box."""
+    offenders, checked = [], 0
+    for rel, src in _pages():
+        for m in re.finditer(r"<nav class=\"[^\"]*-mb-px[^\"]*overflow-x-auto[^\"]*\">(.*?)</nav>",
+                             src, re.S):
+            for tag in re.finditer(r"<(?:button|a)\b[^>]*class=\"([^\"]*)\"", m.group(1)):
+                checked += 1
+                cls = tag.group(1)
+                if "whitespace-nowrap" not in cls:
+                    offenders.append(f"{rel}: {cls[:70]}")
+    assert checked >= 18, f"only {checked} tabs matched; the pattern stopped matching"
+    assert not offenders, (
+        "these tabs wrap their label rather than letting the strip scroll:\n  "
+        + "\n  ".join(offenders[:10]))
+
+
+def test_no_page_header_row_keeps_its_columns_on_a_phone():
+    """The page-header pattern: a `justify-between` row with the <h1> and its description
+    on one side and the page's buttons on the other. On a phone it does not shrink
+    gracefully -- it gives the title a ~100px column ("Manage Azure VMs, images, and
+    containers" wrapped over six lines) and the buttons STILL overflowed, taking the
+    document sideways with them on azure and databases.
+
+    `flex-col gap-N sm:flex-row sm:items-* sm:justify-between` resolves to exactly
+    today's classes at >=640px -- verified in Chromium across all 38 pages at 640 and
+    1280 -- and stacks below it. `flex-wrap` is not a substitute here: a title
+    paragraph's max-content width is what decides where a wrapped row breaks, so it would
+    also break at a DESKTOP width, unpredictably per page."""
+    offenders, checked = [], 0
+    for rel, src in _pages():
+        for m in re.finditer(r'<div class="([^"]*justify-between[^"]*)"', src):
+            i, depth, block = m.start(), 0, None
+            for d in re.finditer(r"<div\b|</div>", src[i:]):
+                depth += 1 if d.group(0).startswith("<div") else -1
+                if depth == 0:
+                    block = src[i:i + d.end()]
+                    break
+            if block is None or "<h1" not in block:
+                continue
+            checked += 1
+            toks = m.group(1).split()
+            if "flex-col" in toks or "flex-wrap" in toks:
+                continue
+            offenders.append(f"{rel}: {m.group(1)}")
+    assert checked >= 33, f"only {checked} page headers matched; the pattern stopped matching"
+    assert not offenders, (
+        "these page headers keep the title and the buttons side by side on a phone:\n  "
+        + "\n  ".join(offenders[:12]))
 
 
 def test_a_no_shrink_group_does_not_refuse_to_shrink_on_a_phone():

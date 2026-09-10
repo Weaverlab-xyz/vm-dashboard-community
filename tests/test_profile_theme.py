@@ -41,7 +41,7 @@ _DOCS = os.path.join(_ROOT, "web_dashboard", "api", "docs_pages.py")
 # (brand, mark paths) are deliberately excluded: those are the CONSTANT half of the system.
 _CHROME = (
     "nav_bg", "nav_hover", "nav_active", "user_text", "logout_btn", "brand_hover",
-    "body_bg", "warp", "weft", "slash", "chip_class", "login_bg", "login_icon_bg",
+    "body_bg", "warp", "weft", "chip_class", "login_bg", "login_icon_bg",
     "login_mark_warp", "login_mark_weft", "login_ring", "login_btn", "login_alt_bg",
     "login_alt_fg", "favicon",
 )
@@ -197,12 +197,12 @@ def test_the_hex_and_tailwind_palettes_agree():
     assert demo["nav_bg"] == "bg-blue-900" and demo["hex"]["nav_bg"] == "#1e3a8a"
 
 
-def test_the_chip_stays_narrow_enough_not_to_fold_the_nav():
-    """static/js/app.js:responsiveNav folds the ENTIRE nav into the flyout drawer the
-    moment the row overflows, so the brand block's width is a functional constraint, not
-    a cosmetic one. Measured at a 1280px viewport, the widest variant (demo/community)
-    leaves 61px of headroom at these lengths; "Demo · Community" left 2px. Anything much
-    longer here silently costs every user at that width their inline nav."""
+def test_the_chip_stays_narrow_enough_for_the_bar():
+    """The chip sits beside the product word in a 64px row that also carries the
+    username, the settings cog and the menu toggle, and it is the first thing that stops
+    fitting. Measured at a 1280px viewport, the widest variant (demo/community) leaves
+    61px of headroom at these lengths; "Demo · Community" left 2px. Past that the lockup
+    starts truncating the one word that says which instance you are on."""
     for p in ("demo", "pov"):
         for app_env in ("production", "development"):
             label = ui_theme.theme_for(p, app_env)["chip_label"]

@@ -203,7 +203,12 @@
                      Settings. masked is not: api/setup.patch_feature_config would refuse
                      the enable with a 409 naming the profile, so a Settings link there
                      would send the operator to a switch that cannot move. -->
-                <p x-show="c.state === 'needs_flag'" class="text-xs text-amber-700 truncate"
+                <!-- `sm:truncate`, not `truncate`: this line ends in the link that makes
+                     the row actionable, and at 393px the clip ate it — a 94px anchor whose
+                     rect is perfectly correct and which nothing on screen says exists. It
+                     wraps on a phone and keeps the one-line row on a desktop. The masked
+                     line below truncates unconditionally because it holds no control. -->
+                <p x-show="c.state === 'needs_flag'" class="text-xs text-amber-700 sm:truncate"
                    :title="'Needs: ' + c.needs.join(', ')">
                   Needs <span x-text="c.needs.join(', ')"></span> —
                   <a :href="c.settings_link" class="underline hover:no-underline">enable in Settings</a>

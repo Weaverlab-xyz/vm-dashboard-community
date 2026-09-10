@@ -13,13 +13,15 @@
   <style>
     [x-cloak] { display: none !important; }
     .progress-bar-fill { transition: width 0.4s ease; }
-    /* The compact flyout's link rows. _nav_links.html is rendered twice from one set of
-       classes, and those classes are sized for the 64px bar -- where a link is a mouse
-       target and every pixel of padding is width responsiveNav has to fold around. In the
-       drawer the same link is a thumb target with a whole column to itself, so it is
-       given the height a thumb needs here, scoped to the drawer, rather than in the
-       shared class list where it would also widen the row it is trying to save. */
+    /* The drawer's link rows. _nav_links.html's own classes (`px-2 py-2`) are sized for a
+       mouse; in the drawer every link is a thumb target with a whole column to itself, so
+       it gets the height a thumb needs. Kept as a scoped rule rather than folded into the
+       shared class list because the same partial is also what the docs shell and any
+       future inline render would use. */
     .nav-drawer a { padding-top: 0.75rem; padding-bottom: 0.75rem; }
+    /* Separator applyPins() inserts between a persona's pinned links and the rest. Only
+       the colour: the list is `space-y-1`, whose margin rule outranks this one anyway. */
+    .nav-drawer hr { border-color: rgb(255 255 255 / 0.2); }
 
     /* Data tables: scroll the columns, never hide them.
 
@@ -62,7 +64,16 @@
 </head>
 <body class="{{ theme.body_bg }} min-h-screen font-sans text-gray-800">
 
-  {# Navigation.
+  {# Navigation. ONE model at every width: a bar that names the instance, and a flyout
+     drawer behind the hamburger that holds the links, who you are, and the way out.
+
+     There used to be two — an inline link row on a wide viewport, folding into this
+     drawer once it overflowed — and the measurement that killed it is in
+     tests/test_persona_nav: a fully-enabled admin instance overflows a 1280px viewport by
+     1290px, so the inline row was ALREADY folded for the configuration most people run.
+     Two navigation models, one of which most users never saw, cost a measure/resize
+     cycle, an overflow popover and its anchoring maths to maintain a layout that was a
+     minority case. The drawer was already the complete list; now it is the only one.
 
      The Alpine root is this wrapper rather than <nav> itself, and the wrapper is
      `display: contents` -- it generates no box at all. Two things need that.
@@ -72,7 +83,7 @@
      level, and the `fixed inset-0 z-40` modals in users/, cert_lab/, functions/ and
      inventory/ would then paint over an open menu. Out here they stay in the root
      stacking context at the z-50/z-40 they were always written for. They still need
-     `compact` and `mobileNav`, hence one component spanning all three.
+     `mobileNav`, hence one component spanning all three.
 
      And `contents` rather than a real div because a sticky element only sticks within its
      PARENT's box: wrapped in an ordinary 64px-tall div, the bar would have 64px of travel
@@ -80,112 +91,66 @@
      block is <body> and it sticks for the length of the page. #}
   <div class="contents"
        x-data="responsiveNav()" x-cloak x-show="$store.auth.isLoggedIn"
-       @keydown.escape.window="mobileNav = false; moreOpen = false">
-  {# `sticky` only while the row is folded. On a phone the bar is the only navigation
-     affordance there is, and a dashboard runs 4+ screens: unpinned, reaching the menu
-     means scrolling back to the top of the page first. It costs 64px of a ~850px
-     viewport, which is the trade the pin is worth making and the wide row is not -- so
-     the wide row keeps `relative` and every desktop pixel it had.
+       @keydown.escape.window="mobileNav = false">
+  {# Pinned at every width, because the bar is now the only navigation affordance there
+     is and a dashboard runs 4+ screens: unpinned, reaching the menu means scrolling back
+     to the top of the page first. It costs 64px, which is the trade a menu you can always
+     reach is worth.
 
      z-30 is the floor that clears scrolling page content and stays UNDER the z-40 modal
-     overlays, which should cover the bar. The More popover is a child and would be
-     trapped at z-30 too, but it renders only when `!compact`, i.e. only when this
-     branch is not taken. #}
-  <nav class="{{ theme.nav_bg }} text-white shadow-lg"
-       :class="compact ? 'sticky top-0 z-30' : 'relative'">
+     overlays, which should cover the bar. #}
+  {% set nav_hover = theme.nav_hover %}
+  {% set nav_active = theme.nav_active %}
+  {% set user_text = theme.user_text %}
+  {% set logout_btn = theme.logout_btn %}
+  <nav class="{{ theme.nav_bg }} text-white shadow-lg sticky top-0 z-30">
     <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8">
-      <div x-ref="navRow" class="flex items-center justify-between h-16 overflow-hidden">
-        <!-- Brand -->
-        {# Brand lockup: [mark] Weaver Lab / <product> [chip].
+      {# navRow is no longer measured — nothing folds any more. The ref stays as the
+         handle tests/test_mobile_nav uses to say "this element is the bar row", which is
+         what lets it assert on the row's classes without pattern-matching prose. #}
+      <div x-ref="navRow" class="flex items-center justify-between gap-3 h-16">
+        <!-- Instance lockup -->
+        {# [mark] <product> [chip] -- the half of the old lockup that says WHICH instance
+           you are on. The parent brand ("Weaver Lab") is constant across both instances
+           and says nothing about where you are, so it moved to the drawer header, where
+           it introduces the menu rather than competing with the page for the bar's width.
 
-           Weaver Lab is constant across both instances; the product word, the accent
-           slash and the chip are what say WHICH instance you are on. The chip is not
-           colour-only on purpose -- "Demo" vs "Customer tenants" survives a greyscale
-           screenshot and colour-vision deficiency, which a violet nav bar does not.
+           The chip is not colour-only on purpose -- "Production" vs "Customer tenants"
+           survives a greyscale screenshot and colour-vision deficiency, which a violet nav
+           bar does not.
 
-           min-w-0 is load-bearing on a phone. This row is `overflow-hidden`, so a brand
-           block that refuses to shrink does not push the user menu along -- it CLIPS it.
-           A flex item's min-width is `auto`, i.e. its content, so at 393px the lockup
-           held its full width, wrapped "Weaver Lab" onto two lines and carried the
-           settings cog and the Logout button off the right edge with no scrollbar, no
-           ellipsis and nothing on screen to say they existed. min-w-0 lifts that floor;
-           whitespace-nowrap keeps the wrap from happening inside the 64px row. #}
+           min-w-0 + truncate are load-bearing on a phone. A flex item's min-width is
+           `auto`, i.e. its content, so without them the lockup holds its full width and
+           pushes the cog and the hamburger off the right edge -- which, now that the row
+           no longer clips, means the whole DOCUMENT scrolls sideways to reach them. #}
         <div class="flex items-center space-x-2.5 min-w-0">
-          {% with mark_warp = theme.warp, mark_weft = theme.weft %}
-            {% include '_brand_mark.html' %}
-          {% endwith %}
-          <a href="/" class="text-lg font-bold tracking-tight whitespace-nowrap {{ theme.brand_hover }}">{{ theme.brand }}</a>
-          {# Slash, product and chip -- the half of the lockup that says WHICH instance.
-             Dropped from the bar once the row folds and re-rendered in the drawer header,
-             so a phone spends its ~190px of bar on controls rather than on a label that
-             does not change between two pages.
-
-             `!compact`, not a `sm:` breakpoint: measure() forces compact false before it
-             reads the fold, so these are still counted at full width and the headroom
-             budget tests/test_profile_theme records still describes the row it measured. #}
-          <span x-show="!compact" class="{{ theme.slash }} font-light" aria-hidden="true">/</span>
-          <span x-show="!compact" class="text-sm font-medium text-white/90 truncate">{{ theme.product }}</span>
-          {# No uppercase/tracking-wide: it cost 17px of nav-bar width for no legibility,
-             and responsiveNav folds the whole nav the moment the row overflows. #}
-          <span x-show="!compact" class="text-xs font-semibold {{ theme.chip_class }} px-2 py-0.5 rounded-full mr-3 whitespace-nowrap">{{ theme.chip_label }}</span>
-        </div>
-
-        <!-- Nav links: same content rendered twice — inline in the bar
-             when it fits, in a right-side flyout drawer when it doesn't.
-             _nav_links.html is the single source for the link list. -->
-        {% set nav_hover = theme.nav_hover %}
-        {% set nav_active = theme.nav_active %}
-        {# The inline row. `navInline` is what responsiveNav.applyPins() reorders, and it is
-           scoped by ref rather than by document.querySelectorAll on purpose: BOTH renders
-           of _nav_links.html are in the DOM at once, and a document-wide selector would
-           scramble the drawer below — which is the guaranteed-complete escape hatch that
-           makes "a persona can never make a page unreachable" true at the DOM level.
-
-           data-nav-pins is a comma-joined list from main._profile_context. Empty for the
-           neutral persona, and applyPins returns immediately on empty, so a user who never
-           picks a focus gets byte-identical DOM to before this existed. #}
-        <div x-show="!compact"
-             x-ref="navInline"
-             data-nav-pins="{{ persona_nav_pins }}"
-             @click="mobileNav = false"
-             class="flex items-center space-x-1 flex-shrink-0">
-          {% include '_nav_links.html' %}
-          {# Overflow menu BUTTON. Lives here rather than in _nav_links.html so the drawer
-             never grows one: that include is rendered twice and must stay a flat, complete
-             list. Hidden unless applyPins actually moved something into it.
-
-             The button only. Its popover is a sibling of navRow, not a child — navRow is
-             `overflow-hidden` (that is what makes the scrollWidth fold read meaningful),
-             and an absolutely positioned panel hanging below a 64px row is a descendant of
-             that clip: it opened at full size and 122 of its 132px were clipped away, so
-             the button read as dead. See positionMore() for how the two are re-anchored. #}
-          <button x-ref="moreBtn"
-                  x-show="moreCount > 0" x-cloak
-                  @click.stop="toggleMore()"
-                  class="px-2 py-2 rounded-md text-sm font-medium {{ theme.nav_hover }}"
-                  :aria-expanded="moreOpen"
-                  aria-label="More navigation links">More ▾</button>
+          <a href="/" class="flex items-center space-x-2.5 min-w-0 {{ theme.brand_hover }} transition">
+            {% with mark_warp = theme.warp, mark_weft = theme.weft %}
+              {% include '_brand_mark.html' %}
+            {% endwith %}
+            <span class="text-lg font-bold tracking-tight truncate">{{ theme.product }}</span>
+          </a>
+          {# No uppercase/tracking-wide: it cost 17px of bar width for no legibility.
+             Hidden below sm because at 320px "Customer tenants" plus the product word
+             plus two controls does not fit, and the drawer header carries the same chip
+             one tap away. #}
+          <span class="hidden sm:inline text-xs font-semibold {{ theme.chip_class }} px-2 py-0.5 rounded-full whitespace-nowrap">{{ theme.chip_label }}</span>
         </div>
 
         <!-- User menu -->
-        {% set user_text = theme.user_text %}
-        {% set logout_btn = theme.logout_btn %}
         {# flex-shrink-0: the controls are the last thing in this row allowed to give up
-           width. Without it the brand block won every contest and `overflow-hidden` ate
-           the cog and the Logout button outright -- not shrunk, not wrapped, gone. #}
-        <div class="flex items-center space-x-3 flex-shrink-0">
-          <span x-show="!compact" class="text-sm {{ user_text }}" x-text="$store.auth.username"></span>
+           width. Without it the lockup wins every contest and pushes them off the end. #}
+        <div class="flex items-center space-x-1 sm:space-x-3 flex-shrink-0">
+          {# The username is in the drawer header too. This copy is the desktop
+             convenience, dropped on a phone where the bar's ~190px is worth more as
+             controls than as a label. #}
+          <span class="hidden md:inline text-sm {{ user_text }}" x-text="$store.auth.username"></span>
           {# Settings stays in the bar at EVERY width. It is the only route to MFA and
              passkeys, and one tap is the right price for it; the drawer carries a second
-             copy only because the open drawer covers this one.
-
-             The touch padding is compact-only, via :class rather than a `sm:` utility,
-             because `compact` is a measured state and not a breakpoint -- and because
-             measure() reads the row with compact false, so the wide row is measured at
-             exactly the width it has always had. #}
+             copy only because the open drawer covers this one. p-2.5 makes it the same
+             44px thumb target as the hamburger beside it. #}
           <a href="/settings"
-             :class="compact ? 'p-2' : ''"
-             class="inline-flex items-center justify-center rounded-md text-sm {{ user_text }} hover:text-white transition"
+             class="inline-flex items-center justify-center p-2.5 rounded-md text-sm {{ user_text }} hover:text-white {{ nav_hover }} transition"
              title="Security settings" aria-label="Security settings">
             <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -193,16 +158,10 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
             </svg>
           </a>
-          <button x-show="!compact"
-                  @click="$store.auth.logout()"
-                  class="text-sm {{ logout_btn }} px-3 py-1.5 rounded-md font-medium transition">
-            Logout
-          </button>
           {# Last in the row and 44px square: the thumb reaches the trailing edge, and a
              24px icon with p-2 was a 40px target on a control that is only ever pressed
-             by a thumb. Hidden while the row is inline, so it costs the measurement 0. #}
+             by a thumb. #}
           <button @click="mobileNav = !mobileNav"
-                  x-show="compact"
                   class="p-2.5 -mr-2 rounded-md {{ nav_hover }}"
                   :aria-expanded="mobileNav" aria-label="Toggle navigation menu">
             <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -213,32 +172,11 @@
         </div>
       </div>
     </div>
-    {# The overflow popover. A child of <nav> rather than of the row holding its button,
-       so navRow's `overflow-hidden` cannot clip it — the nav is the nearest unclipped
-       positioned ancestor (`relative` whenever this panel can be seen at all, since it
-       renders only when the row is inline), so `top-16` lands it flush under the 64px row
-       and positionMore() supplies the `right` that keeps it under its button.
-
-       `!compact` as well as moreOpen: the button is inside navInline and disappears with
-       it when the row folds, but this panel is not, so without the guard a popover left
-       open across a resize would outlive its trigger.
-
-       Capped and scrollable, like the drawer: a persona pins 5-7 links, so the OTHER
-       ~25 land here, and measured at a 720px viewport that popover is 1012px tall — its
-       bottom third simply left the screen with nothing to scroll. #}
-    <div x-ref="navMore"
-         x-show="moreOpen && !compact" x-cloak
-         @click.outside="moreOpen = false"
-         @click="mobileNav = false; moreOpen = false"
-         class="absolute top-16 mt-1 w-56 flex flex-col items-stretch space-y-1
-                max-h-[calc(100vh-5rem)] overflow-y-auto
-                {{ theme.nav_bg }} shadow-2xl rounded-lg z-50 p-2"></div>
   </nav>
 
-    {# The compact flyout drawer. A sibling of <nav>, not a descendant: it is a viewport
-       overlay, and it must stay out of the stacking context a sticky bar creates (see the
-       wrapper above) as well as out of the 64px `overflow-hidden` row whose width decides
-       whether it is ever shown.
+    {# The flyout drawer. A sibling of <nav>, not a descendant: it is a viewport overlay,
+       and it must stay out of the stacking context the sticky bar creates (see the
+       wrapper above).
 
        Full height, and it therefore paints over the bar's own toggle — so it carries its
        own close button. Before that the X you press to dismiss the drawer sat underneath
@@ -246,7 +184,7 @@
 
        max-w-[85vw] keeps a strip of dimmed page visible at 320px, which is what tells a
        first-time user the backdrop is there to be tapped. #}
-    <div x-show="compact && mobileNav"
+    <div x-show="mobileNav"
          x-transition:enter="transition ease-out duration-200 transform"
          x-transition:enter-start="translate-x-full"
          x-transition:enter-end="translate-x-0"
@@ -255,14 +193,14 @@
          x-transition:leave-end="translate-x-full"
          class="fixed inset-y-0 right-0 w-72 max-w-[85vw] flex flex-col {{ theme.nav_bg }} shadow-2xl z-50"
          x-cloak>
-      {# Who, and which instance. Both are dropped from the bar when it folds — the
-         username to buy width, the product and chip with it — so this is where they land
-         rather than nowhere. #}
+      {# The parent brand, and who is holding it. "Weaver Lab" heads the menu rather than
+         the bar: one app, two instances, and the bar already named which one. No
+         separator glyph between them — the old "Weaver Lab / Infrastructure" slash was
+         punctuation for a lockup that no longer sits on one line. #}
       <div class="flex-shrink-0 flex items-start justify-between gap-2 px-4 pt-4 pb-3 border-b border-white/15">
         <div class="min-w-0">
-          <div class="flex items-center space-x-2 min-w-0">
-            <span class="{{ theme.slash }} font-light" aria-hidden="true">/</span>
-            <span class="text-sm font-medium text-white/90 truncate">{{ theme.product }}</span>
+          <div class="flex items-center gap-2 min-w-0">
+            <span class="text-base font-bold tracking-tight text-white truncate">{{ theme.brand }}</span>
             <span class="text-xs font-semibold {{ theme.chip_class }} px-2 py-0.5 rounded-full whitespace-nowrap">{{ theme.chip_label }}</span>
           </div>
           <p class="mt-1.5 text-sm {{ user_text }} truncate" x-text="$store.auth.username"></p>
@@ -275,10 +213,17 @@
           </svg>
         </button>
       </div>
-      {# The complete, un-curated link list. `nav-drawer` gives each row a thumb-sized
-         height in CSS rather than in the shared classes — the same anchors are measured
-         in the bar, where a taller row would spend width this fold exists to save. #}
+      {# The complete link list, in shipped order. `nav-drawer` gives each row a
+         thumb-sized height in CSS rather than in the shared classes.
+
+         data-nav-pins is a comma-joined list from main._profile_context, and
+         responsiveNav.applyPins() hoists those links to the top of this list. CURATION
+         ONLY: nothing is ever removed, so a persona cannot make a page unreachable. Empty
+         for the neutral persona, and applyPins returns immediately on empty, so a user who
+         never picks a focus gets byte-identical DOM to before this existed. #}
       <div class="nav-drawer flex-1 overflow-y-auto overscroll-contain flex flex-col items-stretch space-y-1 p-4"
+           x-ref="navDrawer"
+           data-nav-pins="{{ persona_nav_pins }}"
            @click="mobileNav = false">
         {% include '_nav_links.html' %}
       </div>
@@ -304,7 +249,7 @@
        menu — the user lets go, taps to dismiss, and finds the page somewhere they did not
        put it. responsiveNav locks the body as well; this is the half of that lock which
        iOS honours. #}
-    <div x-show="compact && mobileNav"
+    <div x-show="mobileNav"
          @click="mobileNav = false"
          x-transition:enter="transition ease-out duration-200"
          x-transition:enter-start="opacity-0"
@@ -332,7 +277,12 @@
        x-data="toastManager()"
        x-init="window._toast = $data">
     <template x-for="t in toasts" :key="t.id">
-      <div class="flex items-start gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium text-white max-w-sm"
+      {# `min(24rem, ...)` in ONE declaration rather than `max-w-sm` plus a phone
+         override: two max-width utilities on one element are resolved by stylesheet
+         order, not by which is smaller, so the pair silently picks a winner. 24rem is
+         the old max-w-sm; the calc is the viewport less the container's own inset,
+         which is what kept a toast hanging past the right edge at 393px. #}
+      <div class="flex items-start gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium text-white max-w-[min(24rem,calc(100vw-2rem))]"
            :class="t.type === 'error' ? 'bg-red-600' : t.type === 'success' ? 'bg-green-600' : 'bg-blue-600'"
            x-transition>
         <div class="flex-1">
