@@ -704,6 +704,141 @@ ok(AG + ' falls back to the user agent string last',
    shellFor({userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}) === 'powershell');
 ok(AG + ' an unreadable navigator opens on the POSIX form', shellFor({}) === 'bash');
 
+// ── Bulk power: the eligibility arithmetic ────────────────────────────────────
+//
+// `bulkPowerPlan` decides what a toolbar button will actually do, and the number it
+// produces goes straight into the confirm dialog — so it is the last thing between an
+// operator and a power cut on machines they did not mean to include. Pure, so it is
+// testable here rather than only in a browser.
+const APPJS = '../static/js/app.js';
+
+// The mixin's own list, read out of the source rather than restated, so a page that
+// gains a guest-gated op cannot leave these tests asserting the old set.
+const GUEST_OPS = (() => {
+  const src = fs.readFileSync(T + APPJS, 'utf8');
+  const m = /bulkGuestOps:\s*\[([^\]]*)\]/.exec(src);
+  if (!m) throw new Error('window.bulkPowerState no longer declares bulkGuestOps');
+  return m[1].split(',').map(v => v.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
+})();
+
+// Two methods and the seams a page supplies. `running` is the tri-state
+// _bulkPowerRunning returns: true / false / null for "not known".
+function planner(rows, selected, extra) {
+  return Object.assign(
+    eval('({' + extract(APPJS, 'bulkPowerPlan') + ','
+             + extract(APPJS, 'bulkPowerEligible') + ','
+             + extract(APPJS, 'bulkPowerConfirm') + ','
+             + extract(APPJS, 'bulkOpAllowed') + '})'),
+    {
+      bulkGuestOps: GUEST_OPS,
+      selectedVmIds: selected,
+      _bulkPowerRows: () => rows,
+      _vmKey: (vm) => String(vm.id),
+      _bulkPowerTarget: (vm) => ({ id: vm.id, name: vm.name }),
+      _bulkPowerRunning: (vm) => (vm.running === undefined ? null : vm.running),
+    },
+    extra || {});
+}
+
+const VMS = [
+  { id: '1', name: 'dc01', running: true },
+  { id: '2', name: 'sql01', running: true },
+  { id: '3', name: 'web01', running: false },
+  { id: '4', name: 'app01', running: false },
+];
+const ALL = ['1', '2', '3', '4'];
+
+ok('bulkPowerPlan: Start targets only the VMs that are not running',
+   (() => { const p = planner(VMS, ALL).bulkPowerPlan('start');
+            return p.targets.length === 2 && p.skipped === 2 && p.total === 4
+                   && p.targets.map(t => t.name).join() === 'web01,app01'; })());
+
+ok('bulkPowerPlan: Force Off targets only the VMs that are running',
+   (() => { const p = planner(VMS, ALL).bulkPowerPlan('stop');
+            return p.targets.map(t => t.name).join() === 'dc01,sql01'
+                   && p.skipped === 2; })());
+
+ok('bulkPowerPlan: Start over an all-running selection plans nothing',
+   (() => { const p = planner(VMS.slice(0, 2), ['1', '2']).bulkPowerPlan('start');
+            return p.targets.length === 0 && p.skipped === 2 && p.total === 2; })());
+
+// The rule that stops a silent refusal. A row synced by an agent may carry no power
+// state at all, and skipping it would mean the operator selected a machine and nothing
+// happened to it, with nothing said. A job that should not have run fails out loud
+// instead. Same reasoning as guestToolsMaybeReady: unknown is not absent.
+ok('bulkPowerPlan: a VM with an UNKNOWN power state is planned, never skipped',
+   (() => { const rows = [{ id: '9', name: 'mystery' }];   // running: undefined
+            const start = planner(rows, ['9']).bulkPowerPlan('start');
+            const stop = planner(rows, ['9']).bulkPowerPlan('stop');
+            return start.targets.length === 1 && start.skipped === 0
+                   && stop.targets.length === 1 && stop.skipped === 0; })());
+
+// Select-all, then narrow the filter: the button must act on what is on screen.
+ok('bulkPowerPlan: a selected VM no longer in the filtered rows is not targeted',
+   (() => { const p = planner(VMS.slice(0, 2), ALL).bulkPowerPlan('stop');
+            return p.targets.length === 2 && p.total === 4; })());
+
+ok('bulkPowerPlan: targets carry the page\'s own payload shape',
+   (() => { const p = planner(VMS, ['3']).bulkPowerPlan('start');
+            return JSON.stringify(p.targets) === '[{"id":"3","name":"web01"}]'; })());
+
+ok('bulkPowerPlan: the key is compared as a string, so a numeric id still matches',
+   (() => { const rows = [{ id: 7, name: 'seven', running: false }];
+            return planner(rows, [7]).bulkPowerPlan('start').targets.length === 1; })());
+
+// Hyper-V and vSphere gate their per-row Shutdown on the guest agent; the toolbar has
+// to carry the same gate or bulk Shutdown queues graceful stops for guests that cannot
+// answer them.
+ok('bulkPowerPlan: Shutdown respects the page\'s guest-tools gate',
+   (() => { const p = planner(VMS, ALL,
+                { guestToolsMaybeReady: (vm) => vm.name !== 'dc01' })
+              .bulkPowerPlan('shutdown');
+            return p.targets.map(t => t.name).join() === 'sql01'; })());
+
+ok('bulkPowerPlan: Force Off ignores the guest-tools gate — it does not ask the guest',
+   (() => { const p = planner(VMS, ALL, { guestToolsMaybeReady: () => false })
+              .bulkPowerPlan('stop');
+            return p.targets.length === 2; })());
+
+ok('bulkPowerPlan: a page with no guest-tools gate is not gated by one',
+   (() => planner(VMS, ALL).bulkPowerPlan('shutdown').targets.length === 2)());
+
+ok('bulkGuestOps covers the graceful ops and only those',
+   GUEST_OPS.includes('shutdown') && !GUEST_OPS.includes('stop')
+   && !GUEST_OPS.includes('start'));
+
+// `bulkOpAllowed` must tolerate a page with no canOp: templates/nutanix/index.html has
+// no agent path and defines none, and an unbound name in an Alpine binding fails
+// silently — the button would just always be live.
+ok('bulkOpAllowed defaults to true on a page with no canOp',
+   planner([], []).bulkOpAllowed('shutdown') === true);
+
+ok('bulkOpAllowed defers to the page canOp when there is one',
+   (() => { const o = planner([], [], { canOp: (op) => op === 'start' });
+            return o.bulkOpAllowed('start') === true
+                   && o.bulkOpAllowed('shutdown') === false; })());
+
+// The dialog is where the count the operator confirms has to match the count that
+// happens, so the skipped total is in the sentence rather than only in the toast after.
+ok('bulkPowerConfirm: Start does not confirm, matching the per-row button',
+   planner([], []).bulkPowerConfirm('start', { targets: [1, 2], skipped: 0, total: 2 })
+   === '');
+
+ok('bulkPowerConfirm: Force Off names the count and what it does to the guests',
+   (() => { const q = planner([], []).bulkPowerConfirm(
+              'stop', { targets: [1, 2, 3], skipped: 0, total: 3 });
+            return q.includes('3 VMs') && q.includes('not asked'); })());
+
+ok('bulkPowerConfirm: the skipped VMs are named in the dialog, not just the toast',
+   (() => { const q = planner([], []).bulkPowerConfirm(
+              'shutdown', { targets: [1], skipped: 3, total: 4 });
+            return q.includes('1 VM?') && q.includes('3 of the 4 selected'); })());
+
+ok('bulkPowerConfirm: every destructive op has its own sentence',
+   ['shutdown', 'stop', 'restart', 'reset', 'hard_reboot', 'reboot'].every(op =>
+     planner([], []).bulkPowerConfirm(op, { targets: [1], skipped: 0, total: 1 })
+       .length > 20));
+
 ociPlacementChecks().then(() => process.exit(fail ? 1 : 0),
                           (e) => { console.log('FAIL ' + OCI + ' placement checks threw: ' + e);
                                    process.exit(1); });

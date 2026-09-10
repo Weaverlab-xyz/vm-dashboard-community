@@ -747,6 +747,81 @@ def test_every_router_that_brokers_power_has_a_table_of_its_own():
         f"no agent power ops")
 
 
+# ── The bulk toolbar offers what its router accepts ──────────────────────────
+
+# `{{ bulk_power_buttons([...]) }}` — the ops a page's selection toolbar renders. The
+# list is a Jinja literal, so it is readable without running the template, which is the
+# whole reason the macro expands at compile time rather than through an Alpine x-for.
+_BULK_BUTTONS = re.compile(r"bulk_power_buttons\(\s*\[([^\]]*)\]")
+
+
+def _toolbar_ops(kind: str) -> set:
+    markup = _read(_template(kind))
+    match = _BULK_BUTTONS.search(markup)
+    assert match, f"the {kind} page renders no bulk_power_buttons(...)"
+    return {v.strip().strip("'\"") for v in match.group(1).split(",") if v.strip()}
+
+
+def test_no_bulk_button_offers_an_op_its_router_will_refuse():
+    """Binding-to-model drift again, in the shape the toolbar makes possible.
+
+    `queue_power_batch` checks the op against that router's `BULK_OPS` and 400s the
+    WHOLE request if it misses — so one wrong string here is not one dead button, it is
+    a toolbar that reports "'reset' is not a bulk power operation" for a selection the
+    operator can see is perfectly valid. The failure names the op, so it reads as the
+    page being wrong about the product rather than about itself.
+
+    Equality, not a subset: an op in BULK_OPS with no button is a route nothing can
+    reach, which is how `save` ended up registered on api/hyperv.py with no way to press
+    it.
+    """
+    for kind in sorted(set(_AGENT_ROUTED) | {"nutanix"}):
+        declared = set(_literal(_router(kind), "BULK_OPS"))
+        assert _toolbar_ops(kind) == declared, (
+            f"{kind} toolbar offers {sorted(_toolbar_ops(kind))}, its router accepts "
+            f"{sorted(declared)}")
+
+
+def test_every_bulk_op_a_page_offers_is_one_its_rows_offer_too():
+    """The toolbar is a shortcut for the row buttons, never a superset of them.
+
+    A bulk op with no per-row equivalent would be the only way to reach that operation,
+    on a path that acts on many VMs at once and confirms with a count rather than a
+    name. Whatever the toolbar can do to twenty machines, the operator must be able to
+    do — and to have already done — to one.
+    """
+    for kind in sorted(set(_AGENT_ROUTED) | {"nutanix"}):
+        markup = _read(_template(kind))
+        for op in sorted(_toolbar_ops(kind)):
+            assert f"powerOp(vm, '{op}')" in markup or f"_power(vm, '{op}')" in markup, (
+                f"{kind}: the toolbar offers a bulk '{op}' but no row on that page has "
+                f"an '{op}' button")
+
+
+def test_the_bulk_toolbar_greys_through_the_same_helper_the_rows_use():
+    """`bulkOpAllowed` delegates to the page's own `canOp`, so an op the router refuses
+    for an agent-bound connection is dead in BOTH places or neither.
+
+    It cannot call `canOp` directly: templates/nutanix/index.html has no agent path and
+    therefore no `canOp` at all, and an undefined name in an Alpine binding fails
+    silently — the button would simply always be enabled, on the one page whose power
+    ops an agent genuinely cannot carry.
+    """
+    macro = _read(os.path.join(_ROOT, "web_dashboard", "templates", "partials",
+                               "bulk_power_toolbar.html"))
+    assert "bulkOpAllowed(" in macro, (
+        "the bulk toolbar no longer consults bulkOpAllowed, so a refused op is now a "
+        "live button that 501s every VM in the batch")
+    assert "!canOp(" not in macro, (
+        "the bulk toolbar calls canOp directly; that is an unbound name on the Nutanix "
+        "page, which Alpine fails silently on")
+
+    mixin = _read(os.path.join(_ROOT, "web_dashboard", "static", "js", "app.js"))
+    assert re.search(r"bulkOpAllowed\(op\)\s*\{[^}]*this\.canOp", mixin), (
+        "window.bulkPowerState().bulkOpAllowed no longer defers to the page's canOp, so "
+        "the toolbar and the rows can now disagree about what the agent can express")
+
+
 # ── The page greys what the router refuses ────────────────────────────────────
 
 def test_each_page_greys_exactly_the_ops_its_router_refuses():

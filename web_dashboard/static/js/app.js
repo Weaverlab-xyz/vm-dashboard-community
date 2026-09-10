@@ -300,19 +300,189 @@ window.deployNameState = function () {
 // Returns false when there is no batch_id, so each caller keeps its existing
 // single-job path verbatim — that is what makes count == 1 a zero-risk change, and it
 // lets the front end ship before or after the server.
+//
+// `unit` names what was queued ('instance' by default, 'VM' for a bulk power op) and
+// `message` replaces the composed sentence outright — bulk power needs that because it
+// has to name the VMs it could NOT queue, and a count alone would let the number
+// quietly disagree with the selection. Both are optional, so every existing caller is
+// unchanged.
 window.afterDeploy = function (resp, opts) {
     const o = opts || {};
     const say = o.notify || ((m, t) => toast(m, t || 'success'));
     if (resp && resp.batch_id) {
         const n = resp.count || (resp.job_ids || []).length;
-        say((o.label || 'Deployment') + ': ' + n + ' instance' + (n !== 1 ? 's' : '') + ' queued',
-            'success');
+        const unit = o.unit || 'instance';
+        say(o.message
+            || (o.label || 'Deployment') + ': ' + n + ' ' + unit + (n !== 1 ? 's' : '')
+               + ' queued',
+            o.type || 'success');
         setTimeout(() => {
             window.location.href = '/jobs?batch_id=' + encodeURIComponent(resp.batch_id);
         }, 400);
         return true;
     }
     return false;
+};
+
+// ── Reusable bulk power toolbar ───────────────────────────────────────────────
+//
+// Spread into an on-prem VM page component (`...bulkPowerState()`) and render with the
+// `bulk_power_buttons` Jinja macro (templates/partials/bulk_power_toolbar.html). The
+// page keeps its own selection state — `selectedVmIds` — and supplies four seams,
+// because the six pages genuinely disagree about all four:
+//
+//   bulkPowerUrl            '/api/<kind>/power/bulk'
+//   _bulkPowerRows()        the currently visible rows (filteredVms, filteredResources…)
+//   _bulkPowerTarget(vm)    the per-VM payload — the SAME object shape the row's own
+//                           powerOp already POSTs, so bulk cannot address a VM
+//                           differently from the button beside it
+//   _bulkPowerRunning(vm)   true / false / null, where null means "not known"
+//
+// It also uses the page's existing `_vmKey(vm)` (must match the server's
+// `_override_key`), its `showToast` if it has one, and its `guestToolsMaybeReady` and
+// `canOp` when present. Nothing here is a getter: tests/template_helpers_check.js
+// extracts helpers by the literal `name(args) {` shape and cannot see one.
+window.bulkPowerState = function () {
+    return {
+        bulkPowerBusy: false,
+        // Which op is in flight, so only the button that was pressed says so. All four
+        // are disabled regardless — a second bulk op while the first is still being
+        // accepted would send the same selection twice.
+        bulkPowerOp: '',
+
+        // Which ops a graceful shutdown has to consult the guest agent for. Kept here
+        // rather than in the macro so a page that gains a guest-tools gate does not
+        // also have to remember the toolbar.
+        bulkGuestOps: ['shutdown', 'reboot'],
+
+        // The op the toolbar may send. Falls back to ALLOWED when the page has no
+        // `canOp` — templates/nutanix/index.html has no agent path and therefore no
+        // canOp/agentOps at all, and `!canOp(op)` there would be an unbound name, which
+        // Alpine fails silently on.
+        bulkOpAllowed(op) {
+            return typeof this.canOp === 'function' ? this.canOp(op) : true;
+        },
+
+        bulkOpTitle(op) {
+            return typeof this.opTitle === 'function' ? this.opTitle(op) : '';
+        },
+
+        // Is this VM a candidate for `op`, from the state the table has already drawn?
+        //
+        // UNKNOWN IS NOT ABSENT, and this is the rule worth keeping: a row synced by an
+        // agent may carry no power state at all, and a VM we are unsure about is
+        // ELIGIBLE, never skipped. A skip is silent — the operator selected a machine
+        // and nothing happened to it — whereas a job that should not have run fails
+        // with the hypervisor's own message saying so. Same reasoning as
+        // guestToolsMaybeReady: the page must not refuse on the strength of a field it
+        // never measured.
+        bulkPowerEligible(vm, op) {
+            const running = this._bulkPowerRunning(vm);
+            if (op === 'start') return running !== true;
+            if (running === false) return false;
+            if (this.bulkGuestOps.includes(op)
+                && typeof this.guestToolsMaybeReady === 'function'
+                && !this.guestToolsMaybeReady(vm)) {
+                return false;
+            }
+            return true;
+        },
+
+        // What pressing `op` would actually do. Pure, and unit-tested in
+        // tests/template_helpers_check.js — the eligibility arithmetic is the one piece
+        // of this the operator sees before committing.
+        bulkPowerPlan(op) {
+            const chosen = new Set((this.selectedVmIds || []).map(String));
+            const rows = (this._bulkPowerRows() || [])
+                .filter(vm => chosen.has(String(this._vmKey(vm))));
+            const eligible = rows.filter(vm => this.bulkPowerEligible(vm, op));
+            return {
+                targets: eligible.map(vm => this._bulkPowerTarget(vm)),
+                total: chosen.size,
+                skipped: rows.length - eligible.length,
+            };
+        },
+
+        // Named per op, because "are you sure" tells the operator nothing they did not
+        // already know. Each string says what the guest is or is not asked, which is
+        // the difference between these buttons.
+        bulkPowerConfirm(op, plan) {
+            const n = plan.targets.length;
+            const vms = n + ' VM' + (n !== 1 ? 's' : '');
+            const skip = plan.skipped
+                ? ' (' + plan.skipped + ' of the ' + plan.total
+                  + ' selected cannot take this and will be skipped)'
+                : '';
+            const q = {
+                shutdown: 'Shut down ' + vms + '? Each guest is asked to shut down; one '
+                        + 'with no guest agent running will not answer.',
+                stop: 'Force off ' + vms + '? This cuts the virtual power on all of '
+                    + 'them — the guests are not asked, and unsaved work is lost.',
+                restart: 'Hard-restart ' + vms + '? This is a power cut and back on '
+                       + 'again — the guests are not asked.',
+                reset: 'Reset ' + vms + '? This is a hard reset — the guests are not '
+                     + 'asked.',
+                hard_reboot: 'Force reboot ' + vms + '? The guests are not asked.',
+                reboot: 'Reboot ' + vms + '? Each guest is asked to reboot.',
+            }[op];
+            // `start` returns falsy on purpose: it is not destructive, and the row's own
+            // Start button does not confirm either. A dialog on the safe op is what
+            // teaches an operator to dismiss the dialog on the unsafe one.
+            return q ? q + skip : '';
+        },
+
+        async submitBulkPower(op) {
+            if (this.bulkPowerBusy) return;
+            const say = (m, t) => (typeof this.showToast === 'function'
+                ? this.showToast(m, t) : toast(m, t));
+
+            const plan = this.bulkPowerPlan(op);
+            if (plan.targets.length === 0) {
+                // No request, and no dialog. The selection is real but this op has
+                // nothing to do with it, and a 400 from the server would say the same
+                // thing far less clearly.
+                say('None of the ' + plan.total + ' selected VMs can be sent ' + op
+                    + ' right now — check their current state.', 'error');
+                return;
+            }
+            const question = this.bulkPowerConfirm(op, plan);
+            if (question && !confirm(question)) return;
+
+            this.bulkPowerBusy = true;
+            this.bulkPowerOp = op;
+            try {
+                const resp = await API.post(this.bulkPowerUrl,
+                                            { op: op, targets: plan.targets });
+                const failed = resp.failed || [];
+                let message = 'Queued ' + resp.count + ' job'
+                            + (resp.count !== 1 ? 's' : '');
+                if (failed.length) {
+                    // Named, not counted. Each of these carries its own reason — an
+                    // offline agent, an op with no verb for this product, a workgroup
+                    // this user cannot reach — and collapsing them to a number is how
+                    // one connection's missing grant becomes "some of them didn't work".
+                    message += '; ' + failed.length + ' could not run: '
+                             + failed.map(f => f.name + ' (' + f.error + ')').join('; ');
+                } else if (plan.skipped) {
+                    message += '; ' + plan.skipped + ' skipped';
+                }
+                this.selectedVmIds = [];
+                this.selectAll = false;
+                // Lands on the batch, the way a single power op lands on its job —
+                // otherwise the only reference to N jobs disappears with the toast.
+                window.afterDeploy(resp, {
+                    unit: 'VM', message: message,
+                    type: failed.length ? 'error' : 'success',
+                    notify: say,
+                });
+            } catch (e) {
+                say('Bulk ' + op + ' failed: ' + (e.message || e), 'error');
+            } finally {
+                this.bulkPowerBusy = false;
+                this.bulkPowerOp = '';
+            }
+        },
+    };
 };
 
 // ── WebSocket job tracker ─────────────────────────────────────────────────────
