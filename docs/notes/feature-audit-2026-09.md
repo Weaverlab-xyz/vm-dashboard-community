@@ -451,6 +451,13 @@ the policy genuinely ports. The cost is everywhere else.
 > Deliberately not behind admission control — see `tests/test_cloud_power.py`, which
 > also pins each cloud's verb, the wrong one being expensive and silent in all four
 > cases. Phases 1–2 remain; the blockers below are unchanged.
+>
+> **Phase 0's UI shipped separately, and later.** For a while the endpoints had no
+> caller but the schedule and the spend cap — no cloud page had a power button at
+> all, so the console was still the only way to stop one instance now. Each of the
+> four pages now has per-row Start / Suspend and a bulk toolbar over a selection,
+> queueing one `*_power` job per instance behind a shared `batch_id`. See
+> [Powering a selection](../cloud-vms.md#powering-a-selection).
 
 **Phase 0 — the primitive.** `/power/start` and `/power/stop` on the four cloud routers using
 the `_power_endpoint` shape, backed by new `*_power` job types, with the workgroup check
