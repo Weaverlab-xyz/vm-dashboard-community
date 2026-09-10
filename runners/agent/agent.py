@@ -3041,7 +3041,10 @@ def _vmrest(conn: dict, method: str, path: str, *, body=None, checkins=None,
     except (OSError, ssl.SSLError) as exc:
         raise PolicyRefusal(
             f"could not reach vmrest at {host}:{port}: {exc}. Is `vmrest` running, and "
-            f"does policy.yaml allow this connection to reach it?")
+            f"does policy.yaml allow this connection to reach it? Note that vmrest does "
+            f"NOT restart with this container — it dies with its console window and does "
+            f"not come back after a reboot, and this agent cannot start it. See "
+            f"docs/integrations/vmware.md#1a-keep-it-running-reboots-logouts-closed-windows")
     try:
         return json.loads(raw.decode("utf-8", "replace")) if raw else {}
     except ValueError:
