@@ -86,6 +86,9 @@ control for its whole life; the four clouds had none, so an operator who wanted 
 overnight used the cloud console — which puts this dashboard's inventory out of step with
 reality.
 
+Each cloud page now has **Start** and **Suspend** on every instance row, and a bulk
+toolbar for a whole selection — see [Powering a selection](#powering-a-selection).
+
 `POST /api/{aws,azure,gcp,oci}/power/start` and `/power/stop`, with the instance
 identifier in the **body**, matching every other `/power/*` route here. Each queues a job,
 so the action gets an audit row, a `/jobs` entry and Live Output like any other.
@@ -111,6 +114,51 @@ Power is deliberately **not** behind [Action Guardrails](policy-guardrails.md), 
 destroy is. A reversible action earns a lighter brake than an irreversible one, and a
 change-freeze that forbade *suspending* a VM would forbid the cheapest thing an operator
 can do during one.
+
+### Powering a selection
+
+Tick the checkbox on any instance row — or select-all — and the toolbar above the list
+offers **Start** and **Suspend** for the whole selection. It queues **one job per
+instance**, all sharing a batch id, and takes you to `/jobs?batch_id=…`, which counts them
+by status as they go.
+
+The same two ops as the rows, and nothing more: no cloud path here has a shutdown, a
+restart or a reset, so there is nothing to leave out. Every instance in a selection goes
+through the same code as its own row button, which means the same `write` permission, the
+same per-VM ownership check, and the same discovery-derived region or resource group. An
+instance you cannot reach fails on its own without stopping the rest — the response names
+each one and why.
+
+Four things worth knowing before ticking fifty boxes:
+
+- **They do not all run at once.** These are ordinary jobs, and the worker's light tier
+  admits a few at a time (3 by default). Fifty instances is fifty jobs draining in waves,
+  and on Azure and GCP each one waits for the cloud to finish — a deallocate is minutes.
+  Bulk saves the clicking, not the waiting. OCI is the quick one: its `SOFTSTOP` is
+  fire-and-forget.
+- **Instances already in the target state are skipped, and the dialog says how many.**
+  Suspending a selection of sixteen where five are already stopped sends eleven. An
+  instance whose state the page does not know is *included*, not skipped: a job that turns
+  out to be unnecessary says so, where a silent skip does not.
+- **Azure is the exception worth reading.** A VM the Azure portal has *stopped* without
+  deallocating is not running **and is still billing for compute** — so Suspend is still
+  offered for it, because deallocating is the thing that stops the bill.
+- **Fifty per operation**, then it refuses and asks you to narrow the selection. The same
+  cap and the same wording as a bulk Config-Management run.
+
+**Suspending can break a BeyondTrust wire-up, and bulk Suspend warns you.** A VM wired
+into PRA, Password Safe or Entitle at a **public** address comes back on a different one —
+none of the four clouds guarantees an auto-assigned public address across a stop, and
+there is no repair short of destroy-and-recreate. That is the same rule
+[suspend schedules](#suspend-schedules-all-four-clouds) refuse on, and the same reasons:
+an Azure VM whose private address is not pinned, and a VM under Password Safe
+auto-management, count too.
+
+Bulk Suspend does **not** refuse those. The per-instance button never has — ownership is
+the gate — and a toolbar that refused what a row allows would be worse than useless. It
+tells you instead: the confirmation names how many of the selection are affected, and the
+result names which ones, so you know what to go and check. Start never warns; nothing has
+moved yet.
 
 ### VMs this dashboard did not deploy
 

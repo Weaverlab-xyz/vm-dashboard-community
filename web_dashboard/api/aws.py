@@ -43,7 +43,9 @@ from ..models.aws import (
 from ..services import aws_service, deploy_batch, job_service, cache_service, cloud_stats, region_catalog, workgroup_service
 from ..services.aws_service import AWSError
 from .auth import require_admin, require_permission
+from ..services import vm_suspend_policy
 from . import unmanaged
+from .power_batch import queue_power_batch
 
 from pydantic import BaseModel
 
@@ -333,6 +335,18 @@ async def _fetch_instances(db: Session) -> list:
             continue
         job = job_by_instance.get(iid)
         wg = (job.workgroup or "").lower() if job and job.workgroup else None
+        # Pure policy, no I/O — the same function api/aws.py's power path warns with and
+        # the suspend scheduler refuses with. Computed here so the page can name the
+        # count in its confirmation BEFORE queueing, which is the whole point of a
+        # warning that does not block.
+        warn = ""
+        if job is not None:
+            # The literal, not `job.job_type`: the query above filters on
+            # `ec2_deploy`, so it is known, and `schedulable` returns a FALSE warning
+            # rather than an error for an unrecognised type.
+            ok, reason = vm_suspend_policy.schedulable("ec2_deploy", job.metadata_dict)
+            if not ok:
+                warn = reason
         result.append({
             **live,
             "key_name": live.get("key_name"),
@@ -340,6 +354,7 @@ async def _fetch_instances(db: Session) -> list:
             "workgroup": wg,
             "job_id": job.id if job else None,
             "deployed_by": job.created_by if job else None,
+            "suspend_warning": warn or None,
         })
     return result
 
@@ -1030,48 +1045,131 @@ class PowerOpRequest(BaseModel):
     instance_id: str
 
 
+async def _queue_one(db, current_user, *, op: str, payload: PowerOpRequest,
+                     batch_id=None) -> dict:
+    """Queue ONE EC2 power op. The only path that does, single or bulk.
+
+    Returns ``{"job_id", "status", "task", "warning"}``. ``task`` is always None: a
+    cloud power op is a ``ec2_power`` row the jobs worker claims, so there is no local work
+    for this process to run and no serial batch walk to arrange — the LIGHT tier's cap
+    is what paces a fan-out, and ``jobs_worker`` says so where it tiers these.
+
+    ``warning`` is prose the operator should read but which must not refuse the request;
+    see the ``stop`` branch below. Empty on ``start``.
+
+    This function exists so that bulk power adds selection and not a second code path.
+    Every gate below applied to one button press before bulk existed and applies
+    unchanged to each VM in a selection; tests/test_cloud_power.py pins that both routes
+    come through here and that neither does its own deploy-row lookup or ownership check.
+    """
+    deploy_job = _find_deploy_job(db, "ec2_deploy", "instance_id", payload.instance_id)
+    if deploy_job:
+        region = deploy_job.metadata_dict.get("region") or _aws_region()
+        workgroup = deploy_job.workgroup
+    else:
+        # No deploy job: this may be an instance the dashboard did not deploy. The
+        # region comes from DISCOVERY, never from the request — a caller-supplied one
+        # would make this "stop any instance of this id in any region the credentials
+        # reach". Not discovered means not actionable, which keeps what you can act on
+        # equal to what you can see. `unmanaged.find` is cached per `cache_key`, so a
+        # batch of undeployed instances costs one fetch rather than one each.
+        row = await unmanaged.find(
+            "aws", payload.instance_id, job_type="ec2_deploy",
+            fetch_live=_fetch_unmanaged_live, cache_key="aws_unmanaged_instances")
+        if not row:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No active deployment found for instance {payload.instance_id}.")
+        region = row.get("region") or _aws_region()
+        workgroup = row.get("workgroup")
+    _assert_can_act(current_user, workgroup, f"Instance {payload.instance_id}")
+
+    # A stop is reversible; what a stop can BREAK is not. `vm_suspend_policy` refuses to
+    # *schedule* a suspend for three reasons — a VM wired into PRA, Password Safe or
+    # Entitle at a PUBLIC address (which none of the four clouds guarantees across a
+    # stop, and `terraform_pra_service` exposes no repair short of destroy-and-recreate),
+    # an Azure VM whose private address is not pinned, and a VM under Password Safe
+    # auto-management.
+    #
+    # This does NOT refuse. The single button never has — "ownership is the gate here" —
+    # and a bulk route that refused what a row allows would be the under-offering bug the
+    # on-prem toolbar had to fix. It WARNS, because bulk is exactly when nobody is
+    # thinking about any individual VM, and the policy already returns operator-facing
+    # prose for the purpose. An instance with no deploy row has no metadata to judge.
+    warning = ""
+    if op == "stop" and deploy_job is not None:
+        ok, reason = vm_suspend_policy.schedulable(
+            deploy_job.job_type, deploy_job.metadata_dict)
+        if not ok:
+            warning = reason
+
+    job = job_service.create_job(
+        db,
+        job_type="ec2_power",
+        created_by=current_user.username,
+        workgroup=workgroup,
+        batch_id=batch_id,
+        metadata={"action": op, "instance_id": payload.instance_id, "region": region,
+                  "deploy_job_id": deploy_job.id if deploy_job else None,
+                  "unmanaged": deploy_job is None},
+    )
+    job_service.log_audit(db, current_user.username, "ec2_power",
+                          details={"action": op, "instance_id": payload.instance_id})
+    return {"job_id": job.id, "status": "pending", "task": None, "warning": warning}
+
+
 def _power_endpoint(op: str):
     async def _handler(
         payload: PowerOpRequest,
         db: Session = Depends(get_db),
         current_user: User = Depends(require_permission("aws", "write")),
     ):
-        deploy_job = _find_deploy_job(db, "ec2_deploy", "instance_id", payload.instance_id)
-        if deploy_job:
-            region = deploy_job.metadata_dict.get("region") or _aws_region()
-            workgroup = deploy_job.workgroup
-        else:
-            # No deploy job: this may be an instance the dashboard did not deploy. The
-            # region comes from DISCOVERY, never from the request — a caller-supplied one
-            # would make this "stop any instance of this id in any region the credentials
-            # reach". Not discovered means not actionable, which keeps what you can act on
-            # equal to what you can see.
-            row = await unmanaged.find(
-                "aws", payload.instance_id, job_type="ec2_deploy",
-                fetch_live=_fetch_unmanaged_live, cache_key="aws_unmanaged_instances")
-            if not row:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"No active deployment found for instance {payload.instance_id}.")
-            region = row.get("region") or _aws_region()
-            workgroup = row.get("workgroup")
-        _assert_can_act(current_user, workgroup, f"Instance {payload.instance_id}")
-
-        job = job_service.create_job(
-            db,
-            job_type="ec2_power",
-            created_by=current_user.username,
-            workgroup=workgroup,
-            metadata={"action": op, "instance_id": payload.instance_id, "region": region,
-                      "deploy_job_id": deploy_job.id if deploy_job else None,
-                      "unmanaged": deploy_job is None},
-        )
-        job_service.log_audit(db, current_user.username, "ec2_power",
-                              details={"action": op, "instance_id": payload.instance_id})
+        result = await _queue_one(db, current_user, op=op, payload=payload)
         verb = "Start" if op == "start" else "Suspend"
-        return {"job_id": job.id, "status": "pending", "message": f"{verb} queued"}
+        return {"job_id": result["job_id"], "status": result["status"],
+                "message": f"{verb} queued"}
 
     return _handler
+
+
+# Two, and only two: no cloud path here has a shutdown, a restart or a reset, and
+# tests/test_cloud_power.py pins that each router exposes exactly start and stop. So
+# this is the whole set rather than a toolbar decision, unlike the on-prem routers'.
+BULK_OPS = ("start", "stop")
+
+
+class BulkPowerRequest(BaseModel):
+    """One op, many VMs. `targets` carries the same payload the single route takes.
+
+    The op is a FIELD and the identifiers are in the BODY, matching every other
+    `/power/*` route here — `api/oci.py` binds an OCID with a greedy `:path` converter
+    that would swallow a `/power/...` suffix whole, so a path-shaped bulk route could
+    not exist on all four clouds.
+    """
+    op: str
+    targets: List[PowerOpRequest]
+
+
+@router.post("/power/bulk", summary="Power op across a selection of instances")
+async def bulk_power(
+    payload: BulkPowerRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("aws", "write")),
+):
+    """Queue one power op per selected instance, all sharing a ``batch_id``.
+
+    `write`, not `delete`, and no admission gate — the same two decisions the single
+    route makes, for the reasons recorded above it. No `background_tasks`: every target
+    is a worker job, so there is nothing for this process to run.
+    """
+    op = payload.op.strip().lower()
+    return await queue_power_batch(
+        db, kind="aws", op=payload.op, targets=payload.targets,
+        allowed_ops=BULK_OPS,
+        queue_one=lambda target, batch_id: _queue_one(
+            db, current_user, op=op, payload=target, batch_id=batch_id),
+        label_of=lambda target: target.instance_id,
+        created_by=current_user.username)
 
 
 router.add_api_route("/power/start", _power_endpoint("start"), methods=["POST"],

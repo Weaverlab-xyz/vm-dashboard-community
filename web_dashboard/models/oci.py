@@ -30,6 +30,11 @@ class OCIInstanceInfo(BaseModel):
     workgroup: Optional[str] = None   # from the `workgroup` freeform tag
     job_id: Optional[str] = None
     deployed_by: Optional[str] = None
+    # Why a SUSPEND of this instance may need repairing afterwards, or None — the reason
+    # string straight out of services/vm_suspend_policy. Carried rather than recomputed
+    # on the page: the rule turns on WHICH address was wired, which the row's other
+    # fields do not reveal. A warning, never a refusal.
+    suspend_warning: Optional[str] = None
 
 
 class OCIShapeInfo(BaseModel):

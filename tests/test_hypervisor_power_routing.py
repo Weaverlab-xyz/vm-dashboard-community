@@ -64,6 +64,10 @@ _API = os.path.join(_ROOT, "web_dashboard", "api")
 _TEMPLATES = os.path.join(_ROOT, "web_dashboard", "templates")
 _META = os.path.join(_ROOT, "web_dashboard", "services", "agent_hypervisor_meta.py")
 _DEPS = os.path.join(_API, "hypervisor_deps.py")
+# The bulk fan-out moved out of hypervisor_deps when the cloud routers started
+# using it — a cloud router importing from a hypervisor-named module invites a
+# second copy, which is the thing this whole file exists to prevent.
+_BATCH = os.path.join(_API, "power_batch.py")
 _AGENT = os.path.join(_ROOT, "runners", "agent", "agent.py")
 _SIBLING = os.path.join(_ROOT, "runners", "hypervisor", "run.py")
 _CONNS = os.path.join(_ROOT, "web_dashboard", "services",
@@ -302,15 +306,13 @@ def test_a_direct_batch_runs_serially():
     still have been created correctly.
 
     Pinned structurally: the routers hand `queue_power_batch` a `background_tasks` and it
-    is `hypervisor_deps.queue_power_batch` — the ONE place that decides — which adds
-    exactly one task, `run_power_batch`, whose body is a bare `for` loop with an `await`
-    in it.
+    is `power_batch.queue_power_batch` — the ONE place that decides — which adds exactly
+    one task, `run_power_batch`, whose body is a bare `for` loop with an `await` in it.
     """
-    deps = _read(os.path.join(_API, "hypervisor_deps.py"))
-    tree = ast.parse(deps)
+    tree = ast.parse(_read(_BATCH))
 
     batch = _function(tree, "queue_power_batch")
-    assert batch is not None, "hypervisor_deps.queue_power_batch is gone"
+    assert batch is not None, "power_batch.queue_power_batch is gone"
     adds = re.findall(r"background_tasks\.add_task\(([A-Za-z_][A-Za-z_0-9]*)",
                       ast.unparse(batch))
     assert adds == ["run_power_batch"], (
@@ -318,7 +320,7 @@ def test_a_direct_batch_runs_serially():
         f"run_power_batch for the whole batch")
 
     walker = _function(tree, "run_power_batch")
-    assert walker is not None, "hypervisor_deps.run_power_batch is gone"
+    assert walker is not None, "power_batch.run_power_batch is gone"
     loops = [n for n in ast.walk(walker) if isinstance(n, (ast.For, ast.AsyncFor))]
     assert len(loops) == 1, "run_power_batch must be one loop over the batch"
     assert any(isinstance(n, ast.Await) for n in ast.walk(loops[0])), (
@@ -828,13 +830,34 @@ def test_every_page_with_a_bulk_toolbar_defines_all_of_its_seams():
     the button is live, and pressing it does nothing at all.
 
     The seam list is read out of app.js's own header rather than restated here, so adding
-    a fifth seam fails this test until every page has it.
+    a fifth REQUIRED seam fails this test until every page has it.
+
+    The header also documents OPTIONAL seams, below an "And two optional ones:" line —
+    a cloud page's `_bulkPowerWarn`, for instance, which the on-prem pages have no use
+    for. Those are excluded here and checked differently: an optional seam has to be
+    guarded with `typeof` in the mixin, or "optional" is a claim the code does not keep
+    and every page without it breaks silently. This split is why the required list is
+    read from the text above that line rather than from the whole header.
     """
     mixin = _read(os.path.join(_ROOT, "web_dashboard", "static", "js", "app.js"))
     header = mixin[mixin.index("// ── Reusable bulk power toolbar"):
                    mixin.index("window.bulkPowerState = function")]
-    seams = set(re.findall(r"^//   (_?bulkPower\w+)", header, re.M))
+    split = header.find("optional ones")
+    required_text = header if split < 0 else header[:split]
+    seams = set(re.findall(r"^//   (_?bulkPower\w+)", required_text, re.M))
     assert len(seams) >= 4, f"only found {sorted(seams)} in the mixin's seam list"
+
+    # Two guard shapes, because two shapes of seam: a method is reached through
+    # `typeof this.x === 'function'` and a plain property through `(this.x || {})`.
+    # What matters is that it is guarded at all — an unguarded optional seam is a
+    # TypeError on every page that declined to define it, and Alpine swallows it.
+    optional = set(re.findall(r"^//   (_?bulkPower\w+)", header, re.M)) - seams
+    for seam in sorted(optional):
+        guarded = (re.search(r"typeof this\." + seam + r" === 'function'", mixin)
+                   or re.search(r"this\." + seam + r"\s*\|\|", mixin))
+        assert guarded, (
+            f"{seam} is documented as optional but the mixin reaches it unguarded, so "
+            f"every page that does not define it fails silently")
 
     for kind in sorted(set(_AGENT_ROUTED) | {"nutanix"}):
         markup = _read(_template(kind))

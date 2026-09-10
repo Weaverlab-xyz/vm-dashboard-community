@@ -45,6 +45,12 @@ class AzureVMInfo(BaseModel):
     workgroup: Optional[str] = None  # from `workgroup` resource tag; None = unassigned
     job_id: Optional[str] = None
     deployed_by: Optional[str] = None
+    # Why a SUSPEND of this VM may need repairing afterwards, or None — the reason
+    # string straight out of services/vm_suspend_policy. Carried rather than recomputed
+    # on the page: the rule turns on WHICH address was wired, and on Azure additionally
+    # on whether the private address is PINNED, neither of which the row's other fields
+    # reveal. A warning, never a refusal.
+    suspend_warning: Optional[str] = None
 
 
 # ── Network options (form dropdowns) ─────────────────────────────────────────

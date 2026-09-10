@@ -338,6 +338,16 @@ window.afterDeploy = function (resp, opts) {
 //                           differently from the button beside it
 //   _bulkPowerState(vm)     'on' | 'off' | 'other' | null
 //
+// And two optional ones:
+//
+//   bulkPowerConfirmText    {op: sentence} overriding the defaults below. A cloud page
+//                           MUST set this for `stop`: the default sentence describes a
+//                           power cut, and an Azure deallocate or an OCI SOFTSTOP is
+//                           not one. No test can catch a sentence that is merely FALSE.
+//   _bulkPowerWarn(vm, op)  prose about a risk that must not block. Cloud pages use it
+//                           for a VM whose BeyondTrust wire-up may not survive the
+//                           address change a stop causes.
+//
 // `_bulkPowerState` is three states and a null rather than a boolean, and that is not
 // fussiness. A Hyper-V VM can be Saved and an XCP-ng one Suspended or Paused, and the
 // per-row buttons treat those as neither on nor off: Start resumes them and Force Off
@@ -411,10 +421,16 @@ window.bulkPowerState = function () {
             const rows = (this._bulkPowerRows() || [])
                 .filter(vm => chosen.has(String(this._vmKey(vm))));
             const eligible = rows.filter(vm => this.bulkPowerEligible(vm, op));
+            // Counted client-side purely so the CONFIRM can name it. The server decides
+            // again per VM and returns the reasons in `warnings` — this number is a
+            // heads-up before committing, never the authority.
+            const warn = typeof this._bulkPowerWarn === 'function'
+                ? eligible.filter(vm => this._bulkPowerWarn(vm, op)).length : 0;
             return {
                 targets: eligible.map(vm => this._bulkPowerTarget(vm)),
                 total: chosen.size,
                 skipped: rows.length - eligible.length,
+                warned: warn,
             };
         },
 
@@ -440,16 +456,38 @@ window.bulkPowerState = function () {
                 hard_reboot: 'Force reboot ' + vms + '? The guests are not asked.',
                 reboot: 'Reboot ' + vms + '? Each guest is asked to reboot.',
             }[op];
+            // A page may replace the sentence entirely. The op set is shared across
+            // ten providers and the consequences are not: `stop` is a power cut on a
+            // hypervisor and a billing change on a cloud, and only the page knows
+            // which. Checked before the default so an override always wins.
+            const own = (this.bulkPowerConfirmText || {})[op];
             // `start` returns falsy on purpose: it is not destructive, and the row's own
             // Start button does not confirm either. A dialog on the safe op is what
             // teaches an operator to dismiss the dialog on the unsafe one.
-            return q ? q + skip : '';
+            const base = own || q;
+            if (!base) return '';
+            // Anything the page wants said about the specific VMs, appended once rather
+            // than per VM — a dialog listing twenty reasons is a dialog nobody reads.
+            const warned = plan.warned || 0;
+            const warn = warned
+                ? '\n\n' + warned + ' of them may need their BeyondTrust wire-up '
+                  + 'repaired afterwards: the address a jump item holds does not survive '
+                  + 'a stop. They will still be queued.'
+                : '';
+            return base + skip + warn;
         },
 
         async submitBulkPower(op) {
             if (this.bulkPowerBusy) return;
-            const say = (m, t) => (typeof this.showToast === 'function'
-                ? this.showToast(m, t) : toast(m, t));
+            // Three names, because the pages genuinely use three: five hypervisor
+            // pages own a `showToast`, the OCI page an equivalent `notify`, and the
+            // rest rely on the global `toast` from base.html. Falling straight through
+            // to the global one would work everywhere but would put the toolbar's
+            // messages in a different place from the page's own on two of the ten.
+            const say = (m, t) => (
+                typeof this.showToast === 'function' ? this.showToast(m, t)
+                : typeof this.notify === 'function' ? this.notify(m, t)
+                : toast(m, t));
 
             const plan = this.bulkPowerPlan(op);
             if (plan.targets.length === 0) {
@@ -471,6 +509,14 @@ window.bulkPowerState = function () {
                 const failed = resp.failed || [];
                 let message = 'Queued ' + resp.count + ' job'
                             + (resp.count !== 1 ? 's' : '');
+                const warned = resp.warnings || [];
+                if (warned.length) {
+                    // Named, not counted, for the same reason `failed` is: each carries
+                    // its own reason, and these were QUEUED — the operator needs to know
+                    // which VMs to go and check afterwards.
+                    message += '; ' + warned.length + ' may need attention: '
+                             + warned.map(w => w.name + ' (' + w.reason + ')').join('; ');
+                }
                 if (failed.length) {
                     // Named, not counted. Each of these carries its own reason — an
                     // offline agent, an op with no verb for this product, a workgroup
@@ -490,7 +536,9 @@ window.bulkPowerState = function () {
                 // and going quiet, which would read as nothing having been queued.
                 if (!window.afterDeploy(resp, {
                         unit: 'VM', message: message,
-                        type: failed.length ? 'error' : 'success',
+                        // Amber-ish: a warning is not a failure, but it is not silence
+                    // either. `failed` still wins, because something did not run.
+                    type: failed.length ? 'error' : (warned.length ? 'info' : 'success'),
                         notify: say,
                     })) {
                     say(message + ' — but the response carried no batch id, so there is '

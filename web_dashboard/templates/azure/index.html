@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 {% from "partials/secret_picker.html" import secret_picker %}
 {% block title %}Azure{% endblock %}
 
@@ -265,9 +266,30 @@
       </div>
       <div x-show="vmsLoading" class="p-8 text-center text-gray-400 text-sm">Loading VMs…</div>
       <div x-show="!vmsLoading && vms.length === 0" class="p-8 text-center text-gray-400 text-sm">No dashboard-deployed Azure VMs found.</div>
+      <!-- Bulk power. No workgroup buttons: an Azure VM carries its workgroup as a
+           resource tag, and workgroup_override_service rejects cloud providers outright,
+           so there is nothing here to admin-gate. `azure:write` plus the per-VM
+           ownership check on the endpoint is the whole gate. -->
+      <div x-show="selectedVmIds.length > 0" x-cloak
+           class="flex items-center justify-between bg-blue-50 border-y border-blue-200 px-4 py-2">
+        <span class="text-sm text-blue-800">
+          Selected: <strong x-text="selectedVmIds.length"></strong>
+        </span>
+        <div class="flex items-center gap-2">
+          {{ bulk_power_buttons(['start', 'stop'], {'stop': 'Suspend'}) }}
+          <button @click="clearSelection()" class="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
+        </div>
+      </div>
+
       <table x-show="!vmsLoading && vms.length > 0" class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
           <tr>
+            <th class="px-4 py-3 w-10">
+              <input type="checkbox" :checked="selectAll"
+                     @change="toggleSelectAll($event.target.checked)"
+                     class="h-4 w-4 rounded border-gray-300"
+                     title="Select every VM shown">
+            </th>
             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">State</th>
             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">IP Addresses</th>
@@ -280,6 +302,10 @@
         <tbody class="bg-white divide-y divide-gray-100">
           <template x-for="vm in filteredVms()" :key="vm.vm_id">
             <tr class="hover:bg-gray-50">
+              <td class="px-4 py-3">
+                <input type="checkbox" :value="_vmKey(vm)" x-model="selectedVmIds"
+                       class="h-4 w-4 rounded border-gray-300">
+              </td>
               <td class="px-4 py-3 text-sm font-medium text-gray-900" x-text="vm.name"></td>
               <td class="px-4 py-3">
                 <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
@@ -307,6 +333,26 @@
                         class="text-indigo-600 hover:text-indigo-800 font-medium text-xs">SSH Key</button>
                 <button x-show="vm.os_type === 'Windows'" x-cloak @click="openAdminPasswordModal(vm)"
                         class="text-indigo-600 hover:text-indigo-800 font-medium text-xs">Password</button>
+                {#- Power, which this page has never had. `state` is Azure's
+                    display_status — "VM running", "VM deallocated" — so every test is a
+                    lowercased substring, never an equality. `includes('stopped')` also
+                    matches "VM stopped", a portal-side power-off that is NOT deallocated
+                    and still bills for compute: offering Suspend there is the point. -#}
+                <button @click="powerVm(vm, 'start')"
+                        x-show="vm.state && !vm.state.toLowerCase().includes('running')"
+                        :disabled="pendingPower.has(vm.name)"
+                        class="text-green-600 hover:text-green-800 disabled:opacity-40 font-medium text-xs">
+                  <span x-show="!pendingPower.has(vm.name)">Start</span>
+                  <span x-show="pendingPower.has(vm.name)" x-cloak>Starting…</span>
+                </button>
+                <button @click="powerVm(vm, 'stop')"
+                        x-show="vm.state && !vm.state.toLowerCase().includes('deallocated')"
+                        :disabled="pendingPower.has(vm.name)"
+                        class="text-amber-600 hover:text-amber-800 disabled:opacity-40 font-medium text-xs"
+                        title="Deallocate the VM — a plain power-off would keep billing for compute">
+                  <span x-show="!pendingPower.has(vm.name)">Suspend</span>
+                  <span x-show="pendingPower.has(vm.name)" x-cloak>Suspending…</span>
+                </button>
                 <button @click="openCreateImageModal(vm)"
                         class="text-green-600 hover:text-green-800 font-medium text-xs">Save Image</button>
                 <button @click="confirmDestroyVM(vm)"
@@ -1427,6 +1473,23 @@ function azureDashboard() {
     exportingImages: new Set(),
     vms: [],
     vmsLoading: false,
+
+    // ── Power: per-row and bulk ────────────────────────────────────────────
+    // Keyed on vm.name, not vm_id: /api/azure/power/* addresses a VM by name, which is
+    // also what the deploy job records. `pendingPower` disables a row between the click
+    // and the redirect.
+    pendingPower: new Set(),
+    selectedVmIds: [],
+    selectAll: false,
+    ...bulkPowerState(),
+    bulkPowerUrl: '/api/azure/power/bulk',
+    // A deallocate is not a power cut. The shared sentence talks about unsaved work
+    // being lost; what actually happens is the compute bill stops and the disks stay.
+    bulkPowerConfirmText: {
+      stop: 'Suspend the selected VMs? Each is DEALLOCATED — it stops billing for '
+          + 'compute and keeps its disks. A plain power-off would keep billing, which '
+          + 'is why this does not do one.',
+    },
     filterLocation: '',
     networkOpts: { locations: ['{{ default_location }}'], vm_sizes: [], subnets: [], nsgs: [], ssh_keys: [] },
     networkOptsWarnings: [],
@@ -2289,6 +2352,75 @@ function azureDashboard() {
       } catch (e) {
         toast(`Export failed to queue: ${e.message}`, 'error');
         this.exportingImages = new Set([...this.exportingImages].filter(id => id !== img.resource_id));
+      }
+    },
+
+    // ── Power ──────────────────────────────────────────────────────────────
+    _vmKey(vm) {
+      return String(vm.vm_id || '');
+    },
+
+    clearSelection() {
+      this.selectedVmIds = [];
+      this.selectAll = false;
+    },
+
+    toggleSelectAll(checked) {
+      this.selectAll = checked;
+      this.selectedVmIds = checked
+        ? this.filteredVms().map(v => this._vmKey(v)) : [];
+    },
+
+    // ── Bulk power seams ───────────────────────────────────────────────────
+    _bulkPowerRows() {
+      return this.filteredVms();
+    },
+
+    // The same payload the row's own powerVm posts — by NAME, which is what the
+    // endpoint and the deploy job both key on.
+    _bulkPowerTarget(vm) {
+      return { vm_name: vm.name };
+    },
+
+    // Azure's `state` is the display_status of the PowerState/* code, so the values are
+    // "VM running" and "VM deallocated" — never bare "running". Substring, lowercased,
+    // never ===; models/azure.py's comment says otherwise and the comment is wrong
+    // about the wire.
+    //
+    // Two mappings worth stating. "VM stopped" is 'other', not 'off': it is a
+    // portal-side power-off that was never deallocated, so it is not running AND still
+    // billing — Suspend must reach it, because deallocating is what stops the bill.
+    // "Unknown" is null, not 'other': it is what the projection emits when
+    // instance_view throws, an absence of knowledge rather than a state, and the mixin
+    // treats unknown as eligible rather than silently skipping it.
+    _bulkPowerState(vm) {
+      if (!vm.state || vm.state === 'Unknown') return null;
+      const s = vm.state.toLowerCase();
+      if (s.includes('running')) return 'on';
+      if (s.includes('deallocated')) return 'off';
+      return 'other';
+    },
+
+    _bulkPowerWarn(vm, op) {
+      return op === 'stop' ? (vm.suspend_warning || '') : '';
+    },
+
+    async powerVm(vm, op) {
+      if (op === 'stop' && !confirm(
+            `Suspend ${vm.name}? It is deallocated — billing for compute stops and the `
+            + `disks stay.`)) return;
+      this.pendingPower = new Set([...this.pendingPower, vm.name]);
+      try {
+        const resp = await API.post(`/api/azure/power/${op}`, { vm_name: vm.name });
+        // The global toast: this page has no local showToast, and an unbound name
+        // inside an Alpine handler fails silently — the click would do nothing visible.
+        toast(`${op === 'start' ? 'Start' : 'Suspend'} queued for ${vm.name}`, 'success');
+        setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
+      } catch (e) {
+        toast(`${op} failed: ${e.message}`, 'error');
+        const next = new Set(this.pendingPower);
+        next.delete(vm.name);
+        this.pendingPower = next;
       }
     },
 

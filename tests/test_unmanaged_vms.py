@@ -179,9 +179,18 @@ def test_get_vm_returns_tags_so_the_guard_has_something_to_ask():
 # ── Power resolves its locator from discovery, never from the caller ──────────
 
 def _power_source_of(module: str, cloud_key: str):
+    """The function that resolves an instance's locator, which is `_queue_one`.
+
+    Not `_power_endpoint`: each cloud router has TWO power routes now — one VM and a
+    whole selection — and both delegate to `_queue_one`, which is where the discovery
+    lookup lives. Reading the endpoint would have checked the thinner of the two
+    wrappers and passed while the bulk route resolved a region however it liked.
+    `AsyncFunctionDef`, because `_queue_one` awaits the discovery fetch.
+    """
     src = open(os.path.join(_ROOT, f"web_dashboard/api/{module}.py"), encoding="utf-8").read()
-    fn = next(f for f in ast.walk(ast.parse(src)) if isinstance(f, ast.FunctionDef)
-              and f.name == "_power_endpoint")
+    fn = next(f for f in ast.walk(ast.parse(src))
+              if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and f.name == "_queue_one")
     return src, fn
 
 

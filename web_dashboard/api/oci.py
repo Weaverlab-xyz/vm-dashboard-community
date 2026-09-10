@@ -44,7 +44,9 @@ from ..services import (
     workgroup_service,
 )
 from .auth import require_permission
+from ..services import vm_suspend_policy
 from . import unmanaged
+from .power_batch import queue_power_batch
 
 logger = logging.getLogger(__name__)
 
@@ -332,10 +334,16 @@ async def _build_oci_instances(db, compartment: str) -> list:
         if not ocid:
             continue
         ocids.append(ocid)
+        # Pure policy, no I/O. OCI is the cloud this matters most on: three runners
+        # prefer the private address and OCI prefers the PUBLIC one, so "does it have a
+        # private address?" answers the question for the other three and the wrong
+        # question here — which is why the reason is carried rather than re-derived.
+        _ok, _why = vm_suspend_policy.schedulable("oci_deploy", meta)
         job_meta[ocid] = {
             "job_id": job.id,
             "deployed_by": job.created_by,
             "workgroup": (job.workgroup or meta.get("workgroup") or "").lower() or None,
+            "suspend_warning": None if _ok else _why,
         }
     instances = await oci_service.describe_instances(compartment, ocids)
     for inst in instances:
@@ -343,6 +351,7 @@ async def _build_oci_instances(db, compartment: str) -> list:
         inst["job_id"] = meta.get("job_id")
         inst["deployed_by"] = meta.get("deployed_by")
         inst["workgroup"] = meta.get("workgroup") or inst.get("workgroup")
+        inst["suspend_warning"] = meta.get("suspend_warning")
     full = OCIInstanceListResponse(instances=instances, compartment_ocid=compartment, region=_region())
     await cache_service.set(_cache_key("oci_instances", compartment), full.model_dump(), ttl=60)
     return instances
@@ -583,32 +592,114 @@ class PowerOpRequest(BaseModel):
     instance_ocid: str
 
 
+async def _queue_one(db, current_user, *, op: str, payload: PowerOpRequest,
+                     batch_id=None) -> dict:
+    """Queue ONE OCI power op. The only path that does, single or bulk.
+
+    Returns ``{"job_id", "status", "task", "warning"}``. ``task`` is always None: a
+    cloud power op is a ``oci_power`` row the jobs worker claims, so there is no local work
+    for this process to run and no serial batch walk to arrange — the LIGHT tier's cap
+    is what paces a fan-out, and ``jobs_worker`` says so where it tiers these.
+
+    ``warning`` is prose the operator should read but which must not refuse the request;
+    see the ``stop`` branch below. Empty on ``start``.
+
+    This function exists so that bulk power adds selection and not a second code path.
+    Every gate below applied to one button press before bulk existed and applies
+    unchanged to each VM in a selection; tests/test_cloud_power.py pins that both routes
+    come through here and that neither does its own deploy-row lookup or ownership check.
+    """
+    if not _configured():
+        raise HTTPException(status_code=400,
+                            detail="OCI not configured — run the setup wizard.")
+    deploy_job = _find_deploy_job(db, "oci_deploy", "instance_ocid", payload.instance_ocid)
+    _assert_can_act(current_user, deploy_job.workgroup if deploy_job else None, "This instance")
+
+    # A stop is reversible; what a stop can BREAK is not. `vm_suspend_policy` refuses to
+    # *schedule* a suspend for three reasons — a VM wired into PRA, Password Safe or
+    # Entitle at a PUBLIC address (which none of the four clouds guarantees across a
+    # stop, and `terraform_pra_service` exposes no repair short of destroy-and-recreate),
+    # an Azure VM whose private address is not pinned, and a VM under Password Safe
+    # auto-management.
+    #
+    # This does NOT refuse. The single button never has — "ownership is the gate here" —
+    # and a bulk route that refused what a row allows would be the under-offering bug the
+    # on-prem toolbar had to fix. It WARNS, because bulk is exactly when nobody is
+    # thinking about any individual VM, and the policy already returns operator-facing
+    # prose for the purpose. An instance with no deploy row has no metadata to judge.
+    warning = ""
+    if op == "stop" and deploy_job is not None:
+        ok, reason = vm_suspend_policy.schedulable(
+            deploy_job.job_type, deploy_job.metadata_dict)
+        if not ok:
+            warning = reason
+
+    job = job_service.create_job(
+        db,
+        job_type="oci_power",
+        created_by=current_user.username,
+        workgroup=deploy_job.workgroup if deploy_job else None,
+        batch_id=batch_id,
+        metadata={"action": op, "instance_ocid": payload.instance_ocid,
+                  "deploy_job_id": deploy_job.id if deploy_job else None},
+    )
+    job_service.log_audit(db, current_user.username, "oci_power",
+                          details={"action": op, "instance_ocid": payload.instance_ocid})
+    return {"job_id": job.id, "status": "pending", "task": None, "warning": warning}
+
+
 def _power_endpoint(op: str):
     async def _handler(
         payload: PowerOpRequest,
         db: Session = Depends(get_db),
         current_user: User = Depends(require_permission("oci", "write")),
     ):
-        if not _configured():
-            raise HTTPException(status_code=400,
-                                detail="OCI not configured — run the setup wizard.")
-        deploy_job = _find_deploy_job(db, "oci_deploy", "instance_ocid", payload.instance_ocid)
-        _assert_can_act(current_user, deploy_job.workgroup if deploy_job else None, "This instance")
-
-        job = job_service.create_job(
-            db,
-            job_type="oci_power",
-            created_by=current_user.username,
-            workgroup=deploy_job.workgroup if deploy_job else None,
-            metadata={"action": op, "instance_ocid": payload.instance_ocid,
-                      "deploy_job_id": deploy_job.id if deploy_job else None},
-        )
-        job_service.log_audit(db, current_user.username, "oci_power",
-                              details={"action": op, "instance_ocid": payload.instance_ocid})
+        result = await _queue_one(db, current_user, op=op, payload=payload)
         verb = "Start" if op == "start" else "Suspend"
-        return {"job_id": job.id, "status": "pending", "message": f"{verb} queued"}
+        return {"job_id": result["job_id"], "status": result["status"],
+                "message": f"{verb} queued"}
 
     return _handler
+
+
+# Two, and only two: no cloud path here has a shutdown, a restart or a reset, and
+# tests/test_cloud_power.py pins that each router exposes exactly start and stop. So
+# this is the whole set rather than a toolbar decision, unlike the on-prem routers'.
+BULK_OPS = ("start", "stop")
+
+
+class BulkPowerRequest(BaseModel):
+    """One op, many VMs. `targets` carries the same payload the single route takes.
+
+    The op is a FIELD and the identifiers are in the BODY, matching every other
+    `/power/*` route here — `api/oci.py` binds an OCID with a greedy `:path` converter
+    that would swallow a `/power/...` suffix whole, so a path-shaped bulk route could
+    not exist on all four clouds.
+    """
+    op: str
+    targets: List[PowerOpRequest]
+
+
+@router.post("/power/bulk", summary="Power op across a selection of instances")
+async def bulk_power(
+    payload: BulkPowerRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("oci", "write")),
+):
+    """Queue one power op per selected instance, all sharing a ``batch_id``.
+
+    `write`, not `delete`, and no admission gate — the same two decisions the single
+    route makes, for the reasons recorded above it. No `background_tasks`: every target
+    is a worker job, so there is nothing for this process to run.
+    """
+    op = payload.op.strip().lower()
+    return await queue_power_batch(
+        db, kind="oci", op=payload.op, targets=payload.targets,
+        allowed_ops=BULK_OPS,
+        queue_one=lambda target, batch_id: _queue_one(
+            db, current_user, op=op, payload=target, batch_id=batch_id),
+        label_of=lambda target: target.instance_ocid,
+        created_by=current_user.username)
 
 
 router.add_api_route("/power/start", _power_endpoint("start"), methods=["POST"],
