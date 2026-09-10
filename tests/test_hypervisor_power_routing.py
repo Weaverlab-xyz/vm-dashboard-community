@@ -64,6 +64,10 @@ _API = os.path.join(_ROOT, "web_dashboard", "api")
 _TEMPLATES = os.path.join(_ROOT, "web_dashboard", "templates")
 _META = os.path.join(_ROOT, "web_dashboard", "services", "agent_hypervisor_meta.py")
 _DEPS = os.path.join(_API, "hypervisor_deps.py")
+# The bulk fan-out moved out of hypervisor_deps when the cloud routers started
+# using it — a cloud router importing from a hypervisor-named module invites a
+# second copy, which is the thing this whole file exists to prevent.
+_BATCH = os.path.join(_API, "power_batch.py")
 _AGENT = os.path.join(_ROOT, "runners", "agent", "agent.py")
 _SIBLING = os.path.join(_ROOT, "runners", "hypervisor", "run.py")
 _CONNS = os.path.join(_ROOT, "web_dashboard", "services",
@@ -302,15 +306,13 @@ def test_a_direct_batch_runs_serially():
     still have been created correctly.
 
     Pinned structurally: the routers hand `queue_power_batch` a `background_tasks` and it
-    is `hypervisor_deps.queue_power_batch` — the ONE place that decides — which adds
-    exactly one task, `run_power_batch`, whose body is a bare `for` loop with an `await`
-    in it.
+    is `power_batch.queue_power_batch` — the ONE place that decides — which adds exactly
+    one task, `run_power_batch`, whose body is a bare `for` loop with an `await` in it.
     """
-    deps = _read(os.path.join(_API, "hypervisor_deps.py"))
-    tree = ast.parse(deps)
+    tree = ast.parse(_read(_BATCH))
 
     batch = _function(tree, "queue_power_batch")
-    assert batch is not None, "hypervisor_deps.queue_power_batch is gone"
+    assert batch is not None, "power_batch.queue_power_batch is gone"
     adds = re.findall(r"background_tasks\.add_task\(([A-Za-z_][A-Za-z_0-9]*)",
                       ast.unparse(batch))
     assert adds == ["run_power_batch"], (
@@ -318,7 +320,7 @@ def test_a_direct_batch_runs_serially():
         f"run_power_batch for the whole batch")
 
     walker = _function(tree, "run_power_batch")
-    assert walker is not None, "hypervisor_deps.run_power_batch is gone"
+    assert walker is not None, "power_batch.run_power_batch is gone"
     loops = [n for n in ast.walk(walker) if isinstance(n, (ast.For, ast.AsyncFor))]
     assert len(loops) == 1, "run_power_batch must be one loop over the batch"
     assert any(isinstance(n, ast.Await) for n in ast.walk(loops[0])), (
