@@ -51,6 +51,21 @@ def test_the_pool_defaults_to_the_devops_tier():
     assert re.search(r'variable "tier"\s*\{[^}]*default\s*=\s*"DEVOPS"', tf, re.S)
 
 
+def test_the_ca_lifetime_is_seconds_and_a_unit_spelling_cannot_reach_the_api():
+    # `lifetime` reaches CAS as a protobuf Duration, which takes a count of seconds with
+    # an `s` suffix and nothing else. A Terraform-style "87600h" is just a string to the
+    # provider, so it clears validate and plan and dies at create — by which point the
+    # pool, the service account, its key and the IAM binding exist and the pool id has
+    # been spent permanently. The validation block is what holds that at plan time.
+    tf = _read("terraform", "cert_ca", "gcp_cas", "main.tf")
+    block = tf[tf.index('variable "ca_lifetime"'):]
+    block = block[:block.index("\nvariable ")]
+    assert re.search(r'default\s*=\s*"[0-9]+s"', block), block
+    assert re.search(r'condition\s*=\s*can\(regex\(', block), block
+    # And nothing else in the module reintroduces a unit suffix as a default.
+    assert not re.search(r'default\s*=\s*"[0-9]+[hmd]"', tf)
+
+
 def test_the_aws_pca_module_exists_and_declares_the_aws_provider():
     tf = _read("terraform", "cert_ca", "aws_pca", "main.tf")
     assert 'source  = "hashicorp/aws"' in tf

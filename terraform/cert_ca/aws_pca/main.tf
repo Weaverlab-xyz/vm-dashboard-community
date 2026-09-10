@@ -71,7 +71,7 @@ variable "ca_organization" {
 variable "ca_validity_years" {
   type        = number
   default     = 10
-  description = "Lifetime of the self-signed root certificate, matching gcp_cas's 87600h"
+  description = "Lifetime of the self-signed root certificate, matching gcp_cas's 315360000s. ACM PCA takes a unit and a count, so this side needs no duration-format care"
 }
 
 variable "key_algorithm" {
