@@ -501,7 +501,7 @@ a platform lacks degrades visibly instead of failing late:
 | Runstate | yes — running / suspended / stopped / halted |
 | Idle suspend | yes — `suspend_on_idle`, per environment, in seconds |
 | Bootstrap injection | **metadata** — per-VM `user_data`, read by the guest at `http://169.254.169.254/skytap`. Used by [the broker VM](#the-broker-vm) |
-| Share link | yes — publish sets, with a password and an expiry |
+| Share link | yes — publish sets, with a password and an expiry. The expiry is **two** fields, `expiration_date` + `expiration_date_tz`; sending the date alone is a 400 that names the tz |
 | Stored credentials | yes — `…/vms/{id}/credentials`. Used by [the Resource Broker install](gateway-and-broker.md#there-is-no-login-field-on-purpose), which is why the dashboard stores no Windows password for a POV |
 | Verify | yes — one page of `/v2/templates`, surfaced as **Test connection** in Settings |
 | Project scoping | yes — `/v2/projects/{id}/templates` and `/v2/projects/{id}/configurations` |
@@ -543,6 +543,7 @@ rather than failing somewhere inside a job.
 | "Skytap has no project N (404)" on the POV page or in Test connection | The Project ID is stale, wrong, or belongs to an account this token cannot see | Correct or clear it in Settings → Integrations → Skytap. Blank lists everything the token can see |
 | **Test connection** says the host could not be reached | DNS, a firewall or an outbound proxy | Not a credential problem. Check outbound HTTPS to the API URL from wherever the dashboard runs |
 | VM counts show `—` | The collection read did not include the VM array | Expected. Open the environment for the measured count — a dash means "not measured", never zero |
+| "publishing the share link failed … `Expiration date tz is invalid`" | Skytap did not accept the expiry's timezone. A publish set's expiry is **two** fields — `expiration_date` and `expiration_date_tz` — and the date alone is a 400 naming the tz | Fixed: the dashboard now sends both, the date in UTC and the zone as `UTC`. If it recurs, the message names the zone it sent — change `SHARE_EXPIRY_TZ` in `services/skytap_service.py` to one the account accepts |
 | The Broker column reads **none** and the row names other VMs | No VM matches the POV's Broker VM name | Rename the template's broker VM, or create the POV with the name your template actually uses. The match is exact |
 | The Broker column reads **enrolling** and never changes | Nothing executed the payload, or it executed and died | The broker VM has no metadata runner ([template contract](#the-template-contract)), **has no `docker`**, is on a manual network, or cannot reach the agent endpoint. Fix it and press **Broker** to re-issue |
 | "no agent enrolled within 14 minutes" | Same causes as above | The bootstrap is still on the VM — `user_data` is only cleared on a successful enrolment, so being able to read it proves the agent never enrolled. On the guest: `journalctl -u dashboard-bootstrap-runner -n1 -o cat` names the line that failed, and `docker logs dashboard-agent`, if it ever started, names the rest. A `docker: command not found` there is the base template, not this POV |
