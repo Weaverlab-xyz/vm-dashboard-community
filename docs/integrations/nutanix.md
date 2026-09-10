@@ -45,6 +45,17 @@ The default `admin` account has full access. Suitable for lab environments.
 | Pause | `PAUSE` | No |
 | Resume | `RESUME` | No |
 
+**In bulk.** Tick several rows and the toolbar sends **Start**, **Shutdown**, **Power Off**
+or **Reboot** to the whole selection — one job per VM, sharing a batch you watch on one
+page. VMs already in the target state are skipped and the confirmation says how many;
+fifty per operation is the cap. See
+[Powering a selection](../remote-agents/hypervisors.md#powering-a-selection).
+
+Those four only. The rest of the table above stays per-VM: each of them depends on the
+state the VM is in right now — a Resume needs a paused VM, and a Reset is a power cut you
+would not aim at a set — which is a judgement to make one machine at a time rather than
+across a selection.
+
 **Nutanix Guest Tools (NGT)** is the equivalent of VMware Tools. Install it inside the VM to
 enable ACPI-based graceful shutdown and reboot. Without NGT the graceful buttons are shown but
 will return an error from Prism if the VM does not respond to the ACPI signal.

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 {% block title %}vSphere{% endblock %}
 
 {% block content %}
@@ -117,6 +118,7 @@
         Selected: <strong x-text="selectedVmIds.length"></strong>
       </span>
       <div class="flex items-center gap-2">
+        {{ bulk_power_buttons(['start', 'shutdown', 'stop', 'reset']) }}
         <button @click="openBulkAssign()"
                 class="text-xs px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium">
           Assign workgroup
@@ -390,6 +392,11 @@ function vsphereDashboard() {
     selectAll: false,
     bulkAssignModal: { open: false, workgroup: '' },
 
+    // Bulk power: state and behaviour from window.bulkPowerState() (static/js/app.js),
+    // wired to this page by the three seams below.
+    ...bulkPowerState(),
+    bulkPowerUrl: '/api/vsphere/power/bulk',
+
     // An agent-bound connection can only be sent the verbs the agent implements for
     // this product. Mirrors agent_hypervisor_meta.PAGE_OPS['vsphere'], which is also what
     // refuses the rest with a 501 — this is only so the operator sees why a button is
@@ -423,6 +430,29 @@ function vsphereDashboard() {
     // ── Bulk workgroup assignment ───────────────────────────────────────────
     _vmKey(vm) {
       return String(vm.moref || '');
+    },
+
+    // ── Bulk power seams ────────────────────────────────────────────────────
+    _bulkPowerRows() {
+      // The FILTERED rows, matching what toggleSelectAll selects from. Selecting all,
+      // then narrowing the filter, then pressing a power button must act on what is on
+      // screen — not on a VM the operator can no longer see.
+      return this.filteredVms;
+    },
+
+    // The same object shape powerOp() posts for one row. Bulk must not be able to
+    // address a VM differently from the button beside it.
+    _bulkPowerTarget(vm) {
+      return { moref: vm.moref, name: vm.name, host: vm.host };
+    },
+
+    // vSphere reports a boolean here: a suspended VM reads as not running, which is
+    // also how this page's own Start button treats it. `undefined` is a row with no
+    // power state at all, and the mixin treats unknown as eligible rather than silently
+    // skipping it.
+    _bulkPowerState(vm) {
+      if (vm.is_running === undefined || vm.is_running === null) return null;
+      return vm.is_running ? 'on' : 'off';
     },
 
     toggleSelectAll(checked) {

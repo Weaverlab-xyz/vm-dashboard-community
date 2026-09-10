@@ -234,7 +234,7 @@
     </div>
   </template>
 
-  <!-- Workgroup quick actions (gated on vmware flag — bulk start/stop is a VMware action) -->
+  <!-- Workgroup quick actions (gated on the vmware flag — these link to /vms) -->
   <div x-show="features.vmware && workgroups.length > 0"
        class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
     <template x-for="wg in workgroups" :key="wg.name">
@@ -244,9 +244,13 @@
           <span class="text-xs bg-gray-100 text-gray-600 rounded-full px-2 py-0.5"
                 x-text="(wg.count ?? '…') + ' VMs'"></span>
         </div>
-        <!-- Bulk start/stop is gone with the PowerShell path that implemented it. Power
-             is per-VM through the agent now, so this links to the page that can do it
-             rather than offering a button that would 404. -->
+        <!-- A link, not a bulk power button, and still deliberately so now that bulk
+             power exists. The Workstation page can start or stop a whole selection,
+             but it decides what to send from the power state in the rows it is
+             showing, and skips the VMs already in the target state. The dashboard has
+             neither: it has a workgroup name and a count. A button here would either
+             send blind or need its own copy of that decision, so it goes to the page
+             that already owns it. -->
         <div class="flex gap-3">
           <a :href="'/vms?workgroup=' + encodeURIComponent(wg.name)"
              class="flex-1 text-center bg-gray-100 hover:bg-gray-200 text-gray-700

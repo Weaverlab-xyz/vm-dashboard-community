@@ -101,6 +101,7 @@ host tabs and a table of VMs within a few seconds.
 | **Suspend** | Suspend VM to memory |
 | **VM detail** | Hardware config, guest OS, Tools status, all IP addresses, annotation, managed object reference |
 | **Host summary cards** | CPU, memory, VM count, maintenance mode status per host |
+| **Bulk power** | Tick several rows and send Power On, Shutdown, Force Off or Reset to the whole selection from the toolbar — one job per VM, sharing a batch you watch on one page. VMs already in the target state are skipped and the dialog says how many; fifty per operation is the cap. See [Powering a selection](../remote-agents/hypervisors.md#powering-a-selection) |
 
 Templates are automatically excluded from the VM list.
 

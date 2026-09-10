@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 {% block title %}Workstation{% endblock %}
 
 {% block content %}
@@ -64,19 +65,28 @@
     </div>
   </div>
 
-  <!-- Bulk action bar. Admin-only because /api/workgroup-overrides/bulk is admin-only:
-       showing it to anyone else is a button that can only 403. -->
-  <div x-show="$store.auth.isAdmin && selectedVmIds.length > 0" x-cloak
+  <!-- Bulk action bar.
+       The admin gate used to sit here, and on the checkbox column, because
+       /api/workgroup-overrides/bulk is admin-only — showing that bar to anyone else was
+       a button that could only 403. That reasoning covered the bar when tagging was the
+       only thing in it. It does not cover power: /api/vms/power/* is
+       require_permission("vms","write") plus a per-VM workgroup check, and a non-admin
+       already has ungated Start/Stop on every row of this same table. So the gate moved
+       onto the two buttons that actually need it, and the selection mechanism — which
+       grants no reach the rows did not already give — is available to whoever can see
+       the rows. -->
+  <div x-show="selectedVmIds.length > 0" x-cloak
        class="flex items-center justify-between bg-blue-50 border border-blue-200 rounded-xl px-4 py-2 mb-3">
     <span class="text-sm text-blue-800">
       Selected: <strong x-text="selectedVmIds.length"></strong>
     </span>
     <div class="flex items-center gap-2">
-      <button @click="openBulkAssign()"
+      {{ bulk_power_buttons(['start', 'stop']) }}
+      <button x-show="$store.auth.isAdmin" @click="openBulkAssign()"
               class="text-xs px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium">
         Assign workgroup
       </button>
-      <button @click="submitBulkClear()"
+      <button x-show="$store.auth.isAdmin" @click="submitBulkClear()"
               class="text-xs px-3 py-1.5 rounded bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium">
         Clear workgroup
       </button>
@@ -127,7 +137,7 @@
     <table class="w-full text-sm">
       <thead>
         <tr class="bg-gray-50 border-b border-gray-200 text-left">
-          <th class="px-4 py-3 w-10" x-show="$store.auth.isAdmin">
+          <th class="px-4 py-3 w-10">
             <input type="checkbox" :checked="selectAll" @change="toggleSelectAll($event.target.checked)"
                    class="h-4 w-4 rounded border-gray-300">
           </th>
@@ -154,8 +164,8 @@
              two rows without a path would collide into one and share power state. -->
         <template x-for="vm in filteredVms" :key="vm.vm_id">
           <tr class="hover:bg-gray-50 transition">
-            <td class="px-4 py-3" x-show="$store.auth.isAdmin">
-              <input type="checkbox" :value="vm.vm_id" x-model="selectedVmIds"
+            <td class="px-4 py-3">
+              <input type="checkbox" :value="_vmKey(vm)" x-model="selectedVmIds"
                      class="h-4 w-4 rounded border-gray-300">
             </td>
             <td class="px-4 py-3">
@@ -227,6 +237,11 @@
       selectedVmIds: [],
       selectAll: false,
       bulkAssignModal: { open: false, workgroup: '' },
+
+      // Bulk power: state and behaviour from window.bulkPowerState()
+      // (static/js/app.js), wired to this page by the three seams below.
+      ...bulkPowerState(),
+      bulkPowerUrl: '/api/vms/power/bulk',
 
       // A Workstation connection is agent-bound by construction — the dashboard has no
       // transport to vmrest at all — so this is structurally true, not configuration.
@@ -377,9 +392,42 @@
         this.selectAll = false;
       },
 
+      // One definition of the selection key, used by the row checkbox, select-all and
+      // the bulk power plan alike. It used to be `String(v.vm_id || '')` in
+      // toggleSelectAll and a raw `vm.vm_id` on the checkbox — the same value today
+      // only because vm_id is already a string, which is not a thing this page
+      // guarantees. Must match api/vms.py's own `_override_key`.
+      _vmKey(vm) {
+        return String(vm.vm_id || '');
+      },
+
       toggleSelectAll(checked) {
         this.selectAll = checked;
-        this.selectedVmIds = checked ? this.filteredVms.map(v => String(v.vm_id || '')) : [];
+        this.selectedVmIds = checked ? this.filteredVms.map(v => this._vmKey(v)) : [];
+      },
+
+      // ── Bulk power seams ──────────────────────────────────────────────────
+      _bulkPowerRows() {
+        // The FILTERED rows, matching what toggleSelectAll selects from. Selecting all,
+        // then switching workgroup tab, then pressing a power button must act on what
+        // is on screen — not on a VM the operator can no longer see.
+        return this.filteredVms;
+      },
+
+      // The same object shape _power() posts for one row, connection_id included: this
+      // page lists VMs from every Workstation connection at once, so a selection can
+      // legitimately span agents and each target has to carry its own.
+      _bulkPowerTarget(vm) {
+        return { vm_id: vm.vm_id, name: vm.vm_name,
+                 connection_id: vm.connection_id || '' };
+      },
+
+      // vmrest reports a boolean, and the agent maps only power_on/power_off, so there
+      // is no third state to report. `undefined` is a row with no state at all, and the
+      // mixin treats unknown as eligible rather than silently skipping it.
+      _bulkPowerState(vm) {
+        if (vm.is_running === undefined || vm.is_running === null) return null;
+        return vm.is_running ? 'on' : 'off';
       },
 
       openBulkAssign() {

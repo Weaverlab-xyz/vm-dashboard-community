@@ -41,6 +41,16 @@ The dashboard connects to an **XCP-ng** or **XenServer** host or pool master via
 | Pause | `VM.pause` | No |
 | Unpause | `VM.unpause` | No |
 
+**In bulk.** Tick several rows and the toolbar sends **Start**, **Shutdown**, **Power Off**
+or **Reboot** to the whole selection — one job per VM, sharing a batch you watch on one
+page. VMs already in the target state are skipped and the confirmation says how many;
+fifty per operation is the cap. See
+[Powering a selection](../remote-agents/hypervisors.md#powering-a-selection).
+
+Those four only. The rest of the table above stays per-VM: each of them depends on the
+state the VM is in right now — Resume needs a suspended VM, Unpause a paused one — which
+is a judgement to make one machine at a time rather than across a selection.
+
 ---
 
 ## Installing xe-guest-utilities

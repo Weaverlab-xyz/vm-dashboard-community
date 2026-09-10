@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 {% block title %}Hyper-V{% endblock %}
 
 {% block content %}
@@ -14,8 +15,12 @@
     is reached through a remote agent, so the dashboard cannot query it live.
     {% if synced_at %}<span x-text="'Synced ' + timeAgo('{{ synced_at }}') + '.'"></span>{% endif %}
     Live-only figures such as CPU usage and uptime are blank here.
-    Start, Force Off and Restart run as agent jobs; Shutdown, Pause, Resume and Save
-    are not available through an agent.
+    {#- Do not restate the op list by hand: it said Shutdown was unavailable through an
+        agent for weeks after the graceful `shutdown` verb landed, because nothing
+        checks prose. The buttons themselves grey from `agentOps`, which
+        tests/test_hypervisor_power_routing.py holds equal to PAGE_OPS. -#}
+    Power operations run as agent jobs — singly or over a selection — and any this
+    build cannot express through an agent are greyed out with the reason on hover.
   </div>
   {% endif %}
 
@@ -105,6 +110,7 @@
         Selected: <strong x-text="selectedVmIds.length"></strong>
       </span>
       <div class="flex items-center gap-2">
+        {{ bulk_power_buttons(['start', 'shutdown', 'stop', 'restart']) }}
         <button @click="openBulkAssign()"
                 class="text-xs px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium">
           Assign workgroup
@@ -465,6 +471,11 @@ function hypervDashboard() {
     selectAll: false,
     bulkAssignModal: { open: false, workgroup: '' },
 
+    // Bulk power: state and behaviour from window.bulkPowerState() (static/js/app.js),
+    // wired to this page by the four seams below.
+    ...bulkPowerState(),
+    bulkPowerUrl: '/api/hyperv/power/bulk',
+
     // An agent-bound connection can only be sent the verbs the agent implements for
     // Hyper-V. Mirrors api/hyperv.py::_AGENT_VERBS, which refuses the rest with a 501 —
     // this is only so the operator sees why the button is dead instead of clicking it.
@@ -499,9 +510,34 @@ function hypervDashboard() {
       return this.availableWorkgroups[0] || '';
     },
 
-    // ── Bulk workgroup assignment ───────────────────────────────────────────
+    // ── Bulk selection ──────────────────────────────────────────────────────
     _vmKey(vm) {
       return String(vm.vmid || '');
+    },
+
+    // ── Bulk power seams ────────────────────────────────────────────────────
+    _bulkPowerRows() {
+      // The FILTERED rows, matching what toggleSelectAll selects from. Selecting all,
+      // then narrowing the filter, then pressing a power button must act on what is on
+      // screen — not on a VM the operator can no longer see.
+      return this.filteredVms;
+    },
+
+    // The same object shape powerOp() posts for one row. Bulk must not be able to
+    // address a VM differently from the button beside it.
+    _bulkPowerTarget(vm) {
+      return { vmid: vm.vmid, name: vm.name };
+    },
+
+    // Hyper-V's WMI EnabledState. 6 (Saved) and 9 (Paused) are 'other', not 'off':
+    // they still hold power, which is why the row offers both Start and Force Off for
+    // them. `undefined` is a row this page never got a state for, and the mixin treats
+    // unknown as eligible rather than silently skipping it.
+    _bulkPowerState(vm) {
+      if (vm.state === undefined || vm.state === null) return null;
+      if (vm.state === 2) return 'on';
+      if (vm.state === 3) return 'off';
+      return 'other';
     },
 
     toggleSelectAll(checked) {

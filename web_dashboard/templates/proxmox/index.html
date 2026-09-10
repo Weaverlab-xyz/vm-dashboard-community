@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 {% block title %}Proxmox VE{% endblock %}
 
 {% block content %}
@@ -178,6 +179,7 @@
         Selected: <strong x-text="selectedVmIds.length"></strong>
       </span>
       <div class="flex items-center gap-2">
+        {{ bulk_power_buttons(['start', 'shutdown', 'stop', 'reboot']) }}
         <button @click="openBulkAssign()"
                 class="text-xs px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium">
           Assign workgroup
@@ -587,6 +589,11 @@ function proxmoxDashboard() {
     selectAll: false,
     bulkAssignModal: { open: false, workgroup: '' },
 
+    // Bulk power: state and behaviour from window.bulkPowerState() (static/js/app.js),
+    // wired to this page by the three seams below.
+    ...bulkPowerState(),
+    bulkPowerUrl: '/api/proxmox/power/bulk',
+
     // An agent-bound connection can only be sent the verbs the agent implements for
     // this product. Mirrors agent_hypervisor_meta.PAGE_OPS['proxmox'], which is also what
     // refuses the rest with a 501 — this is only so the operator sees why a button is
@@ -615,6 +622,28 @@ function proxmoxDashboard() {
     _vmKey(vm) {
       // Proxmox VMIDs aren't unique across cluster nodes, so include the node.
       return `${vm.node}/${vm.vmid}`;
+    },
+
+    // ── Bulk power seams ────────────────────────────────────────────────────
+    _bulkPowerRows() {
+      // The FILTERED rows, matching what toggleSelectAll selects from. Selecting all,
+      // then narrowing the filter, then pressing a power button must act on what is on
+      // screen — not on a VM the operator can no longer see.
+      return this.filteredResources;
+    },
+
+    // The same object shape powerOp() posts for one row. Bulk must not be able to
+    // address a VM differently from the button beside it.
+    _bulkPowerTarget(vm) {
+      return { node: vm.node, vmid: vm.vmid, vm_type: vm.type, name: vm.name };
+    },
+
+    // Proxmox reports a boolean, and this page's rows offer nothing for a third state,
+    // so there is none to report. `undefined` is a row with no status at all, and the
+    // mixin treats unknown as eligible rather than silently skipping it.
+    _bulkPowerState(vm) {
+      if (vm.is_running === undefined || vm.is_running === null) return null;
+      return vm.is_running ? 'on' : 'off';
     },
 
     toggleSelectAll(checked) {

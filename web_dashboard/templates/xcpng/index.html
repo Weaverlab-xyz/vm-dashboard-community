@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 {% block title %}XCP-ng{% endblock %}
 
 {% block content %}
@@ -102,6 +103,7 @@
         Selected: <strong x-text="selectedVmIds.length"></strong>
       </span>
       <div class="flex items-center gap-2">
+        {{ bulk_power_buttons(['start', 'shutdown', 'stop', 'reboot']) }}
         <button @click="openBulkAssign()"
                 class="text-xs px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium">
           Assign workgroup
@@ -394,6 +396,11 @@ function xcpngDashboard() {
     selectAll: false,
     bulkAssignModal: { open: false, workgroup: '' },
 
+    // Bulk power: state and behaviour from window.bulkPowerState() (static/js/app.js),
+    // wired to this page by the three seams below.
+    ...bulkPowerState(),
+    bulkPowerUrl: '/api/xcpng/power/bulk',
+
     // An agent-bound connection can only be sent the verbs the agent implements for
     // this product. Mirrors agent_hypervisor_meta.PAGE_OPS['xcpng'], which is also what
     // refuses the rest with a 501 — this is only so the operator sees why a button is
@@ -438,6 +445,31 @@ function xcpngDashboard() {
     // ── Bulk workgroup assignment ───────────────────────────────────────────
     _vmKey(vm) {
       return String(vm.uuid || '');
+    },
+
+    // ── Bulk power seams ────────────────────────────────────────────────────
+    _bulkPowerRows() {
+      // The FILTERED rows, matching what toggleSelectAll selects from. Selecting all,
+      // then narrowing the filter, then pressing a power button must act on what is on
+      // screen — not on a VM the operator can no longer see.
+      return this.filteredVms;
+    },
+
+    // The same object shape powerOp() posts for one row. Bulk must not be able to
+    // address a VM differently from the button beside it.
+    _bulkPowerTarget(vm) {
+      return { uuid: vm.uuid, name: vm.name };
+    },
+
+    // XAPI's power_state. Suspended and Paused are 'other', not 'off' — the row offers
+    // Resume/Unpause and Force Off for them, so Force Off must reach them here too. An
+    // absent value is unknown, and the mixin treats unknown as eligible rather than
+    // silently skipping it.
+    _bulkPowerState(vm) {
+      if (!vm.power_state) return null;
+      if (vm.power_state === 'Running') return 'on';
+      if (vm.power_state === 'Halted') return 'off';
+      return 'other';
     },
 
     toggleSelectAll(checked) {

@@ -5,6 +5,9 @@ All endpoints require authentication.  Long-running operations (image import,
 deploy, delete) are dispatched as background jobs so the client gets a job ID
 immediately and can poll /api/jobs/{id} for progress.
 """
+import functools
+from typing import List
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -15,7 +18,7 @@ from ..services import job_service, workgroup_service, workgroup_override_servic
 from ..services import nutanix_service
 from ..services.nutanix_service import NutanixError
 from ..services import hypervisor_view_service
-from .hypervisor_deps import conn_in_task, conn_or_error
+from .hypervisor_deps import conn_in_task, conn_or_error, queue_power_batch
 
 router = APIRouter(prefix="/api/nutanix", tags=["nutanix"])
 
@@ -343,6 +346,54 @@ async def _run_power_op(job_id: str, connection_id: str, uuid: str, name: str, o
         db.close()
 
 
+async def _queue_one(db, current_user, *, op: str, payload: PowerOpRequest,
+                     connection_id: str = "", batch_id=None) -> dict:
+    """Queue ONE Nutanix power op. The only path that does, single or bulk.
+
+    Returns ``{"job_id", "status", "task"}``. ``task`` is a zero-arg coroutine function
+    for a connection the dashboard dials itself and None for an agent-bound one:
+    deciding *how* that work runs belongs to the caller, and it is the whole difference
+    between the single route (one background task) and the bulk route (one background
+    task for the whole batch, walked serially — see
+    :func:`~web_dashboard.api.hypervisor_deps.run_power_batch`).
+
+    This function exists so that bulk power adds selection and not a second code path.
+    Every gate below applied to one button press before bulk existed and applies
+    unchanged to each VM in a selection.
+    """
+    label = payload.name or payload.uuid
+    conn = conn_or_error(db, "nutanix", connection_id)
+    # No agent branch, and that is a standing decision rather than an omission: a
+    # Nutanix power change is a full spec PUT carrying a metadata version, not a simple
+    # action, so getting one wrong writes to the VM instead of failing —
+    # docs/remote-agents.md records it as worth doing carefully rather than quickly.
+    # Nutanix therefore has no entry in agent_hypervisor_meta.PAGE_OPS, `_power_nutanix`
+    # in the agent refuses before reading a table, and calling `agent_power_job` here
+    # would fail closed and 501 every button on this page.
+    # tests/test_hypervisor_power_routing.py::test_nutanix_power_is_still_unimplemented_in_the_agent
+    # is what keeps that true on purpose. Bulk inherits exactly the reach the single
+    # button has — no wider, no narrower.
+    job = job_service.create_job(
+        db,
+        job_type=f"nutanix_{op}",
+        created_by=current_user.username,
+        workgroup=payload.cluster or "nutanix",
+        batch_id=batch_id,
+        metadata={
+            "vm_uuid": payload.uuid,
+            "vm_name": payload.name,
+            "cluster": payload.cluster,
+            "op": op,
+        },
+    )
+    return {
+        "job_id": job.id,
+        "status": "queued",
+        "task": functools.partial(_run_power_op, job.id, conn.id, payload.uuid,
+                                  payload.name, op, label),
+    }
+
+
 def _power_endpoint(op: str):
     async def _handler(
         payload: PowerOpRequest,
@@ -351,27 +402,54 @@ def _power_endpoint(op: str):
         db: Session = Depends(get_db),
         current_user: User = Depends(get_current_user),
     ):
-        label = payload.name or payload.uuid
-        conn = conn_or_error(db, "nutanix", connection_id)
-        job = job_service.create_job(
-            db,
-            job_type=f"nutanix_{op}",
-            created_by=current_user.username,
-            workgroup=payload.cluster or "nutanix",
-            metadata={
-                "vm_uuid": payload.uuid,
-                "vm_name": payload.name,
-                "cluster": payload.cluster,
-                "op": op,
-            },
-        )
-        background_tasks.add_task(
-            _run_power_op, job.id, conn.id, payload.uuid, payload.name, op, label
-        )
-        return {"job_id": job.id, "status": "queued"}
+        result = await _queue_one(db, current_user, op=op, payload=payload,
+                                  connection_id=connection_id)
+        if result["task"] is not None:
+            background_tasks.add_task(result["task"])
+        return {"job_id": result["job_id"], "status": result["status"]}
 
     _handler.__name__ = f"nutanix_{op}"
     return _handler
+
+
+# The ops the selection toolbar offers. A subset of the per-row buttons on purpose:
+# `reset` is left per-row because `reboot` is the honest bulk equivalent of Restart on AHV, and `pause`/`resume` are per-VM-state operations nobody applies to a selection. Named here rather than derived from PAGE_OPS because this is a decision about
+# the toolbar, not a statement about what the agent can express — PAGE_OPS still decides
+# that, inside _queue_one.
+BULK_OPS = ("start", "shutdown", "stop", "reboot")
+
+
+class BulkPowerRequest(BaseModel):
+    """One op, many VMs. `targets` carries the same payload the single route takes."""
+    op: str
+    targets: List[PowerOpRequest]
+    connection_id: str = ""
+
+
+@router.post("/power/bulk", summary="Power op across a selection of VMs")
+async def bulk_power(
+    payload: BulkPowerRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Queue one power op per selected VM, all sharing a ``batch_id``.
+
+    Auth is deliberately the same as the single route's rather than `require_admin`: a
+    user entitled to power one VM must not be refused for powering ten. The workgroup
+    override endpoints sitting next to this in the same toolbar ARE admin-only, which is
+    why the page gates those two buttons and not these.
+    """
+    op = payload.op.strip().lower()
+    return await queue_power_batch(
+        db, kind="nutanix", op=payload.op, targets=payload.targets,
+        allowed_ops=BULK_OPS,
+        queue_one=lambda target, batch_id: _queue_one(
+            db, current_user, op=op, payload=target,
+            connection_id=payload.connection_id, batch_id=batch_id),
+        label_of=lambda target: target.name or target.uuid,
+        created_by=current_user.username,
+        background_tasks=background_tasks)
 
 
 router.add_api_route("/power/start",    _power_endpoint("start"),    methods=["POST"], summary="Power on a VM")

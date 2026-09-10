@@ -1,0 +1,60 @@
+{#
+  Reusable bulk-power buttons for the selection toolbar on an on-prem VM page.
+
+  Requires the page's Alpine component to spread window.bulkPowerState() and to supply
+  the four seams that helper documents (`bulkPowerUrl`, `_bulkPowerRows()`,
+  `_bulkPowerTarget(vm)`, `_bulkPowerRunning(vm)`), plus the `_vmKey(vm)` and
+  `selectedVmIds` the page already has for the workgroup buttons.
+
+  Usage:
+    {% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
+    {{ bulk_power_buttons(['start', 'shutdown', 'stop', 'restart']) }}
+
+  The ops list must match that router's BULK_OPS, and
+  tests/test_hypervisor_power_routing.py::test_no_bulk_button_offers_an_op_its_router_will_refuse
+  is what says so — a button here for an op the server does not accept would 400 the
+  whole batch with a message about the op rather than about the VMs.
+
+  A Jinja `{% for %}`, deliberately, NOT an Alpine `x-for`: this file is walked by
+  tests/test_templates_parse.py::test_x_for_helpers_are_defined_in_their_page, which
+  requires the helper behind an `x-for` to be defined in the same file — a partial
+  cannot satisfy that, and partials/secret_picker.html avoids it for the same reason.
+  Expanding at compile time also puts each op's literal name in the rendered markup,
+  so the toolbar is greppable by the same tests that already grep the row buttons.
+#}
+{% set _BULK_LABELS = {
+     'start':       'Start',
+     'shutdown':    'Shutdown',
+     'stop':        'Force Off',
+     'restart':     'Restart',
+     'reboot':      'Reboot',
+     'reset':       'Reset',
+     'hard_reboot': 'Force Reboot',
+   } %}
+{# Same colours as the per-row buttons, because they are the same operations and an
+   operator should not have to re-learn which red one cuts the power. #}
+{% set _BULK_CLASSES = {
+     'start':       'bg-green-600 hover:bg-green-700 text-white',
+     'shutdown':    'bg-blue-600 hover:bg-blue-700 text-white',
+     'stop':        'bg-red-600 hover:bg-red-700 text-white',
+     'restart':     'bg-orange-500 hover:bg-orange-600 text-white',
+     'reboot':      'bg-orange-500 hover:bg-orange-600 text-white',
+     'reset':       'bg-orange-500 hover:bg-orange-600 text-white',
+     'hard_reboot': 'bg-orange-500 hover:bg-orange-600 text-white',
+   } %}
+
+{% macro bulk_power_buttons(ops) %}
+{% for op in ops %}
+<button @click="submitBulkPower('{{ op }}')"
+        :disabled="bulkPowerBusy || !bulkOpAllowed('{{ op }}')"
+        :title="bulkOpTitle('{{ op }}')"
+        class="text-xs px-3 py-1.5 rounded font-medium disabled:opacity-50
+               transition-colors {{ _BULK_CLASSES.get(op, 'bg-gray-600 hover:bg-gray-700 text-white') }}">
+  <span x-show="bulkPowerOp === '{{ op }}'">…&nbsp;</span>{{ _BULK_LABELS.get(op, op) }}
+</button>
+{% endfor %}
+{# The divider is inside the macro so a page cannot render the power buttons without
+   separating them from the workgroup ones. They are very different consequences to put
+   side by side: one tags a row, the others cut power to a machine. #}
+<span class="w-px h-5 bg-blue-200 mx-1"></span>
+{% endmacro %}

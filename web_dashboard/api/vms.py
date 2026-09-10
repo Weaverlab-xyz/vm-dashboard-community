@@ -15,7 +15,7 @@ workstation connection is agent-bound by construction (`AGENT_ONLY_KINDS`), so u
 those four there is no direct path to fall back to.
 """
 import logging
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -26,7 +26,7 @@ from ..models.vm import VMListResponse, VMInfo
 from ..services import job_service, config_service
 from ..services import hypervisor_sync_service, workgroup_override_service
 from .auth import require_permission
-from .hypervisor_deps import agent_power_job, conn_or_error
+from .hypervisor_deps import agent_power_job, conn_or_error, queue_power_batch
 
 logger = logging.getLogger(__name__)
 
@@ -254,47 +254,106 @@ def _assert_workgroup_access(user: User, workgroup: str) -> None:
             status_code=403, detail=f"Access denied to workgroup: {workgroup}")
 
 
-def _power_endpoint(op: str):
-    """One power route.
+async def _queue_one(db, current_user, *, op: str, payload: PowerOpRequest,
+                     connection_id: str = "", batch_id=None) -> dict:
+    """Queue ONE Workstation power op. The only path that does, single or bulk.
 
     The page op travels as-is; the per-kind translation to an agent verb belongs to
     `agent_power_job`, which reads the single table in `agent_hypervisor_meta.PAGE_OPS`
     rather than a copy kept here. Three routers once kept their own copy, and it mapped
     every page's graceful stop onto an op that hard-reset the guest.
+
+    Returns ``{"job_id", "status", "task"}`` for symmetry with the other five routers,
+    but ``task`` is always None here: a Workstation connection is agent-bound by
+    construction (`AGENT_ONLY_KINDS`), so there is no local work to run and no serial
+    batch walk to arrange.
+
+    ``connection_id`` is accepted as a keyword for that same symmetry; the payload's own
+    field wins when set, because this page renders VMs from several connections at once
+    and each row carries its own.
     """
+    conn = conn_or_error(db, "workstation",
+                         payload.connection_id or connection_id or None)
+    # Before the job, not after: a refusal must leave nothing on /jobs for the
+    # operator to wonder about. Per VM, not per request — this page can show rows from
+    # more than one workgroup, so a selection can legitimately be part-refused.
+    _assert_workgroup_access(
+        current_user, _workstation_workgroup(db, payload.vm_id))
+
+    label = payload.name or payload.vm_id
+    job = agent_power_job(
+        db, conn, op=op, target_id=payload.vm_id,
+        target_scope="", target_type="vm",
+        created_by=current_user.username,
+        description=f"{op} {label}",
+        batch_id=batch_id)
+    if job is None:
+        # `agent_power_job` returns None for a connection the dashboard could dial
+        # itself. A Workstation connection can never be one — AGENT_ONLY_KINDS — so
+        # this is a corrupt row, not a fallback worth writing.
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Connection '{conn.name}' is not bound to an agent. A "
+                    f"Workstation connection has to be: the dashboard has no "
+                    f"transport to vmrest."))
+
+    job_service.log_audit(db, current_user.username, f"vm_{op}", target_vm=label)
+    return {"job_id": job.id, "status": job.status, "task": None}
+
+
+def _power_endpoint(op: str):
+    """One power route."""
 
     async def _handler(
         payload: PowerOpRequest,
         db: Session = Depends(get_db),
         current_user: User = Depends(require_permission("vms", "write")),
     ):
-        conn = conn_or_error(db, "workstation", payload.connection_id or None)
-        # Before the job, not after: a refusal must leave nothing on /jobs for the
-        # operator to wonder about.
-        _assert_workgroup_access(
-            current_user, _workstation_workgroup(db, payload.vm_id))
-
-        label = payload.name or payload.vm_id
-        job = agent_power_job(
-            db, conn, op=op, target_id=payload.vm_id,
-            target_scope="", target_type="vm",
-            created_by=current_user.username,
-            description=f"{op} {label}")
-        if job is None:
-            # `agent_power_job` returns None for a connection the dashboard could dial
-            # itself. A Workstation connection can never be one — AGENT_ONLY_KINDS — so
-            # this is a corrupt row, not a fallback worth writing.
-            raise HTTPException(
-                status_code=409,
-                detail=(f"Connection '{conn.name}' is not bound to an agent. A "
-                        f"Workstation connection has to be: the dashboard has no "
-                        f"transport to vmrest."))
-
-        job_service.log_audit(db, current_user.username, f"vm_{op}", target_vm=label)
-        return {"job_id": job.id, "status": job.status}
+        result = await _queue_one(db, current_user, op=op, payload=payload)
+        return {"job_id": result["job_id"], "status": result["status"]}
 
     _handler.__name__ = f"workstation_{op}"
     return _handler
+
+
+# Two, and only two, and not a toolbar decision: vmrest's API has no reset, no reboot
+# and no graceful shutdown that the agent maps (`_VMREST_POWER`), so these are every
+# power op this page has. See agent_hypervisor_meta.PAGE_OPS["workstation"].
+BULK_OPS = ("start", "stop")
+
+
+class BulkPowerRequest(BaseModel):
+    """One op, many VMs. `targets` carries the same payload the single route takes."""
+    op: str
+    targets: List[PowerOpRequest]
+    connection_id: str = ""
+
+
+@router.post("/power/bulk", summary="Power op across a selection of Workstation VMs")
+async def bulk_power(
+    payload: BulkPowerRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("vms", "write")),
+):
+    """Queue one power op per selected VM, all sharing a ``batch_id``.
+
+    `vms:write` and the per-VM workgroup check, exactly as the single route — NOT
+    `require_admin`. The two workgroup-override buttons alongside this in the page's
+    toolbar are admin-only, and that is why the page gates those two individually rather
+    than gating the whole bar (and, before this, the checkbox column with it).
+
+    No `background_tasks`: every target here is an agent job, so there is nothing for
+    this process to run.
+    """
+    op = payload.op.strip().lower()
+    return await queue_power_batch(
+        db, kind="workstation", op=payload.op, targets=payload.targets,
+        allowed_ops=BULK_OPS,
+        queue_one=lambda target, batch_id: _queue_one(
+            db, current_user, op=op, payload=target,
+            connection_id=payload.connection_id, batch_id=batch_id),
+        label_of=lambda target: target.name or target.vm_id,
+        created_by=current_user.username)
 
 
 router.add_api_route("/power/start", _power_endpoint("start"), methods=["POST"],
