@@ -216,10 +216,26 @@ with `OLD_PASSWORD` and the functional account needs no privilege over it at all
   identity `roles/iam.serviceAccountTokenCreator` on the rotator. `SA:` is **not** a
   fallback: a base64 key is ~3.2 KB, over Password Safe's 1000-character credential limit.
 - Grant the functional account rights over each managed principal — **unless you use
-  self-rotation on `cloud-run`, which needs none of this.** The dashboard prints the exact
-  statement on the provisioning job, because it cannot issue it itself. On **PostgreSQL
-  16** — the module default — `GRANT "<managed>" TO "<fa>" WITH ADMIN OPTION` per role;
-  `CREATEROLE` alone is no longer sufficient. On MySQL,
+  self-rotation on `cloud-run`, which needs none of this.** On the `data-api` channel the
+  dashboard issues these itself, as the built-in admin, and prints them on the
+  provisioning job only if that fails; on `cloud-run` it can only print them. On
+  **PostgreSQL 16** — the module default — that is **two** statements, and both are
+  required:
+
+  ```sql
+  ALTER ROLE "<fa>" WITH CREATEROLE;                        -- once per instance
+  GRANT "<managed>" TO "<fa>" WITH ADMIN OPTION;            -- once per managed role
+  ```
+
+  "`CREATEROLE` alone is no longer sufficient" is widely misread as "`ADMIN OPTION`
+  replaced `CREATEROLE`". It did not — it was **added**. PostgreSQL's `AlterRole()`
+  requires "the `CREATEROLE` attribute **and** the `ADMIN` option on the role" to change
+  another role's password, and with only one of the two the rotation fails as
+  `permission denied to alter role`. The Data API does not relay the `errdetail` that
+  names the missing half, so that error looks the same whichever one you are short of.
+  `CREATEROLE` is cluster-wide and does let the rotator create and drop roles, but it
+  still cannot alter a role it holds no `ADMIN OPTION` on — so a compromised rotation
+  identity remains confined to the `psafe_*` accounts. On MySQL,
   `GRANT CREATE USER ON *.* TO '<fa>'@'%'`. On SQL Server, `ALTER ANY LOGIN`, which
   `CustomerDbRootRole` carries — `sysadmin` is unavailable on Cloud SQL and
   `ALTER ANY LOGIN` is exactly enough.
