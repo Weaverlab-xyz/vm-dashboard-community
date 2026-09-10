@@ -224,6 +224,44 @@ self-signed root certificate, and the IAM user the plugin authenticates as.
 The cloud selector only appears when more than one module is built — the list comes from
 the modules that actually exist, so a cloud can never be offered without one behind it.
 
+### Every id here is single-use
+
+**CAS never gives a deleted resource id back.** Once a pool is destroyed,
+`projects/<p>/locations/<l>/caPools/<id>` stays reserved permanently, and an apply that
+asks for it again fails:
+
+```
+Error: Error waiting to create CaPool: Error code 3, message: Previously used CaPool ids
+may not be reused. A `CaPool` for `projects/…/caPools/demo-pipeline-pool` has previously
+been deleted
+```
+
+In a feature built around destroying the CA, that makes a pool id derived from the CA's
+*name* alone usable exactly once — the first rebuild of `demo-pipeline`, and every rebuild
+after it, is refused for good in that project and location. So the dashboard generates
+`<name>-pool-<6 hex>`: the name stays the readable part of `pool=` on the address, and the
+suffix is what makes a rebuild possible at all. The generated id is cut to fit CAS's
+63-character cap on **both** the pool id and the `<pool>-root` CA id under it, and a free
+text name is slugged (`Demo Pipeline (EU)` → `demo-pipeline-eu-…`). Those seven extra
+characters come out of the 255-character address budget below.
+
+An id supplied through the API (`pool_id` on `POST /api/cert-lab`; the build form does not
+offer the field) is honoured exactly as typed, because it goes on to name the pool in every
+address built against this CA — but it is validated at the click, and typing an id that has
+existed here before hits the same permanent wall.
+
+**The enrollment identity is per CA for the same reason,** one namespace up: a GCP service
+account id is unique per *project* and an IAM user name per *account*, so the modules'
+shared `certauth-plugin` default only ever fits one lab. The dashboard passes a per-row
+`certauth-<8 hex>` instead. Without it the second CA in a project fails with
+`alreadyExists` **after the pool exists**, and so does the retry after a build that got as
+far as the identity and then died.
+
+A failed build is rolled back — `terraform destroy` over the same state — before the row
+goes `failed`, so a partial apply does not leave a billing pool or a live enrollment key
+behind. If the rollback itself fails, the row says `MANUAL CLEANUP REQUIRED` under the
+original error and **Destroy** retries the teardown.
+
 Teardown is the part worth understanding, because **CAS resists deletion by default in three
 separate ways**, and each one leaves a pool that goes on billing:
 

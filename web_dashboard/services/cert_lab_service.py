@@ -21,6 +21,8 @@ the lifecycle is closed. See docs/infrastructure-as-code.md.
 
 import logging
 import os
+import re
+import uuid
 from datetime import datetime
 from typing import Optional
 
@@ -103,6 +105,66 @@ def get_lab(db: Session, lab_id: str) -> Optional[CertLab]:
     return db.query(CertLab).filter(CertLab.id == lab_id).first()
 
 
+# ── Naming: why nothing here is derived from the CA's name alone ──────────────
+#
+# CAS never releases a resource id. A deleted pool's full name —
+# projects/<p>/locations/<l>/caPools/<id> — stays reserved for good, and every later
+# create with that id fails at the API:
+#
+#   Error code 3, message: Previously used CaPool ids may not be reused. A `CaPool` for
+#   `projects/…/locations/us-central1/caPools/demo-pipeline-pool` has previously been
+#   deleted
+#
+# In a feature whose whole point is that a CA gets DESTROYED, an id derived from the CA's
+# name alone can therefore be built exactly once: the first rebuild of that name — and
+# every rebuild after it — is refused, permanently, in that project and location. So the
+# generated id keeps the name as its readable part and carries a random suffix. The row
+# stores what was actually built, so the teardown still names the same pool.
+#
+# 63 is CAS's cap on a pool id AND on a certificate-authority id, and this module's CA id
+# is `<pool>-root` — so a pool id is capped shorter than the pool's own limit, and the
+# slug shorter again to leave room for its suffix.
+_CAS_ID_MAX = 63
+_POOL_ID_MAX = _CAS_ID_MAX - len("-root")
+_POOL_SLUG_MAX = _POOL_ID_MAX - len("-pool-") - 6
+_POOL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,%d}$" % _POOL_ID_MAX)
+
+
+def _slug(value: str) -> str:
+    """A CAS-legal fragment of a free-text name. Letters, digits, hyphens and underscores
+    are all a pool id may contain, and the name on the build form is free text — so
+    "Demo Pipeline" has to become `demo-pipeline` here rather than a 400 from the API
+    part-way through the apply."""
+    out = re.sub(r"[^a-z0-9_-]+", "-", (value or "").lower())
+    return out[:_POOL_SLUG_MAX].strip("-_") or "ca"
+
+
+def _pool_id_for(name: str) -> str:
+    """A pool id that is readable and single-use. See the note above — the suffix is what
+    makes rebuilding a CA of the same name possible at all."""
+    return f"{_slug(name)}-pool-{uuid.uuid4().hex[:6]}"
+
+
+def _enroll_identity_id(row) -> str:
+    """The id of the enrollment identity the plugin authenticates as — a GCP service
+    account id, an AWS IAM user name.
+
+    Both modules default it to the constant ``certauth-plugin``, and both namespaces are
+    wider than one lab: a service account id is unique per PROJECT and an IAM user name
+    per ACCOUNT. The constant therefore means the SECOND CA built in the same project
+    collides at create with ``alreadyExists`` — and so does the retry after an apply that
+    got as far as creating the identity and then failed, which is exactly what a reused
+    pool id does to it.
+
+    Derived from the row id rather than from the pool id, for two reasons: a GCP service
+    account id is capped at 30 characters, which most pool ids overflow, and the AWS side
+    has no pool to derive from at all. It must be reproducible, because ``_tf_variables``
+    feeds the destroy as well as the apply.
+    """
+    token = str(getattr(row, "id", "") or "").replace("-", "")[:8]
+    return f"certauth-{token}" if len(token) >= 6 else "certauth-plugin"
+
+
 def _tf_variables(row: CertLab) -> dict:
     """The -var set for this row's cloud. ``terraform destroy`` evaluates the module
     config too, so it needs the identical set — a required variable left unset fails the
@@ -120,6 +182,9 @@ def _tf_variables(row: CertLab) -> dict:
         # carries on the GCP side, which is why the row needs no extra column for it.
         return {"region": row.location or "",
                 "ca_common_name": f"{row.name} Root CA",
+                # Per row, not the module's constant default: an IAM user name is unique
+                # per ACCOUNT, so two labs would collide on it. See _enroll_identity_id.
+                "iam_user_name": _enroll_identity_id(row),
                 "tags": {"managed-by": "vm-dashboard", "purpose": "certificate-lab"}}
     return {"project": row.project or "",
             "location": row.location or "",
@@ -127,6 +192,8 @@ def _tf_variables(row: CertLab) -> dict:
             "tier": _cfg("cert_gcp_cas_tier", "DEVOPS"),
             "ca_id": f"{row.pool_id}-root",
             "ca_common_name": f"{row.name} Root CA",
+            # Per row, for the same reason — a service account id is unique per PROJECT.
+            "service_account_id": _enroll_identity_id(row),
             "labels": {"managed-by": "vm-dashboard", "purpose": "certificate-lab"}}
 
 
@@ -208,9 +275,23 @@ def provision(db: Session, *, name: str, project: str, created_by: str,
                 "the build form nor gcp_project/gcp_project_id in config supplies one")
         location = location or _cfg("cert_gcp_cas_location", "us-central1")
         # The pool id is what ends up in `pool=` on every managed-system address built
-        # against this CA, so it is deterministic rather than random: an operator reading
-        # an address back should recognise the pool it names.
-        pool_id = (pool_id or f"{name}-pool").strip().lower()
+        # against this CA, so the CA's name is the readable part of it — an operator
+        # reading an address back should recognise the pool it names. It cannot be ONLY
+        # the name, though: CAS reserves a deleted pool's id permanently, so a
+        # name-derived id builds once and every rebuild of that name is refused for good.
+        # Hence the suffix (see _pool_id_for).
+        pool_id = (pool_id or "").strip().lower()
+        if not pool_id:
+            pool_id = _pool_id_for(name)
+        elif not _POOL_ID_RE.match(pool_id):
+            # An explicit id is honoured as typed — mangling a value that goes on to
+            # identify the pool in every address would be worse — so an unusable one is
+            # refused here rather than failing the apply after the identity exists.
+            raise CertLabError(
+                f"{pool_id!r} cannot be a CAS pool id: CAS accepts letters, digits, "
+                f"hyphens and underscores only, and this id also becomes the root CA's "
+                f"id as {pool_id}-root, which caps it at {_POOL_ID_MAX} characters. "
+                f"Leave it blank to get one derived from the name.")
     else:
         # `template_dir` above proved a module exists, so reaching here means somebody
         # added one and stopped. Loud, because the alternative is a row shaped like a CAS
@@ -238,6 +319,79 @@ def provision(db: Session, *, name: str, project: str, created_by: str,
     return {"lab_id": row.id, "job_id": job.id}
 
 
+def _explain_apply_failure(row: CertLab, text: str) -> str:
+    """Prefix an apply failure with what the operator has to do, for the two failures
+    that read as nothing in particular and have a specific way out.
+
+    Both are id-reuse failures, and both arrive as a wall of plan output with the cause
+    on one line near the bottom — which is also the line that gets cut when the message
+    is truncated onto the row.
+    """
+    low = (text or "").lower()
+    if "may not be reused" in low:
+        return (f"CAS has permanently reserved the pool id {row.pool_id!r} — a deleted "
+                f"CaPool's name can never be used again in this project and location, so "
+                f"this build cannot succeed as asked. Destroy this row to clear what the "
+                f"attempt left behind, then build again leaving the pool id blank: a "
+                f"generated id carries a unique suffix for exactly this reason."
+                f"\n\n{text}")
+    if ("alreadyexists" in low or "already exists" in low) and "certauth-" in low:
+        # Read the id out of the provider's own text rather than re-deriving it: on a row
+        # built before the id became per-lab the collision is with the old constant, and
+        # naming a different account than the error does would send the operator nowhere.
+        found = re.search(r"certauth-[a-z0-9_-]*", low)
+        ident = found.group(0) if found else _enroll_identity_id(row)
+        return (f"The enrollment identity {ident!r} already exists — an earlier attempt "
+                f"created it and did not get to clean it up. Destroy this row (its "
+                f"teardown removes what the last attempt left behind) and build again."
+                f"\n\n{text}")
+    return text
+
+
+async def _rollback_failed_provision(row: CertLab, job_id: str) -> str:
+    """Best-effort ``terraform destroy`` of a build that died part-way through. Returns a
+    note to append to the failure message, and never raises.
+
+    A failed apply is **not** a no-op in the cloud. This one is the observed case: the
+    enrollment service account and its KEY were created, then the pool create was refused
+    for a reused id — leaving a live credential behind, and an identity id that then
+    collides with the retry. A CA pool bills from the moment it exists, so a partial build
+    is exactly as expensive as a whole one.
+
+    Deliberately non-fatal, like ``k8s_service._rollback_failed_provision``: the apply
+    error is the thing the operator needs to read, so a rollback that fails must not
+    replace it. The row stays ``failed`` either way, and Destroy re-runs the teardown.
+    """
+    from ..api.websocket import broadcast_progress
+
+    # No job_service.cancel_check in this stream, unlike the apply's: cancelling is one of
+    # the ways we get here, and re-checking would abort the rollback on its first line —
+    # leaving behind precisely the orphan it exists to clean up.
+    async def on_line(line: str) -> None:
+        await broadcast_progress(job_id, 90, "Rolling back the failed build…",
+                                 log_line=line)
+
+    logger.warning("cert-lab: apply failed for %s — rolling back the partial build",
+                   row.id)
+    try:
+        await broadcast_progress(job_id, 90, "Build failed — rolling back…")
+        await terraform.destroy(
+            _deploy_dir(job_id),
+            variables=_tf_variables(row),
+            template_dir=template_dir(row.cloud),
+            env=terraform_provider_env.provider_env(row.cloud),
+            on_line=on_line)
+    except Exception as exc:                                        # noqa: BLE001
+        logger.error("cert-lab: rollback FAILED for %s: %s", row.id, exc)
+        return ("\n\n[rollback] terraform destroy also failed — MANUAL CLEANUP REQUIRED. "
+                "Whatever the apply created is still live: a CA pool bills from the "
+                "moment it exists, and an enrollment key left behind is a live "
+                f"credential. Destroy this row to retry the teardown. Cause: {exc}")
+    logger.info("cert-lab: rollback complete for %s — partial build destroyed", row.id)
+    return ("\n\n[rollback] The partial build was destroyed — no cloud resources should "
+            "remain from this attempt.")
+
+
 async def run_provision_apply(db: Session, *, lab_id: str, job_id: str) -> None:
     """Worker entry point for ``certca_provision``."""
     from ..api.websocket import broadcast_progress
@@ -246,6 +400,7 @@ async def run_provision_apply(db: Session, *, lab_id: str, job_id: str) -> None:
         logger.warning("cert-lab: row %s vanished before apply", lab_id)
         return
     job_service.set_running(db, job_id)
+    built = False
     try:
         await broadcast_progress(job_id, 10, "Creating the certificate authority…")
         outputs = await terraform.apply(
@@ -254,6 +409,7 @@ async def run_provision_apply(db: Session, *, lab_id: str, job_id: str) -> None:
             env=terraform_provider_env.provider_env(row.cloud),
             on_line=_job_stream(job_id, 10, "Creating the certificate authority…",
                                 row.cloud))
+        built = True
         _read_outputs(row, outputs)
         row.status = "available"
         row.error_message = None
@@ -263,12 +419,21 @@ async def run_provision_apply(db: Session, *, lab_id: str, job_id: str) -> None:
             "lab_id": row.id, "pool_id": row.pool_id,
             "enroll_account": row.enroll_account})
     except Exception as exc:
+        # Tear down whatever the apply managed to create BEFORE the row goes failed: a
+        # partial build leaves a billing pool, or a live enrollment key, or an identity id
+        # that collides with the retry. `built` guards the case where the apply itself
+        # succeeded and something after it did not — there is nothing to roll back then,
+        # and destroying a CA that exists would be the opposite of the intent.
+        note = "" if built else await _rollback_failed_provision(row, job_id)
+        # Explained first, then the rollback note: error_message is truncated at 2000
+        # characters and the actionable line has to survive that.
+        message = f"{_explain_apply_failure(row, str(exc))}{note}"
         row.status = "failed"
-        row.error_message = str(exc)[:2000]
+        row.error_message = message[:2000]
         row.updated_at = datetime.utcnow()
         db.commit()
         logger.error("cert-lab: provision failed for %s: %s", lab_id, exc)
-        job_service.set_failed(db, job_id, str(exc))
+        job_service.set_failed(db, job_id, message)
 
 
 # Coarse progress milestones, matched against lowercased terraform output. Per cloud,
