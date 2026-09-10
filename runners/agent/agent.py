@@ -102,7 +102,14 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 #     any `ansible_*` extra var. A dashboard-supplied inventory could set
 #     `ansible_connection: local`, which would run the operator's playbook inside the runner
 #     container on this network instead of against the target it names.
-AGENT_VERSION = "2.5.0"
+# The PATCH digit exists so a host can be told apart from itself. Every gate here and in
+# agent_service compares (major, minor) only, so bumping it changes no behaviour anywhere —
+# what it changes is that the Agents page can answer "did this host actually pick up the
+# fix?". 2.5.0 shipped twice: once before the NanoCpus clamp and once after, and a POV
+# broker running the earlier one failed identically while reporting the same string as the
+# build that fixed it. A behaviour change the fleet cannot see is a behaviour change nobody
+# can confirm arrived, so bump this whenever the agent's behaviour moves.
+AGENT_VERSION = "2.5.1"
 
 log = logging.getLogger("agent")
 

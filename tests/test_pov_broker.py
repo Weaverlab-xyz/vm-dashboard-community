@@ -244,13 +244,29 @@ def test_a_failed_pull_never_costs_the_pov_its_agent():
     assert "||" in pull, pull
 
 
-def test_no_images_emits_no_loop_at_all():
-    """`for IMAGE in ; do` is a syntax error that would take the whole bootstrap with it,
-    and "no guest opted in for configuration yet" is an ordinary state."""
+def test_the_bootstrap_pulls_the_agent_image_itself():
+    """The one image whose staleness is invisible. `docker run` fetches only what is ABSENT
+    locally, so a broker VM resolves `dashboard-agent:latest` once -- at first bootstrap --
+    and every re-brokering afterwards re-runs that same cached copy. An agent fix then
+    cannot reach a POV that already has an agent: the NanoCpus clamp shipped and the next
+    Config Management run still returned "Range of CPUs is from 0.01 to 1.00"."""
     script = pov_broker.render_bootstrap(
         env_name="poc-01", dashboard_url="https://d", enroll_code="a",
         policy_yaml="v: 1\n")
-    assert "for IMAGE" not in script and "docker pull" not in script
+    pull_line = next(ln for ln in script.splitlines() if ln.startswith("for IMAGE in "))
+    assert pov_broker.AGENT_IMAGE in pull_line.replace(";", " ").split(), pull_line
+
+
+def test_the_agent_image_is_pulled_even_with_no_policy_images():
+    """A POV with no guest opted in for configuration names no extra image, and that used
+    to emit no pull loop at all -- which is exactly the POV that would keep running a
+    year-old agent. The agent's own image makes the list unconditional, which also settles
+    `for IMAGE in ; do`, the syntax error the old empty-list guard existed for."""
+    script = pov_broker.render_bootstrap(
+        env_name="poc-01", dashboard_url="https://d", enroll_code="a",
+        policy_yaml="v: 1\n")
+    assert "docker pull" in script
+    assert "for IMAGE in ; do" not in script
 
 
 def test_the_ansible_image_is_pulled_only_when_config_management_is_on():

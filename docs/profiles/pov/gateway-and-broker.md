@@ -76,12 +76,22 @@ on this host"* on a machine nobody had ever logged into. The **bootstrap** there
 them — the same script that mounts the Docker socket, under the same argument, and without
 the agent doing the pulling.
 
-Two images, and only the ones the generated policy actually names:
+The agent's **own** image, plus the ones the generated policy names:
 
 | Image | Pulled | Used by |
 |---|---|---|
+| `chrweav/dashboard-agent:latest` | always | the agent itself |
 | `beyondtrust/sra-jumpoint:latest` | always | the POV Gateway |
 | `chrweav/ansible-winrm:latest` | only once a guest is opted in for configuration | the Resource Broker and Entitle agent installs |
+
+**`chrweav/dashboard-agent:latest` is on that list for a different reason, and it is the
+one that used to be missing.** `docker run` fetches an image only when it is *absent*
+locally, so a broker VM resolved that tag exactly once — at first bootstrap — and every
+re-brokering afterwards started the copy cached in the guest's image store on the day the
+VM was built. A broker is long-lived, so **an agent fix could not reach a POV that already
+had an agent**: it merged, it was tagged, `:latest` moved, you pressed **Broker** to pick
+it up, and the guest ran the same old binary and failed the same old way. Pressing
+**Broker** now refreshes the agent as well as its runners.
 
 The pull runs **before** the agent is replaced, so a slow registry costs a re-broker
 nothing, and it is **non-fatal**: a POV with an enrolled agent and one missing image
@@ -119,10 +129,13 @@ nothing.
 
 A broker enrolled before this release has a `policy.yaml` with no `agent_gateway` grant
 and no `gateway:` block, and an agent image below **2.4.0**, the build that first carried
-the `agent_gateway` handler. Both are fixed the same way:
-pull a newer `chrweav/dashboard-agent` onto the broker VM, then press **Broker** on the
-POV, which re-issues the enrolment and rewrites the policy. The install refuses with that
-remedy rather than queueing a job the broker would decline.
+the `agent_gateway` handler. Both are fixed by pressing **Broker** on the POV, which
+pulls the current agent image, re-issues the enrolment and rewrites the policy. The
+install refuses with that remedy rather than queueing a job the broker would decline.
+
+Check it landed on the **Agents** page: the broker's reported version is the build that is
+actually running, and it moves on every agent change — a re-broker that leaves it
+unchanged did not fetch anything.
 
 ### Teardown
 
@@ -274,8 +287,15 @@ to have reaped it.
 ## Failure modes
 
 **The Gateway install refuses with "its policy.yaml predates the Gateway grant".** The
-broker was enrolled before this release. Pull a newer agent image onto the broker VM and
-press **Broker** — see [upgrading](#upgrading-a-pov-that-predates-this).
+broker was enrolled before this release. Press **Broker** — see
+[upgrading](#upgrading-a-pov-that-predates-this).
+
+**A job fails with an error that a merged fix was supposed to have removed** — the
+canonical one being Config Management refused with *"could not create the Ansible runner
+(400): Range of CPUs is from 0.01 to 1.00"*. The broker is running an older agent than
+the release notes describe. Compare the version on the **Agents** page against the one in
+the build you expect, and press **Broker**; before this release no amount of re-brokering
+would have changed it, because nothing ever re-pulled the agent image.
 
 **The Gateway registers online and every tunnel times out.** `privileged` is missing from
 the broker's `gateway:` block, so the container has no `NET_ADMIN`/`/dev/net/tun`. A

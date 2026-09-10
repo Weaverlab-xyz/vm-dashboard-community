@@ -382,20 +382,34 @@ def render_bootstrap(*, env_name: str, dashboard_url: str, enroll_code: str,
     * **Non-fatal.** ``set -eu`` is in force, so an unguarded pull failure would abort the
       bootstrap and leave the POV with no agent at all. A POV with an enrolled agent and one
       missing image refuses one job and names it, which is much the better failure.
+
+    **``AGENT_IMAGE`` is pulled too, and it is the one that must never be left out.**
+    ``docker run`` fetches an image only when it is *absent* locally, so the tag below is
+    resolved exactly once in a broker VM's life -- at first bootstrap. Every re-broker after
+    that is ``docker rm -f`` and ``docker run`` against a ``:latest`` that has been sitting
+    in the guest's image store since the day the VM was built, and a broker is a long-lived
+    VM. The effect is that **an agent fix can never reach a POV that already has an agent**:
+    it merges, it is tagged, ``:latest`` moves, the operator re-brokers to pick it up, and
+    the guest runs the same old binary and fails in the same old way. Not hypothetical --
+    the ``NanoCpus`` clamp shipped in the agent and the very next Config Management run
+    still returned "Range of CPUs is from 0.01 to 1.00", because the fixed agent was never
+    fetched. A re-broker is the moment the dashboard is entitled to refresh it, so it does,
+    under the same argument as everything else here: this VM is the dashboard's.
     """
-    # Built separately so an EMPTY list emits nothing at all: `for IMAGE in ; do` is a
-    # syntax error that would take the whole bootstrap with it, and "this POV has no guest
-    # opted in for configuration yet" is an ordinary state rather than an impossible one.
-    pulls = ""
-    if images:
-        pulls = (
-            "# The images this broker's policy names, fetched before the agent that needs\n"
-            "# them. The AGENT refuses to pull -- right on a customer's own host, but this\n"
-            "# VM is the dashboard's: it built it, wrote the policy and chose these names.\n"
-            "# A failure here warns and carries on: one refused job beats no agent at all.\n"
-            "for IMAGE in " + " ".join(images) + "; do\n"
-            "  docker pull \"$IMAGE\" || echo \"WARNING: could not pull $IMAGE\"\n"
-            "done\n\n")
+    # The agent's own image leads, and is why this loop is now unconditional: a POV with
+    # no guest opted in for configuration still needs its agent refreshed. The list can
+    # therefore never be empty, which is also what settles the empty-`for` syntax error
+    # that the previous guard existed for.
+    pulls = (
+        "# Every image this broker runs, fetched before the agent that needs them. The\n"
+        "# AGENT refuses to pull -- right on a customer's own host, but this VM is the\n"
+        "# dashboard's: it built it, wrote the policy and chose these names. Its OWN\n"
+        "# image is in the list because `docker run` pulls only what is ABSENT, so\n"
+        "# without this a re-broker re-runs the copy cached at first boot, forever.\n"
+        "# A failure here warns and carries on: one refused job beats no agent at all.\n"
+        "for IMAGE in " + " ".join((AGENT_IMAGE,) + tuple(images)) + "; do\n"
+        "  docker pull \"$IMAGE\" || echo \"WARNING: could not pull $IMAGE\"\n"
+        "done\n\n")
 
     stamp = (now or datetime.utcnow()).strftime("%Y-%m-%d %H:%M:%SZ")
     # The name reaches a shell comment. `api/pov` already constrains it to a slug, but a
