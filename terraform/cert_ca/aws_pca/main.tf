@@ -95,7 +95,7 @@ variable "usage_mode" {
 variable "iam_user_name" {
   type        = string
   default     = "certauth-plugin"
-  description = "Name of the IAM user that holds the plugin's enrollment credential"
+  description = "Name of the IAM user that holds the plugin's enrollment credential. Unique per ACCOUNT, so the default holds for one lab only — a second CA in the same account must pass its own, or its apply fails with EntityAlreadyExists after the CA exists"
 }
 
 variable "tags" {

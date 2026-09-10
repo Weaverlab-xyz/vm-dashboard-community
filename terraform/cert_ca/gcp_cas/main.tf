@@ -22,6 +22,20 @@
 #
 # Prove destroy before create: apply this module, destroy it immediately, and confirm in
 # the console that the pool and CA are gone rather than pending deletion.
+#
+# ── And a destroyed id is gone for good ──────────────────────────────────────
+#
+# The other half of the same behaviour, which only shows up on the REBUILD: CAS never
+# releases a resource id. Once the pool is deleted, projects/<p>/locations/<l>/caPools/
+# <pool_id> is reserved permanently, and an apply that asks for it again dies with
+#
+#   Error code 3, message: Previously used CaPool ids may not be reused.
+#
+# after the service account and its key have already been created. So `pool_id` must be
+# single-use — cert_lab_service generates one with a random suffix, and anything driving
+# this module by hand has to do the same. `service_account_id` is the same shape of trap
+# one namespace up: it is unique per PROJECT, so its default only works for one lab at a
+# time, and the caller passes a per-lab id.
 
 terraform {
   required_providers {
@@ -52,7 +66,7 @@ variable "location" {
 
 variable "pool_id" {
   type        = string
-  description = "CA pool id — this is the `pool=` value on the plugin's managed-system address"
+  description = "CA pool id — this is the `pool=` value on the plugin's managed-system address. SINGLE-USE: CAS reserves a deleted pool's id permanently, so a rebuild needs a new one (see the header)"
 }
 
 variable "tier" {
@@ -94,7 +108,7 @@ variable "key_algorithm" {
 variable "service_account_id" {
   type        = string
   default     = "certauth-plugin"
-  description = "Account id for the enrollment service account the plugin authenticates as"
+  description = "Account id for the enrollment service account the plugin authenticates as. Unique per PROJECT, so the default holds for one lab only — a second CA in the same project must pass its own, or its apply fails with alreadyExists after the pool exists"
 }
 
 variable "labels" {
