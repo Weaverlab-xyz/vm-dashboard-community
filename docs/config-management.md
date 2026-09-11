@@ -458,6 +458,14 @@ into the run. The operator never sees the value; it's scrubbed from job output a
 the use is audited. Requires the `secrets:use` permission. See
 [Using a Secrets-Management secret in a run](integrations/ansible\secrets.md#using-a-secrets-management-secret-in-a-run).
 
+The **SPIRE** page's build form offers the same two choices — a managed account or an
+SSH-key secret — reading the same `/api/config-mgmt/managed-accounts` and
+`/api/config-mgmt/secret-options` endpoints, refusing a run for the same reasons, and
+requiring the same `secrets:use` permission. One mental model covers both. It differs in
+two ways, both because a lab is one host running four fixed playbooks: the account must
+be **pinned** from that host's own list rather than matched by name, and a single
+checkbox reuses it as the sudo credential instead of offering a separate become picker.
+
 **Tag your runs.** The `Extra Vars` field on the run form accepts JSON
 — include a `run_id` or a deployment ticket number so when something
 breaks at midnight you can `grep` the logs back to the playbook

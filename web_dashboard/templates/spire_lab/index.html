@@ -176,7 +176,7 @@
       </p>
 
       <label class="block text-sm font-medium text-gray-700 mb-1">Cloud</label>
-      <select x-model="form.cloud" @change="form.host = ''"
+      <select x-model="form.cloud" @change="form.host = ''; onHostChange()"
               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3">
         <template x-for="c in (options.clouds || [])" :key="c">
           <option :value="c" x-text="c"></option>
@@ -184,7 +184,7 @@
       </select>
 
       <label class="block text-sm font-medium text-gray-700 mb-1">Host</label>
-      <select x-model="form.host"
+      <select x-model="form.host" @change="onHostChange()"
               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
         <option value="">Pick a VM this dashboard deployed&hellip;</option>
         <template x-for="h in hostsFor(form.cloud)" :key="h.name">
@@ -203,6 +203,81 @@
         </span>
       </p>
 
+      <!-- Connection identity. Hidden without secrets:use, the same way Config
+           Management hides its panel: the two list endpoints 403 for that user, so the
+           picker would only ever be empty. Blank stays valid — it means "use the keypair
+           this VM was deployed with". -->
+      <div x-show="canUseSecrets" x-cloak class="border border-gray-100 rounded-lg p-3 mb-4">
+        <p class="text-sm font-medium text-gray-700 mb-2">How the runs log in
+          <span class="text-gray-400 font-normal">(optional)</span></p>
+
+        <label class="block text-xs font-medium text-gray-600 mb-1">Password Safe account</label>
+        <div x-show="managedLoading" x-cloak class="text-[11px] text-gray-400 mb-1">
+          Looking up managed accounts for this host&hellip;</div>
+        <select x-show="managedEnabled && !managedLoading" x-cloak
+                x-model="managedAccountKey" @change="onAccountChange()"
+                :disabled="!!form.secret_ssh_key_source"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm disabled:bg-gray-50 disabled:text-gray-400">
+          <option value="">&mdash; none &mdash;</option>
+          <template x-for="s in managedSystems" :key="s.system_id">
+            <optgroup :label="s.name + ' (' + s.ip + ')'">
+              <template x-for="a in s.accounts" :key="a.account_id">
+                <option :value="s.system_id + ':' + a.account_id"
+                        x-text="a.name + (a.domain ? ' @' + a.domain : '') + (a.uses_ssh_key ? ' [SSH key]' : ' [password]')"></option>
+              </template>
+            </optgroup>
+          </template>
+        </select>
+        <p x-show="!managedEnabled && !managedLoading" x-cloak
+           class="text-[11px] text-gray-400">
+          <span x-show="!form.host">Pick a host first.</span>
+          <span x-show="form.host">No managed accounts for this host &mdash; Password Safe
+            may be disabled, or the VM is not onboarded there.</span>
+        </p>
+        <p x-show="managedError" x-cloak class="text-[11px] text-amber-600 mt-1"
+           x-text="managedError"></p>
+
+        <label class="flex items-start gap-2 mt-2 text-[11px] text-gray-500">
+          <input type="checkbox" x-model="form.managed_become_self" class="mt-0.5"
+                 :disabled="!managedAccountKey || selectedAccountUsesSshKey">
+          <span>
+            Also use this account for <strong>sudo</strong>.
+            <span x-show="selectedAccountUsesSshKey" x-cloak class="text-amber-600">
+              Unavailable for an <code>[SSH key]</code> account &mdash; there is no
+              password to check out for sudo.</span>
+            <span x-show="!selectedAccountUsesSshKey">
+              All four playbooks run with <code>become</code>, so leave this off only if
+              the account is root or has passwordless sudo.</span>
+          </span>
+        </label>
+
+        <label class="block text-xs font-medium text-gray-600 mt-3 mb-1">SSH private key</label>
+        <select x-model="form.secret_ssh_key_source" :disabled="!!managedAccountKey"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm disabled:bg-gray-50 disabled:text-gray-400">
+          <option value="">&mdash; auto: the keypair this VM was deployed with &mdash;</option>
+          <template x-for="o in secretOptions" :key="'k-' + o.key">
+            <option :value="o.key" x-text="o.description"></option>
+          </template>
+        </select>
+
+        <label class="block text-xs font-medium text-gray-600 mt-3 mb-1">
+          Login user <span class="text-gray-400 font-normal">(optional)</span></label>
+        <input type="text" x-model="form.login_user" placeholder="ubuntu"
+               :disabled="!!managedAccountKey"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono disabled:bg-gray-50 disabled:text-gray-400">
+
+        <p class="text-[11px] text-gray-400 mt-2">
+          An account and a key are two answers to one question, so picking one disables the
+          other. A managed account also supplies its own login user. An SSH-key secret
+          works on every runner; a managed account works on the local and Azure (ACI)
+          runners, and
+          <span x-show="managedEphemeralEnabled" x-cloak>on ECS / Cloud Run via a
+            short-lived RBAC-locked store copy.</span>
+          <span x-show="!managedEphemeralEnabled" x-cloak>on ECS / Cloud Run only if
+            &lsquo;Ephemeral cloud secrets&rsquo; is enabled in Settings.</span>
+        </p>
+      </div>
+
       <label class="block text-sm font-medium text-gray-700 mb-1">
         Administrative SPIFFE ID <span class="text-gray-400 font-normal">(optional)</span>
       </label>
@@ -219,6 +294,19 @@
 
       <div class="border border-gray-200 bg-gray-50 rounded-lg px-3 py-2 text-xs text-gray-500 mb-4">
         <p class="mb-1"><strong>What this will do, in order:</strong></p>
+        <p class="mb-1">
+          Connecting as
+          <span x-show="managedAccountKey" x-cloak>
+            <strong x-text="selectedAccountName"></strong> (Password Safe, checked out
+            just&#8209;in&#8209;time<span x-show="form.managed_become_self">, sudo
+            included</span>)</span>
+          <span x-show="!managedAccountKey && form.secret_ssh_key_source" x-cloak>
+            <strong x-text="form.login_user || 'the configured user'"></strong>, using the
+            SSH-key secret you picked</span>
+          <span x-show="!managedAccountKey && !form.secret_ssh_key_source" x-cloak>
+            <strong x-text="form.login_user || 'the configured user'"></strong>, using the
+            keypair this VM was deployed with</span>
+        </p>
         <ol class="list-decimal list-inside space-y-0.5">
           <li>Open <code>tcp/<span x-text="options.bind_port || 8081"></span></code> on the
               cloud ACL to
@@ -342,7 +430,22 @@ function spireLabPage() {
     toastType: 'info',
 
     buildOpen: false,
-    form: { name: '', trust_domain: '', cloud: 'azure', host: '', admin_spiffe_id: '' },
+    // Kept in step with blankForm() below. Two initialisers that drifted apart is how a
+    // field ends up undefined on the second build of a session.
+    form: { name: '', trust_domain: '', cloud: 'azure', host: '', admin_spiffe_id: '',
+            secret_ssh_key_source: '', managed_become_self: false, login_user: '' },
+
+    // Credential pickers, mirroring the Config-Management page. managedAccountKey lives
+    // out here rather than on `form`: what the request needs is the resolved REF, built
+    // at submit time, not the "system:account" string the select binds to.
+    canUseSecrets: false,
+    secretOptions: [],
+    managedEnabled: false,
+    managedEphemeralEnabled: false,
+    managedLoading: false,
+    managedError: '',
+    managedSystems: [],
+    managedAccountKey: '',
 
     onboardOpen: false,
     onboard: null,
@@ -351,7 +454,7 @@ function spireLabPage() {
     bundlePem: '',
 
     async init() {
-      await Promise.all([this.load(), this.loadOptions()]);
+      await Promise.all([this.load(), this.loadOptions(), this.loadSecretOptions()]);
     },
 
     async load() {
@@ -406,16 +509,111 @@ function spireLabPage() {
       return 'text-gray-600';
     },
 
+    // ONE shape, used by openBuild() and matching the `form` literal above.
+    blankForm(cloud) {
+      return { name: '', trust_domain: '', cloud: cloud || 'azure', host: '',
+               admin_spiffe_id: '', secret_ssh_key_source: '',
+               managed_become_self: false, login_user: '' };
+    },
+
     openBuild() {
-      this.form = { name: '', trust_domain: '', cloud: this.form.cloud,
-                    host: '', admin_spiffe_id: '' };
+      this.form = this.blankForm(this.form.cloud);
+      this.resetCredential();
       this.buildOpen = true;
+    },
+
+    // Succeeds only for a user with secrets:use (admins included); a 403 hides the
+    // whole panel, which is what the Config-Management page does too.
+    async loadSecretOptions() {
+      try {
+        this.secretOptions = (await API.get('/api/config-mgmt/secret-options') || [])
+          .filter(o => o.has_value);
+        this.canUseSecrets = true;
+      } catch (e) { this.canUseSecrets = false; }
+    },
+
+    resetCredential() {
+      this.managedSystems = [];
+      this.managedAccountKey = '';
+      this.managedError = '';
+    },
+
+    // The picked host row, for its IP and its deploy NAME. Both are sent to the lookup:
+    // cloud-native onboarding registers a managed system under the deploy name with a
+    // placeholder IP, so an IP-only lookup misses it.
+    selectedHost() {
+      return this.hostsFor(this.form.cloud).find(h => h.name === this.form.host) || null;
+    },
+
+    // The host is chosen in THIS form, so the account list reloads when it changes —
+    // the equivalent of Config Management's onTargetChange. Both ids are scoped to one
+    // managed system, so a stale key would check out one host's credential and connect
+    // to another; clear it first, always.
+    async onHostChange() {
+      this.resetCredential();
+      this.form.managed_become_self = false;
+      const h = this.selectedHost();
+      if (!this.canUseSecrets || !h || !h.ip) { this.managedEnabled = false; return; }
+      this.managedLoading = true;
+      try {
+        let url = '/api/config-mgmt/managed-accounts?host=' + encodeURIComponent(h.ip);
+        if (h.name) url += '&name=' + encodeURIComponent(h.name);
+        const r = (await API.get(url)) || {};
+        this.managedEnabled = !!r.enabled;
+        this.managedEphemeralEnabled = !!r.ephemeral_enabled;
+        this.managedSystems = r.systems || [];
+        if (r.error) this.managedError = r.error;
+      } catch (e) {
+        this.managedEnabled = true;
+        this.managedError = e.message || 'Managed-account lookup failed.';
+      } finally { this.managedLoading = false; }
+    },
+
+    onAccountChange() {
+      // A DSS account has a private key, not a password, so there is nothing to check
+      // out for sudo — drop the flag rather than sending one the server would honour.
+      if (!this.managedAccountKey || this.selectedAccountUsesSshKey) {
+        this.form.managed_become_self = false;
+      }
+    },
+
+    _account(key) {
+      if (!key) return null;
+      const [sid, aid] = key.split(':');
+      const sys = (this.managedSystems || []).find(s => String(s.system_id) === sid);
+      if (!sys) return null;
+      const acct = (sys.accounts || []).find(a => String(a.account_id) === aid);
+      return acct ? { sys, acct } : null;
+    },
+
+    get selectedAccountUsesSshKey() {
+      const f = this._account(this.managedAccountKey);
+      return !!(f && f.acct.uses_ssh_key);
+    },
+
+    get selectedAccountName() {
+      const f = this._account(this.managedAccountKey);
+      return f ? f.acct.name : '';
+    },
+
+    // PINNED: both ids plus the name and the SSH-key flag. A name-only ref is the bulk
+    // shape and the server refuses it here, because a lab has exactly one host.
+    resolveManaged() {
+      const f = this._account(this.managedAccountKey);
+      if (!f) return null;
+      return { system_id: f.sys.system_id, account_id: f.acct.account_id,
+               account_name: f.acct.name, uses_ssh_key: !!f.acct.uses_ssh_key };
+    },
+
+    buildPayload() {
+      return { ...this.form,
+               managed_account: this.canUseSecrets ? this.resolveManaged() : null };
     },
 
     async build() {
       this.busy = true;
       try {
-        await API.post('/api/spire-lab', this.form);
+        await API.post('/api/spire-lab', this.buildPayload());
         this.buildOpen = false;
         this.notify('Building — the four playbooks each get their own job. Follow them in Jobs.');
         this.load();

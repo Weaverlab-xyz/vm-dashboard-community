@@ -71,11 +71,19 @@ reach, and set an auto-delete timer.
 Nothing SPIRE-specific happens here: it is an ordinary VM, so it already gets the
 auto-delete timer, ref-counted NAT and Password Safe VM onboarding.
 
-**Deploy it from the cloud page, not by hand in the portal or the CLI.** The Ansible
-runner resolves the host's SSH key from that VM's own *deploy job* metadata, so a VM the
-dashboard did not create is one no run can log in to — and the SPIRE page will not offer
-it as a host at all, because it re-derives the host from those same rows rather than
-trusting the name it is given.
+**Deploy it from the cloud page, not by hand in the portal or the CLI.** The SPIRE page
+will not offer a VM it did not create as a host at all, because it re-derives the host
+from its own deploy rows rather than trusting the name it is given — four root playbooks
+against an arbitrary address is not something it accepts. Deploying it here is also what
+gives the runner a keypair to find by default: it resolves the host's SSH key from that
+VM's own *deploy job* metadata.
+
+That default is now a default rather than the only option. If this host's deploy record
+carries no usable keypair, pick a credential in §3's build form instead of rebuilding the
+VM — a Password Safe managed account or a Secrets-Management SSH-key secret, with an
+optional login user. Tick **"also use this account for sudo"** for any account that is
+not root and has no passwordless sudo: all four playbooks run with `become` and there is
+no separate sudo credential on the form.
 
 **Pass:** the VM reaches `running` and Config Management lists it as a target.
 
@@ -222,3 +230,9 @@ before looking anywhere else.
 | Discovery returns fewer accounts than expected | Read the exclusion counts; each category is reported separately. |
 | `Minting is blocked because SpiffeMintablePathPrefix is not set` | Working as designed. Minting is inert until an operator names the mintable namespace. |
 | The credential appeared in a job log | Stop and fix the playbook. `spire-admin-identity.yml` must never print it — `tests/test_playbook_spire.py` pins that. |
+| A stage fails `Load key "/tmp/ssh_key": error in libcrypto`, then `Permission denied (publickey)` | An **empty** key file, not a rejected key. Older builds shipped one whenever the key could not be resolved. Current builds fail the stage with a named reason instead; if you see this, the image predates that fix. |
+| `no usable connection credential for <ip> on the <RUNNER> runner` | Nothing resolved: this VM's deploy job records no keypair secret and no per-cloud global key is set. Pick a managed account or an SSH-key secret in the build form. |
+| `the SSH-key secret '<name>' resolved to no value` | The secret is registered but empty. Check it on the Secrets page — the run refused rather than silently falling back to a different key. |
+| `sudo: a password is required` in stage 1 | The chosen Password Safe account is not root and has no passwordless sudo. Rebuild with **"also use this account for sudo"** ticked. |
+| The sudo checkbox is greyed out | The selected account is `[SSH key]` (DSS-managed) — it has a private key, not a password, so there is nothing to check out for sudo. Use a password account, or give this one passwordless sudo. |
+| `Managed-account checkout on the ECS / Cloud Run runners requires 'Ephemeral cloud secrets'` | Expected on an AWS or GCP lab with a managed account. Enable it in Settings, or use an SSH-key secret, which works on every runner. |

@@ -413,11 +413,13 @@ def _can_use_secrets(user) -> bool:
 # StoreMismatch to an actionable HTTP 400.
 def _effective_runner(cloud: str) -> str:
     """The Ansible runner backend that will actually handle a run for this target
-    cloud — per-cloud override (ansible_runner_<cloud>) falling back to global."""
-    runner = _cfg("ansible_runner") or "local"
-    if cloud in ("aws", "azure", "gcp"):
-        runner = _cfg(f"ansible_runner_{cloud}") or runner
-    return runner
+    cloud — per-cloud override (ansible_runner_<cloud>) falling back to global.
+
+    Delegates to services/ansible_run_gate so the SPIRE lab's build form predicts the
+    runner the same way this endpoint does. The name stays because
+    services/ansible_local_run_service names it in prose."""
+    from ..services import ansible_run_gate
+    return ansible_run_gate.effective_runner(cloud, cfg=_cfg)
 
 
 def _validate_cloud_secret_stores(runner: str, secret_vars: dict | None,
@@ -571,10 +573,16 @@ async def _run_agent_ansible(payload: "RunRequest", db, current_user):
                     f"redirect the play into the runner container instead of the target. "
                     f"Use the run form's own user / key / become fields instead."))
 
-    if payload.secret_vars and not _can_use_secrets(current_user):
-        raise HTTPException(
-            status_code=403,
-            detail="Using a Secrets-Management secret in a run requires the 'secrets:use' permission.")
+    # Same 403, worded once in services/ansible_run_gate. No managed-account arm: the
+    # agent path resolves one of its own later, and `password_safe_enabled=True` here
+    # means "not this check's business", not "assumed on".
+    from ..services import ansible_run_gate as _gate
+    _refusal = _gate.check_permission(
+        wants_secret=bool(payload.secret_vars),
+        can_use_secrets=_can_use_secrets(current_user),
+        has_managed=False, password_safe_enabled=True)
+    if _refusal:
+        raise HTTPException(status_code=_refusal.status, detail=_refusal.detail)
 
     overrides = _resolve_agent_target(payload, db)
     asset_backend = payload.asset_backend or storage_service.active_backend()
@@ -678,12 +686,18 @@ async def _run_cloud_localhost(payload: "RunRequest", db, current_user):
         raise HTTPException(status_code=400, detail=problem)
 
     # Only operator-picked named secret_vars apply to a localhost play (no SSH key /
-    # become / managed-account). Using one requires the secrets:use permission.
+    # become / managed-account). Using one requires the secrets:use permission — the
+    # same 403, worded once in services/ansible_run_gate. Deliberately only the
+    # PERMISSION half: a database run's credential is delivered inline, so there is no
+    # store-residency or ephemeral requirement for this path to consult.
+    from ..services import ansible_run_gate as _gate
     wants_secret = bool(payload.secret_vars)
-    if wants_secret and not _can_use_secrets(current_user):
-        raise HTTPException(
-            status_code=403,
-            detail="Using a Secrets-Management secret in a run requires the 'secrets:use' permission.")
+    _refusal = _gate.check_permission(
+        wants_secret=wants_secret,
+        can_use_secrets=_can_use_secrets(current_user),
+        has_managed=False, password_safe_enabled=True)
+    if _refusal:
+        raise HTTPException(status_code=_refusal.status, detail=_refusal.detail)
 
     description = f"Ansible ({kind}): {payload.asset} → {target_label}"
     job = job_service.create_job(
@@ -777,22 +791,25 @@ async def run_playbook(
     # permission (admins bypass) — the operator never sees the value. Named-var and
     # become-password secrets work on both the local and the cloud runners; on the
     # cloud they are injected via the provider's secret channel (ECS valueFrom /
-    # Cloud Run secret-env / ACI secure_value).
+    # Cloud Run secret-env / ACI secure_value). A managed-account checkout additionally
+    # needs BeyondTrust Password Safe enabled.
+    #
+    # Both refusals are worded in services/ansible_run_gate and shared with the SPIRE
+    # lab's build form: two pages telling one operator two different things about one
+    # Settings checkbox is the failure that sharing them prevents.
+    from ..services import ansible_run_gate as _gate, config_service as cs
     has_managed = bool(payload.managed_account or payload.managed_become)
     wants_secret = bool(payload.secret_vars or payload.secret_become_source
                         or payload.secret_ssh_key_source or has_managed)
-    if wants_secret and not _can_use_secrets(current_user):
-        raise HTTPException(
-            status_code=403,
-            detail="Using a Secrets-Management secret in a run requires the 'secrets:use' permission.")
-
-    # A managed-account checkout needs BeyondTrust Password Safe enabled.
-    if has_managed:
-        from ..services import config_service as cs
-        if not cs.get_bool("password_safe_enabled"):
-            raise HTTPException(
-                status_code=400,
-                detail="Managed-account checkout requires BeyondTrust Password Safe to be enabled in Settings.")
+    _refusal = _gate.check_permission(
+        wants_secret=wants_secret,
+        can_use_secrets=_can_use_secrets(current_user),
+        has_managed=has_managed,
+        # Short-circuited, so a run with no managed account still costs no config read
+        # here — the gate ignores this value in that case anyway.
+        password_safe_enabled=has_managed and cs.get_bool("password_safe_enabled"))
+    if _refusal:
+        raise HTTPException(status_code=_refusal.status, detail=_refusal.detail)
 
     atype = ansible_local_service.asset_type(payload.asset)
 
@@ -808,25 +825,28 @@ async def run_playbook(
             eff_runner, payload.secret_vars, payload.secret_become_source)
 
     # Managed-account checkout works on the local and ACI runners (both inject the
-    # credential inline). ECS / Cloud Run reference a store secret, so a JIT-checked-
-    # out credential needs an ephemeral, RBAC-locked store copy — gated behind an
-    # explicit opt-in (it copies a PAM-vaulted credential into the cloud store for
-    # the run). Rejected up front when that isn't enabled.
-    from ..services import managed_accounts as _ma, config_service as _cs2
-    if _ma.requires_ephemeral_store(has_managed, eff_runner, is_adhoc, atype == "playbook"):
-        if not _cs2.get_bool("ansible_cloud_ephemeral_secrets_enabled"):
-            raise HTTPException(
-                status_code=400,
-                detail=("Managed-account checkout on the ECS / Cloud Run runners requires "
-                        "'Ephemeral cloud secrets' to be enabled in Settings (it briefly copies "
-                        "the credential into the cloud store, RBAC-locked). Otherwise use the "
-                        "local or Azure (ACI) runner."))
-        if eff_runner == "gcp" and not _cfg("gcp_ansible_runner_service_account"):
-            raise HTTPException(
-                status_code=400,
-                detail=("GCP ephemeral secrets require 'gcp_ansible_runner_service_account' to be "
-                        "set — the Cloud Run job runs as that SA and read access to the ephemeral "
-                        "secret is locked to it."))
+    # credential inline); on ECS / Cloud Run it needs an ephemeral store copy, which is
+    # an explicit opt-in. Rejected up front when that isn't enabled — see the gate.
+    #
+    # `requires_ephemeral_store` is called HERE, below the k8s/database dispatch, and
+    # must stay there: a cloud database run must never be subject to a rule written for
+    # the VM SSH path, and tests/test_database_registration pins this call's position
+    # relative to that dispatch. Only its ANSWER crosses into the gate, which is what
+    # lets that module stay stdlib-pure and testable by file path.
+    from ..services import managed_accounts as _ma
+    _needs_ephemeral = _ma.requires_ephemeral_store(
+        has_managed, eff_runner, is_adhoc, atype == "playbook")
+    _refusal = _gate.check_runner_capability(
+        needs_ephemeral_store=_needs_ephemeral,
+        # Both read only when the predicate says they matter, as before — the common
+        # run is not a managed-account run on a store-referencing runner.
+        ephemeral_enabled=(_needs_ephemeral
+                           and cs.get_bool("ansible_cloud_ephemeral_secrets_enabled")),
+        runner=eff_runner,
+        gcp_runner_service_account=(
+            _cfg("gcp_ansible_runner_service_account") if _needs_ephemeral else ""))
+    if _refusal:
+        raise HTTPException(status_code=_refusal.status, detail=_refusal.detail)
     description = f"Ansible ({atype}): {payload.asset} → {payload.target}"
 
     # Everything the run needs, persisted so the durable runner can reconstruct it.

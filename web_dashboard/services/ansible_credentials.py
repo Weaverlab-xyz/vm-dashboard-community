@@ -199,6 +199,14 @@ async def resolve(db, *, secret_vars=None, secret_become_source: str = "",
                 out.scrub.append(bcred)
         except btapi_service.BTAPIError as exc:
             raise CredentialError(f"Password Safe checkout failed: {exc}") from exc
+        # One request id, once. When the connection account is ALSO the become account
+        # — the SPIRE lab's "also use for sudo" — Password Safe returns the already-open
+        # request for the second checkout rather than opening a second one
+        # (ConflictOption=reuse, see btapi_service), so the same id arrives twice. Both
+        # rotate-on-check-in and check-in are best-effort, so a duplicate is harmless,
+        # but two entries would misreport how many requests this run actually opened.
+        out.request_ids = list(dict.fromkeys(out.request_ids))
+
         # Inline runners consume everything through extra_vars; a cloud runner reads the
         # two dicts separately and routes managed_cred_vars through an ephemeral store.
         out.extra_vars.update(out.managed_cred_vars)

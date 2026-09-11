@@ -70,7 +70,13 @@ def _find_cloud_deploy_meta(db, cloud: str, ip: str) -> dict:
         meta = job.metadata_dict
         if meta.get("destroyed"):
             continue
-        if (meta.get("public_ip") or meta.get("private_ip")) == ip:
+        # BOTH addresses, not `(public or private) == ip`: that `or` short-circuits to
+        # the public address, so a run aimed at a VM's PRIVATE ip never matched a deploy
+        # job that also recorded a public one. The miss is silent — no build key found,
+        # so the caller falls back to the per-cloud global key the host may not trust,
+        # an empty key file, and `Permission denied (publickey)`. `ip` is guaranteed
+        # truthy by the guard above, so a blank recorded address cannot match it.
+        if ip in (meta.get("public_ip"), meta.get("private_ip")):
             return meta
     return {}
 
@@ -285,6 +291,33 @@ async def _run_job(
         managed_request_ids = _creds.request_ids
         secret_values = _creds.scrub
 
+        async def _abandon(reason: str) -> None:
+            """Fail the job before the runner launches, releasing anything already
+            checked out. A Password Safe request is opened for `duration` minutes
+            (60 by default), so a run that gives up after the checkout must hand it
+            back rather than leave a credential requested for an hour on a play that
+            never started. Best-effort, like the post-run check-in."""
+            if managed_request_ids:
+                from ..services import btapi_service as _bt
+                for _rid in managed_request_ids:
+                    await _bt.checkin_ps_request(_rid)
+            job_service.set_failed(db, job_id, reason)
+
+        # An SSH-key secret the operator NAMED, which resolved to nothing, is not the
+        # same as no key having been chosen: both paths below would quietly fall through
+        # to the auto-derived deploy key, so the run would connect with a DIFFERENT
+        # credential than was asked for and then succeed or fail for the wrong reason.
+        # `ansible_credentials.resolve` returns None rather than raising, so this is the
+        # only place that distinction still exists. Registered-but-empty is the common
+        # shape, which is why the message says where to look.
+        if secret_ssh_key_source and not secret_ssh_pem:
+            await _abandon(
+                f"the SSH-key secret '{secret_ssh_key_source}' resolved to no value, so "
+                f"this run would have silently fallen back to a different key. Check it "
+                f"on the Secrets page — a registered secret with an empty value looks "
+                f"exactly like this.")
+            return
+
         # Per-target-cloud runner backend: an AWS-target job uses
         # ansible_runner_aws, Azure → ansible_runner_azure, GCP → ansible_runner_gcp,
         # each falling back to the global ansible_runner. The target cloud is the
@@ -356,6 +389,37 @@ async def _run_job(
                 except Exception as exc:
                     logger.warning("SSH key retrieval failed (%s) — proceeding without key: %s", key_cloud, exc)
 
+            # An EMPTY key file is worse than no key file. Every cloud runner's command
+            # writes /tmp/ssh_key unconditionally and always passes --private-key, so a
+            # blank one makes OpenSSH report `Load key "/tmp/ssh_key": error in
+            # libcrypto` and then `Permission denied (publickey)` — which reads as a
+            # credential the HOST rejected rather than a credential that was never
+            # found, and sends the operator to the firewall and the account instead of
+            # to the key. The local path has always been right here (run_playbook's
+            # `has_key`); this is the cloud path catching up.
+            #
+            # NUANCE: a managed PASSWORD account legitimately has no key — its
+            # credential rides ansible_ssh_pass in the inline var set — so the condition
+            # is "no key AND no password", never "no key". secret_vars is checked too
+            # because a named var may itself be ansible_ssh_pass, and on ECS/Cloud Run
+            # that value travels through the store channel and never lands in
+            # secret_extra_vars.
+            _pw_vars = ("ansible_ssh_pass", "ansible_password")
+            _has_password = any(managed_cred_vars.get(v) or secret_extra_vars.get(v)
+                                or (secret_vars or {}).get(v) for v in _pw_vars)
+            if not ssh_key_pem and not _has_password:
+                await _abandon(
+                    f"no usable connection credential for {target} on the "
+                    f"{runner.upper()} runner: no SSH key could be resolved for this "
+                    f"{key_cloud.upper()} VM (its deploy job's keypair secret, then the "
+                    f"per-cloud global key) and no password credential was supplied. "
+                    f"Launching anyway would write an empty private-key file and fail as "
+                    f"'Permission denied (publickey)', which looks like the host rejected "
+                    f"a key rather than like there was none. Pick an SSH-key secret or a "
+                    f"Password Safe managed account for this run, or check that this VM's "
+                    f"deploy job recorded the keypair secret it was built with.")
+                return
+
             ssh_key_b64 = base64.b64encode(ssh_key_pem.encode()).decode() if ssh_key_pem else ""
 
             # Secret injection → per-provider secret channel. ACI injects inline
@@ -363,8 +427,10 @@ async def _run_job(
             # resolved var set — #216/#217 named vars + become AND any managed-
             # account credential (already merged into secret_extra_vars above) — as
             # inline vars. The SSH key rides SSH_KEY_B64 (above). ECS/Cloud Run
-            # reference a store secret, so they resolve per-provider store refs and
-            # a managed-account run never reaches here (rejected at the endpoint).
+            # reference a store secret, so they resolve per-provider store refs and a
+            # managed-account run reaches here only with the ephemeral-store opt-in
+            # enabled — the endpoint refuses it otherwise (see ansible_run_gate), and
+            # the `if managed_cred_vars:` branch below is what handles the opted-in case.
             from ..services import cloud_ansible_secrets as _cas
             ephemeral_cleanup: list = []
             if runner == "aci":

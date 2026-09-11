@@ -79,10 +79,33 @@ build form names the ones that are missing. Storage is where assets are uploaded
 Management only *runs* them.
 
 **It attaches to a VM you already deployed rather than creating one.** That is not a
-shortcut: the Ansible runner resolves the host's SSH key from that VM's own *deploy job*,
-so a host built outside the normal cloud page is one the runner cannot log in to. The VM
-also keeps its own auto-delete timer and its own Destroy, which is why tearing the lab
-down closes `tcp/8081` and leaves the host alone.
+shortcut: the page re-derives the host from this dashboard's own deploy rows rather than
+trusting an address it is handed, because four privileged playbooks against a host of the
+caller's choosing is not something it should accept. So a VM built by hand in the portal
+will not be offered as a host at all. The VM also keeps its own auto-delete timer and its
+own Destroy, which is why tearing the lab down closes `tcp/8081` and leaves the host
+alone.
+
+**How the runs log in is yours to choose.** By default the Ansible runner resolves the
+host's SSH key from that VM's own *deploy job*, which needs nothing from you. The build
+form also takes either a **Password Safe managed account** (checked out just-in-time) or
+a **Secrets-Management SSH-key secret**, plus an optional login user — the same two
+pickers Config Management has, reading the same two endpoints. Two things worth knowing
+before you pick an account:
+
+- All four playbooks run with `become`, and the form has no separate sudo credential, so
+  tick **"also use this account for sudo"** unless the account is root or has passwordless
+  sudo. It reuses the same Password Safe request rather than opening a second one.
+- A `[SSH key]` (DSS-managed) account has a private key and not necessarily a password, so
+  it cannot supply a sudo password — the checkbox is disabled for those.
+- A managed account works on the local and Azure (ACI) runners directly. On ECS or Cloud
+  Run it needs *Ephemeral cloud secrets* enabled in Settings; an SSH-key secret works on
+  every runner.
+
+Choosing nothing keeps the auto-derived key. If that resolves to nothing, the stage now
+fails saying so, rather than shipping an empty key file to the runner and surfacing as
+`Permission denied (publickey)` — which reads like the host rejected a key rather than
+like there was none.
 
 What the build does, in order:
 

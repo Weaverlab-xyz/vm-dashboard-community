@@ -37,6 +37,13 @@ from ..database import User, get_db
 from ..services import config_service, spire_lab_service
 from ..services.spire_lab_service import SpireLabError
 from .auth import require_permission
+# ONE definition of the managed-account ref, imported rather than re-declared: its
+# "pinned ids or a name" validator is the invariant, and a second copy would let the two
+# drift — a drift that presents as a run checking out the wrong host's credential.
+# api/cloud_databases.py already imports a helper from this module, so the direction is
+# established, and api/config_mgmt imports nothing from here, so there is no cycle.
+from .config_mgmt import (ManagedAccountRef, _can_use_secrets,
+                          _validate_cloud_secret_stores)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/spire-lab", tags=["spire-lab"])
@@ -96,6 +103,12 @@ def _shape(row) -> dict:
         "admin_svid_expires_at": (row.admin_svid_expires_at.isoformat()
                                   if row.admin_svid_expires_at else None),
         "ps_system_id": row.ps_system_id, "ps_account_id": row.ps_account_id,
+        # WHICH credential this lab was built with — "managed" / "ssh-key-secret" /
+        # "auto". The kind and the account NAME only: a name is not a credential (it is
+        # also what becomes ansible_user), and the ref itself has no business on a page.
+        "credential_kind": spire_lab_service.credential_kind(row),
+        "credential_account": spire_lab_service.managed_account_name(row),
+        "credential_login_user": row.login_user or "",
         "deploy_job_id": row.deploy_job_id,
         "created_by": row.created_by,
         "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -112,6 +125,17 @@ class BuildRequest(BaseModel):
     # privileged playbooks against a host of the caller's choosing.
     host: str
     admin_spiffe_id: str = ""
+    # WHO the four playbook runs log in as. Field names match Config Management's
+    # RunRequest on purpose: the two forms post the same shape, and the SPIRE page reuses
+    # that page's own /secret-options and /managed-accounts endpoints to populate them.
+    # Either/or — the service refuses both — and blank means "auto-derive this host's
+    # keypair from its deploy job", which is what every lab built before this did.
+    secret_ssh_key_source: str = ""
+    managed_account: ManagedAccountRef | None = None
+    # All four plays are `become: true`, so a non-root account needs a sudo password;
+    # this sends the same account as managed_become rather than adding a second picker.
+    managed_become_self: bool = False
+    login_user: str = ""
 
 
 # ── read ──────────────────────────────────────────────────────────────────────
@@ -313,11 +337,59 @@ def get_onboarding(lab_id: str, db: Session = Depends(get_db),
 def build_lab(req: BuildRequest, db: Session = Depends(get_db),
               user: User = Depends(require_permission("cloud_function", "write"))):
     _require_enabled()
+    # The same pre-flight refusals a Config-Management run gets, worded once in
+    # services/ansible_run_gate. Here rather than in the service because two of them are
+    # about the CALLER — a 403 is not a SpireLabError — and because the runner decision
+    # is per-lab-cloud: an Azure lab dispatches to ACI, which injects a managed
+    # credential inline, while an AWS or GCP lab dispatches to ECS / Cloud Run, where a
+    # just-in-time credential needs the ephemeral-store opt-in.
+    from ..services import (ansible_local_service, ansible_run_gate,
+                            managed_accounts as _ma)
+    from ..services import config_service as cs
+
+    cloud = (req.cloud or "azure").lower()
+    has_managed = req.managed_account is not None
+    wants_secret = bool(has_managed or req.secret_ssh_key_source)
+    # Resolved with ansible_local_service._cfg — the SAME reader _run_job uses — so this
+    # predicts the runner the run will actually dispatch to.
+    eff_runner = ansible_run_gate.effective_runner(cloud, cfg=ansible_local_service._cfg)
+    refusal = ansible_run_gate.check_permission(
+        wants_secret=wants_secret,
+        can_use_secrets=_can_use_secrets(user),
+        has_managed=has_managed,
+        # Short-circuited: a build with no managed account costs no config read here.
+        password_safe_enabled=has_managed and cs.get_bool("password_safe_enabled"))
+    if refusal:
+        raise HTTPException(status_code=refusal.status, detail=refusal.detail)
+    # A no-op by construction today: this form sends no named-var and no become SECRET,
+    # and secret_ssh_key_source is deliberately excluded from the store-residency check.
+    # Kept because it is the line that stops being a no-op the day a become source is
+    # added here, and its absence would be the silent gap.
+    if wants_secret and eff_runner in ("ecs", "aci", "gcp"):
+        _validate_cloud_secret_stores(eff_runner, None, "")
+    # A lab is always a .yml playbook against a bare IP, so the last two are True by
+    # construction — spelled out so the call reads the same as /run's.
+    needs_ephemeral = _ma.requires_ephemeral_store(has_managed, eff_runner, True, True)
+    refusal = ansible_run_gate.check_runner_capability(
+        needs_ephemeral_store=needs_ephemeral,
+        ephemeral_enabled=(needs_ephemeral
+                           and cs.get_bool("ansible_cloud_ephemeral_secrets_enabled")),
+        runner=eff_runner,
+        gcp_runner_service_account=(
+            ansible_local_service._cfg("gcp_ansible_runner_service_account")
+            if needs_ephemeral else ""))
+    if refusal:
+        raise HTTPException(status_code=refusal.status, detail=refusal.detail)
     try:
         return spire_lab_service.provision(
-            db, name=req.name, trust_domain=req.trust_domain, cloud=req.cloud,
+            db, name=req.name, trust_domain=req.trust_domain, cloud=cloud,
             host=req.host, admin_spiffe_id=req.admin_spiffe_id,
-            created_by=user.username)
+            created_by=user.username,
+            secret_ssh_key_source=req.secret_ssh_key_source,
+            managed_account=(req.managed_account.model_dump()
+                             if req.managed_account else None),
+            managed_become_self=req.managed_become_self,
+            login_user=req.login_user)
     except SpireLabError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

@@ -455,6 +455,192 @@ def test_the_page_carries_the_preview_badge_and_never_bare_fetches():
     assert "API.get(" in code and "API.post(" in code and "API.del(" in code
 
 
+# ── the connection identity: chosen once, applied to every stage ─────────────
+
+def test_the_stage_payload_reads_the_credential_off_the_row():
+    """Not hard-coded empty, and not read from the request either. Every `vars_for`
+    builder takes only the row + config so a RESUMED provision rebuilds an identical
+    run; a credential read from anywhere else would change identity halfway through a
+    build that had already failed once."""
+    svc = _read("web_dashboard", "services", "spire_lab_service.py")
+    # The whole builder, because the ref is resolved just above the payload class.
+    meta_fn = svc.split("def _stage_meta(")[1].split("\nasync def ")[0]
+    assert "managed_ref(row)" in meta_fn
+    payload = meta_fn.split("class _Payload:")[1].split("return ansible_run_meta")[0]
+    assert "row.ansible_secret_ssh_key_source" in payload
+    assert "row.ansible_managed_become_self" in payload
+    assert "row.login_user" in payload
+    # The pre-existing hard-coded empties for the kinds this form does NOT offer must
+    # stay empty rather than becoming undeclared -- run_meta would default them anyway,
+    # but a bound-but-undeclared field is how a slot silently stops being sent.
+    assert "secret_vars = None" in payload
+    assert 'secret_become_source = ""' in payload
+    assert 'epml_token_var = ""' in payload
+
+
+def test_the_choice_is_not_written_into_the_parent_jobs_metadata():
+    """The parent `spirelab_provision` job carries only pointers. A ref in there would
+    be a second copy that could disagree with the row the stages actually read."""
+    svc = _read("web_dashboard", "services", "spire_lab_service.py")
+    block = svc.split("job = job_service.create_job(")[1].split(")")[0]
+    for field in ("ansible_managed_account", "ansible_secret_ssh_key_source",
+                  "managed_account", "login_user"):
+        assert field not in block, f"{field} must not ride the parent job's metadata"
+
+
+def test_the_managed_account_ref_is_imported_not_redeclared():
+    """One definition, so its "pinned ids or a name" validator cannot drift. A second
+    copy would present as a run checking out the wrong host's credential."""
+    api = _read("web_dashboard", "api", "spire_lab.py")
+    assert "from .config_mgmt import" in api and "ManagedAccountRef" in api
+    assert "class ManagedAccountRef" not in api
+    # ...and no cycle: config_mgmt must not reach back into this router.
+    cm = _read("web_dashboard", "api", "config_mgmt.py")
+    assert "spire_lab" not in cm
+
+
+def test_the_build_route_applies_the_shared_credential_gate():
+    api = _read("web_dashboard", "api", "spire_lab.py")
+    build = api.split("def build_lab(")[1].split("\n@router.")[0]
+    assert "check_permission(" in build
+    assert "check_runner_capability(" in build
+    assert "requires_ephemeral_store(" in build, (
+        "an AWS/GCP lab dispatches to ECS / Cloud Run, where a just-in-time credential "
+        "needs the ephemeral-store opt-in; an Azure lab on ACI does not")
+    # The gate is consulted BEFORE the row is written: a refused build must leave no
+    # inventory behind.
+    assert build.index("check_permission(") < build.index("spire_lab_service.provision(")
+
+
+def test_the_gate_owns_the_refusal_wording_and_the_api_layers_only_raise_it():
+    """Each operator-facing sentence exists exactly ONCE, in the gate. Two copies is how
+    two pages end up telling one operator different things about one Settings checkbox.
+    """
+    gate = _read("web_dashboard", "services", "ansible_run_gate.py")
+    api = _read("web_dashboard", "api", "spire_lab.py")
+    cm = _read("web_dashboard", "api", "config_mgmt.py")
+    sentences = (
+        "requires the 'secrets:use' permission.",
+        "Managed-account checkout requires BeyondTrust Password Safe",
+        "'Ephemeral cloud secrets' to be enabled in Settings",
+        "GCP ephemeral secrets require 'gcp_ansible_runner_service_account'",
+    )
+    for s in sentences:
+        assert gate.count(s) == 1, f"the gate should word {s!r} exactly once"
+        assert s not in api, f"api/spire_lab re-words {s!r}"
+        assert s not in cm, f"api/config_mgmt re-words {s!r}"
+
+
+def test_the_gate_is_pure_and_loadable_without_the_app():
+    """Stdlib only and no sibling imports -- the property that lets it be unit-tested by
+    file path, the way managed_accounts and ansible_run_meta are. It takes
+    `needs_ephemeral_store` as a BOOL for the same reason."""
+    gate = _read("web_dashboard", "services", "ansible_run_gate.py")
+    # Import STATEMENTS only -- the module explains the rule in prose, and matching the
+    # explanation instead of the code is how this fires on the wrong thing.
+    imports = [l.strip() for l in gate.splitlines()
+               if l.startswith(("import ", "from "))]
+    assert imports == ["from dataclasses import dataclass"], imports
+    assert "raise HTTPException" not in gate
+    assert "needs_ephemeral_store" in gate
+    # It takes the ANSWER, never computes it: the call has to stay in api/config_mgmt,
+    # where tests/test_database_registration pins its position.
+    assert "requires_ephemeral_store(" not in gate
+
+
+def test_the_new_columns_are_text_and_every_one_has_a_migration():
+    """`spire_labs` had no migration entries at all, so the table has only ever arrived
+    via create_all -- without these, an existing install gets the model attributes and
+    not the columns. Text for the refs because a bt_safe:// ref has no bounded length
+    (issue #830: SQLite enforces no VARCHAR width and PostgreSQL does)."""
+    db = _read("web_dashboard", "database.py")
+    cls = db.split("class SpireLab(Base):")[1].split("\nclass ")[0]
+    for col in ("ansible_secret_ssh_key_source", "ansible_managed_account"):
+        assert f"{col} = Column(Text" in cls, f"{col} should be Text, not VARCHAR(n)"
+        assert f"ALTER TABLE spire_labs ADD COLUMN {col} TEXT" in db
+    assert "ansible_managed_become_self = Column(Boolean" in cls
+    assert "login_user = Column(String(104)" in cls
+    assert "ALTER TABLE spire_labs ADD COLUMN login_user VARCHAR(104)" in db
+    # A bare BOOLEAN: PostgreSQL rejects an integer default on a boolean column, the
+    # per-statement savepoint rolls the ALTER back, and the column silently never
+    # appears -- invisible to a SQLite run.
+    assert "ADD COLUMN ansible_managed_become_self BOOLEAN\"" in db
+
+
+def test_the_cloud_runner_refuses_a_run_with_no_usable_credential():
+    """An EMPTY key file is worse than no key file: every cloud runner writes
+    /tmp/ssh_key unconditionally and always passes --private-key, so a blank one fails
+    as `Permission denied (publickey)` -- which reads as a credential the host rejected
+    rather than one that was never found."""
+    svc = _read("web_dashboard", "services", "ansible_local_run_service.py")
+    guard = svc.split("_pw_vars = (")[1].split("ssh_key_b64 = base64")[0]
+    assert "_abandon(" in guard, "the guard must fail the job, not fall through"
+    # "no key AND no password": a managed PASSWORD account legitimately has no key.
+    assert "ansible_ssh_pass" in guard and "ansible_password" in guard
+    assert "not ssh_key_pem and not _has_password" in guard
+    # A NAMED key secret that resolved to nothing is a different, earlier failure --
+    # otherwise the run silently uses a different credential than was chosen.
+    assert "if secret_ssh_key_source and not secret_ssh_pem:" in svc
+    # Both giving-up paths hand back anything already checked out: a Password Safe
+    # request runs for 60 minutes, so a play that never started must not hold one.
+    abandon = svc.split("async def _abandon(")[1].split("if secret_ssh_key_source")[0]
+    assert "checkin_ps_request" in abandon and "set_failed" in abandon
+
+
+def test_the_deploy_job_match_covers_both_recorded_addresses():
+    """`(public or private) == ip` short-circuits to the public address, so a run aimed
+    at a VM's PRIVATE ip never matched a deploy job that also recorded a public one --
+    no build key found, silent fallback to the global key, `Permission denied`."""
+    svc = _read("web_dashboard", "services", "ansible_local_run_service.py")
+    assert 'ip in (meta.get("public_ip"), meta.get("private_ip"))' in svc
+    assert '(meta.get("public_ip") or meta.get("private_ip")) ==' not in svc
+
+
+def test_one_password_safe_request_id_is_recorded_once():
+    """"Also use for sudo" checks the same account out twice; Password Safe returns the
+    already-open request (ConflictOption=reuse) rather than opening a second one, so the
+    same id arrives twice and would misreport how many requests the run opened."""
+    creds = _read("web_dashboard", "services", "ansible_credentials.py")
+    assert "dict.fromkeys(out.request_ids)" in creds
+
+
+def test_the_build_form_reloads_the_account_list_when_the_host_changes():
+    """Both ids are scoped to ONE managed system, so a key left over from another host
+    would check out that host's credential and connect to this one."""
+    page = _read("web_dashboard", "templates", "spire_lab", "index.html")
+    assert "onHostChange()" in page
+    assert 'x-model="form.host" @change="onHostChange()"' in page
+    assert 'form.host = \'\'; onHostChange()' in page          # the cloud select too
+    assert "/api/config-mgmt/managed-accounts" in page
+    assert "/api/config-mgmt/secret-options" in page
+    # The account key is cleared before the reload, never after.
+    hc = page.split("async onHostChange()")[1].split("async ")[0]
+    assert hc.index("resetCredential()") < hc.index("managed-accounts")
+
+
+def test_the_build_form_has_one_shape_used_by_both_initialisers():
+    """Two drifted initialisers is how a field ends up undefined on the SECOND build of
+    a session -- `form` is rebuilt from scratch every time the modal opens."""
+    page = _read("web_dashboard", "templates", "spire_lab", "index.html")
+    literal = page.split("form: {")[1].split("},")[0]
+    blank = page.split("blankForm(cloud) {")[1].split("},")[0]
+    for key in ("secret_ssh_key_source", "managed_become_self", "login_user"):
+        assert key in literal, f"{key} missing from the data object's form"
+        assert key in blank, f"{key} missing from blankForm()"
+    # The DEFINITION, not the @click in the markup above it.
+    assert "this.blankForm(" in page.split("openBuild() {")[1].split("},")[0]
+
+
+def test_the_two_credential_pickers_are_mutually_exclusive_in_the_form():
+    """The server refuses both -- the API is the boundary -- but an operator should not
+    be able to compose a request it will reject."""
+    page = _read("web_dashboard", "templates", "spire_lab", "index.html")
+    assert ':disabled="!!form.secret_ssh_key_source"' in page
+    assert ':disabled="!!managedAccountKey"' in page
+    # A DSS account has a key, not a password, so there is nothing to check out for sudo.
+    assert "selectedAccountUsesSshKey" in page
+
+
 def test_the_page_shows_the_discovery_count_not_just_success():
     """"Discovery succeeded" is not the assertion. The plugin once shipped with discovery
     filtering on the MINTABLE prefix, which narrowed the inventory to 2 accounts while

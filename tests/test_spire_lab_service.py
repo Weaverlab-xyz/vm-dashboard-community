@@ -41,7 +41,8 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_TMPDB}"
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-spire-lab-tests")
 
 try:
-    from web_dashboard.database import Base, Job, SessionLocal, SpireLab, engine
+    from web_dashboard.database import (AuditLog, Base, Job, SessionLocal, SpireLab,
+                                        engine)
     from web_dashboard.services import job_service
 except Exception as exc:  # pragma: no cover — app deps missing
     try:
@@ -91,7 +92,9 @@ def _install_stubs(*, cidrs=("10.1.0.0/24",), acl_opened=True, acl_raises=False,
     runner = types.ModuleType("web_dashboard.services.ansible_local_run_service")
 
     async def run(db, *, job_id, meta):
-        CALLS.append(("stage", meta["asset"], meta["target"], meta["extra_vars"]))
+        # The whole meta rides along as a fifth element so the credential assertions can
+        # read it; every pre-existing assertion indexes [1]..[3], so appending is safe.
+        CALLS.append(("stage", meta["asset"], meta["target"], meta["extra_vars"], meta))
         row = db.query(Job).filter(Job.id == job_id).first()
         row.status = "failed" if meta["asset"] == stage_fails_on else "completed"
         db.commit()
@@ -149,6 +152,9 @@ def _fresh_db():
     db = SessionLocal()
     db.query(SpireLab).delete()
     db.query(Job).delete()
+    # Audit rows too: a credential-use entry from an earlier test would otherwise be
+    # counted by the next one.
+    db.query(AuditLog).delete()
     db.commit()
     return db
 
@@ -248,11 +254,22 @@ def test_a_cloud_with_no_backend_is_refused_at_the_click():
 
 # ── run_provision ────────────────────────────────────────────────────────────
 
-def _provisioned(svc, db, **kw):
+def _provisioned(svc, db, _provision_kw=None, **kw):
+    """Deploy-job + a real provision(). ``_provision_kw`` passes the credential
+    arguments through; everything else describes the VM the lab attaches to."""
     _deploy_job(db, **kw)
     out = svc.provision(db, name="lab", trust_domain="weaverlab.test", cloud="azure",
-                        host="spire-01", created_by="tester")
+                        host="spire-01", created_by="tester", **(_provision_kw or {}))
     return svc.get_lab(db, out["lab_id"]), out["job_id"]
+
+
+# A pinned ref, the shape the build form's resolveManaged() produces.
+_PINNED = {"system_id": 7, "account_id": 2, "account_name": "svc-ansible",
+           "uses_ssh_key": False}
+
+
+def _metas():
+    return [c[4] for c in CALLS if c[0] == "stage"]
 
 
 def test_the_happy_path_opens_the_acl_then_runs_four_playbooks_in_order():
@@ -508,6 +525,226 @@ def test_the_folder_path_follows_the_configured_root_and_the_lab_name():
     db.close()
 
 
+# ── the connection identity the operator chose ───────────────────────────────
+
+def test_the_chosen_managed_account_reaches_all_four_stages():
+    """One choice, four playbooks. A credential that applied to only the first stage
+    would look like it worked and then fail three quarters of the way in."""
+    svc = _install_stubs()
+    db = _fresh_db()
+    row, job_id = _provisioned(svc, db, _provision_kw={"managed_account": dict(_PINNED)})
+    asyncio.run(svc.run_provision(db, lab_id=row.id, job_id=job_id))
+    metas = _metas()
+    assert len(metas) == 4
+    for meta in metas:
+        assert meta["managed_account"] == _PINNED
+        assert meta["secret_ssh_key_source"] == ""
+        # Never the become account unless asked: a second checkout is a second request.
+        assert meta["managed_become"] is None
+    db.close()
+
+
+def test_also_use_for_sudo_sends_the_same_account_as_the_become_account():
+    """All four plays are `become: true`, so a non-root account needs a sudo password.
+    The SAME ref, not a second one — Password Safe reuses the already-open request."""
+    svc = _install_stubs()
+    db = _fresh_db()
+    row, job_id = _provisioned(svc, db, _provision_kw={
+        "managed_account": dict(_PINNED), "managed_become_self": True})
+    asyncio.run(svc.run_provision(db, lab_id=row.id, job_id=job_id))
+    for meta in _metas():
+        assert meta["managed_become"] == meta["managed_account"] == _PINNED
+    db.close()
+
+
+def test_the_chosen_ssh_key_secret_reaches_all_four_stages():
+    svc = _install_stubs()
+    db = _fresh_db()
+    row, job_id = _provisioned(svc, db, _provision_kw={
+        "secret_ssh_key_source": "bt_safe://Automation/keys/spire-host"})
+    asyncio.run(svc.run_provision(db, lab_id=row.id, job_id=job_id))
+    metas = _metas()
+    assert len(metas) == 4
+    for meta in metas:
+        assert meta["secret_ssh_key_source"] == "bt_safe://Automation/keys/spire-host"
+        assert meta["managed_account"] is None and meta["managed_become"] is None
+    db.close()
+
+
+def test_choosing_nothing_still_leaves_every_credential_slot_empty():
+    """The regression guard on the pre-existing path: no choice must keep meaning
+    "auto-derive this host's keypair from its deploy job", not "send something"."""
+    svc = _install_stubs()
+    db = _fresh_db()
+    row, job_id = _provisioned(svc, db)
+    asyncio.run(svc.run_provision(db, lab_id=row.id, job_id=job_id))
+    for meta in _metas():
+        assert meta["managed_account"] is None
+        assert meta["managed_become"] is None
+        assert meta["secret_ssh_key_source"] == ""
+        assert meta["secret_vars"] is None
+        assert meta["secret_become_source"] == ""
+        assert meta["epml_token_var"] == ""
+    db.close()
+
+
+def test_the_login_user_overrides_the_per_cloud_config_key():
+    svc = _install_stubs()
+    db = _fresh_db()
+    row, job_id = _provisioned(svc, db, _provision_kw={"login_user": "cloud-user"})
+    asyncio.run(svc.run_provision(db, lab_id=row.id, job_id=job_id))
+    assert all(m["ansible_user"] == "cloud-user" for m in _metas())
+    db.close()
+
+
+def test_no_login_user_falls_back_to_the_configured_default():
+    svc = _install_stubs()
+    db = _fresh_db()
+    row, job_id = _provisioned(svc, db)
+    asyncio.run(svc.run_provision(db, lab_id=row.id, job_id=job_id))
+    # `ansible_azure_user` defaults to azureuser — the per-cloud key, not the global
+    # ansible_default_user fallback, and not a literal in this service.
+    assert all(m["ansible_user"] == "azureuser" for m in _metas())
+    db.close()
+
+
+def test_a_resumed_provision_reuses_the_same_credential():
+    """The whole reason the choice lives on the ROW and not in the parent job's
+    metadata: a build that resumes after a failed stage must not change identity
+    halfway through."""
+    svc = _install_stubs()
+    db = _fresh_db()
+    row, job_id = _provisioned(svc, db, _provision_kw={"managed_account": dict(_PINNED)})
+    row.stages_done = "install,ports"
+    db.commit()
+    asyncio.run(svc.run_provision(db, lab_id=row.id, job_id=job_id))
+    metas = _metas()
+    assert [m["asset"] for m in metas] == ["spire-seed-entries.yml",
+                                           "spire-admin-identity.yml"]
+    assert all(m["managed_account"] == _PINNED for m in metas)
+    db.close()
+
+
+def test_an_account_and_a_key_at_once_is_refused():
+    """Two answers to one question. A managed account's name also becomes the login
+    user, so a run carrying both would connect as one identity holding the other's
+    key — and would do it without complaining."""
+    svc = _install_stubs()
+    db = _fresh_db()
+    _deploy_job(db)
+    try:
+        svc.provision(db, name="lab", trust_domain="weaverlab.test", cloud="azure",
+                      host="spire-01", created_by="tester",
+                      managed_account=dict(_PINNED),
+                      secret_ssh_key_source="some-key")
+        raise AssertionError("both credentials at once should be refused")
+    except svc.SpireLabError as exc:
+        assert "EITHER" in str(exc)
+    db.close()
+
+
+def test_a_managed_account_without_ids_is_refused():
+    """A name-only ref is the BULK shape, resolved per host at run time. A lab has one
+    host, known now, so accepting it would defer a resolvable failure into stage one."""
+    svc = _install_stubs()
+    db = _fresh_db()
+    _deploy_job(db)
+    try:
+        svc.provision(db, name="lab", trust_domain="weaverlab.test", cloud="azure",
+                      host="spire-01", created_by="tester",
+                      managed_account={"account_name": "svc-ansible"})
+        raise AssertionError("a name-only managed account should be refused")
+    except svc.SpireLabError as exc:
+        assert "system_id" in str(exc) and "account_id" in str(exc)
+    db.close()
+
+
+def test_sudo_reuse_without_an_account_is_refused():
+    svc = _install_stubs()
+    db = _fresh_db()
+    _deploy_job(db)
+    try:
+        svc.provision(db, name="lab", trust_domain="weaverlab.test", cloud="azure",
+                      host="spire-01", created_by="tester", managed_become_self=True)
+        raise AssertionError("become-reuse with no account should be refused")
+    except svc.SpireLabError as exc:
+        assert "sudo" in str(exc)
+    db.close()
+
+
+def test_a_login_user_with_whitespace_is_refused():
+    svc = _install_stubs()
+    db = _fresh_db()
+    _deploy_job(db)
+    for bad in ("two words", "x" * 105):
+        try:
+            svc.provision(db, name="lab", trust_domain="weaverlab.test", cloud="azure",
+                          host="spire-01", created_by="tester", login_user=bad)
+            raise AssertionError(f"login_user {bad[:12]!r} should be refused")
+        except svc.SpireLabError as exc:
+            assert "username" in str(exc)
+    db.close()
+
+
+def test_the_credential_kind_readers_never_expose_the_ref():
+    svc = _install_stubs()
+    db = _fresh_db()
+    row, _ = _provisioned(svc, db, _provision_kw={"managed_account": dict(_PINNED)})
+    assert svc.credential_kind(row) == "managed"
+    assert svc.managed_account_name(row) == "svc-ansible"
+    assert svc.managed_ref(row) == _PINNED
+
+    db2 = _fresh_db()
+    row2, _ = _provisioned(svc, db2, _provision_kw={"secret_ssh_key_source": "k"})
+    assert svc.credential_kind(row2) == "ssh-key-secret"
+    assert svc.managed_account_name(row2) == ""
+
+    db3 = _fresh_db()
+    row3, _ = _provisioned(svc, db3)
+    assert svc.credential_kind(row3) == "auto"
+    assert svc.managed_ref(row3) is None
+    db.close(); db2.close(); db3.close()
+
+
+def test_an_unparseable_managed_ref_degrades_to_auto_rather_than_failing():
+    """A row we cannot parse is a row with no chosen account. Failing the build on a
+    storage artefact would be worse than falling back to the default."""
+    svc = _install_stubs()
+    db = _fresh_db()
+    row, _ = _provisioned(svc, db)
+    row.ansible_managed_account = "{not json"
+    db.commit()
+    assert svc.managed_ref(row) is None
+    assert svc.credential_kind(row) == "auto"
+    db.close()
+
+
+def test_the_credential_choice_is_audited_by_kind_and_name_never_by_value():
+    svc = _install_stubs()
+    db = _fresh_db()
+    _provisioned(svc, db, _provision_kw={"managed_account": dict(_PINNED),
+                                         "managed_become_self": True})
+    rows = db.query(AuditLog).filter(AuditLog.action == "ansible_secret_use").all()
+    assert len(rows) == 1, "one audit entry per credentialed build"
+    details = json.loads(rows[0].details) if isinstance(rows[0].details, str) \
+        else rows[0].details
+    assert details["managed_accounts"] == [
+        {"role": "connection", "account": "svc-ansible", "system_id": 7}]
+    assert "managed" in details["kinds"]
+    # The ref's flags and anything credential-shaped must not be in there.
+    assert "uses_ssh_key" not in json.dumps(details)
+    assert "account_id" not in json.dumps(details)
+    db.close()
+
+
+def test_choosing_nothing_writes_no_audit_entry():
+    svc = _install_stubs()
+    db = _fresh_db()
+    _provisioned(svc, db)
+    assert db.query(AuditLog).filter(
+        AuditLog.action == "ansible_secret_use").count() == 0
+    db.close()
+
 
 def test_no_row_written_exceeds_its_declared_column_width():
     """**SQLite does not enforce VARCHAR length; PostgreSQL does.**
@@ -522,10 +759,20 @@ def test_no_row_written_exceeds_its_declared_column_width():
     against its own declared width, which is the check the test database is not giving
     us. Same family as the foreign-key gap: the test DB is more permissive than the real
     one, so the constraint has to be asserted rather than relied on.
+
+    The sweep only catches values it actually SEES, so this provision deliberately
+    carries the longest thing each new credential column can receive: a fully-qualified
+    `bt_safe://` ref and a login user at exactly the declared 104. The two ref columns
+    are Text (no declared width), which is the point — designed out rather than tested
+    around — but `login_user` is a VARCHAR and has to be exercised.
     """
     svc = _install_stubs()
     db = _fresh_db()
-    row, job_id = _provisioned(svc, db)
+    row, job_id = _provisioned(svc, db, _provision_kw={
+        "secret_ssh_key_source":
+            "bt_safe://Automation-Platform-Engineering/spire/labs/weaverlab-test/"
+            "host-connection-keys/spire-server-01-ed25519-private-key",
+        "login_user": "u" * 104})
     asyncio.run(svc.run_provision(db, lab_id=row.id, job_id=job_id))
 
     db.expire_all()
