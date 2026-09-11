@@ -23,6 +23,11 @@ somewhere this dashboard can no longer reach:
     onboards private databases through a broker sending no `application_host_id` at all.
   * **A POV guest's account is PASSWORD-managed.** There is no per-VM keypair in this
     feature, so `method="ssh"` — which demands one — failed every VM.
+  * **The managed system is named after the POV, not the guest's private IP.** Password
+    Safe names a workgroup-created system after its HostName and the provider attaches an
+    account to its system BY NAME, and POVs are cloned from one template — so two POVs
+    on the same 10.x address would have shared one system. The address rides DnsName and
+    IPAddress instead.
   * **Entitle needs an agent this dashboard does not install**, so a tenant that names no
     agent token is refused with that reason rather than registered against the install's
     own tenant — and never at the cost of the halves that worked.
@@ -711,6 +716,98 @@ def test_the_povs_onboarding_shape_survives_the_real_register_call():
     assert "dss_auto_management_flag = false" in captured["hcl"]
     db.refresh(vm)
     assert vm.ps_managed_system_id == "900"
+    db.close()
+
+
+def test_the_managed_system_is_named_after_the_pov_not_the_private_ip():
+    """HostName is the per-VM label; the address rides DnsName and IPAddress.
+
+    Password Safe names a workgroup-created managed system after its HostName, and the
+    provider attaches an account to its system BY NAME. Passing the private IP as
+    host_name therefore named the system "10.9.0.10" — unhelpful in BeyondInsight, and
+    a collision waiting for the second POV cloned off the same template.
+    """
+    db = d.SessionLocal()
+    env = _ps_env(db)
+    vm = _vm(db, env)
+    fake = _FakePS()
+    original = _install_ps(fake)
+    try:
+        ps = asyncio.run(w.ps_context(db, env))
+        asyncio.run(w.onboard_vm(db, env, vm, ps=ps))
+    finally:
+        _restore_ps(original)
+    kw = fake.registered[0]
+    assert kw["host_name"] == f"{env.name}-{vm.name}"
+    assert kw["host_name"] != vm.private_ip
+    # The address is not lost — it rides BOTH remaining fields, so whichever of them the
+    # built-in Windows/Linux platforms connect on is populated.
+    assert kw["dns_name"] == "10.9.0.10"
+    assert kw["ip_address"] == "10.9.0.10"
+    db.close()
+
+
+def test_two_povs_sharing_a_private_ip_get_two_managed_system_names():
+    """The reason the label had to move into host_name.
+
+    POV environments are cloned from one Skytap template, so two live POVs very plausibly
+    hold the same 10.x guest addresses. Two register calls sharing a host_name share one
+    system NAME, and the second POV's managed-account create resolves to whichever
+    same-named system Password Safe returns first — measured live on the PRA Vault
+    mirror, which is where this shape was fixed the first time.
+    """
+    db = d.SessionLocal()
+    names = []
+    for _ in range(2):
+        env = _ps_env(db)
+        vm = _vm(db, env, ip="10.9.0.10")
+        fake = _FakePS()
+        original = _install_ps(fake)
+        try:
+            ps = asyncio.run(w.ps_context(db, env))
+            asyncio.run(w.onboard_vm(db, env, vm, ps=ps))
+        finally:
+            _restore_ps(original)
+        names.append(fake.registered[0]["host_name"])
+        assert fake.registered[0]["ip_address"] == "10.9.0.10"
+    assert names[0] != names[1], f"both POVs named their managed system {names[0]!r}"
+    db.close()
+
+
+def test_the_label_is_what_reaches_the_hcl_as_host_name():
+    """Through the real register call, not the fake: nothing between onboard_vm and the
+    generator turns the label back into an address.
+
+    Only the HostName half is asserted here. That onboard_vm PASSES a dns_name is pinned
+    by the test above this one; whether the generator emits the line for a non-plugin
+    method is _generate_managed_system_hcl's business, pinned in tests/test_ps_resource.py.
+    """
+    db = d.SessionLocal()
+    env = _ps_env(db)
+    vm = _vm(db, env)
+    original = _install_ps(_FakePS())
+    w.ps_resource_service.register_managed_system = original["reg"]
+    captured = {}
+
+    def _apply(hcl, tf_vars, tenant):
+        captured["hcl"] = hcl
+        return {"managed_system_id": "900", "managed_account_id": "901",
+                "tf_state_json": '{"resources":[]}'}
+
+    real_apply = w.ps_resource_service._apply_hcl_sync
+    w.ps_resource_service._apply_hcl_sync = _apply
+    try:
+        ps = asyncio.run(w.ps_context(db, env))
+        line = asyncio.run(w.onboard_vm(db, env, vm, ps=ps))
+    finally:
+        w.ps_resource_service._apply_hcl_sync = real_apply
+        _restore_ps(original)
+
+    assert "FAILED" not in line, line
+    label = f"{env.name}-{vm.name}"
+    assert w.ps_resource_service._line("host_name", f'"{label}"') in captured["hcl"]
+    assert w.ps_resource_service._line("host_name", '"10.9.0.10"') not in captured["hcl"]
+    assert w.ps_resource_service._line("ip_address", '"10.9.0.10"') in captured["hcl"]
     db.close()
 
 
