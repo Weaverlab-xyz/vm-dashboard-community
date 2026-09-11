@@ -1394,6 +1394,60 @@ def _managed_user_name(db_id: str) -> str:
     return f"psafe_{db_id.replace('-', '')[:12]}"
 
 
+def _fa_db_user_name(db_id: str) -> str:
+    """The dedicated per-database login Password Safe's functional account signs in AS,
+    on the one path where the dashboard owns both halves of that credential (GCP Cloud
+    SQL SQL Server on ``cloud-run`` in "create" mode -- see
+    :func:`_create_db_managed_user_gcp`).
+
+    Derived from :func:`_managed_user_name` rather than spelled independently, so the
+    pair cannot drift and ``sys.sql_logins`` reads as "the managed account and its
+    rotator". The managed name is always exactly 18 characters and this one always 21,
+    so the two sets are disjoint BY LENGTH for every db_id -- a stronger guarantee than
+    "the prefixes differ", which a later tidy-up of either prefix could quietly break.
+
+    Deliberately NOT a bare ``psfa_`` prefix: that is the convention for the accounts an
+    operator creates by hand in "reference" mode (``psfa_pg``, ``psfa_mssql``), and a
+    dashboard-owned login that looks like one of those invites someone to point the
+    reference-mode config key at it."""
+    return f"{_managed_user_name(db_id)}_fa"
+
+
+def _fa_login_password(db_id: str) -> str:
+    """The dedicated functional-account login's password: read it back, or mint and
+    persist one. Never a fresh password on a path that has already run.
+
+    Persisting is load-bearing, not tidiness. ``create_functional_account_on_platform``
+    resolves a DUPLICATE by (platform, account name, display name) and returns the
+    existing account's id -- it does not update the password, and ``ps_api_service`` has
+    no update path at all. Both of those identity components are derived from the row and
+    are therefore stable across attempts, while ``users.insert`` *does* reset an existing
+    user's password to whatever it is handed. So a freshly generated password on a second
+    register would move the DATABASE and leave Password Safe holding the old one: every
+    action then fails 18456 -> ``401 DB_AUTH_FAILED``, with no remedy reachable from the
+    UI. Reading the stored value back makes run N and run N+1 agree by construction --
+    both the "the functional account was created but register failed" retry and a whole
+    deregister/re-register cycle, which deletes the account but not this key.
+
+    ``get_fresh`` rather than ``get`` for the same reason ``run_provision_apply`` uses it
+    on the admin credential: plain ``get``'s 5-second cache answers "" for a row that is
+    certainly in ``app_config``, and here that would mint a SECOND password and write it
+    over the first.
+
+    The one case reuse cannot heal, because the API never returns a functional account's
+    password: Password Safe holding something ELSE for this account name (an account from
+    an earlier build, or an operator edit). That is reported as a remedy on the job log
+    rather than guessed at."""
+    from . import cloud_db_sql_service as sql
+    key = f"clouddb/{db_id}/psfa"
+    existing = config_service.get_fresh(key)
+    if existing:
+        return existing
+    password = sql.generate_password()
+    config_service.set(key, password)
+    return password
+
+
 async def _create_db_managed_user(db: Session, *, row: CloudDatabase,
                                   log_job_id: str, engine: str,
                                   tf_variables: dict) -> dict:
@@ -2155,18 +2209,48 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase,
     #    Everywhere else the functional account is a real database login with a real
     #    password: on cloud-run because the service opens a genuine connection, and on
     #    data-api + SQL SERVER because that engine has no IAM database authentication at
-    #    all. In "create" mode that login is the built-in admin this database was
-    #    provisioned with — which does mean the composite carries a PER-DATABASE
-    #    password, exactly the property that makes "reference" mode the better answer
-    #    here, as it is on Azure.
+    #    all.
     #
-    #    The two differ in WHERE the password goes. cloud-run puts it in the composite,
-    #    so Password Safe stays the sole authority. data-api cannot: the Data API reads
-    #    it from Secret Manager, named by the address's fasecret= option — a second
-    #    authority for the credential, staged in step 5.
+    #    On cloud-run + SQL Server the dashboard mints that login ITSELF — a dedicated
+    #    per-database principal, not the built-in admin this database was provisioned
+    #    with. Reusing the admin is what this used to do, and it is wrong in two
+    #    directions at once: it hands Password Safe the dashboard's own provisioning
+    #    credential, so a *Change Functional Account* rotates `sqlserver` out from under
+    #    clouddb/<id>/admin and silently breaks the grant path, the PRA tunnel and
+    #    decommission with nothing to notice it; and it gives the rotation identity every
+    #    right on the instance when CustomerDbRootRole — or, under self-rotation, no
+    #    privilege whatsoever — is enough. users.insert can create that login without a
+    #    database connection, which is the whole reason this is possible here and not on
+    #    the other two clouds.
+    #
+    #    data-api + SQL Server still takes the admin, deliberately: its password is read
+    #    by the Data API out of Secret Manager (the fasecret= option staged in step 5),
+    #    so a second, dashboard-minted credential there would be a second authority for
+    #    a credential that already has two. Narrowing the new behaviour to cloud-run
+    #    keeps that path byte-identical.
+    #
+    #    The two channels also differ in WHERE the password goes. cloud-run puts it in
+    #    the composite, so Password Safe stays the sole authority. data-api cannot, for
+    #    the reason above.
     rotator = _cfg("clouddb_ps_gcp_rotator_service_account")
     fa_db_user = ""
-    if not iam_db_auth:
+    fa_db_password = ""
+    # "reference" mode is the operator's own account, whose login and password the
+    # dashboard has never seen — there is nothing for it to mint, and minting anyway
+    # would create a principal Password Safe is not configured to use.
+    dedicated_fa = (channel == "cloud-run" and engine == "sqlserver"
+                    and _ps_fa_mode(engine, row.cloud) != _FA_MODE_REFERENCE)
+    if dedicated_fa:
+        fa_db_user = _fa_db_user_name(row.id)
+        fa_db_password = _fa_login_password(row.id)
+        # users.insert resets an existing user's password to the value passed, so a
+        # retry converges onto the PERSISTED credential rather than moving the database
+        # away from what Password Safe already holds — see _fa_login_password.
+        await gcp_service.create_cloudsql_user(project, instance, fa_db_user,
+                                               password=fa_db_password)
+        logger.info("clouddb: dedicated functional-account login %r created via "
+                    "users.insert on %s db_id=%s", fa_db_user, instance, row.id)
+    elif not iam_db_auth:
         fa_db_user = admin_username
     elif rotator:
         # The registered name is engine-dependent and PostgreSQL will not take the
@@ -2209,6 +2293,34 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase,
     grant = "" if (self_rotating or fa_is_admin) else _fa_grant_statement(
         engine, fa_db_user=fa_db_user, managed_user=managed_user,
         managed_host=managed_host)
+    # 4a. Name the login the dashboard just minted, and say what it does and does not
+    #     need. Reported from HERE rather than through _report_fa_db_prereqs, whose every
+    #     clause ("which the dashboard cannot create — it does not have that password")
+    #     is false for this one: that reporter exists for the login an OPERATOR owns in
+    #     "reference" mode, and _fa_db_login is structurally "" in "create" mode, so it
+    #     cannot be reached from this path anyway.
+    #     The grant remedy below is the conditional half. When self-rotation is OFF the
+    #     unconditional fallback further down prints the statement on its own — this line
+    #     must not duplicate it, so it only speaks up when there is nothing to print.
+    if dedicated_fa:
+        if self_rotating:
+            # Name the grant it does NOT need, because turning self-rotation off later
+            # is the change that starts needing it — and by then this job is history.
+            needs = ("Self-rotation is on, so it needs no rights over the managed "
+                     "account. Turning clouddb_ps_self_rotation off would also require: "
+                     + _fa_grant_statement(engine, fa_db_user=fa_db_user,
+                                           managed_user=managed_user,
+                                           managed_host=managed_host))
+        else:
+            # The statement itself is printed by the unconditional fallback below;
+            # duplicating it here would have an operator paste it twice.
+            needs = "Self-rotation is off, so it also needs the grant below."
+        job_service.append_job_log(
+            db, log_job_id,
+            f"Password Safe's functional account signs in to this database as "
+            f"{fa_db_user!r}, a dedicated login the dashboard created for it — the "
+            f"built-in {admin_username!r} admin credential is not shared with Password "
+            f"Safe. {needs}")
     # The functional account's own DB login is a prerequisite too, and it is reported
     # from the cloud-agnostic path (_report_fa_db_prereqs) rather than here: this
     # function only ever runs for GCP, and Azure/AWS are the two clouds where a
@@ -2278,13 +2390,20 @@ async def _create_db_managed_user_gcp(db: Session, *, row: CloudDatabase,
                 password=admin_password)
 
     logger.info("clouddb: managed DB user %r created via Cloud SQL users.insert on %s "
-                "db_id=%s channel=%s iam_db_auth=%s (no jump host)",
-                managed_user, instance, row.id, channel, iam_db_auth)
+                "db_id=%s channel=%s iam_db_auth=%s fa_db_user=%r dedicated_fa=%s "
+                "(no jump host)",
+                managed_user, instance, row.id, channel, iam_db_auth, fa_db_user,
+                dedicated_fa)
     return {"managed_user": managed_user, "managed_pw": managed_pw,
             "managed_user_host": managed_host, "project": project, "instance": instance,
             "fa_db_user": fa_db_user, "region": region, "db_name": db_name,
             "admin_username": admin_username, "client_image": "", "port": port,
             "channel": channel, "iam_db_auth": iam_db_auth,
+            # Non-empty ONLY where the dashboard minted the login above. The composite
+            # builder prefers this over re-reading the config store, so the credential
+            # Password Safe is handed comes from the same function that wrote it to the
+            # database — one source, not two that can disagree.
+            "fa_db_password": fa_db_password,
             "fa_secret_version": fa_secret_version}
 
 
@@ -2449,11 +2568,25 @@ def _ps_fa_mode(engine: str = "", cloud: str = "") -> str:
     two disagree -- and ABOVE the global, so a single Azure key can override a global
     ``reference`` without touching GCP.
 
+    Above both sits ONE cloud+engine rung, ``..._mode_<cloud>_<engine>``. The three
+    coarser rungs can already express every live combination -- with ``..._mode_sqlserver``
+    left BLANK, per-cloud ``reference`` on AWS/Azure and a global ``create``, all of them
+    land correctly -- but only implicitly: the working configuration depends on a key
+    being unset, and the obvious operator action (setting ``..._mode_sqlserver=reference``
+    to match the ``psfa_mssql`` accounts that AWS and Azure genuinely use) silently takes
+    GCP SQL Server's dedicated login away with it. This rung makes that one cell sayable
+    directly. It is deliberately not a complete nine-key tier: it falls THROUGH when
+    blank, so it changes no default and can never outrank a key an operator actually set
+    -- which is the failure the per-cloud rung's own comment in ``config.py`` warns
+    about, and the reason a mode is never inferred from a blank field.
+
     The winning key is logged, because "the key I set was ignored" is otherwise
     indistinguishable from "the mode I set did nothing"."""
     engine = (engine or "").strip().lower()
     cloud = (cloud or "").strip().lower()
-    for key in (f"clouddb_ps_functional_account_mode_{engine}" if engine else "",
+    for key in (f"clouddb_ps_functional_account_mode_{cloud}_{engine}"
+                if (cloud and engine) else "",
+                f"clouddb_ps_functional_account_mode_{engine}" if engine else "",
                 f"clouddb_ps_functional_account_mode_{cloud}" if cloud else "",
                 "clouddb_ps_functional_account_mode"):
         val = _cfg(key).strip().lower() if key else ""
@@ -2629,6 +2762,12 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
                                  if ctx.get("fa_secret_version")
                                  and not _fa_secret_version_configured() else ""),
         "ps_db_fa_sm_project": ctx.get("project", ""),
+        # The login Password Safe's functional account signs in AS. Recorded for the
+        # operator reading a job back, and because the deregister path has to be able to
+        # NAME what it left behind on the instance. A context key rather than a teardown
+        # step: nothing is deleted remotely (see run_ps_register's deregister branch for
+        # why the principals this onboarding creates outlive it).
+        "ps_db_fa_db_user": ctx.get("fa_db_user", ""),
     }
 
     # ── DB managed system (cloud-specific custom plugin) ──
@@ -2650,6 +2789,28 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
         fa_key = f"clouddb_ps_functional_account_gcp_{engine}"
         fa_tokens = ("gcp", "cloud sql")
         channel = ctx.get("channel") or _gcp_channel(engine)
+        # "reference" on cloud-run is legal and supported, but it is the one GCP
+        # combination where the operator owes the database something per INSTANCE — the
+        # channel opens a real connection, so the referenced account's login has to
+        # exist on THIS instance with the password Password Safe holds for it. Say so
+        # here, because the alternative reads as a rotation that simply does not work:
+        # onboarding is green, and the first action fails as a login failure.
+        if channel == "cloud-run" and fa_mode == _FA_MODE_REFERENCE:
+            # Name the key that exists on the panel. The cloud+engine rung is declared
+            # for gcp+sqlserver alone, so a forced-channel postgres/mysql onboarding is
+            # pointed at the per-engine key instead of a control nobody can find.
+            mode_key = ("clouddb_ps_functional_account_mode_gcp_sqlserver"
+                        if engine == "sqlserver"
+                        else f"clouddb_ps_functional_account_mode_{engine}")
+            job_service.append_job_log(
+                db, log_job_id,
+                f"This database onboards on the cloud-run channel in 'reference' mode, "
+                f"so Password Safe's functional account must already have a login on "
+                f"THIS instance whose password matches the third ':'-segment of that "
+                f"account's password — which the dashboard cannot create, because "
+                f"Password Safe never returns a functional account's password. Set "
+                f"{mode_key}=create to have the dashboard mint a dedicated login per "
+                f"database instead.")
         fa_username = fa_password = ""
         if fa_mode != _FA_MODE_REFERENCE:
             auth_mode = (_cfg("clouddb_ps_gcp_auth_mode") or "ADC").upper()
@@ -2663,13 +2824,53 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
             # Segment 1 is the base64 service-account key, and only SA: mode has one —
             # a ~2.4 KB key base64s to ~3.2 KB, over Password Safe's 1000-character
             # credential limit, which is why ADC:/IMP: are the supported modes. Segment
-            # 2 is the impersonation target. Segment 3 is the database password: absent
-            # under IAM auth, but REQUIRED on cloud-run, where in "create" mode it is
-            # this database's own admin credential.
+            # 2 is the impersonation target. Segment 3 is the database password:
+            # absent under IAM auth, but REQUIRED on cloud-run. In "create" mode on SQL
+            # Server that is the dedicated login the dashboard minted for this database
+            # (never the built-in admin); on a forced-channel postgres/mysql onboarding,
+            # which mints nothing, it falls back to the admin credential.
             fa_db_password = "-"
             if channel == "cloud-run":
-                fa_db_password = (config_service.get(f"clouddb/{row.id}/admin")
-                                  or tf_variables.get("master_password") or "-")
+                # ctx first: where the dashboard minted a dedicated login (SQL Server,
+                # see _create_db_managed_user_gcp step 3) that is the ONLY correct
+                # answer, and reading the config store instead would hand Password Safe
+                # the built-in admin's credential for a login that does not use it.
+                # The admin fallback still serves a forced-channel postgres/mysql
+                # cloud-run onboarding, which mints nothing.
+                fa_db_password = (ctx.get("fa_db_password")
+                                  # get_fresh, not get: on the post-hoc register path
+                                  # tf_variables is secret-stripped (see provision), so
+                                  # the config store is the only source, and plain
+                                  # get's 5-second cache answers "" for a row that is
+                                  # certainly in app_config.
+                                  or config_service.get_fresh(f"clouddb/{row.id}/admin")
+                                  or tf_variables.get("master_password") or "")
+                # An empty third segment is the failure that SURVIVES onboarding: the
+                # composite becomes "-:-:-", register_managed_system succeeds, the job
+                # goes GREEN, and every credential action then fails against a
+                # functional account that authenticates to nothing. Seen as a live
+                # hazard on the post-hoc register path, where tf_variables carries no
+                # master_password at all. Refuse it here, where the message can still
+                # name the credential that is missing.
+                if not fa_db_password:
+                    raise CloudDatabaseError(
+                        f"no database password is available for the cloud-run "
+                        f"functional account on {name!r}: neither this onboarding's "
+                        f"minted login nor clouddb/{row.id}/admin holds one. Registering "
+                        f"anyway would create a managed system whose functional account "
+                        f"authenticates to nothing, and it would report success")
+                # The composite is ':'-delimited and the plugin splits it BEFORE it
+                # looks at anything, so a ':' in the password mis-splits every action —
+                # the same hazard _dbssm_fa_fields guards on AWS. generate_password's
+                # charset cannot produce one; the built-in admin's credential is minted
+                # by the same generator, but it is checked rather than assumed because
+                # an imported or hand-edited row need not be.
+                if ":" in fa_db_password:
+                    raise CloudDatabaseError(
+                        f"the database password for the cloud-run functional account on "
+                        f"{name!r} contains ':', the dbgcp plugin's functional-account "
+                        f"field delimiter — the credential would mis-split at every "
+                        f"verify/change action")
             fa_password = f"-:{impersonate or '-'}:{fa_db_password}"
         # Address: channel;project:region:instance;dbName;audience;ssl[;key=value]
         conn_name = f"{ctx['project']}:{row.region}:{row.instance_id}"
@@ -3045,14 +3246,28 @@ async def run_ps_register(db: Session, *, db_id: str, job_id: str,
                 db, row=row, prov_job=prov_job, progress_job_id=job_id, progress=40)
             if errors:
                 raise CloudDatabaseError("; ".join(errors))
-            # The managed DB user outlives a deregister — unlike a decommission, the
-            # database is still here. Say so rather than leaving a login nobody expects.
-            leftover = (prov_job.metadata_dict or {}).get("ps_db_managed_user") if prov_job else None
+            # The principals this onboarding created outlive a deregister — unlike a
+            # decommission, the database is still here. Say so rather than leaving
+            # logins nobody expects. Both are named: the functional account's dedicated
+            # login (GCP Cloud SQL SQL Server) has no PRA-tunnel reason to survive, but
+            # dropping it would be the dashboard reaching into a database it is walking
+            # away from, and an operator may have granted it something out of band.
+            meta = (prov_job.metadata_dict or {}) if prov_job else {}
+            leftover = meta.get("ps_db_managed_user")
+            # Not every recorded fa_db_user is a login the dashboard created: on the
+            # data-api channel it is the built-in admin, and on IAM database
+            # authentication it is the rotator principal. Only name the one that is ours.
+            fa_leftover = meta.get("ps_db_fa_db_user") or ""
+            also = ""
+            if fa_leftover and fa_leftover == _fa_db_user_name(row.id):
+                also = (f" The functional account's dedicated login {fa_leftover!r} was "
+                        f"left in place too; its password is no longer held anywhere "
+                        f"except Password Safe, so drop it by hand as well.")
             job_service.append_job_log(
                 db, job_id,
                 f"The managed database user {leftover or _managed_user_name(row.id)!r} was "
                 f"left in place — it is what the PRA tunnel injects. Drop it by hand if "
-                f"you want the database back on its admin login.")
+                f"you want the database back on its admin login.{also}")
         else:
             reason = _ps_ineligible_reason(row)
             if reason:
@@ -3462,7 +3677,7 @@ _PS_CONTEXT_KEYS = (
     "ps_db_client_image", "ps_db_name", "ps_db_system_id", "ps_db_account_id",
     "ps_pravault_system_id", "ps_pravault_account_id",
     "ps_db_functional_account_ref", "ps_pravault_functional_account_ref",
-    "ps_db_fa_sm_resource", "ps_db_fa_sm_project",
+    "ps_db_fa_sm_resource", "ps_db_fa_sm_project", "ps_db_fa_db_user",
 )
 
 
@@ -3816,8 +4031,13 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
 
     row.status = "decommissioned"
     db.commit()
-    # Retire the minted admin credential from the encrypted config store too.
+    # Retire the minted credentials from the encrypted config store too — the admin, and
+    # the dedicated functional-account login's password where one was minted. Only on a
+    # DECOMMISSION: a deregister must leave the psfa key alone, because reading it back
+    # is what makes a later re-register converge on the password Password Safe already
+    # holds (see _fa_login_password).
     config_service.delete(f"clouddb/{db_id}/admin")
+    config_service.delete(f"clouddb/{db_id}/psfa")
 
     # Terminate the shared Gateway host if nothing is left using it (best-effort;
     # the row is no longer active, so it's excluded from the count).

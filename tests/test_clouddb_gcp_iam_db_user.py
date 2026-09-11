@@ -20,7 +20,8 @@ What these tests pin:
   (``users.list`` reads back ``bt-rotator``, proven live), so pre-truncating would
   replace a working call with an untested one -- the fix must not "tidy" that;
 - SQL Server never registers a rotator at all, because it has no IAM database
-  authentication;
+  authentication -- and on ``cloud-run`` it signs in as a DEDICATED login the dashboard
+  mints per database, not as the built-in admin it used to borrow;
 - the name SENT and the name STORED are separate questions, and the read-back still
   wins over both. That is the trap this feature has already been bitten by once, when
   GKE turned out to store a numeric uniqueId where everyone had derived an email.
@@ -114,6 +115,7 @@ def _install_stubs():
 
     cfg = types.ModuleType("web_dashboard.services.config_service")
     cfg.get = lambda key: CONF.get(key, "")
+    cfg.get_fresh = lambda key, default="": CONF.get(key, default)
     cfg.set = lambda key, val: CONF.__setitem__(key, val)
     cfg.get_bool = lambda key, default=False: bool(CONF.get(key, default))
     sys.modules["web_dashboard.services.config_service"] = cfg
@@ -248,13 +250,67 @@ def test_mysql_registration_is_unchanged_by_the_postgres_fix():
 # -- SQL Server never has a rotator to register ------------------------------
 
 def test_sqlserver_registers_no_iam_principal_at_all():
-    """No IAM database authentication exists for Cloud SQL for SQL Server, so the
-    functional account is the built-in admin and there is nothing to name."""
+    """No IAM database authentication exists for Cloud SQL for SQL Server, so there is
+    no rotator principal to name -- on either channel.
+
+    What the functional account signs in AS is a separate question, and the answer is
+    channel-dependent: see the two tests below. This one is only about the IAM half.
+    """
+    _reset()
+    _onboard("sqlserver")
+    assert _registered() == []
+    assert svc._iam_db_auth("sqlserver", "data-api") is False
+
+
+def test_cloud_run_sqlserver_signs_in_as_a_login_the_dashboard_MINTED():
+    """The default channel for this engine, and the one case where the dashboard owns
+    both halves of the functional account's database credential.
+
+    It used to hand Password Safe the built-in ``dbadmin`` admin instead. That gave the
+    rotation identity every right on the instance, and made *Change Functional Account*
+    able to rotate the admin out from under ``clouddb/<id>/admin`` -- breaking the grant
+    path, the PRA tunnel and decommission, with nothing to notice it."""
     _reset()
     ctx = _onboard("sqlserver")
-    assert _registered() == []
+    assert ctx["fa_db_user"] == svc._fa_db_user_name("db1")
+    assert ctx["fa_db_user"] != "dbadmin"
+    # A real, non-empty password, and NOT the admin's.
+    assert ctx["fa_db_password"]
+    assert ctx["fa_db_password"] != "s3cret"
+    # Two users.insert calls: the managed account, then its rotator. Both with a
+    # password (neither is an IAM principal), and the passwords differ.
+    created = [(c[3], c[4]) for c in CALLS if c[0] == "create_user"]
+    assert created == [(svc._managed_user_name("db1"), False),
+                       (svc._fa_db_user_name("db1"), False)], created
+
+
+def test_data_api_sqlserver_still_takes_the_built_in_admin():
+    """The scoping guard. On ``data-api`` the functional account's password is read by
+    the Data API out of Secret Manager (the ``fasecret=`` option), so minting a second
+    credential there would add a third authority for one password. Only ``cloud-run``
+    changed."""
+    _reset()
+    CONF["clouddb_ps_gcp_channel"] = "data-api"
+    ctx = _onboard("sqlserver")
     assert ctx["fa_db_user"] == "dbadmin"
-    assert svc._iam_db_auth("sqlserver", "data-api") is False
+    assert ctx["fa_db_password"] == ""
+    assert [c[3] for c in CALLS if c[0] == "create_user"] == [
+        svc._managed_user_name("db1")]
+
+
+def test_reference_mode_mints_nothing_even_on_cloud_run():
+    """The operator's own account carries a login the dashboard has never seen. Minting
+    one anyway would create a principal Password Safe is not configured to use."""
+    _reset()
+    CONF["clouddb_ps_functional_account_mode_gcp_sqlserver"] = "reference"
+    ctx = _onboard("sqlserver")
+    # fa_db_user falls back to the admin name here, as it did before this change. It is
+    # unused in reference mode -- the composite is not built at all -- and left alone
+    # deliberately: what matters is that no login was CREATED and no password minted.
+    assert ctx["fa_db_user"] == "dbadmin"
+    assert ctx["fa_db_password"] == ""
+    assert [c[3] for c in CALLS if c[0] == "create_user"] == [
+        svc._managed_user_name("db1")]
 
 
 # -- sent name vs stored name are different questions ------------------------

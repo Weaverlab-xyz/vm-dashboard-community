@@ -63,6 +63,15 @@ secret — out of the dashboard's config store entirely. It needs **one account 
 per cloud**, because a functional account belongs to a platform. A blank name in
 `reference` mode is an error, not a fall-through to `create`.
 
+**The mode resolves on four rungs**, most specific first:
+`clouddb_ps_functional_account_mode_<cloud>_<engine>` → `..._mode_<engine>` →
+`..._mode_<cloud>` → `clouddb_ps_functional_account_mode`. Blank falls through on every
+one of them, so a key you have not set can never outrank one you have. Only
+`gcp_sqlserver` exists on the cloud+engine rung: it is the single cell the coarser rungs
+cannot express, because `..._mode_sqlserver` governs AWS and Azure SQL Server too and
+those want the opposite answer — see
+[Password Safe rotation for Cloud SQL](password-safe-gcp.md).
+
 It also needs `clouddb_ps_self_rotation` on: the account it names is unprivileged on the
 database, so only the plugin's self-rotate action can change a credential. Its DB login must
 still exist on each managed server for *Verify Functional Account* to pass — the dashboard
@@ -147,7 +156,7 @@ field delimiter) — dashboard-generated credentials never do.
 | Key | Default | Notes |
 |---|---|---|
 | `clouddb_ps_onboarding_enabled` | `false` | Master toggle (AWS **and** Azure) |
-| `clouddb_ps_functional_account_mode` | `create` | `create` or `reference` — see above |
+| `clouddb_ps_functional_account_mode` | `create` | `create` or `reference` — see above. Overridden, most specific first, by `..._mode_<cloud>_<engine>` (only `gcp_sqlserver` exists), `..._mode_<engine>` and `..._mode_<cloud>`; blank falls through on all three |
 | `clouddb_ps_self_rotation` | `false` | Emits `use_own_credentials` on the managed account, so the DB plugin's self-rotate action runs. **Required with `reference` mode** — the via-functional-account action needs a privileged DB login a provisioned server does not have |
 | `clouddb_ps_platform_postgres` / `_mysql` / `_sqlserver` | `psql/mysql/mssql SSM Custom Plugin` | Custom-plugin platform names; advisory in `reference` mode |
 | `clouddb_ps_functional_account_postgres` / `_mysql` / `_sqlserver` | — | `reference` mode: the operator-created account on each SSM platform |

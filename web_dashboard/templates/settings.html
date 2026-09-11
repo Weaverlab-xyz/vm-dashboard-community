@@ -1469,6 +1469,31 @@
                   </select>
                 </div>
               </div>
+              <!-- The one cloud+engine override, above every control above it. Its own
+                   row rather than a fourth column in the grid, because it is not a peer
+                   of the three: it names a single cell (GCP + SQL Server), which is the
+                   one combination neither the engine row nor the cloud row can express
+                   without changing an answer that is already correct elsewhere. Blank
+                   falls through, same as every other override here. -->
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-xs font-medium text-gray-700 mb-1">GCP SQL Server override</label>
+                  <select x-model="panelCfg.clouddb_ps_functional_account_mode_gcp_sqlserver"
+                          x-init="panelCfg.clouddb_ps_functional_account_mode_gcp_sqlserver = panelCfg.clouddb_ps_functional_account_mode_gcp_sqlserver || ''"
+                          class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">Use the overrides above</option>
+                    <option value="create">Create one per database</option>
+                    <option value="reference">Reference an existing account</option>
+                  </select>
+                  <p class="text-xs text-gray-400 mt-1">
+                    Cloud SQL for SQL Server has no IAM database authentication, so its functional account is a
+                    real login with a real password. On <code class="bg-gray-100 px-1 rounded">create</code> the
+                    dashboard mints a dedicated login per database and keeps the instance admin credential out of
+                    Password Safe. Set this rather than the SQL Server engine override, which also governs AWS and
+                    Azure.
+                  </p>
+                </div>
+              </div>
               <p class="text-xs text-gray-400">
                 An <strong>engine</strong> override beats a <strong>cloud</strong> override, which beats the source
                 above. On <strong>Azure and AWS</strong> the functional account carries <em>that database's</em> admin

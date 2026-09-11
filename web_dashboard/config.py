@@ -585,6 +585,18 @@ class Settings(BaseSettings):
     clouddb_ps_functional_account_mode_aws: str = ""     # blank = per-engine, then global
     clouddb_ps_functional_account_mode_azure: str = ""   # blank = per-engine, then global
     clouddb_ps_functional_account_mode_gcp: str = ""     # blank = per-engine, then global
+    # ONE cloud+engine rung, above all three above. The comment on the per-cloud keys
+    # warns off a full nine-key tier and still does — this is not that. The three coarse
+    # rungs can already express every live combination, but only IMPLICITLY: it works
+    # because clouddb_ps_functional_account_mode_sqlserver is left BLANK while the
+    # per-cloud keys carry the AWS/Azure answer, and the obvious operator action —
+    # setting ..._mode_sqlserver=reference, which is true of the psfa_mssql accounts AWS
+    # and Azure really do use — silently takes GCP SQL Server's dedicated login away with
+    # it. GCP + SQL Server is the one cell where the two axes disagree and neither can
+    # say so, so it gets the one key. Blank FALLS THROUGH, exactly like every rung below
+    # it: it changes no default and cannot outrank a key an operator actually set, which
+    # is the whole objection to the nine.
+    clouddb_ps_functional_account_mode_gcp_sqlserver: str = ""  # blank = the ladder below
     clouddb_ps_functional_account_postgres: str = ""     # on "psql SSM Custom Plugin"
     clouddb_ps_functional_account_mysql: str = ""        # on "mysql SSM Custom Plugin"
     clouddb_ps_functional_account_sqlserver: str = ""    # on "mssql SSM Custom Plugin"

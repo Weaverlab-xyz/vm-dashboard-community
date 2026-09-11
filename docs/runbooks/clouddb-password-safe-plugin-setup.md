@@ -424,6 +424,21 @@ authenticates to GCP:
 | `IMP:` | Broker already has some GCP identity | `roles/iam.serviceAccountTokenCreator` on the rotator, granted to that identity |
 | `SA:` | **Not supported in practice** | A base64 key is ~3.2 KB, over Password Safe's 1000-character credential limit, so the composite cannot survive a write-back |
 
+**The functional account for Cloud SQL SQL Server.** There is nothing to create by hand
+in `create` mode: the dashboard mints both halves — a dedicated `psafe_<12hex>_fa`
+database login via `users.insert`, and the Password Safe functional account carrying it.
+Keep the instance admin credential out of Password Safe; that is the point.
+
+Set **`clouddb_ps_functional_account_mode_gcp_sqlserver` = `create`** rather than the SQL
+Server *engine* override. The engine rung governs all three clouds, and `reference` is the
+right answer for AWS and Azure (they use operator-created `psfa_mssql` accounts) — setting
+it there is what silently sends GCP SQL Server down the manual path. Blank on this key
+falls through, so it changes nothing until you set it.
+
+In `reference` mode you owe the database a login **per instance**, with the password
+matching the third `:`-segment of the functional account's password — which Password Safe
+never hands back. The onboarding job says so and names the key above.
+
 **The Cloud Run service (SQL Server).** The dashboard deploys this. In
 Settings → Password Safe → *Cloud Run channel*:
 
@@ -539,7 +554,9 @@ them — run them as an admin:
   rotatable.
 - **SQL Server:** `ALTER SERVER ROLE CustomerDbRootRole ADD MEMBER [<fa>];`, which carries
   `ALTER ANY LOGIN`. `sysadmin` is unavailable on Cloud SQL and `ALTER ANY LOGIN` is
-  exactly enough.
+  exactly enough. On **GCP Cloud SQL in `create` mode** the `<fa>` here is the dedicated
+  `psafe_<12hex>_fa` login the dashboard minted, not the instance admin — the job names it
+  and pastes the statement, because `cloud-run` has no Data API to issue it with.
 
 **Or skip the grant entirely on SQL Server** by turning on self-rotation: the managed
 login alters itself with `OLD_PASSWORD` and the functional account needs no privilege over
