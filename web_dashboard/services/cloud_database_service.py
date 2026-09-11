@@ -1425,9 +1425,12 @@ def _fa_login_password(db_id: str) -> str:
     user's password to whatever it is handed. So a freshly generated password on a second
     register would move the DATABASE and leave Password Safe holding the old one: every
     action then fails 18456 -> ``401 DB_AUTH_FAILED``, with no remedy reachable from the
-    UI. Reading the stored value back makes run N and run N+1 agree by construction --
-    both the "the functional account was created but register failed" retry and a whole
-    deregister/re-register cycle, which deletes the account but not this key.
+    UI. Reading the stored value back makes run N and run N+1 agree by construction.
+    The case it exists for is the partial failure: the functional account was created,
+    ``register_managed_system`` then failed, and the operator re-runs. (A clean
+    DEREGISTER is not that case -- it drops the login and this key together, see
+    :func:`_drop_dedicated_fa_login` -- so the next register starts from nothing and
+    mints afresh, which is equally correct.)
 
     ``get_fresh`` rather than ``get`` for the same reason ``run_provision_apply`` uses it
     on the admin credential: plain ``get``'s 5-second cache answers "" for a row that is
@@ -1446,6 +1449,66 @@ def _fa_login_password(db_id: str) -> str:
     password = sql.generate_password()
     config_service.set(key, password)
     return password
+
+
+async def _drop_dedicated_fa_login(*, row: CloudDatabase, meta: dict) -> str:
+    """Drop the functional account's dedicated database login on a DEREGISTER, and
+    retire its stored password with it. Returns a sentence for the caller's job-log
+    line, or ``""`` when there is no such login.
+
+    The counterpart of :func:`_fa_login_password`, and only reachable where the
+    dashboard minted both halves: GCP Cloud SQL SQL Server on ``cloud-run``. Nothing
+    equivalent is needed on a DECOMMISSION -- the login dies with the instance, which is
+    also why the ``psafe_*`` managed user has no drop there.
+
+    **Only ever the login this dashboard created.** A recorded ``fa_db_user`` is the
+    built-in admin on the ``data-api`` channel and the rotator IAM principal under IAM
+    database authentication, so the name is checked against
+    :func:`_fa_db_user_name` rather than trusted -- dropping either of the others would
+    be the dashboard deleting a principal it does not own, one of them the instance's
+    own administrator.
+
+    **Runs AFTER the Password Safe teardown, and is non-fatal.** After, because dropping
+    the login first would leave a live managed system signed in as a principal that no
+    longer exists if the teardown then failed. Non-fatal, because the deregister's own
+    job is already done by that point: raising would fail a job whose Password Safe work
+    succeeded, and the retry is not available either -- ``run_ps_register`` refuses a
+    second deregister with "no Password Safe onboarding recorded", the onboarding having
+    just been removed. So a failure is reported with the statement to paste, which is
+    the one form of it an operator can act on.
+
+    **The stored password is deleted only if the drop succeeded.** It is dead the moment
+    the login is, but while the login survives that key is the only record of its
+    credential anywhere -- Password Safe's copy went with the functional account.
+    """
+    from . import cloud_db_sql_service as sql
+    recorded = (meta.get("ps_db_fa_db_user") or "").strip()
+    if row is None or row.cloud != "gcp" or recorded != _fa_db_user_name(row.id):
+        return ""
+    manual = "; ".join(sql._mssql_drop_login(user=recorded))
+    project = (meta.get("ps_db_fa_sm_project") or _cfg("gcp_project")
+               or _cfg("gcp_project_id"))
+    instance = row.instance_id
+    if not project or not instance:
+        return (f" The functional account's dedicated login {recorded!r} could NOT be "
+                f"dropped: this onboarding recorded no project ({project!r}) or instance "
+                f"({instance!r}) to reach. Drop it as an admin: {manual}")
+    try:
+        from . import gcp_service
+        existed = await gcp_service.delete_cloudsql_user(project, instance, recorded)
+    except Exception as exc:
+        logger.warning("clouddb: dropping the dedicated functional-account login %r on "
+                       "%s failed: %s", recorded, instance, exc)
+        return (f" The functional account's dedicated login {recorded!r} could NOT be "
+                f"dropped ({exc}). Password Safe's copy of its password went with the "
+                f"functional account, so this login can no longer be used or rotated — "
+                f"drop it as an admin: {manual}")
+    config_service.delete(f"clouddb/{row.id}/psfa")
+    logger.info("clouddb: dropped the dedicated functional-account login %r on %s "
+                "db_id=%s (existed=%s)", recorded, instance, row.id, existed)
+    return (f" The functional account's dedicated login {recorded!r} was dropped too."
+            if existed else
+            f" The functional account's dedicated login {recorded!r} was already gone.")
 
 
 async def _create_db_managed_user(db: Session, *, row: CloudDatabase,
@@ -3246,23 +3309,15 @@ async def run_ps_register(db: Session, *, db_id: str, job_id: str,
                 db, row=row, prov_job=prov_job, progress_job_id=job_id, progress=40)
             if errors:
                 raise CloudDatabaseError("; ".join(errors))
-            # The principals this onboarding created outlive a deregister — unlike a
-            # decommission, the database is still here. Say so rather than leaving
-            # logins nobody expects. Both are named: the functional account's dedicated
-            # login (GCP Cloud SQL SQL Server) has no PRA-tunnel reason to survive, but
-            # dropping it would be the dashboard reaching into a database it is walking
-            # away from, and an operator may have granted it something out of band.
+            # The MANAGED user outlives a deregister — unlike a decommission, the
+            # database is still here, and that login is what the PRA tunnel injects, so
+            # dropping it would break a tunnel the deregister was not asked to touch.
+            # The functional account's dedicated login is the opposite case and is
+            # dropped: it exists only to serve a Password Safe rotation that no longer
+            # exists, and after this its password is held nowhere at all.
             meta = (prov_job.metadata_dict or {}) if prov_job else {}
             leftover = meta.get("ps_db_managed_user")
-            # Not every recorded fa_db_user is a login the dashboard created: on the
-            # data-api channel it is the built-in admin, and on IAM database
-            # authentication it is the rotator principal. Only name the one that is ours.
-            fa_leftover = meta.get("ps_db_fa_db_user") or ""
-            also = ""
-            if fa_leftover and fa_leftover == _fa_db_user_name(row.id):
-                also = (f" The functional account's dedicated login {fa_leftover!r} was "
-                        f"left in place too; its password is no longer held anywhere "
-                        f"except Password Safe, so drop it by hand as well.")
+            also = await _drop_dedicated_fa_login(row=row, meta=meta)
             job_service.append_job_log(
                 db, job_id,
                 f"The managed database user {leftover or _managed_user_name(row.id)!r} was "
