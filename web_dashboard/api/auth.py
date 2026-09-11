@@ -210,8 +210,11 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
 
 # "use" grants using a Secrets-Management secret inside an Ansible run without ever
 # seeing its value (scope "secrets"); read/write/delete are unused for that scope. On
-# scope "pov" it means "take part in this POV" — tick a use case, wake a suspended
-# environment — without being able to create, destroy or share one.
+# scope "pov" it means "take part in this POV" — tick a use case — without being able to
+# create, destroy, share or power one. Powering is `write` and not `use` on purpose:
+# POST /managed/{env_id}/power carries a runstate, so it suspends and stops as readily as
+# it starts. The accessor's /self/wake is the start-only form, and it is bound to one
+# environment by the session rather than by a level.
 PERMISSION_LEVELS = ["read", "write", "delete", "use"]
 
 _ALL = ["read", "write", "delete", "use"]

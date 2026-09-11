@@ -7,10 +7,11 @@ for an anonymous prospect and wrong for a named stakeholder who should also be a
 
 Two axes now, and the separation is the design:
 
-  * ``pov`` scope — what you may DO. ``use`` is the level that ticks a use case and wakes a
-    suspended environment, deliberately excluding create, destroy, share and accessor
-    minting. That is what makes "read their POV and check off use cases" a grant rather
-    than a compromise.
+  * ``pov`` scope — what you may DO. ``use`` is the level that ticks a use case,
+    deliberately excluding create, destroy, share, power and accessor minting. That is what
+    makes "read their POV and check off use cases" a grant rather than a compromise.
+    (Powering stays on ``write``: the route carries a runstate, so it suspends and stops as
+    readily as it starts.)
   * ``User.pov_env_ids`` — WHICH POVs. Empty means every POV the scope allows, so every
     pre-existing user is unaffected.
 
@@ -212,6 +213,166 @@ def test_the_users_api_refuses_pov_grants_on_an_accessor():
     block = src.split("if body.pov_env_ids is not None:")[1].split("db.commit")[0]
     assert "_refuse_accessor(user)" in block, (
         "PATCH /api/users lets an admin set pov_env_ids on a POV accessor")
+
+
+# ── the page the stakeholder actually opens ──────────────────────────────────
+#
+# Everything above tests a dependency in isolation, which is how the first cut of this
+# feature shipped a grant that was correct at every route and still produced a blank page.
+# `templates/pov/index.html` calls GET /api/pov/platforms FIRST and `init()` returns early
+# on any non-ok answer, so ONE 403 there costs the whole page: no POV list, no use cases,
+# nothing the `pov:use` level was added to allow. These drive the real router.
+
+def _pov_client():
+    """The real api/pov.py router, with only the principal faked."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from web_dashboard.database import Base, SessionLocal, engine, get_db
+    from web_dashboard.api import pov as pov_api
+
+    Base.metadata.create_all(bind=engine)
+    app = FastAPI()
+    app.include_router(pov_api.router)
+
+    def _db():
+        db = SessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    principal = {}
+    app.dependency_overrides[get_db] = _db
+    app.dependency_overrides[auth_mod.get_current_user] = lambda: principal["user"]
+    return TestClient(app, raise_server_exceptions=False), principal
+
+
+# What index.html fetches before it renders anything at all.
+_PAGE_BOOTSTRAP = ("/api/pov/platforms", "/api/pov/managed", "/api/pov/managed/archive")
+
+
+def test_the_stakeholder_can_paint_the_pov_page():
+    """A POC stakeholder holding exactly {"pov": ["read","use"]} must get through every
+    call the POV list page makes before it renders. `/platforms` is the registry of lab
+    platforms this INSTANCE may use -- it names no environment, template or customer -- so
+    read is the right level; gating it on write made the page die whole."""
+    client, principal = _pov_client()
+    principal["user"] = _user(perms={"pov": ["read", "use"]}, env_ids=["env-theirs"])
+    for path in _PAGE_BOOTSTRAP:
+        res = client.get(path)
+        assert res.status_code == 200, (
+            f"{path} answered {res.status_code} to a read+use stakeholder: index.html's "
+            f"init() returns early on this and never lists a single POV")
+
+
+def test_the_stakeholder_still_cannot_provision_or_list_the_platform():
+    """The other half of the same rule: read+use opens the page and nothing more. The
+    pickers stay on write because /environments lists environments this dashboard did not
+    create -- other customers' POVs on a shared lab account."""
+    client, principal = _pov_client()
+    principal["user"] = _user(perms={"pov": ["read", "use"]}, env_ids=["env-theirs"])
+    for meth, path in (("GET", "/api/pov/environments"),
+                       ("GET", "/api/pov/templates"),
+                       ("POST", "/api/pov/managed"),
+                       ("POST", "/api/pov/managed/reconcile"),
+                       ("POST", "/api/pov/managed/env-theirs/share"),
+                       ("DELETE", "/api/pov/managed/env-theirs")):
+        res = client.request(meth, path)
+        assert res.status_code == 403, f"{meth} {path} answered {res.status_code}, want 403"
+
+
+def test_a_pov_they_were_not_granted_is_still_404_through_the_real_router():
+    """The instance gate, end to end rather than against a fake request. 404 so the id is
+    not probeable."""
+    client, principal = _pov_client()
+    principal["user"] = _user(perms={"pov": ["read", "use"]}, env_ids=["env-theirs"])
+    for path in ("/api/pov/managed/env-someone-else",
+                 "/api/pov/managed/env-someone-else/summary",
+                 "/api/pov/managed/env-someone-else/use-cases"):
+        assert client.get(path).status_code == 404, f"{path} leaked a POV or its existence"
+
+
+def test_platforms_reports_whether_this_caller_may_provision():
+    """The page skips the two write-only pickers on this flag instead of firing them and
+    rendering the 403 as a page-wide error. It hides UI; every write route still checks."""
+    client, principal = _pov_client()
+    principal["user"] = _user(perms={"pov": ["read", "use"]}, env_ids=["env-theirs"])
+    assert client.get("/api/pov/platforms").json().get("can_provision") is False
+    principal["user"] = _user(perms={"pov": ["read", "write", "delete", "use"]})
+    assert client.get("/api/pov/platforms").json().get("can_provision") is True
+    principal["user"] = _user(admin=True)
+    assert client.get("/api/pov/platforms").json().get("can_provision") is True
+
+
+def test_the_registry_is_read_and_the_pickers_are_write():
+    """Pins which of the four platform reads sits at which level, since the difference is
+    one `dependencies=` argument and the symptom of getting it wrong is a blank page."""
+    with open(os.path.join(_ROOT, "web_dashboard", "api", "pov.py"), encoding="utf-8") as fh:
+        lines = fh.read().split("\n")
+
+    def _decorator(path):
+        hits = [l for l in lines if l.strip().startswith(f'@router.get("{path}"')]
+        assert len(hits) == 1, f"expected exactly one route for {path}, got {hits}"
+        return hits[0]
+
+    assert "_POV_WRITE" not in _decorator("/platforms"), (
+        "GET /api/pov/platforms is back on pov:write -- it is the first call index.html "
+        "makes and init() returns early on a 403, so this blanks the page for every "
+        "read-only stakeholder")
+    for path in ("/templates", "/environments"):
+        assert "_POV_WRITE" in _decorator(path), (
+            f"{path} lists platform-side names and must stay on pov:write")
+
+
+def test_the_platform_environment_id_is_not_called_env_id():
+    """`require_pov_env_access` is router-level and keys on path_params["env_id"]. The
+    platform's own environment id lives in a different namespace from PovEnvironment
+    uuids, so naming it `env_id` made the gate compare the two and 404 every platform
+    environment for any narrowed user -- at any level, write included."""
+    with open(os.path.join(_ROOT, "web_dashboard", "api", "pov.py"), encoding="utf-8") as fh:
+        src = fh.read()
+    assert '@router.get("/environments/{platform_env_id}"' in src, (
+        "the platform environment route is not on {platform_env_id}")
+    assert '@router.get("/environments/{env_id}"' not in src, (
+        "the platform environment route took the {env_id} name back, so the instance "
+        "gate now compares a lab-platform id against PovEnvironment uuids")
+
+
+def test_the_page_skips_the_write_only_pickers_without_write():
+    """Without this the stakeholder's page loads and then wears 'Could not load
+    environments (403)' across the top of it."""
+    with open(os.path.join(_ROOT, "web_dashboard", "templates", "pov", "index.html"),
+              encoding="utf-8") as fh:
+        src = fh.read()
+    load_body = src.split("async load() {")[1].split("schedulePoll();")[0]
+    assert "canProvision" in load_body, (
+        "load() fetches /api/pov/environments and /api/pov/templates unconditionally; "
+        "both are pov:write and fetchList renders their 403 as a page error")
+    assert "this.canProvision = !!data.can_provision;" in src, (
+        "index.html no longer reads can_provision out of /api/pov/platforms")
+
+
+def test_a_narrowing_outlives_the_permission_map_and_stays_visible():
+    """``pov_env_ids`` is its own column and ``pov_env_scope`` reads it without consulting
+    the permission map — so a user ticked back to "unrestricted", or stripped of their POV
+    row, is STILL confined to the environments named there. The grid must therefore keep
+    showing the picker whenever the list is non-empty, or that narrowing is invisible on
+    the only page that edits it and cannot be cleared."""
+    u = _user(perms={}, env_ids=["env-theirs"])
+    assert auth_mod.has_permission(u, "pov", "write"), "empty map should read as unrestricted"
+    assert auth_mod.pov_env_scope(u) == {"env-theirs"}, (
+        "an unrestricted user with pov_env_ids is still narrowed — that is the point")
+
+    with open(os.path.join(_ROOT, "web_dashboard", "templates", "users", "list.html"),
+              encoding="utf-8") as fh:
+        src = fh.read()
+    assert 'x-show="povNarrowingVisible()"' in src, (
+        "the POV picker is gated on something other than povNarrowingVisible()")
+    body = src.split("povNarrowingVisible() {")[1].split("},")[0]
+    assert "povEnvIds" in body and "length" in body, (
+        "povNarrowingVisible() does not show the picker for an already-narrowed user, so "
+        "a stale pov_env_ids list is unclearable from the Users page")
 
 
 if __name__ == "__main__":

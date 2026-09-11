@@ -72,8 +72,8 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         pov_ps_config, pov_resource_broker,
                         suspend_schedule, pov_share, spend_policy, pov_summary,
                         pov_use_cases, pov_wireup)
-from .auth import (get_current_user, pov_env_scope, require_permission,
-                   require_pov_env_access)
+from .auth import (get_current_user, has_permission, pov_env_scope,
+                   require_permission, require_pov_env_access)
 
 logger = logging.getLogger(__name__)
 
@@ -95,9 +95,11 @@ router = APIRouter(
 )
 
 # Shorthands for the per-route level bumps. `use` is the POV's own stakeholder: tick a use
-# case, wake a suspended environment. It deliberately does NOT include create, destroy,
-# share or accessor minting -- that is what makes "read access to just this POC's POV, so
-# they can check off use cases" expressible.
+# case. It deliberately does NOT include create, destroy, share, power or accessor minting
+# -- that is what makes "read access to just this POC's POV, so they can check off use
+# cases" expressible. Power stays on `write` because the route takes a runstate and so
+# stops and suspends as readily as it starts; the start-only wake is the accessor's
+# /self/wake, which names no environment because its session already does.
 _POV_WRITE = [Depends(require_permission("pov", "write"))]
 _POV_DELETE = [Depends(require_permission("pov", "delete"))]
 _POV_USE = [Depends(require_permission("pov", "use"))]
@@ -304,19 +306,30 @@ def _platform_error(exc: Exception, what: str) -> HTTPException:
 
 # ── the lab platform's own inventory ─────────────────────────────────────────
 #
-# These four reads are gated on pov:WRITE, not read, and both reasons matter.
+# `/platforms` is the REGISTRY: which lab platforms this instance may use and what each
+# one can do. It names no environment, no template and no customer -- only this install's
+# own configuration -- so it stays on the router's `pov:read` rather than joining the
+# three below. That is not a nicety. It is the FIRST call templates/pov/index.html makes,
+# and `init()` returns early on any non-ok answer, so gating it on write meant a
+# stakeholder holding {"pov": ["read","use"]} -- the persona this whole change exists for
+# -- got "Could not read the lab platform registry" and never reached `load()`: no POV
+# list, no use cases, nothing. The API said 403 to one call and the page died whole.
+#
+# The three below ARE gated on pov:WRITE, and both reasons matter.
 #
 # 1. They are the create form's pickers -- what templates exist, what is already on the
 #    platform -- so they are only useful to somebody who may provision. `/environments`
 #    deliberately includes environments this dashboard did not create, which on a shared
 #    Skytap account means other people's POVs; a read-only stakeholder listing them is a
 #    cross-customer name leak.
-# 2. `/environments/{env_id}` takes a PLATFORM environment id in a path param that happens
-#    to be named `env_id`, so `require_pov_env_access` would be comparing it against
-#    PovEnvironment uuids -- a different namespace. Requiring write keeps the instance gate
-#    from having to reason about which `env_id` it is looking at.
+# 2. `/environments/{platform_env_id}` takes a PLATFORM environment id, which is a
+#    different namespace from the PovEnvironment uuids `require_pov_env_access` holds. The
+#    path param is deliberately NOT called `env_id`: the instance gate is router-level and
+#    keys on `request.path_params["env_id"]`, so that name here would compare the two
+#    namespaces and 404 every platform environment for any narrowed user, at any level.
+#    The gate cannot tell which kind of id it is looking at, so the name is what tells it.
 
-@router.get("/platforms", dependencies=_POV_WRITE)
+@router.get("/platforms")
 async def list_platforms(current_user: User = Depends(get_current_user)):
     """Every lab platform this instance may use, with what it can do.
 
@@ -342,6 +355,13 @@ async def list_platforms(current_user: User = Depends(get_current_user)):
         # without the POV page having to know the difference.
         "cloud_platforms": list(lab_platforms.CLOUD_PLATFORMS),
         "selected_cloud": lab_platforms.selected_cloud(),
+        # Whether this caller may provision, so the page can skip the two create-form
+        # pickers below instead of firing them and wearing a 403 as a page error. Sent
+        # from here because this is the call the page already makes before anything
+        # else; asking the user endpoint would be a second round trip to learn the same
+        # thing. It hides UI, it does not grant anything -- every write route still
+        # checks for itself.
+        "can_provision": has_permission(current_user, "pov", "write"),
     }
 
 
@@ -397,16 +417,22 @@ async def list_environments(platform: str = Query(_DEFAULT_PLATFORM),
         raise _platform_error(exc, f"listing {name} environments") from exc
 
 
-@router.get("/environments/{env_id}", dependencies=_POV_WRITE)
-async def get_environment(env_id: str,
+@router.get("/environments/{platform_env_id}", dependencies=_POV_WRITE)
+async def get_environment(platform_env_id: str,
                           platform: str = Query(_DEFAULT_PLATFORM),
                           current_user: User = Depends(get_current_user)):
-    """One environment, with its VMs, private IPs and published services."""
+    """One environment, with its VMs, private IPs and published services.
+
+    ``platform_env_id`` is the LAB PLATFORM's id (a Skytap environment id), not a
+    ``PovEnvironment.id``. The name is load-bearing — see the note above the section.
+    """
     name, mod = _adapter(platform)
     try:
-        return {"platform": name, "environment": await mod.get_environment(env_id)}
+        return {"platform": name,
+                "environment": await mod.get_environment(platform_env_id)}
     except Exception as exc:  # noqa: BLE001
-        raise _platform_error(exc, f"reading {name} environment {env_id}") from exc
+        raise _platform_error(
+            exc, f"reading {name} environment {platform_env_id}") from exc
 
 
 # ── managed POVs: this dashboard's own inventory ─────────────────────────────

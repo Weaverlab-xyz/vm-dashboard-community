@@ -220,11 +220,12 @@
           <p x-show="form.permissionsUnrestricted" class="text-xs text-gray-400 mt-1">User has unrestricted access to all sections (same as NULL permissions).</p>
 
           <!-- Per-POV narrowing. Shown once the POV row holds any level, because until
-               then there is nothing to narrow. NOT inside the permissions table: it is an
+               then there is nothing to narrow — and ALWAYS once this user is narrowed,
+               whatever the grid now says. NOT inside the permissions table: it is an
                object list, not a level, and a row of checkboxes is the wrong shape for it.
                Deliberately NOT wrapped in an overflow-hidden container — a clipped
                control here reports a perfect bounding rect and is a dead button. -->
-          <div x-show="!form.permissionsUnrestricted && povScopeHeld()" class="mt-3">
+          <div x-show="povNarrowingVisible()" class="mt-3">
             <label class="block text-xs font-medium text-gray-600 mb-1">
               POV access <span class="text-gray-400 font-normal">(optional)</span>
             </label>
@@ -260,6 +261,12 @@
               Leave empty for every POV. Naming one or more narrows this user to exactly
               those — a POV they were not granted answers "no such POV environment", and
               the POV list shows only theirs.
+            </p>
+            <p x-show="(form.povEnvIds || []).length && (form.permissionsUnrestricted || !povScopeHeld())"
+               class="text-xs text-amber-600 mt-1">
+              This user still has no POV permission, or unrestricted access, yet is
+              narrowed to the environments above — that narrowing applies either way.
+              Remove the entries to give them every POV.
             </p>
           </div>
         </div>
@@ -471,6 +478,20 @@ function usersPage() {
     // anyway would imply a narrowing that nothing reads.
     povScopeHeld() {
       return ((this.form.permissions || {}).pov || []).length > 0;
+    },
+
+    // When to render the picker at all.
+    //
+    // The first clause is the one that matters: `pov_env_ids` is its own column and
+    // `auth.pov_env_scope` reads it for every POV route WITHOUT consulting the permission
+    // map, so a user who was narrowed and has since been ticked "unrestricted", or had
+    // their POV row cleared, is STILL confined to those environments. Showing the picker
+    // only while a pov level happens to be held made that narrowing invisible here and
+    // impossible to clear from the only page that edits it — the same permanent,
+    // unclearable state this change set out to remove, wearing different clothes.
+    povNarrowingVisible() {
+      return (this.form.povEnvIds || []).length > 0
+          || (!this.form.permissionsUnrestricted && this.povScopeHeld());
     },
 
     povEnvLabel(id) {

@@ -47,8 +47,13 @@ being read.
 
 - **`secrets:use`** — run an Ansible playbook that reads a secret out of a vault, without
   ever being shown the value.
-- **`pov:use`** — tick off use cases and wake a suspended environment in a POV you have
-  been given, without being able to create, destroy, share or add logins to it.
+- **`pov:use`** — tick off use cases in a POV you have been given, without being able to
+  create, destroy, share, power or add logins to it. Powering an environment, waking a
+  suspended one included, is `pov:write`: the route takes an arbitrary runstate, so it
+  stops and suspends as readily as it starts. A *POV accessor* has a separate start-only
+  wake of its own — see [Customer access to a POV](profiles/pov/customer-access.md) — and
+  a stakeholder who must be able to wake their own POV needs `write` or an accessor
+  alongside.
 
 Not every scope offers every level. A scope that has nothing to delete shows no Delete
 checkbox, rather than a checkbox that saves and then enforces nothing. If you send a level
