@@ -186,10 +186,30 @@ def test_the_push_is_an_action_not_a_side_effect_of_saving_settings():
     assert "put_budget" not in setup and "budgets_api" not in setup
 
 
-def test_the_endpoints_are_admin_only():
-    assert _API_SRC.count("Depends(require_admin)") == 2, (
-        "both the read and the push must require admin — this reads and writes billing "
-        "configuration")
+def test_the_endpoints_need_an_administrator_or_an_explicit_grant():
+    """This reads and writes billing configuration, so it must never be reachable by
+    default — but it does not have to mean the admin flag. Both routes are on the `costs`
+    scope now, which lets somebody who owns cloud spend read and set a budget without
+    being handed the whole dashboard.
+
+    The FORM is the part that carries the original property: `require_explicit_permission`
+    refuses a user whose permission map is empty, whereas the plain `require_permission`
+    treats an empty map as UNRESTRICTED — which would hand billing configuration to every
+    account that predates the permission columns. `costs` is also deliberately absent from
+    the v1 backfill, so it starts off for everyone.
+    """
+    assert _API_SRC.count("Depends(require_admin)") == 0, (
+        "a budget route is back on the bare admin flag — fine, but then this test and "
+        "the `costs` scope disagree")
+    assert _API_SRC.count('require_explicit_permission("costs", "read")') == 1, (
+        "the read is not on costs:read via the explicit form")
+    assert _API_SRC.count('require_explicit_permission("costs", "write")') == 1, (
+        "the push is not on costs:write via the explicit form")
+    assert "require_permission(" not in _API_SRC.replace(
+        "require_explicit_permission(", ""), (
+        "a budget route uses the PERMISSIVE form, so an empty permission map would read "
+        "as unrestricted and billing configuration would be world-writable to legacy "
+        "accounts")
 
 
 def test_the_read_reports_instead_of_failing_when_nothing_is_configured():

@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from ..database import User, get_db
 from ..services import job_service, notification_service, notify_policy, notify_transports
-from .auth import require_explicit_permission
+from .auth import require_admin, require_explicit_permission
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
@@ -147,7 +147,14 @@ async def list_deliveries(page: int = Query(1, ge=1),
                           status: str = "", channel: str = "",
                           event_type: str = "", resource_id: str = "",
                           db: Session = Depends(get_db),
-                          current_user: User = Depends(require_explicit_permission("notifications", "read"))):
+                          # ADMIN, not `notifications:read`, and deliberately the only
+                          # route here that is. `delivery_public` returns the rendered
+                          # `body`, plus `resource_name`, `resource_id` and `workgroup` --
+                          # so this log names resources the reader may have no other way
+                          # to see, which makes it a cross-workgroup read dressed up as a
+                          # notification setting. Configuring an endpoint is a setting;
+                          # reading the history of what was sent through it is not.
+                          current_user: User = Depends(require_admin)):
     rows, total = notification_service.list_deliveries(
         db, page=page, page_size=page_size, status=status, channel=channel,
         event_type=event_type, resource_id=resource_id)

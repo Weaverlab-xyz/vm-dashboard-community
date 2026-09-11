@@ -481,18 +481,32 @@ def test_the_list_row_counts_only_what_this_pov_can_run():
 
 def test_the_endpoints_exist_and_carry_the_same_auth_as_their_neighbours():
     src = _read(_API)
-    for decorator in ('@router.get("/managed/{env_id}/use-cases")',
-                      '@router.post("/managed/{env_id}/use-cases/{card_id}")',
-                      '@router.delete("/managed/{env_id}/use-cases/{card_id}")'):
+    # Matched WITHOUT the closing paren: these decorators carry a `dependencies=[...]`
+    # argument now, and an exact `")` marker silently stops matching -- which reads as
+    # "missing route" when the route is right there.
+    for decorator in ('@router.get("/managed/{env_id}/use-cases"',
+                      '@router.post("/managed/{env_id}/use-cases/{card_id}"',
+                      '@router.delete("/managed/{env_id}/use-cases/{card_id}"'):
         assert decorator in src, f"missing route {decorator}"
         body = src.split(decorator, 1)[1].split("\n@router.", 1)[0]
         assert "Depends(get_current_user)" in body, \
             f"{decorator} does not authenticate like every other POV route"
 
+    # The two WRITE routes carry the `use` level, which is the whole point of it: a POV's
+    # own customer stakeholder ticks their use cases without being able to create,
+    # destroy or share anything. The read is covered by the router-level pov:read floor.
+    for decorator in ('@router.post("/managed/{env_id}/use-cases/{card_id}"',
+                      '@router.delete("/managed/{env_id}/use-cases/{card_id}"'):
+        line = src.split(decorator, 1)[1].split("\n", 1)[0]
+        assert "_POV_USE" in line, (
+            f"{decorator} is not on the `use` level -- if it moved to write, a stakeholder "
+            "granted read+use can no longer tick anything")
+
 
 def test_an_unknown_card_id_is_refused_rather_than_stored():
     src = _read(_API)
-    body = src.split('@router.post("/managed/{env_id}/use-cases/{card_id}")', 1)[1]
+    # Without the closing paren -- see the note in the auth test above.
+    body = src.split('@router.post("/managed/{env_id}/use-cases/{card_id}"', 1)[1]
     body = body.split("\n@router.", 1)[0]
     assert "UseCaseError" in body and "status_code=400" in body, \
         "the write route does not refuse an unknown card id"

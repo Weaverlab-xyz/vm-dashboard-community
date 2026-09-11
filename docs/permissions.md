@@ -75,7 +75,7 @@ The fourteen original scopes — `vms`, the four clouds, `images`, `containers`,
 | `inventory` | read | the cross-cloud inventory. Read-only: acting on a resource is the owning cloud's scope |
 | `agents` | read, write, delete | the remote-agent operator API. The agent-facing protocol authenticates by signature and is unaffected |
 | `audit` | read | the audit log, so it can be handed to whoever reads it without making them an admin |
-| `gateways` | read, write, delete | PRA gateways and jumpoints |
+| `gateways` | read, write, delete | PRA Gateways — deploy, list and tear down |
 | `notifications` | read, write | outbound webhook endpoints and delivery history |
 | `epml` | read, write | EPM for Linux package builds |
 | `ot` | read, write, delete | the OT demo cell and its protocol tunnels. Building a cell also needs the cloud's own `write` |
