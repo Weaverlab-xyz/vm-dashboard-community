@@ -59,7 +59,8 @@ def _products(env: PovEnvironment) -> list:
 
 # ── the archive ──────────────────────────────────────────────────────────────
 
-def archive(db: Session, *, limit: int = DEFAULT_LIMIT) -> dict:
+def archive(db: Session, *, limit: int = DEFAULT_LIMIT,
+            env_ids=None) -> dict:
     """Past POVs, newest first, with just enough to choose one.
 
     Deliberately NOT ``api/pov._serialize``. That builds five describes per row — gateway,
@@ -72,12 +73,17 @@ def archive(db: Session, *, limit: int = DEFAULT_LIMIT) -> dict:
     ``pov_use_cases.summary_for``: that resolves the whole catalog per POV to work out what
     was in scope, which is the right answer on the detail page and a lot of work to repeat
     down a list.
+
+    ``env_ids`` narrows the result to those POV ids (None = every POV). The archive is the
+    one POV list that is NOT reachable through an ``{env_id}`` route, so the caller's
+    instance scope has to be passed in rather than enforced by a route dependency.
     """
     limit = max(1, min(int(limit or DEFAULT_LIMIT), MAX_LIMIT))
-    rows = (db.query(PovEnvironment)
-              .filter(PovEnvironment.status == "destroyed")
-              .order_by(PovEnvironment.created_at.desc())
-              .limit(limit).all())
+    q = db.query(PovEnvironment).filter(PovEnvironment.status == "destroyed")
+    if env_ids is not None:
+        q = q.filter(PovEnvironment.id.in_(sorted(env_ids)))
+    rows = (q.order_by(PovEnvironment.created_at.desc())
+             .limit(limit).all())
     if not rows:
         return {"environments": [], "truncated": False}
 

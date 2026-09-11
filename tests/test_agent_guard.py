@@ -72,8 +72,15 @@ def _app() -> TestClient:
             db.close()
 
     app.dependency_overrides[get_db] = _db
-    from web_dashboard.api.auth import require_admin
-    app.dependency_overrides[require_admin] = lambda: _Admin()
+    from web_dashboard.api.auth import get_current_user
+    # Overrides get_current_user rather than the admin dependency. The operator half
+    # is gated on `agents:<level>` now, and require_explicit_permission returns a
+    # FRESH function per call -- so a dependency_overrides entry keyed on the factory
+    # matches nothing, the real oauth2_scheme runs, and every route answers "Not
+    # authenticated". Overriding the base dependency is the more honest fixture
+    # anyway: it substitutes the IDENTITY and lets the real permission check run
+    # against it (_Admin carries is_effective_admin, which is what it consults).
+    app.dependency_overrides[get_current_user] = lambda: _Admin()
     config_service.set(agent_api._AUDIENCE_CONFIG, AUDIENCE)
     return TestClient(app)
 

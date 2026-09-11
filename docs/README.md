@@ -51,6 +51,7 @@ demoing, running a lab, or running production.
 | [Auto-delete Timer](auto-delete-timer.md) | you want lab resources to clean themselves up — read it before enabling it, because it deletes infrastructure. |
 | [Notifications](notifications.md) | you want to hear about expiring resources and failed jobs without opening the dashboard. |
 | [Action Guardrails](policy-guardrails.md) | you want disallowed deploys blocked before they start rather than reviewed after. |
+| [Permissions](permissions.md) | you are deciding what a user may see or do — and especially before ticking "Full access", or handing a POV to a customer stakeholder. |
 | [Audit Log](audit-log.md) | you need to show who did what, or to satisfy yourself that the record has not been edited. |
 | [Job Worker](job-worker.md) | a long job is sitting queued, or you are sizing the worker for more of them. |
 | [Cloud Hosting](cloud-hosting.md) | you want the dashboard reachable from outside your LAN, or fronting remote agents. |

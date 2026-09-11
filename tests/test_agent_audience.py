@@ -51,7 +51,7 @@ try:
     from fastapi.testclient import TestClient
     from web_dashboard.database import Base, RemoteAgent, SessionLocal, engine, get_db
     from web_dashboard.api import agent as agent_api
-    from web_dashboard.api.auth import require_admin
+    from web_dashboard.api.auth import get_current_user
     from web_dashboard.services import agent_signing, config_service, public_url
 except Exception as exc:  # pragma: no cover — app deps missing
     try:
@@ -90,7 +90,14 @@ def _app() -> TestClient:
             db.close()
 
     app.dependency_overrides[get_db] = _db
-    app.dependency_overrides[require_admin] = lambda: _Admin()
+    # Overrides get_current_user rather than the admin dependency. The operator half
+    # is gated on `agents:<level>` now, and require_explicit_permission returns a
+    # FRESH function per call -- so a dependency_overrides entry keyed on the factory
+    # matches nothing, the real oauth2_scheme runs, and every route answers "Not
+    # authenticated". Overriding the base dependency is the more honest fixture
+    # anyway: it substitutes the IDENTITY and lets the real permission check run
+    # against it (_Admin carries is_effective_admin, which is what it consults).
+    app.dependency_overrides[get_current_user] = lambda: _Admin()
     return TestClient(app)
 
 
@@ -99,7 +106,7 @@ CLIENT = _app()
 # A second client whose admin check fails, so "admin-only" is tested through the real
 # dependency wiring rather than only by reading the source.
 ANON = _app()
-ANON.app.dependency_overrides[require_admin] = _deny
+ANON.app.dependency_overrides[get_current_user] = _deny
 
 
 # ── state helpers ─────────────────────────────────────────────────────────────

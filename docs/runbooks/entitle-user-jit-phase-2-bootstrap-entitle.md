@@ -69,14 +69,22 @@ empty. Re-run Phase 1's bootstrap before continuing.
 cat terraform/entitle_user_jit/groups.auto.tfvars.json | jq '.groups | to_entries | map({key, tier:.value.tier}) | group_by(.tier) | map({tier:.[0].tier, count:length})'
 ```
 
-**Expected** (default 28 prod-seeded groups):
-- `auto_approve` ≈ 9 (baseline + 8 `*-read`)
-- `single_approver` ≈ 10 (8 `*-write` + 2 workgroup-`*`)
-- `two_approver` ≈ 9 (admin + 8 `*-delete`)
+**Expected** (default 102 prod-seeded groups: 1 admin + 1 baseline +
+98 scope/levels + 2 workgroups):
+- `auto_approve` = 32 (baseline + 31 `*-read`)
+- `single_approver` = 46 (29 `*-write` + 15 `*-use` + 2 workgroup-`*`)
+- `two_approver` = 24 (admin + 23 `*-delete`)
 
-Exact counts vary with `PERMISSION_SCOPES`/`PERMISSION_LEVELS` and the
-number of workgroups. If a row landed in the wrong tier, edit
-`_tier_for_group()` in `bootstrap_entitle_app.py` and re-run Step 1.
+Exact counts vary with `PERMISSION_SCOPE_LEVELS` and the number of
+workgroups — not every scope offers all four levels, so the totals are
+the sum of its value lengths rather than a multiple of the scope count.
+If a row landed in the wrong tier, edit `_tier_for_group()` in
+`bootstrap_entitle_app.py` and re-run Step 1.
+
+`*-use` routes to `single_approver`. It was missing from the suffix
+lists until recently, so `dashboard-secrets-use` fell through to the
+"tier inference fell through" warning and took the same tier by
+default — a log line worth grepping for if you are on an older build.
 
 ## Step 3 — `terraform init`
 
@@ -169,14 +177,28 @@ updates the affected entries.
 
 To prove the Phase 1 → Phase 2 chain works:
 
-1. Add a new permission scope to `web_dashboard/api/auth.py:PERMISSION_SCOPES`.
+1. Add a new permission scope to
+   `web_dashboard/api/auth.py:PERMISSION_SCOPE_LEVELS`, declaring only the
+   levels something actually enforces.
 2. Re-run Phase 1: `python -m web_dashboard.scripts.bootstrap_entitle_groups --scope=permissions --yes`.
 3. Re-run Phase 2 Step 1 + Step 5 (apply).
 
 **Expected:** Step 5 reports `~ X to change` (for the bundle's
-`resource_ids` list) and `+ 3 to add` (the three new
-`*-read/-write/-delete` resources). The Entitle UI's VM Dashboard
+`resource_ids` list) and `+ N to add`, where N is the number of levels
+the new scope declared — not always three. The Entitle UI's VM Dashboard
 catalog entry now shows the new resources.
+
+> **Before you add one, read this.** `has_permission` treats an empty
+> permission map as *unrestricted* but a non-empty map as a strict
+> per-scope allowlist. So adding a scope and gating a route on it
+> **revokes that route from every user who has an explicit permission
+> map** — with no error, no log line, and no row the administrator who
+> set those permissions ever saw. A new scope needs a backfill in
+> `web_dashboard/database.py` in the same change, granting exactly what a
+> non-admin with an explicit map could already reach: the full level set
+> for a previously ungated route, and *nothing* for one that required the
+> Admin flag. See
+> [Permissions → Adding a scope](../permissions.md#adding-a-scope-for-contributors).
 
 ## Step 9 — Where this fits
 

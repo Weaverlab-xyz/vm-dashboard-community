@@ -452,7 +452,12 @@ def test_run_cloud_localhost_never_consults_the_ephemeral_store_gate():
     src = _config_mgmt_src()
     start = src.find("async def _run_cloud_localhost(")
     assert start != -1, "_run_cloud_localhost is gone"
-    end = src.find("\n@router.post(\"/run\")", start)
+    # Matched without the closing paren. The decorator now carries a `dependencies=[...]`
+    # argument (config_mgmt:write), so an exact `"/run")` marker silently stopped matching
+    # — which made `body` run to the end of the file and this assertion fail on some other
+    # function's legitimate use of the gate. `"/run"` with its closing quote still cannot
+    # match `"/run-bulk"`.
+    end = src.find("\n@router.post(\"/run\"", start)
     body = src[start:end if end != -1 else len(src)]
     assert "requires_ephemeral_store" not in body, (
         "_run_cloud_localhost consults the ephemeral-store gate; a database run's "

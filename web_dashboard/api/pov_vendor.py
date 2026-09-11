@@ -28,12 +28,31 @@ from sqlalchemy.orm import Session
 from ..database import PovEnvironment, User, get_db
 from ..services import pov_env_service, pov_vendor_access
 from ..services.pra_tenant_api import PRATenantError
-from .auth import get_current_user
+from .auth import get_current_user, require_permission, require_pov_env_access
 
 logger = logging.getLogger(__name__)
 
-# Rides the POV router's prefix, so it inherits that gate at mount time.
-router = APIRouter(prefix="/api/pov", tags=["pov-vendors"])
+# Sharing api/pov.py's PREFIX does not share its dependencies -- a router is gated by what
+# it declares, not by what another router mounted at the same path declares. api/pov_accessor
+# .py carried the same sentence and the same gap until the permission scopes went in, and
+# this module was written against the branch point, so it arrived ungated: any authenticated
+# user could read, create and delete a PRA vendor group on ANY POV, and mint a third-party
+# login into somebody else's customer environment.
+#
+# So, the same two guards api/pov_accessor.py settled on, for the same reasons:
+#
+#   pov:write -- minting and revoking a vendor's login hands out a CREDENTIAL into the
+#                customer's environment. That is not a read, and a stakeholder holding
+#                {"pov": ["read","use"]} must not reach it.
+#   require_pov_env_access -- the instance gate, so an SE narrowed to one POV cannot open a
+#                vendor group on another. Every route here names an {env_id}, and it answers
+#                404 rather than 403 so the id stays unprobeable.
+router = APIRouter(
+    prefix="/api/pov",
+    tags=["pov-vendors"],
+    dependencies=[Depends(require_permission("pov", "write")),
+                  Depends(require_pov_env_access)],
+)
 
 
 class VendorGroupRequest(BaseModel):

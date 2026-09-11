@@ -152,7 +152,7 @@ The dashboard quickstart provisions:
 | Group name pattern | Mapping in `oauth_group_mappings` | Notes |
 |---|---|---|
 | `dashboard-admin` | `default_permissions = {"is_admin": true}` | Highest-value grant; recommend non-auto-approve policy |
-| `dashboard-<scope>-<level>` for each (scope, level) in `PERMISSION_SCOPES × PERMISSION_LEVELS` | `default_permissions = {"<scope>": ["<level>"]}` | ~27 groups today |
+| `dashboard-<scope>-<level>` for each level a scope offers in `PERMISSION_SCOPE_LEVELS` | `default_permissions = {"<scope>": ["<level>"]}` | 98 groups today. Per-scope levels, not the scopes × levels cross product — a level a scope does not offer would be a permanent group in the tenant that can never grant anything. |
 | `dashboard-workgroup-<wg>` for each workgroup the operator manages | `workgroup = "<wg>"` (uses the existing workgroup field) | Per-workgroup membership grant |
 | `dashboard-baseline` (optional) | `default_permissions = {"vms": ["read"], "jobs": ["read"]}` | Default safe-read role for any authenticated user; auto-approve recommended |
 

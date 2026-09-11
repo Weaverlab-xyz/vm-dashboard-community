@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import Job, User, get_db
-from .auth import get_current_user
+from .auth import get_current_user, require_permission
 from ..services import job_service, workgroup_service, workgroup_override_service
 from ..services import proxmox_service
 from ..services.proxmox_service import ProxmoxError
@@ -21,7 +21,12 @@ from ..services import hypervisor_view_service
 from .hypervisor_deps import (agent_power_job, conn_in_task, conn_or_error,
                               queue_power_batch)
 
-router = APIRouter(prefix="/api/proxmox", tags=["proxmox"])
+# Every route in this module was `get_current_user` only -- including deploy,
+# image import and VM delete. The router-level read gate is the floor; the
+# mutating routes add their own level below.
+router = APIRouter(prefix="/api/proxmox", tags=["proxmox"],
+    dependencies=[Depends(require_permission("proxmox", "read"))],
+)
 
 PROVIDER = "proxmox"
 
@@ -214,7 +219,7 @@ async def _run_import(job_id: str, connection_id: str, req: ImportImageRequest):
         db.close()
 
 
-@router.post("/import-image")
+@router.post("/import-image", dependencies=[Depends(require_permission("proxmox", "write"))])
 async def import_image(
     payload: ImportImageRequest,
     background_tasks: BackgroundTasks,
@@ -273,7 +278,7 @@ async def _run_deploy(job_id: str, connection_id: str, req: DeployRequest):
         db.close()
 
 
-@router.post("/deploy")
+@router.post("/deploy", dependencies=[Depends(require_permission("proxmox", "write"))])
 async def deploy(
     payload: DeployRequest,
     background_tasks: BackgroundTasks,
@@ -320,7 +325,7 @@ async def _run_delete(job_id: str, connection_id: str, node: str, vmid: int, vm_
         db.close()
 
 
-@router.delete("/vms/{node}/{vmid}")
+@router.delete("/vms/{node}/{vmid}", dependencies=[Depends(require_permission("proxmox", "delete"))])
 async def delete_vm(
     node: str,
     vmid: int,
@@ -456,7 +461,11 @@ async def bulk_power(
     payload: BulkPowerRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    # `<hv>:write`, in the permissive form, because this route was `get_current_user`
+    # only -- so a legacy NULL-permission user keeps it, and an explicitly-permissioned
+    # one gets it from the backfill. The docstring below is still the rule: the same
+    # authority as powering one VM, never require_admin.
+    current_user: User = Depends(require_permission("proxmox", "write")),
 ):
     """Queue one power op per selected VM, all sharing a ``batch_id``.
 

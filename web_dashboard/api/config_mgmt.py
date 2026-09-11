@@ -29,7 +29,7 @@ from pydantic import BaseModel, model_validator
 from sqlalchemy.orm import Session
 
 from ..database import Job, User, get_db
-from .auth import get_current_user
+from .auth import get_current_user, require_permission
 from ..services import job_service
 from ..services import storage_service
 from ..services.storage_service import StorageError
@@ -37,7 +37,15 @@ from ..services import ansible_local_service
 from ..services import ansible_run_meta
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/config-mgmt", tags=["config-mgmt"])
+# `config_mgmt` has been in PERMISSION_SCOPES from the start and was referenced by
+# NOTHING: all 12 routes here were `get_current_user` only, including POST /run and
+# POST /run-bulk. The grid row promised a gate that did not exist.
+#
+# `secrets:use` is a separate, narrower question -- may this run read a vault secret
+# without seeing it -- and stays where it is, in _can_use_secrets below.
+router = APIRouter(prefix="/api/config-mgmt", tags=["config-mgmt"],
+    dependencies=[Depends(require_permission("config_mgmt", "read"))],
+)
 
 
 # ── Asset / playbook listing ───────────────────────────────────────────────────
@@ -69,7 +77,7 @@ class UploadAssetRequest(BaseModel):
     content_b64: str
 
 
-@router.post("/upload", status_code=201)
+@router.post("/upload", status_code=201, dependencies=[Depends(require_permission("config_mgmt", "write"))])
 async def upload_asset(
     req: UploadAssetRequest,
     current_user: User = Depends(get_current_user),
@@ -727,7 +735,7 @@ async def _run_cloud_localhost(payload: "RunRequest", db, current_user):
     return {"job_id": job.id, "status": "queued"}
 
 
-@router.post("/run")
+@router.post("/run", dependencies=[Depends(require_permission("config_mgmt", "write"))])
 async def run_playbook(
     payload: RunRequest,
     db: Session = Depends(get_db),
@@ -910,7 +918,7 @@ class BulkRunRequest(BaseModel):
     managed_become: ManagedAccountRef | None = None
 
 
-@router.post("/run-bulk")
+@router.post("/run-bulk", dependencies=[Depends(require_permission("config_mgmt", "write"))])
 async def run_playbook_bulk(
     payload: BulkRunRequest,
     db: Session = Depends(get_db),

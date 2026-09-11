@@ -41,14 +41,29 @@ from fastapi import Request
 from ..database import PovEnvironment, User, get_db
 from ..services import (pov_accessor_entitle, pov_accessor_service, pov_env_service,
                         pov_use_cases)
-from .auth import get_current_user
+from .auth import get_current_user, require_permission, require_pov_env_access
 
 logger = logging.getLogger(__name__)
 
 # The SE half rides the POV router's prefix, so it inherits that gate at mount time.
-router = APIRouter(prefix="/api/pov", tags=["pov-accessors"])
+#
+# Minting and revoking a prospect's login is POV WRITE, not read: it hands out a
+# credential. The instance gate goes on too, so an SE narrowed to one POV cannot mint an
+# accessor into somebody else's -- every route here names an {env_id}.
+router = APIRouter(
+    prefix="/api/pov",
+    tags=["pov-accessors"],
+    dependencies=[Depends(require_permission("pov", "write")),
+                  Depends(require_pov_env_access)],
+)
 # The accessor's own half. A separate router only so the allowlisted path is spelled in
 # one obvious place; it is mounted with the same gate.
+#
+# NO permission dependency here, deliberately. An accessor's permission map is empty,
+# which `has_permission` reads as unrestricted -- so a `pov:read` gate would pass for it
+# and mean nothing, while breaking the day somebody gave an accessor an explicit map.
+# Confinement for this half is the path allowlist in `auth.get_current_user`, and
+# authorization is the session binding: nothing under /self takes an environment id.
 self_router = APIRouter(prefix="/api/pov/accessor", tags=["pov-accessors"])
 
 

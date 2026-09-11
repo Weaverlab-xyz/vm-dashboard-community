@@ -41,10 +41,17 @@ from ..database import PovEnvironment, PovTemplateBuild, User, get_db
 from ..services import (job_service, lab_platforms, pov_blueprint_service,
                         pov_broker, pov_cloud_env, pov_cloud_template_service,
                         pov_template_builder)
-from .auth import get_current_user, require_admin
+from .auth import get_current_user, require_admin, require_explicit_permission, require_permission
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/pov", tags=["pov"])
+# The reads here were authenticated-only, so the floor is the plain form (a legacy
+# NULL-permission user keeps what they had). The writes below were require_admin and
+# use require_explicit_permission, which does NOT treat an empty map as unrestricted.
+router = APIRouter(
+    prefix="/api/pov",
+    tags=["pov"],
+    dependencies=[Depends(require_permission("pov_templates", "read"))],
+)
 
 _DEFAULT_PLATFORM = "skytap"
 
@@ -115,7 +122,7 @@ async def get_build(build_id: str, db: Session = Depends(get_db),
 
 @router.post("/builds", status_code=202)
 async def start_build(payload: BuildRequest, db: Session = Depends(get_db),
-                      current_user: User = Depends(require_admin)):
+                      current_user: User = Depends(require_explicit_permission("pov_templates", "write"))):
     """Build a template. 202: it does not exist yet, and the job is where the failure is.
 
     The refusals here are all things resolvable *before* an environment exists. A base
@@ -190,7 +197,7 @@ async def start_build(payload: BuildRequest, db: Session = Depends(get_db),
 
 @router.delete("/builds/{build_id}")
 async def discard_build(build_id: str, db: Session = Depends(get_db),
-                        current_user: User = Depends(require_admin)):
+                        current_user: User = Depends(require_explicit_permission("pov_templates", "delete"))):
     """Reap a build's scratch environment and close the row out.
 
     Not 202: this is one platform DELETE, not a job. A failure is reported to the caller
@@ -303,7 +310,7 @@ async def list_blueprints(db: Session = Depends(get_db),
 
 @router.post("/blueprints", status_code=201)
 async def create_blueprint(payload: BlueprintRequest, db: Session = Depends(get_db),
-                           current_user: User = Depends(require_admin)):
+                           current_user: User = Depends(require_explicit_permission("pov_templates", "write"))):
     try:
         row = pov_blueprint_service.create(
             db, platform=payload.platform, name=payload.name,
@@ -333,7 +340,7 @@ async def create_blueprint(payload: BlueprintRequest, db: Session = Depends(get_
 @router.put("/blueprints/{blueprint_id}")
 async def update_blueprint(blueprint_id: str, payload: dict,
                            db: Session = Depends(get_db),
-                           current_user: User = Depends(require_admin)):
+                           current_user: User = Depends(require_explicit_permission("pov_templates", "write"))):
     """Partial update: only the keys present are touched.
 
     A raw dict rather than a model, because "present" and "blank" have to stay
@@ -352,7 +359,7 @@ async def update_blueprint(blueprint_id: str, payload: dict,
 
 @router.delete("/blueprints/{blueprint_id}")
 async def delete_blueprint(blueprint_id: str, db: Session = Depends(get_db),
-                           current_user: User = Depends(require_admin)):
+                           current_user: User = Depends(require_explicit_permission("pov_templates", "delete"))):
     row = pov_blueprint_service.get(db, blueprint_id)
     if row is None:
         raise HTTPException(status_code=404, detail="No such blueprint")
@@ -435,7 +442,7 @@ async def get_cloud_template(template_id: str, db: Session = Depends(get_db),
 @router.post("/cloud-templates", status_code=201)
 async def create_cloud_template(payload: CloudTemplateRequest,
                                 db: Session = Depends(get_db),
-                                current_user: User = Depends(require_admin)):
+                                current_user: User = Depends(require_explicit_permission("pov_templates", "write"))):
     """Save a cloud template.
 
     Admin, like every other write in this module, and for the sharper of the two reasons
@@ -464,7 +471,7 @@ async def create_cloud_template(payload: CloudTemplateRequest,
 @router.put("/cloud-templates/{template_id}")
 async def update_cloud_template(template_id: str, payload: dict,
                                 db: Session = Depends(get_db),
-                                current_user: User = Depends(require_admin)):
+                                current_user: User = Depends(require_explicit_permission("pov_templates", "write"))):
     """Partial update: only the keys present are touched.
 
     A raw dict rather than a model, for the reason the blueprint editor gives above —
@@ -483,7 +490,7 @@ async def update_cloud_template(template_id: str, payload: dict,
 
 @router.delete("/cloud-templates/{template_id}")
 async def delete_cloud_template(template_id: str, db: Session = Depends(get_db),
-                                current_user: User = Depends(require_admin)):
+                                current_user: User = Depends(require_explicit_permission("pov_templates", "delete"))):
     """Delete a template.
 
     A live POV built from it is deliberately not a reason to refuse — see

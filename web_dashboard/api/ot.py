@@ -62,7 +62,12 @@ from .gcp import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/ot", tags=["ot"])
+# ot:read is the floor for the whole module. The cell-build routes below keep their
+# per-cloud write dependency on top of it: those provision real VMs in a real cloud
+# account, and that is the cloud scope's decision, not this one's.
+router = APIRouter(prefix="/api/ot", tags=["ot"],
+    dependencies=[Depends(require_permission("ot", "read"))],
+)
 
 
 def _require_cloud(user: User, cloud: str, level: str) -> str:
@@ -167,7 +172,7 @@ async def list_tunnels(
 async def create_tunnel(
     payload: OTTunnelRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("ot", "write")),
 ):
     """Provision a PRA protocol tunnel (tunnel_type=tcp) to an arbitrary OT host.
     Short terraform apply, run in-request like the other small PRA operations."""
@@ -210,7 +215,7 @@ async def create_tunnel(
 async def delete_tunnel(
     slug: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("ot", "delete")),
 ):
     # Whose gateway the tunnel rides decides both the permission and which
     # cloud's idle-teardown to run afterwards.
@@ -575,7 +580,7 @@ async def deploy_cell_azure(
 async def rewire_cell(
     vm_job_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("ot", "write")),
 ):
     """Re-run only the missing wiring steps (Web Jump / tunnel / checkout pair) of
     an existing cell — the recovery path a failed ``ot_cell_deploy`` names in its

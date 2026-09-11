@@ -201,10 +201,15 @@
                     <td class="px-3 py-2 font-medium text-gray-700 capitalize" x-text="permissionScopeLabel(scope)"></td>
                     <template x-for="level in permissionLevels" :key="level">
                       <td class="px-3 py-2 text-center">
-                        <input type="checkbox"
+                        <!-- No checkbox where the scope does not offer the level. A
+                             disabled box would invite "why can't I tick this?", and the
+                             answer is that nothing enforces it. -->
+                        <input x-show="allowsLevel(scope, level)" type="checkbox"
                                :checked="hasPerm(scope, level)"
                                @change="togglePerm(scope, level, $event.target.checked)"
                                class="rounded border-gray-300 text-blue-600">
+                        <span x-show="!allowsLevel(scope, level)"
+                              class="text-gray-300 select-none">&middot;</span>
                       </td>
                     </template>
                   </tr>
@@ -213,6 +218,57 @@
             </table>
           </div>
           <p x-show="form.permissionsUnrestricted" class="text-xs text-gray-400 mt-1">User has unrestricted access to all sections (same as NULL permissions).</p>
+
+          <!-- Per-POV narrowing. Shown once the POV row holds any level, because until
+               then there is nothing to narrow — and ALWAYS once this user is narrowed,
+               whatever the grid now says. NOT inside the permissions table: it is an
+               object list, not a level, and a row of checkboxes is the wrong shape for it.
+               Deliberately NOT wrapped in an overflow-hidden container — a clipped
+               control here reports a perfect bounding rect and is a dead button. -->
+          <div x-show="povNarrowingVisible()" class="mt-3">
+            <label class="block text-xs font-medium text-gray-600 mb-1">
+              POV access <span class="text-gray-400 font-normal">(optional)</span>
+            </label>
+            <div class="flex flex-wrap gap-1.5 mb-2">
+              <template x-for="id in (form.povEnvIds || [])" :key="id">
+                <span class="inline-flex items-center gap-1 bg-blue-50 text-blue-700 border border-blue-200 rounded px-2 py-0.5 text-xs">
+                  <span x-text="povEnvLabel(id)"></span>
+                  <button type="button" @click="removePovEnv(id)"
+                          class="text-blue-400 hover:text-blue-700 leading-none">&times;</button>
+                </span>
+              </template>
+            </div>
+            <div class="flex gap-2">
+              <select x-model="form.povEnvToAdd" x-show="povEnvironments.length"
+                      class="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="">— choose a POV —</option>
+                <template x-for="e in selectablePovEnvironments()" :key="e.id">
+                  <option :value="e.id" x-text="e.name || e.id"></option>
+                </template>
+              </select>
+              <!-- Fallback when the POV router is feature-gated off (404) or the list is
+                   empty: an id can still be pasted, so an admin is never blocked by a
+                   picker that could not load. -->
+              <input x-show="!povEnvironments.length" x-model="form.povEnvToAdd" type="text"
+                     placeholder="POV environment id"
+                     class="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <button type="button" @click="addPovEnv()"
+                      class="shrink-0 text-xs bg-gray-100 hover:bg-gray-200 border border-gray-300 rounded-lg px-3 py-1.5 font-medium">
+                Add
+              </button>
+            </div>
+            <p class="text-xs text-gray-500 mt-1">
+              Leave empty for every POV. Naming one or more narrows this user to exactly
+              those — a POV they were not granted answers "no such POV environment", and
+              the POV list shows only theirs.
+            </p>
+            <p x-show="(form.povEnvIds || []).length && (form.permissionsUnrestricted || !povScopeHeld())"
+               class="text-xs text-amber-600 mt-1">
+              This user still has no POV permission, or unrestricted access, yet is
+              narrowed to the environments above — that narrowing applies either way.
+              Remove the entries to give them every POV.
+            </p>
+          </div>
         </div>
         <!-- Actions -->
         <div class="flex justify-end gap-3 pt-2">
@@ -328,6 +384,9 @@
 // the grid will drift from what require_permission actually enforces.
 const PERMISSION_SCOPES = {{ permission_scopes | tojson }};
 const PERMISSION_LEVELS = {{ permission_levels | tojson }};
+// Which levels each scope offers. Same source, same reason: a scope that enforces nothing
+// at a level must not show a checkbox there, or the save 422s.
+const PERMISSION_SCOPE_LEVELS = {{ permission_scope_levels | tojson }};
 
 function usersPage() {
   return {
@@ -336,6 +395,12 @@ function usersPage() {
     availableWorkgroups: {{ workgroups | tojson }},
     permissionScopes: PERMISSION_SCOPES,
     permissionLevels: PERMISSION_LEVELS,
+    permissionScopeLevels: PERMISSION_SCOPE_LEVELS,
+    // POV environments, for the per-POV picker. Loaded lazily and allowed to stay empty:
+    // the POV router is feature-gated, so on a demo install it 404s and the picker falls
+    // back to free-text ids rather than claiming there are no POVs.
+    povEnvironments: [],
+    povEnvironmentsLoaded: false,
 
     // user modal
     showUserModal: false,
@@ -388,11 +453,16 @@ function usersPage() {
         is_active: u.is_active,
         permissions: hasPerms ? JSON.parse(JSON.stringify(u.permissions)) : {},
         permissionsUnrestricted: !hasPerms,
+        // Which POVs this user is narrowed to. Empty = every POV their `pov` scope
+        // allows, which is what every existing user has.
+        povEnvIds: [...(u.pov_env_ids || [])],
+        povEnvToAdd: '',
         // The stored assignment. Empty when their focus comes from a group instead --
         // persona_source says which, and the table shows it.
         persona: u.persona || '',
       };
       this.showUserModal = true;
+      this.loadPovEnvironments();
     },
 
     toggleWorkgroup(wg, checked) {
@@ -402,6 +472,67 @@ function usersPage() {
       } else {
         this.form.workgroups = this.form.workgroups.filter(w => w !== wg);
       }
+    },
+
+    // Is any POV level held? The picker is meaningless without one, and showing it
+    // anyway would imply a narrowing that nothing reads.
+    povScopeHeld() {
+      return ((this.form.permissions || {}).pov || []).length > 0;
+    },
+
+    // When to render the picker at all.
+    //
+    // The first clause is the one that matters: `pov_env_ids` is its own column and
+    // `auth.pov_env_scope` reads it for every POV route WITHOUT consulting the permission
+    // map, so a user who was narrowed and has since been ticked "unrestricted", or had
+    // their POV row cleared, is STILL confined to those environments. Showing the picker
+    // only while a pov level happens to be held made that narrowing invisible here and
+    // impossible to clear from the only page that edits it — the same permanent,
+    // unclearable state this change set out to remove, wearing different clothes.
+    povNarrowingVisible() {
+      return (this.form.povEnvIds || []).length > 0
+          || (!this.form.permissionsUnrestricted && this.povScopeHeld());
+    },
+
+    povEnvLabel(id) {
+      const hit = (this.povEnvironments || []).find(e => e.id === id);
+      return hit ? (hit.name || hit.id) : id;
+    },
+
+    selectablePovEnvironments() {
+      const held = this.form.povEnvIds || [];
+      return (this.povEnvironments || []).filter(e => !held.includes(e.id));
+    },
+
+    addPovEnv() {
+      const id = (this.form.povEnvToAdd || '').trim();
+      if (!id) return;
+      if (!this.form.povEnvIds) this.form.povEnvIds = [];
+      if (!this.form.povEnvIds.includes(id)) this.form.povEnvIds.push(id);
+      this.form.povEnvToAdd = '';
+    },
+
+    removePovEnv(id) {
+      this.form.povEnvIds = (this.form.povEnvIds || []).filter(v => v !== id);
+    },
+
+    async loadPovEnvironments() {
+      if (this.povEnvironmentsLoaded) return;
+      this.povEnvironmentsLoaded = true;
+      try {
+        const data = await API.request('GET', '/api/pov/managed');
+        this.povEnvironments = (data.environments || []).map(e => ({ id: e.id, name: e.name }));
+      } catch (e) {
+        // A 404 here means pov_environments_enabled is off, not that something broke —
+        // this page is admin-only and exists on every install, POV profile or not. The
+        // free-text fallback above covers it, so this stays silent rather than toasting
+        // an error at an admin who was editing a user's workgroups.
+        this.povEnvironments = [];
+      }
+    },
+
+    allowsLevel(scope, level) {
+      return permissionScopeAllowsLevel(this.permissionScopeLevels, scope, level);
     },
 
     hasPerm(scope, level) {
@@ -445,6 +576,9 @@ function usersPage() {
           if (!this.form.is_admin) {
             body.permissions = this.form.permissionsUnrestricted ? {} : (this.form.permissions || {});
           }
+          // Always sent on edit, so removing the last entry actually clears the
+          // narrowing. [] means "every POV", matching the column's NULL.
+          body.pov_env_ids = this.form.povEnvIds || [];
           await API.request('PATCH', `/api/users/${this.editingUser.id}`, body);
           toast('User updated', 'success');
         } else {

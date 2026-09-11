@@ -76,10 +76,13 @@
            prefers this load's live read for display, so this is for the half a live read
            cannot do: persisting the runstate for everything else that reads these rows,
            and re-checking a POV flagged as gone from the platform. -->
-      <button @click="recheck()" :disabled="notConfigured || rechecking"
+      <!-- Both are pov:write routes. Hidden rather than disabled for a read-only
+           stakeholder: a disabled control says "not yet", and the honest answer is that
+           this POV is not theirs to create or reconcile. -->
+      <button x-show="canProvision" @click="recheck()" :disabled="notConfigured || rechecking"
               class="px-3 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
               x-text="rechecking ? 'Checking…' : 'Re-check platform'"></button>
-      <button @click="showCreate = !showCreate" :disabled="notConfigured"
+      <button x-show="canProvision" @click="showCreate = !showCreate" :disabled="notConfigured"
               class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
         New POV
       </button>
@@ -104,7 +107,7 @@
   </div>
 
   <!-- Create -->
-  <div x-show="showCreate && !notConfigured" x-transition
+  <div x-show="canProvision && showCreate && !notConfigured" x-transition
        class="border border-gray-200 rounded-lg p-4 space-y-4 bg-gray-50">
     <h2 class="text-lg font-medium text-gray-900">New POV environment</h2>
 
@@ -220,7 +223,7 @@
       <span class="text-xs text-gray-400" x-text="managed.length + ' managed'"></span>
     </div>
     <div x-show="managed.length === 0" class="text-sm text-gray-400 border border-dashed border-gray-200 rounded-lg px-4 py-6 text-center">
-      None yet. <span x-show="!notConfigured">Use <span class="font-medium">New POV</span> to create one from a template.</span>
+      None yet. <span x-show="canProvision && !notConfigured">Use <span class="font-medium">New POV</span> to create one from a template.</span>
     </div>
     <div x-show="managed.length" class="overflow-hidden border border-gray-200 rounded-lg">
       <table class="min-w-full divide-y divide-gray-200 text-sm">
@@ -819,8 +822,10 @@
     </div>
   </div>
 
-  <!-- Live platform read -->
-  <div x-show="!loading && !notConfigured" class="space-y-3">
+  <!-- Live platform read. Fed by GET /api/pov/environments, which is pov:write: it
+       lists environments this dashboard did not create, so on a shared lab account it
+       is other customers' POVs. Never rendered without write. -->
+  <div x-show="canProvision && !loading && !notConfigured" class="space-y-3">
     <div class="flex items-baseline justify-between">
       <h2 class="text-lg font-medium text-gray-900">All environments on the platform</h2>
       <span class="text-xs text-gray-400" x-text="environments.length + ' found'"></span>
@@ -879,6 +884,10 @@ function povPage() {
     error: '',
     notice: '',
     notConfigured: false,
+    // Set from GET /api/pov/platforms. Starts false so nothing write-shaped is drawn
+    // before the server has said it may be: the wrong way round would flash a New POV
+    // button at a stakeholder and then take it away.
+    canProvision: false,
     platform: '',
     cloudPlatform: '',
     platforms: [],
@@ -1097,6 +1106,11 @@ function povPage() {
         this.platforms = data.platforms || [];
         this.cloudPlatform = data.selected_cloud || '';
         this.platform = data.default || (this.platforms[0] || {}).name || '';
+        // May this user create a POV? Everything the platform read feeds -- the create
+        // form, its two pickers, the live "all environments" table, Re-check -- is
+        // pov:write, so a read-only stakeholder must not be shown it or made to fetch
+        // it. The server decides; this only draws what it was told.
+        this.canProvision = !!data.can_provision;
       } catch (e) {
         this.error = 'Could not reach the dashboard API.';
         this.loading = false;
@@ -1125,6 +1139,11 @@ function povPage() {
       this.managed = await this.fetchList('/api/pov/managed', 'environments', true);
       await this.loadArchive();
       if (this.notConfigured) { this.environments = []; this.templates = []; this.loading = false; return; }
+      // Both of these are pov:write. For a stakeholder they are not merely empty, they
+      // are refused -- and fetchList reports a refusal as "Could not load environments
+      // (403)" across the top of a page that is otherwise fine. Their only consumers are
+      // the create form and the live platform table, both hidden below without write.
+      if (!this.canProvision) { this.environments = []; this.templates = []; this.loading = false; return; }
       const [envs, tpls] = await Promise.all([
         this.fetchList('/api/pov/environments', 'environments'),
         this.fetchList('/api/pov/templates', 'templates'),

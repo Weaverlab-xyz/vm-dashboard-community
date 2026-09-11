@@ -32,6 +32,11 @@ class UserResponse(BaseModel):
     # client can send them there instead of a dashboard that would refuse every call.
     # It is not what confines them -- see api/auth._ACCESSOR_ALLOWED_PREFIXES.
     accessor_env_id: str = ""
+    # Which POVs this user is narrowed to. [] means "not narrowed" -- every POV their
+    # `pov` scope allows. The NARROWING twin of accessor_env_id above: that one belongs to
+    # an ephemeral prospect login confined to a five-route surface, this one belongs to an
+    # ordinary user whose POV pages happen to show a subset.
+    pov_env_ids: List[str] = []
     # The focus assigned to this user, and which rule produced it ("user" | "group" |
     # "default" | "none"). Returned here because /api/auth/me is the hop both login paths
     # ALREADY make for is_admin, and an HTML page load carries no identity of its own --

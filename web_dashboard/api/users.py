@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..database import User, Fido2Credential, PersonalAccessToken, get_db, get_password_hash
 from ..models.user import UserResponse
-from .auth import get_current_user, require_admin
+from .auth import (get_current_user, require_admin, validate_permissions_payload)
 from .tokens import _generate_raw, hash_pat, TokenCreateResponse
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -36,6 +36,11 @@ class UserUpdateRequest(BaseModel):
     is_admin: Optional[bool] = None
     password: Optional[str] = None   # supply to reset password
     permissions: Optional[dict] = None  # None = no change; {} = clear (full access); dict = set specific perms
+    # Which POVs this user may reach. None = no change; [] = clear the narrowing (every
+    # POV their `pov` scope allows); a list = exactly those. Separate from `permissions`
+    # because it is an OBJECT list, not a level set -- the scope says what they may do,
+    # this says which environments they may do it to.
+    pov_env_ids: Optional[List[str]] = None
     # Which role's material the dashboard leads with for this user. NOT a permission --
     # services/personas may only reorder and surface. "" clears the assignment and hands
     # the user back to their OIDC group's focus, or the instance default; None leaves it
@@ -94,6 +99,7 @@ async def list_users(
             auth_provider=u.auth_provider,
             mfa_required=u.mfa_required,
             permissions=u.permissions_dict or None,
+            pov_env_ids=u.pov_env_ids_list,
             # The ASSIGNED value, not the resolved one: an admin editing this row needs to
             # see what is stored here, and `persona_source` tells them when the focus a
             # user actually gets comes from their group instead.
@@ -137,6 +143,7 @@ async def create_user(
         auth_provider=user.auth_provider,
         mfa_required=user.mfa_required,
         permissions=user.permissions_dict or None,
+        pov_env_ids=user.pov_env_ids_list,
     )
 
 
@@ -179,8 +186,22 @@ async def update_user(
             raise HTTPException(status_code=422, detail=f"Unknown persona '{want}'")
         user.persona = want or None
     if body.permissions is not None:
+        # Validated against the catalog, never stored raw -- the same treatment `persona`
+        # gets above, and for the same reason. Before this, an unknown scope was persisted
+        # verbatim, then round-tripped on every subsequent save by a grid that only renders
+        # keys it knows: invisible, permanent, and still granting if any route was ever
+        # gated on that string. Note api/entitle_rest.py has validated its own input since
+        # day one; it was only the human admin path that did not.
+        validate_permissions_payload(body.permissions)
         # Empty dict {} clears restrictions (full access); non-empty dict sets specific perms
         user.permissions_dict = body.permissions if body.permissions else None
+    if body.pov_env_ids is not None:
+        # An accessor is already bound to exactly one POV by accessor_env_id, and confined
+        # by a path allowlist that no permission can widen. A second, contradictory POV
+        # list on the same row would be a lie in the database -- refuse rather than store
+        # something whose meaning depends on which guard reads it first.
+        _refuse_accessor(user)
+        user.pov_env_ids_list = body.pov_env_ids
 
     db.commit()
     db.refresh(user)
@@ -195,6 +216,7 @@ async def update_user(
         auth_provider=user.auth_provider,
         mfa_required=user.mfa_required,
         permissions=user.permissions_dict or None,
+        pov_env_ids=user.pov_env_ids_list,
     )
 
 

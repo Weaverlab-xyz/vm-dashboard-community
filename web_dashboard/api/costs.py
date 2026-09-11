@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, Query
 
 from ..database import User
 from ..services import cost_cache, cost_service
-from .auth import require_admin
+from .auth import require_explicit_permission
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/costs", tags=["costs"])
@@ -29,7 +29,7 @@ router = APIRouter(prefix="/api/costs", tags=["costs"])
 @router.get("/summary")
 async def cost_summary(
     refresh: bool = Query(False, description="Force a live requery (cooldown still applies)"),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_explicit_permission("costs", "read")),
 ) -> dict:
     """Per-cloud account/subscription MTD spend + total.
 
@@ -46,7 +46,7 @@ async def cost_summary(
 @router.get("/breakdown")
 async def cost_breakdown(
     refresh: bool = Query(False, description="Force a live requery (cooldown still applies)"),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_explicit_permission("costs", "read")),
 ) -> dict:
     """Per-cloud, per-service MTD spend split into **dashboard**
     (``managed-by=vm-dashboard``) and **sandbox** (``managed-by=dashboard-sandbox``) scope.

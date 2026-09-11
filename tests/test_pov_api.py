@@ -40,10 +40,24 @@ from web_dashboard.services.skytap_client import SkytapClient, SkytapCreds  # no
 _CREDS = SkytapCreds(username="u", api_token="t", base_url="https://skytap.test")
 
 
+class _Operator:
+    """An authenticated SE. A bare ``object()`` used to be enough here, because nothing on
+    this router checked a permission -- every route was `get_current_user` only. They are
+    gated on the `pov` scope now, so the principal has to be able to answer the question:
+    `has_permission` reads `effective_permissions_dict`, and an object without it raises
+    AttributeError inside the dependency, which surfaces as a 500 rather than a 403."""
+    username = "tester"
+    is_admin = True
+    is_effective_admin = True
+    effective_permissions_dict = {}
+    accessor_env_id = None
+    pov_env_ids_list = []
+
+
 def _app():
     app = FastAPI()
     app.include_router(pov_api.router)
-    app.dependency_overrides[get_current_user] = lambda: object()
+    app.dependency_overrides[get_current_user] = lambda: _Operator()
     return TestClient(app, raise_server_exceptions=False)
 
 

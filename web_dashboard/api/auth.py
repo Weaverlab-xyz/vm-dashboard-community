@@ -208,10 +208,124 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
 
 # ── Permission constants ───────────────────────────────────────────────────────
 
-PERMISSION_SCOPES = ["vms", "aws", "azure", "gcp", "oci", "images", "containers", "config_mgmt", "jobs", "workgroups", "secrets", "cloud_database", "k8s", "cloud_function"]
 # "use" grants using a Secrets-Management secret inside an Ansible run without ever
-# seeing its value (scope "secrets"); read/write/delete are unused for that scope.
+# seeing its value (scope "secrets"); read/write/delete are unused for that scope. On
+# scope "pov" it means "take part in this POV" — tick a use case — without being able to
+# create, destroy, share or power one. Powering is `write` and not `use` on purpose:
+# POST /managed/{env_id}/power carries a runstate, so it suspends and stops as readily as
+# it starts. The accessor's /self/wake is the start-only form, and it is bound to one
+# environment by the session rather than by a level.
 PERMISSION_LEVELS = ["read", "write", "delete", "use"]
+
+_ALL = ["read", "write", "delete", "use"]
+_RWD = ["read", "write", "delete"]
+_RW = ["read", "write"]
+_R = ["read"]
+
+# Which levels each scope actually offers. One source of truth: the grid, the Entitle
+# asset catalog and bootstrap_entitle_groups.py all derive from this, so a scope cannot
+# advertise a level nothing enforces.
+#
+# The FOURTEEN ORIGINAL SCOPES keep all four levels deliberately, even where a level
+# enforces nothing. Narrowing one would hide a checkbox for a grant that is already
+# stored in somebody's permissions JSON, and there is no normalization pass that prunes
+# stored keys — see the hazard note under `has_permission`. New scopes are free to be
+# tight because nothing is stored against them yet.
+PERMISSION_SCOPE_LEVELS = {
+    # ── the original fourteen ──────────────────────────────────────────────────
+    "vms": _ALL,
+    "aws": _ALL,
+    "azure": _ALL,
+    "gcp": _ALL,
+    "oci": _ALL,
+    "images": _ALL,
+    "containers": _ALL,
+    "config_mgmt": _ALL,
+    "jobs": _ALL,
+    "workgroups": _ALL,
+    "secrets": _ALL,
+    "cloud_database": _ALL,
+    "k8s": _ALL,
+    "cloud_function": _ALL,
+    # ── one per shipped nav section ────────────────────────────────────────────
+    # "use" is what a POV's own customer stakeholder gets: read their POV and tick
+    # their use cases, with create/destroy/share refused. See api/pov.py.
+    "pov": _ALL,
+    "pov_templates": _RWD,
+    # Proxmox and Nutanix have real deploy / image-import / delete-VM routes. vSphere,
+    # Hyper-V and XCP-ng are read-plus-power only in this dashboard -- there is no route
+    # that destroys anything on them -- so they offer no `delete`. Advertising one would
+    # be a checkbox that grants nothing, which is exactly what the `images` row was.
+    "proxmox": _RWD,
+    "vsphere": _RW,
+    "hyperv": _RW,
+    "nutanix": _RWD,
+    "xcpng": _RW,
+    "connections": _RWD,
+    "storage": _RWD,
+    "costs": _RW,
+    "inventory": _R,
+    "agents": _RWD,
+    "audit": _R,
+    "gateways": _RWD,
+    "notifications": _RW,
+    "epml": _RW,
+    "ot": _RWD,
+}
+
+# Kept as a list under its original name: api/entitle_rest.py, main.py's page context,
+# scripts/bootstrap_entitle_groups.py and the Users/Groups grids all iterate it, and the
+# order is the row order operators see.
+PERMISSION_SCOPES = list(PERMISSION_SCOPE_LEVELS)
+
+
+def levels_for_scope(scope: str) -> list:
+    """The levels ``scope`` offers, or [] if it is not a scope at all."""
+    return list(PERMISSION_SCOPE_LEVELS.get(scope, ()))
+
+
+def validate_permissions_payload(payload) -> dict:
+    """Return ``payload`` unchanged, or raise 422 explaining why it is not permissions.
+
+    The admin UI path stored whatever dict it was handed for the whole life of the
+    feature, while the machine path (``api/entitle_rest.py``) validated. That asymmetry is
+    how a typo became a permanent, invisible, unclearable key: the grid only renders keys
+    in ``PERMISSION_SCOPES``, but it round-trips the whole object on every save, so an
+    unknown key survives forever and still grants if any route is ever gated on it.
+
+    The non-list check is not pedantry. ``has_permission`` does ``level in perms.get(...)``,
+    so a hand-written ``{"secrets": "use"}`` turns an exact match into a SUBSTRING test.
+    """
+    if payload is None:
+        return payload
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="permissions must be an object")
+    for scope, levels in payload.items():
+        # is_admin is a real key in the session/jit columns, not a scope.
+        if scope == "is_admin":
+            if not isinstance(levels, bool):
+                raise HTTPException(status_code=422, detail="is_admin must be true or false")
+            continue
+        allowed = PERMISSION_SCOPE_LEVELS.get(scope)
+        if allowed is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown permission scope '{scope}'. Valid scopes: "
+                       f"{', '.join(PERMISSION_SCOPES)}")
+        if not isinstance(levels, list):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Levels for '{scope}' must be a list, not {type(levels).__name__}.")
+        for level in levels:
+            if level not in PERMISSION_LEVELS:
+                raise HTTPException(
+                    status_code=422, detail=f"Unknown permission level '{level}'.")
+            if level not in allowed:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Scope '{scope}' does not offer '{level}' — it offers "
+                           f"{', '.join(allowed)}.")
+    return payload
 
 
 def can_audit_jobs(user: User) -> bool:
@@ -235,6 +349,14 @@ def has_permission(user: User, scope: str, level: str) -> bool:
     Includes the backward-compatibility clause deliberately: an empty
     ``effective_permissions_dict`` means unrestricted, for pre-OIDC users who never had one
     set. Being stricter here than the UI would lock them out of things they can already do.
+
+    **Adding a scope is a silent revocation.** A non-empty dict is a strict per-scope
+    allowlist, so a scope absent from it is a deny. The moment a new key lands in
+    ``PERMISSION_SCOPE_LEVELS`` and a route is gated on it, every user with an explicit map
+    loses that route — no error, no log line, and the admin who set those permissions never
+    saw the row. That is why ``_backfill_new_permission_scopes`` in database.py exists and
+    why any future scope needs its own backfill entry there. ``api/expiry.py`` declined to
+    invent a scope for exactly this reason and must stay that way.
     """
     if getattr(user, "is_effective_admin", False):
         return True
@@ -242,6 +364,55 @@ def has_permission(user: User, scope: str, level: str) -> bool:
     if not perms:
         return True
     return level in perms.get(scope, [])
+
+
+def _tag(fn, scope: str, level: str, *, explicit: bool):
+    """Make a permission dependency say what it checks.
+
+    Both factories return a closure, so by default every gate in the application is a
+    function called ``_check`` — indistinguishable in a traceback, in FastAPI's dependency
+    tree, and to a test. Tests previously asserted ``dep.dependency.__name__ ==
+    "require_admin"`` to pin "this route is not open", which only worked while the gate
+    WAS that function; the attributes below let a test state the actual property instead.
+    """
+    fn.__name__ = f"require_{'explicit_' if explicit else ''}permission[{scope}:{level}]"
+    fn.__qualname__ = fn.__name__
+    fn.permission_scope = scope
+    fn.permission_level = level
+    # True = an empty permission map does NOT satisfy this gate. The distinction matters
+    # for any route that used to require the admin flag.
+    fn.permission_explicit = explicit
+    return fn
+
+
+def has_explicit_permission(user: User, scope: str, level: str) -> bool:
+    """Like ``has_permission``, but WITHOUT the empty-map-means-unrestricted clause.
+
+    For routes that used to require the admin flag. Making such a route grantable with
+    ``require_permission`` would quietly widen it to every legacy NULL-permission user,
+    because for them ``effective_permissions_dict`` is ``{}`` and ``has_permission``
+    answers True to everything — so "admin only" would become "everyone who predates the
+    permission system", which is the opposite of the intent.
+
+    The rule here is "administrator, or somebody an administrator explicitly named". A
+    NULL-map user has named nothing, so they are refused exactly as they are today.
+    """
+    if getattr(user, "is_effective_admin", False):
+        return True
+    perms = user.effective_permissions_dict or {}
+    return level in perms.get(scope, [])
+
+
+def require_explicit_permission(scope: str, level: str):
+    """Dependency form of ``has_explicit_permission``. Use this when replacing
+    ``require_admin``; use ``require_permission`` when replacing an ungated route."""
+    async def _check(current_user: User = Depends(get_current_user)) -> User:
+        if has_explicit_permission(current_user, scope, level):
+            return current_user
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Requires '{scope}:{level}' permission or administrator.")
+    return _tag(_check, scope, level, explicit=True)
 
 
 def require_permission(scope: str, level: str):
@@ -285,7 +456,7 @@ def require_permission(scope: str, level: str):
             detail=detail,
         )
         return current_user
-    return _check
+    return _tag(_check, scope, level, explicit=False)
 
 
 def _build_request_access_link(scope: str, level: str):
@@ -311,6 +482,41 @@ def _build_request_access_link(scope: str, level: str):
     if resource_id:
         return f"{portal}/resources/{resource_id}"
     return portal
+
+
+def pov_env_scope(user: User):
+    """The POV ids this user is narrowed to, or ``None`` meaning "not narrowed".
+
+    ``None`` for an administrator and for anyone whose list is empty — the same
+    "``None`` = everything" convention ``api/aws._accessible_workgroups`` uses, so the two
+    read the same way at a call site.
+    """
+    if getattr(user, "is_effective_admin", False):
+        return None
+    ids = getattr(user, "pov_env_ids_list", None) or []
+    return set(ids) if ids else None
+
+
+def require_pov_env_access(request: Request, current_user: User = Depends(get_current_user)) -> User:
+    """Refuse a POV this user was not granted, for every route that names one.
+
+    Deliberately a ROUTER-level dependency keyed on ``request.path_params`` rather than a
+    check inside each handler. ``api/pov.py`` has ~40 routes and ``{env_id}`` appears in
+    most of them; a per-handler check is a thing every future route has to remember, and
+    the one that forgets is silent. This way the guard is applied once, to the router, and
+    a new route is covered the day it is written.
+
+    404 rather than 403, matching ``api/spire_lab._visible_or_404`` and ``api/cert_lab``:
+    a 403 on a POV you were not granted confirms that POV exists, which turns the id into
+    something worth guessing.
+    """
+    env_id = (request.path_params or {}).get("env_id")
+    if not env_id:
+        return current_user
+    scope = pov_env_scope(current_user)
+    if scope is not None and env_id not in scope:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    return current_user
 
 
 def require_workgroup_access(workgroup: str):

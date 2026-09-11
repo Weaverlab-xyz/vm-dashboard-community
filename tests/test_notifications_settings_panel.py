@@ -119,15 +119,53 @@ def test_the_endpoint_routes_are_exposed():
         assert expected in paths, f"{expected} is not routed"
 
 
-def test_every_route_is_admin_only():
+def test_the_delivery_log_stays_admin_only():
     """The delivery log holds the rendered body of every alert, naming resources the
-    reader may not otherwise be able to see."""
+    reader may not otherwise be able to see.
+
+    That reason is why ``/deliveries`` is the one route here that did NOT move to the
+    ``notifications`` scope. ``delivery_public`` returns ``body`` plus ``resource_name``,
+    ``resource_id`` and ``workgroup``, so a ``notifications:read`` grant would be a
+    cross-workgroup read of resource names wearing a notification setting's clothes.
+    Configuring an endpoint is a setting; reading the history of what was sent is not.
+    """
     from web_dashboard.api.auth import require_admin
     for route in notifications_api.router.routes:
+        if route.path != "/api/notifications/deliveries":
+            continue
+        calls = [d.call for d in route.dependant.dependencies]
+        assert require_admin in calls, "the delivery log is no longer admin-only"
+        return
+    raise AssertionError("/api/notifications/deliveries is not routed")
+
+
+def test_every_other_route_needs_an_administrator_or_an_explicit_grant():
+    """The rest of the router is grantable through the `notifications` scope, so a person
+    who owns alerting does not need the admin flag.
+
+    The property that must not slip is the FORM: ``require_explicit_permission`` refuses a
+    user whose permission map is empty, whereas the plain ``require_permission`` reads an
+    empty map as UNRESTRICTED — which would open webhook configuration to every account
+    predating the permission columns. Endpoint URLs and HMAC secrets are never returned
+    (``endpoint_public``), which is what makes read safe to grant at all.
+    """
+    from web_dashboard.api.auth import require_admin
+    checked = 0
+    for route in notifications_api.router.routes:
+        if route.path == "/api/notifications/deliveries":
+            continue
         deps = getattr(route, "dependant", None)
         assert deps is not None, f"{route.path} has no dependant"
-        calls = [d.call for d in deps.dependencies]
-        assert require_admin in calls, f"{route.path} is not admin-gated"
+        gates = [d.call for d in deps.dependencies
+                 if getattr(d.call, "permission_scope", None) == "notifications"]
+        assert gates or require_admin in [d.call for d in deps.dependencies], (
+            f"{route.path} is neither admin-gated nor on the notifications scope")
+        for gate in gates:
+            assert gate.permission_explicit is True, (
+                f"{route.path} uses the permissive form, so an empty permission map would "
+                "read as unrestricted")
+        checked += 1
+    assert checked >= 6, f"only checked {checked} routes — the router shrank unexpectedly"
 
 
 def test_a_patch_can_omit_every_field():

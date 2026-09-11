@@ -1695,7 +1695,12 @@ async def users_page(request: Request):
             # those and its return OVERWRITES a route's context, silently.
             "persona_options": [{"key": p.key, "label": p.label}
                                 for p in personas.all_personas()],
-            "permission_levels": auth.PERMISSION_LEVELS
+            "permission_levels": auth.PERMISSION_LEVELS,
+            # Which levels each scope actually offers, so the grid renders a
+            # checkbox only where one means something. Same anti-drift reasoning as
+            # the two above: a hard-coded copy in the template would keep offering
+            # "delete" on a read-only scope, and the server would 422 the save.
+            "permission_scope_levels": auth.PERMISSION_SCOPE_LEVELS,
         },
     )
 
@@ -1716,7 +1721,12 @@ async def groups_page(request: Request):
             # those and its return OVERWRITES a route's context, silently.
             "persona_options": [{"key": p.key, "label": p.label}
                                 for p in personas.all_personas()],
-            "permission_levels": auth.PERMISSION_LEVELS
+            "permission_levels": auth.PERMISSION_LEVELS,
+            # Which levels each scope actually offers, so the grid renders a
+            # checkbox only where one means something. Same anti-drift reasoning as
+            # the two above: a hard-coded copy in the template would keep offering
+            # "delete" on a read-only scope, and the server would 422 the save.
+            "permission_scope_levels": auth.PERMISSION_SCOPE_LEVELS,
         },
     )
 

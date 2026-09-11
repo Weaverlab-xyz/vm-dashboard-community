@@ -31,7 +31,7 @@ from ..config import settings
 from ..database import User, get_db
 from ..services import storage_chunked, storage_service
 from ..services.storage_service import BACKENDS, StorageError
-from .auth import get_current_user, require_permission
+from .auth import get_current_user, require_admin, require_permission
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/storage", tags=["storage"])
@@ -89,7 +89,8 @@ def _cfg_set_many(values: dict) -> None:
 # ── GET /api/storage/backends ────────────────────────────────────────────────
 
 @router.get("/backends")
-async def list_backends(current_user: User = Depends(get_current_user)):
+async def list_backends(
+        current_user: User = Depends(require_permission("storage", "read"))):
     """Return per-backend configured/active state. Used by /storage and the
     Ansible feature-flag prereq gate."""
     cfgd = set(storage_service.configured_backends())
@@ -159,7 +160,7 @@ async def list_backends(current_user: User = Depends(get_current_user)):
 # ── GET /api/storage/config ──────────────────────────────────────────────────
 
 @router.get("/config")
-async def get_config(current_user: User = Depends(require_permission("admin", "read"))):
+async def get_config(current_user: User = Depends(require_admin)):
     """Return all per-backend config values. Admin-only because the field
     list overlaps with cloud account scoping."""
     out: dict = {
@@ -288,7 +289,7 @@ class StorageConfigPatch(BaseModel):
 @router.patch("/config")
 async def patch_config(
     payload: StorageConfigPatch,
-    current_user: User = Depends(require_permission("admin", "write")),
+    current_user: User = Depends(require_admin),
 ):
     """Partial update — only fields explicitly supplied (non-None) are written.
     Validates that the active backend (if changed) is configured before flipping."""
@@ -415,7 +416,7 @@ class TestRequest(BaseModel):
 @router.post("/test")
 async def test_backend(
     req: TestRequest,
-    current_user: User = Depends(require_permission("admin", "read")),
+    current_user: User = Depends(require_admin),
 ):
     """Probe a backend by listing its assets. Returns ok=true with item count
     on success, ok=false with the error message otherwise. Never raises."""
@@ -431,7 +432,8 @@ async def test_backend(
 # ── GET /api/storage/list ────────────────────────────────────────────────────
 
 @router.get("/list")
-async def list_active(current_user: User = Depends(get_current_user)):
+async def list_active(
+        current_user: User = Depends(require_permission("storage", "read"))):
     """List assets from the *active* backend."""
     try:
         items = await storage_service.list_assets()
@@ -443,7 +445,7 @@ async def list_active(current_user: User = Depends(get_current_user)):
 @router.get("/list/{backend}")
 async def list_specific(
     backend: str,
-    current_user: User = Depends(require_permission("admin", "read")),
+    current_user: User = Depends(require_permission("storage", "read")),
 ):
     """List assets from a specific backend (used by the migrate UI's source picker)."""
     try:
@@ -464,7 +466,7 @@ class MigrateRequest(BaseModel):
 @router.post("/migrate")
 async def migrate(
     req: MigrateRequest,
-    current_user: User = Depends(require_permission("admin", "write")),
+    current_user: User = Depends(require_admin),
 ):
     """Copy every asset from `source` to `target`. The source remains
     untouched — operators can verify the target is healthy before deleting
@@ -522,7 +524,7 @@ class UploadAssetRequest(BaseModel):
 @router.post("/upload", status_code=201)
 async def upload_asset(
     req: UploadAssetRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("storage", "write")),
 ):
     """Upload an asset to the active backend. Open to any logged-in user —
     matches the existing /api/config-mgmt/upload endpoint so the same access
@@ -603,7 +605,7 @@ def _upload_handle(request) -> str:
 @router.post("/upload/begin", status_code=201)
 async def begin_chunked_upload(
     req: BeginChunkedUploadRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("storage", "write")),
 ):
     """Open a chunked upload against the active backend.
 
@@ -630,7 +632,7 @@ async def begin_chunked_upload(
 async def stage_chunked_upload_part(
     part_number: int,
     request: Request,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("storage", "write")),
 ):
     """Stage one raw part. Body is the bytes themselves — no base64, no JSON envelope.
 
@@ -671,7 +673,7 @@ async def stage_chunked_upload_part(
 @router.post("/upload/commit", status_code=201)
 async def commit_chunked_upload(
     req: CommitChunkedUploadRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("storage", "write")),
 ):
     """Stitch the staged parts into the object. Until this returns, nothing is listable."""
     try:
@@ -691,7 +693,7 @@ async def commit_chunked_upload(
 @router.post("/upload/abort")
 async def abort_chunked_upload(
     req: AbortChunkedUploadRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("storage", "write")),
 ):
     """Discard the staged parts — the Cancel button, and what a failed part triggers.
 
@@ -711,7 +713,7 @@ async def abort_chunked_upload(
 @router.delete("/asset/{name:path}")
 async def delete_asset(
     name: str,
-    current_user: User = Depends(require_permission("admin", "delete")),
+    current_user: User = Depends(require_permission("storage", "delete")),
 ):
     """Delete an asset from the active backend."""
     try:
@@ -724,7 +726,8 @@ async def delete_asset(
 # ── GET /api/storage/list-all ────────────────────────────────────────────────
 
 @router.get("/list-all")
-async def list_all(current_user: User = Depends(get_current_user)):
+async def list_all(
+        current_user: User = Depends(require_permission("storage", "read"))):
     """Aggregated asset list across every *configured* backend. Each item is
     tagged with the backend it lives on so the Storage page can render
     per-backend rows and the Config Mgmt page can warn when a local-only asset
@@ -744,7 +747,7 @@ class MoveRequest(BaseModel):
 @router.post("/move")
 async def move_asset(
     req: MoveRequest,
-    current_user: User = Depends(require_permission("admin", "write")),
+    current_user: User = Depends(require_admin),
 ):
     """Move a single asset from one backend to another (copy + delete source).
     Used to relocate playbooks from local filesystem to a cloud backend so a
@@ -764,7 +767,7 @@ async def move_asset(
 async def fetch_asset(
     backend: str,
     name: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("storage", "read")),
 ):
     """Return the raw bytes of a stored asset as base64. Used by the Packer
     image builder forms to load a stored .sh script into the provisioner
@@ -788,7 +791,7 @@ async def fetch_asset(
 async def delete_asset_in(
     backend: str,
     name: str,
-    current_user: User = Depends(require_permission("admin", "delete")),
+    current_user: User = Depends(require_permission("storage", "delete")),
 ):
     """Delete an asset from a *specific* backend (sibling of /asset/{name}
     which targets the active backend). Needed once the UI surfaces assets
@@ -814,7 +817,7 @@ class BulkDeleteRequest(BaseModel):
 @router.post("/bulk-delete")
 async def bulk_delete(
     req: BulkDeleteRequest,
-    current_user: User = Depends(require_permission("admin", "delete")),
+    current_user: User = Depends(require_permission("storage", "delete")),
 ):
     """Delete many assets in one call. Each item names its source backend so
     the UI can mix assets from different backends in a single bulk action

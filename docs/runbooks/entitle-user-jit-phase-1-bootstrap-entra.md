@@ -50,17 +50,24 @@ docker compose exec app python -m web_dashboard.scripts.bootstrap_entitle_groups
   --dry-run
 ```
 
-**Expected:** the script prints `Planned inventory: N groups` (28
-on a default prod seed: 1 admin + 1 baseline + 24 scope/levels + 2
+**Expected:** the script prints `Planned inventory: N groups` (102
+on a default prod seed: 1 admin + 1 baseline + 98 scope/levels + 2
 workgroups), authenticates against Graph to read existing groups,
 then prints a table showing `create` for every row (assuming
 nothing pre-exists) and `created` for every mapping. No Graph
 writes occur and no DB rows are inserted.
 
 If the count looks wrong: open `web_dashboard/api/auth.py` and
-verify `PERMISSION_SCOPES` × `PERMISSION_LEVELS` is what you
-expect. Adding a scope there automatically adds its three groups
-on the next bootstrap run.
+verify `PERMISSION_SCOPE_LEVELS` is what you expect. It is a map of
+scope to the levels that scope offers — not every scope offers all
+four — and the planned count is the sum of its value lengths, plus
+the four rows above. Adding a scope there automatically adds one
+group per level it declares on the next bootstrap run.
+
+Adding a scope also **revokes** its feature from every user who has
+an explicit permission map, silently, unless the change shipped a
+backfill alongside it. See
+[Permissions](../permissions.md#adding-a-scope-for-contributors).
 
 If Graph rejects authentication, fix the app registration before
 proceeding — there is no "skip Graph" mode.

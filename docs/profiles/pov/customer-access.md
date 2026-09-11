@@ -149,6 +149,29 @@ an ephemeral login, bound to one POV, that opens that POV's use-case checklist a
 else. It exists so the evaluation continues when nobody from your side is on the call, and
 so the prospect's own view of what they have covered is theirs to keep.
 
+### Accessor, or a real user scoped to one POV?
+
+There are two ways to let somebody outside your team tick off use cases, and they are for
+different people.
+
+| | **Accessor** | **A user with a POV grant** |
+|---|---|---|
+| Who it is for | a prospect you are emailing a credential to | a named person — a customer champion, or a colleague covering the account |
+| What they get | one POV's checklist, five endpoints, nothing else in the product | an ordinary dashboard login whose POV pages show only the POVs you named |
+| How it is created | POV page → Access → mint | Users page → Permissions: `POV` = `read` + `use`, then pick their POV under the grid |
+| Lifetime | expires, and is deleted when the POV is reaped | until you change it |
+| Shows up on the Users page | no | yes |
+| Can hold anything else | never | yes — whatever else you grant them |
+
+Rule of thumb: if you would put their name in an org chart, give them a user with a POV
+grant. If you are emailing a link to an evaluation, mint an accessor.
+
+The `use` level is the important half of that grant. With `read` alone they can look at the
+checklist but not tick it, and a checklist nobody can tick is a screenshot. With `write`
+they could provision and destroy POVs. See [Permissions](../../permissions.md) for the
+whole model; a POV they were not granted answers *"No such POV environment"*, the same as
+an id that does not exist, because confirming somebody else's POV exists is itself a leak.
+
 Three properties are not configurable, for the same reason the share link's three are not.
 
 ### It can only ever reach its own POV

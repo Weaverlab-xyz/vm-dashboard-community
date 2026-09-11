@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from ..database import RemoteAgent, User, get_db
 from ..services import hypervisor_connection_service as hcs
 from ..services import job_service
-from .auth import require_admin
+from .auth import require_explicit_permission
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/connections", tags=["connections"])
@@ -73,7 +73,7 @@ class ConnectionUpdate(BaseModel):
 @router.get("")
 async def list_connections(kind: str = "",
                            db: Session = Depends(get_db),
-                           current_user: User = Depends(require_admin)):
+                           current_user: User = Depends(require_explicit_permission("connections", "read"))):
     """Every configured connection, optionally filtered to one kind.
 
     Also returns the enrolled agents, so the connection form can offer an agent
@@ -90,7 +90,7 @@ async def list_connections(kind: str = "",
 @router.post("", status_code=201)
 async def create_connection(req: ConnectionRequest,
                             db: Session = Depends(get_db),
-                            current_user: User = Depends(require_admin)):
+                            current_user: User = Depends(require_explicit_permission("connections", "write"))):
     try:
         out = hcs.create(
             db, kind=req.kind, name=req.name, created_by=current_user.username,
@@ -108,7 +108,7 @@ async def create_connection(req: ConnectionRequest,
 @router.patch("/{connection_id}")
 async def update_connection(connection_id: str, req: ConnectionUpdate,
                             db: Session = Depends(get_db),
-                            current_user: User = Depends(require_admin)):
+                            current_user: User = Depends(require_explicit_permission("connections", "write"))):
     try:
         out = hcs.update(db, connection_id, **req.model_dump(exclude_unset=True))
     except hcs.HypervisorConnectionError as exc:
@@ -122,7 +122,7 @@ async def update_connection(connection_id: str, req: ConnectionUpdate,
 @router.post("/{connection_id}/default")
 async def make_default(connection_id: str,
                        db: Session = Depends(get_db),
-                       current_user: User = Depends(require_admin)):
+                       current_user: User = Depends(require_explicit_permission("connections", "write"))):
     try:
         return hcs.set_default(db, connection_id)
     except hcs.HypervisorConnectionError as exc:
@@ -132,7 +132,7 @@ async def make_default(connection_id: str,
 @router.delete("/{connection_id}")
 async def delete_connection(connection_id: str,
                             db: Session = Depends(get_db),
-                            current_user: User = Depends(require_admin)):
+                            current_user: User = Depends(require_explicit_permission("connections", "delete"))):
     try:
         hcs.delete(db, connection_id)
     except hcs.HypervisorConnectionError as exc:
@@ -145,7 +145,7 @@ async def delete_connection(connection_id: str,
 @router.post("/{connection_id}/test")
 async def test_connection(connection_id: str,
                           db: Session = Depends(get_db),
-                          current_user: User = Depends(require_admin)):
+                          current_user: User = Depends(require_explicit_permission("connections", "read"))):
     """Dial the endpoint once and stamp the outcome on the row.
 
     Agent-bound connections are not testable from here and say so rather than

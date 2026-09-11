@@ -74,7 +74,7 @@ async def list_gateways(
     cloud: str = "",
     reconcile: bool = True,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("gateways", "read")),
 ):
     """Every gateway, managed and requested. Read-only for the caller, so any
     authenticated user may see what exists — deploying and removing need admin.
@@ -105,7 +105,7 @@ async def suggest_name(
     cloud: str,
     region: str = "",
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("admin", "write")),
+    current_user: User = Depends(require_permission("gateways", "write")),
 ):
     if cloud not in gateway_service.CLOUDS:
         raise HTTPException(status_code=400, detail=f"Unknown cloud '{cloud}'.")
@@ -119,7 +119,7 @@ async def suggest_name(
 async def deploy_gateway(
     req: DeployGatewayRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("admin", "write")),
+    current_user: User = Depends(require_permission("gateways", "write")),
 ):
     """Queue another gateway host. Deliberately uncapped — the right number is a
     function of session load, which the dashboard can't see."""
@@ -168,7 +168,7 @@ async def deploy_gateway(
 async def destroy_gateway(
     gateway_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("admin", "delete")),
+    current_user: User = Depends(require_permission("gateways", "delete")),
 ):
     """Remove a requested gateway. The managed one is refused: its lifecycle belongs
     to the reference-counted ensure/idle pair, and deleting it here would leave the

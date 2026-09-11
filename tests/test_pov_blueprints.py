@@ -538,6 +538,14 @@ def _provision_app(templates):
     class _User:
         username = "tester"
         is_admin = True
+        # The `pov` scope gates this router now. `is_admin` alone is not what the check
+        # reads -- `has_permission` consults `is_effective_admin` and then
+        # `effective_permissions_dict`, and a principal missing the latter raises inside
+        # the dependency, which surfaces as a 500 instead of a 403.
+        is_effective_admin = True
+        effective_permissions_dict = {}
+        accessor_env_id = None
+        pov_env_ids_list = []
 
     def _db():
         db = _session()
