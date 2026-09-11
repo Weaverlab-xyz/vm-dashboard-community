@@ -62,6 +62,29 @@ reads.
 Re-running is the remedy for a half-finished run, and it is safe by the "already wired"
 rule above.
 
+### What the managed system is called — and why not the IP
+
+Password Safe names a workgroup-created managed system after its **HostName**, and the
+BeyondTrust Terraform provider attaches a managed *account* to its system **by name** —
+there is no system-id argument. So the HostName is not cosmetic: it is the key two
+different POVs can collide on.
+
+POV environments are cloned from one lab template, so two live POVs very plausibly hold
+the same `10.x` guest addresses. If the private IP were the HostName, both would ask for
+a system called `10.0.0.5`, and the second POV's account would be created against
+whichever same-named system Password Safe resolved first. That exact failure was measured
+live on the PRA Vault mirror path and fixed there the same way.
+
+So the managed system is named after **the POV and the guest** — `poc-01-BtPocDC01`, the
+same label the VM's jump item carries — and the guest's private address goes into
+**DnsName** and **IPAddress**, both of them. An operator in BeyondInsight sees the guest's
+name rather than a number, and the address Password Safe connects on is still there.
+
+This applies to systems created from now on. A guest already onboarded keeps the name it
+was given: the wire-up never re-onboards a VM that has a managed-system id, and teardown
+destroys from the stored Terraform state, so an older row still off-boards correctly. To
+re-shape one, unwire that POV and wire it again.
+
 ### Password Safe reaches the VM through the Resource Broker — by zone, not by field
 
 Password Safe does reach these guests through the Resource Broker slice 5b installs. What
