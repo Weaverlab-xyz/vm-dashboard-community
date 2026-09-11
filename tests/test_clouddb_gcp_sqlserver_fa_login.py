@@ -78,6 +78,17 @@ async def _fake_list_cloudsql_users(project, instance):
     return list(USERS)
 
 
+FAIL_DELETE = []          # push an exception to make the login drop fail
+
+
+async def _fake_delete_cloudsql_user(project, instance, name, *, host=""):
+    CALLS.append(("delete_user", project, instance, name))
+    if FAIL_DELETE:
+        raise FAIL_DELETE[0]
+    # The real call returns False when the user (or the instance) is already gone.
+    return name in [c[1] for c in CALLS if c[0] == "create_user"]
+
+
 async def _fake_write_regional_secret(project, region, secret_id, value):
     CALLS.append(("write_secret", secret_id))
     return f"projects/{project}/locations/{region}/secrets/{secret_id}/versions/latest"
@@ -108,6 +119,7 @@ def _install_stubs():
     cfg.set = lambda key, val: CALLS.append(("config_set", key, val)) or \
         CONF.__setitem__(key, val)
     cfg.get_bool = lambda key, default=False: bool(CONF.get(key, default))
+    cfg.delete = lambda key: CALLS.append(("config_delete", key)) or CONF.pop(key, None)
     sys.modules["web_dashboard.services.config_service"] = cfg
 
     js = types.ModuleType("web_dashboard.services.job_service")
@@ -118,6 +130,7 @@ def _install_stubs():
     gs = types.ModuleType("web_dashboard.services.gcp_service")
     gs.ensure_cloudsql_rotation_prereqs = _fake_ensure_prereqs
     gs.create_cloudsql_user = _fake_create_cloudsql_user
+    gs.delete_cloudsql_user = _fake_delete_cloudsql_user
     gs.list_cloudsql_users = _fake_list_cloudsql_users
     gs.write_regional_secret = _fake_write_regional_secret
     gs.delete_regional_secret = _fake_delete_regional_secret
@@ -163,7 +176,22 @@ def _reset(**conf):
     LOGS.clear()
     CALLS.clear()
     USERS.clear()
+    FAIL_DELETE.clear()
     CONF.update(conf)
+
+
+def _deregister(meta=None, cloud="gcp", instance="clouddb-6583f505"):
+    """Run the deregister-time drop with whatever the onboarding recorded."""
+    row = _CloudDatabase(id=DB_ID, cloud=cloud, region="us-east1",
+                         instance_id=instance, engine="sqlserver")
+    stashed = {"ps_db_fa_db_user": svc._fa_db_user_name(DB_ID),
+               "ps_db_fa_sm_project": "acme-proj"}
+    stashed.update(meta or {})
+    return _run(svc._drop_dedicated_fa_login(row=row, meta=stashed))
+
+
+def _dropped():
+    return [c[3] for c in CALLS if c[0] == "delete_user"]
 
 
 def _onboard(engine="sqlserver", **tf):
@@ -326,6 +354,100 @@ def test_the_reference_mode_prerequisite_reporter_is_not_used_here():
     _reset()
     _onboard()
     assert not [m for m in LOGS if "the dashboard cannot create" in m], LOGS
+
+
+# -- the drop on deregister --------------------------------------------------
+#
+# A DECOMMISSION needs none of this: the login dies with the instance, which is also why
+# the psafe_* managed user has no drop there. A DEREGISTER leaves the database up, and
+# the login exists only to serve a Password Safe rotation that no longer exists.
+
+def test_a_deregister_drops_the_login_and_retires_its_password():
+    _reset()
+    _onboard()
+    key = f"clouddb/{DB_ID}/psfa"
+    assert CONF[key]
+    said = _deregister()
+    assert _dropped() == [svc._fa_db_user_name(DB_ID)]
+    assert "was dropped too" in said, said
+    # Dead the moment the login is — Password Safe's copy went with the functional
+    # account, so nothing anywhere can use it.
+    assert key not in CONF
+    assert ("config_delete", key) in CALLS, CALLS
+
+
+def test_the_managed_user_is_NOT_dropped_alongside_it():
+    """It is what the PRA tunnel injects, and the database survives a deregister — so
+    dropping it would break a tunnel the deregister was not asked to touch."""
+    _reset()
+    _onboard()
+    _deregister()
+    assert svc._managed_user_name(DB_ID) not in _dropped()
+
+
+def test_only_the_login_THIS_dashboard_minted_is_ever_dropped():
+    """A recorded fa_db_user is the built-in ADMIN on the data-api channel and the
+    rotator IAM principal under IAM database auth. Dropping either would be the
+    dashboard deleting a principal it does not own — one of them the instance's own
+    administrator."""
+    for recorded in ("sqlserver", "dbadmin", "bt-rotator@acme-proj.iam",
+                     svc._managed_user_name(DB_ID), ""):
+        _reset()
+        said = _deregister(meta={"ps_db_fa_db_user": recorded})
+        assert said == "", recorded
+        assert _dropped() == [], (recorded, CALLS)
+
+
+def test_a_non_gcp_row_is_left_alone():
+    """AWS and Azure never mint a login — there is nothing of ours to drop, and their
+    recorded fa_db_user is the minted admin."""
+    _reset()
+    said = _deregister(cloud="aws")
+    assert said == "" and _dropped() == []
+
+
+def test_an_already_gone_login_is_reported_as_such_not_as_a_failure():
+    """users.delete returns False for a user (or instance) that is already gone, so a
+    second deregister, or a login someone dropped by hand, converges quietly."""
+    _reset()
+    said = _deregister()          # nothing was ever created in this run
+    assert "already gone" in said, said
+    assert f"clouddb/{DB_ID}/psfa" not in CONF
+
+
+def test_a_failed_drop_KEEPS_the_password_and_names_the_statement():
+    """While the login survives, that key is the only record of its credential anywhere
+    — Password Safe's copy went with the functional account. And the failure cannot be
+    fatal: the deregister's Password Safe work has already succeeded, and a retry is
+    refused with "no Password Safe onboarding recorded", so the statement to paste is
+    the only thing an operator can act on."""
+    _reset()
+    _onboard()
+    key = f"clouddb/{DB_ID}/psfa"
+    FAIL_DELETE.append(RuntimeError("HTTP 403 permission denied"))
+    said = _deregister()
+    assert "could NOT be dropped" in said, said
+    assert "permission denied" in said, said
+    assert "can no longer be used or rotated" in said, said
+    assert f"DROP LOGIN [{svc._fa_db_user_name(DB_ID)}]" in said, said
+    assert CONF[key], "the credential's only remaining record was deleted"
+
+
+def test_no_project_or_instance_is_reported_rather_than_guessed():
+    _reset()
+    said = _deregister(meta={"ps_db_fa_sm_project": ""}, instance="")
+    assert "could NOT be dropped" in said, said
+    assert "DROP LOGIN" in said, said
+    assert _dropped() == [], CALLS
+
+
+def test_the_drop_statement_is_guarded_so_a_paste_is_idempotent():
+    """Reuses cloud_db_sql_service's builder rather than spelling DROP LOGIN here, so
+    the remedy carries the same IF EXISTS guard the product path uses."""
+    _reset()
+    FAIL_DELETE.append(RuntimeError("boom"))
+    said = _deregister()
+    assert "IF EXISTS" in said, said
 
 
 if __name__ == "__main__":

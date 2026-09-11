@@ -197,8 +197,21 @@ difference between the two channels:
   resolves a duplicate functional account and returns the existing one *without*
   updating its password, while `users.insert` does reset the database's — so a fresh
   password on a second run would move the database and leave Password Safe behind, and
-  every action would fail as a login failure with no remedy in the UI. A deregister
-  therefore leaves the key in place; only a decommission retires it.
+  every action would fail as a login failure with no remedy in the UI. The case that
+  protects is the partial failure — the functional account was created, the register
+  then failed, and you re-run.
+
+  **Lifecycle.** A **decommission** removes all three: the Password Safe functional
+  account (in `create` mode, before the instance goes), the login itself (it dies with
+  the instance, which is why there is no `DROP LOGIN` — the same reason the `psafe_*`
+  managed user has none), and the stored password. A **deregister** leaves the database
+  up, so the login is dropped explicitly with `users.delete` and the stored password
+  goes with it — it exists only to serve a rotation that no longer exists, and after
+  this its credential is held nowhere at all. If that drop fails the password is
+  **kept**, because while the login is alive that key is the only record of it left, and
+  the job carries the guarded `DROP LOGIN` to paste. The `psafe_*` **managed** user is
+  the one principal a deregister leaves behind: it is what the PRA tunnel injects, and
+  dropping it would break a tunnel the deregister was not asked to touch.
 
   The minted login appears in **Account Discovery** (the DB-Ops service filters only
   `##%` and `cloudsqlsa`). That is correct — it is a real rotatable login — but do not

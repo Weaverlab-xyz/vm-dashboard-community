@@ -791,23 +791,33 @@ def test_a_decommission_retires_the_minted_fa_login_password():
     assert 'config_service.delete(f"clouddb/{db_id}/psfa")' in body
 
 
-def test_a_DEREGISTER_leaves_the_password_in_the_store():
-    """The asymmetry is the point. The database survives a deregister, and reading that
-    key back is what makes a later re-register converge on the password Password Safe
-    already holds (see _fa_login_password) -- deleting it would mint a new one, reset the
-    login, and leave Password Safe authenticating to nothing."""
+def test_a_DEREGISTER_retires_the_password_only_through_the_drop():
+    """The deregister branch must not delete the key on its own. While the login
+    survives, that key is the only record of its credential anywhere -- Password Safe's
+    copy went with the functional account -- so the delete belongs inside
+    _drop_dedicated_fa_login, after the drop has actually succeeded. The behaviour is
+    pinned in tests/test_clouddb_gcp_sqlserver_fa_login.py; this only pins WHERE it
+    lives, which is the part a refactor moves by accident."""
     body = _body("errors = await _teardown_ps_onboarding(",
                  "reason = _ps_ineligible_reason(row)")
     assert "psfa" not in body, body
+    assert "_drop_dedicated_fa_login(" in body, body
+    drop = _body("async def _drop_dedicated_fa_login(", "async def _create_db_managed_user")
+    assert 'config_service.delete(f"clouddb/{row.id}/psfa")' in drop
 
 
-def test_a_deregister_names_both_principals_it_left_behind():
-    """A leftover login whose password lives only in Password Safe is invisible
-    otherwise: it is not the managed account, so the existing line never mentioned it."""
+def test_a_deregister_drops_only_the_login_the_dashboard_MINTED():
+    """The managed user stays -- it is what the PRA tunnel injects, and the database
+    survives a deregister. The functional account's own login goes, and the name is
+    CHECKED rather than trusted: a recorded fa_db_user is the built-in admin on
+    data-api and the rotator principal under IAM database auth."""
+    drop = _body("async def _drop_dedicated_fa_login(", "async def _create_db_managed_user")
+    assert "recorded != _fa_db_user_name(row.id)" in drop, drop
+    assert "delete_cloudsql_user" in drop
     body = _body("errors = await _teardown_ps_onboarding(",
                  "reason = _ps_ineligible_reason(row)")
-    assert "ps_db_fa_db_user" in body
-    assert "_fa_db_user_name" in body, "the line must only claim the login OURS mints"
+    assert "_managed_user_name(row.id)" in body, "the managed user must still be NAMED"
+    assert "left in place" in body
 
 
 _TESTS = [(n, f) for n, f in sorted(globals().items())
