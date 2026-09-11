@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..database import OAuthGroupMapping, get_db
 from ..services import workgroup_service
-from .auth import get_current_user, require_admin
+from .auth import get_current_user, require_admin, validate_permissions_payload
 
 router = APIRouter(prefix="/api/groups", tags=["groups"])
 
@@ -98,6 +98,12 @@ def create_group_mapping(payload: GroupMappingCreate, db: Session = Depends(get_
         )
     if db.query(OAuthGroupMapping).filter(OAuthGroupMapping.entra_group_id == payload.entra_group_id).first():
         raise HTTPException(status_code=409, detail="A mapping for this Entra group ID already exists.")
+    # Validated like `workgroup` and `persona` already are, rather than json.dumps'd
+    # unchecked. A bad scope here is worse than on a user: _complete_oauth_login unions
+    # these into session_permissions on EVERY login, so one typo in one mapping keeps
+    # rewriting itself into every member's permissions, and there is no PUT on this
+    # resource to correct it with -- only delete and recreate.
+    validate_permissions_payload(payload.default_permissions)
 
     mapping = OAuthGroupMapping(
         entra_group_id=payload.entra_group_id.strip(),

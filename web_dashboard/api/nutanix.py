@@ -13,14 +13,19 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import Job, User, get_db
-from .auth import get_current_user
+from .auth import get_current_user, require_permission
 from ..services import job_service, workgroup_service, workgroup_override_service
 from ..services import nutanix_service
 from ..services.nutanix_service import NutanixError
 from ..services import hypervisor_view_service
 from .hypervisor_deps import conn_in_task, conn_or_error, queue_power_batch
 
-router = APIRouter(prefix="/api/nutanix", tags=["nutanix"])
+# Every route in this module was `get_current_user` only -- including deploy,
+# image import and VM delete. The router-level read gate is the floor; the
+# mutating routes add their own level below.
+router = APIRouter(prefix="/api/nutanix", tags=["nutanix"],
+    dependencies=[Depends(require_permission("nutanix", "read"))],
+)
 
 PROVIDER = "nutanix"
 
@@ -161,7 +166,7 @@ async def _run_import(job_id: str, connection_id: str, name: str, source_uri: st
         db.close()
 
 
-@router.post("/import-image")
+@router.post("/import-image", dependencies=[Depends(require_permission("nutanix", "write"))])
 async def import_image(
     payload: ImportImageRequest,
     background_tasks: BackgroundTasks,
@@ -219,7 +224,7 @@ async def _run_deploy(job_id: str, connection_id: str, req: DeployRequest):
         db.close()
 
 
-@router.post("/deploy")
+@router.post("/deploy", dependencies=[Depends(require_permission("nutanix", "write"))])
 async def deploy(
     payload: DeployRequest,
     background_tasks: BackgroundTasks,
@@ -266,7 +271,7 @@ async def _run_delete_image(job_id: str, connection_id: str, uuid: str, name: st
         db.close()
 
 
-@router.delete("/images/{uuid}")
+@router.delete("/images/{uuid}", dependencies=[Depends(require_permission("nutanix", "delete"))])
 async def delete_image(
     uuid: str,
     name: str = "",
@@ -303,7 +308,7 @@ async def _run_delete_vm(job_id: str, connection_id: str, uuid: str, name: str):
         db.close()
 
 
-@router.delete("/vms/{uuid}")
+@router.delete("/vms/{uuid}", dependencies=[Depends(require_permission("nutanix", "delete"))])
 async def delete_vm(
     uuid: str,
     name: str = "",
@@ -431,7 +436,11 @@ async def bulk_power(
     payload: BulkPowerRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    # `<hv>:write`, in the permissive form, because this route was `get_current_user`
+    # only -- so a legacy NULL-permission user keeps it, and an explicitly-permissioned
+    # one gets it from the backfill. The docstring below is still the rule: the same
+    # authority as powering one VM, never require_admin.
+    current_user: User = Depends(require_permission("nutanix", "write")),
 ):
     """Queue one power op per selected VM, all sharing a ``batch_id``.
 

@@ -23,10 +23,17 @@ from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, User, get_db
 from ..services import (lab_platforms, pov_cloud_cost, pov_cloud_env, pov_env_service)
-from .auth import get_current_user
+from .auth import get_current_user, require_permission
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/pov/cloud", tags=["pov"])
+# pov:WRITE rather than read. This is the SE's view of the whole cloud account -- every
+# POV's footprint plus the ORPHANS, resources no POV claims -- so it is cross-customer by
+# construction and useless to a stakeholder narrowed to one environment.
+router = APIRouter(
+    prefix="/api/pov/cloud",
+    tags=["pov"],
+    dependencies=[Depends(require_permission("pov", "write"))],
+)
 
 
 @router.get("/overview")

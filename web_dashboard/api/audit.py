@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from ..database import AuditLog, User, get_db
 from ..services import job_service
-from .auth import require_admin
+from .auth import require_explicit_permission
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/audit", tags=["audit"])
@@ -91,7 +91,7 @@ def _row_dict(e: AuditLog) -> dict:
 
 @router.get("/verify")
 def verify_audit_log(
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_explicit_permission("audit", "read")),
     db: Session = Depends(get_db),
 ) -> dict:
     """Recompute the audit hash chain. Returns ``{ok, count, first_broken_seq}``:
@@ -113,7 +113,7 @@ def list_audit(
     since: Optional[str] = Query(None, description="ISO-8601 lower bound (inclusive)"),
     until: Optional[str] = Query(None, description="ISO-8601 upper bound (inclusive)"),
     q: Optional[str] = Query(None, description="Substring across action/target/details"),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_explicit_permission("audit", "read")),
     db: Session = Depends(get_db),
 ) -> dict:
     """A page of audit entries, newest first. Admin only."""
@@ -128,7 +128,7 @@ def list_audit(
 
 @router.get("/actions")
 def list_actions(
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_explicit_permission("audit", "read")),
     db: Session = Depends(get_db),
 ) -> dict:
     """The distinct action names present, so the filter can be a list rather than a
@@ -147,7 +147,7 @@ def export_audit(
     since: Optional[str] = Query(None),
     until: Optional[str] = Query(None),
     q: Optional[str] = Query(None),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_explicit_permission("audit", "read")),
     db: Session = Depends(get_db),
 ):
     """Stream the matching entries as CSV or JSON, oldest first.

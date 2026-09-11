@@ -26,10 +26,18 @@ from sqlalchemy.orm import Session
 
 from ..database import User, get_db
 from ..services import bt_tenant_service, bt_tenant_verify
-from .auth import get_current_user, require_admin
+from .auth import get_current_user, require_admin, require_explicit_permission, require_permission
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/pov/tenants", tags=["pov"])
+# Shares the `pov_templates` scope rather than minting a `tenants` one: registering a
+# BeyondTrust tenant is part of preparing what POVs get built from, it has no nav
+# section of its own, and a scope nothing in the UI can explain is a scope nobody
+# grants correctly.
+router = APIRouter(
+    prefix="/api/pov/tenants",
+    tags=["pov"],
+    dependencies=[Depends(require_permission("pov_templates", "read"))],
+)
 
 
 class TenantCreate(BaseModel):
@@ -115,7 +123,7 @@ async def list_tenants(kind: str = "", db: Session = Depends(get_db),
 
 @router.post("", status_code=201)
 async def create_tenant(payload: TenantCreate, db: Session = Depends(get_db),
-                        current_user: User = Depends(require_admin)):
+                        current_user: User = Depends(require_explicit_permission("pov_templates", "write"))):
     try:
         return {"tenant": bt_tenant_service.create(
             db, kind=payload.kind, name=payload.name, base_url=payload.base_url,
@@ -130,7 +138,7 @@ async def create_tenant(payload: TenantCreate, db: Session = Depends(get_db),
 @router.patch("/{tenant_id}")
 async def update_tenant(tenant_id: str, payload: TenantUpdate,
                         db: Session = Depends(get_db),
-                        current_user: User = Depends(require_admin)):
+                        current_user: User = Depends(require_explicit_permission("pov_templates", "write"))):
     # exclude_unset, not exclude_none: the service distinguishes "not supplied" from
     # "supplied as empty", and clearing a secret_ref is a real thing an operator does.
     fields = payload.model_dump(exclude_unset=True)
@@ -144,7 +152,7 @@ async def update_tenant(tenant_id: str, payload: TenantUpdate,
 
 @router.post("/{tenant_id}/default")
 async def make_default(tenant_id: str, db: Session = Depends(get_db),
-                       current_user: User = Depends(require_admin)):
+                       current_user: User = Depends(require_explicit_permission("pov_templates", "write"))):
     try:
         return {"tenant": bt_tenant_service.set_default(db, tenant_id)}
     except bt_tenant_service.BTTenantError as exc:
@@ -153,7 +161,7 @@ async def make_default(tenant_id: str, db: Session = Depends(get_db),
 
 @router.post("/{tenant_id}/verify")
 async def verify_tenant(tenant_id: str, db: Session = Depends(get_db),
-                        current_user: User = Depends(require_admin)):
+                        current_user: User = Depends(require_explicit_permission("pov_templates", "write"))):
     """Check the credential against the product, and record what happened.
 
     Synchronous rather than a job: it is one token handshake, it is what an operator is
@@ -193,7 +201,7 @@ async def verify_tenant(tenant_id: str, db: Session = Depends(get_db),
 
 @router.delete("/{tenant_id}", status_code=204)
 async def delete_tenant(tenant_id: str, db: Session = Depends(get_db),
-                        current_user: User = Depends(require_admin)):
+                        current_user: User = Depends(require_explicit_permission("pov_templates", "delete"))):
     try:
         bt_tenant_service.delete(db, tenant_id)
     except bt_tenant_service.BTTenantError as exc:

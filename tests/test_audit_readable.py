@@ -390,14 +390,28 @@ def test_json_export_is_parseable():
     assert "entry_hash" in parsed[0]
 
 
-def test_every_read_route_is_admin_only():
-    """Stated rather than assumed — see the module docstring in api/audit.py."""
+def test_every_read_route_needs_an_administrator_or_an_explicit_grant():
+    """Stated rather than assumed — see the module docstring in api/audit.py.
+
+    These routes are gated on ``audit:read`` rather than the admin flag, so the log can be
+    handed to somebody whose job is reading it without making them an administrator. The
+    property that must not slip is which FORM of the check is used:
+    ``require_explicit_permission`` refuses a user whose permission map is empty, whereas
+    the plain ``require_permission`` treats an empty map as UNRESTRICTED — which would
+    open the audit log to every account that predates the permission columns.
+    """
     import inspect
     for name in ("verify_audit_log", "list_audit", "list_actions", "export_audit"):
         sig = inspect.signature(getattr(api_audit, name))
         dep = sig.parameters["current_user"].default
         assert getattr(dep, "dependency", None) is not None, name
-        assert dep.dependency.__name__ == "require_admin", f"{name} is not admin-only"
+        fn = dep.dependency
+        assert getattr(fn, "permission_scope", None) == "audit", (
+            f"{name} is not gated on the audit scope (got {fn.__name__})")
+        assert getattr(fn, "permission_level", None) == "read", name
+        assert getattr(fn, "permission_explicit", False) is True, (
+            f"{name} uses the permissive form, so an empty permission map would read as "
+            "unrestricted and the audit log would be world-readable to legacy accounts")
 
 
 if __name__ == "__main__":

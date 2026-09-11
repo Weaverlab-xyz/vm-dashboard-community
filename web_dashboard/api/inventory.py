@@ -14,10 +14,16 @@ from fastapi import APIRouter, Depends, Query
 
 from ..database import User
 from ..services import cache_service, inventory_service
-from .auth import get_current_user
+from .auth import get_current_user, require_permission
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/inventory", tags=["inventory"])
+# Read-only, and it keeps its existing workgroup row filter
+# (inventory_service.accessible_workgroups): the scope says whether you may open the
+# page at all, the workgroup filter says which rows are yours. `inventory` is
+# read-only by design -- acting on a resource is the owning cloud scope's job.
+router = APIRouter(prefix="/api/inventory", tags=["inventory"],
+    dependencies=[Depends(require_permission("inventory", "read"))],
+)
 
 
 def _accessible_workgroups(user: User) -> Optional[List[str]]:

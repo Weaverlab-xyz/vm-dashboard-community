@@ -40,7 +40,7 @@ from ..config import settings
 from ..database import User, get_db
 from ..services import config_service
 from ..services import entitle_user_grants as grants
-from .auth import PERMISSION_LEVELS, PERMISSION_SCOPES
+from .auth import PERMISSION_LEVELS, PERMISSION_SCOPE_LEVELS, PERMISSION_SCOPES
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/entitle/rest", tags=["entitle-rest"])
@@ -78,7 +78,11 @@ def _require_secret(authorization: str = Header(default=""),
 @router.get("/get_assets", dependencies=[Depends(_require_secret)])
 def get_assets():
     """Every permission scope, plus administrator."""
-    assets = [grants.asset_for(scope, PERMISSION_LEVELS) for scope in PERMISSION_SCOPES]
+    # Per-scope levels, so Entitle does not publish a requestable role that would be
+    # rejected by _apply below. The asset ids are unchanged -- only each asset's
+    # role_options narrow -- so an existing Entitle resource keeps resolving.
+    assets = [grants.asset_for(scope, levels)
+              for scope, levels in PERMISSION_SCOPE_LEVELS.items()]
     assets.append(grants.admin_asset())
     return {"next": "", "data": {"assets": assets}}
 
@@ -155,6 +159,14 @@ def _apply(db: Session, payload: dict, *, grant: bool) -> dict:
         raise HTTPException(
             status_code=400,
             detail=f"unknown role_code {role!r} (expected one of {PERMISSION_LEVELS})")
+    elif role not in PERMISSION_SCOPE_LEVELS.get(scope, ()):
+        # A real level, but not one this scope offers. Checked separately from the line
+        # above so the message names the actual problem: "inventory has no delete" is
+        # actionable, "unknown role_code delete" sends the operator looking for a typo.
+        raise HTTPException(
+            status_code=400,
+            detail=f"scope {scope!r} does not offer role_code {role!r} (it offers "
+                   f"{', '.join(PERMISSION_SCOPE_LEVELS.get(scope, ()))})")
 
     identifier = str(payload.get("actor_identifier") or "").strip()
     user = next((u for u in db.query(User).filter(_NOT_AN_ACCESSOR).all()

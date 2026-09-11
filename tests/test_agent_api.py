@@ -54,8 +54,9 @@ AUDIENCE = "https://agents.test"
 
 class _Admin:
     """Stands in for an authenticated admin. The operator half is covered by
-    require_admin, which is asserted statically in test_agent_lease_invariants; here we
-    just need a principal so the handlers can record who acted."""
+    the `agents` permission scope, which is asserted statically in
+    test_agent_lease_invariants; here we just need a principal so the handlers can record
+    who acted. `is_effective_admin` is the attribute the gate reads."""
     username = "tester"
     is_admin = True
     is_effective_admin = True
@@ -75,8 +76,15 @@ def _app() -> TestClient:
             db.close()
 
     app.dependency_overrides[get_db] = _db
-    from web_dashboard.api.auth import require_admin
-    app.dependency_overrides[require_admin] = lambda: _Admin()
+    from web_dashboard.api.auth import get_current_user
+    # Overrides get_current_user rather than the admin dependency. The operator half
+    # is gated on `agents:<level>` now, and require_explicit_permission returns a
+    # FRESH function per call -- so a dependency_overrides entry keyed on the factory
+    # matches nothing, the real oauth2_scheme runs, and every route answers "Not
+    # authenticated". Overriding the base dependency is the more honest fixture
+    # anyway: it substitutes the IDENTITY and lets the real permission check run
+    # against it (_Admin carries is_effective_admin, which is what it consults).
+    app.dependency_overrides[get_current_user] = lambda: _Admin()
 
     # Pin the audience rather than letting it derive from the test client's host, so
     # the value the agent signs is the value the server checks.

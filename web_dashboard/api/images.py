@@ -43,7 +43,7 @@ router = APIRouter(prefix="/api/images", tags=["images"])
 @router.get("")
 async def list_images(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("images", "read")),
 ):
     return {"images": image_registry_service.list_images(db)}
 
@@ -54,7 +54,7 @@ async def list_images(
 async def register_image(
     payload: RegisterImageRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("admin", "write")),
+    current_user: User = Depends(require_permission("images", "write")),
 ):
     try:
         return image_registry_service.register_image(
@@ -79,7 +79,7 @@ async def register_image(
 async def get_image(
     image_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("images", "read")),
 ):
     image = image_registry_service.get_image(db, image_id)
     if not image:
@@ -93,7 +93,7 @@ async def get_image(
 async def delete_image(
     image_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("admin", "delete")),
+    current_user: User = Depends(require_permission("images", "delete")),
 ):
     if not image_registry_service.delete_image(db, image_id):
         raise HTTPException(status_code=404, detail=f"Image {image_id} not found.")
@@ -107,7 +107,7 @@ async def preflight_image(
     image_id: str,
     payload: PromoteImageRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("images", "read")),
 ):
     """Return advisory pre-flight checks for promoting `image_id` to a target.
 
@@ -137,7 +137,7 @@ async def promote_image(
     payload: PromoteImageRequest,
     manual: bool = False,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("admin", "write")),
+    current_user: User = Depends(require_permission("images", "write")),
 ):
     """Promote a registered image to a target cloud.
 

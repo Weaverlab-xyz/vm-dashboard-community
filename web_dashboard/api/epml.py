@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from .auth import get_current_user
+from .auth import get_current_user, require_permission
 from ..database import User, get_db
 from ..services import job_service
 from ..services import epml_service
@@ -19,7 +19,11 @@ from ..services import storage_service
 from ..services.epml_service import EpmlError
 from ..services.storage_service import StorageError
 
-router = APIRouter(prefix="/api/epml", tags=["epml"])
+# Was `get_current_user` only, including POST /trigger-build and GET /token -- the
+# latter hands back a Pathfinder PAT.
+router = APIRouter(prefix="/api/epml", tags=["epml"],
+    dependencies=[Depends(require_permission("epml", "read"))],
+)
 
 
 @router.get("/packages")
@@ -38,7 +42,7 @@ async def get_build_status(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=502, detail=str(e))
 
 
-@router.post("/trigger-build")
+@router.post("/trigger-build", dependencies=[Depends(require_permission("epml", "write"))])
 async def trigger_build(current_user: User = Depends(get_current_user)):
     try:
         return await epml_service.trigger_build()
@@ -63,7 +67,7 @@ class SyncPackagesRequest(BaseModel):
     backend: str = ""
 
 
-@router.post("/sync-packages")
+@router.post("/sync-packages", dependencies=[Depends(require_permission("epml", "write"))])
 async def sync_packages(
     payload: SyncPackagesRequest | None = None,
     db: Session = Depends(get_db),

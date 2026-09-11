@@ -72,10 +72,35 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         pov_ps_config, pov_resource_broker,
                         suspend_schedule, pov_share, spend_policy, pov_summary,
                         pov_use_cases, pov_wireup)
-from .auth import get_current_user
+from .auth import (get_current_user, pov_env_scope, require_permission,
+                   require_pov_env_access)
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/pov", tags=["pov"])
+
+# Two router-level guards, so neither is a thing a new route has to remember:
+#
+#   pov:read          -- the feature-area gate. Every route here needs at least read;
+#                        mutating routes add their own level below.
+#   require_pov_env_access -- the INSTANCE gate. Refuses (404) any {env_id} this user was
+#                        not granted. See User.pov_env_ids.
+#
+# Before this, every route in this module was `get_current_user` only: any authenticated
+# user could read, tick, wire, power, share, mint accessors for and destroy every POV in
+# the install. `env.workgroup` was read to stamp job rows, never to authorize.
+router = APIRouter(
+    prefix="/api/pov",
+    tags=["pov"],
+    dependencies=[Depends(require_permission("pov", "read")),
+                  Depends(require_pov_env_access)],
+)
+
+# Shorthands for the per-route level bumps. `use` is the POV's own stakeholder: tick a use
+# case, wake a suspended environment. It deliberately does NOT include create, destroy,
+# share or accessor minting -- that is what makes "read access to just this POC's POV, so
+# they can check off use cases" expressible.
+_POV_WRITE = [Depends(require_permission("pov", "write"))]
+_POV_DELETE = [Depends(require_permission("pov", "delete"))]
+_POV_USE = [Depends(require_permission("pov", "use"))]
 
 _DEFAULT_PLATFORM = "skytap"
 
@@ -277,7 +302,21 @@ def _platform_error(exc: Exception, what: str) -> HTTPException:
     return HTTPException(status_code=502, detail=f"{what} failed: {exc}")
 
 
-@router.get("/platforms")
+# ── the lab platform's own inventory ─────────────────────────────────────────
+#
+# These four reads are gated on pov:WRITE, not read, and both reasons matter.
+#
+# 1. They are the create form's pickers -- what templates exist, what is already on the
+#    platform -- so they are only useful to somebody who may provision. `/environments`
+#    deliberately includes environments this dashboard did not create, which on a shared
+#    Skytap account means other people's POVs; a read-only stakeholder listing them is a
+#    cross-customer name leak.
+# 2. `/environments/{env_id}` takes a PLATFORM environment id in a path param that happens
+#    to be named `env_id`, so `require_pov_env_access` would be comparing it against
+#    PovEnvironment uuids -- a different namespace. Requiring write keeps the instance gate
+#    from having to reason about which `env_id` it is looking at.
+
+@router.get("/platforms", dependencies=_POV_WRITE)
 async def list_platforms(current_user: User = Depends(get_current_user)):
     """Every lab platform this instance may use, with what it can do.
 
@@ -306,7 +345,7 @@ async def list_platforms(current_user: User = Depends(get_current_user)):
     }
 
 
-@router.get("/templates")
+@router.get("/templates", dependencies=_POV_WRITE)
 async def list_templates(platform: str = Query(_DEFAULT_PLATFORM),
                          current_user: User = Depends(get_current_user)):
     """Templates a POV environment could be created from."""
@@ -317,7 +356,7 @@ async def list_templates(platform: str = Query(_DEFAULT_PLATFORM),
         raise _platform_error(exc, f"listing {name} templates") from exc
 
 
-@router.get("/templates/{template_id}/vms")
+@router.get("/templates/{template_id}/vms", dependencies=_POV_WRITE)
 async def list_template_vms(template_id: str, platform: str = Query(_DEFAULT_PLATFORM),
                             current_user: User = Depends(get_current_user)):
     """The VMs inside one template, so an operator can pick which to copy.
@@ -342,7 +381,7 @@ async def list_template_vms(template_id: str, platform: str = Query(_DEFAULT_PLA
             "vms": detail.get("vms") or []}
 
 
-@router.get("/environments")
+@router.get("/environments", dependencies=_POV_WRITE)
 async def list_environments(platform: str = Query(_DEFAULT_PLATFORM),
                             current_user: User = Depends(get_current_user)):
     """Environments visible on the platform.
@@ -358,7 +397,7 @@ async def list_environments(platform: str = Query(_DEFAULT_PLATFORM),
         raise _platform_error(exc, f"listing {name} environments") from exc
 
 
-@router.get("/environments/{env_id}")
+@router.get("/environments/{env_id}", dependencies=_POV_WRITE)
 async def get_environment(env_id: str,
                           platform: str = Query(_DEFAULT_PLATFORM),
                           current_user: User = Depends(get_current_user)):
@@ -375,9 +414,15 @@ async def get_environment(env_id: str,
 @router.get("/managed")
 async def list_managed(db: Session = Depends(get_db),
                        current_user: User = Depends(get_current_user)):
-    rows = (db.query(PovEnvironment)
-              .filter(PovEnvironment.status != pov_env_service.STATUS_DESTROYED)
-              .order_by(PovEnvironment.created_at.desc()).all())
+    q = (db.query(PovEnvironment)
+           .filter(PovEnvironment.status != pov_env_service.STATUS_DESTROYED))
+    # The instance gate in require_pov_env_access covers routes that NAME a POV; a list
+    # has no env_id to inspect, so it filters here. Without this a narrowed user still saw
+    # every POV on the page and only discovered the limit by clicking one.
+    scope = pov_env_scope(current_user)
+    if scope is not None:
+        q = q.filter(PovEnvironment.id.in_(sorted(scope)))
+    rows = q.order_by(PovEnvironment.created_at.desc()).all()
     return {"environments": [_serialize(e, broker=pov_broker.describe(db, e))
                              for e in rows]}
 
@@ -396,7 +441,7 @@ async def list_archive(limit: int = Query(pov_summary.DEFAULT_LIMIT),
     you can act on and is why a finished POV had become unreachable without its uuid. The
     record was kept and the way to it was not.
     """
-    return pov_summary.archive(db, limit=limit)
+    return pov_summary.archive(db, limit=limit, env_ids=pov_env_scope(current_user))
 
 
 @router.get("/managed/{env_id}")
@@ -410,7 +455,7 @@ async def get_managed(env_id: str, db: Session = Depends(get_db),
     return {"environment": _serialize(env, vms, broker=pov_broker.describe(db, env))}
 
 
-@router.post("/managed/reconcile")
+@router.post("/managed/reconcile", dependencies=_POV_WRITE)
 async def reconcile_now(platform: str = Query(_DEFAULT_PLATFORM),
                         db: Session = Depends(get_db),
                         current_user: User = Depends(get_current_user)):
@@ -432,7 +477,7 @@ async def reconcile_now(platform: str = Query(_DEFAULT_PLATFORM),
     return {"reconciled": summary}
 
 
-@router.post("/managed", status_code=202)
+@router.post("/managed", status_code=202, dependencies=_POV_WRITE)
 async def provision(payload: ProvisionRequest,
                     db: Session = Depends(get_db),
                     current_user: User = Depends(get_current_user)):
@@ -611,7 +656,7 @@ async def provision(payload: ProvisionRequest,
             "prefilled": prefilled}
 
 
-@router.post("/managed/{env_id}/power", status_code=202)
+@router.post("/managed/{env_id}/power", status_code=202, dependencies=_POV_WRITE)
 async def power(env_id: str, payload: PowerRequest,
                 db: Session = Depends(get_db),
                 current_user: User = Depends(get_current_user)):
@@ -637,7 +682,7 @@ class TenantSelection(BaseModel):
     entitle_tenant_id: str | None = None
 
 
-@router.post("/managed/{env_id}/tenants")
+@router.post("/managed/{env_id}/tenants", dependencies=_POV_WRITE)
 async def set_tenants(env_id: str, payload: TenantSelection,
                       db: Session = Depends(get_db),
                       current_user: User = Depends(get_current_user)):
@@ -674,7 +719,7 @@ async def set_tenants(env_id: str, payload: TenantSelection,
     return {"environment": _serialize(env, broker=pov_broker.describe(db, env))}
 
 
-@router.post("/managed/{env_id}/broker", status_code=202)
+@router.post("/managed/{env_id}/broker", status_code=202, dependencies=_POV_WRITE)
 async def broker(env_id: str, db: Session = Depends(get_db),
                  current_user: User = Depends(get_current_user)):
     """Install, or re-enrol, the agent inside this POV.
@@ -747,7 +792,7 @@ async def gateway_status(env_id: str, db: Session = Depends(get_db),
     return {"gateway": await pov_gateway.status(db, env)}
 
 
-@router.post("/managed/{env_id}/gateway", status_code=202)
+@router.post("/managed/{env_id}/gateway", status_code=202, dependencies=_POV_WRITE)
 async def gateway(env_id: str, payload: GatewayRequest,
                   db: Session = Depends(get_db),
                   current_user: User = Depends(get_current_user)):
@@ -808,7 +853,7 @@ class ResourceBrokerRequest(BaseModel):
     install: bool = True
 
 
-@router.post("/managed/{env_id}/resource-broker", status_code=202)
+@router.post("/managed/{env_id}/resource-broker", status_code=202, dependencies=_POV_WRITE)
 async def resource_broker(env_id: str, payload: ResourceBrokerRequest,
                           db: Session = Depends(get_db),
                           current_user: User = Depends(get_current_user)):
@@ -869,7 +914,7 @@ class GuestStepRequest(BaseModel):
     run: bool = False
 
 
-@router.post("/managed/{env_id}/guest-step", status_code=202)
+@router.post("/managed/{env_id}/guest-step", status_code=202, dependencies=_POV_WRITE)
 async def guest_step(env_id: str, payload: GuestStepRequest,
                      db: Session = Depends(get_db),
                      current_user: User = Depends(get_current_user)):
@@ -931,7 +976,7 @@ async def ps_smart_rules(env_id: str, db: Session = Depends(get_db),
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/managed/{env_id}/ps-smart-rules/{rule_id}/process")
+@router.post("/managed/{env_id}/ps-smart-rules/{rule_id}/process", dependencies=_POV_WRITE)
 async def ps_process_smart_rule(env_id: str, rule_id: int,
                                 db: Session = Depends(get_db),
                                 current_user: User = Depends(get_current_user)):
@@ -978,7 +1023,7 @@ class AddVmsRequest(BaseModel):
     power_on: bool = True
 
 
-@router.post("/managed/{env_id}/vms", status_code=202)
+@router.post("/managed/{env_id}/vms", status_code=202, dependencies=_POV_WRITE)
 async def add_vms(env_id: str, payload: AddVmsRequest,
                   db: Session = Depends(get_db),
                   current_user: User = Depends(get_current_user)):
@@ -1036,7 +1081,7 @@ class ApplicationHostRequest(BaseModel):
     application_host_id: int = 0
 
 
-@router.post("/managed/{env_id}/application-host")
+@router.post("/managed/{env_id}/application-host", dependencies=_POV_WRITE)
 async def application_host(env_id: str, payload: ApplicationHostRequest,
                            db: Session = Depends(get_db),
                            current_user: User = Depends(get_current_user)):
@@ -1074,7 +1119,7 @@ class VmLoginRequest(BaseModel):
     login_username: str = ""
 
 
-@router.post("/managed/{env_id}/vms/{vm_id}/login")
+@router.post("/managed/{env_id}/vms/{vm_id}/login", dependencies=_POV_WRITE)
 async def set_vm_login(env_id: str, vm_id: str, payload: VmLoginRequest,
                        db: Session = Depends(get_db),
                        current_user: User = Depends(get_current_user)):
@@ -1109,7 +1154,7 @@ class EntitleAgentRequest(BaseModel):
     install: bool = True
 
 
-@router.post("/managed/{env_id}/entitle-agent", status_code=202)
+@router.post("/managed/{env_id}/entitle-agent", status_code=202, dependencies=_POV_WRITE)
 async def entitle_agent(env_id: str, payload: EntitleAgentRequest,
                         db: Session = Depends(get_db),
                         current_user: User = Depends(get_current_user)):
@@ -1140,7 +1185,7 @@ async def entitle_agent(env_id: str, payload: EntitleAgentRequest,
             "environment": _serialize(env, broker=pov_broker.describe(db, env))}
 
 
-@router.post("/managed/{env_id}/wireup", status_code=202)
+@router.post("/managed/{env_id}/wireup", status_code=202, dependencies=_POV_WRITE)
 async def wireup(env_id: str, db: Session = Depends(get_db),
                  current_user: User = Depends(get_current_user)):
     """Wire every VM in this POV into PRA, and into Password Safe and Entitle when it has
@@ -1190,7 +1235,7 @@ class EntitleKeyRequest(BaseModel):
     private_key: str = ""
 
 
-@router.post("/managed/{env_id}/entitle-key")
+@router.post("/managed/{env_id}/entitle-key", dependencies=_POV_WRITE)
 async def entitle_key(env_id: str, payload: EntitleKeyRequest,
                       db: Session = Depends(get_db),
                       current_user: User = Depends(get_current_user)):
@@ -1222,7 +1267,7 @@ def _share_or_400(exc: pov_share.ShareError) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc))
 
 
-@router.post("/managed/{env_id}/share")
+@router.post("/managed/{env_id}/share", dependencies=_POV_WRITE)
 async def share(env_id: str, payload: ShareRequest,
                 db: Session = Depends(get_db),
                 current_user: User = Depends(get_current_user)):
@@ -1255,7 +1300,7 @@ async def share(env_id: str, payload: ShareRequest,
             "environment": _serialize(env, broker=pov_broker.describe(db, env))}
 
 
-@router.delete("/managed/{env_id}/share")
+@router.delete("/managed/{env_id}/share", dependencies=_POV_WRITE)
 async def unshare(env_id: str, db: Session = Depends(get_db),
                   current_user: User = Depends(get_current_user)):
     """Revoke the link without touching the environment."""
@@ -1278,7 +1323,7 @@ async def unshare(env_id: str, db: Session = Depends(get_db),
     return {"environment": _serialize(env, broker=pov_broker.describe(db, env))}
 
 
-@router.post("/managed/{env_id}/share/reveal")
+@router.post("/managed/{env_id}/share/reveal", dependencies=_POV_WRITE)
 async def reveal_share_password(env_id: str, db: Session = Depends(get_db),
                                 current_user: User = Depends(get_current_user)):
     """Show the share link's password.
@@ -1318,7 +1363,7 @@ class ExpiryRequest(BaseModel):
     never: bool = False
 
 
-@router.post("/managed/{env_id}/expiry")
+@router.post("/managed/{env_id}/expiry", dependencies=_POV_WRITE)
 async def set_expiry(env_id: str, payload: ExpiryRequest,
                      db: Session = Depends(get_db),
                      current_user: User = Depends(get_current_user)):
@@ -1393,7 +1438,7 @@ class ScheduleRequest(BaseModel):
     schedule_days: str = ""
 
 
-@router.post("/managed/{env_id}/schedule")
+@router.post("/managed/{env_id}/schedule", dependencies=_POV_WRITE)
 async def set_schedule(env_id: str, payload: ScheduleRequest,
                        db: Session = Depends(get_db),
                        current_user: User = Depends(get_current_user)):
@@ -1443,7 +1488,7 @@ class SpendCapRequest(BaseModel):
     cap_usd: float | None = None
 
 
-@router.post("/managed/{env_id}/spend-cap")
+@router.post("/managed/{env_id}/spend-cap", dependencies=_POV_WRITE)
 async def set_spend_cap(env_id: str, payload: SpendCapRequest,
                         db: Session = Depends(get_db),
                         current_user: User = Depends(get_current_user)):
@@ -1495,7 +1540,7 @@ async def list_use_cases(env_id: str, db: Session = Depends(get_db),
     return pov_use_cases.describe(db, env)
 
 
-@router.post("/managed/{env_id}/use-cases/{card_id}")
+@router.post("/managed/{env_id}/use-cases/{card_id}", dependencies=_POV_USE)
 async def set_use_case(env_id: str, card_id: str, payload: UseCaseRequest,
                        db: Session = Depends(get_db),
                        current_user: User = Depends(get_current_user)):
@@ -1518,7 +1563,7 @@ async def set_use_case(env_id: str, card_id: str, payload: UseCaseRequest,
             "summary": pov_use_cases.summary_for(db, env)}
 
 
-@router.delete("/managed/{env_id}/use-cases/{card_id}")
+@router.delete("/managed/{env_id}/use-cases/{card_id}", dependencies=_POV_USE)
 async def clear_use_case(env_id: str, card_id: str, db: Session = Depends(get_db),
                          current_user: User = Depends(get_current_user)):
     """Un-tick a card. Removing a row nobody wrote is success, not a 404 — the button is a
@@ -1547,7 +1592,7 @@ async def get_summary(env_id: str, db: Session = Depends(get_db),
     return pov_summary.build(db, env)
 
 
-@router.delete("/managed/{env_id}", status_code=202)
+@router.delete("/managed/{env_id}", status_code=202, dependencies=_POV_DELETE)
 async def destroy(env_id: str, db: Session = Depends(get_db),
                   current_user: User = Depends(get_current_user)):
     """Destroy the environment and reap the platform side.

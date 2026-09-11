@@ -52,7 +52,11 @@ logger = logging.getLogger(__name__)
 # Terraform module's workflow_id_by_tier lookup.
 
 _AUTO_APPROVE_SUFFIXES = ("-read",)
-_SINGLE_APPROVER_SUFFIXES = ("-write",)
+# "-use" belongs here and was missing, so `dashboard-secrets-use` fell through to the
+# warning at the bottom of _tier_for_group and took the default. It is a single-approver
+# action by nature: using a secret inside a run without seeing it, or taking part in a POV
+# you were pointed at, is narrower than write and broader than read.
+_SINGLE_APPROVER_SUFFIXES = ("-write", "-use")
 _TWO_APPROVER_SUFFIXES = ("-delete",)
 
 
@@ -63,7 +67,7 @@ def _tier_for_group(display_name: str) -> str:
       1. exact 'dashboard-admin' or 'dashboard-<tenant>-admin' → two_approver
       2. exact 'dashboard-baseline' → auto_approve
       3. workgroup-* → single_approver
-      4. *-read | *-write | *-delete suffix → respective tier
+      4. *-read | *-write | *-use | *-delete suffix → respective tier
       5. fallback → single_approver (the safe-but-not-the-loosest default)
     """
     name = display_name.lower()

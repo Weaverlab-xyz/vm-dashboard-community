@@ -86,14 +86,28 @@ when you are ready.
 administrator:
 
 ```
-dashboard:scope:aws      role_options: read, write, delete, use
-dashboard:scope:k8s      …
-dashboard:admin          role_options: admin
+dashboard:scope:aws        role_options: read, write, delete, use
+dashboard:scope:pov        role_options: read, write, delete, use
+dashboard:scope:inventory  role_options: read
+dashboard:scope:costs      role_options: read, write
+dashboard:scope:k8s        …
+dashboard:admin            role_options: admin
 ```
+
+**`role_options` is per scope, not a fixed four.** A scope only advertises the levels
+something actually enforces — `inventory` is read-only, `costs` has nothing to delete —
+so Entitle never publishes a requestable role that the grant call would then reject. The
+grant call checks the same thing, and says which levels the scope does offer when it
+refuses.
 
 Administrator is its own asset deliberately: it is not a scope/level pair, it is the
 `is_admin` flag, and keeping it out of the generic loop means granting it is always
 an explicit act.
+
+**`pov` is worth calling out.** Its `use` role is what lets a customer stakeholder tick
+off their own use cases without being able to create, destroy or share a POV. Which POVs
+they can reach is a separate, non-Entitle setting on the user — see
+[Permissions](../permissions.md).
 
 **Actors** are dashboard users — local and OIDC alike. An actor resolves by username
 *or* email, case-insensitively.

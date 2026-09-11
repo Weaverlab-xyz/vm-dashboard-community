@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from ..database import User, get_db
 from ..services import job_service, notification_service, notify_policy, notify_transports
-from .auth import require_admin
+from .auth import require_explicit_permission
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
@@ -65,7 +65,7 @@ def _validate(url: str, fmt: str) -> None:
 
 @router.get("/endpoints")
 async def list_endpoints(db: Session = Depends(get_db),
-                         current_user: User = Depends(require_admin)):
+                         current_user: User = Depends(require_explicit_permission("notifications", "read"))):
     return {"endpoints": [notification_service.endpoint_public(e)
                           for e in notification_service.list_endpoints(db)],
             "formats": list(notify_transports.FORMATS),
@@ -75,7 +75,7 @@ async def list_endpoints(db: Session = Depends(get_db),
 @router.post("/endpoints")
 async def create_endpoint(payload: EndpointCreate,
                           db: Session = Depends(get_db),
-                          current_user: User = Depends(require_admin)):
+                          current_user: User = Depends(require_explicit_permission("notifications", "write"))):
     _validate(payload.url, payload.fmt)
     if len(notification_service.list_endpoints(db)) >= MAX_ENDPOINTS:
         raise HTTPException(status_code=400,
@@ -94,7 +94,7 @@ async def create_endpoint(payload: EndpointCreate,
 @router.patch("/endpoints/{endpoint_id}")
 async def patch_endpoint(endpoint_id: str, payload: EndpointPatch,
                          db: Session = Depends(get_db),
-                         current_user: User = Depends(require_admin)):
+                         current_user: User = Depends(require_explicit_permission("notifications", "write"))):
     fields = payload.model_dump(exclude_unset=True)
     if "url" in fields and fields["url"]:
         _validate(fields["url"], fields.get("fmt") or "custom")
@@ -111,7 +111,7 @@ async def patch_endpoint(endpoint_id: str, payload: EndpointPatch,
 @router.delete("/endpoints/{endpoint_id}")
 async def delete_endpoint(endpoint_id: str,
                           db: Session = Depends(get_db),
-                          current_user: User = Depends(require_admin)):
+                          current_user: User = Depends(require_explicit_permission("notifications", "write"))):
     if not notification_service.delete_endpoint(db, endpoint_id):
         raise HTTPException(status_code=404, detail="No such notification endpoint.")
     _audit(db, current_user, "notification_endpoint_deleted", {"endpoint_id": endpoint_id})
@@ -121,7 +121,7 @@ async def delete_endpoint(endpoint_id: str,
 @router.post("/endpoints/{endpoint_id}/test")
 async def test_endpoint(endpoint_id: str,
                         db: Session = Depends(get_db),
-                        current_user: User = Depends(require_admin)):
+                        current_user: User = Depends(require_explicit_permission("notifications", "write"))):
     """Send one real message now and return the verbatim outcome.
 
     Runs inline rather than through the worker's drain loop, and ignores dry-run: the
@@ -147,7 +147,7 @@ async def list_deliveries(page: int = Query(1, ge=1),
                           status: str = "", channel: str = "",
                           event_type: str = "", resource_id: str = "",
                           db: Session = Depends(get_db),
-                          current_user: User = Depends(require_admin)):
+                          current_user: User = Depends(require_explicit_permission("notifications", "read"))):
     rows, total = notification_service.list_deliveries(
         db, page=page, page_size=page_size, status=status, channel=channel,
         event_type=event_type, resource_id=resource_id)
@@ -158,7 +158,7 @@ async def list_deliveries(page: int = Query(1, ge=1),
 @router.get("/summary")
 async def delivery_summary(hours: int = Query(24, ge=1, le=720),
                            db: Session = Depends(get_db),
-                           current_user: User = Depends(require_admin)):
+                           current_user: User = Depends(require_explicit_permission("notifications", "read"))):
     out = notification_service.summary(db, hours=hours)
     out["enabled"] = notify_policy.enabled()
     out["dry_run"] = notify_policy.dry_run()

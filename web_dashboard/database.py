@@ -156,6 +156,21 @@ class User(Base):
     # request and must not need a join.
     accessor_env_id = Column(String(36), nullable=True, index=True)
 
+    # WHICH POVs this user may reach, as a JSON array of pov_environments.id. The `pov`
+    # permission scope says what they may DO with a POV; this says which ones they can see
+    # it on. NULL or [] means every POV the scope allows -- so an existing user is
+    # unaffected, which is what makes the scope backfill honest.
+    #
+    # Deliberately NOT a key inside any of the three permission columns:
+    # `session_permissions` is overwritten wholesale on every OIDC login (see
+    # api/auth._complete_oauth_login), so a grant stored there would vanish the next time
+    # the user signed in, intermittently and with nothing to point at.
+    #
+    # This is a NARROWING list, the opposite of accessor_env_id above. An accessor is
+    # confined by a path allowlist and gets nothing else in the dashboard; a user with
+    # pov_env_ids is an ordinary user whose POV pages happen to show one POV.
+    pov_env_ids = Column(Text, nullable=True)
+
     fido2_credentials = relationship("Fido2Credential", back_populates="user", cascade="all, delete-orphan")
     personal_access_tokens = relationship("PersonalAccessToken", back_populates="user", cascade="all, delete-orphan")
 
@@ -176,6 +191,29 @@ class User(Base):
         resolve via case-insensitive lookups in workgroup_service."""
         normalized = [v.lower() for v in (value or []) if isinstance(v, str)]
         self.workgroups = json.dumps(normalized)
+
+    @property
+    def pov_env_ids_list(self) -> List[str]:
+        """POV environment ids this user is narrowed to. [] means "not narrowed"."""
+        if not self.pov_env_ids:
+            return []
+        try:
+            parsed = json.loads(self.pov_env_ids)
+        except Exception:
+            return []
+        # A non-list here would make `env_id in scope` a substring test, the same trap the
+        # permission map has with a bare string value.
+        if not isinstance(parsed, list):
+            return []
+        return [v for v in parsed if isinstance(v, str)]
+
+    @pov_env_ids_list.setter
+    def pov_env_ids_list(self, value: List[str]):
+        """Set from a list. Empty stores NULL, so "narrowed to nothing" is never
+        expressible -- it would read as a user who can see no POV at all, which is what
+        withholding the `pov` scope is for."""
+        cleaned = [v.strip() for v in (value or []) if isinstance(v, str) and v.strip()]
+        self.pov_env_ids = json.dumps(cleaned) if cleaned else None
 
     @property
     def permissions_dict(self) -> dict:
@@ -1084,6 +1122,27 @@ class AppConfig(Base):
     value = Column(Text, nullable=True)         # Fernet-encrypted
     workgroup = Column(String(64), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class SchemaMarker(Base):
+    """"This one-time data migration has run." One row per migration, never deleted.
+
+    Deliberately NOT a key in ``app_config``: those values are Fernet-encrypted with a key
+    derived from JWT_SECRET_KEY, so rotating that secret would make the marker unreadable
+    and re-run the migration. For a backfill that GRANTS permissions, re-running is not a
+    harmless no-op — it would re-add a scope an administrator had deliberately removed.
+
+    Most backfills in this file derive idempotency from the data instead (see
+    ``job_service.backfill_audit_chain``, which checks whether any row is chained yet).
+    That works when the end state is indistinguishable from "already done". It does not
+    work here, because "this user has no `costs` scope" is both the pre-migration state and
+    a legitimate post-migration choice.
+    """
+    __tablename__ = "schema_markers"
+
+    key = Column(String(128), primary_key=True)
+    applied_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    detail = Column(Text, nullable=True)        # free-text: what it did, for support
 
 
 class SecretVault(Base):
@@ -2616,6 +2675,173 @@ class PovCloudTemplateVM(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+# What to grant so that newly-gating a route revokes nothing.
+#
+# THE RULE, and it is narrower than "every level the scope offers": grant exactly the
+# levels a NON-ADMIN WITH AN EXPLICIT PERMISSION MAP could already reach. Those users are
+# the only ones a new gate can affect — admins pass everything, and a NULL map still means
+# unrestricted.
+#
+# So a router that was `get_current_user`-only contributes its full level set (anyone
+# logged in could do all of it), and a router that was `require_admin` contributes
+# NOTHING and is absent below. Granting on an ex-admin route would not be preserving
+# access, it would be handing out access nobody outside the admin flag ever had —
+# the mirror image of the bug this backfill exists to prevent.
+#
+# The same logic excludes the routes that were gated on the phantom `require_permission
+# ("admin", …)` scope: `"admin"` was never in the catalog, so for a user with an explicit
+# map `has_permission` returned False every time. Unreachable then, not granted now.
+#
+# FROZEN IN TIME ON PURPOSE. This is a migration and must describe what v1 did forever.
+# Importing the live catalog from api/auth.py would mean a scope added next year gets
+# retroactively granted by a migration that claims to have run long ago. A future
+# catalog addition needs its own marker and its own list.
+_BACKFILL_V1_SCOPES = {
+    # Wholly ungated before: every route was `get_current_user` only.
+    "pov": ["read", "write", "delete", "use"],
+    "proxmox": ["read", "write", "delete"],
+    "vsphere": ["read", "write"],
+    "hyperv": ["read", "write"],
+    "nutanix": ["read", "write", "delete"],
+    "xcpng": ["read", "write"],
+    "inventory": ["read"],
+    "epml": ["read", "write"],
+    # Including delete: `DELETE /api/ot/tunnels/{slug}` was `get_current_user` only, so
+    # tearing a protocol tunnel down was already reachable. (The cell-BUILD routes are
+    # unaffected either way -- they keep their per-cloud write dependency.)
+    "ot": ["read", "write", "delete"],
+    # Mixed, so only the previously-reachable half. Storage's data plane (/backends,
+    # /list, /list-all, /fetch, /upload*) was ungated; its configuration and its deletes
+    # were not, and `storage:delete` is therefore a new capability that starts off.
+    "storage": ["read", "write"],
+    # Only `GET /api/gateways` was reachable; create and delete were phantom-admin.
+    "gateways": ["read"],
+    # Read only. The template/blueprint/cloud-template LIST routes were authenticated
+    # (`GET /builds`, `/verify`, `/runner-script`, `/blueprints`, `/cloud-templates`), so
+    # withholding read would revoke pages people can open today. Every WRITE there was
+    # require_admin, so write and delete are deliberately absent.
+    "pov_templates": ["read"],
+    # ── already in the catalog, newly ENFORCED ────────────────────────────────
+    # These two are not new scopes, but nothing has ever checked them, so a map that
+    # happens to omit them would lose access the moment the gate goes in. Same rule
+    # applied: config-management was entirely ungated, and of the image routes only the
+    # three reads were.
+    "config_mgmt": ["read", "write"],
+    "images": ["read"],
+}
+
+# Scopes added in v1 that are deliberately NOT backfilled, recorded so the next reader
+# does not "fix" the omission: every route behind them required the admin flag, so no
+# explicitly-permissioned user is losing anything. They are grantable from the Users page
+# now, which is the point — they start empty and an administrator turns them on.
+_BACKFILL_V1_DELIBERATELY_EMPTY = (
+    "connections", "costs", "agents", "audit", "notifications",
+)
+
+# The third category, and the only one that needs both halves spelled out: routes that
+# were gated on the PHANTOM ``require_permission("admin", ...)`` scope.
+#
+# ``"admin"`` was never in the catalog, so that decorator answered two opposite things:
+# False for every user with an explicit map (the scope is absent, so it is a deny) and
+# True for every legacy NULL-map user (an empty map reads as unrestricted). Repointing
+# them therefore needs BOTH:
+#
+#   * the PERMISSIVE form, so the legacy user keeps what they had, and
+#   * NO backfill, because the explicitly-permissioned user never had it.
+#
+# Which is why these pairs look like a backfill omission and are not one.
+_BACKFILL_V1_PHANTOM_ADMIN = (
+    ("gateways", "write"), ("gateways", "delete"),
+    ("storage", "delete"),
+    # `images` predates this change, so its pairs are exempt for a second reason too.
+    ("images", "write"), ("images", "delete"),
+)
+
+_BACKFILL_V1_MARKER = "rbac_scope_backfill_v1"
+
+
+def _backfill_new_permission_scopes(db) -> int:
+    """Grant the v1 new scopes to everyone who already has an explicit permission map.
+
+    Why this is mandatory rather than tidy: ``api/auth.has_permission`` treats an empty map
+    as UNRESTRICTED but a non-empty map as a strict per-scope allowlist. So the instant a
+    route is gated on a new scope, every user with an explicit map loses that route —
+    silently, with no error and no log line. These features were previously ungated, which
+    means all four levels were reachable; granting each new scope its full level set
+    reproduces exactly what those users could already do. Admins tighten afterwards, on
+    purpose, seeing the rows.
+
+    Users with a NULL map are left alone: NULL still means unrestricted, so writing a map
+    for them would NARROW them to whatever we wrote.
+
+    ``oauth_group_mappings.default_permissions`` gets the same treatment, because
+    ``_complete_oauth_login`` overwrites ``session_permissions`` wholesale from those
+    mappings on every login — widening only the user rows would be undone the next time an
+    OIDC user signed in.
+
+    ``jit_permissions`` is never touched: Entitle owns that column, and a grant it did not
+    make is a grant it cannot revoke.
+
+    Returns the number of rows changed. Idempotent via ``schema_markers``.
+    """
+    if db.query(SchemaMarker).filter(SchemaMarker.key == _BACKFILL_V1_MARKER).first():
+        return 0
+
+    changed = 0
+
+    def _widen(current: dict) -> dict:
+        out = dict(current)
+        for scope, levels in _BACKFILL_V1_SCOPES.items():
+            # Union per LEVEL, not "skip if the scope is present". `config_mgmt` and
+            # `images` are already in the catalog, so a map can hold a subset of them
+            # already — {"images": ["write"]} still needs `read` added, because the three
+            # image reads were ungated and are about to stop being.
+            have = out.get(scope)
+            if not isinstance(have, list):
+                # Absent, or a malformed non-list value that `has_permission` would turn
+                # into a substring test. Replace it with the honest list either way.
+                out[scope] = list(levels)
+                continue
+            merged = list(have) + [lv for lv in levels if lv not in have]
+            if merged != have:
+                out[scope] = merged
+        return out
+
+    for user in db.query(User).filter(User.permissions.isnot(None)).all():
+        # An accessor is confined by a path allowlist, not by permissions. Widening its
+        # map cannot reach anything, but it makes a confined login look permissive to the
+        # next person reading the row, so skip it.
+        if user.accessor_env_id:
+            continue
+        existing = user.permissions_dict
+        if not existing:
+            continue  # "{}" at rest is unrestricted; do not turn it into a restriction
+        widened = _widen(existing)
+        if widened != existing:
+            user.permissions_dict = widened
+            changed += 1
+
+    for mapping in db.query(OAuthGroupMapping).filter(
+            OAuthGroupMapping.default_permissions.isnot(None)).all():
+        try:
+            existing = json.loads(mapping.default_permissions) or {}
+        except Exception:
+            continue  # malformed JSON is skipped at login too, not repaired here
+        if not isinstance(existing, dict) or not existing:
+            continue
+        widened = _widen(existing)
+        if widened != existing:
+            mapping.default_permissions = json.dumps(widened)
+            changed += 1
+
+    db.add(SchemaMarker(
+        key=_BACKFILL_V1_MARKER,
+        detail=f"widened {changed} row(s) with {len(_BACKFILL_V1_SCOPES)} new scopes",
+    ))
+    db.commit()
+    return changed
+
+
 def init_db():
     """Initialize database — create all tables and run lightweight migrations.
 
@@ -2868,6 +3094,11 @@ def init_db():
             "ALTER TABLE spire_labs ADD COLUMN ansible_managed_account TEXT",
             "ALTER TABLE spire_labs ADD COLUMN ansible_managed_become_self BOOLEAN",
             "ALTER TABLE spire_labs ADD COLUMN login_user VARCHAR(104)",
+            # Per-POV narrowing for an ordinary user. TEXT and nullable, so the
+            # DEFAULT-on-a-new-column trap described above does not apply. Every
+            # pre-existing row backfills to NULL = "every POV", which is what keeps
+            # _backfill_new_permission_scopes from changing anybody's access.
+            "ALTER TABLE users ADD COLUMN pov_env_ids TEXT",
             # `cloud_cost_cache` needs no entry: create_all makes new tables. Nothing
             # backfills it either — an empty table is exactly "no cloud has reported a
             # cost yet", which is what the first warmer pass fixes.
@@ -2901,6 +3132,15 @@ def init_db():
     from .services import workgroup_service
     with SessionLocal() as _seed_db:
         workgroup_service.seed_if_empty(_seed_db)
+        # Widen every explicit permission map to cover the scopes added when the catalog
+        # grew from 14 entries to one-per-nav-section. Data, not DDL, and outside the
+        # advisory-locked transaction for the same reason as the seeds below it.
+        try:
+            _backfill_new_permission_scopes(_seed_db)
+        except Exception:  # noqa: BLE001 — a backfill must never stop the app booting
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "permission scope backfill skipped", exc_info=True)
         # Copy the legacy singleton hypervisor config into hypervisor_connections.
         # Here and not in the migration block above on purpose: this is a data seed,
         # not DDL, and it must stay OUTSIDE the advisory-locked transaction — a

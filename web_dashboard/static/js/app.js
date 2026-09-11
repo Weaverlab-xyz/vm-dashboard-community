@@ -628,8 +628,41 @@ function permissionScopeLabel(scope) {
         azure:          'Azure',
         gcp:            'GCP',
         oci:            'OCI',
+        cloud_function: 'Cloud Function',
+        // One entry per nav section. Casing matters here: these are product names, and
+        // the CSS `capitalize` fallback renders "hyperv" as "Hyperv".
+        pov:            'POV',
+        pov_templates:  'POV Templates',
+        proxmox:        'Proxmox',
+        vsphere:        'vSphere',
+        hyperv:         'Hyper-V',
+        nutanix:        'Nutanix',
+        xcpng:          'XCP-ng',
+        connections:    'Connections',
+        storage:        'Storage',
+        costs:          'Costs',
+        inventory:      'Inventory',
+        agents:         'Agents',
+        audit:          'Audit',
+        gateways:       'Gateways',
+        notifications:  'Notifications',
+        epml:           'EPM for Linux',
+        ot:             'OT Demo Cell',
     };
     return map[scope] || String(scope || '').replace(/_/g, ' ');
+}
+
+// Does `scope` offer `level`? Sourced from the backend catalog (api/auth.py
+// PERMISSION_SCOPE_LEVELS) via the page route context. A scope that does not offer a
+// level renders no checkbox at all rather than a disabled one: a disabled box invites the
+// question "why can't I tick this?", and the answer ("nothing enforces it") is not
+// something the grid can say in 12 pixels.
+//
+// Unknown scope => no levels, so a stored-but-retired key renders as a label with an
+// empty row. That is deliberate: it makes an orphan visible instead of editable.
+function permissionScopeAllowsLevel(levelsByScope, scope, level) {
+    const allowed = (levelsByScope || {})[scope];
+    return Array.isArray(allowed) && allowed.includes(level);
 }
 
 function formatDuration(seconds) {

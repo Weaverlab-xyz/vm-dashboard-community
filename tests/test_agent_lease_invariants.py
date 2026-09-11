@@ -230,7 +230,18 @@ def test_the_operator_half_is_admin_only():
         if not decorated or node.name in agent_half:
             continue
         body = ast.get_source_segment(src, node) or ""
-        assert "require_admin" in body, f"{node.name} is not admin-gated"
+        # Either gate satisfies the property this test is about: the operator half must
+        # not be reachable by an agent signature or by nobody at all.
+        # require_explicit_permission("agents", ...) is "administrator, OR somebody an
+        # administrator explicitly named" -- deliberately NOT the plain
+        # require_permission, which treats an empty permission map as unrestricted and
+        # would therefore hand these routes to every legacy NULL-permission account.
+        gated = ("require_admin" in body
+                 or 'require_explicit_permission("agents"' in body)
+        assert gated, f"{node.name} is not gated for an operator"
+        assert 'require_permission("agents"' not in body, (
+            f"{node.name} uses the permissive form: an empty permission map reads as "
+            "unrestricted, so this route would be open to every pre-OIDC user")
 
 
 def test_agent_routes_are_declared_before_the_agent_id_routes():

@@ -55,7 +55,7 @@ from ..services import (agent_ansible_bundle, agent_ansible_meta, agent_gateway_
 from ..services.hypervisor_connection_service import HypervisorConnectionError
 from ..services.agent_guard import AgentThrottled
 from ..services.agent_service import AgentError
-from .auth import require_admin
+from .auth import require_explicit_permission
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/agent", tags=["agent"])
@@ -1078,7 +1078,7 @@ def _install_hint(request: Request, code: str, audience: dict) -> dict:
 @router.post("", status_code=201)
 async def create_agent(body: CreateAgentRequest, request: Request,
                        acknowledge_audience: bool = False,
-                       current_user: User = Depends(require_admin),
+                       current_user: User = Depends(require_explicit_permission("agents", "write")),
                        db: Session = Depends(get_db)):
     """Register an agent and return its one-time enrolment code.
 
@@ -1104,7 +1104,7 @@ async def create_agent(body: CreateAgentRequest, request: Request,
 
 
 @router.get("")
-async def list_agents(current_user: User = Depends(require_admin),
+async def list_agents(current_user: User = Depends(require_explicit_permission("agents", "read")),
                       db: Session = Depends(get_db)):
     """Every registered agent, with derived status and its running-job count."""
     agents = db.query(RemoteAgent).order_by(RemoteAgent.created_at.desc()).all()
@@ -1129,7 +1129,7 @@ def _enrolled_count(db: Session) -> int:
 
 
 @router.get("/audience")
-async def read_audience(request: Request, current_user: User = Depends(require_admin),
+async def read_audience(request: Request, current_user: User = Depends(require_explicit_permission("agents", "read")),
                         db: Session = Depends(get_db)):
     """The pinned signing audience and why it might be wrong. **Read-only.**
 
@@ -1147,7 +1147,7 @@ async def read_audience(request: Request, current_user: User = Depends(require_a
 
 
 @router.delete("/audience")
-async def reset_audience(request: Request, current_user: User = Depends(require_admin),
+async def reset_audience(request: Request, current_user: User = Depends(require_explicit_permission("agents", "write")),
                          db: Session = Depends(get_db)):
     """Clear the pin so the next minted code pins the audience again.
 
@@ -1159,8 +1159,9 @@ async def reset_audience(request: Request, current_user: User = Depends(require_
     admin mint. That distinction is the security property. Write-once pinning is what stops
     the first stranger to reach ``/api/agent/lease`` with a forged ``Host`` from choosing an
     audience they control, which is the one thing that would make a signature captured
-    against a host of theirs replayable here. Guarded by ``require_admin``, the same check
-    that guards minting a code, so the unauthenticated signature path cannot reach it.
+    against a host of theirs replayable here. Guarded by ``agents:write`` (administrator, or
+    somebody an administrator explicitly named), the same check that guards minting a
+    code, so the unauthenticated signature path cannot reach it.
 
     **Invalidates every enrolled agent.** Each one signs against the audience it was handed
     at enrolment, so all of them start failing authentication — as a 401, which the agent
@@ -1200,7 +1201,7 @@ def _load(db: Session, agent_id: str) -> RemoteAgent:
 
 
 @router.get("/{agent_id}")
-async def get_agent(agent_id: str, current_user: User = Depends(require_admin),
+async def get_agent(agent_id: str, current_user: User = Depends(require_explicit_permission("agents", "read")),
                     db: Session = Depends(get_db)):
     return _agent_row(_load(db, agent_id))
 
@@ -1208,7 +1209,7 @@ async def get_agent(agent_id: str, current_user: User = Depends(require_admin),
 @router.post("/{agent_id}/enrollment-code")
 async def reissue_code(agent_id: str, request: Request,
                        acknowledge_audience: bool = False,
-                       current_user: User = Depends(require_admin),
+                       current_user: User = Depends(require_explicit_permission("agents", "write")),
                        db: Session = Depends(get_db)):
     """Issue a fresh enrolment code for a reinstall.
 
@@ -1242,7 +1243,7 @@ class DiscoverRequest(BaseModel):
 
 @router.post("/{agent_id}/discover", status_code=202)
 async def queue_discovery(agent_id: str, body: DiscoverRequest, request: Request,
-                          current_user: User = Depends(require_admin),
+                          current_user: User = Depends(require_explicit_permission("agents", "write")),
                           db: Session = Depends(get_db)):
     """Queue a discovery scan on one agent.
 
@@ -1326,7 +1327,7 @@ class AgentUpdateRequest(BaseModel):
 
 @router.patch("/{agent_id}")
 async def update_agent(agent_id: str, body: AgentUpdateRequest, request: Request,
-                       current_user: User = Depends(require_admin),
+                       current_user: User = Depends(require_explicit_permission("agents", "write")),
                        db: Session = Depends(get_db)):
     """Grant or narrow what this agent may be given.
 
@@ -1352,7 +1353,7 @@ async def update_agent(agent_id: str, body: AgentUpdateRequest, request: Request
 
 @router.delete("/{agent_id}")
 async def revoke(agent_id: str, request: Request,
-                 current_user: User = Depends(require_admin),
+                 current_user: User = Depends(require_explicit_permission("agents", "delete")),
                  db: Session = Depends(get_db)):
     """Revoke an agent and clear any work it was holding."""
     agent = _load(db, agent_id)
@@ -1365,7 +1366,7 @@ async def revoke(agent_id: str, request: Request,
 
 @router.delete("/{agent_id}/record")
 async def remove_record(agent_id: str, request: Request,
-                        current_user: User = Depends(require_admin),
+                        current_user: User = Depends(require_explicit_permission("agents", "delete")),
                         db: Session = Depends(get_db)):
     """Permanently delete a **revoked** agent's row.
 

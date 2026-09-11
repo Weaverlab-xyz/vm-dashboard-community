@@ -65,7 +65,8 @@ GRAPH_SCOPE = "https://graph.microsoft.com/.default"
 # PERMISSION_LEVELS. The script imports them at runtime rather than
 # hard-coding so a new scope added to api/auth.py is automatically
 # covered the next time bootstrap runs.
-from ..api.auth import PERMISSION_LEVELS, PERMISSION_SCOPES  # noqa: E402
+from ..api.auth import (PERMISSION_LEVELS, PERMISSION_SCOPE_LEVELS,  # noqa: E402
+                        PERMISSION_SCOPES)
 
 
 @dataclass(frozen=True)
@@ -137,8 +138,12 @@ def _build_inventory(
         )
 
     if "permissions" in scopes:
-        for scope in PERMISSION_SCOPES:
-            for level in PERMISSION_LEVELS:
+        # PERMISSION_SCOPE_LEVELS, not the scopes x levels cross product. Every entry here
+        # becomes a real Entra security group via Graph, so a level a scope does not
+        # actually offer is a permanent group in a customer's tenant that can never grant
+        # anything. The cross product would be ~124 groups; this is ~101.
+        for scope, levels in PERMISSION_SCOPE_LEVELS.items():
+            for level in levels:
                 out.append(
                     PlannedGroup(
                         display_name=_norm(f"{pfx}{scope}-{level}"),

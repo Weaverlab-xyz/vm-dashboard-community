@@ -38,7 +38,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from ..database import User
 from ..services import aws_service, azure_service, provider_budget
-from .auth import require_admin
+from .auth import require_explicit_permission
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/budgets", tags=["budgets"])
@@ -114,7 +114,7 @@ def _backend(cloud: str) -> dict:
 
 @router.get("/{cloud}")
 async def read_budget(cloud: str,
-                      current_user: User = Depends(require_admin)) -> dict:
+                      current_user: User = Depends(require_explicit_permission("costs", "read"))) -> dict:
     """What is in the account now, beside what a push would set.
 
     Answers 200 even when nothing is configured yet: "you have not set this up" is the
@@ -144,7 +144,7 @@ async def read_budget(cloud: str,
 
 @router.post("/{cloud}")
 async def push_budget(cloud: str,
-                      current_user: User = Depends(require_admin)) -> dict:
+                      current_user: User = Depends(require_explicit_permission("costs", "write"))) -> dict:
     """Create or update the dashboard's budget in the cloud account.
 
     Refuses a budget it did not name — see `provider_budget.assert_writable`. That guard

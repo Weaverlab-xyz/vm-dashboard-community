@@ -187,10 +187,12 @@
                   <td class="px-3 py-2 font-medium text-gray-700 capitalize" x-text="permissionScopeLabel(scope)"></td>
                   <template x-for="level in permissionLevels" :key="level">
                     <td class="px-3 py-2 text-center">
-                      <input type="checkbox"
+                      <input x-show="allowsLevel(scope, level)" type="checkbox"
                              :checked="formHasPerm(scope, level)"
                              @change="formTogglePerm(scope, level, $event.target.checked)"
                              class="rounded border-gray-300 text-blue-600">
+                      <span x-show="!allowsLevel(scope, level)"
+                            class="text-gray-300 select-none">&middot;</span>
                     </td>
                   </template>
                 </tr>
@@ -239,6 +241,8 @@
 // the grid will drift from what require_permission actually enforces.
 const PERMISSION_SCOPES_G = {{ permission_scopes | tojson }};
 const PERMISSION_LEVELS_G = {{ permission_levels | tojson }};
+// Which levels each scope offers, so this grid cannot offer one the server will 422.
+const PERMISSION_SCOPE_LEVELS_G = {{ permission_scope_levels | tojson }};
 
 function groupsPage() {
   return {
@@ -249,6 +253,7 @@ function groupsPage() {
     personaOptions: {{ persona_options | tojson }},
     permissionScopes: PERMISSION_SCOPES_G,
     permissionLevels: PERMISSION_LEVELS_G,
+    permissionScopeLevels: PERMISSION_SCOPE_LEVELS_G,
     loading: true,
     showAdd: false,
     saving: false,
@@ -275,6 +280,10 @@ function groupsPage() {
       } finally {
         this.loading = false;
       }
+    },
+
+    allowsLevel(scope, level) {
+      return permissionScopeAllowsLevel(this.permissionScopeLevels, scope, level);
     },
 
     formHasPerm(scope, level) {
