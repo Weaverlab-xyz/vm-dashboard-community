@@ -209,7 +209,9 @@ resource "google_privateca_certificate_authority" "this" {
 # This is the CA half of the plugin's functional account. Its EMAIL becomes the account
 # name and the `private_key` field of its JSON key becomes the account password — that
 # field's value alone, PEM armour and all, never the whole JSON file. The plugin detects
-# a pasted JSON file and says so, but it is the most common setup mistake.
+# a pasted JSON file and says so, but it is the most common setup mistake — which is why
+# the dashboard now composes the account itself, out of this apply's outputs, rather than
+# printing the key for somebody to paste.
 #
 # The split between the two credentials is on the LAST colon, and a PEM private key
 # contains none, so the key's own `-----BEGIN PRIVATE KEY-----` armour survives intact.
@@ -263,5 +265,5 @@ output "service_account_email" {
 output "service_account_key_json" {
   value       = base64decode(google_service_account_key.plugin.private_key)
   sensitive   = true
-  description = "The whole JSON key. The functional account password takes the `private_key` FIELD out of this, not the file"
+  description = "The whole JSON key. The functional account password takes the `private_key` FIELD out of this, not the file — cert_ps_service._ca_credential does that extraction, so the mistake cannot be made by hand"
 }

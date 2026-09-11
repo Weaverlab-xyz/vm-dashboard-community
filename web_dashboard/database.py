@@ -1557,6 +1557,17 @@ class CertLab(Base):
     # built for it. Nothing secret belongs on a row the inventory page renders.
     enroll_account = Column(String(255), nullable=True)
 
+    # The functional account this CA's identities onboard against, recorded in BOTH
+    # modes so Add identity never has to fall back to a global config key that may have
+    # moved on since the build. Not secret: it is the account's NAME, which is the
+    # enrollment principal plus the BeyondInsight run-as user.
+    ps_functional_account = Column(String(255), nullable=True)
+    # Set ONLY when the dashboard minted that account. Non-NULL is the ownership flag:
+    # teardown deletes what it created and never an operator's own account, exactly how
+    # the cloud-DB onboarding splits ps_db_functional_account_id from ..._ref. NULL
+    # therefore means "referenced, or never created" — never "not yet looked up".
+    ps_functional_account_id = Column(String(36), nullable=True)
+
     ps_system_id = Column(String(36), nullable=True)
     ps_account_id = Column(String(36), nullable=True)
     ps_address = Column(Text, nullable=True)                    # the composed profile
@@ -2795,6 +2806,13 @@ def init_db():
             # NULL backfills to "choose by guest OS", so no existing POV changes
             # behaviour when this lands. See PovEnvironmentVM.login_username.
             "ALTER TABLE pov_environment_vms ADD COLUMN login_username VARCHAR(104)",
+            # The functional account a CA's identities onboard against, and — only when
+            # the dashboard minted it — its id. Both backfill to NULL, which is right
+            # for every CA built before this: their account was made by hand, so
+            # nothing may delete it, and Add identity keeps falling back to
+            # cert_ps_functional_account exactly as it did. See CertLab.
+            "ALTER TABLE cert_labs ADD COLUMN ps_functional_account VARCHAR(255)",
+            "ALTER TABLE cert_labs ADD COLUMN ps_functional_account_id VARCHAR(36)",
             # `cloud_cost_cache` needs no entry: create_all makes new tables. Nothing
             # backfills it either — an empty table is exactly "no cloud has reported a
             # cost yet", which is what the first warmer pass fixes.

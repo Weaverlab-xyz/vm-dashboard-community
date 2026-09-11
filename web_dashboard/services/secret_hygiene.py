@@ -38,6 +38,7 @@ SECRET_REGISTRY: list = [
     ("bt_client_secret",          "BeyondTrust Privileged Remote Access Client Secret"),
     ("epml_pat",                  "BeyondTrust EPM-L Personal Access Token"),
     ("wlc_pat",                   "BeyondTrust Workload Credentials PAT"),
+    ("cert_ps_bi_api_key",        "BeyondInsight API Key (Certificate Lab)"),
     ("entitle_api_token",         "Entitle API Token"),
     ("entitle_api_key",           "Entitle Terraform Provider API Key"),
     ("proxmox_token_secret",      "Proxmox API Token Secret"),

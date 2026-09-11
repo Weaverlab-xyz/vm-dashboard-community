@@ -78,8 +78,13 @@ nothing here re-implements any of that.
 2. **The `.psplugin` imported** and the `Certificate` platform created. The dashboard
    resolves the platform live by name through `GET /Platforms`, so a renamed platform just
    needs its new name in Settings.
-3. **A functional account on that platform.** One account carries **two** credentials, both
-   fields split on the **last** colon:
+3. **A BeyondInsight API registration**, set as `cert_ps_bi_api_key` in Settings →
+   Certificate Lab. The dashboard builds the functional account itself; this is the one
+   half it cannot derive, because its own API sign-in uses OAuth2 client credentials and
+   never a `PS-Auth` key. The run-as user comes from `pscli_api_account_name` unless
+   `cert_ps_bi_run_as_user` overrides it.
+
+   One account carries **two** credentials, both fields split on the **last** colon:
 
    | Field | Form |
    |---|---|
@@ -88,6 +93,10 @@ nothing here re-implements any of that.
 
    Splitting from the right is deliberate: a BeyondInsight username and an API registration
    key contain no colon, but a certificate authority password may contain anything at all.
+
+   **Building the CA creates this account** — see [Building a CA](#building-a-ca) below.
+   The manual path is `cert_ps_functional_account_mode = reference`, which is the right
+   setting for a CA this dashboard did not build.
 4. **A Secrets Safe safe** for the bundles. The dashboard creates the *folder tree* beneath
    it; it never creates the safe, which carries its own ACL.
 
@@ -223,6 +232,30 @@ self-signed root certificate, and the IAM user the plugin authenticates as.
 
 The cloud selector only appears when more than one module is built — the list comes from
 the modules that actually exist, so a cloud can never be offered without one behind it.
+
+### The build also creates the functional account
+
+This is the step that used to be manual, and it had to move because **the enrollment
+credential exists for exactly one moment**. Both clouds' APIs return it once — a GCP
+service account key, an AWS secret access key — so it is live in the apply's outputs and
+in no other place a person can reach. Recovering it by hand meant minting a *second* key.
+
+So the build composes the account and writes it to Password Safe: username
+`<enrollment-principal>:<run-as-user>`, password `<enrollment-secret>:<api-key>`. On GCP
+the secret is the `private_key` **field** out of the key JSON, PEM armour and all — never
+the whole file, which is the most common way to get this wrong by hand.
+
+It is also the only path that fits. `ps-cli` caps a functional-account password at 1,000
+characters; a GCP `private_key` PEM is about 1,700. The REST API the dashboard uses
+accepts 3,216.
+
+**A failure here does not fail the build.** The CA is real and billing the moment the
+apply returns, and a rebuild is not a free retry — CAS never hands a deleted pool id back.
+So the row stays *available* with the error underneath it, and **Wire up Password Safe**
+retries against the credential still recorded in the CA's own terraform state.
+
+Teardown deletes the account, but only one the dashboard minted: in `reference` mode the
+account is an operator's own and may be shared by every CA on the platform.
 
 ### Every id here is single-use
 

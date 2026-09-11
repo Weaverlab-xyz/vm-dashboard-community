@@ -1780,16 +1780,26 @@ class CertLabFeatureConfig(BaseModel):
     objects the "Certificate" plugin needs and the certificate-profile defaults.
     See _CONFIG_ONLY_FEATURES.
 
-    None of these is a secret, deliberately. Both of the plugin's credentials — the CA
-    enrollment identity and the BeyondInsight API user — ride ONE Password Safe functional
-    account, which is a protected field built for exactly that; this panel only names it.
+    Exactly ONE of these is a secret: `cert_ps_bi_api_key`. Both of the plugin's
+    credentials — the CA enrollment identity and the BeyondInsight API user — ride ONE
+    Password Safe functional account, which is the protected field built for exactly
+    that, and in `reference` mode this panel only NAMES that account. In `create` mode
+    the dashboard composes it, and it holds the CA half for the moment it takes to POST
+    it (straight out of the build's terraform outputs, never stored) — but the
+    BeyondInsight half has no other home, because the dashboard's REST client signs in
+    with OAuth2 client credentials and never sends a PS-Auth key. Hence the one secret.
+
     Nothing secret belongs on the managed system's address or the account name either,
     since neither is protected and both are visible anywhere Password Safe shows the
     object."""
     cert_ps_platform: str = "Certificate"
     cert_ps_workgroup: str = ""
+    # reference mode only — in create mode the dashboard mints one per CA and records
+    # its name on the CertLab row instead.
     cert_ps_functional_account: str = ""
-    cert_ps_functional_account_mode: str = "reference"
+    cert_ps_functional_account_mode: str = "create"   # "create" | "reference"
+    cert_ps_bi_api_key: str = ""                      # SECRET — see _SECRET_FEATURE_KEYS
+    cert_ps_bi_run_as_user: str = ""                  # blank → pscli_api_account_name
     # Blank derives the ORIGIN of pscli_api_url, which is the same tenant by construction.
     # The plugin appends its own API path, so the full API URL here yields a doubled path.
     cert_ps_biurl: str = ""
@@ -2003,6 +2013,7 @@ _SECRET_FEATURE_KEYS = frozenset({
     "rancher_bootstrap_password", "rancher_admin_password", "rancher_api_token",
     "oidc_client_secret",
     "wlc_pat",
+    "cert_ps_bi_api_key",
 })
 
 
