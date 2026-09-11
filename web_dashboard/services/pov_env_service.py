@@ -28,7 +28,8 @@ from sqlalchemy.orm import Session
 from ..database import PovEnvironment, PovEnvironmentVM, SessionLocal
 from . import (job_service, lab_platforms, pov_accessor_entitle, pov_accessor_service,
                pov_broker, pov_credentials, pov_entitle_agent, pov_gateway,
-               pov_resource_broker, pov_share, pov_use_cases, pov_wireup)
+               pov_resource_broker, pov_share, pov_use_cases, pov_vendor_access,
+               pov_wireup)
 
 logger = logging.getLogger(__name__)
 
@@ -501,12 +502,13 @@ async def run_env_add_vms(job_id: str, meta: dict) -> None:
 async def run_env_destroy(job_id: str, meta: dict) -> None:
     """Delete the environment from the platform and mark the row destroyed.
 
-    Reaps the POV's share link, then its PRA jump items, then its Resource Broker state,
-    then its Gateway, then its broker agent, then the platform side. The share link goes
-    first because it is the only artifact somebody outside the account can be holding;
-    the jump items next because they are the only ones in a CUSTOMER'S appliance, and
-    every later step removes something they were resolved through. The property they all
-    rely on is kept
+    The removals run sharpest-credential-first: the PRA vendor group, then the Entitle
+    integration that mints accessors, then the accessor logins, then the share link, then
+    the PRA jump items, then the Resource Broker state, the Gateway, the broker agent, and
+    finally the platform side. The vendor group leads because its holder is outside both
+    this account and this dashboard — it is a session into the customer's network. The
+    jump items sit after the things somebody outside can be holding but before everything
+    that removes what they were resolved through. The property they all rely on is kept
     here: **the platform delete is reached even when an earlier step fails**, because a
     half-torn-down POV that keeps billing is the worse outcome.
 
@@ -530,6 +532,13 @@ async def run_env_destroy(job_id: str, meta: dict) -> None:
         # that reason. The one thing the destroy owes it is the summary, in the log, at
         # the moment somebody is closing the evaluation out.
         job_service.append_job_log(db, job_id, pov_use_cases.destroy_note(db, env))
+
+        # The PRA vendor group first, ahead of even the Entitle integration, and for a
+        # sharper version of the same argument. Of the doors a POV holds open, this is the
+        # only one whose holder is neither in this account nor in this dashboard: a vendor
+        # user is a live session into the customer's own network. The tenant is still
+        # fully resolvable here, which is the other thing this step needs. It never raises.
+        job_service.append_job_log(db, job_id, await pov_vendor_access.teardown(db, env))
 
         # The Entitle integration that MINTS accessors goes before the accessors do, and
         # that order is the point rather than housekeeping: while it is live, Entitle can

@@ -71,7 +71,7 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         pov_cloud_cost, pov_entitle_agent, pov_guest_step,
                         pov_ps_config, pov_resource_broker,
                         suspend_schedule, pov_share, spend_policy, pov_summary,
-                        pov_use_cases, pov_wireup)
+                        pov_use_cases, pov_vendor_access, pov_wireup)
 from .auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -206,6 +206,10 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
     # the right answer for a list rendered for an operator: the URL Entitle would be given
     # is the configured one, not whichever host this particular request arrived on.
     out.update(pov_accessor_entitle.describe(_db_of(env), env))
+    # The PRA vendor group, beside it. No Request argument and no network call: this runs
+    # once per row on the list endpoint, so a round trip here would be one per POV on every
+    # page load — see the service's describe.
+    out.update(pov_vendor_access.describe(_db_of(env), env))
     if vms is not None:
         out["vms"] = [{
             "id": v.platform_vm_id,

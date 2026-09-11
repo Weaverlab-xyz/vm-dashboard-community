@@ -325,6 +325,31 @@ def test_an_option_no_caller_reads_is_not_required():
     db.close()
 
 
+def test_the_pra_vendor_options_have_a_reader_and_are_never_required():
+    """The same rule as the Entitle options one below, applied to the two keys PRA Vendor
+    Onboarding added. A tenant that never onboards a third party must stay valid, so
+    neither may be required -- and a field an operator fills in that nothing consumes
+    reads as configured, which is worse than an absent one."""
+    for key in ("vendor_jump_item_role_name", "vendor_portal_url"):
+        assert key in t.OPTION_KEYS["pra"], f"{key} is not on the PRA allowlist"
+        assert key in t.OPTION_LABELS, f"{key} would render its own key as a label"
+        assert key not in t.REQUIRED_OPTIONS["pra"], f"{key} must not be required"
+    src = pathlib.Path(_ROOT, "web_dashboard", "services",
+                       "pov_vendor_access.py").read_text(encoding="utf-8")
+    for key in ("vendor_jump_item_role_name", "vendor_portal_url"):
+        assert f'option("{key}")' in src, (
+            f"the PRA tenant option {key!r} is offered on the form but no caller in "
+            f"pov_vendor_access reads it")
+
+
+def test_the_portal_url_hint_says_the_api_cannot_create_one():
+    """The PRA Configuration API (v1.10) has no portal, slug or email-domain-allow-list
+    endpoint at all -- Portal Settings are a /login screen. Without this sentence in front
+    of the operator, somebody tries to wire it up."""
+    hint = t.OPTION_HINTS.get("vendor_portal_url", "")
+    assert "cannot create" in hint and "/login" in hint
+
+
 def test_the_entitle_options_are_only_ones_a_caller_reads():
     """A field an operator fills in and nothing consumes reads as configured, which is
     worse than an absent one. `machine_identity_email` was exactly that: every reader of

@@ -43,6 +43,7 @@ Runs under pytest, or standalone:
 import asyncio
 import os
 import pathlib
+import re
 import sys
 import uuid
 
@@ -122,18 +123,61 @@ class _FakeTF:
             raise RuntimeError(self.b["remove_raises"])
 
 
-def _install(fake):
+class _FakeJumpGroups:
+    """The Config API calls `ensure_jump_group` and the Jump Group teardown make.
+
+    A separate fake from `_FakeTF` because they are separate layers: jump ITEMS go through
+    terraform, and the Jump Group they live in is created over REST — the provider has an
+    `sra_jump_group` resource, but each VM's jump item is its own workspace, so declaring
+    the group there would put it in eight of them.
+    """
+
+    def __init__(self, **behaviour):
+        self.b = behaviour
+        self.calls = []
+
+    async def find_jump_group(self, tenant, name):
+        self.calls.append(("find", name))
+        return self.b.get("existing")
+
+    async def create_jump_group(self, tenant, *, name, code_name, comments=""):
+        self.calls.append(("create", name, code_name))
+        if self.b.get("create_raises"):
+            raise RuntimeError(self.b["create_raises"])
+        return {"id": self.b["group_id"]} if "group_id" in self.b else {"id": 44}
+
+    async def delete_jump_group(self, tenant, group_id):
+        self.calls.append(("delete", group_id))
+        if self.b.get("delete_raises"):
+            raise RuntimeError(self.b["delete_raises"])
+
+
+_JG_PATCHED = ("find_jump_group", "create_jump_group", "delete_jump_group")
+
+
+def _install(fake, jump_groups=None):
     original = {k: getattr(w.terraform_pra_service, k)
                 for k in ("provision_jump", "provision_rdp_jump", "remove_jump",
                           "remove_rdp_jump")}
     for k in original:
         setattr(w.terraform_pra_service, k, getattr(fake, k))
+    # Always installed, even when a test does not care: without it the wire-up run reaches
+    # a real appliance at preflight and every assertion below becomes a DNS failure.
+    jg = jump_groups or _FakeJumpGroups()
+    original["_jg"] = {k: getattr(w.pra_vendor_api, k) for k in _JG_PATCHED}
+    for k in _JG_PATCHED:
+        setattr(w.pra_vendor_api, k, getattr(jg, k))
+    original["_jg_fake"] = jg
     return original
 
 
 def _restore(original):
     for k, v in original.items():
-        setattr(w.terraform_pra_service, k, v)
+        if k == "_jg":
+            for name, fn in v.items():
+                setattr(w.pra_vendor_api, name, fn)
+        elif k != "_jg_fake":
+            setattr(w.terraform_pra_service, k, v)
 
 
 # ── the tenant override ──────────────────────────────────────────────────────
@@ -172,6 +216,225 @@ def test_a_tenant_with_no_jump_group_is_refused():
     except w.WireupError as exc:
         assert "Jump Group" in str(exc)
     finally:
+        db.close()
+
+
+# -- the per-POV Jump Group --------------------------------------------------
+#
+# A PRA Group Policy grants access BY JUMP GROUP, so the tenant's appliance-wide group is
+# the wrong scope for anything a third party is attached to: a vendor let into it reaches
+# every POV on that appliance. Nothing else in the wire-up cares -- jump items work either
+# way -- which is exactly why the fallback has to keep working and why these are pinned.
+
+def test_a_povs_own_jump_group_beats_the_tenants():
+    db = d.SessionLocal()
+    try:
+        env = _env(db, tenant=_tenant(db), pra_jump_group_name="pov-lab")
+        out = w.tenant_override(db, env)
+        assert out["jump_group_name"] == "pov-lab"
+    finally:
+        db.close()
+
+
+def test_a_pov_without_one_still_resolves_to_the_tenants_group():
+    """Not legacy tolerance -- the ONLY correct answer for a POV wired before per-POV
+    groups existed. Its jump items really are in the tenant's group, and re-homing the name
+    here would point a destroy at a group those items are not in."""
+    db = d.SessionLocal()
+    try:
+        env = _env(db, tenant=_tenant(db))
+        out = w.tenant_override(db, env)
+        assert out["jump_group_name"] == "POV"
+    finally:
+        db.close()
+
+
+def test_tenant_override_makes_no_network_call():
+    """It is called by the API preflight and by teardown, and a destroy that has to reach
+    an appliance before it can decide what to destroy fails when the appliance is down."""
+    db = d.SessionLocal()
+
+    async def _boom(*a, **kw):
+        raise AssertionError("tenant_override reached the appliance")
+
+    original = {k: getattr(w.pra_vendor_api, k) for k in _JG_PATCHED}
+    for k in original:
+        setattr(w.pra_vendor_api, k, _boom)
+    try:
+        env = _env(db, tenant=_tenant(db))
+        w.tenant_override(db, env)
+    finally:
+        for k, fn in original.items():
+            setattr(w.pra_vendor_api, k, fn)
+        db.close()
+
+
+def test_a_new_pov_gets_a_jump_group_named_after_itself():
+    db = d.SessionLocal()
+    jg = _FakeJumpGroups()
+    original = _install(_FakeTF(), jg)
+    try:
+        env = _env(db, tenant=_tenant(db))
+        line = asyncio.run(w.ensure_jump_group(db, env))
+        assert env.pra_jump_group_name == "pov-" + env.name
+        assert env.pra_jump_group_id == "44"
+        assert "scoped to this POV" in line
+        # The code_name has to satisfy PRA's CodeName pattern and its 64-char cap.
+        code = [c for c in jg.calls if c[0] == "create"][0][2]
+        assert len(code) <= 64 and re.match(r"^[a-zA-Z0-9_\-]+$", code)
+    finally:
+        _restore(original)
+        db.close()
+
+
+def test_a_create_that_returns_no_id_writes_neither_column():
+    """Writing the NAME beside a blank id and then raising wedges this function's own
+    adoption check forever: the next run finds the group by name, compares it to a blank
+    id, decides it belongs to somebody else, and tells the operator to rename their POV."""
+    db = d.SessionLocal()
+    jg = _FakeJumpGroups(group_id=None)
+    original = _install(_FakeTF(), jg)
+    try:
+        env = _env(db, tenant=_tenant(db))
+        try:
+            asyncio.run(w.ensure_jump_group(db, env))
+            raise AssertionError("a blank Jump Group id was accepted")
+        except w.WireupError as exc:
+            assert "returned no id" in str(exc)
+        assert env.pra_jump_group_name is None, "the name was committed with no id"
+        assert not env.pra_jump_group_id
+    finally:
+        _restore(original)
+        db.close()
+
+
+def test_an_already_wired_pov_keeps_the_tenants_shared_group():
+    """Moving it would need every jump item destroyed and rebuilt, and doing that silently
+    would orphan the items in the old group."""
+    db = d.SessionLocal()
+    jg = _FakeJumpGroups()
+    original = _install(_FakeTF(), jg)
+    try:
+        env = _env(db, tenant=_tenant(db))
+        vm = _vm(db, env)
+        vm.pra_jump_id = "101"
+        db.commit()
+        line = asyncio.run(w.ensure_jump_group(db, env))
+        assert env.pra_jump_group_name is None
+        assert jg.calls == [], "it reached the appliance anyway"
+        assert "left there" in line
+    finally:
+        _restore(original)
+        db.close()
+
+
+def test_an_existing_group_of_the_same_name_is_refused_not_adopted():
+    """Adopting one would scope a vendor policy to whatever is already in it -- the failure
+    this whole feature exists to prevent, and the no-silent-tenant-side-effects rule."""
+    db = d.SessionLocal()
+    jg = _FakeJumpGroups(existing={"id": 99, "name": "whatever"})
+    original = _install(_FakeTF(), jg)
+    try:
+        env = _env(db, tenant=_tenant(db))
+        try:
+            asyncio.run(w.ensure_jump_group(db, env))
+            raise AssertionError("a foreign Jump Group was adopted")
+        except w.WireupError as exc:
+            assert "did not create" in str(exc)
+            assert "will not adopt" in str(exc)
+        assert "create" not in [c[0] for c in jg.calls]
+        assert env.pra_jump_group_id is None
+    finally:
+        _restore(original)
+        db.close()
+
+
+def test_a_group_whose_id_this_row_already_holds_is_reused():
+    """What makes pressing Wire up twice safe."""
+    db = d.SessionLocal()
+    jg = _FakeJumpGroups(existing={"id": 44, "name": "pov-x"})
+    original = _install(_FakeTF(), jg)
+    try:
+        env = _env(db, tenant=_tenant(db), pra_jump_group_id="44")
+        line = asyncio.run(w.ensure_jump_group(db, env))
+        assert "Reusing" in line
+        assert env.pra_jump_group_name == "pov-" + env.name
+        assert "create" not in [c[0] for c in jg.calls]
+    finally:
+        _restore(original)
+        db.close()
+
+
+def test_a_pov_that_already_has_its_group_asks_the_appliance_nothing():
+    db = d.SessionLocal()
+    jg = _FakeJumpGroups()
+    original = _install(_FakeTF(), jg)
+    try:
+        env = _env(db, tenant=_tenant(db), pra_jump_group_name="pov-x",
+                   pra_jump_group_id="44")
+        assert asyncio.run(w.ensure_jump_group(db, env)) == ""
+        assert jg.calls == []
+    finally:
+        _restore(original)
+        db.close()
+
+
+def test_teardown_removes_the_povs_own_group_and_never_the_shared_one():
+    """A POV on the tenant's group has no id here and reaches none of that code, so a POV
+    teardown can never delete the group every other POV is using."""
+    db = d.SessionLocal()
+    jg = _FakeJumpGroups()
+    original = _install(_FakeTF(), jg)
+    try:
+        shared = _env(db, tenant=_tenant(db))
+        asyncio.run(w.teardown(db, shared))
+        assert jg.calls == []
+
+        own = _env(db, tenant=_tenant(db), pra_jump_group_name="pov-own",
+                   pra_jump_group_id="44")
+        line = asyncio.run(w.teardown(db, own))
+        assert ("delete", "44") in jg.calls
+        assert "Removed this POV's Jump Group" in line
+        assert own.pra_jump_group_id is None and own.pra_jump_group_name is None
+    finally:
+        _restore(original)
+        db.close()
+
+
+def test_a_failed_jump_item_removal_leaves_the_group_in_place():
+    """Deleting it would take the item with it, or fail -- either way the operator's
+    remaining work gets harder."""
+    db = d.SessionLocal()
+    jg = _FakeJumpGroups()
+    original = _install(_FakeTF(remove_raises="nope"), jg)
+    try:
+        env = _env(db, tenant=_tenant(db), pra_jump_group_name="pov-own",
+                   pra_jump_group_id="44")
+        vm = _vm(db, env)
+        vm.pra_jump_tf_state = '{"resources":[]}'
+        db.commit()
+        line = asyncio.run(w.teardown(db, env))
+        assert "delete" not in [c[0] for c in jg.calls]
+        assert "left in place" in line
+        assert env.pra_jump_group_id == "44"
+    finally:
+        _restore(original)
+        db.close()
+
+
+def test_a_group_delete_that_fails_keeps_the_ids_so_a_rerun_can_finish():
+    db = d.SessionLocal()
+    jg = _FakeJumpGroups(delete_raises="a policy still references it")
+    original = _install(_FakeTF(), jg)
+    try:
+        env = _env(db, tenant=_tenant(db), pra_jump_group_name="pov-own",
+                   pra_jump_group_id="44")
+        line = asyncio.run(w.teardown(db, env))
+        assert "could not be removed" in line
+        assert "Group Policy still references it" in line
+        assert env.pra_jump_group_id == "44"
+    finally:
+        _restore(original)
         db.close()
 
 

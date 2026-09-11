@@ -2091,6 +2091,12 @@ class Settings(BaseSettings):
     # How long a minted accessor lasts when nothing else says. Always clamped to the POV's
     # own expiry, so this is a ceiling on a short-lived thing rather than a lifetime.
     pov_accessor_ttl_days: int = 14
+    # How long a POV's PRA Vendor Group lets its users last when nothing else says.
+    # Clamped to the POV's own expiry the same way, and then to PRA's own 1-365 range.
+    # Separate from the accessor ceiling above because the two grant different things: an
+    # accessor opens a checklist in this dashboard, a vendor user opens a session into the
+    # customer's network, and the second deserves the shorter default.
+    pov_vendor_ttl_days: int = 7
 
     class Config:
         env_file = os.path.join(os.path.dirname(__file__), ".env")
