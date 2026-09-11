@@ -1213,6 +1213,12 @@ try:
     # router's _require_secret. Never open because it is unconfigured.
     app.include_router(pov_accessor_rest_api.router,
                        dependencies=[_feature_gate("pov_environments_enabled")])
+    # PRA Vendor Onboarding: a third party's login into ONE POV's lab, in the customer's
+    # own appliance. The same gate — a vendor group is a POV artifact — and the router's
+    # own docstring explains why every refusal inside it is a 409 rather than a 404.
+    from .api import pov_vendor as pov_vendor_api  # noqa: E402
+    app.include_router(pov_vendor_api.router,
+                       dependencies=[_feature_gate("pov_environments_enabled")])
 except ImportError as exc:
     logger.warning("API router 'pov' not loaded: %s", exc)
 

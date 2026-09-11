@@ -2075,6 +2075,38 @@ class PovEnvironment(Base):
     accessor_integration_id = Column(String(64), nullable=True)
     accessor_tf_state = Column(Text, nullable=True)
 
+    # The PRA Jump Group this POV's jump items live in, when it has one of its own.
+    #
+    # NULL means "use the tenant's appliance-wide Jump Group", which is what every POV
+    # wired before this column existed does, and the fallback pov_wireup.tenant_override
+    # still honours. It is a per-POV group at all because a PRA Group Policy grants access
+    # BY JUMP GROUP: a vendor attached to the tenant-wide group would reach every POV on
+    # that appliance, which is the whole reason the vendor feature could not just reuse it.
+    #
+    # The name and the id are both stored. The name is what terraform resolves through the
+    # `sra_jump_group_list` data source when it builds jump items; the id is what the
+    # Config API deletes and what proves a same-named group found later is OURS rather
+    # than one an operator built by hand.
+    pra_jump_group_name = Column(String(255), nullable=True)
+    pra_jump_group_id = Column(String(36), nullable=True)
+
+    # PRA Vendor Onboarding, per POV: one Group Policy scoped to the Jump Group above, and
+    # one Vendor Group whose `default_policy` is that policy. Both are ids the appliance
+    # assigned, held as text like every other foreign id on this table.
+    #
+    # Kept when a teardown fails, for the same reason accessor_tf_state is: clearing them
+    # optimistically is how a vendor group in a customer's appliance becomes unreachable
+    # from here, and a vendor group is a live door into their network.
+    pra_vendor_policy_id = Column(String(36), nullable=True)
+    pra_vendor_group_id = Column(String(36), nullable=True)
+    # This dashboard's own copy of when the vendor group's users stop working. PRA takes a
+    # DAY COUNT and enforces it on its side, so this is not a second clock — it is what
+    # lets the row say "expires Friday" without a round trip, and what the reconcile sweep
+    # reaps on. Kept for the same reason PovAccessor.expires_at is: an appliance that goes
+    # unreachable, or a group somebody edits by hand, would otherwise leave standing
+    # third-party access into a customer's estate with nothing here aware of it.
+    pra_vendor_expires_at = Column(DateTime, nullable=True)
+
     # Slice 7: the customer-facing share link. The platform's own publish set is the
     # source of truth for whether the URL still works; these three record what THIS
     # dashboard published, so it can revoke exactly that one later.
@@ -2344,6 +2376,45 @@ class PovAccessor(Base):
     # credential behind forever. Clamped so an accessor can never outlive its POV.
     expires_at = Column(DateTime, index=True, nullable=True)
 
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by = Column(String(100), nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+    revoke_reason = Column(String(255), nullable=True)
+
+
+class PovVendorUser(Base):
+    """One third party's login into one POV's lab, held in the customer's PRA appliance.
+
+    The sibling of :class:`PovAccessor` and its opposite: an accessor is a door into THIS
+    DASHBOARD, and a vendor user is a door into the customer's NETWORK. That is the whole
+    difference, and it is why this is the artifact the destroy removes first.
+
+    The account itself does not live here. PRA owns it — created under
+    ``/api/config/v1/vendor/{id}/user``, expiring on the Vendor Group's own
+    ``account_expiration`` clock, deleted with the group. This table is the binding and its
+    provenance: which POV, who created it, what it was for, and the PRA id needed to delete
+    exactly that one.
+
+    ``expires_at`` is a COPY of what the appliance will enforce, not a second clock. PRA's
+    ``VendorUser.account_expiration`` is read-only and derived from the group, so the
+    dashboard cannot shorten one user's life — it can only tell an SE when the group's will
+    end. Do not add a sweep that deletes on this column: it would be guessing at a date the
+    appliance owns.
+    """
+    __tablename__ = "pov_vendor_users"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    environment_id = Column(String(36), index=True, nullable=False)
+    # What PRA called it. Recovered by re-reading the vendor group's user list after the
+    # create, because POST /vendor/{id}/user answers 200 with no body.
+    pra_vendor_user_id = Column(String(36), nullable=True)
+    # Always carries the povvnd_ prefix; revoke refuses any name without it, so this path
+    # can never be talked into deleting a vendor the customer added by hand.
+    username = Column(String(64), nullable=False)
+    email = Column(String(256), nullable=True)
+    full_name = Column(String(200), nullable=True)
+
+    expires_at = Column(DateTime, index=True, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     created_by = Column(String(100), nullable=True)
     revoked_at = Column(DateTime, nullable=True)
@@ -2874,6 +2945,18 @@ def init_db():
             # `dashboard_stat_cache` needs no entry for the same two reasons: create_all
             # makes it, and an empty table means "nothing collected yet", which every tile
             # already renders as unavailable.
+            #
+            # PRA Vendor Onboarding per POV. All four backfill to NULL, which reads as
+            # "this POV uses the tenant's Jump Group and has no vendor group" — the right
+            # answer for every environment wired before this feature, and what makes the
+            # Access tab's blocker rather than a silent cross-POV grant the thing an
+            # operator meets. `pov_vendor_users` needs no entry: create_all makes new
+            # tables, and empty means nobody has been let in yet.
+            "ALTER TABLE pov_environments ADD COLUMN pra_jump_group_name VARCHAR(255)",
+            "ALTER TABLE pov_environments ADD COLUMN pra_jump_group_id VARCHAR(36)",
+            "ALTER TABLE pov_environments ADD COLUMN pra_vendor_policy_id VARCHAR(36)",
+            "ALTER TABLE pov_environments ADD COLUMN pra_vendor_group_id VARCHAR(36)",
+            "ALTER TABLE pov_environments ADD COLUMN pra_vendor_expires_at TIMESTAMP",
         ]
         for stmt in _migrations:
             if _is_sqlite:

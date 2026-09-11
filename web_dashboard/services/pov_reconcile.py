@@ -494,6 +494,23 @@ async def run_reconcile(job_id: str, meta: dict) -> None:
             job_service.append_job_log(
                 db, job_id, f"revoked {reaped} expired or orphaned accessor login(s)")
 
+        # The vendor-group backstop, on the same terms and for the same reason. PRA expires
+        # the vendor USERS on its own clock, so this is not what stops somebody logging in
+        # — it removes the GROUP, which would otherwise stand in a customer's appliance
+        # forever naming a POV that is gone. Async because it reaches the appliance; the
+        # accessor sweep above touches only this database.
+        from . import pov_vendor_access
+        try:
+            reaped = await pov_vendor_access.sweep(db)
+        except Exception as exc:  # noqa: BLE001 — a sweep never fails the pass
+            logger.warning("POV reconcile: the vendor group sweep failed", exc_info=True)
+            job_service.append_job_log(db, job_id, f"vendor group sweep FAILED: {exc}")
+            db.rollback()
+            reaped = 0
+        if reaped:
+            job_service.append_job_log(
+                db, job_id, f"removed {reaped} expired or orphaned PRA vendor group(s)")
+
         summaries, failures = [], []
         for platform in lab_platforms.VALID_PLATFORMS:
             try:

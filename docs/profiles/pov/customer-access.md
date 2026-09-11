@@ -2,7 +2,7 @@
 
 > **Audience:** customer · **Profile:** `pov` · **Read this when:** you have been given a login or a link to a POV environment, or you are the one handing them out.
 
-Part of [A POV Instance](README.md). The use-case checklist, the ephemeral accessor login, and the share link.
+Part of [A POV Instance](README.md). The use-case checklist, PRA vendor access, the ephemeral accessor login, and the share link.
 
 ## Use cases, per POV
 
@@ -59,6 +59,83 @@ out, which is the one time anybody reads it.
 
 The design note, including the accessor identity that is **not** kept, is in
 [design/pov-use-cases.md](design/use-cases.md).
+
+---
+
+
+## Vendor access: letting a third party into the lab
+
+**POV page → a POV's name → Access.**
+
+The accessor below is a door into *this dashboard*. This is the door into the **lab** — a
+PRA login that opens this POV's jump items and nothing else, in the customer's own
+appliance, on their own clock.
+
+It closes a real gap. A POV wired into PRA already has a jump item per VM, through the
+Gateway installed inside the environment. Until this, only users who already existed in
+that appliance could launch one, so the items were correct and unreachable by the prospect.
+PRA's own answer to that is **Vendor Onboarding**, and this drives it.
+
+### Four objects, all named after the POV
+
+| In PRA | Named | What it does |
+|---|---|---|
+| Jump Group | `pov-<name>` | Holds this POV's jump items. Created by **Wire up**. |
+| Group Policy | `pov-<name>-vendor-access` | Grants sessions on that Jump Group and nothing else |
+| Vendor Group | `pov-<name>-vendors` | Holds the third-party logins; its policy is the one above |
+| Vendor users | `povvnd_<name>_<random>` | One per person you let in |
+
+The Jump Group is the part worth understanding, because it is why this could not simply be
+bolted on. **A PRA Group Policy grants access by Jump Group**, and a POV's jump items used
+to go into the Jump Group named on the *tenant* — one group shared by every POV on that
+appliance. A vendor attached to it would reach all of them. So a POV now gets a Jump Group
+of its own, and the vendor's policy names that one group.
+
+### A POV wired before this will say so
+
+If this POV's jump items are still in the tenant's appliance-wide group, the card refuses
+and says why rather than offering a button that over-grants. The fix is to tear its wiring
+down and press **Wire up** again, which moves the items into a group of its own. Or don't —
+the dashboard login below and the share link both still work for it.
+
+### Giving somebody a login
+
+Press **Create the vendor group**, then fill in an email and press **New vendor login**.
+
+**PRA has no invite call.** Nothing is emailed: the notification settings on a Vendor Group
+email your PRA administrators, not the vendor. So the dashboard creates the account and
+shows you a username and password **once**, which you hand over — and the account is set to
+require a password change at first sign-in, so the value you sent stops working as soon as
+they have used it. The email you type is a label, and what PRA shows on the account.
+
+They sign in to **PRA itself**, not to this dashboard, and see this POV's jump items only.
+
+If you have built a self-registration portal in `/login`, paste its URL on the PRA tenant
+(Settings → Integrations → tenants) and the card will show it with a Copy button. The
+dashboard cannot create one: **Portal Settings and the Email Domain Allow List are not in
+the Configuration API at all**, so there is nothing to automate. The Network address allow
+list *is* in the API, and the card offers it.
+
+### It expires, and never outlives the POV
+
+Seven days by default, always shortened to the POV's own expiry — ask for thirty on a POV
+with five left and you get five. PRA enforces that on its side, per Vendor Group, and
+expired accounts are deleted a week later so you can still see who had access during a
+post-mortem.
+
+Belt and braces, as with accessors: destroying a POV removes the vendor group **first**,
+ahead of everything else, because of the three doors a POV holds open this is the only one
+whose holder is neither in your account nor in this dashboard. A sweep on the POV reconcile
+pass catches the rest — groups whose clock ran out, and groups whose POV is already gone.
+
+### What it will not do
+
+It will not **adopt** anything. A Jump Group, Group Policy or Vendor Group already in the
+appliance that this dashboard did not create is a refusal naming it, never a reuse — a
+policy scoped to a group somebody else filled would hand a third party whatever is already
+in it. Deleting follows the same rule: only names carrying the `pov-` prefix, and only user
+accounts carrying `povvnd_`, so a vendor your customer added by hand is safe from this
+screen.
 
 ---
 
