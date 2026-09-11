@@ -709,6 +709,11 @@ def test_the_povs_onboarding_shape_survives_the_real_register_call():
     assert "private_key" not in captured["hcl"]
     assert "ps_account_private_key" not in captured["vars"]
     assert "dss_auto_management_flag = false" in captured["hcl"]
+    # And a DnsName, which the second live failure of this same path turned out to need:
+    # the built-in Windows and Linux platforms both answered a create without one with
+    # 400 "DnsName is required" (2026-09-11), even with HostName and IPAddress populated.
+    # The guest's private address, the same one the jump item reaches it at.
+    assert w.ps_resource_service._line("dns_name", '"10.9.0.10"') in captured["hcl"]
     db.refresh(vm)
     assert vm.ps_managed_system_id == "900"
     db.close()
