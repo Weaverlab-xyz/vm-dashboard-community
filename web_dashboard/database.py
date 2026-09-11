@@ -1589,7 +1589,10 @@ class SpireLab(Base):
 
     **Nothing secret lives on this row.** The admin credential is a PKCS#12 that
     ``spire-admin-identity.yml`` writes straight into Secrets Safe under ``no_log``;
-    this row carries only the two TITLES that name it. ``trust_bundle_pem`` is public
+    this row carries only the two TITLES that name it. The same rule covers the
+    connection identity the operator picks for the Ansible runs: a source *ref*, a
+    Password Safe *id and account name*, and a *username* — resolved at run time, never
+    stored. ``trust_bundle_pem`` is public
     by construction — it is what every consumer of the trust domain has to trust, in
     the same sense as a CA chain — and it is stored because the operator has to paste
     it into the managed system and it fits nowhere else.
@@ -1664,6 +1667,40 @@ class SpireLab(Base):
     # by hand can still be recognised, and so the destroy path has somewhere to look.
     ps_system_id = Column(String(36), nullable=True)
     ps_account_id = Column(String(36), nullable=True)
+
+    # WHO the Ansible runner logs in as, when the operator chose explicitly. The first
+    # two are EITHER/OR — two answers to one question — and `provision` refuses both at
+    # once, because a managed account's name also becomes `ansible_user`, so a run
+    # carrying both would connect as one identity holding the other's key.
+    #
+    # All NULL is the normal state and means what every lab built before this did: the
+    # runner auto-derives the keypair from this host's own deploy job. On the ROW rather
+    # than in the parent job's metadata because every stage's `vars_for` builder reads
+    # only the row and config (see spire_lab_service, "never the request"), which is what
+    # lets a resumed provision rebuild an identical run.
+    #
+    # The `ansible_` prefix is load-bearing: `ps_system_id` / `ps_account_id` above are
+    # the SPIFFE functional account being ONBOARDED into Password Safe, which is a
+    # different account for a different purpose.
+    #
+    # Text, not String(n): a source is a config-secret registry key OR a raw
+    # `bt_safe://<safe>/<folder>/<title>` vault ref, which has no bounded length, and the
+    # ref JSON grows with the account name. Issue #830 — SQLite enforces no VARCHAR
+    # length and PostgreSQL does, so a too-long value passes every test here and then
+    # dies mid-INSERT with StringDataRightTruncation (see spire_lab_service.batch_id_for,
+    # which is this repo's write-up of that exact failure).
+    ansible_secret_ssh_key_source = Column(Text, nullable=True)
+    ansible_managed_account = Column(Text, nullable=True)   # ManagedAccountRef as JSON
+    # "Also use that account for sudo." All four playbooks are `become: true`, so a
+    # non-root account without passwordless sudo fails on the first task. Sends the SAME
+    # ref as `managed_become`; Password Safe reuses the open request rather than opening
+    # a second one (btapi_service passes ConflictOption=reuse). NULL = false.
+    ansible_managed_become_self = Column(Boolean, nullable=True)
+    # A USERNAME, never a credential. NULL = derive it from ansible_<cloud>_user as
+    # before, which is right for every host using its cloud's default login. Needed
+    # because an SSH-key secret carries no user, unlike a managed account whose own name
+    # becomes the login.
+    login_user = Column(String(104), nullable=True)
 
     error_message = Column(Text, nullable=True)
     deploy_job_id = Column(String(36), nullable=True)
@@ -2795,6 +2832,24 @@ def init_db():
             # NULL backfills to "choose by guest OS", so no existing POV changes
             # behaviour when this lands. See PovEnvironmentVM.login_username.
             "ALTER TABLE pov_environment_vms ADD COLUMN login_username VARCHAR(104)",
+            # SPIRE lab: the connection identity the operator picked for its four Ansible
+            # runs. `spire_labs`' first migration entries — the table has only ever
+            # arrived via create_all, so an existing install has the model attributes and
+            # not the columns without these. All NULL backfills to "auto-derive the key
+            # from the host's own deploy job", which is what every lab built before this
+            # did. See SpireLab.ansible_secret_ssh_key_source for why the two refs are
+            # TEXT rather than VARCHAR(n).
+            #
+            # Bare BOOLEAN, deliberately no `DEFAULT 0`: PostgreSQL rejects an integer
+            # default on a boolean column, the per-statement savepoint would roll the
+            # whole ALTER back, and the column would silently never appear — a
+            # Postgres-only breakage invisible to a SQLite test run. (The `is_admin`
+            # entry above gets away with `DEFAULT 0` only because create_all already made
+            # that column, so its ALTER never actually executes.)
+            "ALTER TABLE spire_labs ADD COLUMN ansible_secret_ssh_key_source TEXT",
+            "ALTER TABLE spire_labs ADD COLUMN ansible_managed_account TEXT",
+            "ALTER TABLE spire_labs ADD COLUMN ansible_managed_become_self BOOLEAN",
+            "ALTER TABLE spire_labs ADD COLUMN login_user VARCHAR(104)",
             # `cloud_cost_cache` needs no entry: create_all makes new tables. Nothing
             # backfills it either — an empty table is exactly "no cloud has reported a
             # cost yet", which is what the first warmer pass fixes.

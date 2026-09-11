@@ -8,10 +8,19 @@ titles of the admin credential in Secrets Safe.
 
 **It does not create the VM, deliberately.** A SPIRE server is a Go binary and a sqlite
 file; the host is an ordinary VM, so it already has an auto-delete timer, ref-counted
-NAT, Password Safe VM onboarding and a Destroy button. Re-implementing three clouds'
-worth of VM creation here would also break the thing that makes the Ansible runs work at
-all: ``ansible_local_run_service`` resolves the SSH key from the *deploy job's* metadata,
-so a VM this module created out of band would be a host the runner cannot log in to.
+NAT, Password Safe VM onboarding and a Destroy button. The host must still be one this
+dashboard deployed, because ``resolve_host`` re-derives it from the deploy-job rows
+rather than trusting an address it is handed — four privileged playbooks against a host
+of the caller's choosing is not something this should accept.
+
+**The connection identity is the operator's to choose.** By default
+``ansible_local_run_service`` resolves the SSH key from that VM's own *deploy job*
+metadata, which is why this attaches to a dashboard-deployed host. But the build form
+also takes a Password Safe managed account or a Secrets-Management SSH-key secret, held
+on the row as refs (see ``SpireLab.ansible_secret_ssh_key_source``) and resolved per
+stage at run time — so a host whose deploy record carries no usable key is no longer a
+host no run can log in to. Choosing nothing keeps the auto-derivation, which now fails
+with a named reason rather than by shipping an empty key file to the runner.
 
 **It does not write the Password Safe managed system or functional account, deliberately
 and for now.** The plugin takes its whole configuration from BeyondInsight *attributes*,
@@ -351,6 +360,37 @@ def stage_jobs(row: SpireLab) -> dict:
         return {}
 
 
+def managed_ref(row: SpireLab) -> Optional[dict]:
+    """The lab's pinned Password Safe managed-account ref, or None.
+
+    A plain dict, which is exactly what ``ansible_credentials.resolve`` consumes — no
+    pydantic reaches the worker. Public because ``_stage_meta``, the API's serializer and
+    the audit entry all need it, and three ``json.loads`` calls would be three chances to
+    disagree about what a malformed value means.
+    """
+    try:
+        return json.loads(row.ansible_managed_account or "null") or None
+    except Exception:
+        # A row we cannot parse is a row with no chosen account: fall back to
+        # auto-derivation rather than failing the build on a storage artefact.
+        logger.warning("spire-lab: unparseable managed-account ref on lab %s", row.id)
+        return None
+
+
+def credential_kind(row: SpireLab) -> str:
+    """Which connection identity this lab was built with — for the page and the audit
+    entry. Never the ref itself, and never anything resolvable to a credential."""
+    if managed_ref(row):
+        return "managed"
+    return "ssh-key-secret" if (row.ansible_secret_ssh_key_source or "") else "auto"
+
+
+def managed_account_name(row: SpireLab) -> str:
+    """The chosen account's name, or "". A name is not a credential — it is also what
+    becomes ``ansible_user`` — so it is safe to show and to audit."""
+    return ((managed_ref(row) or {}).get("account_name") or "")
+
+
 def secret_refs(row: SpireLab) -> dict:
     """``{role: "<folder>/<title>"}`` for the four artifacts the identity play writes.
 
@@ -414,8 +454,18 @@ def _slug(text: str) -> str:
 
 def provision(db: Session, *, name: str, trust_domain: str, cloud: str, host: str,
               created_by: str, admin_spiffe_id: str = "",
-              workgroup: Optional[str] = None) -> dict:
-    """Record the lab and enqueue its build. Returns ``{lab_id, job_id}``."""
+              workgroup: Optional[str] = None,
+              secret_ssh_key_source: str = "",
+              managed_account: Optional[dict] = None,
+              managed_become_self: bool = False,
+              login_user: str = "") -> dict:
+    """Record the lab and enqueue its build. Returns ``{lab_id, job_id}``.
+
+    The four credential arguments default to "choose nothing", which is the pre-existing
+    behaviour: the runner auto-derives this host's keypair from its deploy job. The
+    caller-facing permission and runner-capability refusals are the API layer's
+    (``services/ansible_run_gate``); what is checked here is the SHAPE of the choice.
+    """
     cloud = (cloud or "azure").lower()
     require_backend(cloud)                    # fail here, not in the worker
     name = (name or "").strip()
@@ -429,6 +479,35 @@ def provision(db: Session, *, name: str, trust_domain: str, cloud: str, host: st
             "the trust domain is a bare DNS-style name such as 'weaverlab.test', not a "
             "spiffe:// URI. It is baked into the server config, every SPIFFE ID and the "
             "Managed System, and the plugin asserts it on every connect.")
+
+    secret_ssh_key_source = (secret_ssh_key_source or "").strip()
+    login_user = (login_user or "").strip()
+    if managed_account and secret_ssh_key_source:
+        raise SpireLabError(
+            "pick EITHER a Password Safe managed account OR an SSH-key secret, not both "
+            "— they are two answers to the same question (who the runner logs in as). A "
+            "managed account's name also overrides the login user, so a run carrying "
+            "both would connect as one identity holding the other's key.")
+    if managed_account and (managed_account.get("system_id") is None
+                            or managed_account.get("account_id") is None):
+        # A name-only ref is the BULK form: it defers the lookup so each host in a batch
+        # resolves its own account. A lab has exactly one host and it is known right
+        # now, so accepting a name-only ref would trade a lookup that can fail here for
+        # a half-built lab whose fourth stage fails on "no such account".
+        raise SpireLabError(
+            "a managed account must be picked from this host's own list, so that it "
+            "carries both system_id and account_id — an account named without ids is "
+            "for bulk runs across many hosts, and a lab has one.")
+    if managed_become_self and not managed_account:
+        raise SpireLabError(
+            "'also use for sudo' needs a managed account to use — there is no separate "
+            "become credential on this form.")
+    if login_user and (len(login_user) > 104 or any(c.isspace() for c in login_user)):
+        # 104 is the column, and a login with whitespace in it is a typo that would
+        # otherwise surface as an SSH auth failure four stages deep.
+        raise SpireLabError(
+            "the login user is a single OS username, at most 104 characters and with no "
+            "whitespace.")
 
     host_info = resolve_host(db, cloud, host)
     placement = require_backend(cloud).placement(host_info["meta"])
@@ -453,6 +532,14 @@ def provision(db: Session, *, name: str, trust_domain: str, cloud: str, host: st
         admin_spiffe_id=(admin_spiffe_id or "").strip()
         or f"spiffe://{trust_domain}/password-safe/admin",
         ps_safe=_cfg("spire_lab_ps_safe", "Automation"),
+        # Refs and a username. NULL throughout = auto-derive from the deploy job, which
+        # is what every lab built before this did. `sort_keys` so the stored JSON is
+        # stable and a row diff means a real change of account.
+        ansible_secret_ssh_key_source=secret_ssh_key_source or None,
+        ansible_managed_account=(json.dumps(managed_account, sort_keys=True)
+                                 if managed_account else None),
+        ansible_managed_become_self=bool(managed_become_self) or None,
+        login_user=login_user or None,
         workgroup=workgroup, created_by=created_by,
         # NULL would mean "never" and never "inherit the default", so the timer is
         # stamped here, in the provision's own transaction. Extending or pinning it
@@ -460,6 +547,23 @@ def provision(db: Session, *, name: str, trust_domain: str, cloud: str, host: st
         expires_at=expiry_policy.default_expiry_for_kind(INVENTORY_KIND))
     db.add(row)
     db.flush()
+
+    if managed_account or secret_ssh_key_source:
+        # Audit the USE, not the credential: kinds, the account name and the system id.
+        # Reuses Config Management's own action name so one audit query still answers
+        # "who used a credential in a run", whichever page they used.
+        job_service.log_audit(
+            db, created_by, "ansible_secret_use",
+            details={
+                "kinds": [credential_kind(row)]
+                         + (["managed-account become (checkout)"]
+                            if managed_become_self else []),
+                "managed_accounts": ([{"role": "connection",
+                                       "account": managed_account.get("account_name"),
+                                       "system_id": managed_account.get("system_id")}]
+                                     if managed_account else []),
+                "asset": "spire lab (4 playbooks)",
+                "target": host_info["name"]})
 
     job = job_service.create_job(
         db, PROVISION_JOB_TYPE, created_by, workgroup=workgroup,
@@ -492,18 +596,32 @@ def _stage_meta(row: SpireLab, stage: dict, asset_backend: str) -> dict:
     """
     from . import ansible_run_meta
 
+    _ref = managed_ref(row)
+
     class _Payload:
         asset = stage["asset"]
         target = _ansible_target(row)
         cloud = row.cloud
-        ansible_user = _cfg(require_backend(row.cloud).default_user_cfg) or \
+        # The lab's own login user wins, then the per-cloud config key. A managed
+        # account overrides even this at run time, because the account's name IS the
+        # login identity (see ansible_credentials.resolve).
+        ansible_user = (row.login_user or "").strip() or \
+            _cfg(require_backend(row.cloud).default_user_cfg) or \
             _cfg("ansible_default_user", "ubuntu")
         extra_vars = stage["vars_for"](row)
         secret_vars = None
         secret_become_source = ""
-        secret_ssh_key_source = ""
-        managed_account = None
-        managed_become = None
+        # Read off the ROW, so all four stages — and a provision resumed after a failed
+        # one — use the identical credential. Both are refs; `run_meta`'s closed
+        # allowlist is what keeps a value out of the jobs table, and neither of these
+        # needed a new key in it.
+        secret_ssh_key_source = row.ansible_secret_ssh_key_source or ""
+        managed_account = _ref
+        # The SAME ref for sudo, because all four plays are `become: true` and this form
+        # offers no separate become credential. Password Safe reuses the already-open
+        # request rather than opening a second one, and the become checkout forces
+        # password mode regardless of the ref's own uses_ssh_key flag.
+        managed_become = _ref if (row.ansible_managed_become_self and _ref) else None
         epml_token_var = ""
 
     return ansible_run_meta.run_meta(
