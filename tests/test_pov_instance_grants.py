@@ -375,6 +375,61 @@ def test_a_narrowing_outlives_the_permission_map_and_stays_visible():
         "a stale pov_env_ids list is unclearable from the Users page")
 
 
+def test_every_pov_route_in_the_whole_app_carries_a_permission_gate():
+    """The sweep that would have caught ``api/pov_vendor.py`` on the day it merged.
+
+    Three routers mount at the ``/api/pov`` prefix and each one says, in a comment, that it
+    "rides the POV router's prefix, so it inherits that gate at mount time". That is not how
+    FastAPI works: a router is gated by the dependencies IT declares. api/pov_accessor.py
+    carried that sentence and that gap; api/pov_vendor.py was written against the branch
+    point and merged in ungated, which made creating a PRA vendor group and minting a
+    third-party login into any customer's POV reachable by any authenticated user.
+
+    Asserting it per known file would miss the next one, so this walks the REAL app.
+    """
+    os.environ.setdefault("JWT_SECRET_KEY", "test-secret-pov-instance-grants")
+    from fastapi.routing import APIRoute
+
+    from web_dashboard.main import app
+
+    # The two deliberate exemptions, each authorized by something other than a scope:
+    #   /accessor/self* — the accessor's own surface. Its permission map is empty, which
+    #       has_permission reads as unrestricted, so a scope gate there would be a no-op.
+    #       Confinement is the path allowlist in get_current_user and the session binding;
+    #       nothing under /self takes an environment id.
+    #   /accessor/rest/* — Entitle's inbound webhook, authorized by a shared secret
+    #       (_require_secret). It carries no user session at all.
+    exempt = ("/api/pov/accessor/self", "/api/pov/accessor/rest")
+
+    ungated = []
+    for route in app.routes:
+        if not isinstance(route, APIRoute) or not route.path.startswith("/api/pov"):
+            continue
+        if route.path.startswith(exempt):
+            continue
+        if not any(hasattr(d.call, "permission_scope") for d in route.dependant.dependencies):
+            ungated.append(f"{','.join(sorted(route.methods))} {route.path}")
+
+    assert not ungated, (
+        "POV routes reachable by any authenticated user, with no permission scope:\n  "
+        + "\n  ".join(sorted(ungated)))
+
+
+def test_the_vendor_router_mints_credentials_and_is_gated_like_the_accessor_one():
+    """Both hand a third party a login into the customer's environment, so both are
+    pov:write plus the instance gate -- not the router's pov:read floor."""
+    with open(os.path.join(_ROOT, "web_dashboard", "api", "pov_vendor.py"),
+              encoding="utf-8") as fh:
+        src = fh.read()
+    decl = src.split("router = APIRouter(")[1].split("\n)")[0]
+    assert 'require_permission("pov", "write")' in decl, (
+        "the vendor router is not on pov:write -- minting a vendor login is not a read, "
+        "and a stakeholder holding read+use would reach it")
+    assert "require_pov_env_access" in decl, (
+        "the vendor router has no instance gate, so an SE narrowed to one POV can open a "
+        "vendor group on another")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

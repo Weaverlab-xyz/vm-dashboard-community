@@ -66,7 +66,12 @@ OPTION_KEYS = {
     # from. BeyondTrust renamed Jumpoint to Gateway and this codebase's prose follows,
     # but a persisted key is an identifier: renaming it reads a row nobody wrote, and the
     # symptom is a blank setting rather than an error. See tests/test_gateway_terminology.
-    "pra": ("jump_group_name", "jumpoint_name"),
+    #
+    # The two `vendor_*` keys serve PRA Vendor Onboarding (services/pov_vendor_access).
+    # Both optional: a tenant that never onboards a third party must stay valid, so
+    # neither appears in REQUIRED_OPTIONS.
+    "pra": ("jump_group_name", "jumpoint_name",
+            "vendor_jump_item_role_name", "vendor_portal_url"),
     # The Password Safe run-as user, plus what a POV VM needs to be onboarded as a
     # managed system. All three of the latter are names inside THAT tenant and mean
     # nothing in another one, which is why they belong here rather than in Settings.
@@ -109,6 +114,8 @@ VERIFIABLE_KINDS = ("pra", "password_safe")
 OPTION_LABELS = {
     "jump_group_name": "Jump Group name",
     "jumpoint_name": "Gateway name",
+    "vendor_jump_item_role_name": "Vendor Jump Item Role",
+    "vendor_portal_url": "Vendor portal URL",
     "api_account_name": "Run-as user",
     "workgroup": "Workgroup",
     "linux_functional_account": "Functional account (Linux)",
@@ -137,6 +144,14 @@ OPTION_HINTS = {
     # not "none" — and an SE who does not know that goes looking for an agent to deploy.
     "agent_token_name": "Only for an agent you deployed yourself. A POV that installs "
                         "its own names that one instead.",
+    "vendor_jump_item_role_name": "Leave blank for the User's Default role. Named, it "
+                                  "must already exist on the appliance.",
+    # Display only, and the hint has to say so. The PRA Configuration API (v1.10) has no
+    # portal, slug or email-domain-allow-list endpoint at all — Portal Settings are a
+    # /login screen. So this is a link an SE pastes in once, and nothing here creates or
+    # checks it. Without this sentence somebody will try to wire it up.
+    "vendor_portal_url": "Only shown, never configured — the PRA API cannot create a "
+                         "self-registration portal. Paste the one you built in /login.",
 }
 
 # Options whose absence makes a tenant unusable rather than merely incomplete. Reported

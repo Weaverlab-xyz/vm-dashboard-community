@@ -71,9 +71,11 @@ import logging
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM
+from .pra_tenant_api import PRATenantError
 from . import (bt_tenant_service, config_service, entitle_registration_service,
-               job_service, pov_functional_account, pov_gateway, ps_api_service,
-               ps_resource_service, terraform_pra_service)
+               job_service, pov_functional_account, pov_gateway, pov_vendor_access,
+               pra_vendor_api, ps_api_service, ps_resource_service,
+               terraform_pra_service)
 
 logger = logging.getLogger(__name__)
 
@@ -104,13 +106,25 @@ def tenant_override(db: Session, env: PovEnvironment) -> dict:
     tenant was deleted or disabled is an error rather than a quiet fall back to the
     default — which here would mean creating a customer's jump items in somebody else's
     appliance.
+
+    **Makes no network call, on purpose.** It is called by the API's preflight and by
+    ``teardown``, and a destroy that has to reach an appliance before it can decide what
+    to destroy is a destroy that fails when the appliance is down. Creating the per-POV
+    Jump Group is :func:`ensure_jump_group`'s job, once, at the top of the wire-up run.
     """
     tenant = pov_gateway.pra_tenant(db, env)   # same resolution, same refusals
     if not tenant.client_id or not tenant.secret:
         raise WireupError(
             f"the PRA tenant {tenant.name!r} has no OAuth client id and secret, so "
             f"terraform cannot authenticate to it.")
-    jump_group = tenant.option("jump_group_name")
+    # This POV's own Jump Group wins, and the tenant's appliance-wide one is the fallback.
+    #
+    # The fallback is not legacy tolerance, it is the ONLY correct answer for a POV wired
+    # before per-POV groups existed: its jump items really are in the tenant's group, and
+    # re-homing the name here would point a destroy at a group those items are not in.
+    # `pov_vendor_access.blocker` is what tells an operator the consequence — a vendor
+    # cannot be scoped to a group every POV shares.
+    jump_group = (env.pra_jump_group_name or "").strip() or tenant.option("jump_group_name")
     if not jump_group:
         raise WireupError(
             f"the PRA tenant {tenant.name!r} names no Jump Group. Jump items have to be "
@@ -119,8 +133,91 @@ def tenant_override(db: Session, env: PovEnvironment) -> dict:
         "env": terraform_pra_service.tenant_env(
             tenant.base_url, tenant.client_id, tenant.secret),
         "jump_group_name": jump_group,
+        # Deliberately NOT a `jump_group_shared` flag. Whether this POV is on the tenant's
+        # shared group is `not env.pra_jump_group_name`, which every caller that cares
+        # already has in front of it — `pov_vendor_access.blocker` reads the column and the
+        # Access tab reads the blocker. A third spelling here would be a field nobody
+        # consumes claiming to be the one answer, which is the shape
+        # `bt_tenant_service.OPTION_KEYS` has a comment about.
         "label": tenant.name,
     }
+
+
+async def ensure_jump_group(db: Session, env: PovEnvironment) -> str:
+    """Give this POV its own PRA Jump Group if it does not have one. Returns a log line.
+
+    **Why a Jump Group per POV at all.** A PRA Group Policy grants access BY JUMP GROUP,
+    so the tenant's appliance-wide group is the wrong scope for anything a third party is
+    attached to: a vendor let into it reaches every POV on that appliance. Nothing else in
+    the wire-up cares — jump items work either way — which is exactly why this landed late
+    and why the fallback in :func:`tenant_override` has to stay.
+
+    **Why REST and not Terraform.** ``terraform_pra_service`` resolves a Jump Group by name
+    through the ``sra_jump_group_list`` data source and its docstring says the group must
+    already exist. The provider does have an ``sra_jump_group`` resource, but each VM's
+    jump item is its own Terraform workspace — so declaring the group there would put it in
+    eight workspaces, and destroying one VM's jump item would try to destroy the group out
+    from under the other seven.
+
+    **Adoption is refused.** A same-named group this dashboard did not create is a hard
+    refusal, not a reuse. Adopting one would scope a vendor policy to whatever is already
+    in it, which is the failure this whole feature exists to prevent, and it is the
+    "no silent tenant side effects" rule besides.
+
+    Idempotent: a POV that already has a group whose id matches simply reuses it, so
+    pressing Wire up twice is safe.
+    """
+    if (env.pra_jump_group_name or "").strip() and env.pra_jump_group_id:
+        return ""
+
+    # An already-wired POV keeps the group its items are actually in. Moving it would need
+    # every jump item destroyed and rebuilt, which is a wire-up teardown, not a side effect
+    # of one — and doing it silently would orphan the items in the old group.
+    already_wired = (db.query(PovEnvironmentVM)
+                       .filter(PovEnvironmentVM.environment_id == env.id,
+                               PovEnvironmentVM.pra_jump_id.isnot(None)).count())
+    if already_wired and not (env.pra_jump_group_name or "").strip():
+        return ("This POV's jump items are in the PRA tenant's appliance-wide Jump Group. "
+                "They are left there — a vendor group cannot be scoped to it, so tear the "
+                "wiring down and wire up again if you need per-POV vendor access.")
+
+    tenant = pov_gateway.pra_tenant(db, env)
+    wanted = pov_vendor_access.JUMP_GROUP_FMT.format(name=env.name)
+    existing = await pra_vendor_api.find_jump_group(tenant, wanted)
+    if existing is not None:
+        found_id = str(existing.get("id") or "")
+        if found_id and found_id == (env.pra_jump_group_id or ""):
+            env.pra_jump_group_name = wanted
+            db.commit()
+            return f"Reusing this POV's Jump Group {wanted}."
+        raise WireupError(
+            f"PRA already holds a Jump Group named {wanted!r} that this dashboard did not "
+            f"create. It will not adopt one — a vendor group policy scoped to it would "
+            f"hand a third party whatever is already in there. Rename this POV, or remove "
+            f"that Jump Group in PRA.")
+
+    row = await pra_vendor_api.create_jump_group(
+        tenant, name=wanted, code_name=pov_vendor_access.jump_group_code_name(env),
+        comments=f"POV {env.name} ({env.id}). Created by the VM dashboard; removed with "
+                 f"the POV.")
+    # Checked BEFORE either column is written, and that order is the whole point. Writing
+    # the name with a blank id and then raising leaves a row that fails this function's own
+    # adoption check forever: the next run finds the group by name, compares it to a blank
+    # id, decides it is somebody else's, and refuses with a message telling the operator to
+    # rename their POV. A wedge, wearing a misleading remedy.
+    new_id = str(row.get("id") or "")
+    if not new_id:
+        raise WireupError(
+            f"PRA created the Jump Group {wanted!r} and returned no id for it, so it "
+            f"cannot be scoped or removed from here. Remove it in PRA before re-running.")
+    # Both, committed, BEFORE a single jump item is built. The loop after this is N calls
+    # that can each fail, and a group created with nothing recorded is a group this
+    # dashboard cannot reap — the same rule `_record` follows per artifact.
+    env.pra_jump_group_name = wanted
+    env.pra_jump_group_id = new_id
+    db.commit()
+    return (f"Created this POV's own Jump Group {wanted} (id {new_id}), so a vendor can be "
+            f"scoped to this POV and nothing else.")
 
 
 def gateway_name(env: PovEnvironment) -> str:
@@ -697,13 +794,29 @@ async def run_env_wireup(job_id: str, meta: dict) -> None:
         if env is None:
             job_service.set_failed(db, job_id, "the POV environment row is gone")
             return
+        # Order inside this block is load-bearing twice over.
+        #
+        # `gateway_name` first because it costs nothing: a POV with no Gateway must be told
+        # so, not left waiting on a DNS lookup against a customer's appliance to find out.
+        # Everything free is refused before anything is spent.
+        #
+        # Then the Jump Group, and `tenant_override` AFTER it rather than before, because
+        # ensure_jump_group CHANGES what that answers: a POV that gets its own group here
+        # must have its jump items built in that group, not in the tenant's. Failing the
+        # run is right — a POV that cannot get a Jump Group has nowhere to put a jump item,
+        # and unlike the Password Safe and Entitle halves below there is no useful
+        # half-result.
+        jump_group_note = ""
         try:
-            tenant = tenant_override(db, env)
             gateway = gateway_name(env)
+            jump_group_note = await ensure_jump_group(db, env)
+            tenant = tenant_override(db, env)
         except (WireupError, pov_gateway.GatewayInstallError,
-                bt_tenant_service.BTTenantError) as exc:
+                bt_tenant_service.BTTenantError, PRATenantError) as exc:
             job_service.set_failed(db, job_id, str(exc))
             return
+        if jump_group_note:
+            job_service.append_job_log(db, job_id, jump_group_note)
 
         # The Password Safe half is optional and resolved once. A refusal here does NOT
         # fail the run: the PRA half is independently useful, and a POV whose tenant is
@@ -843,6 +956,7 @@ async def teardown(db: Session, env: PovEnvironment) -> str:
     wired = [r for r in rows if r.pra_jump_tf_state]
     if not wired:
         lines.append("No PRA jump items to remove.")
+        lines.append(await _teardown_jump_group(db, env, problems=0))
         return " ".join(l for l in lines if l)
 
     try:
@@ -882,7 +996,46 @@ async def teardown(db: Session, env: PovEnvironment) -> str:
                      f"by hand.")
     else:
         lines.append(f"Removed {removed} PRA jump item(s) from tenant {tenant['label']}.")
+    lines.append(await _teardown_jump_group(db, env, problems=problems))
     return " ".join(l for l in lines if l)
+
+
+async def _teardown_jump_group(db: Session, env: PovEnvironment, *,
+                               problems: int) -> str:
+    """Remove this POV's own Jump Group. Returns a line, never raises.
+
+    **Last, and only when every jump item came out.** A Jump Group that still holds an
+    item this dashboard could not remove must stay — deleting it would take the item with
+    it, or fail, and either way the operator's remaining work gets harder. The same gate
+    ``_teardown_password_safe`` puts on the minted functional accounts.
+
+    **Only a group this dashboard created**, which is what ``pra_jump_group_id`` being set
+    means. A POV on the tenant's appliance-wide group has no id here and reaches none of
+    this — so a POV teardown can never delete the group every other POV is using.
+
+    By this point the Vendor Group and its Group Policy are already gone: the destroy runs
+    ``pov_vendor_access.teardown`` first, ahead of everything. A policy still referencing
+    this group would make the delete fail, and the message says to look there.
+    """
+    if not env.pra_jump_group_id:
+        return ""
+    name = env.pra_jump_group_name or env.pra_jump_group_id
+    if problems:
+        return (f"The Jump Group {name} was left in place, because a jump item in it "
+                f"could not be removed.")
+    try:
+        tenant = pov_gateway.pra_tenant(db, env)
+        await pra_vendor_api.delete_jump_group(tenant, env.pra_jump_group_id)
+    except Exception:  # noqa: BLE001 — a teardown line, never a raise
+        logger.warning("POV %s: removing Jump Group %s failed", env.id, name,
+                       exc_info=True)
+        # Ids kept, so a re-run can finish it.
+        return (f"The Jump Group {name} could not be removed from the appliance — check "
+                f"whether a Group Policy still references it, then delete it by hand.")
+    env.pra_jump_group_id = None
+    env.pra_jump_group_name = None
+    db.commit()
+    return f"Removed this POV's Jump Group {name}."
 
 
 async def _teardown_entitle(db: Session, env: PovEnvironment, rows: list) -> str:
