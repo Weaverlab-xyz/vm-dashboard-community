@@ -61,6 +61,10 @@ FLAGS = ("password_safe_enabled", "pra_enabled", "epml_enabled")
 # account per cell, docs/cloud-ot.md), on the Password Safe panel because they name
 # Password Safe platform/functional-account objects, exactly like the
 # clouddb_ps_pravault_* pair they fall back to).
+# `clouddb_ps_gcp_sa_key` is a fourteenth GCP key, added later: the base64
+# service-account key SA: mode embeds in the functional account, which the composite
+# builder had been leaving out (segment 1 was hardcoded `-`), making SA a dead option
+# for the one engine that cannot avoid it.
 # A key that vanishes from all three models is a field an
 # operator can no longer set; one that appears on two breaks the union-check equivalence
 # test_setup_feature_roundtrip documents in its own docstring.
@@ -103,6 +107,7 @@ passwordsafe_gcp_db_registration_method clouddb_ps_platform_gcp_postgres
 clouddb_ps_platform_gcp_mysql clouddb_ps_functional_account_gcp_postgres
 clouddb_ps_functional_account_gcp_mysql clouddb_ps_gcp_auth_mode
 clouddb_ps_gcp_impersonate_target clouddb_ps_gcp_rotator_service_account
+clouddb_ps_gcp_sa_key
 clouddb_ps_platform_gcp_sqlserver clouddb_ps_functional_account_gcp_sqlserver
 clouddb_ps_gcp_channel clouddb_ps_gcp_dbops_audience clouddb_ps_gcp_dbops_ssl
 clouddb_ps_gcp_dbops_invokers clouddb_ps_gcp_dbops_ingress

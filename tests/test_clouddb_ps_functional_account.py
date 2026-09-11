@@ -24,6 +24,8 @@ are easy to break:
 Runs under pytest, or standalone:  python tests/test_clouddb_ps_functional_account.py
 """
 import asyncio
+import base64
+import json
 import os
 import sys
 import types
@@ -879,6 +881,121 @@ def test_gcp_imp_mode_puts_the_target_in_the_second_segment():
     _, _, account_name, password = [c for c in CALLS if c[0] == "create"][0]
     assert account_name.startswith("IMP:"), account_name
     assert password == "-:bt-rotator@acme.iam.gserviceaccount.com:-", password
+
+
+# -- SA: mode, the one that embeds the key --------------------------------------
+#
+# token_uri carries the only colons in a real key document, and they are the reason the
+# key can only travel base64: the composite is ':'-delimited and the plugin splits it
+# before it looks at anything.
+_SA_KEY = {
+    "type": "service_account",
+    "project_id": "acme-data-prod",
+    "private_key_id": "0123456789abcdef0123456789abcdef01234567",
+    "private_key": "-----BEGIN PRIVATE KEY-----\nMIIBVgIBADA=\n-----END PRIVATE KEY-----\n",
+    "client_email": "bt-rotator@acme-data-prod.iam.gserviceaccount.com",
+    "token_uri": "https://oauth2.googleapis.com/token",
+}
+
+
+def test_gcp_sa_mode_embeds_the_key_in_the_first_segment():
+    """SA used to be a DEAD panel option.
+
+    Segment 1 was hardcoded "-" whatever the identity mode, so choosing SA minted
+    ``SA:<login>`` against ``-:-:...`` -- which the plugin refuses in
+    ParseFunctionalAccount, before any network call, with "'SA:' requires the
+    service-account JSON key in the first segment". Onboarding had already gone green.
+    """
+    _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                 clouddb_ps_gcp_auth_mode="SA",
+                 clouddb_ps_gcp_sa_key=json.dumps(_SA_KEY))
+    _, _, account_name, password = [c for c in CALLS if c[0] == "create"][0]
+    assert account_name.startswith("SA:"), account_name
+    segments = password.split(":", 2)
+    assert json.loads(base64.b64decode(segments[0])) == _SA_KEY, password
+    # Under IAM database auth the other two segments are unchanged by SA mode.
+    assert segments[1] == "-" and segments[2] == "-", password
+
+
+def test_the_sa_key_never_reaches_password_safe_as_raw_json():
+    """Raw JSON is not merely ugly here, it is silently destructive.
+
+    GcpKeyReader shape-sniffs a leading '{' and reads the WHOLE password as key
+    material, so segment 3 would vanish -- and token_uri's colons would mis-split the
+    composite before it even got that far. SQL Server is where that is fatal: segment 3
+    is the login the dashboard minted for THIS database, and nothing else holds it.
+    """
+    _onboard_gcp(engine="sqlserver",
+                 clouddb_ps_platform_gcp_sqlserver="GCP Cloud SQL SQL Server",
+                 clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal",
+                 clouddb_ps_gcp_auth_mode="SA",
+                 clouddb_ps_gcp_sa_key=json.dumps(_SA_KEY))
+    _, _, account_name, password = [c for c in CALLS if c[0] == "create"][0]
+    assert account_name == f"SA:{_FA_LOGIN}", account_name
+    assert not password.startswith("{"), password
+    assert "private_key" not in password, password
+    segments = password.split(":", 2)
+    assert json.loads(base64.b64decode(segments[0]))["client_email"], password
+    assert segments[2] == _FA_LOGIN_PW, password
+
+
+def test_gcp_sa_mode_takes_the_key_already_base64():
+    """What an operator pastes out of `base64 -w0 key.json`, line wraps and all --
+    GcpKeyReader strips whitespace on the way in, so accepting it here keeps the two
+    ends agreeing about what a valid paste is."""
+    raw = base64.b64encode(json.dumps(_SA_KEY).encode()).decode()
+    wrapped = "\n".join(raw[i:i + 64] for i in range(0, len(raw), 64))
+    _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                 clouddb_ps_gcp_auth_mode="SA", clouddb_ps_gcp_sa_key=wrapped)
+    _, _, _, password = [c for c in CALLS if c[0] == "create"][0]
+    assert password.split(":", 2)[0] == raw, password
+
+
+def test_gcp_sa_mode_refuses_a_blank_key():
+    """The live failure, 2026-09-11: the panel said SA, no key existed anywhere in the
+    dashboard, and the account was minted anyway. Refuse it here, where the message can
+    still name the field -- the alternative is a green job and an opaque plugin error on
+    every credential action afterwards."""
+    try:
+        _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                     clouddb_ps_gcp_auth_mode="SA")
+        raise AssertionError("expected SA mode with no key to be refused")
+    except svc.CloudDatabaseError as exc:
+        assert "clouddb_ps_gcp_sa_key" in str(exc), exc
+
+
+def test_gcp_sa_mode_refuses_a_key_that_is_neither_json_nor_base64():
+    try:
+        _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                     clouddb_ps_gcp_auth_mode="SA",
+                     clouddb_ps_gcp_sa_key="not a key at all!")
+        raise AssertionError("expected a malformed key to be refused")
+    except svc.CloudDatabaseError:
+        pass
+
+
+def test_gcp_sa_mode_refuses_an_end_user_credential():
+    """Mirrors GcpKeyReader.Validate: an authorized_user credential cannot mint the
+    audience-scoped ID token the cloud-run channel needs, and `gcloud auth
+    application-default login` writes exactly that shape."""
+    try:
+        _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                     clouddb_ps_gcp_auth_mode="SA",
+                     clouddb_ps_gcp_sa_key=json.dumps(
+                         {"type": "authorized_user", "client_id": "x",
+                          "client_secret": "y", "refresh_token": "z"}))
+        raise AssertionError("expected an authorized_user credential to be refused")
+    except svc.CloudDatabaseError as exc:
+        assert "service_account" in str(exc), exc
+
+
+def test_the_other_gcp_modes_keep_an_empty_first_segment():
+    """ADC and IMP resolve the broker's own credentials, so a key in segment 1 would be
+    dead weight at best -- and the guard above must not start demanding one."""
+    _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                 clouddb_ps_gcp_sa_key=json.dumps(_SA_KEY))
+    _, _, _, password = [c for c in CALLS if c[0] == "create"][0]
+    assert password == "-:-:-", password
 
 
 def test_gcp_reference_mode_inherits_the_accounts_platform():
