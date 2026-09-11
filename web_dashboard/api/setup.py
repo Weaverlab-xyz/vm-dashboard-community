@@ -933,6 +933,9 @@ class PasswordSafeFeatureConfig(BaseModel):
     clouddb_ps_functional_account_mode_aws: str = ""
     clouddb_ps_functional_account_mode_azure: str = ""
     clouddb_ps_functional_account_mode_gcp: str = ""
+    # The one cloud+engine rung, above all five keys above. GCP SQL Server is the only
+    # cell the coarser rungs cannot say out loud — see config.py for why one is not nine.
+    clouddb_ps_functional_account_mode_gcp_sqlserver: str = ""
     clouddb_ps_functional_account_postgres: str = ""
     clouddb_ps_functional_account_mysql: str = ""
     clouddb_ps_functional_account_sqlserver: str = ""

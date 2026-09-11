@@ -764,6 +764,52 @@ def test_run_detail_never_ends_at_the_colon():
     assert svc._run_detail({"stderr": "real cause", "stdout": "noise"}) == "real cause"
 
 
+# ── the minted functional-account login's password: which path retires it ─────
+#
+# Source-level, and deliberately so. Driving run_decommission needs the whole terraform
+# destroy apparatus, and what matters here is not that a delete happens but WHICH of the
+# two exit paths does it -- a fact a stubbed run would assert just as indirectly. The
+# same guard shape as tests/test_clouddb_gcp_grant.py's reporter-placement test.
+
+def _source():
+    import inspect
+    return inspect.getsource(svc)
+
+
+def _body(start_marker, end_marker):
+    src = _source()
+    start = src.index(start_marker)
+    return src[start:src.index(end_marker, start)]
+
+
+def test_a_decommission_retires_the_minted_fa_login_password():
+    """clouddb/<id>/psfa holds a real database password. A decommission that left it
+    behind would park a live credential in the config store for good -- the same
+    argument that retires clouddb/<id>/admin, on the same line."""
+    body = _body("async def run_decommission(", "def list_databases(")
+    assert 'config_service.delete(f"clouddb/{db_id}/admin")' in body
+    assert 'config_service.delete(f"clouddb/{db_id}/psfa")' in body
+
+
+def test_a_DEREGISTER_leaves_the_password_in_the_store():
+    """The asymmetry is the point. The database survives a deregister, and reading that
+    key back is what makes a later re-register converge on the password Password Safe
+    already holds (see _fa_login_password) -- deleting it would mint a new one, reset the
+    login, and leave Password Safe authenticating to nothing."""
+    body = _body("errors = await _teardown_ps_onboarding(",
+                 "reason = _ps_ineligible_reason(row)")
+    assert "psfa" not in body, body
+
+
+def test_a_deregister_names_both_principals_it_left_behind():
+    """A leftover login whose password lives only in Password Safe is invisible
+    otherwise: it is not the managed account, so the existing line never mentioned it."""
+    body = _body("errors = await _teardown_ps_onboarding(",
+                 "reason = _ps_ineligible_reason(row)")
+    assert "ps_db_fa_db_user" in body
+    assert "_fa_db_user_name" in body, "the line must only claim the login OURS mints"
+
+
 _TESTS = [(n, f) for n, f in sorted(globals().items())
           if n.startswith("test_") and callable(f)]
 

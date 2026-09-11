@@ -34,6 +34,7 @@ if _ROOT not in sys.path:
 
 CONF = {}
 CALLS = []
+JOB_LOGS = []      # operator-facing lines the onboarding appended to the job
 
 
 class _Settings:
@@ -132,6 +133,7 @@ def _install_stubs():
 
     cfg = types.ModuleType("web_dashboard.services.config_service")
     cfg.get = lambda key: CONF.get(key, "")
+    cfg.get_fresh = lambda key, default="": CONF.get(key, default)
     cfg.set = lambda key, val: CONF.__setitem__(key, val)
     cfg.get_bool = lambda key, default=False: bool(CONF.get(key, default))
     sys.modules["web_dashboard.services.config_service"] = cfg
@@ -153,6 +155,16 @@ def _install_stubs():
     for name in ("terraform", "terraform_provider_env", "job_service"):
         sys.modules[f"web_dashboard.services.{name}"] = types.ModuleType(
             f"web_dashboard.services.{name}")
+    # job_service gets working defaults rather than a bare module. The onboarding now
+    # reports operator-facing lines from paths these tests drive (the minted
+    # functional-account login, the reference-on-cloud-run prerequisite), and with a bare
+    # module whether a test blew up on AttributeError depended on its ALPHABETICAL
+    # position relative to the one test that monkeypatches the attribute in -- and that
+    # test restores only a non-None previous value, so it leaked its lambda to every
+    # test sorted after it.
+    js = sys.modules["web_dashboard.services.job_service"]
+    js.append_job_log = lambda _db, job_id, line: JOB_LOGS.append(line)
+    js.update_progress = lambda *a, **k: None
 
 
 _install_stubs()
@@ -197,6 +209,7 @@ def _reset(**conf):
     CONF.clear()
     CALLS.clear()
     LAST_REGISTER.clear()
+    JOB_LOGS.clear()
     CONF.update(conf)
 
 
@@ -279,6 +292,63 @@ def test_a_blank_cloud_override_falls_back_and_no_cloud_is_the_old_behaviour():
     # the PRA Vault account calls it with neither argument.
     assert svc._ps_fa_mode("postgres") == svc._FA_MODE_REFERENCE
     assert svc._ps_fa_mode() == svc._FA_MODE_REFERENCE
+
+
+# ── the one cloud+engine rung ─────────────────────────────────────────────────
+
+def test_the_cloud_engine_rung_beats_the_engine_rung():
+    """The cell neither coarser rung can say. AWS and Azure SQL Server genuinely use
+    operator-created psfa_mssql accounts, so ..._mode_sqlserver=reference is the true
+    statement for those two -- and it used to take GCP SQL Server's dedicated login
+    away with it, because engine outranks cloud."""
+    _reset(clouddb_ps_functional_account_mode="reference",
+           clouddb_ps_functional_account_mode_sqlserver="reference",
+           clouddb_ps_functional_account_mode_gcp_sqlserver="create")
+    assert svc._ps_fa_mode("sqlserver", "gcp") == "create"
+    # and it changes nothing for the two clouds the engine key was set for
+    assert svc._ps_fa_mode("sqlserver", "aws") == svc._FA_MODE_REFERENCE
+    assert svc._ps_fa_mode("sqlserver", "azure") == svc._FA_MODE_REFERENCE
+
+
+def test_a_blank_cloud_engine_rung_falls_THROUGH_and_overrules_nothing():
+    """Blank means unset, here as on every rung below it. A rung whose blank value
+    meant "create" would outrank a key an operator actually set, which is the whole
+    objection to a nine-key cloud x engine tier."""
+    _reset(clouddb_ps_functional_account_mode="create",
+           clouddb_ps_functional_account_mode_sqlserver="reference",
+           clouddb_ps_functional_account_mode_gcp_sqlserver="")
+    assert svc._ps_fa_mode("sqlserver", "gcp") == svc._FA_MODE_REFERENCE
+
+
+def test_the_cloud_engine_rung_is_scoped_to_exactly_one_cell():
+    _reset(clouddb_ps_functional_account_mode="reference",
+           clouddb_ps_functional_account_mode_gcp_sqlserver="create")
+    assert svc._ps_fa_mode("sqlserver", "gcp") == "create"
+    assert svc._ps_fa_mode("postgres", "gcp") == svc._FA_MODE_REFERENCE
+    assert svc._ps_fa_mode("sqlserver", "aws") == svc._FA_MODE_REFERENCE
+    # Neither half on its own reaches it: the key needs BOTH axes.
+    assert svc._ps_fa_mode("sqlserver") == svc._FA_MODE_REFERENCE
+    assert svc._ps_fa_mode("", "gcp") == svc._FA_MODE_REFERENCE
+
+
+def test_the_implicit_seven_cell_assignment_still_resolves_correctly():
+    """The configuration that works WITHOUT the new key, pinned so it cannot regress:
+    the coarse rungs can express every live combination, but only while
+    ..._mode_sqlserver stays blank and the per-cloud keys carry the AWS/Azure answer.
+    That fragility is why the rung above exists; it is not why it was needed."""
+    _reset(clouddb_ps_functional_account_mode="create",
+           clouddb_ps_functional_account_mode_postgres="reference",
+           clouddb_ps_functional_account_mode_mysql="reference",
+           clouddb_ps_functional_account_mode_sqlserver="",
+           clouddb_ps_functional_account_mode_aws="reference",
+           clouddb_ps_functional_account_mode_azure="reference",
+           clouddb_ps_functional_account_mode_gcp="")
+    assert svc._ps_fa_mode("sqlserver", "gcp") == "create"
+    for cloud in ("aws", "azure"):
+        assert svc._ps_fa_mode("sqlserver", cloud) == svc._FA_MODE_REFERENCE
+    for cloud in ("aws", "azure", "gcp"):
+        for engine in ("postgres", "mysql"):
+            assert svc._ps_fa_mode(engine, cloud) == svc._FA_MODE_REFERENCE
 
 
 def test_the_cloud_rung_is_case_and_whitespace_tolerant():
@@ -565,9 +635,16 @@ def test_gcp_iam_auth_may_carry_no_db_login():
 # functional-account composite carries no database password either.
 
 _GCP_PORTS = {"postgres": 5432, "mysql": 3306, "sqlserver": 1433}
+# The dedicated functional-account login the dashboard mints for Cloud SQL SQL Server on
+# cloud-run, and the password it generates for it. Spelled out rather than computed, so a
+# change to _fa_db_user_name's shape shows up here as a diff rather than as agreement
+# between the code and a test that derives the same answer from it.
+_FA_LOGIN = "psafe_abcdef012345_fa"
+_FA_LOGIN_PW = "Gen3rated-psfa-pw"
 
 
-def _onboard_gcp(engine="postgres", channel=None, ctx_extra=None, **conf):
+def _onboard_gcp(engine="postgres", channel=None, ctx_extra=None, tf_extra=None,
+                 **conf):
     _reset(**conf)
     job_row = _FakeJobRow()
     row = _CloudDatabase(id="abcdef0123456789abcd", cloud="gcp",
@@ -580,8 +657,18 @@ def _onboard_gcp(engine="postgres", channel=None, ctx_extra=None, **conf):
            "port": _GCP_PORTS[engine],
            "project": "acme-data-prod", "instance": "clouddb-abcdef01",
            "channel": channel,
-           "fa_db_user": ("sqlserver" if channel == "cloud-run"
+           # What _create_db_managed_user_gcp resolves for each shape:
+           #   cloud-run + sqlserver -> a DEDICATED login it minted, with the password
+           #     it generated for it (the admin credential is not shared);
+           #   cloud-run + anything else -> the built-in admin, which mints nothing, so
+           #     the composite falls back to the stored admin password;
+           #   data-api -> the IAM principal the database stored.
+           "fa_db_user": (_FA_LOGIN if (channel == "cloud-run" and engine == "sqlserver")
+                          else "dbadmin" if channel == "cloud-run"
                           else "bt-rotator@acme-data-prod.iam"),
+           "fa_db_password": (_FA_LOGIN_PW
+                              if (channel == "cloud-run" and engine == "sqlserver")
+                              else ""),
            "managed_user_host": "%" if engine == "mysql" else ""}
     # What _create_db_managed_user_gcp resolves and hands forward: whether the DATABASE
     # session uses an IAM token, and (when it does not, on the control plane) the
@@ -591,10 +678,12 @@ def _onboard_gcp(engine="postgres", channel=None, ctx_extra=None, **conf):
     # reaches here, which is where the cloud-run functional account's database password
     # comes from in create mode. (On the post-hoc path tf_variables is the SECRET-STRIPPED
     # copy off the job, and the same value is read from the secrets backend instead.)
+    tf_variables = {"identifier": "clouddb-abcdef01",
+                    "master_password": "s3cr3t-admin-pw"}
+    tf_variables.update(tf_extra or {})
     _run(svc._onboard_ps_managed_systems(
         _FakeDB(job_row), row=row, job_id="job-1", engine=engine,
-        tf_variables={"identifier": "clouddb-abcdef01",
-                      "master_password": "s3cr3t-admin-pw"}, ctx=ctx))
+        tf_variables=tf_variables, ctx=ctx))
     return job_row.metadata_dict
 
 
@@ -858,19 +947,80 @@ def test_the_ssl_flag_is_a_real_toggle_on_cloud_run():
     assert LAST_REGISTER["dns_name"].split(";")[4] == "sslFALSE"
 
 
-def test_cloud_run_create_mode_carries_a_real_database_password():
-    # No IAM database auth exists for SQL Server, so segment 3 cannot be "-" the way it
-    # is on data-api. In create mode it is this database's own admin credential -- which
-    # makes the composite PER-DATABASE, exactly the property that makes reference mode
-    # the better answer here, as it is on Azure.
+def test_cloud_run_create_mode_carries_the_DEDICATED_logins_password():
+    """No IAM database auth exists for SQL Server, so segment 3 cannot be "-" the way it
+    is on data-api -- it is a real login with a real password.
+
+    That login is one the DASHBOARD minted, not the instance's built-in admin. Handing
+    Password Safe the admin credential (which is what this used to assert) gave the
+    rotation identity every right on the instance, and let a *Change Functional Account*
+    rotate ``sqlserver`` out from under ``clouddb/<id>/admin`` -- silently breaking the
+    grant path, the PRA tunnel and decommission."""
     _onboard_gcp(engine="sqlserver",
                  clouddb_ps_platform_gcp_sqlserver="GCP Cloud SQL SQL Server",
                  clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal")
     _, _, account_name, password = [c for c in CALLS if c[0] == "create"][0]
-    assert account_name == "ADC:sqlserver", account_name
+    assert account_name == f"ADC:{_FA_LOGIN}", account_name
     segments = password.split(":", 2)
     assert segments[0] == "-" and segments[1] == "-", password
-    assert segments[2] == "s3cr3t-admin-pw", password
+    assert segments[2] == _FA_LOGIN_PW, password
+    # The one assertion that is the point of the change: the admin credential the
+    # dashboard holds for this instance is nowhere in what Password Safe was handed.
+    assert "s3cr3t-admin-pw" not in password
+    assert "sqlserver" != account_name.partition(":")[2]
+
+
+def test_the_composite_prefers_the_minted_password_over_the_stored_admin_one():
+    """Both are available on the provision path. ctx wins, because it comes from the
+    same function that wrote the credential to the DATABASE -- reading the config store
+    instead would hand Password Safe a password the minted login does not have."""
+    _onboard_gcp(engine="sqlserver",
+                 clouddb_ps_platform_gcp_sqlserver="GCP Cloud SQL SQL Server",
+                 clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal",
+                 **{"clouddb/abcdef0123456789abcd/admin": "the-stored-admin-pw"})
+    _, _, _, password = [c for c in CALLS if c[0] == "create"][0]
+    assert password.split(":", 2)[2] == _FA_LOGIN_PW, password
+
+
+def test_a_cloud_run_onboarding_with_no_database_password_REFUSES_to_register():
+    """The failure that used to survive onboarding. On the post-hoc register path
+    tf_variables is the secret-stripped copy off the provisioning job, so an empty
+    config read left the composite as "-:-:-": register_managed_system succeeded, the
+    job went GREEN, and every credential action then failed against a functional account
+    that authenticates to nothing.
+
+    Forced onto cloud-run with postgres, which mints no dedicated login, so the admin
+    credential is the only possible source -- and here there is none."""
+    raised = None
+    try:
+        _onboard_gcp(engine="postgres", channel="cloud-run",
+                     clouddb_ps_gcp_channel="cloud-run",
+                     clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                     clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal",
+                     tf_extra={"master_password": ""})
+    except Exception as exc:
+        raised = exc
+    assert raised is not None, "onboarded green with no functional-account password"
+    assert "authenticates to nothing" in str(raised), raised
+    assert not [c for c in CALLS if c[0] == "register"], CALLS
+
+
+def test_a_colon_in_the_database_password_is_refused_not_shipped():
+    """The composite is ':'-delimited and the plugin splits it before it looks at
+    anything, so a ':' mis-splits every action -- the same hazard _dbssm_fa_fields
+    guards on AWS. generate_password cannot produce one; an imported or hand-edited row
+    can."""
+    raised = None
+    try:
+        _onboard_gcp(engine="postgres", channel="cloud-run",
+                     clouddb_ps_gcp_channel="cloud-run",
+                     clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                     clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal",
+                     tf_extra={"master_password": "pa:ss"})
+    except Exception as exc:
+        raised = exc
+    assert raised is not None, "shipped a composite that mis-splits"
+    assert "delimiter" in str(raised), raised
 
 
 def test_cloud_run_honours_self_rotation_where_data_api_refuses_it():
@@ -923,6 +1073,47 @@ def test_sqlserver_reference_mode_inherits_the_cloud_sql_platform():
                         clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal")
     assert ("register", 91, 806) in CALLS, CALLS
     assert meta["ps_db_functional_account_ref"] == 91
+
+
+def test_reference_mode_on_cloud_run_says_what_the_operator_still_owes():
+    """It is a supported configuration, and the one GCP combination that leaves work on
+    the database: the channel opens a real connection, so the referenced account's login
+    has to exist on THIS instance with a password Password Safe never hands back.
+
+    Without the line, the symptom is a green onboarding whose first action fails as a
+    login failure -- which reads as a broken integration rather than a missing step."""
+    _onboard_gcp(engine="sqlserver",
+                 clouddb_ps_functional_account_mode="reference",
+                 clouddb_ps_functional_account_gcp_sqlserver="clouddb-gcp-mssql",
+                 clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal")
+    said = [line for line in JOB_LOGS if "reference" in line]
+    assert said, JOB_LOGS
+    # It must name the key that switches the behaviour, not just describe the problem.
+    assert "clouddb_ps_functional_account_mode_gcp_sqlserver=create" in said[0], said[0]
+
+
+def test_create_mode_on_cloud_run_owes_the_operator_nothing():
+    """The mirror: where the dashboard minted the login, there is no prerequisite to
+    report, and repeating the reference-mode warning would send an operator looking for
+    a login to create."""
+    _onboard_gcp(engine="sqlserver",
+                 clouddb_ps_platform_gcp_sqlserver="GCP Cloud SQL SQL Server",
+                 clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal")
+    assert not [line for line in JOB_LOGS
+                if "clouddb_ps_functional_account_mode_gcp_sqlserver" in line], JOB_LOGS
+
+
+def test_the_minted_login_is_recorded_on_the_job():
+    """A deregister has to be able to NAME what it left behind on the instance, and an
+    operator reading the job back has to be able to find the login at all -- its
+    password lives only in Password Safe."""
+    meta = _onboard_gcp(engine="sqlserver",
+                        clouddb_ps_platform_gcp_sqlserver="GCP Cloud SQL SQL Server",
+                        clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal")
+    assert meta["ps_db_fa_db_user"] == _FA_LOGIN, meta
+    # A context key, not a teardown step: there is nothing to delete remotely.
+    assert "ps_db_fa_db_user" in svc._PS_CONTEXT_KEYS
+    assert all("ps_db_fa_db_user" not in step for step in svc._PS_TEARDOWN_STEPS)
 
 
 

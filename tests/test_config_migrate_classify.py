@@ -94,6 +94,11 @@ def test_per_resource_keys_are_denied():
     """
     for key in ("k8s_kubeconfig_dec9136c-93d9-40e3-a4e1-fc90c433642d",
                 "clouddb/6f1c2b70-1111-2222-3333-444455556666/admin",
+                # The minted functional-account login's password. Covered by the same
+                # "clouddb/" prefix as the admin credential above, and listed anyway:
+                # a per-database secret that migrated would authenticate to an instance
+                # in another deployment.
+                "clouddb/6f1c2b70-1111-2222-3333-444455556666/psfa",
                 "k8s_api_tunnel_jump_abc123",
                 "k8s_entra_group_abc123", "k8s_entra_group_role_abc123",
                 "k8s_entra_fed_abc123", "k8s_entra_fed_eks_abc123",

@@ -38,6 +38,15 @@ AWS/Azure channels are in
 >   pre-hashed-verifier flags ship off, so there is no fallback; the mitigations are a log
 >   exclusion or a Data Access audit-log exemption for `cloudsql.googleapis.com`. One
 >   canary statement and one log query settle it.
+> - **Does a SQL Server login created by `users.insert` land in `CustomerDbRootRole`, or
+>   in `public` only?** Nothing documents it either way, and the dashboard assumes the
+>   weaker answer: under self-rotation the minted functional-account login needs only
+>   CONNECT to `master` (which `guest` provides and cannot be disabled there), so no
+>   grant is issued. **Verify Functional Account** settles it — it opens a real TDS
+>   session and runs `SELECT @@VERSION`. If it returns 403 naming `CustomerDbRootRole`,
+>   the login has `public` only and the remedy is already on the onboarding job.
+>   Account Discovery is the other tell: without the role it returns the functional
+>   account's own row and nothing else, rather than an error.
 
 Unlike the other two clouds there is **no jump host** on either channel, and the
 dashboard does its own onboarding work without one either: the dedicated managed user is
@@ -172,10 +181,42 @@ difference between the two channels:
   mode the recommended configuration**: one operator-created account per engine covers
   every instance.
 - **`cloud-run`** — SQL Server has no IAM database authentication, so the functional
-  account is a real login with a real password. In `create` mode that is the database's
-  own minted admin, which makes the composite **per-database** — the same property that
-  makes `reference` mode the better answer on Azure. In `reference` mode the operator's
-  account carries a stable login instead.
+  account is a real login with a real password. In `create` mode the dashboard **mints
+  that login itself**: a dedicated `psafe_<12hex>_fa` principal created with
+  `users.insert` (no database connection needed), with a generated password persisted at
+  `clouddb/<id>/psfa`. The instance's built-in `sqlserver` admin credential is **not**
+  shared with Password Safe.
+
+  That is a change from what this used to do, and the reason is not tidiness. Handing
+  Password Safe the admin gave the rotation identity every right on the instance, and it
+  made *Change Functional Account* able to rotate `sqlserver` out from under
+  `clouddb/<id>/admin` — breaking the grant path, the PRA tunnel and decommission, with
+  nothing in the dashboard able to notice.
+
+  The password is **read back** on a re-register rather than regenerated. Password Safe
+  resolves a duplicate functional account and returns the existing one *without*
+  updating its password, while `users.insert` does reset the database's — so a fresh
+  password on a second run would move the database and leave Password Safe behind, and
+  every action would fail as a login failure with no remedy in the UI. A deregister
+  therefore leaves the key in place; only a decommission retires it.
+
+  The minted login appears in **Account Discovery** (the DB-Ops service filters only
+  `##%` and `cloudsqlsa`). That is correct — it is a real rotatable login — but do not
+  onboard it as a managed account.
+
+  In `reference` mode the operator's account carries a stable login instead, and it must
+  exist **on each instance** with the password Password Safe holds for it. The dashboard
+  says so on the job and names
+  `clouddb_ps_functional_account_mode_gcp_sqlserver=create` as the switch that makes it
+  mint one.
+
+**Which mode SQL Server lands in is one key, not five.** `clouddb_ps_functional_account_mode`
+resolves cloud+engine → engine → cloud → global. The engine rung governs all three
+clouds at once, and `..._mode_sqlserver=reference` is a true statement for AWS and Azure
+(they really do use operator-created `psfa_mssql` accounts) — which is exactly how it
+used to take GCP SQL Server's dedicated login away. Set
+`clouddb_ps_functional_account_mode_gcp_sqlserver` instead; blank falls through, so it
+changes nothing until you set it.
 
 **`clouddb_ps_self_rotation` is honoured per channel, not per cloud.** Self-rotation
 needs to log in *as* the managed account, which only `cloud-run` can do; `data-api`
@@ -238,7 +279,11 @@ with `OLD_PASSWORD` and the functional account needs no privilege over it at all
   identity remains confined to the `psafe_*` accounts. On MySQL,
   `GRANT CREATE USER ON *.* TO '<fa>'@'%'`. On SQL Server, `ALTER ANY LOGIN`, which
   `CustomerDbRootRole` carries — `sysadmin` is unavailable on Cloud SQL and
-  `ALTER ANY LOGIN` is exactly enough.
+  `ALTER ANY LOGIN` is exactly enough. **With `clouddb_ps_self_rotation` on this is not
+  needed at all**: the managed login alters itself with `OLD_PASSWORD`, so the functional
+  account needs no privilege over it — only the ability to sign in. On `cloud-run` the
+  dashboard cannot issue the grant either way (there is no Data API on that channel), so
+  it reports the statement on the job when self-rotation is off.
 - Create a **PRA Configuration-API account** as in the AWS section.
 
 On the **`data-api`** path the dashboard enables the two per-instance prerequisites
@@ -260,9 +305,17 @@ separately is exactly how they drifted apart. Since the functional account *is* 
 admin there, the rotation grant is skipped too: it already holds every right over every
 principal on the instance.
 
+**That admin reuse is deliberate on `data-api` and only there.** The Data API reads the
+functional account's password out of Secret Manager (the `fasecret=` option), so a
+second, dashboard-minted credential on that channel would add a third authority for one
+password. `cloud-run` has no such split — Password Safe is the sole authority — which is
+why the dedicated login lives there and nowhere else.
+
 On the **`cloud-run`** path none of that runs. The service connects over TCP with a
 database login, so there is no Data API to enable, no IAM database authentication to turn
-on, and no instance to patch — the dashboard creates the managed user and stops.
+on, and no instance to patch. The dashboard creates two users with `users.insert` and
+stops: the managed account it is onboarding, and (in `create` mode) the dedicated
+functional-account login described above.
 
 **Config keys** (the PRA-Vault plugin and workgroup are shared with the AWS keys above;
 there are no client-image or key-material keys here):
@@ -276,6 +329,7 @@ there are no client-image or key-material keys here):
 | `clouddb_ps_gcp_auth_mode` | `ADC` | `ADC` / `IMP` / `SA` — the functional-account username prefix |
 | `clouddb_ps_gcp_impersonate_target` | — | `IMP` mode: the service account to impersonate |
 | `clouddb_ps_gcp_rotator_service_account` | — | **`data-api` only, and not SQL Server.** The rotation identity, registered as an IAM database user per instance — under the name each engine takes, which is not the same string: MySQL gets the full email and truncates it at the `@` to **32 characters** itself, PostgreSQL gets the email minus `.gserviceaccount.com` because a Postgres role name is capped at **63** and the email overflows it. Keep the local part short for both |
+| `clouddb_ps_functional_account_mode_gcp_sqlserver` | — | `create` or `reference` for **this cell only**, above the per-engine and per-cloud rungs. Blank falls through. The one combination those cannot express: `..._mode_sqlserver` governs AWS and Azure too, and they want `reference` |
 | `clouddb_ps_gcp_fa_secret_version` | — | **`data-api` + SQL Server only.** Address option `fasecret=` — a **regional** Secret Manager version holding the functional account's password. Blank is fine in `create` mode (the dashboard stages one per database); **required** in `reference` mode |
 | `clouddb_ps_gcp_dbops_audience` | — | **`cloud-run` only.** An **override** — address field 4 for a service you deployed yourself, or one behind a custom domain / PSC. A dashboard-deployed service in the database's own region **beats it**, because Direct VPC egress is region-locked and one global value would address a rotation at a service that cannot reach the instance. With neither, SQL Server onboarding stays off |
 | `clouddb_ps_gcp_dbops_ssl` | `true` | `sslTRUE` / `sslFALSE` — address field 5, the service→database TLS choice |
