@@ -42,7 +42,10 @@ def _row(**kw):
     queries through it, so a namespace is the whole fixture."""
     base = dict(id="7f3a9c1e-2b44-4d77-9a10-c0ffee123456",
                 cloud="gcp", name="Demo", project="", location="", pool_id="",
-                ca_arn="", backend="", enroll_account="", ca_chain_pem="")
+                ca_arn="", backend="", enroll_account="", ca_chain_pem="",
+                # NULL on a real row too: the build fills them in from the apply's
+                # outputs, and a failure there leaves them None while the CA stands.
+                ps_functional_account=None, ps_functional_account_id=None)
     base.update(kw)
     return SimpleNamespace(**base)
 

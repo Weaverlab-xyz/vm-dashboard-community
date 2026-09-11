@@ -673,6 +673,40 @@ def _force_unlock_state_sync(state_job_id: str, expected_id: str) -> dict:
                 "backend": backend_type}
 
 
+def _read_state_outputs_sync(state_job_id: str) -> dict:
+    """The outputs recorded in ``state_job_id``'s state, without applying anything.
+
+    ``terraform output`` reads the state and nothing else — it needs neither the module
+    nor any cloud provider credentials, only the backend's, which is why this can reuse
+    :func:`_lock_workdir`'s bare backend.tf dir. ``-json`` emits sensitive values in
+    clear (the masking terraform does is a property of the human-readable renderer), so
+    this is the one way to recover a create-once credential like a service account key
+    after the apply that returned it has gone.
+
+    Handle the result accordingly: it is exactly as sensitive as the apply's own
+    outputs, and callers must keep it out of logs and job metadata.
+    """
+    with _lock_workdir(state_job_id) as work:
+        backend_type, backend_config, backend_env = _backend_settings(work)
+        if backend_type == "local":
+            raise TerraformError(_LOCAL_BACKEND_DETAIL)
+        _init_sync(work, backend_env, backend_type, backend_config)
+        r = _run(["output", "-json"], work, timeout=60, env=backend_env)
+        if r.returncode != 0:
+            raise TerraformError(
+                f"terraform output failed:\n{(r.stderr or r.stdout).strip()}")
+        try:
+            parsed = json.loads(r.stdout or "{}")
+        except ValueError as exc:
+            raise TerraformError(f"terraform output returned no JSON: {exc}") from exc
+        return {k: v.get("value") for k, v in parsed.items()}
+
+
+async def read_state_outputs(state_job_id: str) -> dict:
+    """Async wrapper for :func:`_read_state_outputs_sync`."""
+    return await asyncio.to_thread(_read_state_outputs_sync, state_job_id)
+
+
 async def inspect_state_lock(state_job_id: str) -> dict:
     """Async wrapper for :func:`_inspect_state_lock_sync`."""
     return await asyncio.to_thread(_inspect_state_lock_sync, state_job_id)

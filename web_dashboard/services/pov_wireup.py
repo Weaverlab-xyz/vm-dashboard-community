@@ -44,6 +44,13 @@ they have not. It used to be a hard precondition, which blocked every Password S
 onboarding on a column nothing in the codebase ever wrote. If a rotation later fails to
 reach a guest, the zone/workgroup mapping is the thing to check first.
 
+**A managed system is named after the POV, never after the guest's address.** Password
+Safe names a workgroup-created managed system after its HostName, and the Terraform
+provider attaches an account to its system BY NAME. POV environments are cloned from one
+template, so two of them very plausibly hold the same private IPs — which is why
+``host_name`` is the per-VM label (the same one the jump item carries) and the address
+rides ``dns_name`` + ``ip_address``. See ``onboard_vm``.
+
 The Password Safe half is **optional and independent**. A POV wired into PRA is already
 useful, and a tenant that has not been given a workgroup or a functional account is a
 reason to skip that half with a message, never a reason to fail the jump item that
@@ -561,7 +568,28 @@ async def onboard_vm(db: Session, env: PovEnvironment, vm: PovEnvironmentVM, *,
     try:
         result = await ps_resource_service.register_managed_system(
             name=label,
-            host_name=vm.private_ip,
+            # The LABEL as HostName and the guest's address as DnsName, NOT the address
+            # as both. Password Safe names a workgroup-created managed system after its
+            # HostName, and the provider's passwordsafe_managed_account attaches to its
+            # system BY NAME (there is no system_id argument — see
+            # ps_resource_service._generate_managed_system_hcl). A POV is CLONED from a
+            # shared template, so two POVs very plausibly hold the same 10.x address:
+            # naming both systems after it would put the second POV's account on
+            # whichever same-named system Password Safe resolved first. That is the exact
+            # failure ps_vm_hook's PRA Vault mirror was measured hitting live and fixed
+            # the same way. It also puts "poc-01-BtPocDC01" in front of a BeyondInsight
+            # operator rather than "10.0.0.5".
+            #
+            # The address still rides TWO fields, which is what makes this safe to do on
+            # a path with no live-proven rotation: whichever of DnsName / IPAddress the
+            # built-in Windows and Linux platforms connect on, it is populated with the
+            # same private IP the jump item reaches this guest at. The residual unknown
+            # is a platform that connects on HostName ALONE and will not fall through —
+            # if a Rotate now ever fails to reach a POV guest, put the address back in
+            # host_name (uniquely, e.g. by appending the POV name) and check the resource
+            # zone / workgroup mapping described in the module docstring.
+            host_name=label,
+            dns_name=vm.private_ip,
             ip_address=vm.private_ip,
             port=RDP_PORT if family == "windows" else SSH_PORT,
             functional_account_id=account["id"],

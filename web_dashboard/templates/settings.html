@@ -5303,17 +5303,66 @@
                 needs its new name here.
               </p>
             </div>
+            <!-- The x-init is load-bearing: an unset string key reads back "" from
+                 /api/setup/feature, not the model default, so without it the select
+                 renders blank and a save would write "". -->
             <div class="mt-3">
-              <label class="block text-sm font-medium text-gray-700 mb-1">Functional account</label>
-              <input type="text" x-model="panelCfg.cert_ps_functional_account"
-                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
-                     placeholder="certauth-plugin@project.iam.gserviceaccount.com:certauth-svc">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Functional account source</label>
+              <select x-model="panelCfg.cert_ps_functional_account_mode"
+                      x-init="panelCfg.cert_ps_functional_account_mode = panelCfg.cert_ps_functional_account_mode || 'create'"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="create">Create one per CA</option>
+                <option value="reference">Reference an existing account</option>
+              </select>
               <p class="text-[11px] text-gray-400 mt-1">
                 <strong>One account, two credentials</strong>, both fields split on the
                 <strong>last</strong> colon: username
                 <code>&lt;ca-account&gt;:&lt;bi-run-as-user&gt;</code>, password
                 <code>&lt;ca-secret&gt;:&lt;bi-api-key&gt;</code>. Splitting from the right lets a
                 CA password contain colons.
+              </p>
+              <p class="text-[11px] text-gray-400 mt-1"
+                 x-show="(panelCfg.cert_ps_functional_account_mode || 'create') !== 'reference'">
+                The dashboard mints one per CA from the build's own enrollment credential
+                and deletes it on teardown. That credential is returned <em>once</em>, by
+                the apply — this is the only moment it can be captured — and the REST API
+                used here accepts a 1.7&nbsp;KB private key where <code>ps-cli</code> caps
+                a functional account password at 1,000 characters.
+              </p>
+              <p class="text-[11px] text-gray-400 mt-1"
+                 x-show="(panelCfg.cert_ps_functional_account_mode || 'create') === 'reference'">
+                You maintain the account by hand. Right for a CA this dashboard did not
+                build — an ADCS enterprise CA has no enrollment identity to mint from.
+              </p>
+            </div>
+            <div class="mt-3" x-show="(panelCfg.cert_ps_functional_account_mode || 'create') === 'reference'">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Functional account</label>
+              <input type="text" x-model="panelCfg.cert_ps_functional_account"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="certauth-plugin@project.iam.gserviceaccount.com:certauth-svc">
+            </div>
+            <div class="mt-3" x-show="(panelCfg.cert_ps_functional_account_mode || 'create') !== 'reference'">
+              <label class="block text-sm font-medium text-gray-700 mb-1">BeyondInsight API key</label>
+              <input type="password" x-model="panelCfg.cert_ps_bi_api_key" autocomplete="new-password"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     :placeholder="(panelCfg._secrets_set || []).includes('cert_ps_bi_api_key')
+                                   ? '•••••••• stored — leave blank to keep'
+                                   : 'Paste the API registration key'">
+              <p class="text-[11px] text-gray-400 mt-1">
+                The password's second half. The dashboard's own API sign-in uses OAuth2
+                client credentials and never a PS-Auth key, so this is not held anywhere
+                else — it is the one credential here it cannot derive.
+              </p>
+            </div>
+            <div class="mt-3" x-show="(panelCfg.cert_ps_functional_account_mode || 'create') !== 'reference'">
+              <label class="block text-sm font-medium text-gray-700 mb-1">BeyondInsight run-as user</label>
+              <input type="text" x-model="panelCfg.cert_ps_bi_run_as_user"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="(blank uses pscli_api_account_name)">
+              <p class="text-[11px] text-gray-400 mt-1">
+                The username's second half. Same tenant and almost always the same
+                identity as the Password Safe run-as account, so leaving it blank is
+                what stops the two drifting apart.
               </p>
             </div>
             <div class="mt-3">

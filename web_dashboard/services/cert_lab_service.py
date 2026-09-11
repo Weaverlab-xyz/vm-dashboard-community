@@ -218,6 +218,74 @@ def _read_outputs(row: CertLab, outputs: dict) -> None:
     row.enroll_account = str(outputs.get("service_account_email") or "")
 
 
+async def _wire_up_functional_account(row: CertLab, outputs: dict) -> str:
+    """Mint the CA's functional account from the apply's outputs, onto the row.
+
+    Returns "" on success, or the failure explained — which the caller stores on the row
+    while leaving the status ``available``. **A CA that exists must not be rolled back
+    because BeyondInsight was unreachable**: the pool is real and billing either way, and
+    a rebuild would burn a fresh pool id, since CAS never hands a deleted one back. So
+    this reports instead, and `Wire up Password Safe` retries it against the state's own
+    copy of the outputs.
+
+    Reporting is not silence: the row renders the error under an available CA, which is
+    already how a failed identity registration surfaces here.
+    """
+    from . import cert_ps_service
+    try:
+        fa = await cert_ps_service.ensure_functional_account(row, outputs)
+    except Exception as exc:                                        # noqa: BLE001
+        # str(exc) only. The composed password is never in a CertPSError, and nothing
+        # from `outputs` may reach error_message, which the page renders verbatim.
+        logger.error("cert-lab: functional account failed for %s: %s", row.id, exc)
+        row.error_message = str(exc)[:2000]
+        return str(exc)
+    # Both modes record the NAME, so Add identity reads the account this CA was built
+    # against rather than whatever the global key says now. Only a minted account
+    # carries an id, and that is what teardown keys its delete on — reference mode
+    # returns None there, which is what stops it deleting an operator's own account.
+    row.ps_functional_account = fa.get("account_name") or ""
+    row.ps_functional_account_id = fa.get("id")
+    return ""
+
+
+async def rewire_functional_account(db: Session, *, lab_id: str) -> dict:
+    """Retry the functional account for a CA whose build could not create one.
+
+    The enrollment credential is long gone from this process, but it IS in the state
+    terraform wrote — so this reads the outputs back out of it rather than asking for a
+    rebuild. That is the whole reason the retry can exist.
+
+    Synchronous on purpose: it is one API call against Password Safe plus a state read,
+    both of which the operator is sitting and watching.
+    """
+    from . import cert_ps_service
+    row = get_lab(db, lab_id)
+    if not row:
+        raise CertLabError("that certificate authority no longer exists")
+    if not row.deploy_job_id:
+        raise CertLabError(
+            "this CA has no terraform state recorded, so its enrollment credential "
+            "cannot be recovered — only a rebuild can produce a new one")
+    # A state read fails for its own reasons — a backend credential, a held lock, a
+    # state that was never written. Those are not CertPSError, and letting them out raw
+    # turns an operator-fixable problem into a 500.
+    try:
+        outputs = await terraform.read_state_outputs(row.deploy_job_id)
+    except Exception as exc:                                        # noqa: BLE001
+        raise CertLabError(
+            f"could not read {row.name}'s terraform state, which is where its "
+            f"enrollment credential still is: {exc}") from exc
+    fa = await cert_ps_service.ensure_functional_account(row, outputs)
+    row.ps_functional_account = fa.get("account_name") or ""
+    row.ps_functional_account_id = fa.get("id")
+    row.error_message = None
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    return {"lab_id": row.id, "functional_account": row.ps_functional_account,
+            "mode": fa.get("mode")}
+
+
 def provision(db: Session, *, name: str, project: str, created_by: str,
               cloud: str = "gcp", location: str = "", pool_id: str = "",
               workgroup: Optional[str] = None) -> dict:
@@ -413,11 +481,23 @@ async def run_provision_apply(db: Session, *, lab_id: str, job_id: str) -> None:
         _read_outputs(row, outputs)
         row.status = "available"
         row.error_message = None
+        # The CA is real from here on, so nothing below may fail the build. The
+        # functional account is the LAST thing that needs the apply's outputs, and it
+        # needs them because the enrollment credential is in no other reachable place.
+        # Worded for both modes: reference mode records the account rather than creating
+        # one, and a progress line that claims otherwise is the kind of small lie that
+        # sends somebody looking in BeyondInsight for an object nobody made.
+        await broadcast_progress(job_id, 90,
+                                 "Wiring up the Password Safe functional account…")
+        fa_note = await _wire_up_functional_account(row, outputs)
         row.updated_at = datetime.utcnow()
         db.commit()
         job_service.set_completed(db, job_id, result={
             "lab_id": row.id, "pool_id": row.pool_id,
-            "enroll_account": row.enroll_account})
+            "enroll_account": row.enroll_account,
+            # The account's NAME, never its credential.
+            "functional_account": row.ps_functional_account or "",
+            "functional_account_error": fa_note})
     except Exception as exc:
         # Tear down whatever the apply managed to create BEFORE the row goes failed: a
         # partial build leaves a billing pool, or a live enrollment key, or an identity id
@@ -523,6 +603,7 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str) -> None:
         return
     job_service.set_running(db, job_id)
     try:
+        deregistered = True
         if row.ps_tf_state:
             await broadcast_progress(job_id, 10, "Removing the Password Safe objects\u2026")
             try:
@@ -533,6 +614,7 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str) -> None:
                 row.ps_account_id = None
                 db.commit()
             except Exception as exc:
+                deregistered = False
                 # Never fatal. The CA is the thing that costs money, and a Password Safe
                 # object left behind is visible, deletable and free — so a tenant that is
                 # unreachable right now must not strand a billing pool.
@@ -541,6 +623,37 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str) -> None:
                 await broadcast_progress(
                     job_id, 15,
                     f"Password Safe deregister failed, continuing to the CA: {exc}")
+
+        # Only ever the account this dashboard minted. A NULL id means an operator named
+        # their own in reference mode, and deleting that would take out every other CA
+        # pointed at it.
+        if row.ps_functional_account_id:
+            if not deregistered:
+                # Its managed system still references it, so the delete would be refused
+                # anyway \u2014 and saying why beats a 400 in the log.
+                await broadcast_progress(
+                    job_id, 18,
+                    "Leaving the functional account: its managed system is still "
+                    "registered, so it cannot be deleted yet.")
+            else:
+                await broadcast_progress(
+                    job_id, 18,
+                    "Deleting the Password Safe functional account\u2026")
+                try:
+                    from . import ps_api_service
+                    await ps_api_service.delete_functional_account(
+                        int(row.ps_functional_account_id))
+                    # Cleared only on success, so a retried teardown reattempts exactly
+                    # the step that failed and skips the one that did not.
+                    row.ps_functional_account_id = None
+                    row.ps_functional_account = None
+                    db.commit()
+                except Exception as exc:
+                    logger.warning("cert-lab: functional account delete failed for %s "
+                                   "(continuing to the CA): %s", lab_id, exc)
+                    await broadcast_progress(
+                        job_id, 20,
+                        f"Functional account delete failed, continuing to the CA: {exc}")
 
         await broadcast_progress(job_id, 25, "Destroying the certificate authority\u2026")
         await terraform.destroy(
@@ -614,6 +727,17 @@ def start_ps_register(db: Session, *, lab_id: str, account_name: str, created_by
             f"{row.name} is {row.status}, not available — onboarding an identity against a "
             f"CA that is not built yet produces a managed system that fails every rotation")
     if action == "register":
+        # Same reason as the address below: fail at the click. Both sources are checked
+        # because a CA built before the dashboard minted these has a NULL column and an
+        # operator-configured account that works perfectly — refusing that would break a
+        # lab that is running today.
+        from . import config_service
+        if not (row.ps_functional_account
+                or config_service.get("cert_ps_functional_account")):
+            raise CertLabError(
+                f"{row.name} has no Password Safe functional account, so an identity "
+                f"onboarded against it would fail every credential action. "
+                f"Use 'Wire up Password Safe' on the CA first.")
         # Compose here, in the request, so a bad profile is a 400 the operator can fix
         # while the form is still open rather than a failed job ten seconds later.
         address = address_for(row, overrides)
@@ -656,8 +780,13 @@ async def run_ps_register(db: Session, *, lab_id: str, job_id: str, account_name
         # Fall back to recomposing only for a job queued before this argument existed.
         address = address or address_for(row)
         await broadcast_progress(job_id, 20, "Creating the Secrets Safe folder\u2026")
+        # This CA's OWN functional account, not the global config key. In create mode
+        # it is the one minted from this CA's enrollment credential, and no other
+        # account can rotate these certificates; falling through to config would onboard
+        # against a different CA's identity and fail every credential action.
         reg = await cert_ps_service.register(
-            system_name=row.name, account_name=account_name, address=address)
+            system_name=row.name, account_name=account_name, address=address,
+            functional_account=row.ps_functional_account or "")
         row.ps_system_id = str(reg.get("managed_system_id") or "")
         row.ps_account_id = str(reg.get("managed_account_id") or "")
         row.ps_address = address

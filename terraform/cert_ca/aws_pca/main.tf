@@ -236,5 +236,5 @@ output "enroll_access_key_id" {
 output "enroll_secret_access_key" {
   value       = aws_iam_access_key.plugin.secret
   sensitive   = true
-  description = "The functional account's password. Never stored by the dashboard — move it into Password Safe by hand, as with the gcp_cas key"
+  description = "The functional account's password, used as-is (unlike the gcp_cas key, which is a container). The dashboard reads it from this apply's outputs straight into Password Safe and never stores it on a row"
 }

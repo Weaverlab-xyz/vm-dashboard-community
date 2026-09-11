@@ -147,6 +147,80 @@ def test_the_password_method_is_declared_password_managed():
     assert "password" in ps._PASSWORD_MANAGED_METHODS
 
 
+def test_the_password_method_carries_a_dns_name():
+    """The built-in Windows and Linux platforms REQUIRE a DnsName on managed-system
+    create — live 400 "DnsName is required" on every POV guest (2026-09-11), with both
+    HostName and IPAddress populated with the guest's private IP. So `password` sends one
+    the same way `pravault` does."""
+    hcl = ps._generate_managed_system_hcl(method="password", emit_private_key=False,
+                                          dss_auto_management=False,
+                                          dns_name="10.0.0.5", **_COMMON)
+    assert ps._line("dns_name", '"10.0.0.5"') in hcl
+
+
+def test_a_non_plugin_dns_name_is_no_longer_discarded():
+    """The emit used to be gated on "is a plugin method", so a non-plugin caller handed a
+    dns_name to answer that 400 and it vanished on the way to the HCL — the failure looked
+    identical before and after the fix."""
+    for method in ("password", "ssh"):
+        hcl = ps._generate_managed_system_hcl(method=method, dns_name="host.corp.local",
+                                              **_COMMON)
+        assert ps._line("dns_name", '"host.corp.local"') in hcl, method
+
+
+def test_the_ssh_method_still_sends_no_dns_name_of_its_own():
+    """Deliberately NOT given the password branch's default: those systems reach their
+    guests today, their host_name is a bare VM name rather than an address, and a DnsName
+    that does not resolve is a way to break a rotation that works."""
+    assert "dns_name" not in ps._generate_managed_system_hcl(**_COMMON)
+
+
+def test_password_register_defaults_dns_name_to_the_host_name():
+    """The POV wireup passes no dns_name — the register branch itself must fill it, or
+    every guest 400s as it did live."""
+    import asyncio
+    captured = {}
+
+    def _fake_apply(hcl, tf_vars, tenant=None):
+        captured["hcl"] = hcl
+        return {"tf_state_json": "{}", "managed_system_id": "1", "managed_account_id": "2"}
+
+    real = ps._apply_hcl_sync
+    ps._apply_hcl_sync = _fake_apply
+    try:
+        asyncio.run(ps.register_managed_system(
+            name="poc-01-BtPocDC01", host_name="10.0.0.5", ip_address="10.0.0.5",
+            functional_account_id=1, platform_id=2, workgroup_id="55",
+            managed_account_name="adminuser", port=3389, method="password"))
+    finally:
+        ps._apply_hcl_sync = real
+    assert ps._line("dns_name", '"10.0.0.5"') in captured["hcl"]
+    assert ps._line("host_name", '"10.0.0.5"') in captured["hcl"]
+
+
+def test_password_register_keeps_an_explicit_dns_name():
+    """A caller holding a resolvable name passes it, and the default must not overwrite
+    it — the same contract the pravault branch honours for its own callers."""
+    import asyncio
+    captured = {}
+
+    def _fake_apply(hcl, tf_vars, tenant=None):
+        captured["hcl"] = hcl
+        return {"tf_state_json": "{}", "managed_system_id": "1", "managed_account_id": "2"}
+
+    real = ps._apply_hcl_sync
+    ps._apply_hcl_sync = _fake_apply
+    try:
+        asyncio.run(ps.register_managed_system(
+            name="lab-dc01", host_name="lab-dc01", ip_address="10.0.0.5",
+            dns_name="dc01.lab.local", functional_account_id=1, platform_id=2,
+            workgroup_id="55", managed_account_name="adminuser", method="password"))
+    finally:
+        ps._apply_hcl_sync = real
+    assert ps._line("dns_name", '"dc01.lab.local"') in captured["hcl"]
+    assert ps._line("host_name", '"lab-dc01"') in captured["hcl"]
+
+
 def test_the_key_managed_refusal_names_the_password_method():
     """The refusal an operator actually hits should name the way out. `pov_wireup` sat on
     this exact message for the life of the feature without it."""

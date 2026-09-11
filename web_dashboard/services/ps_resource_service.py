@@ -1304,7 +1304,12 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
         _line("entity_type_id", int(entity_type_id)),
         _line("host_name", json.dumps(host_name)),
     ]
-    if method in _PLUGIN_METHODS and dns_name:
+    if dns_name:
+        # NOT gated on "is a plugin", because a non-plugin platform can REQUIRE a DnsName
+        # too: the POV wireup's `password` systems failed every VM with a live 400
+        # "DnsName is required" (2026-09-11), the same refusal the "PRA Vault Username
+        # Password" platform gives. The gate used to drop a non-plugin caller's dns_name
+        # silently, so no caller could answer that 400 by passing one.
         sys_lines.append(_line("dns_name", json.dumps(dns_name)))
     if ip_address:
         sys_lines.append(_line("ip_address", json.dumps(ip_address)))
@@ -1549,7 +1554,10 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     ``host_name``/``ip_address``, whose account is PASSWORD-managed: no ``private_key``, no
     DSS auto-management, and none of the SSH client fields — so it serves a Windows guest as
     readily as a Linux one. For callers that hold a working login and no key material, which
-    is every lab guest reached through the platform's own stored credentials.
+    is every lab guest reached through the platform's own stored credentials. ``dns_name``
+    defaults to ``host_name``: the built-in Windows and Linux platforms both reject a create
+    without one (live 400 "DnsName is required"), and a caller with a separate resolvable
+    name passes it explicitly.
 
     ``method="ssh"`` (default) keeps the traditional key-managed flow and requires
     ``private_key``.
@@ -1786,6 +1794,15 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
         # material used to fall through to the branch below and be refused for a "VM
         # keypair secret" it does not have and never could -- which read as a
         # misconfiguration rather than as a method that did not exist yet.
+        #
+        # DnsName defaults to host_name, exactly as `pravault` does and for the same
+        # reason: the create API answered every POV guest with 400 "DnsName is required"
+        # (live 2026-09-11, Windows AND Linux platforms, HostName and IPAddress both
+        # populated with the guest's private IP). The requirement is the PLATFORM's, so it
+        # cannot be predicted from the method — the only safe shape is to always send one.
+        # `ssh` is deliberately NOT given the same default: its systems are live and reach
+        # their guests today, host_name there is a bare VM name rather than an address,
+        # and a DnsName that does not resolve is a way to break a rotation that works.
         hcl = _generate_managed_system_hcl(
             name=name, host_name=host_name, ip_address=ip_address, port=port,
             functional_account_id=functional_account_id, platform_id=platform_id,
@@ -1793,7 +1810,8 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             managed_account_name=managed_account_name,
             ssh_key_enforcement_mode=ssh_key_enforcement_mode,
             application_host_id=application_host_id,
-            method="password", emit_private_key=False, dss_auto_management=False)
+            method="password", dns_name=dns_name or host_name,
+            emit_private_key=False, dss_auto_management=False)
     else:
         if not private_key:
             raise PSResourceError(
