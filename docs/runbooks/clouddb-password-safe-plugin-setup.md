@@ -79,7 +79,7 @@ the right platform. (Live 2026-08-27, AWS postgres.)
 | **AWS** (IAM-user mode) | `<iamUserName>:<dbLogin>` | `<accessKeyId>:<secretAccessKey>:<dbLoginPassword>` |
 | **AWS** (EC2-role mode) | `EC2:<dbLogin>` — **case-sensitive** | `x:x:<dbLoginPassword>` |
 | **Azure** | `SP:<dbLogin>` / `MSI:<dbLogin>` | `<clientId>:<clientSecret>:<dbLoginPassword>` / `-:-:<dbLoginPassword>` |
-| **GCP** | `ADC:<dbLogin>` / `IMP:<dbLogin>` | `-:<impersonationTarget|->:<dbLoginPassword|->` |
+| **GCP** | `ADC:<dbLogin>` / `IMP:<dbLogin>` / `SA:<dbLogin>` | `-:<impersonationTarget|->:<dbLoginPassword|->`, or `<base64KeyFile>:-:<dbLoginPassword|->` under `SA:` |
 
 Two traps inside the trap:
 
@@ -422,7 +422,7 @@ authenticates to GCP:
 | `ADC:` | Broker on a Compute Engine VM | The rotator attached to the VM. Nothing stored in Password Safe or the dashboard |
 | `ADC:` | Broker on-premises or in another cloud | A key file at `GOOGLE_APPLICATION_CREDENTIALS` on **each** broker — the dashboard can generate the key but cannot place it |
 | `IMP:` | Broker already has some GCP identity | `roles/iam.serviceAccountTokenCreator` on the rotator, granted to that identity |
-| `SA:` | **Not supported in practice** | A base64 key is ~3.2 KB, over Password Safe's 1000-character credential limit, so the composite cannot survive a write-back |
+| `SA:` | Broker with no GCP identity at all — and every Cloud SQL **SQL Server** onboarding, which cannot use `reference` mode | The base64 of the rotator's JSON key in password segment 1. In `create` mode the dashboard embeds it from `clouddb_ps_gcp_sa_key`; in `reference` mode you paste it yourself. The ~3.2 KB composite stores fine, but the plugin refuses a **write-back** over 1000 characters — so leave password management off for that account |
 
 **The functional account for Cloud SQL SQL Server.** There is nothing to create by hand
 in `create` mode: the dashboard mints both halves — a dedicated `psafe_<12hex>_fa`

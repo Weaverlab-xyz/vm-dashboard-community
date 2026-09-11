@@ -798,11 +798,20 @@ class Settings(BaseSettings):
     # Resource Broker's own credentials (an attached service account on a Compute
     # Engine broker, GOOGLE_APPLICATION_CREDENTIALS on an on-premises one) and stores
     # no key anywhere. IMP starts from ADC and impersonates the rotator service account
-    # via roles/iam.serviceAccountTokenCreator. SA embeds a base64 key, which at ~3.2 KB
-    # is over Password Safe's 1000-character credential limit — so it cannot survive a
-    # functional-account write-back and is not a supported production mode.
+    # via roles/iam.serviceAccountTokenCreator. SA embeds the base64 key in the
+    # functional account itself (clouddb_ps_gcp_sa_key, below) and is the only mode open
+    # to a Resource Broker with no GCP identity of its own. The ~3.2 KB composite is
+    # stored fine; what it cannot survive is a functional-account WRITE-BACK, which the
+    # plugin refuses over 1000 characters — so never turn on password management for an
+    # SA functional account.
     clouddb_ps_gcp_auth_mode: str = "ADC"          # ADC | IMP | SA
     clouddb_ps_gcp_impersonate_target: str = ""    # IMP mode: service account to impersonate
+    # SA mode only, and only on the "create" path — in "reference" mode the operator's
+    # own account already carries the key. The rotator's service-account key, as either
+    # the JSON document or its base64; _gcp_sa_key_segment normalises to base64, because
+    # raw JSON reaching the plugin is shape-sniffed as the WHOLE credential and silently
+    # drops the database password in segment 3.
+    clouddb_ps_gcp_sa_key: str = ""                # JSON or base64; encrypted at rest
     # The operator-created rotation identity. The dashboard registers this as an IAM
     # database user on each instance it onboards and reads back the name the database
     # actually stored. KEEP IT SHORT: MySQL truncates an IAM database username at the

@@ -994,8 +994,9 @@ class PasswordSafeFeatureConfig(BaseModel):
     clouddb_ps_functional_account_gcp_postgres: str = ""
     clouddb_ps_functional_account_gcp_mysql: str = ""
     clouddb_ps_functional_account_gcp_sqlserver: str = ""
-    clouddb_ps_gcp_auth_mode: str = "ADC"           # "ADC" | "IMP" | "SA" (SA busts the 1000-char limit)
+    clouddb_ps_gcp_auth_mode: str = "ADC"           # "ADC" | "IMP" | "SA"
     clouddb_ps_gcp_impersonate_target: str = ""     # IMP mode: service account to impersonate
+    clouddb_ps_gcp_sa_key: str = ""                 # SA mode: rotator key, JSON or base64; encrypted
     clouddb_ps_gcp_rotator_service_account: str = ""  # keep short: MySQL caps IAM db usernames at 32
     clouddb_ps_gcp_fa_secret_version: str = ""  # data-api + SQL Server: REGIONAL secret version
     clouddb_ps_gcp_dbops_audience: str = ""   # cloud-run: OVERRIDE; the deployed service's URL wins
@@ -1998,6 +1999,7 @@ _SECRET_FEATURE_KEYS = frozenset({
     "clouddb_ps_azure_sp_client_secret", "clouddb_ps_azure_plugin_private_key",
     "clouddb_ps_azure_plugin_passphrase",
     "clouddb_ps_ssm_plugin_private_key", "clouddb_ps_ssm_plugin_passphrase",
+    "clouddb_ps_gcp_sa_key",
     "portainer_pat", "portainer_admin_password",
     "entitle_api_token", "entitle_api_key", "entitle_rest_secret",
     "pov_accessor_rest_secret",

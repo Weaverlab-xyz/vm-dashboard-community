@@ -26,6 +26,7 @@ background task by the API). The real apply needs cloud creds — dev mocks it.
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -2526,6 +2527,85 @@ def _dbssm_fa_fields(*, admin_user: str, admin_password: str,
             f"{access_key_id or 'x'}:{secret_access_key or 'x'}:{admin_password}")
 
 
+def _gcp_sa_key_segment(auth_mode: str) -> str:
+    """Segment 1 of the dbgcp functional-account password: the base64 service-account key.
+
+    Only ``SA:`` has one. ``ADC:`` resolves the Resource Broker's own credentials and
+    ``IMP:`` starts from those and impersonates, so both take ``-``.
+
+    This used to be hardcoded ``-`` for every mode, which made ``SA`` a DEAD panel
+    option: the dashboard minted ``SA:<login>`` against ``-:-:<password>`` and the plugin
+    refused it inside ``ParseFunctionalAccount`` — before any network call — with "'SA:'
+    requires the service-account JSON key in the first segment". Only ``create`` mode was
+    ever affected, because ``reference`` mode composes the whole credential operator-side.
+    But that is exactly the mode GCP SQL Server cannot use: segment 3 is the per-database
+    login password the dashboard mints, so nobody can pre-create that account. ``SA`` +
+    ``create`` is therefore the ONLY way to onboard Cloud SQL SQL Server from a broker
+    with no GCP identity of its own — which is why this is a fix and not a removal.
+
+    Raw JSON (what ``keys create`` writes) and base64-of-JSON are both accepted, and JSON
+    is encoded HERE rather than passed through. It must not reach Password Safe unencoded:
+    the plugin's ``GcpKeyReader`` shape-sniffs a leading ``{`` and treats the WHOLE
+    password as key material, silently discarding the database password in segment 3 —
+    and the key's own colons would mis-split the composite before that anyway.
+
+    The checks mirror ``GcpKeyReader.Validate`` deliberately, so a bad paste fails at the
+    click with the field named, rather than days later inside the plugin. Length is NOT
+    one of them: the plugin's 1000-character cap fires only from ``ChangeFunctionalAccount``
+    (the write-back), no GCP key can get under it (``keys create`` offers RSA-2048 alone
+    and its PEM is ~1.7 KB by itself), and Password Safe has been observed storing a
+    3212-character composite intact.
+    """
+    if auth_mode != "SA":
+        return "-"
+    raw = (_cfg("clouddb_ps_gcp_sa_key") or "").strip()
+    if not raw:
+        raise CloudDatabaseError(
+            "the GCP identity mode is 'SA' but clouddb_ps_gcp_sa_key is blank: the "
+            "functional account would be minted as 'SA:<login>' with no key in the first "
+            "password segment, and every credential action — Verify Functional Account "
+            "included — would fail inside the plugin with \"'SA:' requires the "
+            "service-account JSON key in the first segment\". Paste the rotator's "
+            "service-account key on the Password Safe panel, or set the identity mode to "
+            "ADC/IMP so the broker's own credentials are used")
+    if raw.startswith("{"):
+        try:
+            key = json.loads(raw)
+        except ValueError as exc:
+            raise CloudDatabaseError(
+                f"clouddb_ps_gcp_sa_key starts with '{{' but is not valid JSON: {exc}"
+            ) from exc
+        b64 = base64.b64encode(
+            json.dumps(key, separators=(",", ":")).encode("utf-8")).decode("ascii")
+    else:
+        # Strip a line-wrapped paste, as GcpKeyReader.StripWhitespace does on the way in.
+        b64 = "".join(raw.split())
+        try:
+            key = json.loads(base64.b64decode(b64, validate=True).decode("utf-8"))
+        except Exception as exc:
+            raise CloudDatabaseError(
+                f"clouddb_ps_gcp_sa_key is neither raw JSON nor the base64 of a JSON key "
+                f"file ({exc}) — which is the plugin's own late error, checked here "
+                f"instead. Paste the key document, or its base64 (base64 -w0 key.json)"
+            ) from exc
+    if not isinstance(key, dict):
+        raise CloudDatabaseError(
+            "clouddb_ps_gcp_sa_key is not a JSON object — it must be the whole key "
+            "document written by 'gcloud iam service-accounts keys create'")
+    key_type = key.get("type") or "service_account"
+    if key_type != "service_account":
+        raise CloudDatabaseError(
+            f"clouddb_ps_gcp_sa_key has type {key_type!r}, not 'service_account'. The "
+            f"plugin authenticates AS a service account, so an authorized_user (end-user) "
+            f"credential cannot mint the audience-scoped ID token the cloud-run channel "
+            f"requires")
+    if not key.get("client_email") or not key.get("private_key"):
+        raise CloudDatabaseError(
+            "clouddb_ps_gcp_sa_key carries no 'client_email'/'private_key' — it does not "
+            "look like a key downloaded from 'gcloud iam service-accounts keys create'")
+    return b64
+
+
 # ── Referenced functional-account name grammar ────────────────────────────────
 #
 # Every DB plugin parses its functional account POSITIONALLY, exactly the way it parses
@@ -2884,9 +2964,10 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
             fa_username = f"{auth_mode}:{ctx.get('fa_db_user') or ''}"
             impersonate = (_cfg("clouddb_ps_gcp_impersonate_target")
                            if auth_mode == "IMP" else "")
-            # Segment 1 is the base64 service-account key, and only SA: mode has one —
-            # a ~2.4 KB key base64s to ~3.2 KB, over Password Safe's 1000-character
-            # credential limit, which is why ADC:/IMP: are the supported modes. Segment
+            sa_key = _gcp_sa_key_segment(auth_mode)
+            # Segment 1 is the base64 service-account key, and only SA: mode has one
+            # — see _gcp_sa_key_segment, including why SA is the only mode open to a
+            # broker that has no GCP identity of its own. Segment
             # 2 is the impersonation target. Segment 3 is the database password:
             # absent under IAM auth, but REQUIRED on cloud-run. In "create" mode on SQL
             # Server that is the dedicated login the dashboard minted for this database
@@ -2934,7 +3015,19 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
                         f"{name!r} contains ':', the dbgcp plugin's functional-account "
                         f"field delimiter — the credential would mis-split at every "
                         f"verify/change action")
-            fa_password = f"-:{impersonate or '-'}:{fa_db_password}"
+            fa_password = f"{sa_key}:{impersonate or '-'}:{fa_db_password}"
+            if auth_mode == "SA":
+                # Operator-facing because it is not recoverable from the UI: passwords are
+                # write-only in Password Safe and FunctionalAccounts has no update
+                # endpoint, so a write-back the plugin refuses on length cannot be undone
+                # by re-saving — the account has to be deleted and recreated.
+                job_service.append_job_log(
+                    db, log_job_id,
+                    f"The functional account embeds the service-account key, so its "
+                    f"password is {len(fa_password)} characters. Leave the account's own "
+                    f"password management OFF: the plugin refuses a write-back over "
+                    f"1000 characters, and a rotation of it cannot be undone from the "
+                    f"UI.")
         # Address: channel;project:region:instance;dbName;audience;ssl[;key=value]
         conn_name = f"{ctx['project']}:{row.region}:{row.instance_id}"
         if channel == "cloud-run":
