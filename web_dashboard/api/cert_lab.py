@@ -68,6 +68,10 @@ def _shape(row) -> dict:
             # here: it goes straight into the Password Safe functional account, which is
             # the protected field built for it.
             "enroll_account": row.enroll_account,
+            # The functional account's NAME (never its credential), and whether this
+            # dashboard minted it — which is what decides if teardown may delete it.
+            "functional_account": row.ps_functional_account,
+            "functional_account_owned": bool(row.ps_functional_account_id),
             "has_chain": bool(row.ca_chain_pem),
             "ps_system_id": row.ps_system_id, "ps_account_id": row.ps_account_id,
             "ps_address": row.ps_address,
@@ -125,10 +129,24 @@ def build_options(user: User = Depends(require_permission("cloud_function", "rea
     if not config_service.get("cert_ps_owner_group_id"):
         missing.append("cert_ps_owner_group_id — Secrets Safe requires an owner for "
                        "created secrets, and it is a GROUP id here")
-    if not config_service.get("cert_ps_functional_account"):
-        missing.append("cert_ps_functional_account — one account carries BOTH the CA "
-                       "enrollment credential and the BeyondInsight API user, split on "
-                       "the last colon")
+    # What is missing depends on who makes the functional account. In create mode the
+    # dashboard holds the CA half already — it comes out of the build — so the only
+    # thing it cannot produce is the BeyondInsight half.
+    if cert_ps_service.functional_account_mode() == "reference":
+        if not config_service.get("cert_ps_functional_account"):
+            missing.append("cert_ps_functional_account — one account carries BOTH the "
+                           "CA enrollment credential and the BeyondInsight API user, "
+                           "split on the last colon")
+    else:
+        if not config_service.get("cert_ps_bi_api_key"):
+            missing.append("cert_ps_bi_api_key — the dashboard composes the functional "
+                           "account from the CA build, but the BeyondInsight API key is "
+                           "the half it cannot derive, and the plugin needs it to write "
+                           "the bundle into Secrets Safe")
+        if not cert_ps_service.bi_run_as_user():
+            missing.append("cert_ps_bi_run_as_user (or pscli_api_account_name) — the "
+                           "BeyondInsight run-as user is the second half of the "
+                           "functional account's username")
     # A stamped timer is necessary and not sufficient: the reaper only DELETES when
     # `resource_expiry_enforce` is on and dry-run is off. `cert_lab_service.provision`
     # refuses an AWS build that would get no timer at all; this is the other half, and it
@@ -228,6 +246,34 @@ def add_identity(lab_id: str, req: IdentityRequest, db: Session = Depends(get_db
             db, lab_id=lab_id, account_name=req.account_name,
             created_by=user.username, overrides=req.overrides)
     except (CertLabError, CertPSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/{lab_id}/functional-account")
+async def wire_up_functional_account(
+        lab_id: str, db: Session = Depends(get_db),
+        user: User = Depends(require_permission("cloud_function", "write"))):
+    """Retry the functional account for a CA whose build could not create one.
+
+    Recovers the enrollment credential from the CA's own terraform state, so this needs
+    no rebuild — which matters, because CAS never hands a deleted pool id back and a
+    rebuild is therefore not a free retry.
+
+    Synchronous rather than a job: it is one Password Safe call plus a state read, and
+    the operator who just fixed the setting is watching."""
+    _require_enabled()
+    row = _row_or_404(db, lab_id)
+    if not _visible(row, user):
+        raise HTTPException(status_code=404, detail="certificate authority not found")
+    try:
+        return await cert_lab_service.rewire_functional_account(db, lab_id=lab_id)
+    except (CertLabError, CertPSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:                                        # noqa: BLE001
+        # A Password Safe API failure is the operator's to fix (a wrong API key, a
+        # platform that is not there), so it belongs in the response rather than as a
+        # 500 with the detail only in the log.
+        logger.error("cert-lab: wire-up failed for %s: %s", lab_id, exc)
         raise HTTPException(status_code=400, detail=str(exc))
 
 

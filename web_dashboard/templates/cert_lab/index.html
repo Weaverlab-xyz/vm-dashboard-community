@@ -95,13 +95,23 @@
             <td class="px-4 py-2 text-gray-600">
               <span x-show="ca.ps_account_id" x-cloak class="text-xs">onboarded</span>
               <span x-show="!ca.ps_account_id" x-cloak class="text-xs text-gray-400">—</span>
+              <!-- The functional account is what makes Add identity possible at all, so
+                   its absence has to be visible before the button is clicked. -->
+              <span x-show="ca.functional_account" x-cloak
+                    class="block text-[11px] text-gray-400 font-mono truncate max-w-[16rem]"
+                    :title="ca.functional_account" x-text="ca.functional_account"></span>
+              <span x-show="!ca.functional_account && ca.status === 'available'" x-cloak
+                    class="block text-[11px] text-amber-600">no functional account</span>
             </td>
             <td class="px-4 py-2 text-gray-600 text-xs"
                 x-text="ca.expires_at ? new Date(ca.expires_at).toLocaleString() : 'never'"></td>
             <td class="px-4 py-2 text-right whitespace-nowrap">
               <button x-show="ca.has_chain" x-cloak @click="showChain(ca)"
                       class="text-blue-600 hover:underline text-xs mr-3">Chain</button>
-              <button x-show="ca.status === 'available' && !ca.ps_account_id" x-cloak
+              <button x-show="ca.status === 'available' && !ca.functional_account" x-cloak
+                      @click="wireUp(ca)" :disabled="busy"
+                      class="text-blue-600 hover:underline text-xs mr-3 disabled:opacity-50">Wire up Password Safe</button>
+              <button x-show="ca.status === 'available' && !ca.ps_account_id && ca.functional_account" x-cloak
                       @click="openIdentity(ca)"
                       class="text-blue-600 hover:underline text-xs mr-3">Add identity</button>
               <button @click="destroy(ca)"
@@ -358,6 +368,20 @@ function certLabPage() {
         await API.post('/api/cert-lab', this.form);
         this.buildOpen = false;
         this.notify('Building the CA — follow progress in Jobs.');
+        this.load();
+      } catch (e) { this.notify(e.message, 'error'); }
+      finally { this.busy = false; }
+    },
+
+    // Retry the functional account a build could not create. The enrollment credential
+    // is recovered from the CA's own terraform state server-side, so this needs no
+    // rebuild — which matters, because CAS never returns a deleted pool id and a
+    // rebuild is therefore a one-way door.
+    async wireUp(ca) {
+      this.busy = true;
+      try {
+        const r = await API.post(`/api/cert-lab/${encodeURIComponent(ca.id)}/functional-account`, {});
+        this.notify(`Functional account ready: ${r.functional_account}`);
         this.load();
       } catch (e) { this.notify(e.message, 'error'); }
       finally { this.busy = false; }

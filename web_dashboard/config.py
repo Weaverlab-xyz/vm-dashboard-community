@@ -1914,8 +1914,10 @@ class Settings(BaseSettings):
     # appsettings.json ships INSIDE the .psplugin and a Password Safe **Cloud** tenant
     # cannot edit it. So the whole certificate profile rides the managed system's Network
     # Address, and the two credentials ride one functional account split on the LAST colon.
-    # Operator prerequisites (manual): import the .psplugin, create the platform, create
-    # the functional account, and create the Secrets Safe folder's parent safe.
+    # Operator prerequisites (manual): import the .psplugin, create the platform, and
+    # create the Secrets Safe folder's parent safe. The functional account is NOT one of
+    # them any more — the dashboard mints it from the CA build's own terraform outputs,
+    # which is the only moment the enrollment credential exists in this process.
     # See docs/certificates.md.
     # PREVIEW flag, alongside vdesktops_enabled / workload_credentials_enabled in
     # setup._PREVIEW_FLAGS: none of the plugin's four
@@ -1924,8 +1926,18 @@ class Settings(BaseSettings):
     cert_lab_enabled: bool = False                   # master gate: page, nav, router
     cert_ps_platform: str = "Certificate"            # plugin platform (name or id) — resolved live via /Platforms
     cert_ps_workgroup: str = ""                      # blank → passwordsafe_workgroup
-    cert_ps_functional_account: str = ""             # the enrollment identity + BI API user, on the Certificate platform
-    cert_ps_functional_account_mode: str = "reference"  # reference an existing account | create one
+    cert_ps_functional_account: str = ""             # reference mode ONLY: the account to use, named by the operator
+    # create  — mint one per CA from the build's terraform outputs (the default)
+    # reference — use cert_ps_functional_account, which an operator maintains by hand.
+    # Reference mode is not legacy: an ADCS or other bring-your-own CA has no
+    # dashboard-built enrollment identity to mint from, so there is nothing to create.
+    cert_ps_functional_account_mode: str = "create"
+    # The BeyondInsight half of the functional account's two credentials, used in CREATE
+    # mode only. The dashboard's own REST client signs in with OAuth2 client credentials
+    # (pscli_client_id/secret) and never sends a PS-Auth key, so the plugin's API
+    # registration key is genuinely not otherwise held anywhere in this config.
+    cert_ps_bi_api_key: str = ""                     # SECRET: BI API registration key — the password's second half
+    cert_ps_bi_run_as_user: str = ""                 # blank → pscli_api_account_name, which is the same run-as user
     # Where the plugin writes the bundle. `biurl` is the BeyondInsight base URL the plugin
     # calls; on a Cloud tenant it is the ONLY place it can come from, since appsettings.json
     # is unreachable. `owner` is a Secrets Safe OwnerGroupId — deliberately NOT the

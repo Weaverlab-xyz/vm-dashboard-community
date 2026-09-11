@@ -28,12 +28,18 @@ The two credentials ride ONE functional account, both fields split on the **last
 Splitting from the right is deliberate: a BeyondInsight username and an API registration
 key contain no colon, but a certificate authority password may contain anything at all.
 
+``ensure_functional_account`` composes that account during the CA build, because the CA
+half is returned exactly once — by the apply — and exists nowhere else afterwards.
+``reference`` mode keeps the operator-maintained account, which is what a CA this
+dashboard did not build needs.
+
 Nothing secret belongs in the address or the account name. Neither is a protected field and
 both are visible anywhere Password Safe displays the object; CA names, templates, ARNs,
 project ids, tenant ids and object ids are identifiers and belong there, passwords and keys
 never do.
 """
 
+import json
 import logging
 import re
 from typing import Optional
@@ -234,6 +240,132 @@ def address_preview(backend: str, backend_options: dict,
 # onboarding off before ("Azure VM SSH Rotation" -> "Azure Waagent VM SSH Rotation").
 _PLATFORM_TOKENS = ("certificate",)
 
+_FA_MODE_REFERENCE = "reference"
+
+
+def functional_account_mode() -> str:
+    """``create`` (mint one per CA) or ``reference`` (an operator names one).
+
+    Normalised to exactly one of those two, and anything that is not ``reference`` is
+    ``create`` — the same shape the cloud-DB onboarding uses. A typo in the mode must
+    not silently disable the thing that makes the feature work, and callers comparing
+    against a raw config string would each have to re-decide that."""
+    val = _cfg("cert_ps_functional_account_mode", "create").strip().lower()
+    return _FA_MODE_REFERENCE if val == _FA_MODE_REFERENCE else "create"
+
+
+def bi_run_as_user() -> str:
+    """The BeyondInsight run-as user that is the USERNAME's second half.
+
+    Falls back to ``pscli_api_account_name`` — the run-as user this install already
+    configured for the Password Safe terraform provider. It is the same tenant and
+    almost always the same identity, so asking for it twice invites them to drift."""
+    return _cfg("cert_ps_bi_run_as_user") or _cfg("pscli_api_account_name")
+
+
+def _ca_credential(cloud: str, outputs: dict) -> tuple:
+    """``(principal, secret)`` — the CA half of the two credentials, per cloud.
+
+    The two modules deliberately do not name these the same way (see
+    ``cert_lab_service._read_outputs`` for why), and the SHAPES differ too: AWS's secret
+    output is the password half already, while GCP's is a JSON key file that merely
+    CONTAINS it. Pasting that whole file is the most common setup mistake there is, so
+    the extraction happens here, once, rather than in anybody's fingers."""
+    if (cloud or "").lower() == "aws":
+        return (str(outputs.get("enroll_access_key_id") or ""),
+                str(outputs.get("enroll_secret_access_key") or ""))
+
+    email = str(outputs.get("service_account_email") or "")
+    raw = outputs.get("service_account_key_json") or ""
+    if not raw:
+        return email, ""
+    try:
+        key = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError as exc:
+        raise CertPSError(
+            "the CA build's service account key is not JSON, so the private key cannot "
+            f"be taken out of it: {exc}") from exc
+    private_key = str(key.get("private_key") or "")
+    if not private_key.startswith("-----BEGIN"):
+        raise CertPSError(
+            "the service account key JSON has no `private_key` field — the functional "
+            "account password is that FIELD, PEM armour and all, never the whole file")
+    return email, private_key
+
+
+async def ensure_functional_account(row, outputs: dict) -> dict:
+    """Mint the functional account carrying BOTH of the plugin's credentials.
+
+    Returns ``{"mode", "account_name", "id"}``; ``id`` is None in reference mode, where
+    nothing is created and the operator's own ``cert_ps_functional_account`` still
+    applies.
+
+    **This has to happen during the CA build.** The enrollment credential exists in the
+    apply's outputs and nowhere else a human can reach: the GCP key is returned once by
+    the API and the AWS secret access key likewise, so by the time an operator opens
+    BeyondInsight the only copies left are the remote terraform state and this dict.
+    Minting it here is what removes the manual step, and it is also the only path that
+    works — ``ps-cli`` caps a functional-account password at 1,000 characters and a GCP
+    ``private_key`` PEM is about 1,700, while the REST API used here accepts 3,216.
+
+    **The composed password must never leave this function except in the POST body.**
+    Not a log line, not a progress broadcast, not job metadata, not ``error_message``:
+    the progress path persists every line verbatim into ``JobLog`` with no redaction.
+    """
+    from . import ps_api_service
+
+    mode = functional_account_mode()
+    if mode == _FA_MODE_REFERENCE:
+        return {"mode": mode, "account_name": _cfg("cert_ps_functional_account"),
+                "id": None}
+
+    principal, secret = _ca_credential(row.cloud, outputs)
+    if not principal or not secret:
+        raise CertPSError(
+            "the CA build returned no enrollment credential, so no functional account "
+            "can be composed — the pool exists, but its identity does not")
+
+    run_as = bi_run_as_user()
+    api_key = _cfg("cert_ps_bi_api_key")
+    if not api_key:
+        raise CertPSError(
+            "no BeyondInsight API key is configured — set cert_ps_bi_api_key. It is the "
+            "second half of the functional account's password, and the plugin needs it "
+            "to write the PKCS#12 bundle into Secrets Safe")
+    if not run_as:
+        raise CertPSError(
+            "no BeyondInsight run-as user is configured — set cert_ps_bi_run_as_user "
+            "or pscli_api_account_name. It is the second half of the functional "
+            "account's username")
+    # Splitting on the LAST colon is what lets a CA credential contain one. It buys the
+    # BeyondInsight halves nothing, and a colon in either of them silently moves the
+    # split point and mis-parses BOTH fields.
+    for label, value in (("run-as user", run_as), ("API key", api_key)):
+        if ":" in value:
+            raise CertPSError(
+                f"the BeyondInsight {label} contains ':', which is the delimiter both "
+                f"fields are split on — the CA half may contain colons, this half may "
+                f"not")
+
+    platform_id = await ps_api_service.get_platform_id(
+        _cfg("cert_ps_platform", "Certificate"))
+    account_name = f"{principal}:{run_as}"
+    # Uniqueness tenant-side is (platform, domain, account name, display name), and the
+    # account name is already unique per CA here — the enrollment identity is minted per
+    # row for exactly that reason. The display name carries the row anyway, because it
+    # is also what makes a RETRY resolve back to this account rather than fail or mint a
+    # second one.
+    fa_id = await ps_api_service.create_functional_account_on_platform(
+        platform_id=int(platform_id),
+        account_name=account_name,
+        display_name=f"{row.name}-certauth-{str(row.id)[:8]}",
+        password=f"{secret}:{api_key}",
+        description=(f"Certificate Lab enrollment identity for CA {row.name} "
+                     f"(lab_id={row.id}, {row.cloud})"))
+    logger.info("PS: minted certificate functional account %r (id %s) for CA %s",
+                account_name, fa_id, row.id)
+    return {"mode": "create", "account_name": account_name, "id": str(fa_id)}
+
 
 async def resolve_functional_account(name: str = "") -> dict:
     """The functional account carrying BOTH credentials, with its platform checked.
@@ -243,6 +375,13 @@ async def resolve_functional_account(name: str = "") -> dict:
     from . import ps_api_service, ps_vm_hook
     name = (name or _cfg("cert_ps_functional_account")).strip()
     if not name:
+        if functional_account_mode() != _FA_MODE_REFERENCE:
+            # Create mode: the account should have been minted during the CA build, so
+            # the remedy is to finish that, not to go and make one by hand.
+            raise CertPSError(
+                "this CA has no Password Safe functional account yet — the build could "
+                "not create one. Use 'Wire up Password Safe' on the CA to retry it, "
+                "which needs cert_ps_bi_api_key set.")
         raise CertPSError(
             "no Password Safe functional account is configured for the Certificate "
             "platform — set cert_ps_functional_account. It carries two credentials on one "
