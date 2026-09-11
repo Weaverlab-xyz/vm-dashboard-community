@@ -25,13 +25,13 @@
    link because it IS this section; giving it no lit link would leave an SE who followed a
    row into it with no indication of where they are. #}
 <a data-nav="pov" href="/pov" class="px-2 py-2 rounded-md text-sm font-semibold {{ nav_hover }}
-   {% if request.url.path == '/pov' or (request.url.path.startswith('/pov/') and not request.url.path.startswith('/pov/templates')) %}{{ nav_active }}{% else %}{{ theme.weft }}{% endif %}">POV</a>
+   {% if request.url.path == '/pov' or (request.url.path.startswith('/pov/') and not request.url.path.startswith('/pov/templates')) %}{{ nav_active }}{% endif %}">POV</a>
 {# The template builder. Admin-only, unlike POV itself: it writes to the lab platform
    account — baking templates and creating scratch environments that bill — while the POV
    page's own actions are scoped to a POV somebody already provisioned. #}
 <a x-show="$store.auth.isAdmin" data-nav="pov_templates" href="/pov/templates"
    class="px-2 py-2 rounded-md text-sm font-semibold {{ nav_hover }}
-   {% if request.url.path.startswith('/pov/templates') %}{{ nav_active }}{% else %}{{ theme.weft }}{% endif %}">Templates</a>
+   {% if request.url.path.startswith('/pov/templates') %}{{ nav_active }}{% endif %}">Templates</a>
 {% endif %}
 
 {# ── On-premises hypervisors ───────────────────────────────────────── #}

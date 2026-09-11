@@ -221,7 +221,25 @@
          ONLY: nothing is ever removed, so a persona cannot make a page unreachable. Empty
          for the neutral persona, and applyPins returns immediately on empty, so a user who
          never picks a focus gets byte-identical DOM to before this existed. #}
-      <div class="nav-drawer flex-1 overflow-y-auto overscroll-contain flex flex-col items-stretch space-y-1 p-4"
+      {# theme.warp -- the near-white neutral strand -- colours every link in here, and it
+         is set ONCE on the list rather than per link. The drawer is a SIBLING of the nav
+         bar, not a descendant, so it never inherited the bar's `text-white`: it inherited
+         the body's `text-gray-800`, and near-black on the violet panel was close to
+         unreadable. Stating it here rather than in _nav_links.html means a link added to
+         that file cannot be born invisible, and keeps that file's only job "which links
+         exist".
+
+         warp and not the weft accent, which POV and Templates used to carry alone: the
+         accent reads at roughly 4:1 on this panel on all three profiles, under AA for
+         body text, and ~30 rows of it is a wall of colour with no hierarchy left for the
+         lit row. The warp is ~11:1 and lets nav_active's fill do the highlighting.
+
+         Keep angle brackets out of this comment, and out of any comment between here and
+         the tag below. tests/test_mobile_nav reads this element by scanning forward from
+         the word nav-drawer to the end of the next tag, so a bracket in prose here ends
+         that scan early and hands the test the prose instead of the classes it means to
+         assert on. Writing one cost two failures before this sentence existed. #}
+      <div class="nav-drawer flex-1 overflow-y-auto overscroll-contain flex flex-col items-stretch space-y-1 p-4 {{ theme.warp }}"
            x-ref="navDrawer"
            data-nav-pins="{{ persona_nav_pins }}"
            @click="mobileNav = false">
