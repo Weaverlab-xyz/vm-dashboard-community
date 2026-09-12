@@ -1,0 +1,208 @@
+# Inventory a cluster with a Password-Safe-brokered ServiceAccount token
+# Target: localhost. Ansible reaches OUT to the API server, as every k8s play here does.
+#
+# The Reader half of the pair, and the case an operator usually has first: a fleet
+# inventory, a posture scan, a CMDB sync — something that needs to read the WHOLE cluster
+# from outside it, and has no business writing anything or reading a Secret.
+#
+# Onboard the identity first: Workload Lab → Kubernetes → "Onboard a workload identity",
+# profile **reader**. That creates the ServiceAccount and binds ClusterRole/**view**
+# through a **ClusterRoleBinding**. A ClusterRoleBinding is a cluster-wide grant, which is
+# what a fleet scan needs and is only acceptable because of what `view` leaves out.
+#
+# NEVER LIVE-VALIDATED — see docs/workload-kubernetes.md.
+#
+# ── WHAT `view` LEAVES OUT IS THE POINT. Upstream's `view` ClusterRole deliberately omits
+# `secrets`, so a Reader can enumerate every Pod, Deployment and Node in the cluster and
+# cannot read one Secret. That is an UPSTREAM property, not something this repo asserts,
+# which is exactly why the profile uses `view` rather than a hand-written Role: a Role
+# written here would be this feature's opinion about what a scan needs, and would have to
+# be re-audited every time Kubernetes added a resource type.
+#
+# ── THE INJECTED KUBECONFIG IS CLEARED ON PURPOSE. The dashboard injects a CLUSTER-ADMIN
+# kubeconfig as K8S_AUTH_KUBECONFIG/KUBECONFIG for Kubernetes targets. Left set, it could
+# authenticate these tasks instead of the token — reading the Secret below would SUCCEED,
+# the refusal assertion would fail, and on a play written less carefully it would instead
+# have passed while proving nothing. The `environment:` block blanks both.
+#
+# ── THE REFUSAL IS AN ASSERTED TASK. Reading a Secret MUST come back 403 Forbidden. The
+# play fails if it succeeds, because a "read-only" identity that can read Secrets can read
+# every credential in the cluster, and from the outside that is indistinguishable from a
+# working scan.
+#
+# extra_vars:
+#   api_server: https://CLUSTER:443    # REQUIRED
+#   managed_account: ""                # REQUIRED — "<system>/<namespace>/<serviceaccount>"
+#   probe_namespace: kube-system       # a namespace that certainly has a Secret in it
+#   build_id: local                    # goes into the Password Safe audit trail
+#   ca_cert_path: ""                   # the cluster CA; blank skips TLS verification
+- name: Inventory a cluster with a Password-Safe-brokered ServiceAccount token
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  environment:
+    # See the header. Blanking these is what makes the token the only credential.
+    K8S_AUTH_KUBECONFIG: ""
+    KUBECONFIG: ""
+  vars:
+    api_server: ""
+    managed_account: ""
+    probe_namespace: "kube-system"
+    build_id: "local"
+    ca_cert_path: ""
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true
+  tasks:
+    - name: Require the cluster and the account path
+      ansible.builtin.assert:
+        that:
+          - api_server | length > 0
+          - managed_account | length > 0
+          - "'/' in managed_account"
+          - probe_namespace | length > 0
+        fail_msg: >-
+          api_server and managed_account ("<system>/<namespace>/<serviceaccount>", from the
+          identity's Consumer details panel) are both required.
+
+    - name: Require the Password Safe credentials
+      ansible.builtin.assert:
+        that:
+          - ps_api_url | length > 0
+          - ps_client_id | length > 0
+          - ps_client_secret | length > 0
+        fail_msg: >-
+          The PASSWORD_SAFE_* environment (auto-injected when BeyondTrust is configured) is
+          what this play authenticates to Password Safe with. There is no fallback on
+          purpose: falling back to the injected kubeconfig would silently turn this into an
+          ordinary cluster-admin read, and the Secret refusal below would not refuse.
+
+    # `reason` is what puts WHICH BUILD in the Password Safe audit trail. If the installed
+    # collection rejects the argument, drop it: the retrieval is still recorded, just
+    # without the build id attached.
+    - name: Retrieve the ServiceAccount token (checked out just-in-time)
+      ansible.builtin.set_fact:
+        _ps_sa_token: "{{ lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
+          api_url=ps_api_url,
+          api_version='3.1',
+          retrieval_type='MANAGED_ACCOUNT',
+          client_id=ps_client_id,
+          client_secret=ps_client_secret,
+          secret_list=managed_account,
+          verify_ca=ps_verify_ca,
+          wantlist=False,
+          reason='CI build ' ~ build_id) }}"
+      no_log: true
+      when: managed_account | length > 0
+
+    # Checked by SHAPE, not by length: the managed account holds a placeholder until its
+    # first rotation completes (a bearer token cannot be seeded — far longer than the
+    # create API's 128-character cap), and "non-empty" would accept that and fail later as
+    # an opaque 401.
+    - name: Confirm a token came back, and that it is a token
+      ansible.builtin.assert:
+        that:
+          - _ps_sa_token is defined
+          - _ps_sa_token | length > 0
+          - _ps_sa_token.split('.') | length == 3
+        fail_msg: >-
+          No JWT came back for {{ managed_account }}. Either the path is wrong (a wrong
+          half reads as "not found", which looks like a permissions problem), the API user
+          lacks Managed Account scope plus Requests→Create on it, or the identity has never
+          rotated and the account still holds its create-time placeholder — the Workload
+          Lab row says "placeholder — never rotated" in that case.
+
+    # Nodes are CLUSTER-scoped, which is the point: a RoleBinding could never read these,
+    # so this succeeding is what distinguishes a Reader from a Deployer.
+    - name: Read every node in the cluster
+      kubernetes.core.k8s_info:
+        kind: Node
+        # host + api_key, never a kubeconfig on disk. The credential exists in this
+        # process and nowhere else.
+        host: "{{ api_server }}"
+        api_key: "{{ _ps_sa_token }}"
+        validate_certs: "{{ ca_cert_path | length > 0 }}"
+        ca_cert: "{{ ca_cert_path if ca_cert_path | length > 0 else omit }}"
+      register: nodes
+      no_log: true          # the task args carry the token
+
+    - name: Read pods across every namespace
+      kubernetes.core.k8s_info:
+        kind: Pod
+        host: "{{ api_server }}"
+        api_key: "{{ _ps_sa_token }}"
+        validate_certs: "{{ ca_cert_path | length > 0 }}"
+        ca_cert: "{{ ca_cert_path if ca_cert_path | length > 0 else omit }}"
+      register: pods
+      no_log: true
+
+    - name: Confirm the cluster-wide read worked
+      ansible.builtin.assert:
+        that:
+          - not nodes.failed | default(false)
+          - not pods.failed | default(false)
+          # A ClusterRoleBinding that did not apply reads as an EMPTY list rather than as
+          # an error on some paths, so emptiness is refused too: a cluster with no nodes
+          # is not a cluster, and "scanned successfully, found nothing" is the shape this
+          # assertion exists to reject.
+          - nodes.resources | default([]) | length > 0
+        fail_msg: >-
+          The cluster-wide read returned nothing. A Reader is bound with a
+          ClusterRoleBinding; if the Workload Lab created a namespace-scoped RoleBinding
+          instead, cluster-scoped resources come back empty or Forbidden rather than
+          erroring in a way that names the cause.
+        success_msg: >-
+          Read {{ nodes.resources | length }} node(s) and
+          {{ pods.resources | default([]) | length }} pod(s) across the cluster.
+
+    # ── The assertion that makes this a demonstration ────────────────────────────
+    # `failed_when: false` so the NEXT task judges the result. Deliberately not
+    # `ignore_errors`, which would also swallow an unreachable API server and let this
+    # pass on a connection error rather than on a 403.
+    - name: Try to read a Secret — this MUST be refused
+      kubernetes.core.k8s_info:
+        kind: Secret
+        namespace: "{{ probe_namespace }}"
+        host: "{{ api_server }}"
+        api_key: "{{ _ps_sa_token }}"
+        validate_certs: "{{ ca_cert_path | length > 0 }}"
+        ca_cert: "{{ ca_cert_path if ca_cert_path | length > 0 else omit }}"
+      register: secret_probe
+      failed_when: false
+      no_log: true
+
+    - name: The token must be Forbidden from reading Secrets
+      ansible.builtin.assert:
+        that:
+          # A 403 is the expected outcome. The `resources | length == 0` alternative is
+          # NOT slack: some client versions surface an authorization failure on a LIST as
+          # an empty result rather than as an exception, and treating that as a pass would
+          # be wrong in the other direction — so a non-empty result fails either way,
+          # which is the property that actually matters.
+          - >-
+            (secret_probe.failed | default(false)) or
+            (secret_probe.resources | default([]) | length == 0)
+          - (secret_probe.resources | default([]) | length) == 0
+        fail_msg: >-
+          Reading Secrets in '{{ probe_namespace }}' returned
+          {{ secret_probe.resources | default([]) | length }} item(s). This identity can
+          read credentials, which means it is not bound to `view` — check that the Workload
+          Lab bound ClusterRole/view and not `edit` or `cluster-admin`. A read-only identity
+          that can read Secrets can read every credential in the cluster.
+        success_msg: >-
+          Refused (or returned nothing) on Secrets, as it must be. `view` omits Secrets
+          upstream, and THAT is what makes a cluster-wide read grant acceptable.
+
+    - name: What this proved
+      ansible.builtin.debug:
+        msg:
+          - "Retrieved a ServiceAccount token from Password Safe as build '{{ build_id }}'."
+          - "The retrieval is in the audit trail, attributed to this build."
+          - "Read {{ nodes.resources | length }} node(s) cluster-wide — allowed."
+          - "Could not read a Secret in '{{ probe_namespace }}' — `view` omits them."
+          - "No kubeconfig was written and no credential is on disk anywhere."
+          - "The token expires on its own TTL (600s floor). Nothing has to revoke it."
+          - "What this does NOT prove: that the WORKLOAD is who it says it is. Password"
+          - "Safe authenticated whoever holds the API client below, and anyone who can"
+          - "retrieve is this workload. The SPIRE tab is the path that fixes that axis."

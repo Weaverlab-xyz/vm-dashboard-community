@@ -1,0 +1,249 @@
+# Deploy to Kubernetes with a Password-Safe-brokered ServiceAccount token
+# Target: localhost. Ansible reaches OUT to the API server, as every k8s play here does.
+#
+# THIS IS THE FIRST k8s PLAY THAT AUTHENTICATES WITH SOMETHING IT FETCHED ITSELF. The other
+# four take the kubeconfig the dashboard injects (K8S_AUTH_KUBECONFIG) and supply nothing —
+# which is convenient and is exactly the property this play exists to remove. Here the
+# credential is retrieved, per run, from Password Safe, and the retrieval is recorded
+# against the build that asked for it.
+#
+# Onboard the identity first: Workload Lab → Kubernetes → "Onboard a workload identity",
+# profile **deployer**. That creates the ServiceAccount, binds ClusterRole/edit through a
+# **RoleBinding in one namespace**, and onboards it as a managed account. Its "Consumer
+# details" panel gives you every string below.
+#
+# NEVER LIVE-VALIDATED — see docs/workload-kubernetes.md.
+#
+# ── THE INJECTED KUBECONFIG IS CLEARED ON PURPOSE, and this is the trap that would
+# otherwise make this play prove nothing. When the dashboard runs a play against a
+# Kubernetes target it injects a CLUSTER-ADMIN kubeconfig as K8S_AUTH_KUBECONFIG and
+# KUBECONFIG. If those stayed set, `kubernetes.core` could authenticate with THEM instead
+# of the token — every task would pass, the refusal below would not refuse, and the play
+# would report a successful demonstration of nothing at all. The `environment:` block
+# blanks both so the retrieved token is the only credential in play.
+#
+# ── THE REFUSAL IS AN ASSERTED TASK, NOT A RUNBOOK STEP. A step in a runbook gets skipped;
+# an assertion does not. Applying into a second namespace MUST come back 403 Forbidden, and
+# the play fails if it succeeds — because a Deployer that can write anywhere is the exact
+# failure this profile exists to rule out, and it looks identical to success from here.
+#
+# Worth knowing: the 403 arrives even when `refusal_namespace` does not exist. Kubernetes
+# authorizes BEFORE it looks the resource up, so an unauthorized request to a nonexistent
+# namespace is refused rather than reported missing. The assertion is sound either way.
+#
+# extra_vars:
+#   api_server: https://CLUSTER:443    # REQUIRED — the cluster's API server URL
+#   managed_account: ""                # REQUIRED — "<system>/<namespace>/<serviceaccount>"
+#                                      #   exactly as Consumer details prints it
+#   namespace: ci                      # the namespace the token may write in
+#   refusal_namespace: default         # the one it must NOT be able to write in
+#   app_name: hello-ps
+#   app_image: nginx:1.27-alpine
+#   replicas: 1
+#   build_id: local                    # goes into the Password Safe audit trail
+#   ca_cert_path: ""                   # the cluster CA; blank skips TLS verification
+- name: Deploy with a Password-Safe-brokered ServiceAccount token
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  environment:
+    # See the header. Blanking these is what makes the token the only credential.
+    K8S_AUTH_KUBECONFIG: ""
+    KUBECONFIG: ""
+  vars:
+    api_server: ""
+    managed_account: ""
+    namespace: "ci"
+    refusal_namespace: "default"
+    app_name: "hello-ps"
+    app_image: "nginx:1.27-alpine"
+    replicas: 1
+    build_id: "local"
+    ca_cert_path: ""
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true
+  tasks:
+    - name: Require the cluster and the account path
+      ansible.builtin.assert:
+        that:
+          - api_server | length > 0
+          - managed_account | length > 0
+          - "'/' in managed_account"
+          - namespace | length > 0
+          - refusal_namespace | length > 0
+          - namespace != refusal_namespace
+        fail_msg: >-
+          api_server and managed_account ("<system>/<namespace>/<serviceaccount>", from the
+          identity's Consumer details panel) are both required, and refusal_namespace must
+          differ from namespace — pointing both at the same place would assert that the
+          token is refused where it is supposed to work, which cannot pass and would not
+          mean anything if it did.
+
+    - name: Require the Password Safe credentials
+      ansible.builtin.assert:
+        that:
+          - ps_api_url | length > 0
+          - ps_client_id | length > 0
+          - ps_client_secret | length > 0
+        fail_msg: >-
+          The PASSWORD_SAFE_* environment (auto-injected when BeyondTrust is configured) is
+          what this play authenticates to Password Safe with. There is no fallback on
+          purpose: falling back to the injected kubeconfig would silently turn this into an
+          ordinary cluster-admin deploy.
+
+    # `reason` is what puts WHICH BUILD in the Password Safe audit trail — the whole point
+    # of retrieving per run rather than holding a kubeconfig. If the installed collection
+    # rejects the argument, drop it: the retrieval is still recorded, just without the
+    # build id attached.
+    - name: Retrieve the ServiceAccount token (checked out just-in-time)
+      ansible.builtin.set_fact:
+        _ps_sa_token: "{{ lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
+          api_url=ps_api_url,
+          api_version='3.1',
+          retrieval_type='MANAGED_ACCOUNT',
+          client_id=ps_client_id,
+          client_secret=ps_client_secret,
+          secret_list=managed_account,
+          verify_ca=ps_verify_ca,
+          wantlist=False,
+          reason='CI build ' ~ build_id) }}"
+      no_log: true
+      when: managed_account | length > 0
+
+    # A placeholder is what the managed account holds until its first rotation completes —
+    # a bearer token is far longer than the 128 characters Password Safe's create API
+    # accepts, so it can never be seeded. Caught here by SHAPE rather than by length: a
+    # JWT has two dots and three parts, and "it came back non-empty" would accept the
+    # placeholder and fail later as an opaque 401.
+    - name: Confirm a token came back, and that it is a token
+      ansible.builtin.assert:
+        that:
+          - _ps_sa_token is defined
+          - _ps_sa_token | length > 0
+          - _ps_sa_token.split('.') | length == 3
+        fail_msg: >-
+          No JWT came back for {{ managed_account }}. Either the path is wrong (it is
+          "<system>/<namespace>/<serviceaccount>" — a wrong half reads as "not found",
+          which looks like a permissions problem), the API user lacks Managed Account
+          scope plus Requests→Create on it, or the identity has never rotated and the
+          account still holds the placeholder it was created with. The Workload Lab row
+          says "placeholder — never rotated" in that last case.
+
+    - name: Apply the Deployment into the namespace this token is bound to
+      kubernetes.core.k8s:
+        state: present
+        # host + api_key, never a kubeconfig on disk. The credential exists in this
+        # process and nowhere else, which is the improvement over a checked-in kubeconfig
+        # and is why nothing here writes one.
+        host: "{{ api_server }}"
+        api_key: "{{ _ps_sa_token }}"
+        validate_certs: "{{ ca_cert_path | length > 0 }}"
+        ca_cert: "{{ ca_cert_path if ca_cert_path | length > 0 else omit }}"
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: "{{ app_name }}"
+            namespace: "{{ namespace }}"
+            labels:
+              app: "{{ app_name }}"
+              # So an operator can tell where this came from months later.
+              managed-by: workload-lab
+          spec:
+            replicas: "{{ replicas | int }}"
+            selector:
+              matchLabels:
+                app: "{{ app_name }}"
+            template:
+              metadata:
+                labels:
+                  app: "{{ app_name }}"
+              spec:
+                containers:
+                  - name: "{{ app_name }}"
+                    image: "{{ app_image }}"
+      register: deploy_result
+      no_log: true          # the task args carry the token
+
+    - name: Confirm the deploy succeeded
+      ansible.builtin.assert:
+        that:
+          - not deploy_result.failed | default(false)
+        fail_msg: >-
+          The token could not deploy into '{{ namespace }}', which is the namespace it is
+          supposed to own. Check that the identity's namespace matches this one — a
+          Deployer is bound by a RoleBinding in ONE namespace, and the binding is what
+          decides, not the ServiceAccount's own namespace.
+        success_msg: "Deployed {{ app_name }} into {{ namespace }} with a brokered token."
+
+    # ── The assertion that makes this a demonstration ────────────────────────────
+    # `failed_when: false` so the play continues and the NEXT task judges the result.
+    # Deliberately not `ignore_errors`, which would also swallow an unreachable API server
+    # and let the refusal assertion pass on a connection error instead of on a 403 — the
+    # exact way this kind of check ends up vacuous.
+    - name: Try the same Deployment in another namespace — this MUST be refused
+      kubernetes.core.k8s:
+        state: present
+        host: "{{ api_server }}"
+        api_key: "{{ _ps_sa_token }}"
+        validate_certs: "{{ ca_cert_path | length > 0 }}"
+        ca_cert: "{{ ca_cert_path if ca_cert_path | length > 0 else omit }}"
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: "{{ app_name }}-should-not-exist"
+            namespace: "{{ refusal_namespace }}"
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: "{{ app_name }}-should-not-exist"
+            template:
+              metadata:
+                labels:
+                  app: "{{ app_name }}-should-not-exist"
+              spec:
+                containers:
+                  - name: "{{ app_name }}"
+                    image: "{{ app_image }}"
+      register: refusal
+      failed_when: false
+      no_log: true
+
+    - name: The token must be Forbidden outside its namespace
+      ansible.builtin.assert:
+        that:
+          # BOTH halves, and neither is redundant. The first is the finding; the second
+          # pins that it was refused for the RIGHT REASON — a wrong API server or an
+          # expired token also fails, and a check that only asserted "it failed" would
+          # report a passing demonstration on a typo.
+          - refusal.failed | default(false)
+          - >-
+            'orbidden' in (refusal.msg | default('')) or
+            '403' in (refusal.msg | default(''))
+        fail_msg: >-
+          Applying into '{{ refusal_namespace }}' was NOT refused with a 403. If it
+          succeeded, this identity is not namespace-scoped — check that the Workload Lab
+          created a RoleBinding and not a ClusterRoleBinding, because a ClusterRoleBinding
+          to `edit` grants write access to the entire cluster and passes every other
+          assertion in this play. If it failed for some other reason, the message was:
+          {{ refusal.msg | default('(none)') }}
+        success_msg: >-
+          Refused in '{{ refusal_namespace }}', as it must be. THAT is the demonstration —
+          a vaulted token that can write anywhere would be a vaulted skeleton key.
+
+    - name: What this proved
+      ansible.builtin.debug:
+        msg:
+          - "Retrieved a ServiceAccount token from Password Safe as build '{{ build_id }}'."
+          - "The retrieval is in the audit trail, attributed to this build."
+          - "Deployed {{ app_name }} into '{{ namespace }}' — allowed."
+          - "Refused in '{{ refusal_namespace }}' — the RoleBinding is namespace-scoped."
+          - "No kubeconfig was written and no credential is on disk anywhere."
+          - "The token expires on its own TTL (600s floor). Nothing has to revoke it."
+          - "What this does NOT prove: that the WORKLOAD is who it says it is. Password"
+          - "Safe authenticated whoever holds the API client below, and anyone who can"
+          - "retrieve is this workload. The SPIRE tab is the path that fixes that axis."

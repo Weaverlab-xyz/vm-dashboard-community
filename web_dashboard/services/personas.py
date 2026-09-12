@@ -434,6 +434,28 @@ _DEVOPS = Persona(
             requires_flags=("spire_lab_enabled",),
         ),
         UseCase(
+            id="devops-workload-cluster-token",
+            title="A build server that reaches the cluster without a kubeconfig",
+            summary="A CI build fetches a short-lived ServiceAccount token from Password "
+                    "Safe per run, deploys into one namespace, and is refused in every "
+                    "other — instead of a long-lived kubeconfig nobody can revoke or "
+                    "prove anyone read. The answer for a MANAGED cluster, where the "
+                    "SPIFFE route above cannot be configured at all.",
+            target="/workload-lab#kubernetes",
+            minutes=10,
+            docs="workload-kubernetes",
+            # THREE flags, and `spire_lab_enabled` is the one that looks wrong. The tab
+            # needs k8s + Password Safe, but /workload-lab itself is gated on the derived
+            # `workload_lab_enabled` — either PREVIEW flag — so a card that named only the
+            # first two would render as a link to a page that 404s. That is the drift
+            # tests/test_personas.py::test_a_card_declares_the_flag_its_target_page_is_gated_on
+            # exists to catch, and it caught this. Paired with the SPIRE flag rather than
+            # the certificate one because this story IS the managed-cluster counterpart to
+            # the entry above, and a visitor reading one wants the other.
+            requires_flags=("k8s_management_enabled", "password_safe_enabled",
+                            "spire_lab_enabled"),
+        ),
+        UseCase(
             id="devops-function-secret",
             title="A serverless function that fetches its secret at cold start",
             summary="Deploy a cloud function with no environment secret, and show it pull "

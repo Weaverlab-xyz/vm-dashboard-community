@@ -81,6 +81,31 @@ key.
 
 **Guide:** [SPIFFE and SPIRE](../../../spiffe.md)
 
+### A build server that reaches the cluster without a kubeconfig
+
+The trust domain above is the better answer and most customers cannot have it. Configuring a
+cluster to accept a SPIFFE identity means passing `--authentication-config` to the API
+server, and no managed control plane lets you — so on EKS, AKS and GKE that path is not
+merely inconvenient, it is unavailable.
+
+What those teams have instead is a long-lived kubeconfig sitting in a CI system: no expiry,
+no revocation, and no record that anyone ever read it. Kubernetes cannot revoke a client
+certificate either, and since 1.24 it no longer creates the forever-tokens people used to
+reach for.
+
+So broker a **bound ServiceAccount token** through Password Safe: the API server mints it,
+Password Safe rotates and audits it, and the build fetches it once per run with the build id
+attached to the retrieval. The demonstration is not the token — it is the scope. A Deployer
+deploys into one namespace and is **refused** in every other; a Reader reads the whole
+cluster and **cannot read a Secret**. Both refusals are asserted inside the shipped
+playbooks, because a step in a runbook gets skipped and an assertion does not.
+
+Say the limit out loud while you are there: the vault authenticates whoever can retrieve,
+not the workload. Anyone who can retrieve *is* the workload. That is precisely the axis the
+trust domain above wins on, and it is why both live on one page.
+
+**Guide:** [Workload access to Kubernetes](../../../workload-kubernetes.md)
+
 ### A serverless function that fetches its secret at cold start
 
 Deploy a cloud function with no environment secret and show it pull what it needs on first

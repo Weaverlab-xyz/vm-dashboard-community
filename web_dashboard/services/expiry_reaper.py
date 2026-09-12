@@ -47,7 +47,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..database import (CertLab, CloudDatabase, Job, JobLog, K8sCluster,
-                        PovEnvironment, SpireLab)
+                        PovEnvironment, SpireLab, WorkloadK8sToken)
 from . import expiry_policy, job_service
 
 logger = logging.getLogger(__name__)
@@ -584,6 +584,11 @@ def _reap_row(db: Session, target: dict) -> str:
         from . import spire_lab_service
         out = spire_lab_service.start_decommission(db, lab_id=rid, created_by=REAPER_ACTOR)
         model, jid = SpireLab, out.get("job_id")
+    elif kind == "workloadk8s":
+        from . import workload_k8s_service
+        out = workload_k8s_service.start_decommission(db, row_id=rid,
+                                                     created_by=REAPER_ACTOR)
+        model, jid = WorkloadK8sToken, out.get("job_id")
     elif kind == "pov":
         # The identical job row DELETE /api/pov/managed/{id} creates. Going through the
         # queue rather than calling the teardown directly is what makes the share link,
@@ -914,6 +919,8 @@ def _resolve_row(db: Session, inv_id: str):
         row = db.query(CertLab).filter(CertLab.id == rid).first()
     elif prefix == "spirelab":
         row = db.query(SpireLab).filter(SpireLab.id == rid).first()
+    elif prefix == "workloadk8s":
+        row = db.query(WorkloadK8sToken).filter(WorkloadK8sToken.id == rid).first()
     else:
         return None
     if row is None:

@@ -46,6 +46,7 @@ demoing, running a lab, or running production.
 | [Secrets Management](secrets-management.md) | you are deciding where to store cloud credentials, and how to evolve that over time. |
 | [Certificates](certificates.md) | you are onboarding certificate identities, and need a private CA to issue them from. |
 | [SPIFFE and SPIRE](spiffe.md) | you are governing non-human identities in a SPIRE trust domain, and need a lab to prove it against. |
+| [Workload access to Kubernetes](workload-kubernetes.md) | a machine OUTSIDE a cluster needs to reach its API server, and the cluster is managed (EKS/AKS/GKE) so the SPIFFE path is unavailable. |
 | [Storage Management](storage-management.md) | you are enabling a feature that needs a storage backend, which several of them do. |
 | [Remote Agents](remote-agents.md) | your hypervisors, databases or clusters live somewhere the dashboard cannot reach. |
 | [Auto-delete Timer](auto-delete-timer.md) | you want lab resources to clean themselves up — read it before enabling it, because it deletes infrastructure. |

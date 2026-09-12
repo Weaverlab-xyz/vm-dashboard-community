@@ -67,6 +67,7 @@ HANDLED_TYPES = (
     "clouddb_adapter_pair", "clouddb_dbops_deploy",
     "certca_provision", "certca_decommission", "cert_ps_register",
     "spirelab_provision", "spirelab_decommission", "spirelab_k8s_link",
+    "workload_k8s_token",
     "ansible_cloud_run", "ansible_local", "epml_sync",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     "packer_aws_build", "packer_azure_build", "packer_gcp_build", "packer_oci_build",
@@ -135,6 +136,12 @@ MEDIUM_TYPES = (
     # One short terraform for the Password Safe managed system (ps_resource_service),
     # plus a ps-cli round trip to create the Secrets Safe folder the plugin writes into.
     "cert_ps_register",
+    # The same shape as `k8s_ps_token` above and MEDIUM for the same two reasons: it
+    # applies RBAC with kubectl (in-process by default — k8s_runner_service.mode) and
+    # creates a Password Safe managed system, which is a terraform apply in a tempdir.
+    # NOT light: light is for a parent awaiting HEAVY children, or a job with no local
+    # process at all, and this one runs two.
+    "workload_k8s_token",
     # cloud SDK + HTTP readiness poll + an OPT-IN short terraform for the PRA Web Jump
     "rancher_node_deploy", "rancher_node_teardown",
     "portainer_node_deploy", "portainer_node_teardown",
@@ -512,6 +519,16 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             from .services import spire_lab_service
             await spire_lab_service.run_k8s_link(
                 db, lab_id=meta["lab_id"], job_id=job_id)
+        elif job_type == "workload_k8s_token":
+            # One job type with an action, as `k8s_ps_token` does: register applies the
+            # workload RBAC and the rotator's, onboards the managed system and rotates
+            # once; rotate and deregister act on what register left. A neutral name
+            # because the job row is read by a human, and "…_register" carrying
+            # action=deregister reads as a mistake.
+            from .services import workload_k8s_service
+            await workload_k8s_service.run(
+                db, row_id=meta["row_id"], job_id=job_id,
+                action=meta.get("action", "register"))
         elif job_type == "cloudfn_deploy":
             from .services import cloud_function_service
             await cloud_function_service.run_deploy_apply(

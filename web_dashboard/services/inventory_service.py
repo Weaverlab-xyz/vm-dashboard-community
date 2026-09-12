@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from ..database import (CertLab, CloudDatabase, CloudFunction,
                         HypervisorConnection, HypervisorVMCache, Job, K8sCluster,
-                        PovEnvironment, SpireLab, VirtualDesktop)
+                        PovEnvironment, SpireLab, VirtualDesktop, WorkloadK8sToken)
 from . import expiry_policy, hypervisor_view_service
 
 logger = logging.getLogger(__name__)
@@ -257,6 +257,39 @@ def _spirelab_item(row) -> dict:
         "expires_at": _iso(row.expires_at),
         "job_id": row.deploy_job_id,
         "detail_href": "/workload-lab#spire",
+    }
+
+
+def _workloadk8s_item(row) -> dict:
+    """A Password-Safe-brokered workload identity in a Kubernetes cluster, as one row.
+
+    `name` carries the PROFILE and the `<namespace>/<serviceaccount>` it binds, because
+    those are what say how much this identity can do. Two rows on the same cluster is the
+    normal shape — a Deployer and a Reader — and telling them apart by name alone would be
+    guesswork.
+
+    The CLUSTER is not this row. It appears separately as its own `k8s` row with its own
+    timer, and the two teardowns are deliberately independent: reaping this removes the
+    ServiceAccount and the managed account, and leaves the cluster running.
+
+    `cloud` is the cluster's, so the reaper's per-cloud grouping works with no special
+    case even though nothing here is a cloud resource of its own.
+    """
+    label = f"{row.name} ({row.profile} · {row.namespace}/{row.service_account})"
+    return {
+        "id": f"workloadk8s:{row.id}",
+        "cloud": row.cloud or "",
+        "kind": "workloadk8s",
+        "source": "provisioned",
+        "name": label,
+        "region": row.cluster_name or "",
+        "state": row.status,
+        "workgroup": row.workgroup,
+        "deployed_by": row.created_by,
+        "created_at": _iso(row.created_at),
+        "expires_at": _iso(row.expires_at),
+        "job_id": None,
+        "detail_href": "/workload-lab#kubernetes",
     }
 
 
@@ -529,6 +562,14 @@ def collect(db: Session) -> list:
     # domain nobody can see is still minting identities for anyone who can reach it.
     for row in db.query(SpireLab).filter(SpireLab.status != "deleted").all():
         items.append(_spirelab_item(row))
+
+    # Queried unconditionally for the third variation on the same reason. Turning the tab
+    # off hides the page; the ServiceAccount stays in the cluster and Password Safe keeps
+    # serving its token to anyone who can retrieve it. A workload identity nobody can see
+    # is the one most worth a timer.
+    for row in (db.query(WorkloadK8sToken)
+                .filter(WorkloadK8sToken.status != "deleted").all()):
+        items.append(_workloadk8s_item(row))
 
     for row in (db.query(VirtualDesktop)
                 .filter(VirtualDesktop.status.notin_(("deprovisioning", "deleted"))).all()):

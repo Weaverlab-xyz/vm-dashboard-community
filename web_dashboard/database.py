@@ -1841,6 +1841,121 @@ class SpireLab(Base):
     expiry_warned_at = Column(DateTime, nullable=True)
 
 
+class WorkloadK8sToken(Base):
+    """A Password-Safe-brokered ServiceAccount token for a workload OUTSIDE the cluster.
+
+    The Workload Lab's third answer, and the only one that works on a managed cluster.
+    The SPIRE lab proves a workload can reach an API server with a credential stored
+    nowhere, but that rests on ``--authentication-config``, a kube-apiserver flag — so it
+    is available on self-managed k3s and on **none** of EKS, AKS or GKE. This is the path
+    that is: a bound ServiceAccount token, minted by the API server, rotated and audited
+    by Password Safe, retrieved by the consumer for each run.
+
+    **One row per IDENTITY, not per cluster**, which is why this is its own table rather
+    than more columns on ``K8sCluster``. That model has room for exactly one registration
+    (``ps_token_account_id`` plus one state key), and it is already spoken for by the PRA
+    tunnel's ``pra-access`` account. A Deployer and a Reader on the same cluster are two
+    ServiceAccounts, two managed accounts and two sets of RBAC, so they are two rows.
+
+    ``cluster_id`` references ``k8s_clusters.id`` and is deliberately **not** a foreign
+    key, matching how the sibling labs reference their hosts: the two delete paths stay
+    independent, so unregistering a cluster cannot cascade away the audit record of a
+    token that existed, and this row's own teardown is the only thing that removes the
+    ServiceAccount it created.
+
+    **THE PROFILE IS THE POINT, not the token.** ``profile`` picks the RBAC, and the RBAC
+    is the whole demonstration:
+
+      * ``deployer`` — ClusterRole ``edit`` through a **RoleBinding** in one namespace. A
+        CI build that can deploy where it is supposed to and is refused everywhere else.
+      * ``reader`` — ClusterRole ``view`` through a **ClusterRoleBinding**. A fleet scan
+        that can read the whole cluster and **cannot read Secrets**, because upstream
+        ``view`` omits them by design.
+
+    Neither is ``cluster-admin``. The existing ``ps-token`` path onboards a cluster-admin
+    ServiceAccount because it serves a human's brokered session through PRA; a *vaulted*
+    cluster-admin token is a vaulted skeleton key and demonstrates nothing about scoping.
+
+    **Nothing secret lives on this row** — the rule both sibling models state. The
+    credential is the bearer token, it is held in Password Safe, and what is here is
+    ``ps_system_id`` / ``ps_account_id``: ids that NAME it. There is no kubeconfig column
+    either, deliberately: a kubeconfig containing the token would be a copy of the
+    credential with no expiry and no audit trail, which is the artefact this feature
+    exists to remove. The consumer assembles one at run time from what it retrieved.
+
+    **The timer is not about cost.** It is the same argument ``docs/spiffe.md`` makes for
+    the SPIRE lab: a forgotten workload token keeps authenticating, and this row is the
+    only page it appears on.
+    """
+    __tablename__ = "workload_k8s_tokens"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(120), nullable=False)
+
+    # The registered cluster this identity lives in. Denormalised alongside it because
+    # the row has to stay readable after the cluster is unregistered: an inventory entry
+    # naming a cluster id nobody can resolve is a record of nothing, and the whole reason
+    # the timer exists is to be read long after the fact.
+    cluster_id = Column(String(36), nullable=False, index=True)
+    cluster_name = Column(String(200), nullable=True)
+    cloud = Column(String(20), nullable=True)
+
+    # deployer | reader. See the class docstring — this selects the RBAC, and changing it
+    # on an existing row would leave the old binding in the cluster, so it is set once.
+    profile = Column(String(20), nullable=False, default="deployer")
+    namespace = Column(String(253), nullable=False, default="default")
+    service_account = Column(String(253), nullable=False)
+
+    # bound | longlived, and the reason to record it is that it changes what the ROTATOR
+    # is granted: bound gets `serviceaccounts/token` create and no access to Secrets at
+    # all. `ttl_seconds` is meaningful in bound mode only, where the API server's own
+    # floor is 600 (ps_k8s_token_service._MIN_BOUND_TTL clamps it).
+    mode = Column(String(20), nullable=False, default="bound")
+    ttl_seconds = Column(Integer, nullable=True)
+
+    # Password Safe coordinates — IDS ONLY, never the credential. `ps_account_id` being
+    # set is what "onboarded" means, and it is what the rotate path acts on.
+    ps_system_id = Column(String(64), nullable=True)
+    ps_account_id = Column(String(64), nullable=True, index=True)
+    # The managed system address the plugin parses, e.g. `eks;us-east-2;prod;bound;ttl=600`.
+    # Stored because the operator has to be able to see it: when it disagrees with the
+    # cluster the rotation fails inside Password Safe, where this dashboard sees only a
+    # generic failure.
+    ps_address = Column(String(255), nullable=True)
+    # `<namespace>/<serviceaccount>` — the managed ACCOUNT name, which is a name and not
+    # a credential. Recorded so the consumer playbooks can be told what to look up.
+    ps_account_name = Column(String(255), nullable=True)
+    # The scrubbed Terraform state for the managed system + account, which is what makes
+    # the teardown deterministic: `ps_resource_service.deregister` is fed the recorded
+    # state rather than hand-typed ids, exactly as the CA and cluster paths are. Holding
+    # the ids alone would leave nothing able to remove them — the ids are for display and
+    # for the rotate call, this is what destroys. Scrubbed, so it carries no credential
+    # (see CertLab.ps_tf_state, the same split for the same reason).
+    ps_tf_state = Column(Text, nullable=True)
+    # Whether a rotation has ever completed. A bearer token is far longer than the 128
+    # characters Password Safe's create API accepts, so the account is always created
+    # holding a placeholder — until this is true, the vault holds nothing that
+    # authenticates, and that is indistinguishable from success on the page.
+    rotated = Column(Boolean, nullable=True)
+
+    status = Column(String(32), nullable=False, default="onboarding", index=True)
+    error_message = Column(Text, nullable=True)
+    # Progress through the onboarding steps, as the names of the ones that finished, and
+    # the job ids behind them. Same purpose as the sibling labs': a half-failed onboard
+    # has to be distinguishable from one that never started, and a failed step's error
+    # exists only in its own job log.
+    stages_done = Column(Text, nullable=True)
+    stage_job_ids = Column(Text, nullable=True)
+
+    workgroup = Column(String(100), nullable=True, index=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+    # Auto-delete timer — NULL = never, never "inherit the default" (see Job.expires_at).
+    expires_at = Column(DateTime, nullable=True, index=True)
+    expiry_warned_at = Column(DateTime, nullable=True)
+
+
 class CloudFunction(Base):
     """Inventory of dashboard-deployed cloud functions — Cloud Functions, Phase 1
     (docs/design/cloud-functions.md).
@@ -3271,6 +3386,14 @@ def init_db():
             "ALTER TABLE pov_environments ADD COLUMN pra_vendor_policy_id VARCHAR(36)",
             "ALTER TABLE pov_environments ADD COLUMN pra_vendor_group_id VARCHAR(36)",
             "ALTER TABLE pov_environments ADD COLUMN pra_vendor_expires_at TIMESTAMP",
+            # `workload_k8s_tokens` needs no entry: create_all makes new tables, and empty
+            # means no workload identity has been onboarded yet — which is the state every
+            # install is in before an operator uses the tab. Worth naming here rather than
+            # leaving silent, because the table looks like it should have a backfill: it
+            # references `k8s_clusters.id`, and a reader could reasonably expect the
+            # existing `ps-token` registrations to migrate into it. They must NOT. Those
+            # are cluster-admin accounts serving PRA's brokered sessions, and the whole
+            # point of this table is that nothing in it is cluster-admin.
         ]
         for stmt in _migrations:
             if _is_sqlite:
