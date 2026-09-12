@@ -21,6 +21,19 @@ def _read(*parts) -> str:
         return fh.read()
 
 
+def _page(slug: str) -> str:
+    """A Workload Lab tab, as one string: the shell plus the tab's partial.
+
+    The two labs used to be a page each; they are now tabs of one page. The shell carries
+    the chrome (title, Preview badge, tab bar) and the partial carries this lab's markup
+    and its Alpine factory. Assertions here care what the tab says, not which of the two
+    files says it, so read both.
+    """
+    return chr(10).join(
+        _read("web_dashboard", "templates", "workload_lab", name)
+        for name in ("index.html", "_%s.html" % slug))
+
+
 # ── the per-cloud backends actually exist ─────────────────────────────────────
 
 def test_every_declared_cloud_has_an_ingress_primitive_behind_it():
@@ -435,15 +448,26 @@ def test_the_flag_gates_the_router_the_page_and_the_nav():
     main = _read("web_dashboard", "main.py")
     assert "app.include_router(spire_lab_api.router," in main
     assert main.count('_feature_gate("spire_lab_enabled")') >= 2, "router AND page"
+    # /spire-lab is now a 301 to the Workload Lab tab, and still gated: it must not resolve
+    # on an instance that only enabled the Certificate lab.
     assert '@app.get("/spire-lab"' in main
+    assert '_Redirect("/workload-lab#spire"' in main
+    # The nav carries ONE link for both labs, gated on the derived workload_lab_enabled.
+    # The tab itself is still gated on this lab's own flag, inside the page.
     nav = _read("web_dashboard", "templates", "_nav_links.html")
-    assert "{% if spire_lab_enabled %}" in nav
+    assert "{% if workload_lab_enabled %}" in nav
+    assert 'data-nav="workload_lab"' in nav
+    shell = _read("web_dashboard", "templates", "workload_lab", "index.html")
+    assert "{% if spire_lab_enabled %}" in shell, \
+        "the tab must not render on an instance that never enabled this lab"
     flags = _read("web_dashboard", "services", "feature_flags.py")
     assert '"spire_lab_enabled"' in flags
+    assert '"workload_lab_enabled": ("cert_lab_enabled", "spire_lab_enabled")' in flags, \
+        "the nav link and /workload-lab resolve through the derived flag; see _DERIVED"
 
 
 def test_the_page_carries_the_preview_badge_and_never_bare_fetches():
-    page = _read("web_dashboard", "templates", "spire_lab", "index.html")
+    page = _page("spire")
     assert ">Preview</span>" in page
     # Every call goes through window.API, which attaches the bearer token. A bare fetch
     # would be anonymous and 401 -- there is no auth cookie on this app. Comment lines
@@ -607,7 +631,7 @@ def test_one_password_safe_request_id_is_recorded_once():
 def test_the_build_form_reloads_the_account_list_when_the_host_changes():
     """Both ids are scoped to ONE managed system, so a key left over from another host
     would check out that host's credential and connect to this one."""
-    page = _read("web_dashboard", "templates", "spire_lab", "index.html")
+    page = _page("spire")
     assert "onHostChange()" in page
     assert 'x-model="form.host" @change="onHostChange()"' in page
     assert 'form.host = \'\'; onHostChange()' in page          # the cloud select too
@@ -621,7 +645,7 @@ def test_the_build_form_reloads_the_account_list_when_the_host_changes():
 def test_the_build_form_has_one_shape_used_by_both_initialisers():
     """Two drifted initialisers is how a field ends up undefined on the SECOND build of
     a session -- `form` is rebuilt from scratch every time the modal opens."""
-    page = _read("web_dashboard", "templates", "spire_lab", "index.html")
+    page = _page("spire")
     literal = page.split("form: {")[1].split("},")[0]
     blank = page.split("blankForm(cloud) {")[1].split("},")[0]
     for key in ("secret_ssh_key_source", "managed_become_self", "login_user"):
@@ -634,7 +658,7 @@ def test_the_build_form_has_one_shape_used_by_both_initialisers():
 def test_the_two_credential_pickers_are_mutually_exclusive_in_the_form():
     """The server refuses both -- the API is the boundary -- but an operator should not
     be able to compose a request it will reject."""
-    page = _read("web_dashboard", "templates", "spire_lab", "index.html")
+    page = _page("spire")
     assert ':disabled="!!form.secret_ssh_key_source"' in page
     assert ':disabled="!!managedAccountKey"' in page
     # A DSS account has a key, not a password, so there is nothing to check out for sudo.
@@ -645,7 +669,7 @@ def test_the_page_shows_the_discovery_count_not_just_success():
     """"Discovery succeeded" is not the assertion. The plugin once shipped with discovery
     filtering on the MINTABLE prefix, which narrowed the inventory to 2 accounts while
     the action still reported success."""
-    page = _read("web_dashboard", "templates", "spire_lab", "index.html")
+    page = _page("spire")
     assert "discovery_expected" in page
     assert "entries_seeded" in page
 

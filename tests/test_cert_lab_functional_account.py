@@ -411,7 +411,8 @@ def test_add_identity_is_refused_at_the_click_when_there_is_no_account():
 
 def test_the_page_shows_the_account_and_offers_the_retry():
     api = _src("web_dashboard/api/cert_lab.py")
-    page = _src("web_dashboard/templates/cert_lab/index.html")
+    # The Certificate tab of the Workload Lab, markup and Alpine factory in the one file.
+    page = _src("web_dashboard/templates/workload_lab/_certificates.html")
     assert '"functional_account": row.ps_functional_account' in api
     assert "/functional-account" in api, "the retry route is missing"
     assert "wireUp(ca)" in page and "async wireUp(ca)" in page

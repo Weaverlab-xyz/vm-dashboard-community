@@ -150,6 +150,20 @@ def profile_page_allowed(name: str) -> bool:
     return owner is None or owner == install_profile()
 
 
+# Flags with no config row of their own: each is the OR of the flags that can reveal the
+# thing it gates. Resolved inside :func:`enabled` rather than in :func:`flags`, because
+# ``main._feature_gate`` calls the former and the nav calls the latter -- a derived flag
+# resolved in only one of them is the exact page-you-can-see-and-cannot-use bug this
+# module exists to prevent.
+_DERIVED = {
+    # The Workload Lab page carries the Certificate and SPIRE labs as tabs, so the nav link
+    # and the page route turn on either lab being on. It is deliberately NOT a preview flag
+    # of its own: Settings owns exactly one toggle per lab, and a third row there would
+    # offer an operator a switch that controls nothing they cannot already reach.
+    "workload_lab_enabled": ("cert_lab_enabled", "spire_lab_enabled"),
+}
+
+
 def enabled(flag: str, default: bool = False) -> bool:
     """Resolve a feature flag. **The one place this happens.**
 
@@ -164,6 +178,11 @@ def enabled(flag: str, default: bool = False) -> bool:
     """
     if profile_masks(flag):
         return False
+    parts = _DERIVED.get(flag)
+    if parts is not None:
+        # Each part resolves through here too, so a profile mask on a constituent still
+        # subtracts -- both of the Workload Lab's are demo-only.
+        return any(enabled(p, getattr(settings, p, False)) for p in parts)
     return config_service.get_bool(flag, default)
 
 
@@ -192,6 +211,8 @@ def flags() -> dict:
         "cloud_functions_enabled": enabled("cloud_functions_enabled", settings.cloud_functions_enabled),
         "cert_lab_enabled":     enabled("cert_lab_enabled",      settings.cert_lab_enabled),
         "spire_lab_enabled":    enabled("spire_lab_enabled",     settings.spire_lab_enabled),
+        # Derived from the two above -- see _DERIVED. Gates the nav link and /workload-lab.
+        "workload_lab_enabled": enabled("workload_lab_enabled"),
         "cost_explorer_enabled": enabled("cost_explorer_enabled", settings.cost_explorer_enabled),
         "cloud_unmanaged_discovery_enabled": enabled(
             "cloud_unmanaged_discovery_enabled", settings.cloud_unmanaged_discovery_enabled),

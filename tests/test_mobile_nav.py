@@ -389,7 +389,7 @@ def test_the_bar_is_pinned():
 
 def test_the_pinned_bar_stays_under_the_pages_modal_overlays():
     """A pinned bar has to clear scrolling content and duck under a modal. The page's
-    overlays are z-40 (users/, cert_lab/, functions/, inventory/), so the bar's z-index
+    overlays are z-40 (users/, workload_lab/, functions/, inventory/), so the bar's z-index
     is bounded on both sides: high enough to beat ordinary content, below 40."""
     tag = _tag_named(_read(), "nav")
     z = re.search(r"\bz-(\d+)\b", tag)
@@ -402,7 +402,7 @@ def test_the_pinned_bar_stays_under_the_pages_modal_overlays():
 def test_the_overlays_are_outside_the_nav_a_sticky_bar_would_trap_them_in():
     """`position: sticky` creates a stacking context whatever its z-index. With the drawer
     still inside <nav>, the bar would trap it at its own z-30 — and the `fixed inset-0
-    z-40` modals in users/, cert_lab/, functions/ and inventory/ would paint over an open
+    z-40` modals in users/, workload_lab/, functions/ and inventory/ would paint over an open
     menu."""
     src = _read()
     nav = src[src.index("<nav "):src.index("</nav>")]

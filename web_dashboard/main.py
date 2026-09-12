@@ -1492,22 +1492,36 @@ async def oci_page(request: Request):
     return templates.TemplateResponse("oci/index.html", {"request": request})
 
 
-@app.get("/cert-lab", response_class=HTMLResponse, include_in_schema=False,
+@app.get("/workload-lab", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("workload_lab_enabled")])
+async def workload_lab_page(request: Request):
+    """Workload Lab: the labs for identities that belong to machines, as one page.
+
+    Tabs over the Certificate Lab (a private CA for the Password Safe "Certificate" plugin)
+    and the SPIRE Lab (a trust domain for the "SPIFFE SVID" plugin), plus a static explainer
+    for the Kubernetes short-lived-token pattern that nothing here builds yet.
+
+    Gated on the DERIVED workload_lab_enabled -- either lab being on -- while each tab is
+    gated on its own preview flag inside the template. The two routers stay separate and
+    keep their own gates, so a tab can never render against a router that 404s.
+    """
+    return templates.TemplateResponse("workload_lab/index.html", {"request": request})
+
+
+# The two labs had a nav section and a page each before they were consolidated. Bookmarks,
+# Inventory rows written before the change and any link in a runbook still point here, so
+# these redirect to the tab rather than 404. Each keeps its OWN gate: /spire-lab must not
+# resolve on an instance that only enabled the Certificate Lab.
+@app.get("/cert-lab", include_in_schema=False,
          dependencies=[_feature_gate("cert_lab_enabled")])
-async def cert_lab_page(request: Request):
-    """Certificate Lab: build a private CA that can be destroyed on a timer, and onboard
-    certificate identities onto the Password Safe "Certificate" custom plugin.
-    Nav-, page- and router-gated on cert_lab_enabled (a preview flag)."""
-    return templates.TemplateResponse("cert_lab/index.html", {"request": request})
+async def cert_lab_page():
+    return _Redirect("/workload-lab#certificates", status_code=301)
 
 
-@app.get("/spire-lab", response_class=HTMLResponse, include_in_schema=False,
+@app.get("/spire-lab", include_in_schema=False,
          dependencies=[_feature_gate("spire_lab_enabled")])
-async def spire_lab_page(request: Request):
-    """SPIRE Lab: stand a SPIRE trust domain up on a VM this dashboard already deployed,
-    for the Password Safe "SPIFFE SVID" custom plugin to govern.
-    Nav-, page- and router-gated on spire_lab_enabled (a preview flag)."""
-    return templates.TemplateResponse("spire_lab/index.html", {"request": request})
+async def spire_lab_page():
+    return _Redirect("/workload-lab#spire", status_code=301)
 
 
 @app.get("/settings", response_class=HTMLResponse, include_in_schema=False)

@@ -18,6 +18,7 @@ reachable by path, and from here.
 | [Entitle resource registration](entitle-resource-registration.md) | you are changing how built resources register themselves as Entitle integrations. |
 | [Cloud Functions](cloud-functions.md) | you are extending Cloud Functions or its workload catalog. |
 | [k8s ServiceAccount token rotation](k8s-sa-token-rotation.md) | you are touching ServiceAccount token rotation and need the reasoning that is not in the code. |
+| [A workload reaching Kubernetes with a short-lived token](workload-k8s-short-lived-token.md) | you are building the Workload Lab's Kubernetes tab, or deciding whether a SPIFFE identity should authenticate to a cluster at all. Nothing here is built yet. |
 | [PRA's session-issuing CA](pra-session-ca.md) | you are making Password Safe the issuer and rotator of the CA that PRA Vault uses to mint session certificates. The plugin half is built; the delivery into PRA is not. |
 | [The dashboard deploys `bt-dbops`](ps-dbops-cloud-run.md) | you are working on the in-VPC service the Cloud SQL rotation plugin calls. |
 
