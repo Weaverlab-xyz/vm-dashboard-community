@@ -138,17 +138,24 @@ Each playbook gets its own job row, so a failed stage's Ansible output is somewh
 can read it; the page links all four. The first failure stops the sequence, because every
 later stage asserts the server is up.
 
-**The dashboard does not write the Password Safe objects.** The plugin takes its whole
-configuration from BeyondInsight *attributes*, and whether the gateway populates those
-for a plugin action has never been observed — so a writer built now would be betting on
-the answer. The page's **Onboarding** panel resolves every value instead:
+**Govern** writes the managed system. A trust domain nothing governs demonstrates SPIRE
+rather than governance of machine identities, which is what this page is for — so the
+deterministic half of the onboarding is a button, and the two parts that are not
+deterministic are named rather than guessed at:
 
-- an Asset for the host, and a Managed System on the `SPIFFE SVID` platform at port 8081;
-- a Functional Account whose **name is a SPIFFE ID**
-  (`spiffe://<trust-domain>/password-safe/admin`), carrying the PKCS#12 as its DSS key —
-  the panel names the two Secrets Safe titles holding it and never reads them;
-- `SpiffeTrustDomain` on the managed system, and `SpiffeTrustBundlePem` from the
-  **Bundle** button.
+| | Who | Why |
+|---|---|---|
+| Asset + **Managed System** on `SPIFFE SVID` at port 8081 | **Govern** | deterministic: the address, the port and the platform are all known |
+| **Functional Account** whose *name is a SPIFFE ID* (`spiffe://<trust-domain>/password-safe/admin`), PKCS#12 as its DSS key | you | its DSS-key field holds the administrative credential, and creating it here would mean the dashboard reading that credential out of Secrets Safe to push it back in. `spire-admin-identity.yml` writes it there under `no_log`; nothing in the app ever reads it |
+| **`SpiffeTrustDomain`** attribute on the managed system | you | the plugin takes its whole configuration from BeyondInsight *attributes*, there is no attribute API in this codebase, and whether the gateway populates them for a plugin action **has never been observed** — which is the question this lab exists to answer. A writer built now would be betting on it |
+
+**No managed account is created, deliberately.** The plugin's accounts are SPIRE
+registration entries and they arrive by *discovery*; one created here would sit beside
+them, indistinguishable, and move the number the next section measures — the number that
+caught a real plugin bug.
+
+The **Onboarding** panel still resolves every value, and after Govern it shows what ran
+and what is left. `SpiffeTrustBundlePem` comes from the **Bundle** button.
 
 Then run *Verify Functional Account* and read the `Attributes received:` line.
 [The standup runbook](runbooks/spire-lab-standup.md) §5 is that procedure and what each

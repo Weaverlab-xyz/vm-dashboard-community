@@ -1790,11 +1790,23 @@ class SpireLab(Base):
     # stored and surfaced rather than left in a job log.
     admin_svid_expires_at = Column(DateTime, nullable=True)
 
-    # Password Safe onboarding is deliberately NOT written by this feature yet — see
-    # docs/runbooks/spire-lab-standup.md section 5. These are recorded so a lab onboarded
-    # by hand can still be recognised, and so the destroy path has somewhere to look.
+    # Password Safe onboarding. `ps_system_id` is written by `start_ps_register` and is
+    # what "this trust domain is governed" means; a row carrying one an operator created by
+    # hand is still recognised, which is why these predate the button.
+    #
+    # `ps_account_id` stays NULL BY DESIGN and is not dead weight. The SPIFFE SVID plugin
+    # DISCOVERS its accounts — each is a SPIRE registration entry — so there is no single
+    # account this lab owns, and creating one would move the discovery count that is the
+    # lab's whole assertion (eleven seeded, eight discovered). The column remains because a
+    # hand-onboarded lab may name one, and because its emptiness is the fact worth being
+    # able to read.
     ps_system_id = Column(String(36), nullable=True)
     ps_account_id = Column(String(36), nullable=True)
+    # Scrubbed Terraform state for the managed system, which is what makes the removal
+    # deterministic: `ps_resource_service.deregister` destroys from the recorded state
+    # rather than from a hand-typed id. Holding the id alone would leave nothing able to
+    # remove what was created. Same split as CertLab.ps_tf_state and WorkloadK8sToken's.
+    ps_tf_state = Column(Text, nullable=True)
 
     # WHO the Ansible runner logs in as, when the operator chose explicitly. The first
     # two are EITHER/OR — two answers to one question — and `provision` refuses both at
@@ -3363,6 +3375,12 @@ def init_db():
             "ALTER TABLE spire_labs ADD COLUMN k8s_ansible_managed_account TEXT",
             "ALTER TABLE spire_labs ADD COLUMN k8s_ansible_managed_become_self BOOLEAN",
             "ALTER TABLE spire_labs ADD COLUMN k8s_login_user VARCHAR(104)",
+            # The Password Safe managed system's scrubbed Terraform state, so the SPIRE
+            # lab's onboarding can be REMOVED as deterministically as it is created. NULL
+            # backfills to "this lab was not onboarded by the dashboard", which is every
+            # lab built before the button — including one an operator onboarded by hand,
+            # whose `ps_system_id` is set and whose state correctly is not.
+            "ALTER TABLE spire_labs ADD COLUMN ps_tf_state TEXT",
             # Per-POV narrowing for an ordinary user. TEXT and nullable, so the
             # DEFAULT-on-a-new-column trap described above does not apply. Every
             # pre-existing row backfills to NULL = "every POV", which is what keeps

@@ -140,6 +140,12 @@ def _shape(row) -> dict:
         "k8s_credential_account": (
             (spire_lab_service.managed_ref_for(row, "k8s") or {}).get("account_name") or ""),
         "k8s_credential_login_user": row.k8s_login_user or "",
+        # Governance state. `ps_system_id` being set is what "this trust domain is
+        # governed" means; `ps_account_id` stays empty by design (the plugin discovers its
+        # accounts), so the page must not read its absence as an incomplete onboard.
+        "ps_system_id": row.ps_system_id or "",
+        "ps_governed": bool(row.ps_system_id),
+        "ps_platform": spire_lab_service.ps_platform(),
         "k8s_workload_user": spire_lab_service.K8S_WORKLOAD_USER,
         "k8s_jwt_svid_ttl": spire_lab_service.K8S_JWT_SVID_TTL,
         "deploy_job_id": row.deploy_job_id,
@@ -381,6 +387,12 @@ def get_onboarding(lab_id: str, db: Session = Depends(get_db),
         "discovery_expected": row.discovery_expected,
         "entries_seeded": row.entries_seeded,
         "runbook": "runbooks/spire-lab-standup",
+        # WHAT THE BUTTON NOW DOES, and what it still cannot. Returned here rather than
+        # only in the docs because this payload is what an operator reads while onboarding,
+        # and a list of things to paste that no longer need pasting is worse than no list.
+        "automated": bool(row.ps_system_id),
+        "ps_system_id": row.ps_system_id or "",
+        "gaps": spire_lab_service.onboarding_gaps(row),
     }
 
 
@@ -475,6 +487,50 @@ def link_kubernetes(lab_id: str, req: K8sLinkRequest, db: Session = Depends(get_
                              if req.managed_account else None),
             managed_become_self=req.managed_become_self,
             login_user=req.login_user)
+    except SpireLabError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/{lab_id}/ps-register")
+def ps_register(lab_id: str, db: Session = Depends(get_db),
+                user: User = Depends(require_permission("cloud_function", "write"))):
+    """Onboard this trust domain as a Password Safe managed system.
+
+    The half of the runbook's section 5 that is deterministic, and the reason the lab
+    exists: a trust domain nothing governs demonstrates SPIRE, not governance of machine
+    identities. Both sibling tabs already onboard their identities, and this was the one
+    that still asked an operator to paste values from ``/onboarding``.
+
+    **Creates no managed account**, deliberately — the plugin discovers its accounts as
+    SPIRE registration entries, and one made here would move the eleven-in-eight-out count
+    the lab asserts on. Two steps still need a human and the response names both: the
+    functional account (whose DSS-key field holds the administrative PKCS#12, which this
+    dashboard never reads) and the ``SpiffeTrustDomain`` attribute (for which no attribute
+    API exists here, and whose behaviour is the open question the lab was built to answer).
+    """
+    _require_enabled()
+    _visible_or_404(db, lab_id, user)
+    try:
+        return spire_lab_service.start_ps_register(
+            db, lab_id=lab_id, created_by=user.username)
+    except SpireLabError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.delete("/{lab_id}/ps-register")
+def ps_deregister(lab_id: str, db: Session = Depends(get_db),
+                  user: User = Depends(require_permission("cloud_function", "write"))):
+    """Remove the Password Safe managed system, leaving the trust domain running.
+
+    Separate from the lab's own teardown on purpose: an operator may want to stop
+    governing a trust domain without destroying it, and the reverse — closing the lab —
+    leaves the audit history of what was governed intact.
+    """
+    _require_enabled()
+    _visible_or_404(db, lab_id, user)
+    try:
+        return spire_lab_service.start_ps_register(
+            db, lab_id=lab_id, created_by=user.username, action="deregister")
     except SpireLabError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

@@ -1,0 +1,165 @@
+# Undo k3s-spiffe-auth.yml — stop the API server trusting a trust domain
+# Target: the k3s host. Idempotent, and safe to run on a node that was never linked.
+#
+# THIS IS THE RECOVERY PATH k3s-spiffe-auth.yml DOCUMENTS, made a play. That play ends by
+# telling an operator staring at a dead cluster to delete one drop-in and restart k3s; this
+# runs exactly that, plus the rest of what the link left behind. Written because the SPIRE
+# lab's teardown closed tcp/8081 and touched the k3s node not at all — so Closing a lab left
+# an agent attesting to a server that no longer answers and an API server trusting an issuer
+# that no longer resolves.
+#
+# NEVER LIVE-VALIDATED — see docs/design/workload-k8s-short-lived-token.md.
+#
+# ── THE ORDER MATTERS AND IT IS THE REVERSE OF THE LINK. The drop-in goes FIRST, because
+# it is the only change that can stop the API server: while it names an issuer nothing
+# resolves, every restart of k3s has to wait out a discovery timeout, and a node whose
+# other pieces were removed first would be slower to recover rather than faster. Remove the
+# reason the API server reaches out, then remove what it was reaching for.
+#
+# ── AND IT NEVER FAILS ON SOMETHING ALREADY GONE. A teardown is run on half-built and
+# half-broken hosts by definition — that is when it is needed — so every task here is
+# `state: absent` or guarded. A teardown that refuses because the thing it removes is
+# missing is a teardown that cannot finish the job it exists for.
+#
+# extra_vars:
+#   workload_user: deploy-bot          # whose kubeconfig and account the link created
+#   username_prefix: "spiffe:"         # must match the link, to name the right binding
+#   workload_spiffe_id: ""             # the RBAC subject, if the binding is to be removed
+#   remove_workload_user: false        # also delete the OS account (see below)
+#   spire_root: /opt/spire
+- name: Unlink this k3s node from its SPIRE trust domain
+  hosts: all
+  become: true
+  vars:
+    workload_user: "deploy-bot"
+    username_prefix: "spiffe:"
+    workload_spiffe_id: ""
+    remove_workload_user: false
+    spire_root: /opt/spire
+    dropin: /etc/rancher/k3s/config.yaml.d/90-spiffe-auth.yaml
+    auth_config: /etc/rancher/k3s/spiffe-auth.yaml
+    rbac_manifest: /etc/rancher/k3s/spiffe-rbac.yaml
+  tasks:
+    # 1. THE FLAG. Deleting this one file is the whole recovery path, and it is why the
+    #    link put the flag in a drop-in rather than in config.yaml: config.yaml carries
+    #    whatever k3s-server-init.yml or an operator put there, and clobbering it would
+    #    make this teardown destructive.
+    - name: Remove the authentication-config drop-in
+      ansible.builtin.file:
+        path: "{{ dropin }}"
+        state: absent
+      register: dropin_gone
+
+    - name: Remove the AuthenticationConfiguration itself
+      ansible.builtin.file:
+        path: "{{ auth_config }}"
+        state: absent
+
+    # Only when the flag actually changed. Restarting k3s is disruptive to everything on
+    # the node, so a teardown re-run on an already-unlinked host must not do it again.
+    - name: Restart k3s so the API server drops the issuer
+      ansible.builtin.systemd:
+        name: k3s
+        state: restarted
+        daemon_reload: true
+      when: dropin_gone.changed
+
+    - name: Wait for the API server to come back
+      ansible.builtin.command: k3s kubectl get --raw /readyz
+      register: readyz
+      changed_when: false
+      retries: 12
+      delay: 5
+      until: readyz.rc == 0
+      when: dropin_gone.changed
+
+    # 2. THE BINDING. Removed through the manifest the link wrote where it still exists,
+    #    which is exact; otherwise by name, which is best-effort. `--ignore-not-found` so a
+    #    half-built node does not fail here.
+    - name: Remove the SPIFFE RBAC binding
+      ansible.builtin.command: >-
+        k3s kubectl delete -f {{ rbac_manifest }} --ignore-not-found
+      register: rbac_removed
+      changed_when: "'deleted' in rbac_removed.stdout"
+      failed_when:
+        - rbac_removed.rc != 0
+        - "'no such file' not in (rbac_removed.stderr | lower)"
+        - "'not found' not in (rbac_removed.stderr | lower)"
+
+    - name: Remove the RBAC manifest
+      ansible.builtin.file:
+        path: "{{ rbac_manifest }}"
+        state: absent
+
+    # 3. THE AGENT. Stopped and removed, so it stops trying to re-attest to a server that
+    #    may be gone — an agent left running against a dead server retries forever and
+    #    fills the journal with what looks like a network fault.
+    - name: Stop and disable spire-agent
+      ansible.builtin.systemd:
+        name: spire-agent
+        state: stopped
+        enabled: false
+      failed_when: false          # never installed is a normal state for this play
+
+    - name: Remove the spire-agent unit
+      ansible.builtin.file:
+        path: /etc/systemd/system/spire-agent.service
+        state: absent
+      register: unit_gone
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: unit_gone.changed
+
+    # The agent's data directory holds its own SVID and its attestation state. Removed so a
+    # RE-LINK attests cleanly with a fresh join token rather than presenting a stale SVID
+    # the new server has never issued — which fails as an unknown agent and reads like a
+    # bad token.
+    - name: Remove the agent's data, config and bootstrap bundle
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ spire_root }}/data-agent"
+        - "{{ spire_root }}/conf/agent.conf"
+        - "{{ spire_root }}/conf/bootstrap.crt"
+      loop_control:
+        label: "{{ item }}"
+
+    # 4. THE WORKLOAD'S KUBECONFIG. It holds no credential — that was the whole point —
+    #    but it names an exec plugin and a cluster the token can no longer reach, so
+    #    leaving it produces a confusing failure rather than a clear absence.
+    - name: Remove the workload's kubeconfig
+      ansible.builtin.file:
+        path: "/home/{{ workload_user }}/.kube/config"
+        state: absent
+
+    - name: Remove the issuer's /etc/hosts entry
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\soidc\.'
+        state: absent
+
+    # OFF BY DEFAULT, and deliberately. The account may predate the link and may own other
+    # things on this node; deleting it because a lab was closed is a bigger surprise than
+    # leaving an account that can no longer obtain a token. Every token it ever held died
+    # with the agent above.
+    - name: Remove the workload account
+      ansible.builtin.user:
+        name: "{{ workload_user }}"
+        state: absent
+        remove: true
+      when: remove_workload_user | bool
+
+    - name: What was undone
+      ansible.builtin.debug:
+        msg:
+          - "The API server no longer trusts the trust domain's issuer."
+          - "Drop-in removed: {{ dropin }}{{ ' (k3s restarted)' if dropin_gone.changed else ' (was already gone)' }}"
+          - "SPIRE agent stopped and its data removed, so a re-link attests cleanly."
+          - "RBAC binding and the workload's kubeconfig removed."
+          - "LEFT ALONE: k3s itself, the cluster's own data, and the {{ workload_user }}"
+          - "  account (set remove_workload_user=true to delete it too)."
+          - "The SPIRE server is untouched — its registration entries for this node are"
+          - "  stale but harmless, and closing tcp/8081 is what stops it minting."

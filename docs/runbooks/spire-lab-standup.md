@@ -167,18 +167,40 @@ exactly like an `admin_ids` problem — so put that date somewhere.
 
 ## 5. Onboard, and read the one line that matters
 
+**Step 3 is now a button.** On the lab's row, **Govern** creates the managed system for
+you — on the `SPIFFE SVID` platform, at the server's address and port, referencing the
+functional account from step 2. Steps 2 and 4 are still yours, and the panel behind
+**Governed ✓** lists them with their remedies. The order below is unchanged; what has
+changed is how much of it you type.
+
 In BeyondInsight:
 
 1. **Asset** for the VM.
-2. **Functional Account** on the `SPIFFE SVID` platform. Its **name is a SPIFFE ID**,
-   not a username: `spiffe://weaverlab.test/password-safe/admin`. DSS key = the text
-   secret `spire/weaverlab/admin-pfx-b64`; DSS passphrase = `spire/weaverlab/admin-pfx-pass`.
+2. **Functional Account** on the `SPIFFE SVID` platform — *yours, and deliberately so*.
+   Its **name is a SPIFFE ID**, not a username:
+   `spiffe://weaverlab.test/password-safe/admin`. DSS key = the text secret
+   `spire/weaverlab/admin-pfx-b64`; DSS passphrase = `spire/weaverlab/admin-pfx-pass`.
    Paste both from Secrets Safe.
+
+   The dashboard will not do this one, and that is the point: the DSS-key field holds the
+   administrative PKCS#12, and creating the account from the dashboard would mean reading
+   that credential out of Secrets Safe to push it back in. `spire-admin-identity.yml`
+   writes it there under `no_log` and nothing in the app ever reads it — which is the same
+   split every other custom plugin here uses.
 3. **Managed System** on the same platform, port **8081**, using that functional
-   account. The managed system inherits its platform from the account, so an account on
-   the wrong platform onboards green and then fails every action.
+   account. **← Govern does this.** The managed system inherits its platform from the
+   account, so an account on the wrong platform onboards green and then fails every
+   action; Govern refuses up front if the account it finds is on the wrong one.
+
+   It creates **no managed account**, deliberately. The plugin's accounts are registration
+   entries and they arrive by discovery — one created here would sit beside them,
+   indistinguishable, and move the number section 6 measures.
 4. Define an attribute type and set **`SpiffeTrustDomain` = `weaverlab.test`** on the
-   managed system.
+   managed system. *Still yours*, and this is the interesting one: the plugin takes its
+   whole configuration from attributes, there is no attribute API in the dashboard, and
+   **whether the gateway populates attributes for a plugin action is exactly the question
+   this runbook exists to answer**. Writing it from the dashboard before that is known
+   would be betting on the answer.
 5. Run **Verify Functional Account** and open the activity record.
 
 **The line to read:**

@@ -952,6 +952,40 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str) -> None:
         return
     job_service.set_running(db, job_id)
     try:
+        # THE K3S HALF FIRST, and only when there is one. Closing the ACL stops the SPIRE
+        # server minting, which is the kill switch — but it leaves the k3s node with an
+        # agent re-attesting to a server that no longer answers and an API server trusting
+        # an issuer that no longer resolves. Neither is dangerous; both are confusing, and
+        # the Kubernetes tab next to this one deletes its ServiceAccount on teardown, so
+        # leaving this half in place was an asymmetry an operator would meet as a mystery.
+        #
+        # NON-FATAL, and that is the important part. The node may be gone, unreachable, or
+        # never have been linked; none of those may stop the ACL from closing, because the
+        # ACL is the thing that actually matters. A failure here is reported and the
+        # teardown continues.
+        if row.k8s_status == "linked" and row.k8s_vm_name:
+            await broadcast_progress(job_id, 15, UNLINK_STAGE["label"])
+            try:
+                status = await _run_stage(
+                    db, row=row, stage=UNLINK_STAGE, actor=row.created_by or "system",
+                    asset_backend=(_cfg("spire_lab_asset_backend")
+                                   or storage_service.active_backend()),
+                    parent_job_id=job_id)
+                row.k8s_status = "unlinked" if status == "completed" else "failed"
+                db.commit()
+                if status != "completed":
+                    job_service.append_job_log(
+                        db, job_id,
+                        "the k3s unlink did not complete — the node keeps its SPIRE agent "
+                        "and its API server keeps the authentication-config drop-in. Run "
+                        "examples/playbooks/k3s/k3s-spiffe-unlink.yml on it by hand. "
+                        "Closing the ACL below is unaffected.")
+            except Exception as exc:  # noqa: BLE001 — see the note above
+                job_service.append_job_log(
+                    db, job_id, f"the k3s unlink could not run ({exc}) — the node keeps "
+                                f"its agent and drop-in; closing the ACL regardless")
+                logger.warning("spire-lab: k3s unlink for %s failed: %s", lab_id, exc)
+
         backend = require_backend(row.cloud)
         placement = json.loads(row.vm_resource_id or "{}")
         await broadcast_progress(job_id, 30, f"Closing tcp/{row.bind_port} on the "
@@ -1008,6 +1042,29 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str) -> None:
 # it to the SPIRE host's private address.
 
 K8S_LINK_JOB_TYPE = "spirelab_k8s_link"
+
+# The teardown's one stage, on the k3s host. Kept beside the link's stages rather than
+# inside `run_decommission` so it goes through the same `_stage_meta` / `_run_stage`
+# machinery — which is what keeps a credential out of the jobs table (see
+# `ansible_run_meta.run_meta`) and gives the stage its own readable Ansible output.
+def _unlink_vars(row: SpireLab) -> dict:
+    """Extra vars for the unlink. Reads only the row, like every other `vars_for`.
+
+    `remove_workload_user` is deliberately absent, which leaves the play's own `false`
+    default in force: the account may predate the link and may own other things on the
+    node, so deleting it because a lab was closed is a bigger surprise than leaving one
+    that can no longer obtain a token.
+    """
+    return {"workload_user": K8S_WORKLOAD_USER,
+            "username_prefix": K8S_USERNAME_PREFIX,
+            "workload_spiffe_id": row.k8s_workload_spiffe_id or ""}
+
+
+UNLINK_STAGE = {
+    "key": "unlink", "asset": "k3s-spiffe-unlink.yml", "vars_for": _unlink_vars,
+    "host": "k8s", "pct": 15,
+    "label": "Unlinking the k3s node from the trust domain…",
+}
 
 # The OIDC Discovery Provider's port on the SPIRE host. Opened to the k3s node only — the
 # k3s node itself needs nothing inbound, because the workload runs on it.
@@ -1384,3 +1441,203 @@ async def _run_k8s_stage(db: Session, *, row: SpireLab, stage: dict, actor: str,
     db.expire_all()
     fresh = db.query(Job).filter(Job.id == child.id).first()
     return (fresh.status if fresh else "failed") or "failed"
+
+
+# ── Password Safe onboarding ──────────────────────────────────────────────────
+# The half of section 5 of the standup runbook that is deterministic, and it is the
+# reason this lab exists: a SPIRE trust domain nothing governs is a demo of SPIRE, not a
+# demo of governing machine identities. Both sibling tabs onboard their identities to
+# Password Safe (the Certificate Lab through `cert_ps_service`, the Kubernetes tab through
+# `workload_k8s_service`), and this was the one that still asked an operator to paste.
+#
+# WHAT THE BUTTON DOES: create the managed system on the "SPIFFE SVID" platform, pointed
+# at this lab's SPIRE server at its API port, in the configured workgroup, referencing the
+# functional account whose NAME is the administrative SPIFFE ID.
+#
+# WHAT IT DELIBERATELY LEAVES TO A HUMAN, and why neither is an oversight:
+#
+#   * THE FUNCTIONAL ACCOUNT. Its DSS-key field holds the administrative PKCS#12, and
+#     creating it here would mean this process reading that credential out of Secrets Safe
+#     to push it back in. Every other plugin in this codebase looks a functional account up
+#     BY NAME for exactly that reason, and `spire-admin-identity.yml` already writes the
+#     PKCS#12 into Secrets Safe under `no_log` without it ever passing through here.
+#   * THE `SpiffeTrustDomain` ATTRIBUTE. The plugin takes its whole configuration from
+#     BeyondInsight attributes; there is no attribute API in this codebase, and whether the
+#     gateway populates attributes for a plugin ACTION has never been observed. That is the
+#     open question this lab was built to answer, so writing an attribute writer now would
+#     be betting on the answer. `onboarding_gaps` names it, the result reports it, and the
+#     page shows it — which is what makes the first live run answer the question instead of
+#     hiding it.
+
+PS_REGISTER_JOB_TYPE = "spirelab_ps_register"
+
+# The platform the imported .psplugin presents. Config-overridable because a Password Safe
+# admin renaming an imported platform is a real event that has silently switched onboarding
+# off before (ps_k8s_token_service._resolve_functional_account documents the case).
+_PS_PLATFORM_DEFAULT = "SPIFFE SVID"
+
+
+def ps_platform() -> str:
+    return _cfg("spire_ps_platform", _PS_PLATFORM_DEFAULT)
+
+
+def onboarding_gaps(row: SpireLab) -> list:
+    """What still needs a human after the button, each with its remedy.
+
+    Returned to the page rather than buried in a docstring, because every item here is a
+    thing that makes the plugin fail an ACTION while the managed system looks correctly
+    onboarded — and the failure mode reads as a credential problem in all three cases.
+    """
+    gaps = [
+        {"what": f"the {ps_platform()!r} functional account",
+         "why": ("its DSS-key field holds the administrative PKCS#12, and this dashboard "
+                 "never reads that credential — it is written straight into Secrets Safe "
+                 "by the identity playbook"),
+         "remedy": (f"create a functional account named {row.admin_spiffe_id or '<the admin SPIFFE ID>'} "
+                    f"on the {ps_platform()!r} platform and upload the PKCS#12 from "
+                    f"{(secret_refs(row) or {}).get('pfx') or 'the lab folder'} as its DSS key")},
+        {"what": "the SpiffeTrustDomain attribute",
+         "why": ("the plugin reads its configuration from BeyondInsight attributes, and "
+                 "whether the gateway populates them for a plugin action is the open "
+                 "question this lab exists to answer — so nothing here guesses at it"),
+         "remedy": (f"add attribute SpiffeTrustDomain = {row.trust_domain} to the managed "
+                    f"system, then run Test Functional Account")},
+    ]
+    return gaps
+
+
+def start_ps_register(db: Session, *, lab_id: str, created_by: str,
+                      action: str = "register") -> dict:
+    """Enqueue onboarding this trust domain as a Password Safe managed system.
+
+    Refused before the job exists when the lab cannot possibly be governed yet, because
+    each of these produces a managed system that onboards green and then fails every
+    action — which is the failure this whole path is meant to remove, not relocate.
+    """
+    if action not in ("register", "deregister"):
+        raise SpireLabError(f"unknown action {action!r}")
+    row = get_lab(db, lab_id)
+    if not row:
+        raise SpireLabError(f"SPIRE lab {lab_id} not found")
+
+    if action == "register":
+        if row.status != "available":
+            raise SpireLabError(
+                f"{row.name} is {row.status}, not available — onboarding a trust domain "
+                f"whose server is not up yet produces a managed system that fails every "
+                f"action, and the failure reads as a credential problem")
+        if not (row.private_ip or row.public_ip):
+            raise SpireLabError(
+                f"{row.name} has no recorded address, so nothing could tell Password Safe "
+                f"where to reach the SPIRE API")
+        if not row.admin_spiffe_id:
+            raise SpireLabError(
+                f"{row.name} has no administrative SPIFFE ID recorded, and that string is "
+                f"the functional account's NAME — without it the managed system would "
+                f"inherit the wrong platform. Re-run the identity stage.")
+        if row.ps_system_id:
+            raise SpireLabError(
+                f"{row.name} is already onboarded as managed system {row.ps_system_id}. "
+                f"Remove it first if you need to re-create it — a second managed system "
+                f"for one trust domain would discover the same entries twice.")
+    elif not row.ps_system_id:
+        raise SpireLabError(f"{row.name} has no Password Safe managed system recorded")
+
+    job = job_service.create_job(
+        db, PS_REGISTER_JOB_TYPE, created_by, workgroup=row.workgroup,
+        metadata={"lab_id": row.id, "action": action,
+                  "trust_domain": row.trust_domain})
+    db.commit()
+    logger.info("spire-lab: queued Password Safe %s for %r as job %s",
+                action, row.name, job.id)
+    return {"lab_id": row.id, "job_id": job.id, "action": action}
+
+
+async def run_ps_register(db: Session, *, lab_id: str, job_id: str,
+                          action: str = "register") -> None:
+    """Worker entry point for ``spirelab_ps_register``."""
+    from ..api.websocket import broadcast_progress
+    from . import ps_api_service, ps_resource_service
+
+    row = get_lab(db, lab_id)
+    if not row:
+        logger.warning("spire-lab: row %s vanished before the Password Safe %s",
+                       lab_id, action)
+        return
+    job_service.set_running(db, job_id)
+    try:
+        if action == "deregister":
+            await broadcast_progress(job_id, 30, "Removing the Password Safe objects…")
+            if row.ps_tf_state:
+                await ps_resource_service.deregister(row.ps_tf_state)
+            # Cleared whether or not the destroy found anything: the point of clearing is
+            # that this dashboard no longer claims to have onboarded the trust domain, and
+            # a row still naming a managed system an operator removed by hand is a worse
+            # record than one naming none.
+            row.ps_system_id = row.ps_tf_state = None
+            row.updated_at = datetime.utcnow()
+            db.commit()
+            job_service.set_completed(db, job_id, result={
+                "lab_id": row.id, "deregistered": True})
+            return
+
+        if not ps_api_service.configured():
+            raise SpireLabError(
+                "Password Safe is not configured — set pscli_api_url, pscli_client_id, "
+                "pscli_client_secret and pscli_api_account_name")
+
+        await broadcast_progress(job_id, 20, "Resolving the functional account…")
+        # The account's NAME is a SPIFFE ID, not a username, and the managed system
+        # INHERITS ITS PLATFORM from it — so an account on the wrong platform onboards
+        # green and then fails every action. Resolved by name and its platform checked,
+        # the same guard ps_k8s_token_service applies for the same reason.
+        fa = await ps_api_service.get_functional_account(row.admin_spiffe_id)
+        pname = (fa.get("platform_name") or "")
+        if pname and ps_platform().lower() not in pname.lower():
+            raise SpireLabError(
+                f"functional account {row.admin_spiffe_id!r} is on platform {pname!r}, "
+                f"not {ps_platform()!r}. The managed system inherits the functional "
+                f"account's platform, so this would onboard against the wrong plugin.")
+        platform_id = await ps_api_service.get_platform_id(ps_platform())
+        workgroup_id = await ps_api_service.get_workgroup_id(
+            _cfg("spire_ps_workgroup") or _cfg("passwordsafe_workgroup"))
+
+        await broadcast_progress(job_id, 55, "Creating the Password Safe managed system…")
+        # `host_name` is the TRUST DOMAIN (what an operator recognises, and what the plugin
+        # governs); the address is the server's. No managed account and no seed — the
+        # plugin discovers its accounts as registration entries, which is the count this
+        # lab asserts on. See ps_resource_service, method="spiffesvid".
+        reg = await ps_resource_service.register_managed_system(
+            name=f"spire-{row.trust_domain}", host_name=row.trust_domain,
+            functional_account_id=fa["id"], platform_id=platform_id,
+            workgroup_id=workgroup_id,
+            ip_address=(row.private_ip or row.public_ip),
+            port=int(row.bind_port or 8081),
+            managed_account_name=row.admin_spiffe_id, method="spiffesvid")
+        row.ps_system_id = str(reg.get("managed_system_id") or "")
+        row.ps_tf_state = reg.get("tf_state_json")
+        row.updated_at = datetime.utcnow()
+        db.commit()
+
+        gaps = onboarding_gaps(row)
+        for gap in gaps:
+            job_service.append_job_log(
+                db, job_id, f"still needs a human: {gap['what']} — {gap['remedy']}")
+        await broadcast_progress(
+            job_id, 95,
+            "Managed system created. Two steps still need a human — see the job log and "
+            "the lab's onboarding panel.")
+        job_service.set_completed(db, job_id, result={
+            "lab_id": row.id, "managed_system_id": row.ps_system_id,
+            "platform": ps_platform(), "trust_domain": row.trust_domain,
+            "discovery_expected": row.discovery_expected,
+            "gaps": [g["what"] for g in gaps]})
+    except Exception as exc:
+        # The message, never a traceback and never a chained cause: it reaches a browser
+        # through the row (CodeQL py/stack-trace-exposure, and the reason ansible_run_gate
+        # gives at length).
+        row.error_message = str(exc)[:2000]
+        row.updated_at = datetime.utcnow()
+        db.commit()
+        logger.error("spire-lab: Password Safe %s failed for %s: %s", action, lab_id, exc)
+        job_service.set_failed(db, job_id, str(exc))
