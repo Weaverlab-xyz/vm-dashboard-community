@@ -5,10 +5,22 @@
    the Certificate Lab (cert_lab_enabled, /api/cert-lab) and the SPIRE Lab
    (spire_lab_enabled, /api/spire-lab).
 
-   THE KUBERNETES HALF IS NOT A THIRD TAB. It was, briefly, and that was wrong: a tab
-   explaining a by-hand procedure is precisely what the SPIRE page exists to replace, since
-   standing this up by hand is the afternoon that page eliminates. It belongs inside the
-   SPIRE tab, as a panel with a button on the lab's own row -- see _spire.html.
+   THERE ARE NOW TWO KUBERNETES SURFACES AND THEY ARE NOT THE SAME THING. An earlier draft
+   had a third tab that EXPLAINED the SPIFFE-to-Kubernetes procedure, and removing it was
+   right: a tab describing a by-hand procedure is precisely what the SPIRE page exists to
+   replace, since standing that up by hand is the afternoon that page eliminates. That
+   content is a panel with a button on the lab's own row -- see _spire.html -- and a
+   narrative in docs/spiffe.md.
+
+   The Kubernetes tab below is a different claim and keeps its own tab for a reason that
+   survives the one above: it is a CONTROL SURFACE for a DIFFERENT MECHANISM against
+   DIFFERENT CLUSTERS. SPIFFE-to-Kubernetes needs `--authentication-config`, a
+   kube-apiserver flag, so it reaches self-managed k3s and none of EKS, AKS or GKE; this
+   tab brokers a bound ServiceAccount token through Password Safe, which is the only one of
+   the two available on a managed cluster. It has its own model, its own router and its own
+   button, and it has no home inside either existing tab -- it is not about a trust domain,
+   and a certificate is not what it issues. Both tabs cross-link, because which one an
+   operator can actually have depends on who runs their control plane.
 
    Nothing below the template layer is shared. Each tab keeps its own Alpine component, its
    own API prefix, its own model and its own inventory kind -- this page is a container, not
@@ -39,10 +51,31 @@
 {% if spire_lab_enabled %}
   {% set _ = tabs.append({'slug': 'spire', 'label': 'SPIRE'}) %}
 {% endif %}
+{# No preview flag of its own -- "do not change the settings menu" still holds, and
+   Settings owns exactly two toggles here. This tab renders when the page is already
+   reachable AND both capabilities it needs are on: a cluster to act on and a vault to
+   broker with. Adding non-preview flags to feature_flags._DERIVED would make
+   workload_lab stop resolving as all-preview, and tests/test_permission_catalog.py would
+   then demand a new RBAC scope for the page. #}
+{% if k8s_management_enabled and password_safe_enabled %}
+  {% set _ = tabs.append({'slug': 'kubernetes', 'label': 'Kubernetes'}) %}
+{% endif %}
+{# ONE CONSEQUENCE WORTH KNOWING: with BOTH preview flags off this whole page 404s at the
+   route gate, so the Kubernetes tab is unreachable no matter how its own two flags are
+   set. That is deliberate and not a gap to plug. The page is the Workload Lab preview;
+   this tab is a capability of it, not a feature that can stand the page up on its own.
+   Making it do so would mean putting non-preview flags in _DERIVED, which is exactly the
+   change the note above rules out. #}
 
 <div class="max-w-6xl mx-auto py-8 px-4"
      x-data="workloadLabPage({{ tabs | map(attribute='slug') | list | tojson }})"
-     x-init="init()">
+     x-init="init()"
+     {# Cross-tab links. A tab partial has its OWN Alpine component, so it cannot call
+        select() directly -- `this` inside it is that component, not the container. It
+        dispatches instead and the container listens here, which also means a link to a
+        tab that is switched off is inert rather than an error: select() ignores a slug
+        that is not in the list. #}
+     @select-tab.window="select($event.detail)">
 
   <div class="flex items-center gap-2 mb-3 sm:mb-1">
     <h1 class="text-2xl font-bold text-gray-800">Workload Lab</h1>
@@ -80,6 +113,12 @@
   </div>
   {% endif %}
 
+  {% if k8s_management_enabled and password_safe_enabled %}
+  <div x-show="activeTab === 'kubernetes'" x-cloak role="tabpanel">
+    {% include "workload_lab/_kubernetes.html" %}
+  </div>
+  {% endif %}
+
 </div>
 {% endblock %}
 
@@ -90,6 +129,8 @@
 function workloadLabPage(slugs) {
   return {
     activeTab: '',
+    // The tabs this render actually has, kept so select() can refuse one it does not.
+    slugs: slugs,
 
     init() {
       // Deep links land here -- Inventory rows, the persona use cases, and the 301s from
@@ -98,7 +139,14 @@ function workloadLabPage(slugs) {
       this.select(slugs.includes(want) ? want : slugs[0], false);
     },
 
+    // A SLUG THIS PAGE DOES NOT HAVE IS IGNORED, and that is what makes the cross-tab
+    // links safe. Each tab renders behind its own flags, so the SPIRE tab's "use the
+    // Kubernetes tab" link exists on a page where that tab may be switched off -- and
+    // setting activeTab to a slug with no panel would show the header and nothing else,
+    // which reads as a broken page rather than as a feature being off. Deep links from
+    // Inventory and the persona cards hit the same guard through init() above.
     select(slug, push = true) {
+      if (!this.slugs.includes(slug)) return;
       this.activeTab = slug;
       // replaceState, not pushState: the back button should leave the page rather than walk
       // the tabs the visitor clicked through.

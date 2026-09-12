@@ -356,6 +356,25 @@
            class="text-blue-600 hover:underline">What this proves</a>.
       </p>
 
+      <!-- THE LIMIT, said before the operator spends the afternoon finding it. This path
+           configures the API server with `--authentication-config`, which is a
+           kube-apiserver flag: no managed control plane lets you pass it, so EKS, AKS and
+           GKE cannot do this AT ALL. Sending them to the sibling tab is the only useful
+           thing to say, and saying it here is cheaper than saying it in a runbook. -->
+      <p class="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg
+                px-3 py-2 mb-4">
+        <strong>Self-managed clusters only.</strong> This sets
+        <code>--authentication-config</code> on the API server, which EKS, AKS and GKE do
+        not let you pass &mdash; which is why the lab brings its own k3s node. For a
+        <strong>managed</strong> cluster, the
+        <button type="button"
+                @click="k8sOpen = false; $dispatch('select-tab', 'kubernetes')"
+                class="text-blue-600 hover:underline">Kubernetes tab</button>
+        brokers a bound ServiceAccount token through Password Safe instead &mdash; audited
+        and rotated, though the vault authenticates whoever can retrieve rather than the
+        workload itself. That is the trade, and it is the one axis this page wins on.
+      </p>
+
       <!-- Already linked: show what has to agree, and how to prove it. -->
       <template x-if="k8sLab?.k8s_status === 'linked'">
         <div>

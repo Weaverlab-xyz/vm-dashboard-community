@@ -885,6 +885,7 @@ from .api import auth, jobs, websocket, aws, azure, gcp, oci, packer, mfa, token
 from .api import cloud_databases  # noqa: E402
 from .api import cert_lab as cert_lab_api  # noqa: E402
 from .api import spire_lab as spire_lab_api  # noqa: E402
+from .api import workload_k8s as workload_k8s_api  # noqa: E402
 from .api import cloud_functions as cloud_functions_api  # noqa: E402
 from .api import entitle_rest as entitle_rest_api  # noqa: E402
 from .api import pra as pra_api  # noqa: E402
@@ -1070,6 +1071,13 @@ app.include_router(cert_lab_api.router,
                    dependencies=[_feature_gate("cert_lab_enabled")])
 app.include_router(spire_lab_api.router,
                    dependencies=[_feature_gate("spire_lab_enabled")])
+# The Workload Lab's Kubernetes tab. Gated on `k8s_management_enabled` here and on
+# `password_safe_enabled` inside every endpoint (`_require_enabled`), because it needs a
+# cluster to act on AND a vault to broker with — and `_feature_gate` takes one flag.
+# Deliberately not a third preview flag: Settings owns two toggles for this page, one per
+# lab, and this is a capability of the page rather than a lab of its own.
+app.include_router(workload_k8s_api.router,
+                   dependencies=[_feature_gate("k8s_management_enabled")])
 # The one Entitle adapter the dashboard hosts itself, because here the dashboard IS
 # the target system. Gated by entitle_user_jit_enabled, and additionally closed
 # (503) whenever entitle_rest_secret is unset — see the router's _require_secret.

@@ -73,7 +73,15 @@ _DESTROY_FOR = {
 # trust domain keeps MINTING: tcp/8081 is an API that issues identities, so a lab
 # nobody remembers is an identity provider nobody is watching. Its teardown closes
 # that port, which is the reachability kill switch.
-REAPABLE_KINDS = ("vm", "database", "k8s", "pov", "certlab", "spirelab")
+#
+# "workloadk8s" is a Password-Safe-brokered ServiceAccount token for a workload outside
+# the cluster, and its argument is the same as spirelab's with the cost removed entirely:
+# there is no billable resource here at all. What a forgotten row leaves behind is a
+# ServiceAccount with a live RoleBinding and a managed account Password Safe will keep
+# serving a fresh token from, to anyone who can retrieve it. Its teardown deletes the
+# ServiceAccount, which is the one hard kill switch the mechanism has — every token ever
+# issued is bound to that account's uid and dies with it.
+REAPABLE_KINDS = ("vm", "database", "k8s", "pov", "certlab", "spirelab", "workloadk8s")
 
 # Clouds whose VM teardown is a claimable job (the keys of _DESTROY_FOR, as inventory
 # `cloud` values).
@@ -106,6 +114,13 @@ _REAPABLE_STATES = {
     # for the same reason as certlab: a half-built lab may have an ACL open and a
     # server part-configured, and a human should decide which.
     "spirelab": frozenset({"available"}),
+    # workload_k8s_service marks a finished onboard "active". "failed" is excluded for the
+    # same reason as the two labs above, and one specific to this kind: a failed onboard
+    # may have created the ServiceAccount and its binding without ever reaching Password
+    # Safe, so the row names no managed account to deregister while the in-cluster half
+    # really is there. Destroying on that record would leave the binding behind and report
+    # success. A human looks at it.
+    "workloadk8s": frozenset({"active"}),
     # k8s_service lands a finished provision on "registered", and the management-plane
     # path also produces "managed" / "awaiting_agent".
     "k8s":      frozenset({"registered", "managed", "awaiting_agent"}),

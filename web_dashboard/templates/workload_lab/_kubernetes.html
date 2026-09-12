@@ -1,0 +1,569 @@
+{# Workload Lab → Kubernetes. A Password-Safe-brokered ServiceAccount token for a
+   workload OUTSIDE the cluster. Backed by /api/workload-k8s.
+
+   THIS IS THE MANAGED-CLUSTER ANSWER, and that is the whole reason it exists next to the
+   SPIRE tab rather than inside it. The SPIRE lab's Kubernetes panel proves a workload can
+   reach an API server holding a credential stored NOWHERE — but it does that with
+   `--authentication-config`, a kube-apiserver flag, so it works on self-managed k3s and on
+   none of EKS, AKS or GKE. Every cluster this dashboard provisions is in the second group.
+   The two tabs are two answers to one question and the page shows both, because which one
+   an operator can have depends entirely on who runs their control plane.
+
+   Three things here are load-bearing and easy to mistake for decoration:
+     * THE PROFILE, not the token. `deployer` binds ClusterRole/edit through a RoleBinding
+       in ONE namespace; `reader` binds ClusterRole/view through a ClusterRoleBinding.
+       Neither is cluster-admin, and the refusals are what the demonstration turns on.
+     * `rotated`. A bearer token is far longer than the 128 characters Password Safe's
+       create API accepts, so the managed account is ALWAYS created holding a placeholder.
+       Until a rotation has completed the row looks onboarded and the vault holds nothing
+       that authenticates — so the page says so rather than showing a green badge.
+     * ROTATION DOES NOT REVOKE. A token already retrieved lives out its TTL. Deleting the
+       ServiceAccount is the kill switch, because every token is bound to its uid.
+
+   The consumer panel returns NO credential and never will: retrieval is the consumer's
+   own Password Safe call with its own client id, which is what records WHICH BUILD read
+   the token. A value proxied through this dashboard would record only that the dashboard
+   did, and would be a second unaudited way to read it. #}
+
+<div x-data="workloadK8sTab()" x-init="init()">
+
+  <div class="flex justify-end mb-3 sm:mb-1">
+    <button @click="openOnboard()" :disabled="!usableClusters().length"
+            :class="usableClusters().length ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-300 cursor-not-allowed'"
+            class="text-white text-sm font-medium px-3 py-1.5 rounded-lg">
+      Onboard a workload identity
+    </button>
+  </div>
+  <p class="text-sm text-gray-500 mb-6">
+    A <strong>bound ServiceAccount token</strong> for a machine <em>outside</em> the
+    cluster &mdash; a CI build, a fleet scan &mdash; minted by the API server, rotated and
+    audited by Password Safe, retrieved per run. This is the path that works on a
+    <strong>managed</strong> cluster: the SPIFFE route needs
+    <code class="text-xs">--authentication-config</code>, which EKS, AKS and GKE do not let
+    you pass.
+    <a href="/docs/workload-kubernetes" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>.
+    For a self-managed cluster with <strong>no credential at rest at all</strong>, use
+    <button type="button" @click="$dispatch('select-tab', 'spire')"
+            class="text-blue-600 hover:underline">the SPIRE tab</button>.
+  </p>
+
+  <!-- Toast -->
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm whitespace-pre-line" x-text="toast"></div>
+
+  <!-- What is not configured yet. Every item produces a failure inside Password Safe at
+       the first rotation, where this dashboard sees only a generic error. -->
+  <div x-show="missing.length" x-cloak
+       class="mb-6 border border-amber-200 bg-amber-50 rounded-lg px-4 py-3">
+    <p class="text-sm font-medium text-amber-800 mb-1">Not configured yet</p>
+    <ul class="text-sm text-amber-700 list-disc list-inside space-y-0.5">
+      <template x-for="m in missing" :key="m"><li x-text="m"></li></template>
+    </ul>
+  </div>
+
+  <div x-show="loading" class="text-sm text-gray-500">Loading…</div>
+
+  <div x-show="!loading && !identities.length" x-cloak
+       class="border border-dashed border-gray-300 rounded-lg p-8 text-center">
+    <p class="text-sm text-gray-600 mb-1">No workload identity is onboarded.</p>
+    <p class="text-xs text-gray-500">
+      Onboard a <strong>Deployer</strong> to show a CI build deploying into one namespace
+      and being refused in another, or a <strong>Reader</strong> to show a cluster-wide
+      scan that cannot read Secrets.
+    </p>
+  </div>
+
+  <!-- Identities -->
+  <div x-show="!loading && identities.length" x-cloak class="space-y-4">
+    <template x-for="row in identities" :key="row.id">
+      <div class="border border-gray-200 rounded-lg p-4">
+
+        <div class="flex flex-wrap items-start justify-between gap-2 mb-2">
+          <div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="font-medium text-gray-800" x-text="row.name"></span>
+              <span class="text-xs px-2 py-0.5 rounded-full"
+                    :class="row.profile === 'reader' ? 'bg-purple-100 text-purple-800' : 'bg-indigo-100 text-indigo-800'"
+                    x-text="row.profile"></span>
+              <span class="text-xs px-2 py-0.5 rounded-full" :class="statusClass(row.status)"
+                    x-text="row.status"></span>
+              <!-- The placeholder warning. Not a nit: until a rotation completes the
+                   vault holds the create-time placeholder, and everything else on this
+                   row looks finished. -->
+              <span x-show="row.status === 'active' && !row.rotated" x-cloak
+                    class="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800"
+                    title="A bearer token is too long to seed, so the account was created holding a placeholder. Rotate to put a real credential in the vault.">
+                placeholder — never rotated
+              </span>
+            </div>
+            <p class="text-xs text-gray-500 mt-1">
+              <span x-text="row.cluster_name || row.cluster_id"></span>
+              <span x-show="row.cloud" x-cloak> · <span x-text="row.cloud"></span></span>
+              · <code x-text="row.namespace + '/' + row.service_account"></code>
+              · <span x-text="row.mode"></span><span x-show="row.mode === 'bound' && row.ttl_seconds"
+                    x-cloak>, ttl <span x-text="row.ttl_seconds"></span>s</span>
+            </p>
+          </div>
+          <div class="flex gap-2">
+            <button @click="openConsumer(row)"
+                    class="text-xs border border-gray-300 hover:bg-gray-50 px-2 py-1 rounded">
+              Consumer details
+            </button>
+            <button @click="rotate(row)" :disabled="busy || !row.ps_account_id"
+                    class="text-xs border border-gray-300 hover:bg-gray-50 px-2 py-1 rounded disabled:opacity-50">
+              Rotate
+            </button>
+            <button @click="destroy(row)" :disabled="busy"
+                    class="text-xs border border-red-300 text-red-700 hover:bg-red-50 px-2 py-1 rounded disabled:opacity-50">
+              Delete
+            </button>
+          </div>
+        </div>
+
+        <!-- What this identity may actually do. Resolved server-side so the page cannot
+             describe a binding the service does not create. -->
+        <p class="text-xs text-gray-600 bg-gray-50 border border-gray-200 rounded px-2 py-1.5 mb-2">
+          <span x-text="row.binds"></span>
+        </p>
+
+        <!-- Steps. A failed one's error exists only in its own job log, so each links. -->
+        <div class="flex flex-wrap items-center gap-1.5 mb-2">
+          <template x-for="(st, i) in row.stages" :key="st">
+            <span class="text-xs px-1.5 py-0.5 rounded border"
+                  :class="row.stages_done.includes(st)
+                            ? 'bg-green-50 border-green-200 text-green-700'
+                            : 'bg-gray-50 border-gray-200 text-gray-400'"
+                  x-text="st.replace(/_/g, ' ')"></span>
+          </template>
+          <template x-for="jid in row.stage_job_ids" :key="jid">
+            <a :href="'/jobs/' + jid" target="_blank"
+               class="text-xs text-blue-600 hover:underline">job</a>
+          </template>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-xs">
+          <div x-show="row.ps_account_name" x-cloak>
+            <span class="text-gray-500">Managed account</span>
+            <code class="ml-1" x-text="row.ps_account_name"></code>
+          </div>
+          <div x-show="row.ps_address" x-cloak>
+            <span class="text-gray-500">Address</span>
+            <code class="ml-1 break-all" x-text="row.ps_address"></code>
+          </div>
+          <div x-show="row.expires_at" x-cloak>
+            <span class="text-gray-500">Auto-delete</span>
+            <span class="ml-1" :class="expiryClass(row.expires_at)"
+                  x-text="fmt(row.expires_at)"></span>
+          </div>
+        </div>
+
+        <p x-show="row.error_message" x-cloak
+           class="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1.5 whitespace-pre-line"
+           x-text="row.error_message"></p>
+      </div>
+    </template>
+  </div>
+
+  <!-- ── Onboard ──────────────────────────────────────────────────────────── -->
+  <div x-show="onboardOpen" x-cloak
+       class="fixed inset-0 bg-black/40 flex items-start justify-center p-4 overflow-y-auto z-50">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-lg my-8 p-5" @click.outside="onboardOpen = false">
+      <h3 class="text-lg font-semibold text-gray-800 mb-1">Onboard a workload identity</h3>
+      <p class="text-xs text-gray-500 mb-4">
+        The <strong>profile</strong> is the decision here, not the token. It selects the
+        RBAC, and the RBAC is what makes a vaulted token worth demonstrating &mdash;
+        neither profile is <code>cluster-admin</code>.
+      </p>
+
+      <div class="space-y-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Name</label>
+          <input x-model="form.name" type="text" placeholder="ci-deployer"
+                 class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Cluster</label>
+          <select x-model="form.cluster_id"
+                  class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+            <option value="">Choose a registered cluster…</option>
+            <template x-for="c in usableClusters()" :key="c.id">
+              <option :value="c.id" x-text="c.name + ' (' + c.cloud + ')'"></option>
+            </template>
+          </select>
+          <!-- Listed, not hidden: an operator who registered it is entitled to see why
+               it cannot be chosen. -->
+          <p x-show="unusableClusters().length" x-cloak class="text-xs text-gray-500 mt-1">
+            Not selectable (no stored kubeconfig, so nothing here can reach the API
+            server):
+            <span x-text="unusableClusters().map(c => c.name).join(', ')"></span>
+          </p>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Profile</label>
+          <div class="space-y-2">
+            <template x-for="p in options.profiles" :key="p.key">
+              <label class="flex items-start gap-2 border border-gray-200 rounded px-2 py-1.5 cursor-pointer"
+                     :class="form.profile === p.key ? 'border-blue-400 bg-blue-50' : ''">
+                <input type="radio" :value="p.key" x-model="form.profile" class="mt-0.5">
+                <span>
+                  <span class="text-sm font-medium text-gray-800" x-text="p.key"></span>
+                  <span class="block text-xs text-gray-600" x-text="p.binds"></span>
+                </span>
+              </label>
+            </template>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">Namespace</label>
+            <input x-model="form.namespace" type="text" placeholder="default"
+                   class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+            <p class="text-xs text-gray-500 mt-1">
+              Created if it does not exist. For <strong>deployer</strong> this is the
+              <em>only</em> namespace the token may write in.
+            </p>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">ServiceAccount</label>
+            <input x-model="form.service_account" type="text" placeholder="deploy-bot"
+                   class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+          </div>
+        </div>
+
+        <!-- THE CLOUD'S OWN NAME FOR THE CLUSTER. Derivable for a cluster this dashboard
+             provisioned (its deploy job carries it); NOT derivable for a registered one,
+             which has no deploy job — and the plugin's address cannot be built without it,
+             so the onboard is refused. Shown only when it is actually needed, because for
+             the provisioned case an empty field an operator feels obliged to fill is how a
+             wrong cluster name gets in. -->
+        <div x-show="needsCloudName()" x-cloak
+             class="border border-gray-200 rounded px-3 py-2 space-y-3">
+          <p class="text-xs text-gray-600">
+            <span x-text="selectedCluster()?.cloud === 'aws' ? 'EKS' :
+                          (selectedCluster()?.cloud === 'azure' ? 'AKS' : 'GKE')"></span>
+            needs the cloud's own name for this cluster. The dashboard only stores the label
+            you registered it under, and the Password Safe plugin looks it up by its real
+            name &mdash; a mismatch fails at the first rotation, inside Password Safe.
+          </p>
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">Cluster name in the cloud</label>
+            <input x-model="form.cluster_name" type="text"
+                   :placeholder="selectedCluster()?.name || ''"
+                   class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+          </div>
+          <div x-show="selectedCluster()?.cloud === 'azure'" x-cloak>
+            <label class="block text-xs font-medium text-gray-700 mb-1">Resource group</label>
+            <input x-model="form.resource_group" type="text"
+                   class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+          </div>
+          <div x-show="selectedCluster()?.cloud === 'gcp'" x-cloak>
+            <label class="block text-xs font-medium text-gray-700 mb-1">Location</label>
+            <input x-model="form.location" type="text"
+                   class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+            <p class="text-xs text-gray-500 mt-1">
+              A zonal cluster's location is its <strong>zone</strong>, a regional one's is
+              its region. Mixing them is the documented cause of a GKE 404.
+            </p>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">Mode</label>
+            <select x-model="form.mode"
+                    class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+              <template x-for="m in options.modes" :key="m">
+                <option :value="m" x-text="m"></option>
+              </template>
+            </select>
+            <p class="text-xs text-gray-500 mt-1">
+              <strong>bound</strong> mints through the TokenRequest API and creates no
+              Secret at all &mdash; strictly less privilege for the rotator.
+            </p>
+          </div>
+          <div x-show="form.mode === 'bound'" x-cloak>
+            <label class="block text-xs font-medium text-gray-700 mb-1">TTL (seconds)</label>
+            <input x-model.number="form.ttl_seconds" type="number" min="600" step="60"
+                   class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+            <p class="text-xs text-gray-500 mt-1">
+              600 is the TokenRequest API's own floor; anything lower is clamped.
+            </p>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">
+            Auto-delete after (hours, blank = never)
+          </label>
+          <input x-model.number="form.expires_in_hours" type="number" min="1"
+                 class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+          <p class="text-xs text-gray-500 mt-1">
+            A forgotten workload token keeps authenticating, and this row is the only page
+            it appears on.
+          </p>
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-2 mt-5">
+        <button @click="onboardOpen = false"
+                class="text-sm px-3 py-1.5 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
+        <button @click="submitOnboard()" :disabled="busy"
+                class="text-sm px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50">
+          Onboard
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Consumer details ─────────────────────────────────────────────────── -->
+  <div x-show="consumerOpen" x-cloak
+       class="fixed inset-0 bg-black/40 flex items-start justify-center p-4 overflow-y-auto z-50">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl my-8 p-5" @click.outside="consumerOpen = false">
+      <h3 class="text-lg font-semibold text-gray-800 mb-1">What the consumer needs</h3>
+      <p class="text-xs text-gray-500 mb-4">
+        <strong>No credential is shown here, and none ever will be.</strong> The consumer
+        retrieves with its own Password Safe client id &mdash; that is what records
+        <em>which build</em> read the token. A value proxied through this page would record
+        only that the dashboard did.
+      </p>
+
+      <div x-show="consumer" x-cloak class="space-y-2 text-sm">
+        <template x-for="f in consumerFields()" :key="f.label">
+          <div class="flex items-start gap-2">
+            <span class="text-xs text-gray-500 w-40 shrink-0 pt-1" x-text="f.label"></span>
+            <code class="flex-1 text-xs bg-gray-50 border border-gray-200 rounded px-2 py-1 break-all"
+                  x-text="f.value"></code>
+            <button @click="copy(f.value)"
+                    class="text-xs text-blue-600 hover:underline pt-1">copy</button>
+          </div>
+        </template>
+
+        <p x-show="!consumer.ready" x-cloak
+           class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
+          Not ready: the managed account either does not exist yet or has never rotated,
+          so a retrieval would return the placeholder it was created with rather than a
+          token.
+        </p>
+
+        <p class="text-xs text-gray-600 pt-2" x-text="consumer.note"></p>
+      </div>
+
+      <div class="flex justify-end mt-5">
+        <button @click="consumerOpen = false"
+                class="text-sm px-3 py-1.5 border border-gray-300 rounded hover:bg-gray-50">Close</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// Every call goes through window.API, which attaches the bearer token from the auth store.
+// The browser's own fetch against an /api route would be ANONYMOUS and 401 -- there is no
+// auth cookie on this app.
+function workloadK8sTab() {
+  return {
+    loading: true,
+    busy: false,
+    identities: [],
+    options: { clusters: [], profiles: [], modes: ['bound', 'longlived'],
+               defaults: { profile: 'deployer', namespace: 'default', mode: 'bound',
+                           ttl_seconds: 600 } },
+    missing: [],
+    toast: '',
+    toastType: 'info',
+
+    onboardOpen: false,
+    // Kept in step with blankForm() below. Two initialisers that drift apart is how a
+    // field ends up undefined on the second onboard of a session.
+    form: { name: '', cluster_id: '', profile: 'deployer', namespace: 'default',
+            service_account: '', mode: 'bound', ttl_seconds: 600,
+            expires_in_hours: null, cluster_name: '', resource_group: '',
+            location: '' },
+
+    // A SNAPSHOT of the row, not a live reference: load() replaces `identities`
+    // wholesale, so holding an element of it would silently detach and the panel would
+    // stop matching what is on screen.
+    consumerOpen: false,
+    consumer: null,
+
+    async init() {
+      await Promise.all([this.load(), this.loadOptions()]);
+      this.loading = false;
+    },
+
+    async load() {
+      try {
+        const out = await API.get('/api/workload-k8s');
+        this.identities = (out && out.identities) || [];
+      } catch (e) {
+        this.notify('Could not load workload identities: ' + (e.message || e), 'error');
+      }
+    },
+
+    async loadOptions() {
+      try {
+        const out = await API.get('/api/workload-k8s/options');
+        if (out) {
+          this.options = out;
+          this.missing = out.missing || [];
+          const d = out.defaults || {};
+          this.form.profile = d.profile || 'deployer';
+          this.form.namespace = d.namespace || 'default';
+          this.form.mode = d.mode || 'bound';
+          this.form.ttl_seconds = d.ttl_seconds || 600;
+        }
+      } catch (e) { /* the tab still lists what exists without the hints */ }
+    },
+
+    // A cluster with no stored kubeconfig cannot be reached to create the
+    // ServiceAccount, so it is shown but not selectable.
+    usableClusters() { return (this.options.clusters || []).filter(c => c.usable); },
+    unusableClusters() { return (this.options.clusters || []).filter(c => !c.usable); },
+
+    selectedCluster() {
+      return (this.options.clusters || []).find(c => c.id === this.form.cluster_id) || null;
+    },
+
+    // The three managed clouds build a per-cloud address and need the cloud's real name
+    // for the cluster; a generic (`k8s;<apiServerUrl>`) one is built from the stored API
+    // server and needs nothing. `source` says whether the dashboard provisioned it: a
+    // provisioned cluster has a deploy job carrying every part, so asking would invite a
+    // wrong answer where a derived one is already right.
+    needsCloudName() {
+      const c = this.selectedCluster();
+      if (!c) return false;
+      return ['aws', 'azure', 'gcp'].includes(c.cloud) && c.source !== 'provisioned';
+    },
+
+    notify(msg, type) {
+      this.toast = msg;
+      this.toastType = type || 'info';
+      setTimeout(() => { this.toast = ''; }, 9000);
+    },
+
+    copy(text) {
+      if (!text) return;
+      navigator.clipboard.writeText(text)
+        .then(() => this.notify('Copied.'))
+        .catch(() => this.notify('Could not copy — select it by hand.', 'error'));
+    },
+
+    statusClass(s) {
+      if (s === 'active') return 'bg-green-100 text-green-800';
+      if (s === 'failed') return 'bg-red-100 text-red-800';
+      if (s === 'deleted') return 'bg-gray-100 text-gray-600';
+      return 'bg-blue-100 text-blue-800';
+    },
+
+    fmt(iso) {
+      if (!iso) return '';
+      try { return new Date(iso).toLocaleString(); } catch (e) { return iso; }
+    },
+
+    // Amber inside a day, red once lapsed. The reap deletes the ServiceAccount, which
+    // invalidates every token ever issued to it -- worth colouring rather than printing.
+    expiryClass(iso) {
+      if (!iso) return 'text-gray-400';
+      const hours = (new Date(iso) - new Date()) / 3600000;
+      if (hours < 0) return 'text-red-600 font-medium';
+      if (hours < 24) return 'text-amber-600 font-medium';
+      return 'text-gray-600';
+    },
+
+    // ONE shape, used by openOnboard() and matching the `form` literal above.
+    blankForm() {
+      const d = this.options.defaults || {};
+      return { name: '', cluster_id: '', profile: d.profile || 'deployer',
+               namespace: d.namespace || 'default', service_account: '',
+               mode: d.mode || 'bound', ttl_seconds: d.ttl_seconds || 600,
+               expires_in_hours: null, cluster_name: '', resource_group: '',
+               location: '' };
+    },
+
+    openOnboard() {
+      this.form = this.blankForm();
+      this.onboardOpen = true;
+    },
+
+    async submitOnboard() {
+      this.busy = true;
+      try {
+        const body = Object.assign({}, this.form);
+        // Blank means "never", and the API takes null rather than 0 -- 0 hours would be
+        // an expiry in the past, which the reaper would act on immediately.
+        if (!body.expires_in_hours) body.expires_in_hours = null;
+        const out = await API.post('/api/workload-k8s', body);
+        this.onboardOpen = false;
+        this.notify('Onboarding ' + (out.account_name || '') + '. The first rotation is '
+                    + 'what puts a real token in the vault — watch the job.');
+        await this.load();
+      } catch (e) {
+        this.notify('Onboard failed: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+
+    async rotate(row) {
+      this.busy = true;
+      try {
+        await API.post('/api/workload-k8s/' + row.id + '/rotate', {});
+        // Said plainly rather than left to be inferred: an operator who rotates to lock
+        // somebody out has not, and finding that out later is the expensive way.
+        this.notify('Rotating. This does NOT revoke — a token already retrieved keeps '
+                    + 'working until its TTL expires. Delete the identity to invalidate '
+                    + 'every token at once.');
+        await this.load();
+      } catch (e) {
+        this.notify('Rotate failed: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+
+    async destroy(row) {
+      if (!confirm('Delete ' + row.namespace + '/' + row.service_account + ' on '
+                   + (row.cluster_name || row.cluster_id) + '?\n\n'
+                   + 'This deletes the ServiceAccount, so every token Password Safe has '
+                   + 'ever issued for it stops working immediately. The namespace is left '
+                   + 'alone.')) return;
+      this.busy = true;
+      try {
+        await API.del('/api/workload-k8s/' + row.id);
+        this.notify('Deleting. Every token issued to that ServiceAccount is now invalid.');
+        await this.load();
+      } catch (e) {
+        this.notify('Delete failed: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+
+    async openConsumer(row) {
+      this.consumer = null;
+      this.consumerOpen = true;
+      try {
+        this.consumer = await API.get('/api/workload-k8s/' + row.id + '/consumer');
+      } catch (e) {
+        this.consumerOpen = false;
+        this.notify('Could not load the consumer details: ' + (e.message || e), 'error');
+      }
+    },
+
+    // Built here rather than in the markup so the order is fixed and the copy button gets
+    // exactly the string a play needs. `account_name` is the one that has to be right:
+    // secret_list is `<system>/<account>`, and a wrong half fails as "not found", which
+    // reads like a permissions problem.
+    consumerFields() {
+      const c = this.consumer || {};
+      return [
+        { label: 'Managed system', value: c.managed_system || '' },
+        { label: 'Managed account', value: c.account_name || '' },
+        { label: 'Workgroup / safe', value: c.workgroup || '(none configured)' },
+        { label: 'Namespace', value: c.namespace || '' },
+        { label: 'Binds', value: c.binds || '' },
+        { label: 'Consumer playbook', value: c.playbook || '' },
+      ];
+    },
+  };
+}
+</script>
