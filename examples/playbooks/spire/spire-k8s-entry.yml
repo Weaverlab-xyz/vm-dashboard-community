@@ -1,0 +1,206 @@
+# Register the k3s node and the workload that will reach its API server
+# Target: the SPIRE server VM, after spire-server-install.yml. Idempotent.
+#
+# Everything the SPIRE server has to know about the Kubernetes half of the lab, in one
+# place because it all needs the server's own CLI: a join token for the k3s node, the node
+# entry that token attests to, and the workload entry whose JWT-SVID the API server will
+# accept. The agent and the API server are configured by the two plays that follow, on the
+# other host.
+#
+# NEVER LIVE-VALIDATED — see docs/design/workload-k8s-short-lived-token.md.
+#
+# THE WORKLOAD ENTRY IS DELIBERATELY NOT IN spire-seed-entries.yml. That play seeds 11
+# entries and docs/spiffe.md asserts discovery returns exactly 8 of them;
+# tests/test_playbook_spire.py computes those numbers from its _entries list. Adding an
+# entry there would move a count that has already caught a real bug — the plugin shipping
+# with discovery filtered to the mintable prefix — and retire the assertion that caught
+# it. So this entry lives here, where it changes nothing the governance demo measures.
+#
+# THE AUDIENCE IS THE SECURITY BOUNDARY, not a label. A JWT-SVID is a bearer token: any
+# service that accepts an audience it was not issued for will accept a token minted for
+# somebody else's service. `-jwtSVIDTTL` and the audience the workload requests must both
+# line up with the API server's AuthenticationConfiguration, and `audience` below is the
+# one string that has to match in three places — here, the provider's relying party
+# config, and the workload's SPIFFE_JWT_AUDIENCE.
+#
+# A JOIN TOKEN IS ONE-USE AND SHORT-LIVED. It is printed by default, which means anyone
+# who can read the job output can attest a host into this trust domain until it is spent
+# or expires. Set node_token_secret to keep it out of the log, exactly as k3s-server-init
+# does with the k3s node token.
+#
+# extra_vars:
+#   trust_domain: weaverlab.test      # REQUIRED — must match the running server
+#   audience: k8s                     # must match the API server and the workload
+#   workload_uid: 1010                # the UID the workload runs as on the k3s node
+#   workload_path: /ns/kube-system/sa/deploy-bot
+#   node_path: /node/k3s-01
+#   jwt_svid_ttl: 300                 # seconds. 5m is the server default; this is the
+#                                     #   whole point of the pattern, so it is explicit
+#   join_token_ttl: 600               # seconds the token stays usable
+#   node_token_secret: ""             # folder/title — store instead of printing
+#   token_safe: Automation
+- name: Register the k3s node and its workload with SPIRE
+  hosts: all
+  become: true
+  vars:
+    trust_domain: ""
+    audience: "k8s"
+    workload_uid: 1010
+    workload_path: /ns/kube-system/sa/deploy-bot
+    node_path: /node/k3s-01
+    jwt_svid_ttl: 300
+    join_token_ttl: 600
+    spire_root: /opt/spire
+    node_token_secret: ""
+    token_safe: "Automation"
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true
+  tasks:
+    - name: Require a trust domain and legal SPIFFE paths
+      ansible.builtin.assert:
+        that:
+          - trust_domain | length > 0
+          - "'/' not in trust_domain"
+          - workload_path is match('^(/[A-Za-z0-9._-]+)+$')
+          - node_path is match('^(/[A-Za-z0-9._-]+)+$')
+          - audience | length > 0
+        fail_msg: >-
+          trust_domain is required as a bare name such as 'weaverlab.test', and both
+          paths must be SPIFFE-legal — segments of letters, numbers, dots, dashes and
+          underscores only. The server REFUSES anything else outright, so an illegal
+          path produces an entry that simply never exists.
+
+    - name: Validate the Password Safe destination
+      ansible.builtin.assert:
+        that:
+          - "'/' in node_token_secret or node_token_secret | length == 0"
+          - ps_api_url | length > 0 or node_token_secret | length == 0
+        fail_msg: >-
+          node_token_secret must be 'folder/title', and writing needs the
+          PASSWORD_SAFE_* credentials (auto-injected when BeyondTrust is configured).
+
+    - name: Resolve the identities
+      ansible.builtin.set_fact:
+        _node_id: "spiffe://{{ trust_domain }}{{ node_path }}"
+        _workload_id: "spiffe://{{ trust_domain }}{{ workload_path }}"
+
+    - name: Confirm the server is up
+      ansible.builtin.command: "{{ spire_root }}/bin/spire-server healthcheck"
+      register: entry_health
+      changed_when: false
+
+    # NO HAND-MADE NODE ENTRY HERE, and that is the correction worth reading. `token
+    # generate -spiffeID` creates the node registration entry itself, with the token's own
+    # UUID as the selector value — which is the only value that can work, because that is
+    # what the attesting agent presents. Writing the entry by hand with a made-up
+    # `join_token:<name>` selector, the way spire-seed-entries.yml does, produces an entry
+    # no agent ever matches: that play has no agent at all and its node entry exists only
+    # to give the workload entries a parent and to give discovery something to exclude.
+    # Here an agent really attests, so the token has to be what mints the entry.
+    #
+    # Re-running this play therefore mints another token and another node entry for the
+    # same SPIFFE ID. That is how re-attestation works and it is harmless to the
+    # governance demo: the plugin excludes node/agent entries from discovery, so the
+    # documented 8-of-11 count does not move.
+    - name: Generate a join token, which also creates the node entry
+      ansible.builtin.command: >-
+        {{ spire_root }}/bin/spire-server token generate
+        -spiffeID {{ _node_id }}
+        -ttl {{ join_token_ttl }}
+      register: join_token_raw
+      changed_when: true
+      no_log: true
+
+    # `token generate` prints "Token: <uuid>". Parsed rather than passed through whole,
+    # because the agent config takes the bare value and a stray label in it fails
+    # attestation with a message about the token being unknown.
+    - name: Extract the join token
+      ansible.builtin.set_fact:
+        _join_token: >-
+          {{ (join_token_raw.stdout | regex_search('Token:\s*(\S+)', '\\1') | first) | default('', true) }}
+      no_log: true
+
+    - name: Confirm a token was produced
+      ansible.builtin.assert:
+        that:
+          - _join_token | length > 0
+        fail_msg: >-
+          Could not parse a token out of `spire-server token generate`. Its output
+          format changed, or the command failed while returning 0 — re-run it by hand
+          on this host and read what it actually printed.
+
+    # unix:uid is the attestation, and it is what makes this different from the vaulted
+    # identities the governance demo covers: nothing is stored anywhere, and only a process
+    # running as this UID on the attested node can obtain a token at all. Parented to the
+    # node entry the token above created.
+    - name: Create the workload entry
+      ansible.builtin.command: >-
+        {{ spire_root }}/bin/spire-server entry create
+        -parentID {{ _node_id }}
+        -spiffeID {{ _workload_id }}
+        -selector unix:uid:{{ workload_uid }}
+        -jwtSVIDTTL {{ jwt_svid_ttl }}
+      register: k8s_workload_entry
+      changed_when: "'already exists' not in (k8s_workload_entry.stdout + k8s_workload_entry.stderr)"
+      failed_when:
+        - k8s_workload_entry.rc != 0
+        - "'already exists' not in (k8s_workload_entry.stdout + k8s_workload_entry.stderr)"
+
+    - name: Read the trust bundle
+      ansible.builtin.command: "{{ spire_root }}/bin/spire-server bundle show"
+      register: k8s_bundle
+      changed_when: false
+
+    # delegate_to: localhost is load-bearing. secrets_create is a MODULE, so by default it
+    # would run on the SPIRE host, which has no beyondtrust-bips-library. Only the runner
+    # container does. Same reasoning as k3s-server-init.yml.
+    - name: Store the join token in Password Safe
+      beyondtrust.secrets_safe.secrets_create:
+        api_url: "{{ ps_api_url }}"
+        api_version: "3.1"
+        client_id: "{{ ps_client_id }}"
+        client_secret: "{{ ps_client_secret }}"
+        verify_ca: "{{ ps_verify_ca }}"
+        safe_name: "{{ token_safe }}"
+        folder_name: "{{ node_token_secret.split('/')[:-1] | join('/') }}"
+        title: "{{ node_token_secret.split('/') | last }}"
+        secret_type: "text"
+        text: "{{ _join_token }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      when: node_token_secret | length > 0
+
+    - name: The trust bundle, for the next two plays
+      ansible.builtin.debug:
+        msg: "{{ k8s_bundle.stdout }}"
+
+    - name: What was registered (join token stored in Password Safe)
+      ansible.builtin.debug:
+        msg:
+          - "Node entry:     {{ _node_id }}  (created by the join token, selector is its UUID)"
+          - "Workload entry: {{ _workload_id }}  (selector unix:uid:{{ workload_uid }})"
+          - "JWT-SVID TTL:   {{ jwt_svid_ttl }}s — this is the short-lived token."
+          - "Audience:       '{{ audience }}' must match the API server AND the workload."
+          - "Join token stored at '{{ node_token_secret }}' in safe '{{ token_safe }}'."
+          - "It is ONE-USE and expires in {{ join_token_ttl }}s — run the agent play now."
+          - "Copy the trust bundle printed above into BOTH remaining plays."
+          - "Next: spire-agent-install.yml on the k3s node, then k3s-spiffe-auth.yml."
+      when: node_token_secret | length > 0
+
+    - name: What was registered (join token printed — nothing was stored)
+      ansible.builtin.debug:
+        msg:
+          - "Node entry:     {{ _node_id }}  (created by the join token, selector is its UUID)"
+          - "Workload entry: {{ _workload_id }}  (selector unix:uid:{{ workload_uid }})"
+          - "JWT-SVID TTL:   {{ jwt_svid_ttl }}s — this is the short-lived token."
+          - "Audience:       '{{ audience }}' must match the API server AND the workload."
+          - "Join token:     {{ _join_token }}"
+          - "It is ONE-USE and expires in {{ join_token_ttl }}s — run the agent play now."
+          - "Anyone who can read this job output can attest a host until then. Set"
+          - "node_token_secret next time to store it instead of printing it."
+          - "Copy the trust bundle printed above into BOTH remaining plays."
+          - "Next: spire-agent-install.yml on the k3s node, then k3s-spiffe-auth.yml."
+      when: node_token_secret | length == 0

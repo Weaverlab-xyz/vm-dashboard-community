@@ -16,6 +16,9 @@ network ACL is opened — see [Opening the port](#opening-the-port).
 | `spire-open-ports.yml` | Linux VM (SSH) | `ansible-winrm` | Opens tcp/8081 on the **host** firewall (firewalld or ufw) |
 | `spire-seed-entries.yml` | Linux VM (SSH) | `ansible-winrm` | The 11 registration entries the demo is built on |
 | `spire-admin-identity.yml` | Linux VM (SSH) | `ansible-winrm` | Mints the admin X509-SVID, packs a PKCS#12, writes it into Password Safe |
+| `spire-oidc-provider.yml` | the SPIRE VM (SSH) | `ansible-winrm` | The OIDC Discovery Provider, serving JWKS over TLS with an SVID SPIRE issued itself. **Never live-validated** |
+| `spire-k8s-entry.yml` | the SPIRE VM (SSH) | `ansible-winrm` | A join token for a k3s node, and the workload entry carrying the `k8s` audience. **Never live-validated** |
+| `spire-agent-install.yml` | the **k3s node** (SSH) | `ansible-winrm` | A SPIRE agent, and a JWT-SVID fetched as the workload to prove the chain. **Never live-validated** |
 
 All four are `--syntax-check` clean against `chrweav/ansible-winrm`, which is the image
 to use: `spire-open-ports.yml` needs `ansible.posix`, and `spire-admin-identity.yml`
@@ -41,6 +44,36 @@ Kubernetes/database image.
 5. **`spire-admin-identity.yml`**, passing `admin_secret_folder`. Copy the two Secrets
    Safe values it names into the Password Safe functional account, and the printed
    trust bundle into the managed system's `SpiffeTrustBundlePem`.
+
+### The optional Kubernetes track
+
+**The dashboard's build job does not run these three.** It runs the four plays above and
+stops; these are a by-hand extension, and they need a second host — a k3s cluster — that
+the SPIRE page knows nothing about.
+
+They exist because the four plays above prove *issuance* and *governance* and never prove
+that a relying party accepts the result. Here the relying party is a Kubernetes API server,
+and the credential is a JWT-SVID the workload fetches for itself — so unlike every identity
+the plugin governs, nothing is stored in a vault, on disk, or anywhere else.
+
+6. **`spire-oidc-provider.yml`** on the SPIRE VM, passing `oidc_domain` — the address the
+   *Kubernetes API server* will reach it on, which is why `localhost` is refused. Open the
+   port on the host firewall and the cloud ACL afterwards, the same two gates as step 3.
+7. **`spire-k8s-entry.yml`** on the SPIRE VM. Note its entry is deliberately **not** added
+   to `spire-seed-entries.yml`: that play's 11-in/8-discovered count is asserted by
+   `tests/test_playbook_spire.py` and stated in three documents, and it has already caught
+   a real bug. Keep it still.
+8. **`spire-agent-install.yml`** on the k3s node, with the join token and trust bundle from
+   step 7. The lab has never had an agent before — the plugin only talks to the server API —
+   and this is the play that makes the un-vaulted path possible at all.
+9. **`k3s/k3s-spiffe-auth.yml`** on the k3s server. See
+   [`examples/playbooks/README.md`](../README.md) for that half.
+
+**None of the three has been run against a live server-and-cluster pair.** Treat the first
+run as the validation; each play ends with what to check by hand and how its failures read.
+The argument for the pattern, and the honest comparison against the ServiceAccount-token
+path the dashboard already ships, is in
+[docs/design/workload-k8s-short-lived-token.md](../../../docs/design/workload-k8s-short-lived-token.md).
 
 ## What each one is actually proving
 

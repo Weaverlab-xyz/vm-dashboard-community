@@ -3,22 +3,29 @@
    in this dashboard ever presents one to a relying party, so the lab proves issuance and
    governance but never proves acceptance.
 
-   The argument, the comparison against the Bound-mode path that IS built, and the three
-   playbooks this would need are in docs/design/workload-k8s-short-lived-token.md. Keep this
-   tab and that note in step — the note is the reasoning, this is the summary.
+   THE PLAYBOOKS NOW EXIST; nothing here runs them. Four plays across
+   examples/playbooks/spire/ and examples/playbooks/k3s/ build the chain by hand, and none
+   has been run against a live server-and-cluster pair. This tab must keep saying so — the
+   moment it reads like a feature, somebody demonstrates it to a customer cold.
+
+   The argument and the comparison against the Bound-mode path that IS built are in
+   docs/design/workload-k8s-short-lived-token.md. Keep this tab and that note in step: the
+   note is the reasoning, this is the summary.
 
    Rides spire_lab_enabled (see index.html): the pattern presupposes a trust domain. #}
 
 <div>
 
   <div class="mb-6 border border-amber-200 bg-amber-50 rounded-lg px-4 py-3 text-sm text-amber-800">
-    <p class="font-medium mb-1">Nothing here is built yet</p>
+    <p class="font-medium mb-1">Playbooks exist &mdash; nothing here runs them, and none is live-validated</p>
     <p>
-      This tab is the argument for a pattern, not a feature. There is no build button, and
-      the three playbooks it describes do not exist. The reasoning, including what would have
-      to be settled first, is in
+      There is no build button on this tab by design. The chain below is four Ansible plays
+      you run yourself through <a href="/config-mgmt" class="text-amber-900 underline">Config
+      Management</a>, and <strong>not one of them has been run against a live SPIRE server and
+      k3s cluster</strong>. Treat the first run as the validation, and read
       <a href="/docs/design/workload-k8s-short-lived-token" target="_blank"
-         class="text-amber-900 underline">the design note</a>.
+         class="text-amber-900 underline">the design note</a> first &mdash; the last play edits
+      the API server's authentication configuration.
     </p>
   </div>
 
@@ -86,7 +93,7 @@
     <div class="px-4 py-3 border-b border-gray-200">
       <h2 class="text-sm font-semibold text-gray-800">Against the path that is already built</h2>
       <p class="text-xs text-gray-500 mt-0.5">
-        This would not replace ServiceAccount token rotation. The two answer different
+This does not replace ServiceAccount token rotation. The two answer different
         questions, and the interesting claim is what each one still leaves lying around.
       </p>
     </div>
@@ -96,7 +103,7 @@
           <tr>
             <th class="text-left font-medium px-4 py-2"></th>
             <th class="text-left font-medium px-4 py-2">Bound-mode SA token <span class="text-xs font-normal text-green-700">(built)</span></th>
-            <th class="text-left font-medium px-4 py-2">JWT-SVID over the Workload API <span class="text-xs font-normal text-gray-400">(not built)</span></th>
+            <th class="text-left font-medium px-4 py-2">JWT-SVID over the Workload API <span class="text-xs font-normal text-amber-700">(plays written, unvalidated)</span></th>
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-100 text-gray-600">
@@ -138,10 +145,10 @@
     </div>
   </div>
 
-  <!-- What it would need -->
+  <!-- What running it takes -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
     <div class="px-4 py-3 border-b border-gray-200">
-      <h2 class="text-sm font-semibold text-gray-800">What it would need</h2>
+      <h2 class="text-sm font-semibold text-gray-800">What running it takes</h2>
     </div>
     <div class="px-4 py-4 text-sm text-gray-600 space-y-3">
       <p>
@@ -153,12 +160,31 @@
         up and emit a registration-ready kubeconfig. That limitation is the pattern's reach:
         a customer running only managed clusters cannot adopt it.
       </p>
-      <p>
-        <strong class="text-gray-700">Three playbooks that do not exist yet</strong> &mdash;
-        the OIDC Discovery Provider beside the SPIRE server, a SPIRE agent on the k3s node
-        (the lab installs the server only), and the API server's authentication config plus
-        an RBAC binding whose subject is the SPIFFE ID.
-      </p>
+      <div>
+        <p class="mb-2">
+          <strong class="text-gray-700">Four plays, alternating hosts.</strong> The middle two
+          are new surface for this lab: it has never had a SPIRE agent, because the Password
+          Safe plugin only ever talks to the server's API.
+        </p>
+        <ol class="list-decimal list-inside space-y-1 text-xs">
+          <li><code class="font-mono">spire/spire-oidc-provider.yml</code> &mdash; on the
+              <strong>SPIRE server</strong>. Publishes the trust domain as an OIDC issuer.</li>
+          <li><code class="font-mono">spire/spire-k8s-entry.yml</code> &mdash; on the
+              <strong>SPIRE server</strong>. A join token, and the workload entry carrying the
+              audience.</li>
+          <li><code class="font-mono">spire/spire-agent-install.yml</code> &mdash; on the
+              <strong>k3s node</strong>. The agent, and a JWT-SVID fetched as the workload to
+              prove the chain.</li>
+          <li><code class="font-mono">k3s/k3s-spiffe-auth.yml</code> &mdash; on the
+              <strong>k3s server</strong>. The authentication config, the RBAC binding, and a
+              kubeconfig holding no credential.</li>
+        </ol>
+        <p class="text-xs text-gray-500 mt-2">
+          Upload them on the <a href="/storage" class="text-blue-600 hover:underline">Storage</a>
+          page first &mdash; a run resolves an asset by bare filename, exactly as the SPIRE
+          tab's four plays do.
+        </p>
+      </div>
       <div class="border border-blue-200 bg-blue-50 rounded-lg px-3 py-2 text-xs text-blue-800">
         Structured Authentication Configuration is stable as of Kubernetes 1.34. Both SPIFFE
         projects above carry a <strong>&ldquo;Development Phase&rdquo;</strong> badge and have

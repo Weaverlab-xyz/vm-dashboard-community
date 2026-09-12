@@ -16,8 +16,17 @@ consumer is a pipeline, not a person.
 
 It is the **SPIRE** tab of the **Workload Lab** page (`/workload-lab`), alongside
 [Certificates](certificates.md) — both labs govern identities that belong to machines, so
-they share a page. Each still has its own preview toggle and its own Settings panel. The
-page's third tab, **Kubernetes access**, argues a pattern nothing here builds yet: see
+they share a page. Each still has its own preview toggle and its own Settings panel.
+
+The page's third tab, **Kubernetes access**, covers the other half of the story this doc
+argues for. Everything below is about identities that are *minted and vaulted*, which
+[Minting is a deliberate downgrade](#minting-is-a-deliberate-downgrade-and-the-honest-version-matters)
+is explicit about being a downgrade. Three further playbooks
+([`spire-oidc-provider.yml`](../examples/playbooks/spire/README.md), `spire-k8s-entry.yml`
+and `spire-agent-install.yml`, plus `k3s/k3s-spiffe-auth.yml`) build the un-downgraded path
+instead: a workload attests itself, fetches a JWT-SVID over the Workload API, and reaches a
+Kubernetes API server with a token stored nowhere. **They are not part of the dashboard's
+build job and none has been run against a live pair** — see
 [the design note](design/workload-k8s-short-lived-token.md).
 
 The companion docs:

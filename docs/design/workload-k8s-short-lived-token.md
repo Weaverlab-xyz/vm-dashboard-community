@@ -2,11 +2,13 @@
 
 > **Audience:** contributor · **Profile:** `demo` · **Read this when:** you are about to build the Workload Lab's Kubernetes tab, or you are deciding whether a SPIFFE identity should be able to authenticate to a cluster at all.
 
-**Nothing in this note is built.** The Workload Lab's **Kubernetes access** tab is an
-explainer over the argument below, and the three playbooks in
-[What building it would take](#what-building-it-would-take) do not exist. This records the
-reasoning while it is fresh, so the build starts from a decision rather than from a blank
-page.
+**The playbooks now exist; none of them has been run against a live pair.** The chain in
+[The playbooks](#the-playbooks) is written and its invariants are pinned by
+`tests/test_playbook_spire.py` and `tests/test_playbook_k3s.py`, but each of the four is
+marked NEVER LIVE-VALIDATED in its own header. Nothing in the dashboard runs them: the SPIRE
+page's build job still runs exactly the four original plays, and the Workload Lab's
+**Kubernetes access** tab is an explainer, not a button. Treat the first real run as the
+validation.
 
 ## The problem
 
@@ -27,10 +29,10 @@ clusters and already has a competing answer to compare against.
 ServiceAccount token onboarded as a Password Safe managed account on the *Kubernetes Service
 Account Token* plugin, with **Bound mode** issuing TokenRequest-API bound tokens.
 
-That is a real short-lived token and it is **not** what this note proposes replacing. It is
-what the proposal has to be better than, on one axis:
+That is a real short-lived token and it is **not** what this replaces. It is what the
+pattern here has to be better than, on one axis:
 
-| | Bound-mode SA token (built) | JWT-SVID over the Workload API (proposed) |
+| | Bound-mode SA token (built, live) | JWT-SVID over the Workload API (plays written, unvalidated) |
 |---|---|---|
 | What authenticates | a bearer token | a bearer token |
 | Where the credential rests | **Password Safe, and PRA Vault via the synced account** | **nowhere** — process memory, for minutes |
@@ -98,9 +100,13 @@ has never been run against a live authority. The value here is that the *pattern
 upstream and standard: the API server side is ordinary OIDC, so nothing in this repo invents
 a trust mechanism.
 
-Note the discovery provider is a **third daemon**, not a SPIRE server flag. The lab installs
-the server only today, so it is new surface — and it must be reachable by the API server over
-TLS, which is what makes it a network question rather than a packaging one.
+Note the discovery provider is a **third daemon**, not a SPIRE server flag, and it ships in
+the `spire-extras` tarball rather than the `spire` one the server play fetches. It must also
+be reachable by the API server over TLS, which makes it a network question as much as a
+packaging one: `spire-oidc-provider.yml` refuses an `oidc_domain` of `localhost` for exactly
+that reason. Neither is the SPIRE agent something the lab had before —
+`spire-server-install.yml` deliberately installs none, because the plugin only ever talks to
+the server's API.
 
 ## 3. `--authentication-config` is what picks the cluster, and it excludes all three clouds
 
@@ -140,33 +146,61 @@ The workload's entry (a unix-UID selector, with `k8s` in its audience list) ther
 the **new** playbook, not in `spire-seed-entries.yml`. Adding it to the seed set would move
 the count and silently retire the one assertion that has already caught a real bug.
 
-## What building it would take
+## The playbooks
 
-| Play | Would do |
-|---|---|
-| `spire-oidc-provider.yml` | The SPIRE OIDC Discovery Provider beside the server, publishing `/.well-known/openid-configuration` and JWKS over TLS to an address the k3s API server can reach |
-| `spire-agent-install.yml` | A SPIRE agent on the k3s node, joined with a join token — the lab installs the server only today, so there is no Workload API anywhere yet |
-| `k3s-spiffe-auth.yml` | The `AuthenticationConfiguration` plus the `kube-apiserver-arg`, a ClusterRoleBinding whose subject is the SPIFFE ID, the workload's registration entry, and the exec-auth binary on the workload host |
+**Four, not the three this note first sketched.** The sketch put the workload's registration
+entry in `k3s-spiffe-auth.yml`, which cannot work: `spire-server entry create` needs the
+server's own CLI and its admin socket, and that play targets the k3s node. Anything the SPIRE
+server has to be *told* is therefore its own play, on its own host.
 
-All three follow the existing pattern: fetched by bare filename from the storage backend,
-run through Config Management on `chrweav/ansible-winrm` (`ansible.posix` is needed and is
-not in `ansible-cloud`). Uploading them to Storage is a prerequisite, as it is for the
-`spire-*` four.
+| Play | Host | Does |
+|---|---|---|
+| `spire/spire-oidc-provider.yml` | SPIRE server | The OIDC Discovery Provider, publishing `/.well-known/openid-configuration` and JWKS over TLS on an address the API server can reach |
+| `spire/spire-k8s-entry.yml` | SPIRE server | A join token for the k3s node, the workload entry carrying the `k8s` audience, and the trust bundle both later plays need |
+| `spire/spire-agent-install.yml` | k3s node | The SPIRE agent, and a JWT-SVID fetched *as the workload account* to prove the chain before reporting success |
+| `k3s/k3s-spiffe-auth.yml` | k3s server | The `AuthenticationConfiguration`, the apiserver flag as a `config.yaml.d` drop-in, an RBAC binding whose subject is the SPIFFE ID, and the exec-auth binary plus a credential-free kubeconfig |
 
-Two things to settle before writing them:
+All four follow the existing pattern: fetched by bare filename from the storage backend, run
+through Config Management on `chrweav/ansible-winrm`. Uploading them to Storage is a
+prerequisite, as it is for the `spire-*` four.
+
+Four things the writing settled, each of them a trap:
+
+- **The node entry must come from the join token, not by hand.** `spire-server token generate
+  -spiffeID X` creates the node registration entry itself, with the token's own UUID as the
+  selector value — the only value an attesting agent can present. Copying
+  `spire-seed-entries.yml`'s hand-written `join_token:bootstrap` entry produces something no
+  agent ever matches; that play has no agent at all, and its node entry exists only to give
+  the workload entries a parent and to give discovery something to exclude.
+- **`WorkloadAttestor "unix"` is not optional.** Without it the agent cannot learn a caller's
+  UID, every `unix:uid` selector matches nothing, and the fetch fails with "no identity
+  issued" — which reads like a missing entry on the server rather than a missing plugin on
+  the node.
+- **`PrivateTmp` must stay off the agent's systemd unit.** The Workload API socket lives under
+  `/tmp`; a private namespace gives the agent its own, the agent passes its own health check,
+  and no workload can ever reach it.
+- **The agent play's verification has to run as the workload.** Fetching as root is attested
+  as `unix:uid:0`, matches no entry, and fails. Fetching as the workload account proves the
+  entry, the selector, the audience and the attestation at once — the single assertion that
+  makes the other three plays meaningful.
+
+And two that are still open:
 
 - **What the username should be.** The `sub` of a JWT-SVID is the SPIFFE ID
   (`spiffe://<trust-domain>/<path>`), so the RBAC subject is a URI. A `claimMappings.username`
   prefix is mandatory unless the claim is `email`, and whatever is chosen becomes the string
   every binding names — the same trap `docs/kubernetes.md` documents for Entitle's sanitized
   `entitle:karen.walker-weaverlab.xyz` subject, where nothing in this repo does the rewrite
-  and the binding has to be read rather than assumed.
+  and the binding has to be read rather than assumed. `k3s-spiffe-auth.yml` defaults
+  `username_prefix` to `spiffe:`, so the subject reads `spiffe:spiffe://<td>/<path>`. It looks
+  wrong and is correct, and it is the first thing to check on a 403.
 - **Whether the k3s node and the SPIRE server share a VM.** One VM is cheaper and the
   auto-delete timer already reaps it; two proves the agent actually attests over the network,
-  which is the half worth proving. Two is probably right, and it doubles the lab's standing
-  cost.
+  which is the half worth proving. The plays assume two — `spire-agent-install.yml` takes
+  `spire_server_address` and refuses to bootstrap without a trust bundle — though nothing
+  stops pointing it at the loopback. Two doubles the lab's standing cost.
 
-## What this would still not demonstrate
+## What this still does not demonstrate
 
 - **No revocation story.** Deleting the entry stops renewal; an SVID already issued stays
   valid for its TTL. Same boundary `docs/spiffe.md` already records, and short TTLs are the

@@ -1,0 +1,309 @@
+# Make the k3s API server accept SPIFFE JWT-SVIDs as bearer tokens
+# Target: the k3s SERVER node, after spire-agent-install.yml on the same host.
+# Idempotent — re-running rewrites the config and restarts k3s only if something changed.
+#
+# The last piece of the chain: the API server trusts the SPIRE OIDC Discovery Provider as a
+# JWT issuer, maps the SPIFFE ID in the token's `sub` to a username, and RBAC binds that
+# username. A workload then reaches the cluster with a token that lives minutes and is
+# written to no disk and no vault. Full argument, and what it is being compared against, in
+# docs/design/workload-k8s-short-lived-token.md.
+#
+# NEVER LIVE-VALIDATED. This is the play in the set most likely to need adjusting, because
+# it edits the API server's authentication configuration: get it wrong and the API server
+# can fail to start. Read "If k3s will not come back" at the end BEFORE the first run.
+#
+# WHY k3s AND NOT A MANAGED CLUSTER. --authentication-config is a kube-apiserver flag.
+# EKS, AKS and GKE do not expose it, so none of the clusters on the dashboard's Kubernetes
+# page can do this at all. k3s takes arbitrary API server flags, which is the whole reason
+# the lab is built on it. That is a real limit on the pattern's reach, not a lab shortcut.
+#
+# STRUCTURED AUTHENTICATION IS GA IN KUBERNETES 1.34 (apiserver.config.k8s.io/v1). On an
+# older k3s the apiVersion has to be v1beta1 and the feature gate turned on; this play
+# checks the server's version and refuses rather than writing a config it will reject.
+#
+# THE USERNAME PREFIX IS MANDATORY AND IT BECOMES PART OF EVERY BINDING. Kubernetes
+# requires a prefix on any claim mapping that is not `email`, so the RBAC subject is
+# "<prefix><spiffe id>" — by default "spiffe:spiffe://td/path", which looks odd and is
+# correct. Read the binding rather than assuming the name; docs/kubernetes.md records the
+# same trap costing hours when Entitle silently rewrote an email into its subject.
+#
+# extra_vars:
+#   oidc_issuer_url: https://10.0.0.10:8443    # REQUIRED — from spire-oidc-provider.yml
+#   trust_bundle_pem: ""                       # REQUIRED — from spire-k8s-entry.yml
+#   workload_spiffe_id: ""                     # REQUIRED — the full spiffe:// URI
+#   audience: k8s                              # MUST match the entry and the workload
+#   username_prefix: "spiffe:"
+#   workload_role: view                        # a ClusterRole that already exists
+#   exec_auth_version: v0.1.0                  # spiffe/k8s-spiffe-workload-jwt-exec-auth
+#   workload_user: deploy-bot                  # gets the kubeconfig
+- name: Accept SPIFFE JWT-SVIDs at the k3s API server
+  hosts: all
+  become: true
+  vars:
+    oidc_issuer_url: ""
+    trust_bundle_pem: ""
+    workload_spiffe_id: ""
+    audience: "k8s"
+    username_prefix: "spiffe:"
+    workload_role: "view"
+    exec_auth_version: "v0.1.0"
+    workload_user: "deploy-bot"
+    k3s_server_dir: /var/lib/rancher/k3s/server
+    auth_config: /var/lib/rancher/k3s/server/spiffe-auth-config.yaml
+    bundle_path: /var/lib/rancher/k3s/server/tls/spiffe-bundle.pem
+    # A drop-in, NOT config.yaml itself: k3s merges everything in config.yaml.d, so this
+    # cannot clobber flags an operator or k3s-server-init.yml already set there.
+    dropin: /etc/rancher/k3s/config.yaml.d/10-spiffe-auth.yaml
+    exec_auth_bin: /usr/local/bin/k8s-spiffe-workload-jwt-exec-auth
+  tasks:
+    - name: Require the issuer, the bundle and the identity
+      ansible.builtin.assert:
+        that:
+          - oidc_issuer_url is match('^https://')
+          - "'BEGIN CERTIFICATE' in trust_bundle_pem"
+          - workload_spiffe_id is match('^spiffe://')
+          - audience | length > 0
+        fail_msg: >-
+          oidc_issuer_url (https, from spire-oidc-provider.yml), trust_bundle_pem (the
+          PEM itself, from spire-k8s-entry.yml) and workload_spiffe_id (the full
+          spiffe:// URI) are all required. The issuer must be https and must be spelled
+          EXACTLY as the discovery document advertises it — Kubernetes matches the
+          issuer string, so a trailing slash or a swapped host rejects every token with
+          no useful message.
+
+    - name: Confirm k3s is running here
+      ansible.builtin.command: systemctl is-active k3s
+      register: k3s_state
+      changed_when: false
+      failed_when: false
+
+    - name: Fail when this is not a k3s server
+      ansible.builtin.fail:
+        msg: >-
+          k3s is not active on this host (systemctl is-active k3s said
+          '{{ k3s_state.stdout | default("nothing") }}'). Run k3s-server-init.yml first —
+          this play edits the API server's configuration and has nothing to edit yet.
+      when: k3s_state.stdout != "active"
+
+    - name: Read the k3s version
+      ansible.builtin.command: k3s --version
+      register: k3s_version_out
+      changed_when: false
+
+    # Structured authentication went GA in 1.34 as apiserver.config.k8s.io/v1. Writing a v1
+    # document to an older API server makes it reject the file and fail to start, which on a
+    # single-node cluster means no API to fix it from. Refused up front instead.
+    - name: Require Kubernetes 1.34 or newer
+      ansible.builtin.assert:
+        that:
+          - _k8s_minor | int >= 34
+        fail_msg: >-
+          This host runs Kubernetes {{ _k8s_minor }}, and apiserver.config.k8s.io/v1
+          AuthenticationConfiguration is GA in 1.34. On an older release the apiVersion
+          must be v1beta1 and the StructuredAuthenticationConfiguration feature gate
+          turned on — both deliberately out of scope here, because a rejected config
+          file stops the API server on a single-node cluster.
+      vars:
+        _k8s_minor: >-
+          {{ (k3s_version_out.stdout | regex_search('v1\.(\d+)\.', '\\1') | first) | default(0, true) }}
+
+    - name: Write the SPIFFE trust bundle for the API server
+      ansible.builtin.copy:
+        dest: "{{ bundle_path }}"
+        content: "{{ trust_bundle_pem }}"
+        mode: "0600"
+      notify: Restart k3s
+
+    # certificateAuthority is why no public CA is involved: the provider serves TLS with an
+    # SVID that SPIRE issued, so the same bundle that validates the token validates the
+    # connection the keys arrived over.
+    #
+    # claimMappings.username.prefix is REQUIRED by Kubernetes for any claim other than
+    # email. The resulting username is what every binding below has to name.
+    - name: Write the AuthenticationConfiguration
+      ansible.builtin.copy:
+        dest: "{{ auth_config }}"
+        mode: "0600"
+        content: |
+          apiVersion: apiserver.config.k8s.io/v1
+          kind: AuthenticationConfiguration
+          jwt:
+          - issuer:
+              url: {{ oidc_issuer_url }}
+              audiences:
+              - {{ audience }}
+              certificateAuthority: |
+          {{ trust_bundle_pem | indent(10, true) }}
+            claimMappings:
+              username:
+                claim: sub
+                prefix: "{{ username_prefix }}"
+            claimValidationRules:
+            # Belt and braces with `audiences` above: the audience is the only thing
+            # stopping a token minted for another relying party being replayed here.
+            - claim: aud
+              requiredValue: {{ audience }}
+      notify: Restart k3s
+
+    - name: Create the drop-in directory
+      ansible.builtin.file:
+        path: /etc/rancher/k3s/config.yaml.d
+        state: directory
+        mode: "0755"
+
+    - name: Point the API server at it
+      ansible.builtin.copy:
+        dest: "{{ dropin }}"
+        mode: "0600"
+        content: |
+          # Managed by k3s-spiffe-auth.yml. A drop-in rather than config.yaml, so flags
+          # set elsewhere survive.
+          kube-apiserver-arg:
+            - "authentication-config={{ auth_config }}"
+      notify: Restart k3s
+
+    - name: Apply the restart before touching the API
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for the API to serve again
+      ansible.builtin.wait_for:
+        port: 6443
+        host: 127.0.0.1
+        timeout: 180
+
+    - name: Resolve the RBAC username
+      ansible.builtin.set_fact:
+        _rbac_user: "{{ username_prefix }}{{ workload_spiffe_id }}"
+
+    # Written as a manifest and applied, rather than `kubectl create clusterrolebinding`,
+    # so a re-run is an update instead of an AlreadyExists failure.
+    - name: Write the RBAC binding
+      ansible.builtin.copy:
+        dest: "{{ k3s_server_dir }}/spiffe-rbac.yaml"
+        mode: "0600"
+        content: |
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: spiffe-workload
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: {{ workload_role }}
+          subjects:
+          - apiGroup: rbac.authorization.k8s.io
+            kind: User
+            name: "{{ _rbac_user }}"
+
+    - name: Bind the SPIFFE identity to a role
+      ansible.builtin.command: >-
+        k3s kubectl apply -f {{ k3s_server_dir }}/spiffe-rbac.yaml
+      register: rbac_apply
+      changed_when: "'unchanged' not in rbac_apply.stdout"
+
+    # ── the client half ──────────────────────────────────────────────────────
+    - name: Install the exec credential plugin
+      ansible.builtin.get_url:
+        url: >-
+          https://github.com/spiffe/k8s-spiffe-workload-jwt-exec-auth/releases/download/{{ exec_auth_version }}/k8s-spiffe-workload-jwt-exec-auth-linux-amd64
+        dest: "{{ exec_auth_bin }}"
+        mode: "0755"
+      register: exec_dl
+      failed_when: false
+
+    # Checked by stat, not by exec_dl.failed: `failed_when: false` makes Ansible report the
+    # task as succeeded whatever happened, so reading .failed here would always be false and
+    # the note below would never print.
+    - name: Check whether the plugin actually landed
+      ansible.builtin.stat:
+        path: "{{ exec_auth_bin }}"
+      register: exec_bin
+
+    # The release asset naming on a project still badged "Development Phase" is the least
+    # stable thing in this play, so a 404 here does not fail the run: everything the API
+    # server needs is already in place, and the binary can be built from source. Said out
+    # loud rather than swallowed.
+    - name: Note a failed plugin download
+      ansible.builtin.debug:
+        msg:
+          - "Could not fetch {{ exec_auth_version }} of the exec credential plugin:"
+          - "  {{ exec_dl.msg | default('no message') }}"
+          - "The CLUSTER side is configured and working regardless — this is the client"
+          - "half only. Build it instead with:"
+          - "  go install github.com/spiffe/k8s-spiffe-workload-jwt-exec-auth@latest"
+          - "and place the binary at {{ exec_auth_bin }}. Check the project's release"
+          - "asset names before pinning a different exec_auth_version."
+      when: not exec_bin.stat.exists
+
+    - name: Read the cluster CA for the workload's kubeconfig
+      ansible.builtin.slurp:
+        src: "{{ k3s_server_dir }}/tls/server-ca.crt"
+      register: k3s_ca
+
+    - name: Resolve this node's API address
+      ansible.builtin.set_fact:
+        _api_addr: "{{ ansible_facts['default_ipv4']['address'] }}"
+
+    - name: Ensure the kubeconfig directory belongs to the workload
+      ansible.builtin.file:
+        path: "/home/{{ workload_user }}/.kube"
+        state: directory
+        owner: "{{ workload_user }}"
+        mode: "0700"
+
+    # No token, no client certificate, no secret of any kind in this file — which is the
+    # entire point. It names a command; the command asks the Workload API.
+    - name: Write the workload's kubeconfig
+      ansible.builtin.copy:
+        dest: "/home/{{ workload_user }}/.kube/config"
+        owner: "{{ workload_user }}"
+        mode: "0600"
+        content: |
+          apiVersion: v1
+          kind: Config
+          clusters:
+          - name: k3s
+            cluster:
+              server: https://{{ _api_addr }}:6443
+              certificate-authority-data: {{ k3s_ca.content }}
+          contexts:
+          - name: spiffe
+            context:
+              cluster: k3s
+              user: spiffe-workload
+          current-context: spiffe
+          users:
+          - name: spiffe-workload
+            user:
+              exec:
+                apiVersion: "client.authentication.k8s.io/v1"
+                command: "{{ exec_auth_bin }}"
+                interactiveMode: Never
+                env:
+                - name: SPIFFE_JWT_AUDIENCE
+                  value: "{{ audience }}"
+
+    - name: What was built
+      ansible.builtin.debug:
+        msg:
+          - "The k3s API server now accepts JWT-SVIDs from {{ oidc_issuer_url }}."
+          - "Audience:      {{ audience }}   (entry, API server and workload must agree)"
+          - "RBAC subject:  {{ _rbac_user }}"
+          - "Bound to:      ClusterRole/{{ workload_role }}"
+          - "Kubeconfig:    /home/{{ workload_user }}/.kube/config — it holds NO credential."
+          - "Prove it end to end, as the workload:"
+          - "  sudo -u {{ workload_user }} kubectl get pods -A"
+          - "Then prove the audience is load-bearing — this MUST be rejected:"
+          - "  sudo -u {{ workload_user }} env SPIFFE_JWT_AUDIENCE=wrong kubectl get pods -A"
+          - "A 401 on the first attempt is almost always the issuer string or the clock:"
+          - "  journalctl -u k3s | grep -i 'authentication\\|oidc\\|jwt'"
+          - "IF K3S WILL NOT COME BACK: delete {{ dropin }} and run"
+          - "  systemctl restart k3s"
+          - "That removes the flag and leaves the cluster exactly as it was. The config"
+          - "file and the binding are inert on their own."
+  handlers:
+    - name: Restart k3s
+      ansible.builtin.systemd:
+        name: k3s
+        state: restarted
+        daemon_reload: true

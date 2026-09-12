@@ -1,0 +1,290 @@
+# Install a SPIRE Agent on the k3s node
+# Target: the k3s host — NOT the SPIRE server. Run spire-k8s-entry.yml first, on the
+# server, and bring its join token and trust bundle here. Idempotent.
+#
+# This is the piece the governance lab has never had. spire-server-install.yml deliberately
+# installs no agent, because the Password Safe plugin only ever talks to the server's API
+# and every identity it governs is vaulted. An agent is what makes the OTHER half possible:
+# a workload that attests itself and fetches its own short-lived token, with nothing stored
+# anywhere. docs/spiffe.md argues at length that this is the path to prefer when it is
+# available; this play is what makes it available.
+#
+# NEVER LIVE-VALIDATED — see docs/design/workload-k8s-short-lived-token.md.
+#
+# NEEDS EGRESS to github.com for the release tarball, and a route to the SPIRE server on
+# its API port (8081 by default). Both the host firewall and the cloud ACL have to allow it
+# — spire-open-ports.yml opens the server's half, and they fail identically.
+#
+# THE SOCKET PATH IS AN INTERFACE, not a preference. spiffe/k8s-spiffe-workload-jwt-exec-auth
+# defaults to unix:///tmp/spire-agent/public/api.sock, so the default here matches it and
+# the kubeconfig needs no environment variable. Change it and you must set
+# SPIFFE_ENDPOINT_SOCKET on the workload to match.
+#
+# PrivateTmp IS DELIBERATELY ABSENT FROM THE UNIT. With it, systemd gives the agent a
+# private /tmp and the socket it publishes is invisible to every other process on the host.
+# The agent starts, passes its own health check, and no workload can ever reach it.
+#
+# THE JOIN TOKEN IS ONE-USE AND EXPIRES. It attests the agent once; afterwards the agent
+# holds its own SVID and re-attests with that, so a restart needs no new token. A token
+# that has expired or been spent fails with a message about an unknown token — generate a
+# fresh one with spire-k8s-entry.yml rather than debugging the agent.
+#
+# extra_vars:
+#   trust_domain: weaverlab.test       # REQUIRED — must match the server
+#   spire_server_address: 10.0.0.10    # REQUIRED — where the server is
+#   join_token: ""                     # REQUIRED — from spire-k8s-entry.yml, one use
+#   trust_bundle_pem: ""               # REQUIRED — from spire-k8s-entry.yml
+#   spire_server_port: 8081
+#   spire_version: 1.15.3              # match the server
+#   spire_sha256: ""                   # tarball checksum; blank skips
+#   workload_user: deploy-bot          # created here; its UID is the entry's selector
+#   workload_uid: 1010                 # MUST match spire-k8s-entry.yml
+#   verify_audience: k8s               # audience to prove a token can be fetched
+- name: Install a SPIRE Agent on the k3s node
+  hosts: all
+  become: true
+  vars:
+    trust_domain: ""
+    spire_server_address: ""
+    spire_server_port: 8081
+    join_token: ""
+    trust_bundle_pem: ""
+    spire_version: "1.15.3"
+    spire_sha256: ""
+    workload_user: "deploy-bot"
+    workload_uid: 1010
+    verify_audience: "k8s"
+    spire_root: /opt/spire
+    agent_data: /opt/spire/data-agent
+    agent_socket_dir: /tmp/spire-agent/public
+    agent_socket: /tmp/spire-agent/public/api.sock
+  tasks:
+    - name: Require the server coordinates and the bootstrap material
+      ansible.builtin.assert:
+        that:
+          - trust_domain | length > 0
+          - "'/' not in trust_domain"
+          - spire_server_address | length > 0
+          - join_token | length > 0
+          - "'BEGIN CERTIFICATE' in trust_bundle_pem"
+        fail_msg: >-
+          trust_domain, spire_server_address, join_token and trust_bundle_pem are all
+          required. The last two come from spire-k8s-entry.yml on the SERVER, and the
+          bundle must be the PEM itself rather than a path — an agent with no bundle
+          cannot verify the server it is about to trust, and refusing here is better
+          than an insecure_bootstrap that quietly trusts anything.
+
+    - name: Map the CPU architecture to a SPIRE release asset
+      ansible.builtin.set_fact:
+        _arch: "{{ _arch_map[ansible_facts['architecture']] | default('') }}"
+      vars:
+        _arch_map:
+          x86_64: amd64
+          aarch64: arm64
+
+    - name: Fail on an architecture SPIRE does not publish
+      ansible.builtin.fail:
+        msg: "no SPIRE release asset for architecture {{ ansible_facts['architecture'] }}"
+      when: _arch | length == 0
+
+    - name: Detect an existing install
+      ansible.builtin.command: "{{ spire_root }}/bin/spire-agent --version"
+      register: agent_installed
+      changed_when: false
+      failed_when: false
+
+    # spire-agent prints its version to STDERR, exactly as spire-server does. Reading only
+    # stdout would leave the download guard permanently true — the bug the server play
+    # documents, and the same one costs the same here.
+    - name: Note the version already installed
+      ansible.builtin.set_fact:
+        _installed: "{{ (agent_installed.stdout | default('')) ~ (agent_installed.stderr | default('')) }}"
+
+    - name: Create the SPIRE directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        mode: "{{ item.mode }}"
+      loop:
+        - {path: "{{ spire_root }}", mode: "0750"}
+        - {path: "{{ spire_root }}/conf", mode: "0755"}
+        - {path: "{{ agent_data }}", mode: "0750"}
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Download the SPIRE release
+      ansible.builtin.get_url:
+        url: >-
+          https://github.com/spiffe/spire/releases/download/v{{ spire_version }}/spire-{{ spire_version }}-linux-{{ _arch }}-musl.tar.gz
+        dest: "/tmp/spire-{{ spire_version }}.tar.gz"
+        checksum: "{{ ('sha256:' ~ spire_sha256) if spire_sha256 | length > 0 else omit }}"
+        mode: "0640"
+      when: spire_version not in _installed
+
+    - name: Warn when the download was not checksummed
+      ansible.builtin.debug:
+        msg: >-
+          spire_sha256 was blank, so the tarball was taken on TLS alone. The release
+          page publishes a checksum — set it for anything you intend to keep.
+      when:
+        - spire_sha256 | length == 0
+        - spire_version not in _installed
+
+    - name: Unpack SPIRE
+      ansible.builtin.unarchive:
+        src: "/tmp/spire-{{ spire_version }}.tar.gz"
+        dest: "{{ spire_root }}"
+        remote_src: true
+        extra_opts: ["--strip-components=1"]
+      when: spire_version not in _installed
+
+    - name: Remove the downloaded tarball
+      ansible.builtin.file:
+        path: "/tmp/spire-{{ spire_version }}.tar.gz"
+        state: absent
+
+    # The UID is the whole selector. A workload entry keyed on unix:uid:1010 issues to
+    # whatever runs as 1010 and to nothing else, so this account existing with exactly
+    # that UID is what makes the entry reachable — and creating it here keeps the two
+    # plays' numbers from drifting silently.
+    - name: Create the workload account
+      ansible.builtin.user:
+        name: "{{ workload_user }}"
+        uid: "{{ workload_uid }}"
+        shell: /usr/sbin/nologin
+        create_home: true
+        state: present
+
+    - name: Write the bootstrap trust bundle
+      ansible.builtin.copy:
+        dest: "{{ spire_root }}/conf/bootstrap.crt"
+        content: "{{ trust_bundle_pem }}"
+        mode: "0644"
+      notify: Restart spire-agent
+
+    # WorkloadAttestor "unix" is NOT optional: without it the agent has no way to learn a
+    # caller's UID, every unix:uid selector matches nothing, and the workload's fetch fails
+    # with "no identity issued" — which reads like a missing registration entry on the
+    # server rather than a missing plugin here.
+    #
+    # The file is 0640 and root-owned because join_token is in it.
+    - name: Write the agent configuration
+      ansible.builtin.copy:
+        dest: "{{ spire_root }}/conf/agent.conf"
+        mode: "0640"
+        content: |
+          agent {
+              data_dir          = "{{ agent_data }}"
+              log_level         = "INFO"
+              server_address    = "{{ spire_server_address }}"
+              server_port       = "{{ spire_server_port }}"
+              socket_path       = "{{ agent_socket }}"
+              trust_bundle_path = "{{ spire_root }}/conf/bootstrap.crt"
+              trust_domain      = "{{ trust_domain }}"
+              join_token        = "{{ join_token }}"
+          }
+
+          plugins {
+              NodeAttestor "join_token" { plugin_data {} }
+              KeyManager  "disk" { plugin_data { directory = "{{ agent_data }}" } }
+
+              # Required for unix:uid selectors to resolve at all.
+              WorkloadAttestor "unix" { plugin_data { discover_workload_path = true } }
+          }
+      no_log: true
+      notify: Restart spire-agent
+
+    - name: Install the systemd unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/spire-agent.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=SPIRE Agent (Workload Lab — Kubernetes access)
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          # No PrivateTmp. The Workload API socket lives under /tmp and every workload on
+          # this host has to be able to reach it.
+          ExecStart={{ spire_root }}/bin/spire-agent run -config {{ spire_root }}/conf/agent.conf
+          WorkingDirectory={{ spire_root }}
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart spire-agent
+
+    - name: Enable and start spire-agent
+      ansible.builtin.systemd:
+        name: spire-agent
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Apply any pending restart before probing
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for the Workload API socket
+      ansible.builtin.wait_for:
+        path: "{{ agent_socket }}"
+        timeout: 60
+
+    - name: Health check
+      ansible.builtin.command: >-
+        {{ spire_root }}/bin/spire-agent healthcheck -socketPath {{ agent_socket }}
+      register: agent_health
+      changed_when: false
+      retries: 5
+      delay: 3
+      until: agent_health.rc == 0
+
+    # THE ASSERTION THAT MATTERS, and it has to run as the workload rather than as root.
+    # Fetching as root would be attested as unix:uid:0, match no entry, and fail — while
+    # fetching as the workload proves the entry, the selector, the audience and the agent's
+    # attestation all line up. A play that skipped this would report success on a chain
+    # that cannot issue a single token.
+    - name: Fetch a JWT-SVID as the workload
+      ansible.builtin.command: >-
+        {{ spire_root }}/bin/spire-agent api fetch jwt
+        -audience {{ verify_audience }}
+        -socketPath {{ agent_socket }}
+      become_user: "{{ workload_user }}"
+      register: agent_jwt
+      changed_when: false
+      retries: 5
+      delay: 3
+      until: agent_jwt.rc == 0
+      no_log: true
+
+    - name: Confirm a token was issued for this workload
+      ansible.builtin.assert:
+        that:
+          - "'token(' in agent_jwt.stdout or 'eyJ' in agent_jwt.stdout"
+        fail_msg: >-
+          The agent is healthy but issued no JWT-SVID for uid {{ workload_uid }} with
+          audience '{{ verify_audience }}'. Check that spire-k8s-entry.yml created the
+          workload entry with the SAME uid and that WorkloadAttestor "unix" is in the
+          config above — a missing attestor and a missing entry fail identically.
+
+    - name: What was built
+      ansible.builtin.debug:
+        msg:
+          - "SPIRE agent attested to {{ spire_server_address }}:{{ spire_server_port }}."
+          - "Trust domain: {{ trust_domain }}"
+          - "Workload API: {{ agent_socket }}  (the exec-auth plugin's default)"
+          - "Workload:     {{ workload_user }} (uid {{ workload_uid }})"
+          - "A JWT-SVID for audience '{{ verify_audience }}' was issued to that account —"
+          - "so the entry, the selector and the attestation all line up."
+          - "The token is NOT printed: it authenticates to the API server."
+          - "Fetch one by hand with:"
+          - "  sudo -u {{ workload_user }} {{ spire_root }}/bin/spire-agent api fetch jwt \\"
+          - "    -audience {{ verify_audience }} -socketPath {{ agent_socket }}"
+          - "Next: k3s-spiffe-auth.yml on this host, to make the API server accept it."
+  handlers:
+    - name: Restart spire-agent
+      ansible.builtin.systemd:
+        name: spire-agent
+        state: restarted
+        daemon_reload: true
