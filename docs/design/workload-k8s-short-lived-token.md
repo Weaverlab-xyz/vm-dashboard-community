@@ -173,6 +173,14 @@ them to Storage is the same prerequisite.
 Three things about the orchestration are worth recording, because none is recoverable from
 the code alone:
 
+- **The two hosts keep separate connection identities.** They are deployed independently
+  and do not share an SSH key. A blank set for either means auto-derive from *that* host's
+  deploy job — which already works, because `_find_cloud_deploy_meta` matches the deploy job
+  on the target address and each stage targets its own machine. The tempting fallback,
+  inheriting the SPIRE host's chosen account when the k3s set is empty, is the bug: it
+  connects to one VM with another VM's credential and fails as
+  `Permission denied (publickey)` several stages in. `_cred_fields` is the one place that
+  decides, and a test pins that its k3s branch reads no `ansible_*` column.
 - **Two hosts, both ATTACHED, never created.** The lab provisions no compute and this does
   not change that: both VMs come from the dashboard's own deploy rows through the existing
   `resolve_host`, for the reason `docs/spiffe.md` already gives — accepting an address the

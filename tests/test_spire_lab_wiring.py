@@ -487,13 +487,18 @@ def test_the_stage_payload_reads_the_credential_off_the_row():
     run; a credential read from anywhere else would change identity halfway through a
     build that had already failed once."""
     svc = _read("web_dashboard", "services", "spire_lab_service.py")
-    # The whole builder, because the ref is resolved just above the payload class.
+    # The whole builder, because the credential set is resolved just above the payload.
     meta_fn = svc.split("def _stage_meta(")[1].split("\nasync def ")[0]
-    assert "managed_ref(row)" in meta_fn
+    # Row-derived, per host. Matched on the accessors rather than on `row.<field>` because
+    # the fields are now read one level up, in _cred_fields -- which still takes only the
+    # row, so the invariant this test protects is unchanged.
+    assert "_cred_fields(row, _host)" in meta_fn, \
+        "the credential is no longer resolved from the row for this stage's host"
+    assert "managed_ref_for(row, _host)" in meta_fn
     payload = meta_fn.split("class _Payload:")[1].split("return ansible_run_meta")[0]
-    assert "row.ansible_secret_ssh_key_source" in payload
-    assert "row.ansible_managed_become_self" in payload
-    assert "row.login_user" in payload
+    assert '_cred["ssh_key_source"]' in payload
+    assert '_cred["become_self"]' in payload
+    assert '_cred["login_user"]' in payload
     # The hard-coded empties for the kinds this form does NOT offer must stay DECLARED
     # rather than disappearing -- run_meta would default them anyway, but a
     # bound-but-undeclared field is how a slot silently stops being sent.
@@ -650,9 +655,13 @@ def test_the_build_form_reloads_the_account_list_when_the_host_changes():
     assert 'form.host = \'\'; onHostChange()' in page          # the cloud select too
     assert "/api/config-mgmt/managed-accounts" in page
     assert "/api/config-mgmt/secret-options" in page
-    # The account key is cleared before the reload, never after.
-    hc = page.split("async onHostChange()")[1].split("async ")[0]
-    assert hc.index("resetCredential()") < hc.index("managed-accounts")
+    # The account key is cleared before the reload, never after. Anchored on the lookup
+    # CALL rather than on the URL: the request itself now lives in _lookupAccounts, which
+    # the Kubernetes panel shares -- the two pickers share the network call and nothing
+    # else, because they are choosing a credential for two different VMs.
+    hc = page.split("async onHostChange()")[1].split("\n    async ")[0]
+    assert hc.index("resetCredential()") < hc.index("_lookupAccounts"), \
+        "the stale account key survives a host change, so it can check out the wrong host's"
 
 
 def test_the_build_form_has_one_shape_used_by_both_initialisers():
@@ -804,6 +813,61 @@ def test_the_issuer_is_a_hostname_because_mint_writes_a_dns_san():
     auth_vars = src.split("def _auth_vars(")[1].split("\n\nK8S_STAGES")[0]
     assert "spire_oidc_host_ip" in auth_vars, \
         "nothing passes the address the issuer hostname resolves to"
+
+
+def test_the_two_hosts_do_not_share_a_connection_identity():
+    """The SPIRE VM and the k3s node are deployed independently and do not share an SSH
+    key. A blank set for one host must mean "auto-derive from THAT host's deploy job" --
+    which already works, because the deploy job is matched on the target address -- and
+    must NOT mean "use whatever the other host was given". Inheriting would connect to one
+    VM with another VM's credential, and the failure is Permission denied (publickey)
+    several stages into a run that looked configured."""
+    from web_dashboard.database import SpireLab
+    cols = {c.name for c in SpireLab.__table__.columns}
+    for f in ("k8s_ansible_secret_ssh_key_source", "k8s_ansible_managed_account",
+              "k8s_ansible_managed_become_self", "k8s_login_user"):
+        assert f in cols, f"{f} is missing, so the k3s node cannot have its own credential"
+
+    svc = _read("web_dashboard", "services", "spire_lab_service.py")
+    fn = svc.split("def _cred_fields(")[1].split("\ndef ")[0]
+    k8s_branch = fn.split('if host == "k8s":')[1].split("\n    return {")[0]
+    assert "k8s" in k8s_branch, "the k8s branch slice came out empty -- the regex broke"
+    # The k8s branch must read ONLY k8s_ columns. A bare `row.ansible_` or `row.login_user`
+    # in there is the inheritance bug.
+    for leaked in ("row.ansible_secret_ssh_key_source", "row.ansible_managed_account",
+                   "row.ansible_managed_become_self", "row.login_user"):
+        assert leaked not in k8s_branch, (
+            f"the k3s host's credential falls back to {leaked} -- that is the SPIRE host's, "
+            "and it would connect to one VM with another VM's key")
+    for own in ("row.k8s_ansible_secret_ssh_key_source", "row.k8s_login_user"):
+        assert own in k8s_branch, f"the k3s branch does not read {own}"
+
+
+def test_the_two_hosts_credential_pickers_do_not_share_selection_state():
+    """Two pickers on one Alpine component, for two different VMs. Sharing
+    `managedAccountKey` would offer one host's accounts while the run connects to the
+    other -- and both ids are scoped to ONE managed system, so that checks out the wrong
+    machine's credential rather than failing cleanly."""
+    page = _page("spire")
+    # Separate bags.
+    for name in ("k8sManagedAccountKey", "k8sManagedSystems", "k8sManagedEnabled"):
+        assert name in page, f"the Kubernetes panel has no {name} of its own"
+    # The panel's markup must bind its OWN key, never the build form's.
+    panel = page.split("<!-- Kubernetes access")[1].split("<!-- Onboarding")[0]
+    assert 'x-model="k8sManagedAccountKey"' in panel
+    assert 'x-model="managedAccountKey"' not in panel, \
+        "the panel binds the build form's account key, so it would send another VM's account"
+    assert 'x-model="k8sForm.secret_ssh_key_source"' in panel
+    assert 'x-model="form.secret_ssh_key_source"' not in panel, \
+        "the panel binds the build form's key secret"
+    # Switching host must clear the stale selection BEFORE reloading the list.
+    fn = page.split("async k8sOnHostChange()")[1].split("\n    k8sOnAccountChange()")[0]
+    assert fn.index("k8sResetCredential()") < fn.index("_lookupAccounts"), \
+        "the stale account key survives a host change, so it can check out the wrong host's"
+    # And the POST has to carry the panel's pin, not the build form's.
+    link = page.split("async linkKubernetes()")[1].split("\n    async ")[0]
+    assert "k8sManagedSystems" in link and "k8sManagedAccountKey" in link, \
+        "linkKubernetes sends the wrong host's managed account"
 
 
 def test_the_link_job_type_is_registered_everywhere_it_has_to_be():

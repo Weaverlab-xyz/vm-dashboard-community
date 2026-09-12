@@ -377,6 +377,46 @@ def managed_ref(row: SpireLab) -> Optional[dict]:
         return None
 
 
+def _cred_fields(row: SpireLab, host: str = "spire") -> dict:
+    """The connection identity for ONE of the lab's two hosts.
+
+    The two VMs are deployed independently and **do not share an SSH key**, so each keeps
+    its own set. A NULL set means auto-derive from THAT host's deploy job — which already
+    works, because ``ansible_local_run_service._find_cloud_deploy_meta`` matches the deploy
+    job on the *target address*, and each stage targets its own machine.
+
+    It deliberately does NOT fall back to the other host's choice. Inheriting it would
+    connect to one VM with another VM's credential, and the failure is
+    ``Permission denied (publickey)`` several stages into a run that looked configured.
+    """
+    if host == "k8s":
+        return {"ssh_key_source": row.k8s_ansible_secret_ssh_key_source or "",
+                "managed": row.k8s_ansible_managed_account,
+                "become_self": row.k8s_ansible_managed_become_self,
+                "login_user": row.k8s_login_user or ""}
+    return {"ssh_key_source": row.ansible_secret_ssh_key_source or "",
+            "managed": row.ansible_managed_account,
+            "become_self": row.ansible_managed_become_self,
+            "login_user": row.login_user or ""}
+
+
+def managed_ref_for(row: SpireLab, host: str = "spire") -> Optional[dict]:
+    """``managed_ref`` for either host. Same parse, same "unparseable means none" rule."""
+    raw = _cred_fields(row, host)["managed"]
+    try:
+        return json.loads(raw or "null") or None
+    except Exception:
+        logger.warning("spire-lab: unparseable managed-account ref (%s host) on lab %s",
+                       host, row.id)
+        return None
+
+
+def credential_kind_for(row: SpireLab, host: str = "spire") -> str:
+    if managed_ref_for(row, host):
+        return "managed"
+    return "ssh-key-secret" if _cred_fields(row, host)["ssh_key_source"] else "auto"
+
+
 def credential_kind(row: SpireLab) -> str:
     """Which connection identity this lab was built with — for the page and the audit
     entry. Never the ref itself, and never anything resolvable to a credential."""
@@ -602,10 +642,14 @@ def _stage_meta(row: SpireLab, stage: dict, asset_backend: str) -> dict:
     """
     from . import ansible_run_meta
 
-    _ref = managed_ref(row)
     # Which machine this stage runs on. The original four have no `host` key and all mean
     # the SPIRE server, so the default keeps them untouched.
-    _target = _ansible_target(row, stage.get("host", "spire"))
+    _host = stage.get("host", "spire")
+    _target = _ansible_target(row, _host)
+    # Per host, because the two VMs do not share an SSH key. See _cred_fields for why a
+    # blank set here must NOT inherit the other host's choice.
+    _cred = _cred_fields(row, _host)
+    _ref = managed_ref_for(row, _host)
 
     class _Payload:
         asset = stage["asset"]
@@ -614,7 +658,7 @@ def _stage_meta(row: SpireLab, stage: dict, asset_backend: str) -> dict:
         # The lab's own login user wins, then the per-cloud config key. A managed
         # account overrides even this at run time, because the account's name IS the
         # login identity (see ansible_credentials.resolve).
-        ansible_user = (row.login_user or "").strip() or \
+        ansible_user = _cred["login_user"].strip() or \
             _cfg(require_backend(row.cloud).default_user_cfg) or \
             _cfg("ansible_default_user", "ubuntu")
         extra_vars = stage["vars_for"](row)
@@ -627,13 +671,13 @@ def _stage_meta(row: SpireLab, stage: dict, asset_backend: str) -> dict:
         # one — use the identical credential. Both are refs; `run_meta`'s closed
         # allowlist is what keeps a value out of the jobs table, and neither of these
         # needed a new key in it.
-        secret_ssh_key_source = row.ansible_secret_ssh_key_source or ""
+        secret_ssh_key_source = _cred["ssh_key_source"]
         managed_account = _ref
         # The SAME ref for sudo, because all four plays are `become: true` and this form
         # offers no separate become credential. Password Safe reuses the already-open
         # request rather than opening a second one, and the become checkout forces
         # password mode regardless of the ref's own uses_ssh_key flag.
-        managed_become = _ref if (row.ansible_managed_become_self and _ref) else None
+        managed_become = _ref if (_cred["become_self"] and _ref) else None
         epml_token_var = ""
 
     return ansible_run_meta.run_meta(
@@ -1105,7 +1149,11 @@ def k8s_stage_jobs(row: SpireLab) -> dict:
 
 
 def start_k8s_link(db: Session, *, lab_id: str, created_by: str, host: str,
-                   audience: str = "", workload_role: str = "") -> dict:
+                   audience: str = "", workload_role: str = "",
+                   secret_ssh_key_source: str = "",
+                   managed_account: Optional[dict] = None,
+                   managed_become_self: bool = False,
+                   login_user: str = "") -> dict:
     """Enqueue the Kubernetes link for an existing lab.
 
     ``host`` is a VM NAME or IP for the k3s node, re-derived through ``resolve_host``
@@ -1130,6 +1178,33 @@ def start_k8s_link(db: Session, *, lab_id: str, created_by: str, host: str,
             "this lab has no trust bundle recorded, so the agent would have nothing to "
             "verify the server with and the API server nothing to verify tokens with. "
             "Re-run the build, or read the bundle back from the row's Bundle button")
+    # The k3s node's OWN credential. Same either/or rule as the build form, because it is
+    # the same question: who does the runner log in as. Checked here rather than in the API
+    # for the same reason provision does it — the API owns caller-facing refusals, this owns
+    # the SHAPE of the choice.
+    secret_ssh_key_source = (secret_ssh_key_source or "").strip()
+    login_user = (login_user or "").strip()
+    if managed_account and secret_ssh_key_source:
+        raise SpireLabError(
+            "pick EITHER a Password Safe managed account OR an SSH-key secret for the k3s "
+            "node, not both — they are two answers to the same question. A managed "
+            "account's name also overrides the login user, so a run carrying both would "
+            "connect as one identity holding the other's key.")
+    if managed_account and (managed_account.get("system_id") is None
+                            or managed_account.get("account_id") is None):
+        raise SpireLabError(
+            "a managed account must be picked from the k3s host's own list, so that it "
+            "carries both system_id and account_id — a name-only ref is for bulk runs "
+            "across many hosts, and this is one host.")
+    if managed_become_self and not managed_account:
+        raise SpireLabError(
+            "'also use this account for sudo' needs a managed account to use — there is no "
+            "separate become credential for the k3s node.")
+    if login_user and (len(login_user) > 104 or any(c.isspace() for c in login_user)):
+        raise SpireLabError(
+            "the k3s node's login user is a single OS username, at most 104 characters "
+            "and with no whitespace.")
+
     host_info = resolve_host(db, row.cloud, host)
     placement = json.dumps(require_backend(row.cloud).placement(host_info["meta"]),
                            sort_keys=True)
@@ -1165,7 +1240,28 @@ def start_k8s_link(db: Session, *, lab_id: str, created_by: str, host: str,
     row.k8s_workload_uid = K8S_WORKLOAD_UID
     row.k8s_workload_spiffe_id = workload_spiffe_id_for(row)
     row.k8s_issuer_url = issuer_url_for(row)
+    # NULL throughout = auto-derive from the K3S host's own deploy job, which is what the
+    # runner does when nothing is set and is the correct default: the deploy job is matched
+    # on the target address, and these stages target this VM. Never inherited from the SPIRE
+    # host's set — see _cred_fields.
+    row.k8s_ansible_secret_ssh_key_source = secret_ssh_key_source or None
+    row.k8s_ansible_managed_account = (json.dumps(managed_account, sort_keys=True)
+                                       if managed_account else None)
+    row.k8s_ansible_managed_become_self = bool(managed_become_self) or None
+    row.k8s_login_user = login_user or None
     row.updated_at = datetime.utcnow()
+    if managed_account or secret_ssh_key_source:
+        # Audit the USE, not the credential. Same action name as Config Management's, so one
+        # audit query still answers "who used a credential in a run" whichever page it was.
+        job_service.log_audit(
+            db, created_by, "ansible_secret_use",
+            details={"kinds": [credential_kind_for(row, "k8s")]
+                              + (["managed-account become (checkout)"]
+                                 if managed_become_self else []),
+                     "account": (managed_account or {}).get("account_name", ""),
+                     "system_id": (managed_account or {}).get("system_id"),
+                     "target": row.k8s_vm_name, "lab": row.name,
+                     "why": "spire lab kubernetes link"})
     job = job_service.create_job(
         db, K8S_LINK_JOB_TYPE, created_by, workgroup=row.workgroup,
         metadata={"lab_id": row.id, "name": row.name, "cloud": row.cloud,

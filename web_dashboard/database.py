@@ -1747,6 +1747,26 @@ class SpireLab(Base):
     # diagnostic — which is why it is recorded rather than rebuilt from parts each time.
     k8s_issuer_url = Column(String(255), nullable=True)
 
+    # WHO the runner logs in as ON THE K3S NODE. A SEPARATE SET from the four
+    # `ansible_*` / `login_user` fields above, which belong to the SPIRE host, because the
+    # two VMs are deployed independently and **do not share an SSH key**.
+    #
+    # ALL NULL IS THE NORMAL STATE AND IT ALREADY WORKS: the runner auto-derives a keypair
+    # from the deploy job of the VM it is CONNECTING TO (`_find_cloud_deploy_meta` matches
+    # on the target address), and the Kubernetes stages target this host, so each machine
+    # gets its own key with nothing configured.
+    #
+    # What these exist for is the explicit case. Inheriting the SPIRE host's chosen account
+    # or key secret here would be the wrong fallback, not a convenient one: it would connect
+    # to this VM with another VM's credential, and the failure is
+    # `Permission denied (publickey)` five stages into a run that looked configured. So a
+    # NULL here means auto-derive from THIS host's deploy job, never "whatever the SPIRE
+    # host uses".
+    k8s_ansible_secret_ssh_key_source = Column(Text, nullable=True)
+    k8s_ansible_managed_account = Column(Text, nullable=True)
+    k8s_ansible_managed_become_self = Column(Boolean, nullable=True)
+    k8s_login_user = Column(String(104), nullable=True)
+
     # What the seed put in and what discovery should return. 11 in, 8 out — and the
     # count IS the assertion, not "discovery succeeded". The plugin shipped with
     # discovery defaulting its path filter to the MINTABLE prefix, which silently
@@ -3220,6 +3240,14 @@ def init_db():
             "ALTER TABLE spire_labs ADD COLUMN k8s_workload_uid INTEGER",
             "ALTER TABLE spire_labs ADD COLUMN k8s_workload_role VARCHAR(120)",
             "ALTER TABLE spire_labs ADD COLUMN k8s_issuer_url VARCHAR(255)",
+            # The k3s node's OWN connection identity. The two VMs do not share an SSH
+            # key. NULL backfills to "auto-derive from this host's deploy job", which is
+            # both the pre-existing behaviour and the correct one — see the model. Bare
+            # BOOLEAN with no DEFAULT, for the PostgreSQL reason described above.
+            "ALTER TABLE spire_labs ADD COLUMN k8s_ansible_secret_ssh_key_source TEXT",
+            "ALTER TABLE spire_labs ADD COLUMN k8s_ansible_managed_account TEXT",
+            "ALTER TABLE spire_labs ADD COLUMN k8s_ansible_managed_become_self BOOLEAN",
+            "ALTER TABLE spire_labs ADD COLUMN k8s_login_user VARCHAR(104)",
             # Per-POV narrowing for an ordinary user. TEXT and nullable, so the
             # DEFAULT-on-a-new-column trap described above does not apply. Every
             # pre-existing row backfills to NULL = "every POV", which is what keeps

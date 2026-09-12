@@ -134,6 +134,12 @@ def _shape(row) -> dict:
         "k8s_rbac_subject": (
             f"{spire_lab_service.K8S_USERNAME_PREFIX}{row.k8s_workload_spiffe_id}"
             if row.k8s_workload_spiffe_id else ""),
+        # The k3s node's own, separate from credential_kind above: two VMs, two keys.
+        # The KIND and the account NAME only — a name is not a credential.
+        "k8s_credential_kind": spire_lab_service.credential_kind_for(row, "k8s"),
+        "k8s_credential_account": (
+            (spire_lab_service.managed_ref_for(row, "k8s") or {}).get("account_name") or ""),
+        "k8s_credential_login_user": row.k8s_login_user or "",
         "k8s_workload_user": spire_lab_service.K8S_WORKLOAD_USER,
         "k8s_jwt_svid_ttl": spire_lab_service.K8S_JWT_SVID_TTL,
         "deploy_job_id": row.deploy_job_id,
@@ -174,6 +180,15 @@ class K8sLinkRequest(BaseModel):
     # for somebody else's service.
     audience: str = ""
     workload_role: str = ""
+    # THE K3S NODE'S OWN connection identity. The two VMs are deployed independently and do
+    # not share an SSH key, so these are a separate set from the ones BuildRequest took for
+    # the SPIRE host — and a blank set here means "auto-derive from THIS host's deploy job",
+    # never "reuse the SPIRE host's". Same either/or rule and the same field names as the
+    # build form, so the panel reuses Config Management's own pickers unchanged.
+    secret_ssh_key_source: str = ""
+    managed_account: ManagedAccountRef | None = None
+    managed_become_self: bool = False
+    login_user: str = ""
 
 
 # ── read ──────────────────────────────────────────────────────────────────────
@@ -442,17 +457,24 @@ def link_kubernetes(lab_id: str, req: K8sLinkRequest, db: Session = Depends(get_
     failure must not make a working trust domain read as broken. An existing lab can also
     gain the capability without being rebuilt.
 
-    The credential is the lab's own — whatever was chosen at build time, or the key
-    auto-derived from each host's deploy job. There is deliberately no second credential
-    picker here: adding one would ask the operator the same question twice for a pair of
-    VMs the dashboard deployed itself.
+    The k3s node brings its OWN connection identity, because the two VMs are deployed
+    independently and do not share an SSH key. Leaving it blank is the normal case and
+    already works: the runner derives a keypair from the deploy job of the host it is
+    connecting to, and these stages target the k3s node. What it must never do is inherit
+    the SPIRE host's chosen account or key secret — that would connect to one VM with
+    another VM's credential.
     """
     _require_enabled()
     _visible_or_404(db, lab_id, user)
     try:
         return spire_lab_service.start_k8s_link(
             db, lab_id=lab_id, created_by=user.username, host=req.host,
-            audience=req.audience, workload_role=req.workload_role)
+            audience=req.audience, workload_role=req.workload_role,
+            secret_ssh_key_source=req.secret_ssh_key_source,
+            managed_account=(req.managed_account.model_dump()
+                             if req.managed_account else None),
+            managed_become_self=req.managed_become_self,
+            login_user=req.login_user)
     except SpireLabError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

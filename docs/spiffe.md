@@ -237,6 +237,14 @@ somewhere you can read it, and the panel links all five. Three things worth know
   un-vaulted path possible at all, and it proves itself by fetching a JWT-SVID *as the
   workload account* before reporting success.
 
+**The two VMs do not share an SSH key, and the panel asks separately.** Leaving its
+credential fields blank is the normal case and already correct: the runner derives a keypair
+from the deploy job of the host it is *connecting to*, and the Kubernetes stages target the
+k3s node. What it deliberately does **not** do is inherit whatever the SPIRE host was given
+at build time — that would connect to one VM with another VM's credential, and the failure is
+`Permission denied (publickey)` several stages into a run that looked configured. The same
+either/or rule applies: a Password Safe managed account **or** an SSH-key secret, not both.
+
 ### The two upstream halves
 
 Both are Apache-2.0 projects in the **SPIFFE GitHub org**, and both carry a "Development
