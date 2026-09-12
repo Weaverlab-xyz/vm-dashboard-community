@@ -80,7 +80,7 @@
 
      The drawer and the backdrop have to be OUTSIDE <nav>: `position: sticky` creates a
      stacking context whatever its z-index, so a sticky bar would trap them at its own
-     level, and the `fixed inset-0 z-40` modals in users/, cert_lab/, functions/ and
+     level, and the `fixed inset-0 z-40` modals in users/, workload_lab/, functions/ and
      inventory/ would then paint over an open menu. Out here they stay in the root
      stacking context at the z-50/z-40 they were always written for. They still need
      `mobileNav`, hence one component spanning all three.

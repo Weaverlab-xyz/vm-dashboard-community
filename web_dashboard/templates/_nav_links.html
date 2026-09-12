@@ -107,15 +107,10 @@
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/functions') %}{{ nav_active }}{% endif %}">Functions</a>
 {% endif %}
-{% if cert_lab_enabled %}
-<a data-nav="certificates" href="/cert-lab"
+{% if workload_lab_enabled %}
+<a data-nav="workload_lab" href="/workload-lab"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-   {% if request.url.path.startswith('/cert-lab') %}{{ nav_active }}{% endif %}">Certificates</a>
-{% endif %}
-{% if spire_lab_enabled %}
-<a data-nav="spire" href="/spire-lab"
-   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-   {% if request.url.path.startswith('/spire-lab') %}{{ nav_active }}{% endif %}">SPIRE</a>
+   {% if request.url.path.startswith('/workload-lab') %}{{ nav_active }}{% endif %}">Workload Lab</a>
 {% endif %}
 {% if k8s_management_enabled %}
 <a data-nav="k8s" href="/k8s"

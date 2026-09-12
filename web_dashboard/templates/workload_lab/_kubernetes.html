@@ -1,0 +1,171 @@
+{# Workload Lab -> Kubernetes access. A STATIC explainer: no x-data, no API calls, no
+   provisioning. It exists because the SPIRE lab mints audience-scoped JWT-SVIDs and nothing
+   in this dashboard ever presents one to a relying party, so the lab proves issuance and
+   governance but never proves acceptance.
+
+   The argument, the comparison against the Bound-mode path that IS built, and the three
+   playbooks this would need are in docs/design/workload-k8s-short-lived-token.md. Keep this
+   tab and that note in step — the note is the reasoning, this is the summary.
+
+   Rides spire_lab_enabled (see index.html): the pattern presupposes a trust domain. #}
+
+<div>
+
+  <div class="mb-6 border border-amber-200 bg-amber-50 rounded-lg px-4 py-3 text-sm text-amber-800">
+    <p class="font-medium mb-1">Nothing here is built yet</p>
+    <p>
+      This tab is the argument for a pattern, not a feature. There is no build button, and
+      the three playbooks it describes do not exist. The reasoning, including what would have
+      to be settled first, is in
+      <a href="/docs/design/workload-k8s-short-lived-token" target="_blank"
+         class="text-amber-900 underline">the design note</a>.
+    </p>
+  </div>
+
+  <p class="text-sm text-gray-500 mb-6">
+    The SPIRE tab mints <strong>audience-scoped JWT-SVIDs</strong>, and nothing in this
+    dashboard presents one to anything. This is the relying party worth picking: a workload
+    reaches the Kubernetes API with a token that lives for minutes and is written to no disk
+    and no vault, anywhere.
+  </p>
+
+  <!-- How it works -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-6">
+    <div class="px-4 py-3 border-b border-gray-200">
+      <h2 class="text-sm font-semibold text-gray-800">How it works</h2>
+      <p class="text-xs text-gray-500 mt-0.5">
+        Two upstream projects in the SPIFFE org, one on each side of the connection.
+      </p>
+    </div>
+    <div class="px-4 py-4 text-sm text-gray-600 space-y-4">
+      <ol class="list-decimal list-inside space-y-1.5">
+        <li>A SPIRE <strong>agent</strong> on the workload's host attests it, the same way
+            any SPIFFE workload is attested.</li>
+        <li>The workload asks the <strong>Workload API</strong> for a JWT-SVID with audience
+            <code class="font-mono text-xs bg-gray-50 border border-gray-200 rounded px-1">k8s</code>.</li>
+        <li><code class="font-mono text-xs bg-gray-50 border border-gray-200 rounded px-1">kubectl</code>
+            gets that token from an <strong>exec credential plugin</strong> and sends it as
+            the bearer token.</li>
+        <li>The API server validates it as an ordinary OIDC token against the SPIRE
+            <strong>OIDC Discovery Provider</strong>, and RBAC binds the SPIFFE ID.</li>
+      </ol>
+
+      <div>
+        <p class="text-xs font-medium text-gray-700 mb-1">The client half &mdash; the whole kubeconfig user</p>
+        <pre class="text-xs font-mono bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 overflow-x-auto"><code>user:
+  exec:
+    apiVersion: "client.authentication.k8s.io/v1"
+    command: "k8s-spiffe-workload-jwt-exec-auth"
+    interactiveMode: Never</code></pre>
+        <p class="text-xs text-gray-500 mt-1">
+          <a href="https://github.com/spiffe/k8s-spiffe-workload-jwt-exec-auth" target="_blank"
+             rel="noopener" class="text-blue-600 hover:underline">spiffe/k8s-spiffe-workload-jwt-exec-auth</a>
+          &middot; reads the Workload API socket; audience from <code class="font-mono">SPIFFE_JWT_AUDIENCE</code>.
+        </p>
+      </div>
+
+      <div>
+        <p class="text-xs font-medium text-gray-700 mb-1">The server half &mdash; kube-apiserver structured authentication</p>
+        <pre class="text-xs font-mono bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 overflow-x-auto"><code>jwt:
+- issuer:
+    url: https://oidc-discovery.example.org
+    audiences:
+    - k8s</code></pre>
+        <p class="text-xs text-gray-500 mt-1">
+          <a href="https://github.com/spiffe/k8s-spiffe-workload-auth-config" target="_blank"
+             rel="noopener" class="text-blue-600 hover:underline">spiffe/k8s-spiffe-workload-auth-config</a>
+          &middot; injects the SPIFFE trust bundle as <code class="font-mono">certificateAuthority</code>,
+          loaded with <code class="font-mono">--authentication-config</code>.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- The comparison that is the actual point -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-6">
+    <div class="px-4 py-3 border-b border-gray-200">
+      <h2 class="text-sm font-semibold text-gray-800">Against the path that is already built</h2>
+      <p class="text-xs text-gray-500 mt-0.5">
+        This would not replace ServiceAccount token rotation. The two answer different
+        questions, and the interesting claim is what each one still leaves lying around.
+      </p>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-50 text-gray-600">
+          <tr>
+            <th class="text-left font-medium px-4 py-2"></th>
+            <th class="text-left font-medium px-4 py-2">Bound-mode SA token <span class="text-xs font-normal text-green-700">(built)</span></th>
+            <th class="text-left font-medium px-4 py-2">JWT-SVID over the Workload API <span class="text-xs font-normal text-gray-400">(not built)</span></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100 text-gray-600">
+          <tr>
+            <td class="px-4 py-2 font-medium text-gray-700">Where the credential rests</td>
+            <td class="px-4 py-2">Password Safe, and PRA Vault via the synced account</td>
+            <td class="px-4 py-2"><strong>Nowhere</strong> &mdash; process memory, for minutes</td>
+          </tr>
+          <tr>
+            <td class="px-4 py-2 font-medium text-gray-700">Who can replay it</td>
+            <td class="px-4 py-2">Anyone who can retrieve it from either vault</td>
+            <td class="px-4 py-2">A caller on the attested workload's own machine</td>
+          </tr>
+          <tr>
+            <td class="px-4 py-2 font-medium text-gray-700">What binds it</td>
+            <td class="px-4 py-2">The ServiceAccount's <code class="font-mono text-xs">uid</code> claim</td>
+            <td class="px-4 py-2">Node and workload attestation</td>
+          </tr>
+          <tr>
+            <td class="px-4 py-2 font-medium text-gray-700">EKS / AKS / GKE</td>
+            <td class="px-4 py-2 text-green-700">Yes</td>
+            <td class="px-4 py-2 text-red-700">No &mdash; needs a self-managed API server</td>
+          </tr>
+          <tr>
+            <td class="px-4 py-2 font-medium text-gray-700">Governed as an inventory row</td>
+            <td class="px-4 py-2 text-green-700">Yes</td>
+            <td class="px-4 py-2">No &mdash; there is no credential to govern</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="px-4 py-3 border-t border-gray-200 text-xs text-gray-500">
+      The built path is on the
+      <a href="/k8s" class="text-blue-600 hover:underline">Kubernetes</a> page &mdash; a
+      cluster's <strong>Password Safe token rotation</strong> action &mdash; with its
+      reasoning in
+      <a href="/docs/design/k8s-sa-token-rotation" target="_blank"
+         class="text-blue-600 hover:underline">its own design note</a>.
+    </div>
+  </div>
+
+  <!-- What it would need -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <div class="px-4 py-3 border-b border-gray-200">
+      <h2 class="text-sm font-semibold text-gray-800">What it would need</h2>
+    </div>
+    <div class="px-4 py-4 text-sm text-gray-600 space-y-3">
+      <p>
+        <strong class="text-gray-700">A k3s cluster, not a managed one.</strong>
+        <code class="font-mono text-xs bg-gray-50 border border-gray-200 rounded px-1">--authentication-config</code>
+        is a kube-apiserver flag, and EKS, AKS and GKE do not expose it. k3s takes it through
+        <code class="font-mono text-xs bg-gray-50 border border-gray-200 rounded px-1">kube-apiserver-arg</code>,
+        and the <code class="font-mono text-xs">k3s/</code> playbooks already stand a server
+        up and emit a registration-ready kubeconfig. That limitation is the pattern's reach:
+        a customer running only managed clusters cannot adopt it.
+      </p>
+      <p>
+        <strong class="text-gray-700">Three playbooks that do not exist yet</strong> &mdash;
+        the OIDC Discovery Provider beside the SPIRE server, a SPIRE agent on the k3s node
+        (the lab installs the server only), and the API server's authentication config plus
+        an RBAC binding whose subject is the SPIFFE ID.
+      </p>
+      <div class="border border-blue-200 bg-blue-50 rounded-lg px-3 py-2 text-xs text-blue-800">
+        Structured Authentication Configuration is stable as of Kubernetes 1.34. Both SPIFFE
+        projects above carry a <strong>&ldquo;Development Phase&rdquo;</strong> badge and have
+        single-digit stars &mdash; officially owned, not production-proven. Worth raising
+        before anyone plans a customer demonstration on them.
+      </div>
+    </div>
+  </div>
+
+</div>

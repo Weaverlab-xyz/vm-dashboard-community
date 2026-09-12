@@ -14,6 +14,10 @@ authority is **provisioned and destroyed**, and certificate identities are **onb
 onto it as Password Safe managed accounts. Issuance itself belongs in BeyondInsight, behind
 an approval — see [Why nothing is issued from here](#why-nothing-is-issued-from-here).
 
+It is the **Certificates** tab of the **Workload Lab** page (`/workload-lab`), alongside
+[SPIRE](spiffe.md) — both labs govern identities that belong to machines, so they share a
+page. Each still has its own preview toggle and its own Settings panel.
+
 The companion docs:
 
 - [Infrastructure as Code](infrastructure-as-code.md) — the closed provision/destroy
@@ -225,7 +229,7 @@ without its target id.
 
 ## Building a CA
 
-**Certificate Lab → Build a CA.** Pick a cloud; one Terraform module per cloud does the
+**Workload Lab → Certificates → Build a CA.** Pick a cloud; one Terraform module per cloud does the
 rest. On **GCP** that is a CAS pool on the DevOps tier, a self-signed root CA, and the
 enrollment service account the plugin authenticates as. On **AWS** it is a Private CA, its
 self-signed root certificate, and the IAM user the plugin authenticates as.
@@ -347,7 +351,7 @@ loop, silently.
 
 ## Onboarding a certificate identity
 
-**Certificate Lab → Add identity.** The dashboard composes the address from the CA row (so
+**Workload Lab → Certificates → Add identity.** The dashboard composes the address from the CA row (so
 `project=`, `location=` and `pool=` can never drift from the pool that was actually built),
 creates the Secrets Safe folder tree, resolves the functional account and platform, and
 registers the managed system plus one managed account.
@@ -472,7 +476,7 @@ Being straight about the boundary is more persuasive than eliding it.
 
 | | |
 |---|---|
-| Page | `/cert-lab` → `web_dashboard/templates/cert_lab/index.html` |
+| Page | `/workload-lab#certificates` → `web_dashboard/templates/workload_lab/` (`index.html` + `_certificates.html` + `_certificates_scripts.html`) |
 | API | `web_dashboard/api/cert_lab.py` (`/api/cert-lab/*`) |
 | CA lifecycle | `web_dashboard/services/cert_lab_service.py` |
 | Address + Password Safe objects | `web_dashboard/services/cert_ps_service.py` |

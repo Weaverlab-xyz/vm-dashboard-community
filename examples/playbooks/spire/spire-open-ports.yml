@@ -31,7 +31,7 @@
 # TAKE THE LIST FORM WHEN YOU HAVE MORE THAN ONE SOURCE. Corporate egress commonly
 # rotates between two addresses, so a rule pinned to one of them fails on roughly
 # half the connections and reads as an intermittent credential problem. The
-# dashboard's /spire-lab page passes whatever it opened on the cloud ACL, so both
+# dashboard's Workload Lab page (SPIRE tab) passes whatever it opened on the cloud ACL, so both
 # gates end up carrying the same source set.
 - name: Open the SPIRE Server API port
   hosts: all

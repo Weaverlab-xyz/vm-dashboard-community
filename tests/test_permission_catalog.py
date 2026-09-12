@@ -169,6 +169,7 @@ def _preview_nav_sections():
     be trusted.
     """
     from web_dashboard.api.setup import _PREVIEW_FLAGS
+    from web_dashboard.services.feature_flags import _DERIVED
     nav = _read("web_dashboard", "templates", "_nav_links.html")
     out = set()
     # Each nav link sits inside `{% if <flag> %}` … `{% endif %}`; pair every data-nav with
@@ -179,7 +180,15 @@ def _preview_nav_sections():
         if m:
             flag = m.group(1)
         for nav_m in re.finditer(r'data-nav="([a-z0-9_]+)"', line):
-            if flag in _PREVIEW_FLAGS:
+            # A DERIVED flag (feature_flags._DERIVED) has no toggle of its own -- it is the
+            # OR of the flags that can reveal the section, which is how one nav link covers
+            # the Workload Lab's two labs without adding a third row to Settings. Such a
+            # section counts as preview only while EVERY constituent does, so the moment one
+            # graduates it drops out of this set and the scope assertions below start
+            # demanding a real scope for it. That is the same forcing function a plain
+            # single-flag section gets.
+            parts = _DERIVED.get(flag, (flag,))
+            if all(p in _PREVIEW_FLAGS for p in parts):
                 out.add(nav_m.group(1))
     assert out, "no preview nav sections found — the flag/nav pairing broke"
     return out
@@ -207,14 +216,19 @@ def test_every_shipped_nav_section_has_a_scope():
 def test_preview_sections_are_excluded_rather_than_listed():
     """Graduating a preview feature must FAIL here, not ship ungated.
 
-    Certificates and SPIRE both borrow ``cloud_function`` read/write today, so
-    `cloud_function:read` silently grants both labs. That is acceptable only while they are
-    preview; the moment the flag leaves _PREVIEW_FLAGS this test demands a real scope.
+    The Workload Lab's two tabs -- the Certificate Lab and the SPIRE Lab -- both borrow
+    ``cloud_function`` read/write today, so `cloud_function:read` silently grants both. That
+    is acceptable only while they are preview; the moment either flag leaves _PREVIEW_FLAGS
+    the section stops resolving as preview (see :func:`_preview_nav_sections`) and this test
+    demands a real scope.
+
+    ``workload_lab`` is one nav section over both labs on purpose: consolidating them was a
+    page-layer change, and Settings still owns exactly one toggle per lab.
     """
     preview = _preview_nav_sections()
-    assert {"desktops", "certificates", "spire"} <= preview, (
-        f"expected the three preview nav sections, found {sorted(preview)} — if one "
-        "graduated, give it its own scope and update _NAV_SCOPE")
+    assert {"desktops", "workload_lab"} <= preview, (
+        f"expected the preview nav sections, found {sorted(preview)} — if one graduated, "
+        "give it its own scope and update _NAV_SCOPE")
     for section in preview:
         assert section not in _NAV_SCOPE, (
             f"{section} is still marked preview but has a scope — remove it from "

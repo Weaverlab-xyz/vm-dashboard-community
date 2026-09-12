@@ -416,7 +416,7 @@ _DEVOPS = Persona(
             summary="Issue a short-lived client certificate under approval, have a build "
                     "retrieve it over the API, and prove it actually completes an mTLS "
                     "handshake — then rotate and show the build never notices.",
-            target="/cert-lab",
+            target="/workload-lab#certificates",
             minutes=15,
             docs="certificates",
             requires_flags=("cert_lab_enabled",),
@@ -428,7 +428,7 @@ _DEVOPS = Persona(
                     "a managed account, and show which ones carry control-plane rights "
                     "nobody meant to grant — then mint an audience-scoped JWT-SVID for "
                     "the one consumer that cannot run an agent.",
-            target="/spire-lab",
+            target="/workload-lab#spire",
             minutes=20,
             docs="spiffe",
             requires_flags=("spire_lab_enabled",),

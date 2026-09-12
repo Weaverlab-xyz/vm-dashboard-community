@@ -229,7 +229,7 @@ def _certlab_item(row) -> dict:
         "created_at": _iso(row.created_at),
         "expires_at": _iso(row.expires_at),
         "job_id": row.deploy_job_id,
-        "detail_href": "/cert-lab",
+        "detail_href": "/workload-lab#certificates",
     }
 
 def _spirelab_item(row) -> dict:
@@ -256,7 +256,7 @@ def _spirelab_item(row) -> dict:
         "created_at": _iso(row.created_at),
         "expires_at": _iso(row.expires_at),
         "job_id": row.deploy_job_id,
-        "detail_href": "/spire-lab",
+        "detail_href": "/workload-lab#spire",
     }
 
 

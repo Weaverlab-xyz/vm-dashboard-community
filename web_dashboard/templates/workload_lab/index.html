@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}Workload Lab{% endblock %}
+
+{# Workload Lab (PREVIEW). One page over the two labs that govern NON-HUMAN identities:
+   the Certificate Lab (cert_lab_enabled, /api/cert-lab) and the SPIRE Lab
+   (spire_lab_enabled, /api/spire-lab), plus a static explainer for the Kubernetes
+   short-lived-token pattern that nothing here builds yet.
+
+   Nothing below the template layer is shared. Each tab keeps its own Alpine component, its
+   own API prefix, its own model and its own inventory kind -- this page is a container, not
+   a merge. Three things about it are load-bearing:
+
+     * EACH TAB PARTIAL IS SELF-CONTAINED: its markup and its Alpine factory live in the
+       one file, which is what tests/test_template_scripts.py and test_templates_parse.py
+       require of any template naming an x-data or x-for helper. An earlier draft split the
+       factory into a sibling file so the panel could be wrapped in a lazy-mounting
+       "x-if" template; that broke both checkers, and the invariant is worth more than the
+       optimisation. Do not reintroduce the split -- and note a script tag inside an x-if
+       template is cloned rather than executed, so moving a factory in there silently
+       leaves a dead x-data.
+     * PANELS TOGGLE WITH x-show, so both components mount on page load and each fetches
+       its own /options once. That is the same two requests the two separate pages made
+       between them, and revisiting a tab costs nothing.
+     * THE TAB BAR IS SUPPRESSED AT ONE TAB. Either preview flag can be off on its own, and
+       a bar holding a single pill reads like a rendering fault.
+
+   The nav gates on the DERIVED workload_lab_enabled (either flag). It is deliberately not
+   a preview flag of its own: Settings owns exactly two toggles here, one per lab. #}
+
+{% block content %}
+{% set tabs = [] %}
+{% if cert_lab_enabled %}
+  {% set _ = tabs.append({'slug': 'certificates', 'label': 'Certificates'}) %}
+{% endif %}
+{% if spire_lab_enabled %}
+  {% set _ = tabs.append({'slug': 'spire', 'label': 'SPIRE'}) %}
+  {# The pattern presupposes a SPIRE trust domain to issue the JWT-SVID, so it rides the
+     SPIRE flag rather than carrying one of its own. #}
+  {% set _ = tabs.append({'slug': 'kubernetes', 'label': 'Kubernetes access'}) %}
+{% endif %}
+
+<div class="max-w-6xl mx-auto py-8 px-4"
+     x-data="workloadLabPage({{ tabs | map(attribute='slug') | list | tojson }})"
+     x-init="init()">
+
+  <div class="flex items-center gap-2 mb-3 sm:mb-1">
+    <h1 class="text-2xl font-bold text-gray-800">Workload Lab</h1>
+    <span class="text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Preview</span>
+  </div>
+  <p class="text-sm text-gray-500 mb-6">
+    The labs for identities that belong to machines. <strong>There is no human in any of
+    these workflows by design</strong> &mdash; the consumer is a pipeline, a broker or a
+    cluster, not a person. A certificate identity and a SPIFFE identity are two answers to
+    the same question, which is why they share a page.
+  </p>
+
+  {% if tabs | length > 1 %}
+  <div class="border-b border-gray-200 mb-6 flex flex-wrap gap-1" role="tablist" aria-label="Workload Lab sections">
+    {% for tab in tabs %}
+    <button @click="select('{{ tab.slug }}')" role="tab" type="button"
+            :aria-selected="activeTab === '{{ tab.slug }}' ? 'true' : 'false'"
+            :class="activeTab === '{{ tab.slug }}'
+                      ? 'border-blue-600 text-blue-700'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+            class="px-3 py-2 -mb-px border-b-2 text-sm font-medium">{{ tab.label }}</button>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if cert_lab_enabled %}
+  <div x-show="activeTab === 'certificates'" x-cloak role="tabpanel">
+    {% include "workload_lab/_certificates.html" %}
+  </div>
+  {% endif %}
+
+  {% if spire_lab_enabled %}
+  <div x-show="activeTab === 'spire'" x-cloak role="tabpanel">
+    {% include "workload_lab/_spire.html" %}
+  </div>
+
+  <div x-show="activeTab === 'kubernetes'" x-cloak role="tabpanel">
+    {% include "workload_lab/_kubernetes.html" %}
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// The container. It owns which tab is showing and nothing else -- each tab's state stays in
+// that tab's own component, so the two labs cannot reach each other's data.
+function workloadLabPage(slugs) {
+  return {
+    activeTab: '',
+
+    init() {
+      // Deep links land here -- Inventory rows, the persona use cases, and the 301s from
+      // the old /cert-lab and /spire-lab URLs all carry the tab in the fragment.
+      const want = (window.location.hash || '').replace(/^#/, '');
+      this.select(slugs.includes(want) ? want : slugs[0], false);
+    },
+
+    select(slug, push = true) {
+      this.activeTab = slug;
+      // replaceState, not pushState: the back button should leave the page rather than walk
+      // the tabs the visitor clicked through.
+      if (push) window.history.replaceState(null, '', '#' + slug);
+    },
+  };
+}
+</script>
+{% endblock %}

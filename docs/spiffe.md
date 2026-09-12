@@ -14,6 +14,12 @@ which brings a SPIRE trust domain into BeyondInsight as a Managed System. **Ther
 human in this workflow by design** — every identity here belongs to a machine, and the
 consumer is a pipeline, not a person.
 
+It is the **SPIRE** tab of the **Workload Lab** page (`/workload-lab`), alongside
+[Certificates](certificates.md) — both labs govern identities that belong to machines, so
+they share a page. Each still has its own preview toggle and its own Settings panel. The
+page's third tab, **Kubernetes access**, argues a pattern nothing here builds yet: see
+[the design note](design/workload-k8s-short-lived-token.md).
+
 The companion docs:
 
 - [`examples/playbooks/spire/`](../examples/playbooks/spire/README.md) — the playbooks
@@ -71,7 +77,7 @@ minting identities that relying services keep accepting, and it appears on no ot
 
 ## Building it from the dashboard
 
-The **SPIRE** page (preview; enable `spire_lab_enabled` under Settings → Preview
+The **Workload Lab** page's **SPIRE** tab (preview; enable `spire_lab_enabled` under Settings → Preview
 features) does steps 1–5 below as one job. Configure it under **Settings → SPIRE Lab**,
 and upload the four `spire-*.yml` playbooks on the **Storage** page first — a run
 fetches assets *by filename from the storage backend*, never from `examples/`, and the
@@ -165,7 +171,7 @@ reported separately, and that is what tells you which one bit.
 server issues, so `-ttl 720h` against the default 168h gives a ~7-day credential and
 SPIRE says so rather than failing. Once it lapses, every action fails
 `PERMISSION_DENIED`, which reads exactly like an `admin_ids` misconfiguration. Schedule
-off the real expiry the playbook prints — or off the date the SPIRE page shows, which
+off the real expiry the playbook prints — or off the date the SPIRE tab shows, which
 is the same number: the playbook publishes it, and the trust bundle, as text secrets
 alongside the credential so the dashboard reads them as *values* rather than scraping a
 job log. Both are public by construction; the credential itself never leaves Secrets

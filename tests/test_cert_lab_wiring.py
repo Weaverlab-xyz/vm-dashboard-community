@@ -22,6 +22,19 @@ def _read(*parts) -> str:
         return fh.read()
 
 
+def _page(slug: str) -> str:
+    """A Workload Lab tab, as one string: the shell plus the tab's partial.
+
+    The two labs used to be a page each; they are now tabs of one page. The shell carries
+    the chrome (title, Preview badge, tab bar) and the partial carries this lab's markup
+    and its Alpine factory. Assertions here care what the tab says, not which of the two
+    files says it, so read both.
+    """
+    return chr(10).join(
+        _read("web_dashboard", "templates", "workload_lab", name)
+        for name in ("index.html", "_%s.html" % slug))
+
+
 # ── the Terraform module reaches the image ────────────────────────────────────
 
 def test_the_gcp_cas_module_exists_and_declares_the_google_provider():
@@ -236,7 +249,7 @@ def test_the_gcp_project_defaults_to_the_dashboards_own_credential():
 
     api = _read("web_dashboard", "api", "cert_lab.py")
     assert '"default_project"' in api
-    page = _read("web_dashboard", "templates", "cert_lab", "index.html")
+    page = _page("certificates")
     assert "o.default_project" in page, "the API exposes it but the form never reads it"
 
 
@@ -285,15 +298,26 @@ def test_the_flag_gates_the_router_the_page_and_the_nav():
     main = _read("web_dashboard", "main.py")
     assert 'app.include_router(cert_lab_api.router,' in main
     assert main.count('_feature_gate("cert_lab_enabled")') >= 2, "router AND page"
+    # /cert-lab is now a 301 to the Workload Lab tab, and still gated: it must not resolve
+    # on an instance that only enabled the SPIRE lab.
     assert '@app.get("/cert-lab"' in main
+    assert '_Redirect("/workload-lab#certificates"' in main
+    # The nav carries ONE link for both labs, gated on the derived workload_lab_enabled.
+    # The tab itself is still gated on this lab's own flag, inside the page.
     nav = _read("web_dashboard", "templates", "_nav_links.html")
-    assert "{% if cert_lab_enabled %}" in nav
+    assert "{% if workload_lab_enabled %}" in nav
+    assert 'data-nav="workload_lab"' in nav
+    shell = _read("web_dashboard", "templates", "workload_lab", "index.html")
+    assert "{% if cert_lab_enabled %}" in shell, \
+        "the tab must not render on an instance that never enabled this lab"
     flags = _read("web_dashboard", "services", "feature_flags.py")
     assert '"cert_lab_enabled"' in flags
+    assert '"workload_lab_enabled": ("cert_lab_enabled", "spire_lab_enabled")' in flags, \
+        "the nav link and /workload-lab resolve through the derived flag; see _DERIVED"
 
 
 def test_the_page_carries_the_preview_badge():
-    page = _read("web_dashboard", "templates", "cert_lab", "index.html")
+    page = _page("certificates")
     assert ">Preview</span>" in page
     # Every call goes through window.API, which attaches the bearer token. A bare fetch
     # would be anonymous and 401 -- there is no auth cookie on this app. Comment lines are

@@ -126,7 +126,15 @@ def test_the_registry_imports_no_adapter_at_module_scope():
 
 
 def test_configured_platforms_survives_a_broken_adapter():
-    """One platform failing its credential check must not take the list down."""
+    """One platform failing its credential check must not take the list down.
+
+    Asserted as "skytap is absent and the call still returned a list", NOT as "the list is
+    empty". Emptiness is not this function's invariant -- it is ambient state, and the same
+    shared `vm_cli.db` that `_with_selected_cloud` below is careful not to write is written
+    by EARLIER test files in a full-suite run. So `== []` passed this file in isolation and
+    failed it after, for instance, an AWS credential row landed in that db: a real
+    order-dependent failure on main that said nothing about broken adapters.
+    """
     original = skytap_service.configured
 
     def _boom():
@@ -134,9 +142,13 @@ def test_configured_platforms_survives_a_broken_adapter():
 
     skytap_service.configured = _boom
     try:
-        assert lp.configured_platforms() == []
+        out = lp.configured_platforms()
     finally:
         skytap_service.configured = original
+
+    assert isinstance(out, list), "the raising adapter took the whole call down"
+    assert "skytap" not in out, \
+        "the adapter raised, so its platform cannot be reported as configured"
 
 
 # ── one cloud at a time ──────────────────────────────────────────────────────

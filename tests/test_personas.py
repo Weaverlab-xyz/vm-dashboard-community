@@ -276,6 +276,9 @@ _TEMPLATE_OF = {
     "/aws": "aws/index.html", "/azure": "azure/index.html",
     "/gcp": "gcp/index.html", "/oci": "oci/index.html",
     "/containers": "containers/index.html",
+    # The Certificate and SPIRE labs are tabs of one page now, so their cards deep-link by
+    # fragment the way the cloud pages' do.
+    "/workload-lab": "workload_lab/index.html",
 }
 
 
@@ -340,14 +343,21 @@ def test_a_card_declares_the_flag_its_target_page_is_gated_on():
             gate_of[path] = m.group(1)
     assert gate_of, "could not parse any _feature_gate() page gates out of main.py"
 
+    from web_dashboard.services.feature_flags import _DERIVED
+
     for p, c in _all_cards():
         path = c.target.split("#")[0]
         flag = gate_of.get(path)
         if not flag:
             continue
-        assert flag in c.requires_flags, (
+        # A DERIVED gate (feature_flags._DERIVED) is an OR over flags that each have their
+        # own toggle -- /workload-lab resolves if EITHER lab is on. Requiring the one tab
+        # the card actually targets is therefore sufficient, and requiring the derived name
+        # instead would list a flag no operator can set.
+        acceptable = set(_DERIVED.get(flag, (flag,)))
+        assert acceptable & set(c.requires_flags), (
             f"{p.key}/{c.id} targets {path}, which main.py gates on '{flag}', but the "
-            f"card does not require it (requires {list(c.requires_flags)})")
+            f"card requires none of {sorted(acceptable)} (requires {list(c.requires_flags)})")
 
 
 def test_a_card_declares_an_inline_any_of_page_guard():

@@ -1,6 +1,3 @@
-{% extends "base.html" %}
-{% block title %}SPIRE{% endblock %}
-
 {# SPIRE Lab page (PREVIEW, gated by spire_lab_enabled).
    Stands a SPIRE trust domain up on a VM this dashboard already deployed, for the
    Password Safe "SPIFFE SVID" custom plugin to govern. Backed by /api/spire-lab.
@@ -19,14 +16,9 @@
    write the Password Safe objects yet, because whether BeyondInsight populates plugin
    attributes is unresolved — see docs/runbooks/spire-lab-standup.md section 5. #}
 
-{% block content %}
-<div class="max-w-6xl mx-auto py-8 px-4" x-data="spireLabPage()" x-init="init()">
+<div x-data="spireLabPage()" x-init="init()">
 
-  <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3 sm:mb-1">
-    <div class="flex items-center gap-2">
-      <h1 class="text-2xl font-bold text-gray-800">SPIRE</h1>
-      <span class="text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Preview</span>
-    </div>
+  <div class="flex justify-end mb-3 sm:mb-1">
     <button @click="openBuild()"
             class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
       Build a trust domain
@@ -412,9 +404,7 @@
   </div>
 
 </div>
-{% endblock %}
 
-{% block scripts %}
 <script>
 // Every call goes through window.API, which attaches the bearer token from the auth
 // store. Calling an /api route with the browser's own fetch would be ANONYMOUS and 401 --
@@ -684,4 +674,3 @@ function spireLabPage() {
   };
 }
 </script>
-{% endblock %}

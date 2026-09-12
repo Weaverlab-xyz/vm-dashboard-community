@@ -218,7 +218,13 @@ def test_no_page_header_row_keeps_its_columns_on_a_phone():
             if "flex-col" in toks or "flex-wrap" in toks:
                 continue
             offenders.append(f"{rel}: {m.group(1)}")
-    assert checked >= 33, f"only {checked} page headers matched; the pattern stopped matching"
+    # 31, not the 33 this pinned before the Workload Lab consolidation. The Certificate and
+    # SPIRE labs had a header row each; they are tabs of one page now, and that page's title
+    # row carries no buttons to sit opposite -- each tab owns its own action, below the tab
+    # bar and inside its own component's scope -- so the justify-between pattern genuinely
+    # does not apply to it. This floor is the canary for the REGEX silently stopping to
+    # match; lower it only alongside a deliberate merge like that one.
+    assert checked >= 31, f"only {checked} page headers matched; the pattern stopped matching"
     assert not offenders, (
         "these page headers keep the title and the buttons side by side on a phone:\n  "
         + "\n  ".join(offenders[:12]))
@@ -240,7 +246,11 @@ def test_every_page_still_extends_the_shell_that_carries_the_rules():
     """The rules above live in base.html. A page that stopped extending it would quietly
     opt out of all of them."""
     pages = _pages()
-    assert len(pages) >= 38, f"only {len(pages)} page templates found; expected 38+"
+    # 37, not the 38 this pinned before the Workload Lab consolidation: the Certificate and
+    # SPIRE labs became two tabs of one page, so one template legitimately stopped existing.
+    # The floor is what catches a page quietly DROPPING `extends "base.html"` -- lower it
+    # only alongside a deliberate merge like that one.
+    assert len(pages) >= 37, f"only {len(pages)} page templates found; expected 37+"
 
 
 if __name__ == "__main__":

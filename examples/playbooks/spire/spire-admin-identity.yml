@@ -222,7 +222,7 @@
     # Secrets Safe anyway, because it is the only channel out of this run that is a
     # VALUE rather than a log: the debug task below prints them for a human, and a
     # caller that parsed that back out would be parsing Ansible's callback formatting.
-    # The dashboard's /spire-lab page reads these two titles instead.
+    # The dashboard's Workload Lab page (SPIRE tab) reads these two titles instead.
     #
     # no_log is for `ps_client_secret` in the module args, NOT for the payload: a failed
     # task dumps its arguments, and the OAuth secret is in them.
