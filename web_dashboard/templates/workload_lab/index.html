@@ -3,8 +3,12 @@
 
 {# Workload Lab (PREVIEW). One page over the two labs that govern NON-HUMAN identities:
    the Certificate Lab (cert_lab_enabled, /api/cert-lab) and the SPIRE Lab
-   (spire_lab_enabled, /api/spire-lab), plus a static explainer for the Kubernetes
-   short-lived-token pattern that nothing here builds yet.
+   (spire_lab_enabled, /api/spire-lab).
+
+   THE KUBERNETES HALF IS NOT A THIRD TAB. It was, briefly, and that was wrong: a tab
+   explaining a by-hand procedure is precisely what the SPIRE page exists to replace, since
+   standing this up by hand is the afternoon that page eliminates. It belongs inside the
+   SPIRE tab, as a panel with a button on the lab's own row -- see _spire.html.
 
    Nothing below the template layer is shared. Each tab keeps its own Alpine component, its
    own API prefix, its own model and its own inventory kind -- this page is a container, not
@@ -34,9 +38,6 @@
 {% endif %}
 {% if spire_lab_enabled %}
   {% set _ = tabs.append({'slug': 'spire', 'label': 'SPIRE'}) %}
-  {# The pattern presupposes a SPIRE trust domain to issue the JWT-SVID, so it rides the
-     SPIRE flag rather than carrying one of its own. #}
-  {% set _ = tabs.append({'slug': 'kubernetes', 'label': 'Kubernetes access'}) %}
 {% endif %}
 
 <div class="max-w-6xl mx-auto py-8 px-4"
@@ -76,10 +77,6 @@
   {% if spire_lab_enabled %}
   <div x-show="activeTab === 'spire'" x-cloak role="tabpanel">
     {% include "workload_lab/_spire.html" %}
-  </div>
-
-  <div x-show="activeTab === 'kubernetes'" x-cloak role="tabpanel">
-    {% include "workload_lab/_kubernetes.html" %}
   </div>
   {% endif %}
 

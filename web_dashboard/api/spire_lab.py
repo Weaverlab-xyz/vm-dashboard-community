@@ -109,6 +109,33 @@ def _shape(row) -> dict:
         "credential_kind": spire_lab_service.credential_kind(row),
         "credential_account": spire_lab_service.managed_account_name(row),
         "credential_login_user": row.login_user or "",
+        # ── the Kubernetes half ──────────────────────────────────────────────
+        # `k8s_status` NULL is "never attempted", which is every lab built before the
+        # feature. Kept SEPARATE from `status` so a failed link never makes an otherwise
+        # working trust domain read as broken.
+        "k8s_status": row.k8s_status or "",
+        "k8s_error_message": row.k8s_error_message,
+        "k8s_vm_name": row.k8s_vm_name or "",
+        "k8s_private_ip": row.k8s_private_ip or "",
+        "k8s_stages_done": [x for x in (row.k8s_stages_done or "").split(",") if x],
+        "k8s_stages": [{"key": x["key"], "asset": x["asset"], "host": x.get("host", "spire")}
+                       for x in spire_lab_service.K8S_STAGES],
+        "k8s_stage_job_ids": spire_lab_service.k8s_stage_jobs(row),
+        # The three strings that have to agree in three places. Shown because when they
+        # disagree Kubernetes rejects every token and says nothing useful about why.
+        "k8s_audience": row.k8s_audience or "",
+        "k8s_issuer_url": row.k8s_issuer_url or "",
+        "k8s_workload_spiffe_id": row.k8s_workload_spiffe_id or "",
+        "k8s_workload_role": row.k8s_workload_role or "",
+        # What the RBAC subject actually is. Not the SPIFFE ID: Kubernetes requires a
+        # prefix on any username claim other than email, so the binding names
+        # "spiffe:spiffe://…". It looks wrong, it is correct, and it is the first thing
+        # to check on a 403 — so the page shows the real string rather than implying it.
+        "k8s_rbac_subject": (
+            f"{spire_lab_service.K8S_USERNAME_PREFIX}{row.k8s_workload_spiffe_id}"
+            if row.k8s_workload_spiffe_id else ""),
+        "k8s_workload_user": spire_lab_service.K8S_WORKLOAD_USER,
+        "k8s_jwt_svid_ttl": spire_lab_service.K8S_JWT_SVID_TTL,
         "deploy_job_id": row.deploy_job_id,
         "created_by": row.created_by,
         "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -136,6 +163,17 @@ class BuildRequest(BaseModel):
     # this sends the same account as managed_become rather than adding a second picker.
     managed_become_self: bool = False
     login_user: str = ""
+
+
+class K8sLinkRequest(BaseModel):
+    # A VM NAME or IP, re-derived server-side against this dashboard's own deploy rows —
+    # same contract as BuildRequest.host, and the same reason.
+    host: str
+    # Blank takes the default. The audience is the security boundary rather than a label:
+    # a relying party that accepts an audience it was not issued for accepts tokens minted
+    # for somebody else's service.
+    audience: str = ""
+    workload_role: str = ""
 
 
 # ── read ──────────────────────────────────────────────────────────────────────
@@ -390,6 +428,31 @@ def build_lab(req: BuildRequest, db: Session = Depends(get_db),
                              if req.managed_account else None),
             managed_become_self=req.managed_become_self,
             login_user=req.login_user)
+    except SpireLabError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/{lab_id}/k8s-link")
+def link_kubernetes(lab_id: str, req: K8sLinkRequest, db: Session = Depends(get_db),
+                    user: User = Depends(require_permission("cloud_function", "write"))):
+    """Attest a k3s node into this trust domain and make its API server accept JWT-SVIDs.
+
+    Deliberately a SEPARATE action on an existing lab rather than a stage of the build:
+    the governance half is what most labs are built for and stands on its own, so a k3s
+    failure must not make a working trust domain read as broken. An existing lab can also
+    gain the capability without being rebuilt.
+
+    The credential is the lab's own — whatever was chosen at build time, or the key
+    auto-derived from each host's deploy job. There is deliberately no second credential
+    picker here: adding one would ask the operator the same question twice for a pair of
+    VMs the dashboard deployed itself.
+    """
+    _require_enabled()
+    _visible_or_404(db, lab_id, user)
+    try:
+        return spire_lab_service.start_k8s_link(
+            db, lab_id=lab_id, created_by=user.username, host=req.host,
+            audience=req.audience, workload_role=req.workload_role)
     except SpireLabError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

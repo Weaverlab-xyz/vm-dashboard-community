@@ -45,34 +45,48 @@ Kubernetes/database image.
    Safe values it names into the Password Safe functional account, and the printed
    trust bundle into the managed system's `SpiffeTrustBundlePem`.
 
-### The optional Kubernetes track
+### The Kubernetes track
 
-**The dashboard's build job does not run these three.** It runs the four plays above and
-stops; these are a by-hand extension, and they need a second host — a k3s cluster — that
-the SPIRE page knows nothing about.
+Three of these plays, plus `k3s/k3s-spiffe-auth.yml`, attest a **second VM** into the trust
+domain and make its Kubernetes API server accept the tokens. **The dashboard drives them
+from a button** — the *Kubernetes* action on a lab's row, which runs all five stages
+alternating hosts and passes the join token and trust bundle between them so nothing is
+copied by hand. See [docs/spiffe.md](../../../docs/spiffe.md#reaching-a-kubernetes-cluster-with-a-jwt-svid).
 
 They exist because the four plays above prove *issuance* and *governance* and never prove
-that a relying party accepts the result. Here the relying party is a Kubernetes API server,
-and the credential is a JWT-SVID the workload fetches for itself — so unlike every identity
-the plugin governs, nothing is stored in a vault, on disk, or anywhere else.
+that a relying party accepts the result. Here it does, and unlike every identity the plugin
+governs, nothing is stored in a vault, on disk, or anywhere else.
 
-6. **`spire-oidc-provider.yml`** on the SPIRE VM, passing `oidc_domain` — the address the
-   *Kubernetes API server* will reach it on, which is why `localhost` is refused. Open the
-   port on the host firewall and the cloud ACL afterwards, the same two gates as step 3.
-7. **`spire-k8s-entry.yml`** on the SPIRE VM. Note its entry is deliberately **not** added
-   to `spire-seed-entries.yml`: that play's 11-in/8-discovered count is asserted by
-   `tests/test_playbook_spire.py` and stated in three documents, and it has already caught
-   a real bug. Keep it still.
-8. **`spire-agent-install.yml`** on the k3s node, with the join token and trust bundle from
-   step 7. The lab has never had an agent before — the plugin only talks to the server API —
-   and this is the play that makes the un-vaulted path possible at all.
-9. **`k3s/k3s-spiffe-auth.yml`** on the k3s server. See
-   [`examples/playbooks/README.md`](../README.md) for that half.
+| Order | Play | Host |
+|---|---|---|
+| 1 | `k3s/k3s-server-init.yml` | the k3s node |
+| 2 | `spire-oidc-provider.yml` | the SPIRE VM |
+| 3 | `spire-k8s-entry.yml` | the SPIRE VM |
+| 4 | `spire-agent-install.yml` | the k3s node |
+| 5 | `k3s/k3s-spiffe-auth.yml` | the k3s node |
 
-**None of the three has been run against a live server-and-cluster pair.** Treat the first
-run as the validation; each play ends with what to check by hand and how its failures read.
-The argument for the pattern, and the honest comparison against the ServiceAccount-token
-path the dashboard already ships, is in
+Running them by hand is still supported and is what the headers document. Four things to
+know either way:
+
+- **`spire-k8s-entry.yml`'s entry is deliberately not in `spire-seed-entries.yml`.** That
+  play's 11-in/8-discovered count is asserted by `tests/test_playbook_spire.py` and stated
+  in three documents, and it has already caught a real bug. Keep it still.
+- **The issuer has to be a hostname, not an IP.** `spire-server x509 mint -dns` writes a
+  DNS SAN, and Go verifies an *IP* SAN for `https://10.0.0.5:8443` — so an IP issuer fails
+  TLS at the API server however correct the trust bundle is, and the error reads as a bad
+  CA. The provider is minted for `oidc.<trust-domain>`, and play 5 writes the `/etc/hosts`
+  entry resolving it. The dashboard passes `spire_oidc_host_ip` for that.
+- **The join token is one-use and expires in ten minutes.** Play 3 mints it; play 4 spends
+  it. Run them together. Set `node_token_secret` to keep it out of the job log — which is
+  what the dashboard does, reading it back as a `bt_safe://` ref rather than parsing a log.
+- **The agent has never existed in this lab before.** `spire-server-install.yml` installs
+  none, because the plugin only ever talks to the server's API. Play 4 is what makes the
+  un-vaulted path possible at all.
+
+**None of the five has been run against a live pair.** Treat the first run as the
+validation; each play ends with what to check by hand and how its failures read. The
+argument, and the honest comparison against the ServiceAccount-token path the dashboard
+already ships, is in
 [docs/design/workload-k8s-short-lived-token.md](../../../docs/design/workload-k8s-short-lived-token.md).
 
 ## What each one is actually proving

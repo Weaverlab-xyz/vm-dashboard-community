@@ -21,6 +21,14 @@
 # older k3s the apiVersion has to be v1beta1 and the feature gate turned on; this play
 # checks the server's version and refuses rather than writing a config it will reject.
 #
+# THE ISSUER MUST BE A HOSTNAME, NOT AN IP, AND THAT IS NOT COSMETIC.
+# `spire-server x509 mint -dns <x>` writes a **DNS** SAN. Go verifies an **IP** SAN for a
+# URL like https://10.0.0.5:8443, so an IP issuer fails TLS verification at the API server
+# no matter how correct the trust bundle is — and the error reads as a bad CA, which sends
+# you looking in the wrong place entirely. So the provider is minted for a hostname
+# (oidc.<trust-domain>) and this play writes the /etc/hosts entry that resolves it to
+# `spire_oidc_host_ip`. Leave that blank only if the name already resolves in real DNS.
+#
 # THE USERNAME PREFIX IS MANDATORY AND IT BECOMES PART OF EVERY BINDING. Kubernetes
 # requires a prefix on any claim mapping that is not `email`, so the RBAC subject is
 # "<prefix><spiffe id>" — by default "spiffe:spiffe://td/path", which looks odd and is
@@ -48,6 +56,9 @@
     workload_role: "view"
     exec_auth_version: "v0.1.0"
     workload_user: "deploy-bot"
+    # The SPIRE host's address, for the /etc/hosts entry below. Blank skips it, for a lab
+    # whose issuer hostname already resolves in DNS.
+    spire_oidc_host_ip: ""
     k3s_server_dir: /var/lib/rancher/k3s/server
     auth_config: /var/lib/rancher/k3s/server/spiffe-auth-config.yaml
     bundle_path: /var/lib/rancher/k3s/server/tls/spiffe-bundle.pem
@@ -106,6 +117,20 @@
       vars:
         _k8s_minor: >-
           {{ (k3s_version_out.stdout | regex_search('v1\.(\d+)\.', '\\1') | first) | default(0, true) }}
+
+    - name: Resolve the issuer hostname to the SPIRE host
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        # Anchored on the NAME, so a changed address rewrites the entry instead of
+        # appending a second one that /etc/hosts resolution order decides between.
+        regexp: '\s{{ _issuer_host | regex_escape }}(\s|$)'
+        line: "{{ spire_oidc_host_ip }} {{ _issuer_host }}"
+        state: present
+      when:
+        - spire_oidc_host_ip | length > 0
+        - _issuer_host is not match('^[0-9.]+$')
+      vars:
+        _issuer_host: "{{ oidc_issuer_url | regex_replace('^https://([^:/]+).*$', '\\1') }}"
 
     - name: Write the SPIFFE trust bundle for the API server
       ansible.builtin.copy:

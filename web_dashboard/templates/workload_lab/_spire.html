@@ -133,6 +133,11 @@
             <td class="px-4 py-2 text-right whitespace-nowrap align-top">
               <button @click="showOnboarding(lab)"
                       class="text-blue-600 hover:underline text-xs mr-2">Onboarding</button>
+              <button @click="openK8s(lab)" x-show="lab.status === 'available'" x-cloak
+                      class="hover:underline text-xs mr-2"
+                      :class="lab.k8s_status === 'linked' ? 'text-green-700' : 'text-blue-600'"
+                      x-text="lab.k8s_status === 'linked' ? 'Kubernetes ✓'
+                              : (lab.k8s_status === 'linking' ? 'Kubernetes…' : 'Kubernetes')"></button>
               <button @click="showBundle(lab)" x-show="lab.has_bundle" x-cloak
                       class="text-blue-600 hover:underline text-xs mr-2">Bundle</button>
               <button @click="reapplyAcl(lab)"
@@ -326,6 +331,150 @@
     </div>
   </div>
 
+  <!-- Kubernetes access -------------------------------------------------------
+       The un-downgraded path: a workload attests itself and reaches a real relying party
+       with a token stored nowhere. Deliberately a panel on the lab's own row rather than a
+       tab of its own -- a tab explaining a by-hand procedure is what this page exists to
+       replace. docs/spiffe.md#reaching-a-kubernetes-cluster-with-a-jwt-svid. -->
+  <div x-show="k8sOpen" x-cloak
+       class="fixed inset-0 bg-black/40 flex items-start justify-center z-40 overflow-y-auto p-4"
+       @click.self="k8sOpen = false">
+    <div class="bg-white rounded-xl shadow-lg w-full max-w-2xl p-6 my-8">
+      <div class="flex items-center gap-2 mb-1">
+        <h2 class="text-lg font-semibold text-gray-800">Kubernetes access</h2>
+        <span class="text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
+          Never live-validated</span>
+      </div>
+      <p class="text-xs text-gray-500 mb-4">
+        Attest a second VM &mdash; a small k3s node &mdash; into
+        <span class="font-mono" x-text="k8sLab?.trust_domain"></span>, and make its API
+        server accept this trust domain's JWT-SVIDs. The workload then reaches the cluster
+        with a token that lives
+        <span x-text="k8sLab?.k8s_jwt_svid_ttl || 300"></span>s and is written to no disk
+        and no vault.
+        <a href="/docs/spiffe#reaching-a-kubernetes-cluster-with-a-jwt-svid" target="_blank"
+           class="text-blue-600 hover:underline">What this proves</a>.
+      </p>
+
+      <!-- Already linked: show what has to agree, and how to prove it. -->
+      <template x-if="k8sLab?.k8s_status === 'linked'">
+        <div>
+          <div class="border border-green-200 bg-green-50 rounded-lg px-3 py-2 text-xs text-green-800 mb-4">
+            Linked to <strong x-text="k8sLab.k8s_vm_name"></strong>.
+          </div>
+          <dl class="text-xs space-y-2 mb-4">
+            <div><dt class="text-gray-500">Issuer</dt>
+              <dd class="font-mono text-gray-800 break-all" x-text="k8sLab.k8s_issuer_url"></dd></div>
+            <div><dt class="text-gray-500">Audience &mdash; must match in three places</dt>
+              <dd class="font-mono text-gray-800" x-text="k8sLab.k8s_audience"></dd></div>
+            <div><dt class="text-gray-500">Workload identity</dt>
+              <dd class="font-mono text-gray-800 break-all" x-text="k8sLab.k8s_workload_spiffe_id"></dd></div>
+            <div><dt class="text-gray-500">RBAC subject &mdash; the prefix is mandatory and looks wrong</dt>
+              <dd class="font-mono text-gray-800 break-all" x-text="k8sLab.k8s_rbac_subject"></dd></div>
+            <div><dt class="text-gray-500">Bound to</dt>
+              <dd class="font-mono text-gray-800" x-text="'ClusterRole/' + k8sLab.k8s_workload_role"></dd></div>
+          </dl>
+          <p class="text-xs font-medium text-gray-700 mb-1">Prove it, on the k3s node</p>
+          <pre class="text-xs font-mono bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 overflow-x-auto mb-1"><code x-text="'sudo -u ' + k8sLab.k8s_workload_user + ' kubectl get pods -A'"></code></pre>
+          <p class="text-xs font-medium text-gray-700 mb-1 mt-3">
+            Then break it &mdash; this MUST be refused</p>
+          <pre class="text-xs font-mono bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 overflow-x-auto"><code x-text="'sudo -u ' + k8sLab.k8s_workload_user + ' env SPIFFE_JWT_AUDIENCE=wrong kubectl get pods -A'"></code></pre>
+          <p class="text-[11px] text-gray-400 mt-1">
+            The audience is the only thing stopping a token minted for another relying
+            party being replayed here. Stopping the agent is the other one worth showing:
+            access lapses within the TTL, with no revocation step anywhere.
+          </p>
+        </div>
+      </template>
+
+      <!-- Not linked yet: pick the second host. -->
+      <template x-if="k8sLab?.k8s_status !== 'linked'">
+        <div>
+          <div x-show="k8sLab?.k8s_status === 'failed'" x-cloak
+               class="border border-red-200 bg-red-50 rounded-lg px-3 py-2 text-xs text-red-700 mb-4">
+            <p class="font-medium mb-0.5">The last attempt failed</p>
+            <p x-text="k8sLab.k8s_error_message"></p>
+            <p class="mt-1">The trust domain itself is unaffected &mdash; it is still
+              <strong>available</strong> and still governs everything it did before.</p>
+          </div>
+
+          <label class="block text-sm font-medium text-gray-700 mb-1">k3s host</label>
+          <select x-model="k8sForm.host"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">Pick a second VM this dashboard deployed&hellip;</option>
+            <template x-for="h in k8sHosts()" :key="h.name">
+              <option :value="h.name" x-text="h.name + '  (' + h.ip + ')'"></option>
+            </template>
+          </select>
+          <p class="text-[11px] text-gray-400 mt-1 mb-3">
+            A plain VM; k3s is installed here. <strong>Not the SPIRE host</strong> &mdash;
+            an agent attesting over loopback proves the mechanism but not that it works
+            across a network, which is the half worth showing. 2 vCPU / 4 GB is plenty.
+            <span x-show="k8sHosts().length === 0" x-cloak class="block mt-1">
+              No other <span x-text="k8sLab?.cloud"></span> VM available. Deploy one from
+              its cloud page first &mdash; it keeps its own SSH key, timer and Destroy.
+            </span>
+          </p>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Audience</label>
+              <input x-model="k8sForm.audience" placeholder="k8s"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">ClusterRole</label>
+              <input x-model="k8sForm.workload_role" placeholder="view"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+              <p class="text-[11px] text-gray-400 mt-1">Must already exist in the cluster.</p>
+            </div>
+          </div>
+
+          <div class="border border-amber-200 bg-amber-50 rounded-lg px-3 py-2 text-xs text-amber-800 mb-4">
+            <p class="font-medium mb-0.5">Read this before the first run</p>
+            <p>
+              The last stage edits the API server's authentication configuration, and a
+              cluster that will not restart has no API left to repair itself through. The
+              way back is deleting one drop-in file and restarting k3s &mdash; the play
+              says so at the end. Structured authentication is GA in Kubernetes 1.34, and
+              the play refuses anything older rather than writing a config it will reject.
+            </p>
+          </div>
+
+          <p class="text-xs text-gray-500 mb-1">
+            Five playbooks, alternating hosts. Upload them on the
+            <a href="/storage" class="text-blue-600 hover:underline">Storage</a> page first.
+          </p>
+          <ol class="text-[11px] text-gray-400 list-decimal list-inside mb-4 space-y-0.5">
+            <template x-for="st in (k8sLab?.k8s_stages || [])" :key="st.key">
+              <li>
+                <span class="font-mono" x-text="st.asset"></span>
+                <span x-text="st.host === 'k8s' ? ' — k3s node' : ' — SPIRE host'"></span>
+                <span x-show="(k8sLab.k8s_stages_done || []).includes(st.key)"
+                      x-cloak class="text-green-600">✓</span>
+              </li>
+            </template>
+          </ol>
+
+          <div class="flex justify-end gap-2">
+            <button @click="k8sOpen = false"
+                    class="text-sm px-3 py-1.5 rounded-lg border border-gray-300">Cancel</button>
+            <button @click="linkKubernetes()"
+                    :disabled="busy || !k8sForm.host || k8sLab?.k8s_status === 'linking'"
+                    class="text-sm px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50">
+              <span x-text="k8sLab?.k8s_status === 'failed' ? 'Retry the link' : 'Link the two'"></span>
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <div class="flex justify-end mt-4" x-show="k8sLab?.k8s_status === 'linked'">
+        <button @click="k8sOpen = false"
+                class="text-sm px-3 py-1.5 rounded-lg border border-gray-300">Close</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Onboarding ------------------------------------------------------------->
   <div x-show="onboardOpen" x-cloak
        class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50 p-4">
@@ -436,6 +585,13 @@ function spireLabPage() {
     managedError: '',
     managedSystems: [],
     managedAccountKey: '',
+
+    // Kubernetes access. `k8sLab` is a SNAPSHOT of the row the panel was opened on, not
+    // a live reference: load() replaces `labs` wholesale, so holding an element of it
+    // would silently detach mid-poll and the panel would stop updating.
+    k8sOpen: false,
+    k8sLab: null,
+    k8sForm: { host: '', audience: '', workload_role: '' },
 
     onboardOpen: false,
     onboard: null,
@@ -606,6 +762,35 @@ function spireLabPage() {
         await API.post('/api/spire-lab', this.buildPayload());
         this.buildOpen = false;
         this.notify('Building — the four playbooks each get their own job. Follow them in Jobs.');
+        this.load();
+      } catch (e) { this.notify(e.message, 'error'); }
+      finally { this.busy = false; }
+    },
+
+    openK8s(lab) {
+      this.k8sLab = lab;
+      this.k8sForm = { host: '', audience: lab.k8s_audience || '',
+                       workload_role: lab.k8s_workload_role || '' };
+      this.k8sOpen = true;
+    },
+
+    // Every VM of this lab's cloud EXCEPT the one running SPIRE. Filtered here as well as
+    // refused server-side: offering the SPIRE host and then rejecting it is a worse
+    // experience than not offering it, and the server still has the last word because the
+    // host is re-derived from the deploy rows either way.
+    k8sHosts() {
+      const lab = this.k8sLab;
+      if (!lab) return [];
+      return this.hostsFor(lab.cloud).filter(h => h.name !== lab.vm_name);
+    },
+
+    async linkKubernetes() {
+      if (!this.k8sLab) return;
+      this.busy = true;
+      try {
+        await API.post('/api/spire-lab/' + this.k8sLab.id + '/k8s-link', this.k8sForm);
+        this.k8sOpen = false;
+        this.notify('Linking — five playbooks across two hosts; follow progress in Jobs.');
         this.load();
       } catch (e) { this.notify(e.message, 'error'); }
       finally { this.busy = false; }

@@ -1709,6 +1709,44 @@ class SpireLab(Base):
     # Output. A failed stage's log is the only place its Ansible error exists.
     stage_job_ids = Column(Text, nullable=True)
 
+    # ── The Kubernetes half ──────────────────────────────────────────────────
+    # A SECOND HOST on the same row rather than a second row: the trust domain is still
+    # the thing being modelled, and the k3s node is an attribute of this lab. It holds one
+    # SPIRE agent attested into this domain and is meaningless without it.
+    #
+    # ATTACHED, NEVER CREATED — the same rule as the SPIRE host and for the same reason:
+    # privileged playbooks against a host of the caller's choosing is not something this
+    # should accept, so both hosts come from the dashboard's own deploy rows.
+    k8s_vm_resource_id = Column(String(500), nullable=True)
+    k8s_vm_name = Column(String(120), nullable=True)
+    # The same two-address split, and the same trap: `k8s_private_ip` is what the SPIRE
+    # host's ACL is opened TO and what the agent dials the server from; `k8s_public_ip` is
+    # what the Ansible runner SSHes to. Either may be blank.
+    k8s_private_ip = Column(String(64), nullable=True)
+    k8s_public_ip = Column(String(64), nullable=True)
+
+    # linking | linked | failed, or NULL for "never attempted". Deliberately SEPARATE from
+    # `status`: the governance half is what most labs are built for and it stands on its
+    # own, so a failed link must not make a working trust domain read as broken.
+    k8s_status = Column(String(32), nullable=True)
+    k8s_error_message = Column(Text, nullable=True)
+    k8s_stages_done = Column(Text, nullable=True)
+    k8s_stage_job_ids = Column(Text, nullable=True)
+
+    # The strings that have to agree in three places at once — the registration entry, the
+    # API server's AuthenticationConfiguration, and the workload's SPIFFE_JWT_AUDIENCE.
+    # Stored rather than recomputed because the panel shows them and because a re-link must
+    # not quietly change one: an audience that stops matching rejects every token, and
+    # Kubernetes says nothing useful about why.
+    k8s_audience = Column(String(120), nullable=True)
+    k8s_workload_spiffe_id = Column(String(255), nullable=True)
+    k8s_workload_uid = Column(Integer, nullable=True)
+    k8s_workload_role = Column(String(120), nullable=True)
+    # Spelled exactly as the discovery document advertises it. Kubernetes matches the
+    # issuer STRING, so a trailing slash or a swapped host is a total failure with no
+    # diagnostic — which is why it is recorded rather than rebuilt from parts each time.
+    k8s_issuer_url = Column(String(255), nullable=True)
+
     # What the seed put in and what discovery should return. 11 in, 8 out — and the
     # count IS the assertion, not "discovery succeeded". The plugin shipped with
     # discovery defaulting its path filter to the MINTABLE prefix, which silently
@@ -3165,6 +3203,23 @@ def init_db():
             "ALTER TABLE spire_labs ADD COLUMN ansible_managed_account TEXT",
             "ALTER TABLE spire_labs ADD COLUMN ansible_managed_become_self BOOLEAN",
             "ALTER TABLE spire_labs ADD COLUMN login_user VARCHAR(104)",
+            # SPIRE lab, the Kubernetes half. All NULL backfills to "this lab has no k3s
+            # node", which is every lab built before the feature — `k8s_status` NULL is
+            # what the panel reads as "never attempted". No BOOLEAN here, so the
+            # DEFAULT-on-a-new-column trap described above does not apply.
+            "ALTER TABLE spire_labs ADD COLUMN k8s_vm_resource_id VARCHAR(500)",
+            "ALTER TABLE spire_labs ADD COLUMN k8s_vm_name VARCHAR(120)",
+            "ALTER TABLE spire_labs ADD COLUMN k8s_private_ip VARCHAR(64)",
+            "ALTER TABLE spire_labs ADD COLUMN k8s_public_ip VARCHAR(64)",
+            "ALTER TABLE spire_labs ADD COLUMN k8s_status VARCHAR(32)",
+            "ALTER TABLE spire_labs ADD COLUMN k8s_error_message TEXT",
+            "ALTER TABLE spire_labs ADD COLUMN k8s_stages_done TEXT",
+            "ALTER TABLE spire_labs ADD COLUMN k8s_stage_job_ids TEXT",
+            "ALTER TABLE spire_labs ADD COLUMN k8s_audience VARCHAR(120)",
+            "ALTER TABLE spire_labs ADD COLUMN k8s_workload_spiffe_id VARCHAR(255)",
+            "ALTER TABLE spire_labs ADD COLUMN k8s_workload_uid INTEGER",
+            "ALTER TABLE spire_labs ADD COLUMN k8s_workload_role VARCHAR(120)",
+            "ALTER TABLE spire_labs ADD COLUMN k8s_issuer_url VARCHAR(255)",
             # Per-POV narrowing for an ordinary user. TEXT and nullable, so the
             # DEFAULT-on-a-new-column trap described above does not apply. Every
             # pre-existing row backfills to NULL = "every POV", which is what keeps

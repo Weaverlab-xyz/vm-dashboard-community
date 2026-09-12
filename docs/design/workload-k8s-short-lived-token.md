@@ -2,13 +2,18 @@
 
 > **Audience:** contributor · **Profile:** `demo` · **Read this when:** you are about to build the Workload Lab's Kubernetes tab, or you are deciding whether a SPIFFE identity should be able to authenticate to a cluster at all.
 
-**The playbooks now exist; none of them has been run against a live pair.** The chain in
-[The playbooks](#the-playbooks) is written and its invariants are pinned by
-`tests/test_playbook_spire.py` and `tests/test_playbook_k3s.py`, but each of the four is
-marked NEVER LIVE-VALIDATED in its own header. Nothing in the dashboard runs them: the SPIRE
-page's build job still runs exactly the four original plays, and the Workload Lab's
-**Kubernetes access** tab is an explainer, not a button. Treat the first real run as the
-validation.
+**Built, and never run against a live pair.** The five stages in
+[The playbooks](#the-playbooks) are written, their invariants are pinned by
+`tests/test_playbook_spire.py` and `tests/test_playbook_k3s.py`, and the dashboard drives
+them from the **Kubernetes** action on a SPIRE lab's row (`POST /api/spire-lab/{id}/k8s-link`,
+job type `spirelab_k8s_link`). Every play is still marked NEVER LIVE-VALIDATED in its own
+header. Treat the first real run as the validation.
+
+**This is not a tab.** It was, briefly, and that was the wrong shape: a tab explaining a
+by-hand procedure with copy-pasted join tokens is precisely what the SPIRE page exists to
+replace — standing this up by hand is the afternoon that page eliminates. It is a panel on
+the lab's own row, and the orchestrator passes the join token and trust bundle between hosts
+so nothing is copied by hand.
 
 ## The problem
 
@@ -160,9 +165,36 @@ server has to be *told* is therefore its own play, on its own host.
 | `spire/spire-agent-install.yml` | k3s node | The SPIRE agent, and a JWT-SVID fetched *as the workload account* to prove the chain before reporting success |
 | `k3s/k3s-spiffe-auth.yml` | k3s server | The `AuthenticationConfiguration`, the apiserver flag as a `config.yaml.d` drop-in, an RBAC binding whose subject is the SPIFFE ID, and the exec-auth binary plus a credential-free kubeconfig |
 
-All four follow the existing pattern: fetched by bare filename from the storage backend, run
-through Config Management on `chrweav/ansible-winrm`. Uploading them to Storage is a
-prerequisite, as it is for the `spire-*` four.
+Five stages, because a plain VM has to become a k3s server first
+(`k3s/k3s-server-init.yml` runs before the four above). All are fetched by bare filename from
+the storage backend and run through Config Management, as the `spire-*` four are — uploading
+them to Storage is the same prerequisite.
+
+Three things about the orchestration are worth recording, because none is recoverable from
+the code alone:
+
+- **Two hosts, both ATTACHED, never created.** The lab provisions no compute and this does
+  not change that: both VMs come from the dashboard's own deploy rows through the existing
+  `resolve_host`, for the reason `docs/spiffe.md` already gives — accepting an address the
+  request supplies would be accepting a request to run privileged playbooks against a host
+  of the caller's choosing. `start_k8s_link` refuses the SPIRE host as the k3s node, because
+  an agent attesting over loopback proves the mechanism but not that it crosses a network.
+- **The join token crosses hosts as a REF, not a value.** It is minted on the SPIRE host and
+  spent on the k3s node minutes later, so it can be neither stored on the row nor put in a
+  job log — a job's output *is* a captured log. The entry play writes it to Secrets Safe
+  under the lab's own folder and the agent stage binds it through `secret_vars`, which
+  resolves at run time and is scrubbed from the output. That also keeps every `vars_for`
+  builder reading only the row and config, which is what lets a resumed run rebuild an
+  identical one.
+- **The entry stage always re-runs.** A join token is one-use and expires in ten minutes, so
+  a link resumed after a later stage failed cannot reuse the first attempt's token — it
+  would fail attestation with a message about an unknown token, which reads like a broken
+  agent. Re-running mints a fresh token and another node entry; node entries are excluded
+  from discovery, so the documented 8-of-11 count does not move.
+
+The ACL is deliberately **asymmetric**: only the SPIRE host gains a rule, for tcp/8081 and
+tcp/8443, sourced from the k3s node's private address alone. The k3s node needs nothing
+inbound, because the workload runs on it.
 
 Four things the writing settled, each of them a trap:
 
@@ -182,7 +214,14 @@ Four things the writing settled, each of them a trap:
 - **The agent play's verification has to run as the workload.** Fetching as root is attested
   as `unix:uid:0`, matches no entry, and fails. Fetching as the workload account proves the
   entry, the selector, the audience and the attestation at once — the single assertion that
-  makes the other three plays meaningful.
+  makes the other plays meaningful.
+- **The issuer must be a hostname, and this one nearly shipped wrong.** `spire-server x509
+  mint -dns <x>` writes a **DNS** SAN, and Go verifies an **IP** SAN for a URL like
+  `https://10.0.0.5:8443`. An IP issuer therefore fails TLS verification at the API server
+  no matter how correct the trust bundle is, and the error reads as a bad CA — which sends
+  you looking in entirely the wrong place. So the provider is minted for
+  `oidc.<trust-domain>` and `k3s-spiffe-auth.yml` writes the `/etc/hosts` entry that
+  resolves it to the SPIRE host's private address.
 
 And two that are still open:
 

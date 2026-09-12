@@ -175,26 +175,26 @@ nodes need egress. Air-gapped installs are out of scope.
 
 ### A workload reaching the cluster with a short-lived token
 
-`k3s-spiffe-auth.yml` is the last step of a four-play chain that spans this directory and
-`spire/`: a SPIRE-attested workload fetches a JWT-SVID over the Workload API and `kubectl`
+`k3s-spiffe-auth.yml` is the last step of a five-stage chain that spans this directory
+and `spire/`, and the dashboard drives the whole chain from a button on a SPIRE lab's row: a SPIRE-attested workload fetches a JWT-SVID over the Workload API and `kubectl`
 sends it as the bearer token, so nothing is stored on disk or in a vault. It exists because
 `--authentication-config` is a kube-apiserver flag and **EKS, AKS and GKE do not expose it**
 — a self-managed cluster is the only place the pattern works at all.
 
 Run order, alternating hosts:
 
-1. `spire/spire-oidc-provider.yml` — on the **SPIRE server**. Publishes the trust domain as
+1. `k3s-server-init.yml` — on the **k3s node**. A plain VM becomes a k3s server.
+2. `spire/spire-oidc-provider.yml` — on the **SPIRE server**. Publishes the trust domain as
    an OIDC issuer, serving TLS with an SVID SPIRE issued itself.
-2. `spire/spire-k8s-entry.yml` — on the **SPIRE server**. A join token for the k3s node, and
-   the workload entry carrying the `k8s` audience. Prints the trust bundle both later plays
-   need.
-3. `spire/spire-agent-install.yml` — on the **k3s node**. The agent, and the first real
+3. `spire/spire-k8s-entry.yml` — on the **SPIRE server**. A join token for the k3s node, and
+   the workload entry carrying the `k8s` audience.
+4. `spire/spire-agent-install.yml` — on the **k3s node**. The agent, and the first real
    proof: it fetches a JWT-SVID *as the workload account* before reporting success.
-4. `k3s-spiffe-auth.yml` — on the **k3s server**. The `AuthenticationConfiguration`, the
-   apiserver flag as a `config.yaml.d` drop-in, and an RBAC binding whose subject is the
-   SPIFFE ID.
+5. `k3s-spiffe-auth.yml` — on the **k3s server**. The `AuthenticationConfiguration`, the
+   apiserver flag as a `config.yaml.d` drop-in, an RBAC binding whose subject is the SPIFFE
+   ID, and a kubeconfig holding no credential.
 
-**None of the four has been run against a live pair yet.** Step 4 edits the API server's
+**None of the five has been run against a live pair yet.** Step 5 edits the API server's
 authentication configuration, so read its "If k3s will not come back" note first — the
 recovery is deleting one drop-in file. The reasoning, and the comparison against the
 ServiceAccount-token path the dashboard already has, is in
