@@ -487,19 +487,37 @@ def test_the_stage_payload_reads_the_credential_off_the_row():
     run; a credential read from anywhere else would change identity halfway through a
     build that had already failed once."""
     svc = _read("web_dashboard", "services", "spire_lab_service.py")
-    # The whole builder, because the ref is resolved just above the payload class.
+    # The whole builder, because the credential set is resolved just above the payload.
     meta_fn = svc.split("def _stage_meta(")[1].split("\nasync def ")[0]
-    assert "managed_ref(row)" in meta_fn
+    # Row-derived, per host. Matched on the accessors rather than on `row.<field>` because
+    # the fields are now read one level up, in _cred_fields -- which still takes only the
+    # row, so the invariant this test protects is unchanged.
+    assert "_cred_fields(row, _host)" in meta_fn, \
+        "the credential is no longer resolved from the row for this stage's host"
+    assert "managed_ref_for(row, _host)" in meta_fn
     payload = meta_fn.split("class _Payload:")[1].split("return ansible_run_meta")[0]
-    assert "row.ansible_secret_ssh_key_source" in payload
-    assert "row.ansible_managed_become_self" in payload
-    assert "row.login_user" in payload
-    # The pre-existing hard-coded empties for the kinds this form does NOT offer must
-    # stay empty rather than becoming undeclared -- run_meta would default them anyway,
-    # but a bound-but-undeclared field is how a slot silently stops being sent.
-    assert "secret_vars = None" in payload
+    assert '_cred["ssh_key_source"]' in payload
+    assert '_cred["become_self"]' in payload
+    assert '_cred["login_user"]' in payload
+    # The hard-coded empties for the kinds this form does NOT offer must stay DECLARED
+    # rather than disappearing -- run_meta would default them anyway, but a
+    # bound-but-undeclared field is how a slot silently stops being sent.
     assert 'secret_become_source = ""' in payload
     assert 'epml_token_var = ""' in payload
+    # secret_vars is now per-stage: the Kubernetes link's agent stage binds the join
+    # token through it, as a REF resolved at run time. The token is one-use and spent
+    # within minutes, so it can be neither stored on the row nor put in a job log, and
+    # this is the only channel that is neither. Asserted as "declared, and still None for
+    # a stage that offers no builder" rather than as the old literal `= None`, which is
+    # the same invariant one step less brittle.
+    assert "secret_vars = " in payload, "the secret_vars slot stopped being declared"
+    assert "else None" in payload, (
+        "a stage with no secret_vars_for must still send None -- an undeclared slot is "
+        "how this silently stops carrying the join token")
+    assert "stage.get(\"secret_vars_for\")" in payload or \
+           "stage.get('secret_vars_for')" in payload, (
+        "secret_vars must come from the STAGE. Read from the request instead and a "
+        "resumed link would rebuild a different run")
 
 
 def test_the_choice_is_not_written_into_the_parent_jobs_metadata():
@@ -637,9 +655,13 @@ def test_the_build_form_reloads_the_account_list_when_the_host_changes():
     assert 'form.host = \'\'; onHostChange()' in page          # the cloud select too
     assert "/api/config-mgmt/managed-accounts" in page
     assert "/api/config-mgmt/secret-options" in page
-    # The account key is cleared before the reload, never after.
-    hc = page.split("async onHostChange()")[1].split("async ")[0]
-    assert hc.index("resetCredential()") < hc.index("managed-accounts")
+    # The account key is cleared before the reload, never after. Anchored on the lookup
+    # CALL rather than on the URL: the request itself now lives in _lookupAccounts, which
+    # the Kubernetes panel shares -- the two pickers share the network call and nothing
+    # else, because they are choosing a credential for two different VMs.
+    hc = page.split("async onHostChange()")[1].split("\n    async ")[0]
+    assert hc.index("resetCredential()") < hc.index("_lookupAccounts"), \
+        "the stale account key survives a host change, so it can check out the wrong host's"
 
 
 def test_the_build_form_has_one_shape_used_by_both_initialisers():
@@ -672,6 +694,193 @@ def test_the_page_shows_the_discovery_count_not_just_success():
     page = _page("spire")
     assert "discovery_expected" in page
     assert "entries_seeded" in page
+
+
+# ── the Kubernetes link ──────────────────────────────────────────────────────
+# Five stages across TWO hosts, driven by one button. Nothing here has run against a live
+# pair, so these pin the parts that decide whether the chain can work at all. Reasoning:
+# docs/design/workload-k8s-short-lived-token.md.
+
+def _svc_src():
+    return _read("web_dashboard", "services", "spire_lab_service.py")
+
+
+def test_the_link_stages_alternate_the_two_hosts_correctly():
+    """A stage landing on the wrong machine would install a SPIRE server where k3s should
+    be. The k3s node runs k3s, the agent and the apiserver config; the SPIRE server runs
+    the OIDC provider and the registration entry, because those need its own CLI."""
+    from web_dashboard.services import spire_lab_service as svc
+    expected = {
+        "k3s-server-init.yml": "k8s",
+        "spire-oidc-provider.yml": "spire",
+        "spire-k8s-entry.yml": "spire",
+        "spire-agent-install.yml": "k8s",
+        "k3s-spiffe-auth.yml": "k8s",
+    }
+    got = {st["asset"]: st.get("host") for st in svc.K8S_STAGES}
+    assert got == expected, f"stage hosts drifted: {got}"
+    # And the order matters: k3s must exist before the agent is installed on it, and the
+    # entry must exist before the agent tries to attest against it.
+    order = [st["asset"] for st in svc.K8S_STAGES]
+    assert order.index("k3s-server-init.yml") < order.index("spire-agent-install.yml")
+    assert order.index("spire-k8s-entry.yml") < order.index("spire-agent-install.yml")
+    assert order.index("spire-agent-install.yml") < order.index("k3s-spiffe-auth.yml")
+
+
+def test_the_entry_stage_always_reruns_because_a_join_token_is_one_use():
+    """A link resumed after a later stage failed cannot reuse the first attempt's token: it
+    is spent or expired, and attestation then fails with a message about an unknown token,
+    which reads like a broken agent."""
+    from web_dashboard.services import spire_lab_service as svc
+    entry = next(s for s in svc.K8S_STAGES if s["asset"] == "spire-k8s-entry.yml")
+    assert entry.get("always") is True, \
+        "the entry stage is skippable on resume, so a resumed link reuses a spent token"
+    # And the loop honours it rather than only the flag existing.
+    src = _svc_src()
+    loop = src.split("for stage in K8S_STAGES:")[1].split("row.k8s_status = \"linked\"")[0]
+    assert 'stage.get("always")' in loop, \
+        "run_k8s_link skips done stages without consulting `always`"
+
+
+def test_the_join_token_crosses_hosts_as_a_ref_and_never_as_a_value():
+    """It is minted on one host and spent on the other minutes later, so it can be neither
+    stored on the row nor put in a job log -- a job's output IS a captured log."""
+    from web_dashboard.services import spire_lab_service as svc
+    agent = next(s for s in svc.K8S_STAGES if s["asset"] == "spire-agent-install.yml")
+    assert agent.get("secret_vars_for"), "the agent stage binds no secret_vars"
+    src = _svc_src()
+    # extra_vars for the agent must NOT carry the token.
+    agent_vars = src.split("def _agent_vars(")[1].split("\ndef ")[0]
+    assert "join_token" not in agent_vars, \
+        "the join token is in extra_vars, which lands in the jobs table"
+    ref_fn = src.split("def _join_token_ref(")[1].split("\ndef ")[0]
+    assert "bt_safe://" in ref_fn, "the token is not passed as a vault ref"
+    # And the entry stage has to WRITE it there rather than printing it.
+    entry_vars = src.split("def _k8s_entry_vars(")[1].split("\ndef ")[0]
+    assert "node_token_secret" in entry_vars, \
+        "the entry stage does not store the token, so it is printed into the job log"
+    # No column holds it.
+    from web_dashboard.database import SpireLab
+    assert not [c.name for c in SpireLab.__table__.columns if "token" in c.name], \
+        "a column now holds the join token; it is one-use and must not be stored"
+
+
+def test_the_link_refuses_the_spire_host_as_the_k3s_node():
+    """Two hosts is the point. An agent attesting over loopback proves the mechanism but
+    not that it crosses a network, which is the half worth demonstrating."""
+    block = _svc_src().split("def start_k8s_link(")[1].split("\nasync def ")[0]
+    assert "row.vm_resource_id" in block and "same VM" in block, \
+        "nothing stops the k3s node being the SPIRE server"
+    # And it is re-derived from the deploy rows, not taken from the request.
+    assert "resolve_host(" in block, \
+        "the host is trusted as given; it must be re-derived against the deploy rows"
+
+
+def test_a_failed_link_leaves_the_trust_domain_available():
+    """The governance half is what most labs are built for and stands on its own, so a k3s
+    failure must not make a working trust domain read as broken."""
+    src = _svc_src()
+    handler = src.split("except Exception as exc:  # noqa: BLE001")[-1]
+    assert 'row.k8s_status = "failed"' in handler
+    assert 'row.status = "failed"' not in handler, \
+        "the link's failure path also fails the lab, so the trust domain reads as broken"
+    from web_dashboard.database import SpireLab
+    cols = {c.name for c in SpireLab.__table__.columns}
+    assert {"k8s_status", "k8s_error_message"} <= cols, \
+        "the link has no status of its own, so it cannot fail independently"
+
+
+def test_the_acl_opens_both_ports_to_the_node_alone():
+    """Asymmetric on purpose: the agent dials 8081 and the API server fetches JWKS on 8443,
+    while the k3s node needs nothing inbound because the workload runs on it."""
+    block = _svc_src().split("async def run_k8s_link(")[1].split("\nasync def ")[0]
+    assert "OIDC_PORT" in block and "row.bind_port" in block, \
+        "the link does not open both the API and the JWKS port"
+    assert "/32" in block, \
+        "the rule is not scoped to the k3s node's own address"
+    assert "k8s_private_ip" in block, "the source is not the node's private address"
+
+
+def test_the_issuer_is_a_hostname_because_mint_writes_a_dns_san():
+    """`spire-server x509 mint -dns` writes a DNS SAN, and Go verifies an IP SAN for
+    https://10.0.0.5:8443 -- so an IP issuer fails TLS at the API server however correct the
+    trust bundle is, and the error reads as a bad CA."""
+    src = _svc_src()
+    fn = src.split("def oidc_domain_for(")[1].split("\ndef ")[0]
+    assert "trust_domain" in fn and "private_ip" not in fn, \
+        "the issuer host is built from an address; it must be a name (oidc.<trust-domain>)"
+    # And the API server must be told how to resolve it.
+    auth_vars = src.split("def _auth_vars(")[1].split("\n\nK8S_STAGES")[0]
+    assert "spire_oidc_host_ip" in auth_vars, \
+        "nothing passes the address the issuer hostname resolves to"
+
+
+def test_the_two_hosts_do_not_share_a_connection_identity():
+    """The SPIRE VM and the k3s node are deployed independently and do not share an SSH
+    key. A blank set for one host must mean "auto-derive from THAT host's deploy job" --
+    which already works, because the deploy job is matched on the target address -- and
+    must NOT mean "use whatever the other host was given". Inheriting would connect to one
+    VM with another VM's credential, and the failure is Permission denied (publickey)
+    several stages into a run that looked configured."""
+    from web_dashboard.database import SpireLab
+    cols = {c.name for c in SpireLab.__table__.columns}
+    for f in ("k8s_ansible_secret_ssh_key_source", "k8s_ansible_managed_account",
+              "k8s_ansible_managed_become_self", "k8s_login_user"):
+        assert f in cols, f"{f} is missing, so the k3s node cannot have its own credential"
+
+    svc = _read("web_dashboard", "services", "spire_lab_service.py")
+    fn = svc.split("def _cred_fields(")[1].split("\ndef ")[0]
+    k8s_branch = fn.split('if host == "k8s":')[1].split("\n    return {")[0]
+    assert "k8s" in k8s_branch, "the k8s branch slice came out empty -- the regex broke"
+    # The k8s branch must read ONLY k8s_ columns. A bare `row.ansible_` or `row.login_user`
+    # in there is the inheritance bug.
+    for leaked in ("row.ansible_secret_ssh_key_source", "row.ansible_managed_account",
+                   "row.ansible_managed_become_self", "row.login_user"):
+        assert leaked not in k8s_branch, (
+            f"the k3s host's credential falls back to {leaked} -- that is the SPIRE host's, "
+            "and it would connect to one VM with another VM's key")
+    for own in ("row.k8s_ansible_secret_ssh_key_source", "row.k8s_login_user"):
+        assert own in k8s_branch, f"the k3s branch does not read {own}"
+
+
+def test_the_two_hosts_credential_pickers_do_not_share_selection_state():
+    """Two pickers on one Alpine component, for two different VMs. Sharing
+    `managedAccountKey` would offer one host's accounts while the run connects to the
+    other -- and both ids are scoped to ONE managed system, so that checks out the wrong
+    machine's credential rather than failing cleanly."""
+    page = _page("spire")
+    # Separate bags.
+    for name in ("k8sManagedAccountKey", "k8sManagedSystems", "k8sManagedEnabled"):
+        assert name in page, f"the Kubernetes panel has no {name} of its own"
+    # The panel's markup must bind its OWN key, never the build form's.
+    panel = page.split("<!-- Kubernetes access")[1].split("<!-- Onboarding")[0]
+    assert 'x-model="k8sManagedAccountKey"' in panel
+    assert 'x-model="managedAccountKey"' not in panel, \
+        "the panel binds the build form's account key, so it would send another VM's account"
+    assert 'x-model="k8sForm.secret_ssh_key_source"' in panel
+    assert 'x-model="form.secret_ssh_key_source"' not in panel, \
+        "the panel binds the build form's key secret"
+    # Switching host must clear the stale selection BEFORE reloading the list.
+    fn = page.split("async k8sOnHostChange()")[1].split("\n    k8sOnAccountChange()")[0]
+    assert fn.index("k8sResetCredential()") < fn.index("_lookupAccounts"), \
+        "the stale account key survives a host change, so it can check out the wrong host's"
+    # And the POST has to carry the panel's pin, not the build form's.
+    link = page.split("async linkKubernetes()")[1].split("\n    async ")[0]
+    assert "k8sManagedSystems" in link and "k8sManagedAccountKey" in link, \
+        "linkKubernetes sends the wrong host's managed account"
+
+
+def test_the_link_job_type_is_registered_everywhere_it_has_to_be():
+    """Three places, and a miss in any one of them is a job that is created and never runs,
+    or runs in the wrong concurrency tier."""
+    worker = _read("web_dashboard", "jobs_worker.py")
+    assert worker.count('"spirelab_k8s_link"') >= 3, (
+        "spirelab_k8s_link is missing from the handled-types tuple, the LIGHT tier, or the "
+        "dispatch chain")
+    assert 'job_type == "spirelab_k8s_link"' in worker
+    assert "run_k8s_link(" in worker
+    api = _read("web_dashboard", "api", "spire_lab.py")
+    assert '"/{lab_id}/k8s-link"' in api and "start_k8s_link(" in api
 
 
 if __name__ == "__main__":

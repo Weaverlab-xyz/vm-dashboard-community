@@ -16,6 +16,9 @@ network ACL is opened — see [Opening the port](#opening-the-port).
 | `spire-open-ports.yml` | Linux VM (SSH) | `ansible-winrm` | Opens tcp/8081 on the **host** firewall (firewalld or ufw) |
 | `spire-seed-entries.yml` | Linux VM (SSH) | `ansible-winrm` | The 11 registration entries the demo is built on |
 | `spire-admin-identity.yml` | Linux VM (SSH) | `ansible-winrm` | Mints the admin X509-SVID, packs a PKCS#12, writes it into Password Safe |
+| `spire-oidc-provider.yml` | the SPIRE VM (SSH) | `ansible-winrm` | The OIDC Discovery Provider, serving JWKS over TLS with an SVID SPIRE issued itself. **Never live-validated** |
+| `spire-k8s-entry.yml` | the SPIRE VM (SSH) | `ansible-winrm` | A join token for a k3s node, and the workload entry carrying the `k8s` audience. **Never live-validated** |
+| `spire-agent-install.yml` | the **k3s node** (SSH) | `ansible-winrm` | A SPIRE agent, and a JWT-SVID fetched as the workload to prove the chain. **Never live-validated** |
 
 All four are `--syntax-check` clean against `chrweav/ansible-winrm`, which is the image
 to use: `spire-open-ports.yml` needs `ansible.posix`, and `spire-admin-identity.yml`
@@ -41,6 +44,50 @@ Kubernetes/database image.
 5. **`spire-admin-identity.yml`**, passing `admin_secret_folder`. Copy the two Secrets
    Safe values it names into the Password Safe functional account, and the printed
    trust bundle into the managed system's `SpiffeTrustBundlePem`.
+
+### The Kubernetes track
+
+Three of these plays, plus `k3s/k3s-spiffe-auth.yml`, attest a **second VM** into the trust
+domain and make its Kubernetes API server accept the tokens. **The dashboard drives them
+from a button** — the *Kubernetes* action on a lab's row, which runs all five stages
+alternating hosts and passes the join token and trust bundle between them so nothing is
+copied by hand. See [docs/spiffe.md](../../../docs/spiffe.md#reaching-a-kubernetes-cluster-with-a-jwt-svid).
+
+They exist because the four plays above prove *issuance* and *governance* and never prove
+that a relying party accepts the result. Here it does, and unlike every identity the plugin
+governs, nothing is stored in a vault, on disk, or anywhere else.
+
+| Order | Play | Host |
+|---|---|---|
+| 1 | `k3s/k3s-server-init.yml` | the k3s node |
+| 2 | `spire-oidc-provider.yml` | the SPIRE VM |
+| 3 | `spire-k8s-entry.yml` | the SPIRE VM |
+| 4 | `spire-agent-install.yml` | the k3s node |
+| 5 | `k3s/k3s-spiffe-auth.yml` | the k3s node |
+
+Running them by hand is still supported and is what the headers document. Four things to
+know either way:
+
+- **`spire-k8s-entry.yml`'s entry is deliberately not in `spire-seed-entries.yml`.** That
+  play's 11-in/8-discovered count is asserted by `tests/test_playbook_spire.py` and stated
+  in three documents, and it has already caught a real bug. Keep it still.
+- **The issuer has to be a hostname, not an IP.** `spire-server x509 mint -dns` writes a
+  DNS SAN, and Go verifies an *IP* SAN for `https://10.0.0.5:8443` — so an IP issuer fails
+  TLS at the API server however correct the trust bundle is, and the error reads as a bad
+  CA. The provider is minted for `oidc.<trust-domain>`, and play 5 writes the `/etc/hosts`
+  entry resolving it. The dashboard passes `spire_oidc_host_ip` for that.
+- **The join token is one-use and expires in ten minutes.** Play 3 mints it; play 4 spends
+  it. Run them together. Set `node_token_secret` to keep it out of the job log — which is
+  what the dashboard does, reading it back as a `bt_safe://` ref rather than parsing a log.
+- **The agent has never existed in this lab before.** `spire-server-install.yml` installs
+  none, because the plugin only ever talks to the server's API. Play 4 is what makes the
+  un-vaulted path possible at all.
+
+**None of the five has been run against a live pair.** Treat the first run as the
+validation; each play ends with what to check by hand and how its failures read. The
+argument, and the honest comparison against the ServiceAccount-token path the dashboard
+already ships, is in
+[docs/design/workload-k8s-short-lived-token.md](../../../docs/design/workload-k8s-short-lived-token.md).
 
 ## What each one is actually proving
 

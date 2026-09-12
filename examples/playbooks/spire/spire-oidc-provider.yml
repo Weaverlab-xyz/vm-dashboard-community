@@ -1,0 +1,270 @@
+# Install the SPIRE OIDC Discovery Provider beside the server
+# Target: the SPIRE server VM, after spire-server-install.yml. Idempotent.
+#
+# This is what turns a SPIRE trust domain into an ordinary OIDC issuer: it publishes
+# /.well-known/openid-configuration and a JWKS endpoint carrying the trust domain's JWT
+# signing keys, so any relying party that can validate an OIDC token can validate a
+# JWT-SVID. The Kubernetes API server is the relying party this lab is built for — see
+# k3s-spiffe-auth.yml and docs/design/workload-k8s-short-lived-token.md.
+#
+# NEVER LIVE-VALIDATED. Written against the SPIRE 1.15.3 documentation and this lab's own
+# server.conf, but not yet run against a live server-plus-k3s pair. Treat the first run as
+# the validation, and read the "Verify by hand" block at the end before trusting it.
+#
+# NEEDS EGRESS to github.com for the spire-extras release tarball. The provider ships in
+# spire-extras-<version>, NOT in the spire-<version> tarball spire-server-install.yml
+# fetches, so this downloads a second archive at the same version.
+#
+# IT SERVES TLS WITH AN SVID THAT SPIRE ITSELF ISSUED, which is the point. The API server
+# is configured with the SPIFFE trust bundle as its certificateAuthority, so the same
+# bundle that validates the token also validates the connection that published the keys,
+# and no public CA or ACME round trip is involved. The consequence is the one below.
+#
+# THE SERVING CERTIFICATE EXPIRES, AND RE-RUNNING THIS PLAY IS THE RENEWAL. ca_ttl on the
+# server caps every SVID it issues, so at the 168h default this certificate lives ~7 days
+# however large svid_ttl is set — the same clamp that shortens the admin credential, and
+# it prints the real expiry below. Past it the API server's JWKS fetch fails and every
+# workload's kubectl call reads as an authentication error with nothing wrong at the
+# workload end. A production topology renews from the Workload API on a timer; this lab
+# does not, deliberately, because a lab that hides the expiry teaches the wrong lesson.
+#
+# extra_vars:
+#   trust_domain: weaverlab.test    # REQUIRED — must match the running server
+#   oidc_domain: ""                 # REQUIRED — the DNS name or IP the KUBERNETES API
+#                                   #   SERVER will reach this on. It becomes the cert's
+#                                   #   SAN and the issuer URL, so it cannot be localhost.
+#   oidc_port: 8443
+#   spire_version: 1.15.3           # match spire-server-install.yml
+#   spire_extras_sha256: ""         # tarball checksum from the release page; blank skips
+#   svid_ttl: 168h                  # asked for; ca_ttl is what you actually get
+- name: Install the SPIRE OIDC Discovery Provider
+  hosts: all
+  become: true
+  vars:
+    trust_domain: ""
+    oidc_domain: ""
+    oidc_port: 8443
+    spire_version: "1.15.3"
+    spire_extras_sha256: ""
+    svid_ttl: "168h"
+    spire_root: /opt/spire
+    oidc_dir: /opt/spire/oidc
+    # The server's default socket_path. spire-server-install.yml does not override it, so
+    # the provider reads the admin API here to fetch the JWKS.
+    server_socket: /tmp/spire-server/private/api.sock
+  tasks:
+    - name: Require a trust domain and a reachable domain
+      ansible.builtin.assert:
+        that:
+          - trust_domain | length > 0
+          - "'/' not in trust_domain"
+          - oidc_domain | length > 0
+          - oidc_domain not in ['localhost', '127.0.0.1']
+        fail_msg: >-
+          trust_domain is required as a bare name such as 'weaverlab.test', and
+          oidc_domain is required as the address the KUBERNETES API SERVER will fetch
+          JWKS from. localhost is refused because the API server is on another host —
+          a certificate and an issuer URL naming localhost produce a JWKS fetch that
+          fails only once Kubernetes tries it, from a play that reported success.
+
+    - name: Resolve the provider identity and issuer URL
+      ansible.builtin.set_fact:
+        _oidc_id: "spiffe://{{ trust_domain }}/oidc-discovery-provider"
+        _issuer: "https://{{ oidc_domain }}:{{ oidc_port }}"
+
+    - name: Confirm the server is up
+      ansible.builtin.command: "{{ spire_root }}/bin/spire-server healthcheck"
+      register: oidc_health
+      changed_when: false
+
+    - name: Map the CPU architecture to a SPIRE release asset
+      ansible.builtin.set_fact:
+        _arch: "{{ _arch_map[ansible_facts['architecture']] | default('') }}"
+      vars:
+        _arch_map:
+          x86_64: amd64
+          aarch64: arm64
+
+    - name: Fail on an architecture SPIRE does not publish
+      ansible.builtin.fail:
+        msg: "no spire-extras release asset for architecture {{ ansible_facts['architecture'] }}"
+      when: _arch | length == 0
+
+    - name: Create the provider directory
+      ansible.builtin.file:
+        path: "{{ oidc_dir }}"
+        state: directory
+        mode: "0750"
+
+    # Guarded on the binary's absence rather than on a version probe: unlike
+    # spire-server, oidc-discovery-provider has no --version flag that is stable across
+    # the 1.x line, so a version bump wants the binary removed first. Said out loud in
+    # the output below rather than silently re-downloading every run.
+    - name: Detect the provider binary
+      ansible.builtin.stat:
+        path: "{{ oidc_dir }}/oidc-discovery-provider"
+      register: oidc_bin
+
+    - name: Download the spire-extras release
+      ansible.builtin.get_url:
+        url: >-
+          https://github.com/spiffe/spire/releases/download/v{{ spire_version }}/spire-extras-{{ spire_version }}-linux-{{ _arch }}-musl.tar.gz
+        dest: "/tmp/spire-extras-{{ spire_version }}.tar.gz"
+        checksum: "{{ ('sha256:' ~ spire_extras_sha256) if spire_extras_sha256 | length > 0 else omit }}"
+        mode: "0640"
+      when: not oidc_bin.stat.exists
+
+    - name: Warn when the download was not checksummed
+      ansible.builtin.debug:
+        msg: >-
+          spire_extras_sha256 was blank, so the tarball was taken on TLS alone. The
+          release page publishes a checksum — set it for anything you intend to keep.
+      when:
+        - spire_extras_sha256 | length == 0
+        - not oidc_bin.stat.exists
+
+    - name: Unpack the provider binary
+      ansible.builtin.unarchive:
+        src: "/tmp/spire-extras-{{ spire_version }}.tar.gz"
+        dest: "{{ oidc_dir }}"
+        remote_src: true
+        extra_opts: ["--strip-components=2", "--wildcards", "*/bin/oidc-discovery-provider"]
+        mode: "0750"
+      when: not oidc_bin.stat.exists
+
+    - name: Remove the downloaded tarball
+      ansible.builtin.file:
+        path: "/tmp/spire-extras-{{ spire_version }}.tar.gz"
+        state: absent
+
+    # -dns puts oidc_domain in the certificate's SAN. Without it the cert carries only the
+    # SPIFFE URI, and Go's TLS stack rejects the connection on hostname mismatch before
+    # any of the trust-bundle configuration is consulted — which reads like a bad CA.
+    - name: Mint the provider's serving SVID
+      ansible.builtin.command: >-
+        {{ spire_root }}/bin/spire-server x509 mint
+        -spiffeID {{ _oidc_id }}
+        -dns {{ oidc_domain }}
+        -ttl {{ svid_ttl }}
+        -write {{ oidc_dir }}
+      register: oidc_mint
+      changed_when: oidc_mint.rc == 0
+
+    - name: Secure the minted key
+      ansible.builtin.file:
+        path: "{{ oidc_dir }}/{{ item }}"
+        mode: "0640"
+      loop: [svid.pem, key.pem, bundle.pem]
+
+    - name: Read the serving certificate's real expiry
+      ansible.builtin.command: >-
+        openssl x509 -in {{ oidc_dir }}/svid.pem -noout -enddate
+      register: oidc_expiry
+      changed_when: false
+
+    # domains must list every name the issuer URL can be spelled as, because the provider
+    # refuses a request whose Host header is not in this list — a 404 on the discovery
+    # document that looks like the endpoint does not exist.
+    - name: Write the provider configuration
+      ansible.builtin.copy:
+        dest: "{{ spire_root }}/conf/oidc-discovery-provider.conf"
+        mode: "0640"
+        content: |
+          log_level = "INFO"
+          domains = ["{{ oidc_domain }}"]
+
+          serving_cert_file {
+              addr           = ":{{ oidc_port }}"
+              cert_file_path = "{{ oidc_dir }}/svid.pem"
+              key_file_path  = "{{ oidc_dir }}/key.pem"
+          }
+
+          server_api {
+              address = "unix://{{ server_socket }}"
+          }
+      notify: Restart spire-oidc-provider
+
+    # PrivateTmp is deliberately absent: the server's API socket lives under /tmp, and a
+    # private /tmp namespace would give this unit its own empty one. The provider would
+    # then start cleanly and fail every key fetch.
+    - name: Install the systemd unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/spire-oidc-provider.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=SPIRE OIDC Discovery Provider (Workload Lab)
+          After=spire-server.service
+          Wants=spire-server.service
+
+          [Service]
+          ExecStart={{ oidc_dir }}/oidc-discovery-provider -config {{ spire_root }}/conf/oidc-discovery-provider.conf
+          WorkingDirectory={{ oidc_dir }}
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart spire-oidc-provider
+
+    - name: Enable and start the provider
+      ansible.builtin.systemd:
+        name: spire-oidc-provider
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Apply any pending restart before probing
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for the provider port to accept connections
+      ansible.builtin.wait_for:
+        port: "{{ oidc_port }}"
+        host: 127.0.0.1
+        timeout: 60
+
+    # Validated against the bundle it was minted from, not with -k: skipping verification
+    # here would pass on exactly the misconfiguration this endpoint exists to avoid.
+    - name: Fetch the discovery document
+      ansible.builtin.command: >-
+        curl -sS --cacert {{ oidc_dir }}/bundle.pem
+        --resolve {{ oidc_domain }}:{{ oidc_port }}:127.0.0.1
+        {{ _issuer }}/.well-known/openid-configuration
+      register: oidc_discovery
+      changed_when: false
+      retries: 5
+      delay: 3
+      until: oidc_discovery.rc == 0 and 'jwks_uri' in oidc_discovery.stdout
+
+    - name: Confirm the issuer the document advertises
+      ansible.builtin.assert:
+        that:
+          - _issuer in oidc_discovery.stdout
+        fail_msg: >-
+          The discovery document does not advertise {{ _issuer }} as its issuer. The
+          Kubernetes AuthenticationConfiguration matches on the issuer STRING, so a
+          mismatch here rejects every token with no useful message. Check oidc_domain
+          and oidc_port against the URL Kubernetes will be given.
+
+    - name: What was built
+      ansible.builtin.debug:
+        msg:
+          - "OIDC Discovery Provider serving {{ _issuer }} for trust domain '{{ trust_domain }}'."
+          - "Issuer URL (give this to k3s-spiffe-auth.yml): {{ _issuer }}"
+          - "JWKS:      {{ _issuer }}/keys"
+          - "Identity:  {{ _oidc_id }}"
+          - "Serving certificate {{ oidc_expiry.stdout | trim }} — RE-RUN THIS PLAY TO RENEW."
+          - "ca_ttl on the server caps that date whatever svid_ttl ({{ svid_ttl }}) asked for."
+          - "Open {{ oidc_port }} on the host firewall AND the cloud ACL to the k3s node."
+          - "Verify by hand from the K3S NODE, not from here:"
+          - "  curl --cacert <trust-bundle.pem> {{ _issuer }}/.well-known/openid-configuration"
+          - "A connection refused there is the firewall; a certificate error is oidc_domain."
+          - "Next: spire-k8s-entry.yml on this host, then spire-agent-install.yml on the node."
+          - "To upgrade the provider, remove {{ oidc_dir }}/oidc-discovery-provider first —"
+          - "this play guards on the binary existing, not on its version."
+  handlers:
+    - name: Restart spire-oidc-provider
+      ansible.builtin.systemd:
+        name: spire-oidc-provider
+        state: restarted
+        daemon_reload: true

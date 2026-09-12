@@ -66,7 +66,7 @@ HANDLED_TYPES = (
     "cloudfn_entitle_register",
     "clouddb_adapter_pair", "clouddb_dbops_deploy",
     "certca_provision", "certca_decommission", "cert_ps_register",
-    "spirelab_provision", "spirelab_decommission",
+    "spirelab_provision", "spirelab_decommission", "spirelab_k8s_link",
     "ansible_cloud_run", "ansible_local", "epml_sync",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     "packer_aws_build", "packer_azure_build", "packer_gcp_build", "packer_oci_build",
@@ -206,7 +206,7 @@ LIGHT_TYPES = (
     # a DEADLOCK constraint. Each child is HEAVY, and the HEAVY cap can be 1, so a
     # parent that held a HEAVY slot while waiting on a HEAVY child would wait forever.
     # The parent itself runs no local process and streams no output; the children do.
-    "spirelab_provision", "spirelab_decommission",
+    "spirelab_provision", "spirelab_decommission", "spirelab_k8s_link",
     # One metadata write, then up to fourteen minutes of polling our own agent row for an
     # enrolment that happens in the APP process. Nothing local, nothing streamed -- and
     # tiering it heavier would let one POV's enrolment wait block another POV's provision.
@@ -503,6 +503,14 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
         elif job_type == "spirelab_decommission":
             from .services import spire_lab_service
             await spire_lab_service.run_decommission(
+                db, lab_id=meta["lab_id"], job_id=job_id)
+        elif job_type == "spirelab_k8s_link":
+            # Opens tcp/8081 and tcp/8443 on the SPIRE host to the k3s node, then drives
+            # five playbooks ALTERNATING HOSTS: k3s install and the agent on the node, the
+            # OIDC provider and the registration entry on the SPIRE server. LIGHT for the
+            # same reason as its two siblings -- it is a parent waiting on HEAVY children.
+            from .services import spire_lab_service
+            await spire_lab_service.run_k8s_link(
                 db, lab_id=meta["lab_id"], job_id=job_id)
         elif job_type == "cloudfn_deploy":
             from .services import cloud_function_service

@@ -278,6 +278,116 @@ def test_seed_is_idempotent_on_an_existing_entry():
     assert creates >= 2, "expected the node entry and the workload entries to be created"
 
 
+# ── the Kubernetes track ─────────────────────────────────────────────────────
+# Four traps, each recorded in docs/design/workload-k8s-short-lived-token.md. None of these
+# plays has been run against a live pair, so these assertions are the only thing standing
+# between a plausible-looking edit and a chain that cannot issue a single token.
+
+def _play(name):
+    return yaml.safe_load(open(os.path.join(_SPIRE_DIR, name), encoding="utf-8").read())[0]
+
+
+def test_the_kubernetes_track_plays_exist():
+    for name in ("spire-oidc-provider.yml", "spire-k8s-entry.yml", "spire-agent-install.yml"):
+        assert os.path.exists(os.path.join(_SPIRE_DIR, name)), f"{name} is missing"
+
+
+def test_the_workload_entry_stays_out_of_the_seed_play():
+    """The 8-of-11 count is asserted above, stated in three documents, and has already
+    caught a real bug. The Kubernetes workload entry therefore belongs in
+    spire-k8s-entry.yml — putting it in the seed set would move the number and retire the
+    assertion that caught that bug."""
+    seeded = {e["path"] for e in _seed_entries()}
+    entry_play = yaml.safe_dump(_play("spire-k8s-entry.yml"))
+    assert "workload_path" in entry_play, \
+        "spire-k8s-entry.yml no longer declares its own workload path"
+    for path in seeded:
+        assert "kube" not in path and "k8s" not in path, (
+            f"seeded path {path!r} looks like the Kubernetes workload entry. It must live in "
+            "spire-k8s-entry.yml — the seed play's entry count is load-bearing")
+
+
+def test_the_node_entry_comes_from_the_join_token():
+    """`token generate -spiffeID` creates the node entry itself, with the token's UUID as
+    the selector. A hand-written `join_token:<name>` node entry — which is what
+    spire-seed-entries.yml has, for a lab with no agent at all — matches no agent ever."""
+    play = _play("spire-k8s-entry.yml")
+    generates = [t for t in _tasks(play) if "token generate" in (_command_of(t) or "")]
+    assert len(generates) == 1, "expected exactly one `token generate`"
+    assert "-spiffeID" in _command_of(generates[0]), (
+        "`token generate` must pass -spiffeID, or it creates no node entry and the "
+        "workload entry is parented to nothing")
+    for task in _tasks(play):
+        cmd = _command_of(task) or ""
+        if "entry create" in cmd and "-node" in cmd:
+            raise AssertionError(
+                f"{task.get('name')!r} hand-writes a -node entry. The join token creates it; "
+                "a made-up join_token:<name> selector matches no attesting agent")
+
+
+def test_the_agent_can_actually_resolve_a_unix_selector():
+    """WorkloadAttestor "unix" is what lets the agent learn a caller's UID. Without it every
+    unix:uid selector matches nothing and the fetch fails with "no identity issued", which
+    reads like a missing entry on the server rather than a missing plugin on the node."""
+    play = _play("spire-agent-install.yml")
+    conf = next((t for t in _tasks(play)
+                 if "agent.conf" in str((t.get("ansible.builtin.copy") or {}).get("dest", ""))), None)
+    assert conf, "spire-agent-install.yml writes no agent.conf"
+    content = conf["ansible.builtin.copy"]["content"]
+    assert 'WorkloadAttestor "unix"' in content, \
+        'agent.conf has no WorkloadAttestor "unix" — unix:uid selectors cannot resolve'
+    assert 'NodeAttestor "join_token"' in content, "agent.conf cannot attest with its token"
+    assert conf.get("no_log") is True, "agent.conf holds the join token and must no_log"
+
+
+def test_the_agent_socket_matches_the_exec_plugin_default():
+    """spiffe/k8s-spiffe-workload-jwt-exec-auth defaults to
+    unix:///tmp/spire-agent/public/api.sock. Matching it is what lets the kubeconfig carry
+    no environment variable for the socket."""
+    play = _play("spire-agent-install.yml")
+    assert play["vars"]["agent_socket"] == "/tmp/spire-agent/public/api.sock", (
+        "the agent socket no longer matches the exec plugin's default — either restore it "
+        "or set SPIFFE_ENDPOINT_SOCKET in the kubeconfig k3s-spiffe-auth.yml writes")
+
+
+def test_the_agent_unit_does_not_get_a_private_tmp():
+    """The Workload API socket lives under /tmp. With PrivateTmp the agent gets its own,
+    starts cleanly, passes its own health check, and no workload can ever reach it."""
+    play = _play("spire-agent-install.yml")
+    for task in _tasks(play):
+        content = str((task.get("ansible.builtin.copy") or {}).get("content", ""))
+        if "[Service]" not in content:
+            continue
+        assert "PrivateTmp=true" not in content.replace(" ", ""), (
+            "the agent unit sets PrivateTmp. The socket under /tmp would be invisible to "
+            "every workload on the host, and nothing would report an error")
+
+
+def test_the_agent_proves_the_chain_as_the_workload_not_as_root():
+    """The assertion that makes the other plays meaningful. Fetching as root is attested as
+    unix:uid:0, matches no entry and fails; fetching as the workload proves the entry, the
+    selector, the audience and the attestation together."""
+    play = _play("spire-agent-install.yml")
+    fetch = [t for t in _tasks(play) if "api fetch jwt" in (_command_of(t) or "")]
+    assert len(fetch) == 1, "spire-agent-install.yml must fetch a JWT-SVID to prove the chain"
+    task = fetch[0]
+    assert task.get("become_user"), (
+        "the fetch runs as root, so it is attested as unix:uid:0 and matches no entry. It "
+        "has to run as the workload account")
+    assert "-audience" in _command_of(task), "the fetch must name an audience"
+    assert task.get("no_log") is True, "the fetched token authenticates to the API server"
+
+
+def test_the_oidc_provider_refuses_an_unreachable_domain():
+    """oidc_domain is the address the KUBERNETES API SERVER fetches JWKS from, and it lands
+    in both the certificate SAN and the issuer string. localhost passes every check on the
+    SPIRE host and then fails from the cluster, after a play that reported success."""
+    play = _play("spire-oidc-provider.yml")
+    guard = yaml.safe_dump([t for t in _tasks(play) if "assert" in yaml.safe_dump(t)])
+    assert "localhost" in guard, "nothing stops oidc_domain being localhost"
+    assert "oidc_domain" in guard, "oidc_domain is not asserted at all"
+
+
 if __name__ == "__main__":
     _tests = [v for k, v in sorted(globals().items())
               if k.startswith("test_") and callable(v)]

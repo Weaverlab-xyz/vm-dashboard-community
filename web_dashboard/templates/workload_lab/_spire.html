@@ -133,6 +133,11 @@
             <td class="px-4 py-2 text-right whitespace-nowrap align-top">
               <button @click="showOnboarding(lab)"
                       class="text-blue-600 hover:underline text-xs mr-2">Onboarding</button>
+              <button @click="openK8s(lab)" x-show="lab.status === 'available'" x-cloak
+                      class="hover:underline text-xs mr-2"
+                      :class="lab.k8s_status === 'linked' ? 'text-green-700' : 'text-blue-600'"
+                      x-text="lab.k8s_status === 'linked' ? 'Kubernetes ✓'
+                              : (lab.k8s_status === 'linking' ? 'Kubernetes…' : 'Kubernetes')"></button>
               <button @click="showBundle(lab)" x-show="lab.has_bundle" x-cloak
                       class="text-blue-600 hover:underline text-xs mr-2">Bundle</button>
               <button @click="reapplyAcl(lab)"
@@ -326,6 +331,220 @@
     </div>
   </div>
 
+  <!-- Kubernetes access -------------------------------------------------------
+       The un-downgraded path: a workload attests itself and reaches a real relying party
+       with a token stored nowhere. Deliberately a panel on the lab's own row rather than a
+       tab of its own -- a tab explaining a by-hand procedure is what this page exists to
+       replace. docs/spiffe.md#reaching-a-kubernetes-cluster-with-a-jwt-svid. -->
+  <div x-show="k8sOpen" x-cloak
+       class="fixed inset-0 bg-black/40 flex items-start justify-center z-40 overflow-y-auto p-4"
+       @click.self="k8sOpen = false">
+    <div class="bg-white rounded-xl shadow-lg w-full max-w-2xl p-6 my-8">
+      <div class="flex items-center gap-2 mb-1">
+        <h2 class="text-lg font-semibold text-gray-800">Kubernetes access</h2>
+        <span class="text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
+          Never live-validated</span>
+      </div>
+      <p class="text-xs text-gray-500 mb-4">
+        Attest a second VM &mdash; a small k3s node &mdash; into
+        <span class="font-mono" x-text="k8sLab?.trust_domain"></span>, and make its API
+        server accept this trust domain's JWT-SVIDs. The workload then reaches the cluster
+        with a token that lives
+        <span x-text="k8sLab?.k8s_jwt_svid_ttl || 300"></span>s and is written to no disk
+        and no vault.
+        <a href="/docs/spiffe#reaching-a-kubernetes-cluster-with-a-jwt-svid" target="_blank"
+           class="text-blue-600 hover:underline">What this proves</a>.
+      </p>
+
+      <!-- Already linked: show what has to agree, and how to prove it. -->
+      <template x-if="k8sLab?.k8s_status === 'linked'">
+        <div>
+          <div class="border border-green-200 bg-green-50 rounded-lg px-3 py-2 text-xs text-green-800 mb-4">
+            Linked to <strong x-text="k8sLab.k8s_vm_name"></strong>.
+          </div>
+          <dl class="text-xs space-y-2 mb-4">
+            <div><dt class="text-gray-500">Issuer</dt>
+              <dd class="font-mono text-gray-800 break-all" x-text="k8sLab.k8s_issuer_url"></dd></div>
+            <div><dt class="text-gray-500">Audience &mdash; must match in three places</dt>
+              <dd class="font-mono text-gray-800" x-text="k8sLab.k8s_audience"></dd></div>
+            <div><dt class="text-gray-500">Workload identity</dt>
+              <dd class="font-mono text-gray-800 break-all" x-text="k8sLab.k8s_workload_spiffe_id"></dd></div>
+            <div><dt class="text-gray-500">RBAC subject &mdash; the prefix is mandatory and looks wrong</dt>
+              <dd class="font-mono text-gray-800 break-all" x-text="k8sLab.k8s_rbac_subject"></dd></div>
+            <div><dt class="text-gray-500">Bound to</dt>
+              <dd class="font-mono text-gray-800" x-text="'ClusterRole/' + k8sLab.k8s_workload_role"></dd></div>
+          </dl>
+          <p class="text-xs font-medium text-gray-700 mb-1">Prove it, on the k3s node</p>
+          <pre class="text-xs font-mono bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 overflow-x-auto mb-1"><code x-text="'sudo -u ' + k8sLab.k8s_workload_user + ' kubectl get pods -A'"></code></pre>
+          <p class="text-xs font-medium text-gray-700 mb-1 mt-3">
+            Then break it &mdash; this MUST be refused</p>
+          <pre class="text-xs font-mono bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 overflow-x-auto"><code x-text="'sudo -u ' + k8sLab.k8s_workload_user + ' env SPIFFE_JWT_AUDIENCE=wrong kubectl get pods -A'"></code></pre>
+          <p class="text-[11px] text-gray-400 mt-1">
+            The audience is the only thing stopping a token minted for another relying
+            party being replayed here. Stopping the agent is the other one worth showing:
+            access lapses within the TTL, with no revocation step anywhere.
+          </p>
+        </div>
+      </template>
+
+      <!-- Not linked yet: pick the second host. -->
+      <template x-if="k8sLab?.k8s_status !== 'linked'">
+        <div>
+          <div x-show="k8sLab?.k8s_status === 'failed'" x-cloak
+               class="border border-red-200 bg-red-50 rounded-lg px-3 py-2 text-xs text-red-700 mb-4">
+            <p class="font-medium mb-0.5">The last attempt failed</p>
+            <p x-text="k8sLab.k8s_error_message"></p>
+            <p class="mt-1">The trust domain itself is unaffected &mdash; it is still
+              <strong>available</strong> and still governs everything it did before.</p>
+          </div>
+
+          <label class="block text-sm font-medium text-gray-700 mb-1">k3s host</label>
+          <select x-model="k8sForm.host" @change="k8sOnHostChange()"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">Pick a second VM this dashboard deployed&hellip;</option>
+            <template x-for="h in k8sHosts()" :key="h.name">
+              <option :value="h.name" x-text="h.name + '  (' + h.ip + ')'"></option>
+            </template>
+          </select>
+          <p class="text-[11px] text-gray-400 mt-1 mb-3">
+            A plain VM; k3s is installed here. <strong>Not the SPIRE host</strong> &mdash;
+            an agent attesting over loopback proves the mechanism but not that it works
+            across a network, which is the half worth showing. 2 vCPU / 4 GB is plenty.
+            <span x-show="k8sHosts().length === 0" x-cloak class="block mt-1">
+              No other <span x-text="k8sLab?.cloud"></span> VM available. Deploy one from
+              its cloud page first &mdash; it keeps its own SSH key, timer and Destroy.
+            </span>
+          </p>
+
+          <!-- The k3s node's OWN login. The two VMs are deployed independently and do not
+               share an SSH key; blank means "the keypair THIS VM was deployed with", which
+               is derived from its own deploy job and is the normal case. It deliberately
+               does not inherit the SPIRE host's choice. -->
+          <div x-show="canUseSecrets" x-cloak class="border border-gray-100 rounded-lg p-3 mb-3">
+            <p class="text-sm font-medium text-gray-700 mb-2">How the k3s runs log in
+              <span class="text-gray-400 font-normal">(optional)</span></p>
+
+            <label class="block text-xs font-medium text-gray-600 mb-1">Password Safe account</label>
+            <div x-show="k8sManagedLoading" x-cloak class="text-[11px] text-gray-400 mb-1">
+              Looking up managed accounts for this host&hellip;</div>
+            <select x-show="k8sManagedEnabled && !k8sManagedLoading" x-cloak
+                    x-model="k8sManagedAccountKey" @change="k8sOnAccountChange()"
+                    :disabled="!!k8sForm.secret_ssh_key_source"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm disabled:bg-gray-50 disabled:text-gray-400">
+              <option value="">&mdash; none &mdash;</option>
+              <template x-for="sy in k8sManagedSystems" :key="'k8s-' + sy.system_id">
+                <optgroup :label="sy.name + ' (' + sy.ip + ')'">
+                  <template x-for="a in sy.accounts" :key="'k8s-' + a.account_id">
+                    <option :value="sy.system_id + ':' + a.account_id"
+                            x-text="a.name + (a.domain ? ' @' + a.domain : '') + (a.uses_ssh_key ? ' [SSH key]' : ' [password]')"></option>
+                  </template>
+                </optgroup>
+              </template>
+            </select>
+            <p x-show="!k8sManagedEnabled && !k8sManagedLoading" x-cloak
+               class="text-[11px] text-gray-400">
+              <span x-show="!k8sForm.host">Pick the k3s host first.</span>
+              <span x-show="k8sForm.host">No managed accounts for that host &mdash; Password
+                Safe may be disabled, or the VM is not onboarded there.</span>
+            </p>
+            <p x-show="k8sManagedError" x-cloak class="text-[11px] text-amber-600 mt-1"
+               x-text="k8sManagedError"></p>
+
+            <label class="flex items-start gap-2 mt-2 text-[11px] text-gray-500">
+              <input type="checkbox" x-model="k8sForm.managed_become_self" class="mt-0.5"
+                     :disabled="!k8sManagedAccountKey || k8sSelectedAccountUsesSshKey">
+              <span>
+                Also use this account for <strong>sudo</strong>.
+                <span x-show="k8sSelectedAccountUsesSshKey" x-cloak class="text-amber-600">
+                  Unavailable for an <code>[SSH key]</code> account &mdash; there is no
+                  password to check out for sudo.</span>
+                <span x-show="!k8sSelectedAccountUsesSshKey">
+                  Every play here runs with <code>become</code>, so leave this off only if
+                  the account is root or has passwordless sudo.</span>
+              </span>
+            </label>
+
+            <label class="block text-xs font-medium text-gray-600 mt-3 mb-1">SSH private key</label>
+            <select x-model="k8sForm.secret_ssh_key_source" :disabled="!!k8sManagedAccountKey"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm disabled:bg-gray-50 disabled:text-gray-400">
+              <option value="">&mdash; auto: the keypair THIS VM was deployed with &mdash;</option>
+              <template x-for="o in secretOptions" :key="'k8sk-' + o.key">
+                <option :value="o.key" x-text="o.description"></option>
+              </template>
+            </select>
+
+            <label class="block text-xs font-medium text-gray-600 mt-3 mb-1">
+              Login user <span class="text-gray-400 font-normal">(optional)</span></label>
+            <input type="text" x-model="k8sForm.login_user" placeholder="ubuntu"
+                   :disabled="!!k8sManagedAccountKey"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono disabled:bg-gray-50 disabled:text-gray-400">
+
+            <p class="text-[11px] text-gray-400 mt-2">
+              Separate from the SPIRE host's on purpose &mdash; the two VMs were deployed
+              independently and do not share a key. Leaving all three blank is the normal
+              case: each host's keypair comes from its own deploy job.
+            </p>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Audience</label>
+              <input x-model="k8sForm.audience" placeholder="k8s"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">ClusterRole</label>
+              <input x-model="k8sForm.workload_role" placeholder="view"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+              <p class="text-[11px] text-gray-400 mt-1">Must already exist in the cluster.</p>
+            </div>
+          </div>
+
+          <div class="border border-amber-200 bg-amber-50 rounded-lg px-3 py-2 text-xs text-amber-800 mb-4">
+            <p class="font-medium mb-0.5">Read this before the first run</p>
+            <p>
+              The last stage edits the API server's authentication configuration, and a
+              cluster that will not restart has no API left to repair itself through. The
+              way back is deleting one drop-in file and restarting k3s &mdash; the play
+              says so at the end. Structured authentication is GA in Kubernetes 1.34, and
+              the play refuses anything older rather than writing a config it will reject.
+            </p>
+          </div>
+
+          <p class="text-xs text-gray-500 mb-1">
+            Five playbooks, alternating hosts. Upload them on the
+            <a href="/storage" class="text-blue-600 hover:underline">Storage</a> page first.
+          </p>
+          <ol class="text-[11px] text-gray-400 list-decimal list-inside mb-4 space-y-0.5">
+            <template x-for="st in (k8sLab?.k8s_stages || [])" :key="st.key">
+              <li>
+                <span class="font-mono" x-text="st.asset"></span>
+                <span x-text="st.host === 'k8s' ? ' — k3s node' : ' — SPIRE host'"></span>
+                <span x-show="(k8sLab.k8s_stages_done || []).includes(st.key)"
+                      x-cloak class="text-green-600">✓</span>
+              </li>
+            </template>
+          </ol>
+
+          <div class="flex justify-end gap-2">
+            <button @click="k8sOpen = false"
+                    class="text-sm px-3 py-1.5 rounded-lg border border-gray-300">Cancel</button>
+            <button @click="linkKubernetes()"
+                    :disabled="busy || !k8sForm.host || k8sLab?.k8s_status === 'linking'"
+                    class="text-sm px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50">
+              <span x-text="k8sLab?.k8s_status === 'failed' ? 'Retry the link' : 'Link the two'"></span>
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <div class="flex justify-end mt-4" x-show="k8sLab?.k8s_status === 'linked'">
+        <button @click="k8sOpen = false"
+                class="text-sm px-3 py-1.5 rounded-lg border border-gray-300">Close</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Onboarding ------------------------------------------------------------->
   <div x-show="onboardOpen" x-cloak
        class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50 p-4">
@@ -437,6 +656,22 @@ function spireLabPage() {
     managedSystems: [],
     managedAccountKey: '',
 
+    // Kubernetes access. `k8sLab` is a SNAPSHOT of the row the panel was opened on, not
+    // a live reference: load() replaces `labs` wholesale, so holding an element of it
+    // would silently detach mid-poll and the panel would stop updating.
+    k8sOpen: false,
+    k8sLab: null,
+    k8sForm: { host: '', audience: '', workload_role: '',
+               secret_ssh_key_source: '', managed_become_self: false, login_user: '' },
+    // A SEPARATE selection bag from the build modal's. The k3s node is a different VM with
+    // a different SSH key, so sharing `managedAccountKey` would offer one host's accounts
+    // while connecting to the other.
+    k8sManagedAccountKey: '',
+    k8sManagedSystems: [],
+    k8sManagedEnabled: false,
+    k8sManagedLoading: false,
+    k8sManagedError: '',
+
     onboardOpen: false,
     onboard: null,
 
@@ -539,6 +774,17 @@ function spireLabPage() {
     // the equivalent of Config Management's onTargetChange. Both ids are scoped to one
     // managed system, so a stale key would check out one host's credential and connect
     // to another; clear it first, always.
+    // The network half, shared. The build modal and the Kubernetes panel each pick a
+    // credential for a DIFFERENT VM -- the two do not share an SSH key -- so their
+    // SELECTION state has to stay separate or opening one would clobber the other's. The
+    // call is identical though, so only that is factored.
+    async _lookupAccounts(h) {
+      if (!this.canUseSecrets || !h || !h.ip) return { enabled: false, systems: [] };
+      let url = '/api/config-mgmt/managed-accounts?host=' + encodeURIComponent(h.ip);
+      if (h.name) url += '&name=' + encodeURIComponent(h.name);
+      return (await API.get(url)) || {};
+    },
+
     async onHostChange() {
       this.resetCredential();
       this.form.managed_become_self = false;
@@ -546,9 +792,7 @@ function spireLabPage() {
       if (!this.canUseSecrets || !h || !h.ip) { this.managedEnabled = false; return; }
       this.managedLoading = true;
       try {
-        let url = '/api/config-mgmt/managed-accounts?host=' + encodeURIComponent(h.ip);
-        if (h.name) url += '&name=' + encodeURIComponent(h.name);
-        const r = (await API.get(url)) || {};
+        const r = await this._lookupAccounts(h);
         this.managedEnabled = !!r.enabled;
         this.managedEphemeralEnabled = !!r.ephemeral_enabled;
         this.managedSystems = r.systems || [];
@@ -567,13 +811,22 @@ function spireLabPage() {
       }
     },
 
-    _account(key) {
+    _accountIn(systems, key) {
       if (!key) return null;
       const [sid, aid] = key.split(':');
-      const sys = (this.managedSystems || []).find(s => String(s.system_id) === sid);
+      const sys = (systems || []).find(s => String(s.system_id) === sid);
       if (!sys) return null;
       const acct = (sys.accounts || []).find(a => String(a.account_id) === aid);
       return acct ? { sys, acct } : null;
+    },
+
+    _account(key) { return this._accountIn(this.managedSystems, key); },
+
+    // PINNED: both ids plus the name and the SSH-key flag, from whichever host's list.
+    _pin(found) {
+      if (!found) return null;
+      return { system_id: found.sys.system_id, account_id: found.acct.account_id,
+               account_name: found.acct.name, uses_ssh_key: !!found.acct.uses_ssh_key };
     },
 
     get selectedAccountUsesSshKey() {
@@ -588,12 +841,7 @@ function spireLabPage() {
 
     // PINNED: both ids plus the name and the SSH-key flag. A name-only ref is the bulk
     // shape and the server refuses it here, because a lab has exactly one host.
-    resolveManaged() {
-      const f = this._account(this.managedAccountKey);
-      if (!f) return null;
-      return { system_id: f.sys.system_id, account_id: f.acct.account_id,
-               account_name: f.acct.name, uses_ssh_key: !!f.acct.uses_ssh_key };
-    },
+    resolveManaged() { return this._pin(this._account(this.managedAccountKey)); },
 
     buildPayload() {
       return { ...this.form,
@@ -606,6 +854,83 @@ function spireLabPage() {
         await API.post('/api/spire-lab', this.buildPayload());
         this.buildOpen = false;
         this.notify('Building — the four playbooks each get their own job. Follow them in Jobs.');
+        this.load();
+      } catch (e) { this.notify(e.message, 'error'); }
+      finally { this.busy = false; }
+    },
+
+    openK8s(lab) {
+      this.k8sLab = lab;
+      this.k8sForm = { host: '', audience: lab.k8s_audience || '',
+                       workload_role: lab.k8s_workload_role || '',
+                       secret_ssh_key_source: '', managed_become_self: false,
+                       login_user: '' };
+      this.k8sResetCredential();
+      this.k8sOpen = true;
+    },
+
+    k8sResetCredential() {
+      this.k8sManagedAccountKey = '';
+      this.k8sManagedSystems = [];
+      this.k8sManagedEnabled = false;
+      this.k8sManagedError = '';
+    },
+
+    // Both ids are scoped to ONE managed system, so a key left over from another host
+    // would check out that host's credential and connect to this one. Cleared before the
+    // reload, never after — the same rule as the build form's onHostChange.
+    async k8sOnHostChange() {
+      this.k8sResetCredential();
+      this.k8sForm.managed_become_self = false;
+      const h = (this.k8sHosts() || []).find(x => x.name === this.k8sForm.host);
+      if (!this.canUseSecrets || !h || !h.ip) return;
+      this.k8sManagedLoading = true;
+      try {
+        const r = await this._lookupAccounts(h);
+        this.k8sManagedEnabled = !!r.enabled;
+        this.k8sManagedSystems = r.systems || [];
+        if (r.error) this.k8sManagedError = r.error;
+      } catch (e) {
+        this.k8sManagedEnabled = true;
+        this.k8sManagedError = e.message || 'Managed-account lookup failed.';
+      } finally { this.k8sManagedLoading = false; }
+    },
+
+    k8sOnAccountChange() {
+      // A DSS account holds a private key, not a password, so there is nothing to check
+      // out for sudo.
+      if (!this.k8sManagedAccountKey || this.k8sSelectedAccountUsesSshKey) {
+        this.k8sForm.managed_become_self = false;
+      }
+    },
+
+    get k8sSelectedAccountUsesSshKey() {
+      const f = this._accountIn(this.k8sManagedSystems, this.k8sManagedAccountKey);
+      return !!(f && f.acct.uses_ssh_key);
+    },
+
+    // Every VM of this lab's cloud EXCEPT the one running SPIRE. Filtered here as well as
+    // refused server-side: offering the SPIRE host and then rejecting it is a worse
+    // experience than not offering it, and the server still has the last word because the
+    // host is re-derived from the deploy rows either way.
+    k8sHosts() {
+      const lab = this.k8sLab;
+      if (!lab) return [];
+      return this.hostsFor(lab.cloud).filter(h => h.name !== lab.vm_name);
+    },
+
+    async linkKubernetes() {
+      if (!this.k8sLab) return;
+      this.busy = true;
+      try {
+        await API.post('/api/spire-lab/' + this.k8sLab.id + '/k8s-link', {
+          ...this.k8sForm,
+          managed_account: this.canUseSecrets
+            ? this._pin(this._accountIn(this.k8sManagedSystems, this.k8sManagedAccountKey))
+            : null,
+        });
+        this.k8sOpen = false;
+        this.notify('Linking — five playbooks across two hosts; follow progress in Jobs.');
         this.load();
       } catch (e) { this.notify(e.message, 'error'); }
       finally { this.busy = false; }

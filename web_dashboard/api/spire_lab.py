@@ -109,6 +109,39 @@ def _shape(row) -> dict:
         "credential_kind": spire_lab_service.credential_kind(row),
         "credential_account": spire_lab_service.managed_account_name(row),
         "credential_login_user": row.login_user or "",
+        # ── the Kubernetes half ──────────────────────────────────────────────
+        # `k8s_status` NULL is "never attempted", which is every lab built before the
+        # feature. Kept SEPARATE from `status` so a failed link never makes an otherwise
+        # working trust domain read as broken.
+        "k8s_status": row.k8s_status or "",
+        "k8s_error_message": row.k8s_error_message,
+        "k8s_vm_name": row.k8s_vm_name or "",
+        "k8s_private_ip": row.k8s_private_ip or "",
+        "k8s_stages_done": [x for x in (row.k8s_stages_done or "").split(",") if x],
+        "k8s_stages": [{"key": x["key"], "asset": x["asset"], "host": x.get("host", "spire")}
+                       for x in spire_lab_service.K8S_STAGES],
+        "k8s_stage_job_ids": spire_lab_service.k8s_stage_jobs(row),
+        # The three strings that have to agree in three places. Shown because when they
+        # disagree Kubernetes rejects every token and says nothing useful about why.
+        "k8s_audience": row.k8s_audience or "",
+        "k8s_issuer_url": row.k8s_issuer_url or "",
+        "k8s_workload_spiffe_id": row.k8s_workload_spiffe_id or "",
+        "k8s_workload_role": row.k8s_workload_role or "",
+        # What the RBAC subject actually is. Not the SPIFFE ID: Kubernetes requires a
+        # prefix on any username claim other than email, so the binding names
+        # "spiffe:spiffe://…". It looks wrong, it is correct, and it is the first thing
+        # to check on a 403 — so the page shows the real string rather than implying it.
+        "k8s_rbac_subject": (
+            f"{spire_lab_service.K8S_USERNAME_PREFIX}{row.k8s_workload_spiffe_id}"
+            if row.k8s_workload_spiffe_id else ""),
+        # The k3s node's own, separate from credential_kind above: two VMs, two keys.
+        # The KIND and the account NAME only — a name is not a credential.
+        "k8s_credential_kind": spire_lab_service.credential_kind_for(row, "k8s"),
+        "k8s_credential_account": (
+            (spire_lab_service.managed_ref_for(row, "k8s") or {}).get("account_name") or ""),
+        "k8s_credential_login_user": row.k8s_login_user or "",
+        "k8s_workload_user": spire_lab_service.K8S_WORKLOAD_USER,
+        "k8s_jwt_svid_ttl": spire_lab_service.K8S_JWT_SVID_TTL,
         "deploy_job_id": row.deploy_job_id,
         "created_by": row.created_by,
         "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -134,6 +167,26 @@ class BuildRequest(BaseModel):
     managed_account: ManagedAccountRef | None = None
     # All four plays are `become: true`, so a non-root account needs a sudo password;
     # this sends the same account as managed_become rather than adding a second picker.
+    managed_become_self: bool = False
+    login_user: str = ""
+
+
+class K8sLinkRequest(BaseModel):
+    # A VM NAME or IP, re-derived server-side against this dashboard's own deploy rows —
+    # same contract as BuildRequest.host, and the same reason.
+    host: str
+    # Blank takes the default. The audience is the security boundary rather than a label:
+    # a relying party that accepts an audience it was not issued for accepts tokens minted
+    # for somebody else's service.
+    audience: str = ""
+    workload_role: str = ""
+    # THE K3S NODE'S OWN connection identity. The two VMs are deployed independently and do
+    # not share an SSH key, so these are a separate set from the ones BuildRequest took for
+    # the SPIRE host — and a blank set here means "auto-derive from THIS host's deploy job",
+    # never "reuse the SPIRE host's". Same either/or rule and the same field names as the
+    # build form, so the panel reuses Config Management's own pickers unchanged.
+    secret_ssh_key_source: str = ""
+    managed_account: ManagedAccountRef | None = None
     managed_become_self: bool = False
     login_user: str = ""
 
@@ -385,6 +438,38 @@ def build_lab(req: BuildRequest, db: Session = Depends(get_db),
             db, name=req.name, trust_domain=req.trust_domain, cloud=cloud,
             host=req.host, admin_spiffe_id=req.admin_spiffe_id,
             created_by=user.username,
+            secret_ssh_key_source=req.secret_ssh_key_source,
+            managed_account=(req.managed_account.model_dump()
+                             if req.managed_account else None),
+            managed_become_self=req.managed_become_self,
+            login_user=req.login_user)
+    except SpireLabError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/{lab_id}/k8s-link")
+def link_kubernetes(lab_id: str, req: K8sLinkRequest, db: Session = Depends(get_db),
+                    user: User = Depends(require_permission("cloud_function", "write"))):
+    """Attest a k3s node into this trust domain and make its API server accept JWT-SVIDs.
+
+    Deliberately a SEPARATE action on an existing lab rather than a stage of the build:
+    the governance half is what most labs are built for and stands on its own, so a k3s
+    failure must not make a working trust domain read as broken. An existing lab can also
+    gain the capability without being rebuilt.
+
+    The k3s node brings its OWN connection identity, because the two VMs are deployed
+    independently and do not share an SSH key. Leaving it blank is the normal case and
+    already works: the runner derives a keypair from the deploy job of the host it is
+    connecting to, and these stages target the k3s node. What it must never do is inherit
+    the SPIRE host's chosen account or key secret — that would connect to one VM with
+    another VM's credential.
+    """
+    _require_enabled()
+    _visible_or_404(db, lab_id, user)
+    try:
+        return spire_lab_service.start_k8s_link(
+            db, lab_id=lab_id, created_by=user.username, host=req.host,
+            audience=req.audience, workload_role=req.workload_role,
             secret_ssh_key_source=req.secret_ssh_key_source,
             managed_account=(req.managed_account.model_dump()
                              if req.managed_account else None),

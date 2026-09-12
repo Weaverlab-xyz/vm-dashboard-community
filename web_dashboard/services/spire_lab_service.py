@@ -377,6 +377,46 @@ def managed_ref(row: SpireLab) -> Optional[dict]:
         return None
 
 
+def _cred_fields(row: SpireLab, host: str = "spire") -> dict:
+    """The connection identity for ONE of the lab's two hosts.
+
+    The two VMs are deployed independently and **do not share an SSH key**, so each keeps
+    its own set. A NULL set means auto-derive from THAT host's deploy job — which already
+    works, because ``ansible_local_run_service._find_cloud_deploy_meta`` matches the deploy
+    job on the *target address*, and each stage targets its own machine.
+
+    It deliberately does NOT fall back to the other host's choice. Inheriting it would
+    connect to one VM with another VM's credential, and the failure is
+    ``Permission denied (publickey)`` several stages into a run that looked configured.
+    """
+    if host == "k8s":
+        return {"ssh_key_source": row.k8s_ansible_secret_ssh_key_source or "",
+                "managed": row.k8s_ansible_managed_account,
+                "become_self": row.k8s_ansible_managed_become_self,
+                "login_user": row.k8s_login_user or ""}
+    return {"ssh_key_source": row.ansible_secret_ssh_key_source or "",
+            "managed": row.ansible_managed_account,
+            "become_self": row.ansible_managed_become_self,
+            "login_user": row.login_user or ""}
+
+
+def managed_ref_for(row: SpireLab, host: str = "spire") -> Optional[dict]:
+    """``managed_ref`` for either host. Same parse, same "unparseable means none" rule."""
+    raw = _cred_fields(row, host)["managed"]
+    try:
+        return json.loads(raw or "null") or None
+    except Exception:
+        logger.warning("spire-lab: unparseable managed-account ref (%s host) on lab %s",
+                       host, row.id)
+        return None
+
+
+def credential_kind_for(row: SpireLab, host: str = "spire") -> str:
+    if managed_ref_for(row, host):
+        return "managed"
+    return "ssh-key-secret" if _cred_fields(row, host)["ssh_key_source"] else "auto"
+
+
 def credential_kind(row: SpireLab) -> str:
     """Which connection identity this lab was built with — for the page and the audit
     entry. Never the ref itself, and never anything resolvable to a credential."""
@@ -576,13 +616,19 @@ def provision(db: Session, *, name: str, trust_domain: str, cloud: str, host: st
     return {"lab_id": row.id, "job_id": job.id}
 
 
-def _ansible_target(row: SpireLab) -> str:
-    """The address the Ansible runner connects to.
+def _ansible_target(row: SpireLab, host: str = "spire") -> str:
+    """The address the Ansible runner connects to, for one of the lab's two hosts.
 
     Public first. The runner is a transient in-cloud task or a local container, and
     neither is reliably in-subnet — a private address works only when it happens to be,
     and when it is not the failure is an SSH timeout that reads as a firewall problem.
+
+    ``host`` is ``"spire"`` or ``"k8s"``. It exists because the Kubernetes half runs
+    stages on BOTH machines in one job, and a stage silently landing on the wrong one
+    would install a SPIRE server where k3s should be.
     """
+    if host == "k8s":
+        return row.k8s_public_ip or row.k8s_private_ip or ""
     return row.public_ip or row.private_ip or ""
 
 
@@ -596,37 +642,47 @@ def _stage_meta(row: SpireLab, stage: dict, asset_backend: str) -> dict:
     """
     from . import ansible_run_meta
 
-    _ref = managed_ref(row)
+    # Which machine this stage runs on. The original four have no `host` key and all mean
+    # the SPIRE server, so the default keeps them untouched.
+    _host = stage.get("host", "spire")
+    _target = _ansible_target(row, _host)
+    # Per host, because the two VMs do not share an SSH key. See _cred_fields for why a
+    # blank set here must NOT inherit the other host's choice.
+    _cred = _cred_fields(row, _host)
+    _ref = managed_ref_for(row, _host)
 
     class _Payload:
         asset = stage["asset"]
-        target = _ansible_target(row)
+        target = _target
         cloud = row.cloud
         # The lab's own login user wins, then the per-cloud config key. A managed
         # account overrides even this at run time, because the account's name IS the
         # login identity (see ansible_credentials.resolve).
-        ansible_user = (row.login_user or "").strip() or \
+        ansible_user = _cred["login_user"].strip() or \
             _cfg(require_backend(row.cloud).default_user_cfg) or \
             _cfg("ansible_default_user", "ubuntu")
         extra_vars = stage["vars_for"](row)
-        secret_vars = None
+        # A ref per var name, never a value — resolved at run time and scrubbed from the
+        # output. The join token rides this channel: it must not be stored on the row (it
+        # is one-use and spent within minutes) and must not reach a job log.
+        secret_vars = stage["secret_vars_for"](row) if stage.get("secret_vars_for") else None
         secret_become_source = ""
         # Read off the ROW, so all four stages — and a provision resumed after a failed
         # one — use the identical credential. Both are refs; `run_meta`'s closed
         # allowlist is what keeps a value out of the jobs table, and neither of these
         # needed a new key in it.
-        secret_ssh_key_source = row.ansible_secret_ssh_key_source or ""
+        secret_ssh_key_source = _cred["ssh_key_source"]
         managed_account = _ref
         # The SAME ref for sudo, because all four plays are `become: true` and this form
         # offers no separate become credential. Password Safe reuses the already-open
         # request rather than opening a second one, and the become checkout forces
         # password mode regardless of the ref's own uses_ssh_key flag.
-        managed_become = _ref if (row.ansible_managed_become_self and _ref) else None
+        managed_become = _ref if (_cred["become_self"] and _ref) else None
         epml_token_var = ""
 
     return ansible_run_meta.run_meta(
         _Payload(),
-        description=f"SPIRE lab ({row.name}): {stage['asset']} → {_ansible_target(row)}",
+        description=f"SPIRE lab ({row.name}): {stage['asset']} → {_target}",
         asset_backend=asset_backend)
 
 
@@ -929,3 +985,402 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str) -> None:
         db.commit()
         logger.error("spire-lab: teardown failed for %s: %s", lab_id, exc)
         job_service.set_failed(db, job_id, str(exc))
+
+
+# ── The Kubernetes half: linking a k3s node into the trust domain ─────────────
+# The four stages above prove ISSUANCE and GOVERNANCE. They never prove that anything
+# accepts the result, because nothing in this dashboard has ever presented a JWT-SVID to a
+# relying party. This links a second VM — a small k3s node — into the same trust domain and
+# makes its API server accept those tokens, so the lab finally demonstrates the path
+# docs/spiffe.md argues for rather than only the vaulted downgrade.
+#
+# WHY THIS IS A SEPARATE JOB, not extra stages on provision:
+#   * the governance half is what most labs are built for and it stands on its own. A k3s
+#     failure must not make a working trust domain read as broken, which is why `k8s_status`
+#     is a separate column;
+#   * an existing lab can gain the capability without being rebuilt.
+#
+# WHY THE ISSUER IS A HOSTNAME AND NOT THE SPIRE HOST'S IP. `spire-server x509 mint -dns`
+# writes a **DNS** SAN, and Go verifies an **IP** SAN for `https://10.0.0.5:8443`. An IP
+# issuer therefore fails TLS verification at the API server no matter how correct the trust
+# bundle is, and the error reads as a bad CA. So the provider is minted for
+# `oidc.<trust-domain>` and `k3s-spiffe-auth.yml` writes the /etc/hosts entry that resolves
+# it to the SPIRE host's private address.
+
+K8S_LINK_JOB_TYPE = "spirelab_k8s_link"
+
+# The OIDC Discovery Provider's port on the SPIRE host. Opened to the k3s node only — the
+# k3s node itself needs nothing inbound, because the workload runs on it.
+OIDC_PORT = 8443
+OIDC_RULE_NAME = "allow-spire-oidc"
+
+# The Secrets Safe title the join token is written to, under this lab's own folder. Named
+# here beside SECRET_TITLES because it is the same value channel, but it is NOT in that
+# dict: those four are read back after a provision, and this one is consumed by the very
+# next stage and is worthless minutes later.
+JOIN_TOKEN_TITLE = "k8s-join-token"
+
+# Defaults for a link. Recorded on the row once it succeeds, so the panel can show what has
+# to agree and a re-link cannot quietly change one of them.
+K8S_AUDIENCE = "k8s"
+K8S_WORKLOAD_USER = "deploy-bot"
+K8S_WORKLOAD_UID = 1010
+K8S_WORKLOAD_PATH = "/ns/kube-system/sa/deploy-bot"
+K8S_NODE_PATH = "/node/k3s-01"
+K8S_WORKLOAD_ROLE = "view"
+K8S_USERNAME_PREFIX = "spiffe:"
+# Seconds. The whole point of the pattern, so it is explicit rather than inherited.
+K8S_JWT_SVID_TTL = 300
+
+
+def oidc_domain_for(row: SpireLab) -> str:
+    """The hostname the k3s API server fetches JWKS from. See the section note above."""
+    return f"oidc.{row.trust_domain}"
+
+
+def issuer_url_for(row: SpireLab) -> str:
+    return f"https://{oidc_domain_for(row)}:{OIDC_PORT}"
+
+
+def workload_spiffe_id_for(row: SpireLab) -> str:
+    return f"spiffe://{row.trust_domain}{K8S_WORKLOAD_PATH}"
+
+
+def _join_token_ref(row: SpireLab) -> str:
+    """`bt_safe://` ref to the join token the entry stage just wrote."""
+    folder = (row.admin_secret_folder or "").strip("/")
+    return f"bt_safe://{(row.ps_safe or '').strip('/')}/{folder}/{JOIN_TOKEN_TITLE}"
+
+
+def _k3s_install_vars(row: SpireLab) -> dict:
+    # Pinned, not latest: k3s-spiffe-auth.yml refuses anything below 1.34 because a v1
+    # AuthenticationConfiguration stops a pre-1.34 API server, and on a single node there
+    # is then no API left to repair it through. Blank means "whatever get.k3s.io serves",
+    # which is fine while that is >= 1.34 and is why the guard stays in the play.
+    return {"k3s_version": _cfg("spire_lab_k3s_version", "")}
+
+
+def _oidc_vars(row: SpireLab) -> dict:
+    return {"trust_domain": row.trust_domain,
+            "oidc_domain": oidc_domain_for(row),
+            "oidc_port": OIDC_PORT,
+            "spire_version": _cfg("spire_lab_version", "1.15.3")}
+
+
+def _k8s_entry_vars(row: SpireLab) -> dict:
+    return {"trust_domain": row.trust_domain,
+            "audience": row.k8s_audience or K8S_AUDIENCE,
+            "workload_uid": row.k8s_workload_uid or K8S_WORKLOAD_UID,
+            "workload_path": K8S_WORKLOAD_PATH,
+            "node_path": K8S_NODE_PATH,
+            "jwt_svid_ttl": K8S_JWT_SVID_TTL,
+            # Stored rather than printed. Without this the token is in the job log, and a
+            # job's output IS a captured log — anyone who can read it can attest a host
+            # into this trust domain until the token is spent.
+            "node_token_secret": f"{(row.admin_secret_folder or '').strip('/')}/{JOIN_TOKEN_TITLE}",
+            "token_safe": row.ps_safe or ""}
+
+
+def _agent_vars(row: SpireLab) -> dict:
+    return {"trust_domain": row.trust_domain,
+            # The PRIVATE address: the agent dials the server from inside the network, and
+            # `spire-open-ports.yml` plus the cloud ACL is what lets it.
+            "spire_server_address": row.private_ip or row.public_ip or "",
+            "spire_server_port": row.bind_port or BIND_PORT,
+            "trust_bundle_pem": row.trust_bundle_pem or "",
+            "spire_version": _cfg("spire_lab_version", "1.15.3"),
+            "workload_user": K8S_WORKLOAD_USER,
+            "workload_uid": row.k8s_workload_uid or K8S_WORKLOAD_UID,
+            "verify_audience": row.k8s_audience or K8S_AUDIENCE}
+
+
+def _agent_secret_vars(row: SpireLab) -> dict:
+    """The join token, as a ref. Never a value — see _stage_meta."""
+    return {"join_token": _join_token_ref(row)}
+
+
+def _auth_vars(row: SpireLab) -> dict:
+    return {"oidc_issuer_url": issuer_url_for(row),
+            "trust_bundle_pem": row.trust_bundle_pem or "",
+            "workload_spiffe_id": workload_spiffe_id_for(row),
+            "audience": row.k8s_audience or K8S_AUDIENCE,
+            "username_prefix": K8S_USERNAME_PREFIX,
+            "workload_role": row.k8s_workload_role or K8S_WORKLOAD_ROLE,
+            "workload_user": K8S_WORKLOAD_USER,
+            # Resolves the issuer hostname to the SPIRE host. Without it the API server
+            # cannot reach JWKS at all, and see the section note for why the issuer is not
+            # simply this address.
+            "spire_oidc_host_ip": row.private_ip or row.public_ip or ""}
+
+
+K8S_STAGES = (
+    {"key": "k3s", "asset": "k3s-server-init.yml", "vars_for": _k3s_install_vars,
+     "host": "k8s", "pct": 25, "label": "Installing k3s on the second host…"},
+    {"key": "oidc", "asset": "spire-oidc-provider.yml", "vars_for": _oidc_vars,
+     "host": "spire", "pct": 42, "label": "Publishing the trust domain as an OIDC issuer…"},
+    # ALWAYS re-runs. A join token is one-use and expires in ten minutes, so a link resumed
+    # after a later stage failed cannot reuse the one the first attempt minted — it would
+    # fail attestation with a message about an unknown token, which reads like a broken
+    # agent. Re-running mints a fresh token and another node entry, which is how
+    # re-attestation works and is excluded from discovery either way.
+    {"key": "entry", "asset": "spire-k8s-entry.yml", "vars_for": _k8s_entry_vars,
+     "host": "spire", "pct": 58, "always": True,
+     "label": "Minting a join token and the workload entry…"},
+    {"key": "agent", "asset": "spire-agent-install.yml", "vars_for": _agent_vars,
+     "secret_vars_for": _agent_secret_vars, "host": "k8s", "pct": 76,
+     "label": "Attesting the SPIRE agent on the k3s node…"},
+    {"key": "auth", "asset": "k3s-spiffe-auth.yml", "vars_for": _auth_vars,
+     "host": "k8s", "pct": 92,
+     "label": "Teaching the API server to accept JWT-SVIDs…"},
+)
+
+K8S_STAGE_ASSETS = tuple(s["asset"] for s in K8S_STAGES)
+
+
+def k8s_stages_done(row: SpireLab) -> list:
+    return [s for s in (row.k8s_stages_done or "").split(",") if s]
+
+
+def k8s_stage_jobs(row: SpireLab) -> dict:
+    try:
+        return json.loads(row.k8s_stage_job_ids or "{}")
+    except Exception:
+        return {}
+
+
+def start_k8s_link(db: Session, *, lab_id: str, created_by: str, host: str,
+                   audience: str = "", workload_role: str = "",
+                   secret_ssh_key_source: str = "",
+                   managed_account: Optional[dict] = None,
+                   managed_become_self: bool = False,
+                   login_user: str = "") -> dict:
+    """Enqueue the Kubernetes link for an existing lab.
+
+    ``host`` is a VM NAME or IP for the k3s node, re-derived through ``resolve_host``
+    against this dashboard's own deploy rows — exactly as ``provision`` treats the SPIRE
+    host, and for the same reason: accepting an arbitrary address here would be accepting
+    a request to run privileged playbooks against a host of the caller's choosing.
+
+    The refusals below are the ones worth making before a job row exists, because every
+    one of them otherwise fails several minutes into a run.
+    """
+    row = get_lab(db, lab_id)
+    if not row:
+        raise SpireLabError(f"SPIRE lab {lab_id} not found")
+    if row.status != "available":
+        raise SpireLabError(
+            f"{row.name} is {row.status}. The trust domain has to be built and its bundle "
+            f"read back before a k3s node can be attested into it")
+    if row.k8s_status == "linking":
+        raise SpireLabError(f"{row.name} is already being linked to a k3s node")
+    if not (row.trust_bundle_pem or "").strip():
+        raise SpireLabError(
+            "this lab has no trust bundle recorded, so the agent would have nothing to "
+            "verify the server with and the API server nothing to verify tokens with. "
+            "Re-run the build, or read the bundle back from the row's Bundle button")
+    # The k3s node's OWN credential. Same either/or rule as the build form, because it is
+    # the same question: who does the runner log in as. Checked here rather than in the API
+    # for the same reason provision does it — the API owns caller-facing refusals, this owns
+    # the SHAPE of the choice.
+    secret_ssh_key_source = (secret_ssh_key_source or "").strip()
+    login_user = (login_user or "").strip()
+    if managed_account and secret_ssh_key_source:
+        raise SpireLabError(
+            "pick EITHER a Password Safe managed account OR an SSH-key secret for the k3s "
+            "node, not both — they are two answers to the same question. A managed "
+            "account's name also overrides the login user, so a run carrying both would "
+            "connect as one identity holding the other's key.")
+    if managed_account and (managed_account.get("system_id") is None
+                            or managed_account.get("account_id") is None):
+        raise SpireLabError(
+            "a managed account must be picked from the k3s host's own list, so that it "
+            "carries both system_id and account_id — a name-only ref is for bulk runs "
+            "across many hosts, and this is one host.")
+    if managed_become_self and not managed_account:
+        raise SpireLabError(
+            "'also use this account for sudo' needs a managed account to use — there is no "
+            "separate become credential for the k3s node.")
+    if login_user and (len(login_user) > 104 or any(c.isspace() for c in login_user)):
+        raise SpireLabError(
+            "the k3s node's login user is a single OS username, at most 104 characters "
+            "and with no whitespace.")
+
+    host_info = resolve_host(db, row.cloud, host)
+    placement = json.dumps(require_backend(row.cloud).placement(host_info["meta"]),
+                           sort_keys=True)
+    if not (host_info["public_ip"] or host_info["private_ip"]):
+        raise SpireLabError(
+            "the chosen k3s host reports no address, so the Ansible runner cannot reach "
+            "it. Its deploy job's metadata predates address capture, or the VM is stopped")
+    if not (host_info["private_ip"] or "").strip():
+        # The SPIRE host's ACL is opened to THIS address and nothing else. Widening the
+        # rule instead would undo the only thing keeping tcp/8443 off the rest of the
+        # subnet, so it is refused rather than quietly substituted.
+        raise SpireLabError(
+            "the chosen k3s host reports no private address. The SPIRE host's firewall is "
+            "opened to that address specifically, and widening it instead is not "
+            "something this should do silently")
+    if placement == (row.vm_resource_id or ""):
+        raise SpireLabError(
+            "the k3s node and the SPIRE server are the same VM. Two hosts is the point: "
+            "an agent attesting over loopback proves the mechanism but not that it works "
+            "across a network, which is the half worth demonstrating")
+
+    row.k8s_vm_resource_id = placement
+    row.k8s_vm_name = host_info["name"]
+    row.k8s_private_ip = host_info["private_ip"]
+    row.k8s_public_ip = host_info["public_ip"]
+    row.k8s_status = "linking"
+    row.k8s_error_message = None
+    # Cleared so a re-link after a failure starts from the top rather than trusting the
+    # stages a previous attempt claimed. The entry stage re-runs regardless (see K8S_STAGES).
+    row.k8s_stages_done = None
+    row.k8s_audience = (audience or "").strip() or K8S_AUDIENCE
+    row.k8s_workload_role = (workload_role or "").strip() or K8S_WORKLOAD_ROLE
+    row.k8s_workload_uid = K8S_WORKLOAD_UID
+    row.k8s_workload_spiffe_id = workload_spiffe_id_for(row)
+    row.k8s_issuer_url = issuer_url_for(row)
+    # NULL throughout = auto-derive from the K3S host's own deploy job, which is what the
+    # runner does when nothing is set and is the correct default: the deploy job is matched
+    # on the target address, and these stages target this VM. Never inherited from the SPIRE
+    # host's set — see _cred_fields.
+    row.k8s_ansible_secret_ssh_key_source = secret_ssh_key_source or None
+    row.k8s_ansible_managed_account = (json.dumps(managed_account, sort_keys=True)
+                                       if managed_account else None)
+    row.k8s_ansible_managed_become_self = bool(managed_become_self) or None
+    row.k8s_login_user = login_user or None
+    row.updated_at = datetime.utcnow()
+    if managed_account or secret_ssh_key_source:
+        # Audit the USE, not the credential. Same action name as Config Management's, so one
+        # audit query still answers "who used a credential in a run" whichever page it was.
+        job_service.log_audit(
+            db, created_by, "ansible_secret_use",
+            details={"kinds": [credential_kind_for(row, "k8s")]
+                              + (["managed-account become (checkout)"]
+                                 if managed_become_self else []),
+                     "account": (managed_account or {}).get("account_name", ""),
+                     "system_id": (managed_account or {}).get("system_id"),
+                     "target": row.k8s_vm_name, "lab": row.name,
+                     "why": "spire lab kubernetes link"})
+    job = job_service.create_job(
+        db, K8S_LINK_JOB_TYPE, created_by, workgroup=row.workgroup,
+        metadata={"lab_id": row.id, "name": row.name, "cloud": row.cloud,
+                  "trust_domain": row.trust_domain, "k8s_host": row.k8s_vm_name})
+    db.commit()
+    logger.info("spire-lab: queued k8s link for %r (k3s node %s) as job %s",
+                row.name, row.k8s_vm_name, job.id)
+    return {"lab_id": row.id, "job_id": job.id}
+
+
+async def run_k8s_link(db: Session, *, lab_id: str, job_id: str) -> None:
+    """Worker entry point for ``spirelab_k8s_link``.
+
+    Opens tcp/8443 on the SPIRE host to the k3s node, then runs the five stages in order,
+    alternating hosts. Stops at the first failure: every later stage depends on the one
+    before, so continuing turns one legible Ansible error into several.
+
+    **The ACL is asymmetric and that is not an oversight.** Only the SPIRE host gains a
+    rule: the agent dials the server on 8081 and the API server fetches JWKS on 8443, while
+    the k3s node needs nothing inbound because the workload runs on it. Two ports, one
+    source — the node's private address.
+    """
+    from ..api.websocket import broadcast_progress
+    from . import storage_service
+    row = get_lab(db, lab_id)
+    if not row:
+        logger.warning("spire-lab: row %s vanished before the k8s link", lab_id)
+        return
+    job_service.set_running(db, job_id)
+    try:
+        backend = require_backend(row.cloud)
+        placement = json.loads(row.vm_resource_id or "{}")
+        node_cidr = f"{row.k8s_private_ip}/32"
+
+        await broadcast_progress(
+            job_id, 6, f"Opening tcp/{row.bind_port} and tcp/{OIDC_PORT} on the "
+                       f"{backend.acl_label} to {node_cidr}…")
+        res = await backend.apply_ingress(
+            placement, [row.bind_port or BIND_PORT, OIDC_PORT], [node_cidr])
+        if not res.get("opened"):
+            raise SpireLabError(
+                f"the {backend.acl_label} was not opened to {node_cidr}, so the agent "
+                f"cannot reach tcp/{row.bind_port} and the API server cannot reach "
+                f"tcp/{OIDC_PORT}")
+        await broadcast_progress(
+            job_id, 10,
+            f"{backend.acl_label} allows tcp/{row.bind_port} and tcp/{OIDC_PORT} from "
+            f"{node_cidr}.")
+
+        asset_backend = _cfg("spire_lab_asset_backend") or storage_service.active_backend()
+        done = k8s_stages_done(row)
+        for stage in K8S_STAGES:
+            if stage["key"] in done and not stage.get("always"):
+                continue
+            status = await _run_k8s_stage(
+                db, row=row, stage=stage, actor=row.created_by or "system",
+                asset_backend=asset_backend, parent_job_id=job_id)
+            if status != "completed":
+                raise SpireLabError(
+                    f"{stage['asset']} {status} — see job "
+                    f"{k8s_stage_jobs(row).get(stage['key'], '')} for the Ansible output")
+            if stage["key"] not in done:
+                done.append(stage["key"])
+            row.k8s_stages_done = ",".join(done)
+            db.commit()
+
+        row.k8s_status = "linked"
+        row.k8s_error_message = None
+        row.updated_at = datetime.utcnow()
+        db.commit()
+        job_service.set_completed(db, job_id, result={
+            "lab_id": row.id,
+            "trust_domain": row.trust_domain,
+            "k8s_host": row.k8s_vm_name,
+            "issuer_url": row.k8s_issuer_url,
+            "workload_spiffe_id": row.k8s_workload_spiffe_id,
+            "audience": row.k8s_audience,
+            # The one command that proves it, and it has to run as the workload: as root it
+            # is attested unix:uid:0 and matches no entry.
+            "verify": f"sudo -u {K8S_WORKLOAD_USER} kubectl get pods -A",
+        })
+        logger.info("spire-lab: linked %r to k3s node %s", row.name, row.k8s_vm_name)
+    except Exception as exc:  # noqa: BLE001
+        # `status` is deliberately untouched: the trust domain is still available and still
+        # governs everything it governed before. Only the link failed.
+        row = get_lab(db, lab_id)
+        if row:
+            row.k8s_status = "failed"
+            row.k8s_error_message = str(exc)[:2000]
+            row.updated_at = datetime.utcnow()
+            db.commit()
+        logger.error("spire-lab: k8s link failed for %s: %s", lab_id, exc)
+        job_service.set_failed(db, job_id, str(exc))
+
+
+async def _run_k8s_stage(db: Session, *, row: SpireLab, stage: dict, actor: str,
+                         asset_backend: str, parent_job_id: str) -> str:
+    """``_run_stage`` for the link, writing into the k8s-side stage-job map.
+
+    A separate function rather than a flag on ``_run_stage`` because the two write to
+    different columns, and a boolean that decides which column a function writes to is the
+    kind of parameter that eventually gets passed wrong.
+    """
+    from ..api.websocket import broadcast_progress
+    from . import ansible_local_run_service
+
+    meta = _stage_meta(row, stage, asset_backend)
+    child = job_service.create_job(
+        db, "ansible_local", actor, workgroup="ansible", status="queued",
+        metadata=meta, batch_id=batch_id_for(row))
+    jobs = k8s_stage_jobs(row)
+    jobs[stage["key"]] = child.id
+    row.k8s_stage_job_ids = json.dumps(jobs)
+    db.commit()
+
+    await broadcast_progress(parent_job_id, stage["pct"],
+                             f"{stage['label']} (job {child.id[:8]})")
+    await ansible_local_run_service.run(db, job_id=child.id, meta=meta)
+
+    db.expire_all()
+    fresh = db.query(Job).filter(Job.id == child.id).first()
+    return (fresh.status if fresh else "failed") or "failed"
