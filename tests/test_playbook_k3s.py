@@ -306,7 +306,22 @@ def test_the_workloads_kubeconfig_holds_no_credential():
     what it claims."""
     play = _spiffe_play()
     content = _copy_task(play, ".kube/config")["ansible.builtin.copy"]["content"]
-    assert "exec:" in content and "client.authentication.k8s.io" in content
+    # Matched as whole LINES, exactly as the AuthenticationConfiguration above is, and for
+    # the same reason twice over: `"exec:" in content` is satisfied by "notexec:", and
+    # "…k8s.io/v1" is a substring of "…k8s.io/v1beta1". Both halves of the substring form
+    # passed mutations that broke precisely what they claim to pin. Quotes are dropped from
+    # the lines rather than written into the literal so the play may quote the value or not.
+    #
+    # It also keeps CodeQL off the line. A bare dotted hostname in a positive membership test
+    # is how a URL allow-list check is written, which is what
+    # py/incomplete-url-substring-sanitization flags -- correctly in general, since a
+    # substring is a weak way to validate a URL. It is not what this line does, but the fix
+    # is to stop writing the shape rather than to suppress the query.
+    lines = [ln.strip().replace('"', "") for ln in content.splitlines()]
+    assert "exec:" in lines, "the user entry runs no exec credential plugin"
+    assert "apiVersion: client.authentication.k8s.io/v1" in lines, (
+        "the exec plugin does not name the client-go credential API at its GA version; found "
+        + repr([ln for ln in lines if ln.startswith("apiVersion:")]))
     for banned in ("token:", "client-certificate-data:", "client-key-data:", "password:"):
         assert banned not in content, (
             f"the workload kubeconfig contains {banned!r} — it must carry no credential at all")
