@@ -71,7 +71,7 @@ def _shape(row) -> dict:
     """
     return {
         "id": row.id, "name": row.name, "cloud": row.cloud,
-        "secret_name": row.secret_name, "secret_folder": row.secret_folder or "",
+        "dynamic_name": row.dynamic_name, "dynamic_folder": row.dynamic_folder or "",
         "purpose": row.purpose or "",
         "ttl_seconds": row.ttl_seconds or 0,
         "status": row.status, "error_message": row.error_message,
@@ -101,8 +101,8 @@ class RegisterRequest(BaseModel):
     # The Workload Credentials dynamic secret. **This is what decides the scope** — which
     # role is assumed, which subscription, which permissions — and the dashboard cannot
     # widen or narrow it, so there is deliberately no default.
-    secret_name: str
-    secret_folder: str = ""
+    dynamic_name: str
+    dynamic_folder: str = ""
     purpose: str = ""
     ttl_seconds: int = 0
     expires_in_hours: Optional[int] = None
@@ -161,7 +161,16 @@ def register_options(db: Session = Depends(get_db),
     try:
         folders = [str(f) for f in (wlc.list_folders() or [])][:100]
     except Exception as exc:                            # noqa: BLE001 — see above
-        missing.append(f"could not list dynamic-secret folders: {exc}")
+        # THE TYPE NAME, NEVER THE MESSAGE. `missing` is rendered on the page, and a
+        # stringified HTTP-client exception carries the request URL and whatever the provider
+        # put in its body — a stack trace flowing to a response, which is what CodeQL's
+        # py/stack-trace-exposure fires on and is right to. The type is enough to tell a
+        # timeout from an auth failure; the rest is logged, where an operator can read it and
+        # a browser cannot.
+        logger.warning("workload-cloud: could not list dynamic-secret folders",
+                       exc_info=True)
+        missing.append("could not list dynamic-secret folders "
+                       f"({type(exc).__name__}) — see the dashboard log")
 
     return {
         "clouds": clouds,
@@ -213,8 +222,8 @@ def register_identity(req: RegisterRequest, db: Session = Depends(get_db),
         expires_at = datetime.utcnow() + timedelta(hours=int(req.expires_in_hours))
     try:
         return workload_cloud_service.register(
-            db, name=req.name, cloud=req.cloud, secret_name=req.secret_name,
-            secret_folder=req.secret_folder, purpose=req.purpose,
+            db, name=req.name, cloud=req.cloud, dynamic_name=req.dynamic_name,
+            dynamic_folder=req.dynamic_folder, purpose=req.purpose,
             ttl_seconds=req.ttl_seconds, created_by=user.username,
             expires_at=expires_at)
     except WorkloadCloudError as exc:

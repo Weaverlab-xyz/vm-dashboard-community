@@ -305,7 +305,7 @@ def _workloadcloud_item(row) -> dict:
     and expected — that is the whole point of the mechanism — so an expired lease must not
     make the identity read as broken here.
     """
-    label = f"{row.name} ({row.cloud} · {row.secret_name})"
+    label = f"{row.name} ({row.cloud} · {row.dynamic_name})"
     return {
         "id": f"workloadcloud:{row.id}",
         "cloud": row.cloud,

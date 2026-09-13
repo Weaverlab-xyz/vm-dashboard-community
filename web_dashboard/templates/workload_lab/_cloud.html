@@ -109,7 +109,7 @@
               </span>
             </div>
             <p class="text-xs text-gray-500 mt-1">
-              <code x-text="(row.secret_folder ? row.secret_folder + '/' : '') + row.secret_name"></code>
+              <code x-text="(row.dynamic_folder ? row.dynamic_folder + '/' : '') + row.dynamic_name"></code>
               <span x-show="row.purpose" x-cloak> · <span x-text="row.purpose"></span></span>
               ·
               <!-- Metered: the count is a cost figure as much as an audit one. -->
@@ -223,7 +223,7 @@
 
         <div>
           <label class="block text-xs font-medium text-gray-700 mb-1">Dynamic secret</label>
-          <input x-model="form.secret_name" type="text"
+          <input x-model="form.dynamic_name" type="text"
                  class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
           <p class="text-xs text-gray-500 mt-1">
             <strong>This decides the scope</strong> &mdash; which role is assumed and what it
@@ -243,7 +243,7 @@
 
         <div>
           <label class="block text-xs font-medium text-gray-700 mb-1">Folder</label>
-          <input x-model="form.secret_folder" type="text" list="wc-folders"
+          <input x-model="form.dynamic_folder" type="text" list="wc-folders"
                  :placeholder="selectedCloud()?.default_folder || '(root)'"
                  class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
           <datalist id="wc-folders">
@@ -361,7 +361,7 @@ function workloadCloudTab() {
     registerOpen: false,
     // Kept in step with blankForm() below. Two initialisers that drift apart is how a field
     // ends up undefined on the second registration of a session.
-    form: { name: '', cloud: '', secret_name: '', secret_folder: '', purpose: '',
+    form: { name: '', cloud: '', dynamic_name: '', dynamic_folder: '', purpose: '',
             ttl_seconds: 0, expires_in_hours: null },
 
     leaseOpen: false,
@@ -445,8 +445,8 @@ function workloadCloudTab() {
     // ONE shape, used by openRegister() and matching the `form` literal above.
     blankForm() {
       const on = this.enabledClouds();
-      return { name: '', cloud: on.length === 1 ? on[0].key : '', secret_name: '',
-               secret_folder: '', purpose: '', ttl_seconds: 0, expires_in_hours: null };
+      return { name: '', cloud: on.length === 1 ? on[0].key : '', dynamic_name: '',
+               dynamic_folder: '', purpose: '', ttl_seconds: 0, expires_in_hours: null };
     },
 
     openRegister() {

@@ -58,6 +58,25 @@ def _code(path) -> str:
                      if ln.strip() and not ln.lstrip().startswith("#"))
 
 
+def _schema():
+    """Create the tables this file's DB-backed tests need, and return the module.
+
+    Per-test rather than at module level on purpose. Most assertions here read SOURCE and
+    need no app import at all, so a module-level `import web_dashboard.database` would make
+    the whole file unrunnable wherever the app's dependencies are missing — and the tests
+    that would then be skipped are precisely the cross-cutting invariants this file exists
+    for. The cost is this call at the top of the two tests that touch a database.
+
+    Needed at all because `config_service` reads `app_config`, and running this file FIRST
+    against a clean database is the one order in which nothing else has created it. That is
+    also the order CI's per-file loop uses for whichever file happens to be first.
+    """
+    import web_dashboard.database as d
+
+    d.Base.metadata.create_all(bind=d.engine)
+    return d
+
+
 def _tabs() -> list:
     """The tab slugs, read off disk rather than hand-listed. See the module docstring."""
     return sorted(f[1:-5] for f in os.listdir(_TAB_DIR)
@@ -360,6 +379,7 @@ def test_a_disabled_cloud_is_refused():
     Workload Credentials configuration, failing later at the first mint with a message about
     the site rather than about the cloud. Found by resolving a real row.
     """
+    _schema()                                      # config_service reads a table
     from web_dashboard.services import config_service
     from web_dashboard.services import workload_cloud_service as svc
 
@@ -462,6 +482,90 @@ def test_the_cloud_job_is_registered_and_light():
     assert '"workload_cloud_credential"' in worker[light:], "not in LIGHT_TYPES"
     assert '"workload_cloud_credential"' not in worker[medium:light], (
         "workload_cloud_credential is ALSO in MEDIUM_TYPES")
+
+
+def test_a_provider_failure_never_carries_its_text_into_a_response():
+    """A caught exception's MESSAGE must not reach a browser. The type name, never the text.
+
+    Both sites exercised here return a dict that becomes an HTTP response body, and an
+    HTTP-client exception stringifies to the request URL plus whatever the provider put in
+    its body — an internal hostname, a query string, sometimes a token. That is a stack
+    trace flowing to an external user, which is what CodeQL's py/stack-trace-exposure fires
+    on, and it flagged the folder listing on the first draft of this tab.
+
+    The TYPE is kept rather than dropped because it is the diagnostic half: a timeout reads
+    differently from an auth failure, and a note that said only "could not be reached" would
+    send every operator to the log for both. The message goes to the log, where an operator
+    can reach it and a browser cannot.
+
+    Exercised rather than grepped, because the shape that leaks is an f-string and the shape
+    that does not is also an f-string — a source search cannot tell them apart.
+    """
+    import asyncio
+
+    from web_dashboard.api import workload_cloud as api
+    from web_dashboard.services import workload_cloud_service as svc
+    from web_dashboard.services import workload_credentials_service as wlc
+
+    d = _schema()
+
+    class _Leaky(RuntimeError):
+        """Stands in for the client's own error type. What matters is that its MESSAGE is
+        the sort of thing an HTTP client puts there."""
+
+    leak = "https://wc.internal.example/BeyondTrust/api/public/v3/dynamic?pat=s3cr3t-pat"
+
+    def _boom(*_a, **_kw):
+        raise _Leaky(leak)
+
+    class _User:
+        username = "tests"
+        is_admin = True
+
+    db = d.SessionLocal()
+    row = d.WorkloadCloudCredential(
+        name="codeql-regression", cloud="aws", dynamic_name="ci-deploy",
+        lease_id="lease-abc", status="issued", created_by="tests")
+    saved = (wlc.get_lease, wlc.list_folders, api._require_enabled)
+    try:
+        db.add(row)
+        db.commit()
+
+        # ── 1. the live lease read, served by GET /api/workload-cloud/{id}/lease
+        wlc.get_lease = _boom
+        out = asyncio.run(svc.inspect_lease(db, row_id=row.id))
+        assert leak not in repr(out), f"the provider's URL reached the response: {out}"
+        assert "s3cr3t" not in repr(out), f"a credential reached the response: {out}"
+        assert "_Leaky" in out["note"], (
+            f"the note names no exception type, so an unreachable provider and a rejected "
+            f"token read identically: {out['note']!r}")
+        # `unknown`, NOT `expired`. The provider did not say the lease was gone — this
+        # dashboard failed to ask. Reporting that as expired would call a live credential
+        # dead, which is the more dangerous of the two wrong answers.
+        assert out["state"] == "unknown", (
+            f"a provider this dashboard could not reach reads as {out['state']!r}")
+
+        # ── 2. the folder list on the register form, served by GET /options
+        api._require_enabled = lambda: None            # the gate is not what is under test
+        wlc.list_folders = _boom
+        opts = api.register_options(db=db, user=_User())
+        assert leak not in repr(opts), f"the provider's URL reached the response: {opts}"
+        folder_note = [m for m in opts["missing"] if "folder" in m]
+        assert folder_note, (
+            f"a failed browse is not reported at all, so the form silently offers no "
+            f"folders: {opts['missing']}")
+        assert "_Leaky" in folder_note[0], folder_note[0]
+        # And the call still succeeds: a browse is a convenience, and failing the whole
+        # options request over it would make the tab unusable whenever WC is unreachable.
+        assert opts["clouds"], "the options call returned no clouds"
+    finally:
+        wlc.get_lease, wlc.list_folders, api._require_enabled = saved
+        try:
+            db.delete(row)
+            db.commit()
+        except Exception:                              # noqa: BLE001 — teardown only
+            db.rollback()
+        db.close()
 
 
 # ── the k3s link teardown ─────────────────────────────────────────────────────

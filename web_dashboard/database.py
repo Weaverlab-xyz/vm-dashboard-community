@@ -2014,8 +2014,8 @@ class WorkloadCloudCredential(Base):
 
     # The Workload Credentials dynamic secret this identity draws from — a FOLDER and a
     # NAME, which are addresses and not secrets. The scope lives behind them, in WC.
-    secret_name = Column(String(255), nullable=False)
-    secret_folder = Column(String(255), nullable=True)
+    dynamic_name = Column(String(255), nullable=False)
+    dynamic_folder = Column(String(255), nullable=True)
     # What this identity is for, in the operator's words. Free text on purpose: the
     # dashboard cannot enforce a purpose here (see the class docstring), so claiming a
     # closed vocabulary would imply a guarantee it cannot make.

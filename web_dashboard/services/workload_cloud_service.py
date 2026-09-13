@@ -188,8 +188,8 @@ def lease_state(row: WorkloadCloudCredential,
 
 # ── register ──────────────────────────────────────────────────────────────────
 
-def register(db: Session, *, name: str, cloud: str, secret_name: str,
-             created_by: str, secret_folder: str = "", purpose: str = "",
+def register(db: Session, *, name: str, cloud: str, dynamic_name: str,
+             created_by: str, dynamic_folder: str = "", purpose: str = "",
              ttl_seconds: int = 0, workgroup: Optional[str] = None,
              expires_at: Optional[datetime] = None) -> dict:
     """Record a workload identity against a dynamic secret. **Mints nothing.**
@@ -213,32 +213,32 @@ def register(db: Session, *, name: str, cloud: str, secret_name: str,
         raise WorkloadCloudError(
             f"{cloud} has no Workload Credentials configuration — set wlc_{cloud}_enabled "
             f"and its dynamic-secret settings first")
-    secret_name = (secret_name or "").strip()
-    if not secret_name:
+    dynamic_name = (dynamic_name or "").strip()
+    if not dynamic_name:
         raise WorkloadCloudError(
             "a dynamic-secret name is required — it is what decides the scope of every "
             "credential this identity receives, and this dashboard cannot supply a default "
             "for it")
-    secret_folder = (secret_folder or "").strip()
+    dynamic_folder = (dynamic_folder or "").strip()
 
     # One identity per (cloud, folder, secret, purpose). A second row on the same four would
     # mint from the same dynamic secret under two names — two billed streams of issuance for
     # one workload, and two rows an operator has to reconcile when revoking.
     dup = (db.query(WorkloadCloudCredential)
            .filter(WorkloadCloudCredential.cloud == cloud,
-                   WorkloadCloudCredential.secret_name == secret_name,
-                   WorkloadCloudCredential.secret_folder == (secret_folder or None),
+                   WorkloadCloudCredential.dynamic_name == dynamic_name,
+                   WorkloadCloudCredential.dynamic_folder == (dynamic_folder or None),
                    WorkloadCloudCredential.purpose == ((purpose or "").strip() or None),
                    WorkloadCloudCredential.status != "deleted").first())
     if dup is not None:
         raise WorkloadCloudError(
-            f"{cloud}/{secret_name} is already registered as {dup.name!r} for the same "
+            f"{cloud}/{dynamic_name} is already registered as {dup.name!r} for the same "
             f"purpose. Two identities on one dynamic secret mint two billed streams for one "
             f"workload — give this one a different purpose, or use the existing row.")
 
     row = WorkloadCloudCredential(
-        name=name, cloud=cloud, secret_name=secret_name,
-        secret_folder=secret_folder or None,
+        name=name, cloud=cloud, dynamic_name=dynamic_name,
+        dynamic_folder=dynamic_folder or None,
         purpose=(purpose or "").strip() or None,
         ttl_seconds=int(ttl_seconds or 0) or None,
         # Recorded at registration from the cloud, so the page never has to decide at render
@@ -249,8 +249,8 @@ def register(db: Session, *, name: str, cloud: str, secret_name: str,
     db.add(row)
     db.commit()
     logger.info("workload-cloud: registered %r against %s dynamic secret %s/%s",
-                name, cloud, secret_folder or "(root)", secret_name)
-    return {"id": row.id, "cloud": cloud, "secret_name": secret_name,
+                name, cloud, dynamic_folder or "(root)", dynamic_name)
+    return {"id": row.id, "cloud": cloud, "dynamic_name": dynamic_name,
             "revocable": bool(row.revocable),
             "credential_fields": list(credential_fields(cloud)),
             "note": ("nothing has been minted — issuance is metered, so the first "
@@ -368,11 +368,11 @@ async def _run_issue(db: Session, row: WorkloadCloudCredential, job_id: str) -> 
     from . import workload_credentials_service as wlc
 
     await broadcast_progress(job_id, 25,
-                             f"Minting from {row.cloud} dynamic secret {row.secret_name}…")
+                             f"Minting from {row.cloud} dynamic secret {row.dynamic_name}…")
     # `generate` is synchronous by design (see its module docstring on the thread pool), so
     # it goes off the event loop here rather than blocking every other request.
     result = await asyncio.to_thread(
-        wlc.generate, row.secret_name, row.secret_folder or "")
+        wlc.generate, row.dynamic_name, row.dynamic_folder or "")
 
     # Names only. `result["values"]` holds the credential and is deliberately not read,
     # not logged, and not put on the row — the one thing taken from it is which fields came
@@ -511,8 +511,22 @@ async def inspect_lease(db: Session, *, row_id: str) -> dict:
     try:
         data = await asyncio.to_thread(wlc.get_lease, row.lease_id)
     except Exception as exc:                            # noqa: BLE001
+        # `state: unknown` is the honest answer and it is deliberately NOT "expired": the
+        # provider did not say the lease was gone, this dashboard failed to ask. A page that
+        # rendered an unreachable provider as an expired lease would report a credential dead
+        # while it was still working, which is the more dangerous of the two wrong answers.
+        #
+        # The note carries the exception's TYPE NAME, never its message — the same rule the
+        # POV clients follow. This dict is an HTTP response body, a stringified HTTP-client
+        # exception carries the request URL and the provider's own body with it, and that is
+        # a stack trace reaching an external user (CodeQL's py/stack-trace-exposure). The
+        # type separates a timeout from an auth failure, which is all a reader needs; the
+        # detail goes to the log.
+        logger.warning("workload-cloud: lease %s could not be read from the provider",
+                       row.lease_id, exc_info=True)
         return {"id": row.id, "lease_id": row.lease_id, "state": "unknown",
-                "note": f"Workload Credentials could not be reached: {exc}"}
+                "note": ("Workload Credentials could not be reached "
+                         f"({type(exc).__name__}) — see the dashboard log")}
     return {"id": row.id, "lease_id": row.lease_id,
             "state": lease_state(row),
             "expires_at": (row.lease_expires_at.isoformat()
