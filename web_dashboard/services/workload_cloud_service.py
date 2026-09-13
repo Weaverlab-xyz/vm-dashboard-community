@@ -519,9 +519,13 @@ async def inspect_lease(db: Session, *, row_id: str) -> dict:
         # The note carries the exception's TYPE NAME, never its message — the same rule the
         # POV clients follow. This dict is an HTTP response body, a stringified HTTP-client
         # exception carries the request URL and the provider's own body with it, and that is
-        # a stack trace reaching an external user (CodeQL's py/stack-trace-exposure). The
-        # type separates a timeout from an auth failure, which is all a reader needs; the
-        # detail goes to the log.
+        # a stack trace reaching an external user (CodeQL's py/stack-trace-exposure).
+        #
+        # The type is a COARSE signal and worth being honest about: the client wraps every
+        # provider-side failure in `WorkloadCredentialsError`, so it says "the call to WC
+        # failed" and not why. What it does distinguish is a provider failure from a bug in
+        # this dashboard — which is the first fork an operator takes — and the log carries
+        # the rest.
         logger.warning("workload-cloud: lease %s could not be read from the provider",
                        row.lease_id, exc_info=True)
         return {"id": row.id, "lease_id": row.lease_id, "state": "unknown",

@@ -164,9 +164,14 @@ def register_options(db: Session = Depends(get_db),
         # THE TYPE NAME, NEVER THE MESSAGE. `missing` is rendered on the page, and a
         # stringified HTTP-client exception carries the request URL and whatever the provider
         # put in its body — a stack trace flowing to a response, which is what CodeQL's
-        # py/stack-trace-exposure fires on and is right to. The type is enough to tell a
-        # timeout from an auth failure; the rest is logged, where an operator can read it and
-        # a browser cannot.
+        # py/stack-trace-exposure fires on and is right to.
+        #
+        # What the type name buys, precisely: the client raises `WorkloadCredentialsError`
+        # for EVERY provider-side failure — unreachable, 401, 500, non-JSON — so it does not
+        # separate a timeout from a rejected token. It does separate "the provider call
+        # failed" from "this dashboard has a bug", which is the distinction an operator acts
+        # on first: `WorkloadCredentialsError` sends them to WC, a `KeyError` sends them
+        # here. Everything finer lives in the log, where a browser cannot reach it.
         logger.warning("workload-cloud: could not list dynamic-secret folders",
                        exc_info=True)
         missing.append("could not list dynamic-secret folders "

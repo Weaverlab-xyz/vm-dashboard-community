@@ -493,10 +493,12 @@ def test_a_provider_failure_never_carries_its_text_into_a_response():
     trace flowing to an external user, which is what CodeQL's py/stack-trace-exposure fires
     on, and it flagged the folder listing on the first draft of this tab.
 
-    The TYPE is kept rather than dropped because it is the diagnostic half: a timeout reads
-    differently from an auth failure, and a note that said only "could not be reached" would
-    send every operator to the log for both. The message goes to the log, where an operator
-    can reach it and a browser cannot.
+    The TYPE is kept rather than dropped, and it is worth being exact about what it buys.
+    The client wraps every provider-side failure in one `WorkloadCredentialsError`, so the
+    type does NOT separate a timeout from a rejected token. It separates "the call to the
+    provider failed" from "this dashboard raised something unexpected" — the first fork an
+    operator takes, and the one a bare "could not be reached" hides. The message itself goes
+    to the log, where an operator can reach it and a browser cannot.
 
     Exercised rather than grepped, because the shape that leaks is an f-string and the shape
     that does not is also an f-string — a source search cannot tell them apart.
@@ -537,8 +539,8 @@ def test_a_provider_failure_never_carries_its_text_into_a_response():
         assert leak not in repr(out), f"the provider's URL reached the response: {out}"
         assert "s3cr3t" not in repr(out), f"a credential reached the response: {out}"
         assert "_Leaky" in out["note"], (
-            f"the note names no exception type, so an unreachable provider and a rejected "
-            f"token read identically: {out['note']!r}")
+            f"the note names no exception type, so a provider that failed and a bug in this "
+            f"dashboard read identically: {out['note']!r}")
         # `unknown`, NOT `expired`. The provider did not say the lease was gone — this
         # dashboard failed to ask. Reporting that as expired would call a live credential
         # dead, which is the more dangerous of the two wrong answers.
