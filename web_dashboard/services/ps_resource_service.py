@@ -1274,7 +1274,8 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
                                  dns_name: str = "", emit_private_key: bool = True,
                                  dss_auto_management: bool = True,
                                  use_own_credentials: bool = False,
-                                 timeout_value: int = 0) -> str:
+                                 timeout_value: int = 0,
+                                 emit_account: bool = True) -> str:
     """HCL onboarding a VM as a managed system + its account. Two shapes via ``method``:
 
     * ``ssh`` (default) — traditional managed system keyed by host_name/ip on an SSH
@@ -1291,11 +1292,27 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
       private-key TF_VAR is omitted entirely (a declared-but-unset required var fails
       apply under TF_INPUT=0).
 
+    * ``spiffesvid`` — the "SPIFFE SVID" custom plugin. A managed system ONLY: see
+      ``emit_account``.
+
+    ``emit_account=False`` renders the managed system and no managed account, and exists
+    for exactly one caller. The SPIFFE SVID plugin DISCOVERS its accounts — each is a SPIRE
+    registration entry — so an account created here would sit alongside the discovered ones
+    and be indistinguishable from them. That matters more than tidiness: the SPIRE lab's
+    assertion IS the count (eleven entries seeded, eight discovered, the rest excluded as
+    node/agent identities), and it caught a real plugin bug where discovery filtered on the
+    mintable prefix and silently returned two. One extra account moves the number and
+    retires the assertion. The `managed_account_id` output is omitted with it, so a caller
+    passing False must not read that key.
+
     ``application_host_id`` (>0) routes management through a specific application host
     (the traditional Resource Broker path); 0 leaves it to the functional account's platform."""
     label = _safe_name(name)
-    extra_vars = 'variable "ps_account_password"    { sensitive = true }\n'
-    if emit_private_key:
+    # A declared-but-unset required var fails apply under TF_INPUT=0, so both of these are
+    # emitted only when something references them.
+    extra_vars = ('variable "ps_account_password"    { sensitive = true }\n'
+                  if emit_account else "")
+    if emit_account and emit_private_key:
         extra_vars += 'variable "ps_account_private_key" { sensitive = true }\n'
     header = _provider_header(extra_vars)
 
@@ -1364,23 +1381,25 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
 
     sys_block = "\n".join(sys_lines)
     acct_block = "\n".join(acct_lines)
-    return header + f"""
-resource "passwordsafe_managed_system_by_workgroup" {json.dumps(label)} {{
-{sys_block}
-}}
-
+    account = "" if not emit_account else f"""
 resource "passwordsafe_managed_account" {json.dumps(label)} {{
 {acct_block}
 }}
-
-output "managed_system_id" {{
-  value = passwordsafe_managed_system_by_workgroup.{label}.managed_system_id
-}}
-
+"""
+    account_output = "" if not emit_account else f"""
 output "managed_account_id" {{
   value = passwordsafe_managed_account.{label}.id
 }}
 """
+    return header + f"""
+resource "passwordsafe_managed_system_by_workgroup" {json.dumps(label)} {{
+{sys_block}
+}}
+{account}
+output "managed_system_id" {{
+  value = passwordsafe_managed_system_by_workgroup.{label}.managed_system_id
+}}
+{account_output}"""
 
 
 # ── Terraform plumbing ────────────────────────────────────────────────────────
@@ -1538,6 +1557,15 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     ``managed_account_name`` is ``<namespace>/<serviceaccount>``. The account is
     password-managed — the credential IS the bearer token — but a bearer token cannot be
     seeded (see ``initial_password``), so the first rotation is what populates it.
+
+    ``method="spiffesvid"`` uses the "SPIFFE SVID" plugin: one managed system per SPIRE
+    trust domain, with ``host_name`` the trust domain, ``ip_address`` the SPIRE server's
+    reachable address and ``port`` its API port (8081 by default). **No managed account is
+    created** — the plugin discovers its accounts as SPIRE registration entries, and one
+    made here would move the discovery count the lab asserts on. No private key and no
+    seed either: the administrative PKCS#12 lives in the functional account's DSS-key
+    field, which is the operator's to populate. The returned dict therefore carries no
+    ``managed_account_id``.
 
     ``method="certificate"`` uses the "Certificate" plugin: ``dns_name`` carries the whole
     certificate profile — ``<backend>?key=value&...``, e.g.
@@ -1789,6 +1817,48 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             method="certificate", dns_name=dns_name, emit_private_key=False,
             dss_auto_management=False,
             timeout_value=_CERTIFICATE_PLUGIN_TIMEOUT_SECONDS)
+    elif method == "spiffesvid":
+        # "SPIFFE SVID" plugin: one managed system per TRUST DOMAIN, reached at the SPIRE
+        # server's own address and API port. `host_name` is the trust domain (the human
+        # label an operator recognises), `ip_address` the server's reachable IP, and `port`
+        # its bind port — 8081 unless the lab changed it. A real host at a real port,
+        # unlike the cloud plugins' 127.0.0.1 placeholder: the Resource Broker opens a gRPC
+        # connection to the SPIRE API itself.
+        #
+        # A MANAGED SYSTEM AND NO ACCOUNT, which is the one thing to understand here. The
+        # plugin's accounts are SPIRE registration entries and they arrive by DISCOVERY.
+        # Creating one here would put a dashboard-made account beside the discovered ones,
+        # indistinguishable from them, and move the count that is the lab's whole
+        # assertion — eleven entries seeded, eight discovered. See `emit_account` in
+        # `_generate_managed_system_hcl`.
+        #
+        # NO PRIVATE KEY AND NO SEED. The credential the plugin authenticates with is an
+        # administrative X509-SVID held as a PKCS#12 in the FUNCTIONAL ACCOUNT's DSS-key
+        # field, and the functional account is the operator's to create — the same split
+        # every other plugin here uses, and the reason this whole path never holds plugin
+        # credentials. `spire-admin-identity.yml` writes that PKCS#12 straight into Secrets
+        # Safe under `no_log`; nothing in this process ever reads it.
+        #
+        # WHAT THIS DOES NOT DO is set the `SpiffeTrustDomain` BeyondInsight ATTRIBUTE. The
+        # plugin reads its configuration from attributes, there is no attribute API in this
+        # codebase, and whether the gateway populates them for a plugin action has not been
+        # observed once — which is the open question the lab exists to answer. So the
+        # attribute stays a named manual step rather than a writer built on a guess. See
+        # docs/runbooks/spire-lab-standup.md section 5.
+        _validate_ip_field(ip_address, "SPIFFE SVID")
+        if not host_name:
+            raise PSResourceError(
+                "a SPIFFE SVID managed system needs the trust domain as its host_name")
+        hcl = _generate_managed_system_hcl(
+            name=name, host_name=host_name, ip_address=ip_address, port=port,
+            functional_account_id=functional_account_id, platform_id=platform_id,
+            entity_type_id=entity_type_id, workgroup_id=workgroup_id,
+            managed_account_name=managed_account_name,
+            ssh_key_enforcement_mode=ssh_key_enforcement_mode,
+            application_host_id=application_host_id,
+            method="spiffesvid", dns_name=dns_name or host_name,
+            emit_private_key=False, dss_auto_management=False,
+            emit_account=False)
     elif method == "password":
         # Same shape as `ssh` minus the key. A caller with a working login and no key
         # material used to fall through to the branch below and be refused for a "VM

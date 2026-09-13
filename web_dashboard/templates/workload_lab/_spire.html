@@ -131,7 +131,19 @@
                    x-text="lab.admin_svid_expires_at ? lab.admin_svid_expires_at.slice(0, 10) : '—'"></div>
             </td>
             <td class="px-4 py-2 text-right whitespace-nowrap align-top">
-              <button @click="showOnboarding(lab)"
+              <!-- GOVERNANCE, which is what the lab is for. `ps_governed` is
+                   `ps_system_id` being set; `ps_account_id` stays empty by design because
+                   the plugin DISCOVERS its accounts, so an empty one must not read here as
+                   an incomplete onboard. -->
+              <button @click="govern(lab)" x-show="lab.status === 'available' && !lab.ps_governed"
+                      x-cloak :disabled="busy"
+                      class="text-blue-600 hover:underline text-xs mr-2 disabled:opacity-50">
+                Govern</button>
+              <button @click="showOnboarding(lab)" x-show="lab.ps_governed" x-cloak
+                      class="text-green-700 hover:underline text-xs mr-2"
+                      title="Onboarded as a Password Safe managed system. Two steps still need a human — open for the list.">
+                Governed ✓</button>
+              <button @click="showOnboarding(lab)" x-show="!lab.ps_governed" x-cloak
                       class="text-blue-600 hover:underline text-xs mr-2">Onboarding</button>
               <button @click="openK8s(lab)" x-show="lab.status === 'available'" x-cloak
                       class="hover:underline text-xs mr-2"
@@ -569,14 +581,48 @@
        class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50 p-4">
     <div class="bg-white rounded-xl shadow-lg w-full max-w-2xl p-6 max-h-full overflow-y-auto">
       <h2 class="text-lg font-semibold text-gray-800 mb-1">Onboard into BeyondInsight</h2>
-      <p class="text-sm text-gray-500 mb-4">
-        The dashboard does not write these objects. Whether BeyondInsight populates plugin
-        <em>attributes</em> for an action has never been observed, and the plugin takes its
-        whole configuration from them &mdash; so building a writer now would be betting on
-        the answer. These are the values;
+
+      <!-- Already onboarded by the button: say what it did and what is left. -->
+      <template x-if="onboard?.automated">
+        <div class="border border-green-200 bg-green-50 rounded-lg px-3 py-2 text-xs
+                    text-green-800 mb-3">
+          <strong>Managed system created</strong> by this dashboard
+          (<span class="font-mono" x-text="onboard.ps_system_id"></span>) on the
+          <span class="font-mono" x-text="onboard.platform"></span> platform.
+          <span class="block mt-1">
+            No managed <em>account</em> was created, and that is deliberate &mdash; the
+            plugin discovers its accounts as registration entries, and one made here would
+            move the
+            <strong x-text="onboard.discovery_expected || 8"></strong>-of-<strong
+              x-text="onboard.entries_seeded || 11"></strong> count this lab measures.
+          </span>
+        </div>
+      </template>
+
+      <p class="text-sm text-gray-500 mb-4" x-show="!onboard?.automated" x-cloak>
+        <strong>Govern</strong> creates the managed system for you. These are the values it
+        uses, and the two below it cannot;
         <a href="/docs/runbooks/spire-lab-standup" target="_blank"
            class="text-blue-600 hover:underline">&sect;5 of the runbook</a> is the order.
       </p>
+
+      <!-- WHAT STILL NEEDS A HUMAN. Resolved server-side (spire_lab_service.onboarding_gaps)
+           so the page cannot claim the button does more than it does. Both items make the
+           plugin fail an ACTION while the managed system looks correctly onboarded, and
+           both failures read as a credential problem. -->
+      <template x-if="onboard?.gaps?.length">
+        <div class="border border-amber-200 bg-amber-50 rounded-lg px-3 py-2 mb-4">
+          <p class="text-xs font-medium text-amber-800 mb-1">Still needs a human</p>
+          <ul class="text-xs text-amber-700 space-y-1.5">
+            <template x-for="g in onboard.gaps" :key="g.what">
+              <li>
+                <strong x-text="g.what"></strong> &mdash; <span x-text="g.why"></span>
+                <span class="block mt-0.5 text-amber-900" x-text="g.remedy"></span>
+              </li>
+            </template>
+          </ul>
+        </div>
+      </template>
 
       <template x-if="onboard">
         <div class="space-y-3 text-sm">
@@ -953,6 +999,25 @@ function spireLabPage() {
         this.load();
       } catch (e) { this.notify(e.message, 'error'); }
       finally { this.busy = false; }
+    },
+
+    // Governance. The button the lab exists for: a trust domain nothing governs is a demo
+    // of SPIRE rather than of governing machine identities.
+    async govern(lab) {
+      this.busy = true;
+      try {
+        await API.post('/api/spire-lab/' + lab.id + '/ps-register', {});
+        // Said plainly rather than implied by a green tick. The managed system existing is
+        // not the same as the plugin working, and the two remaining steps are what decide
+        // that — an operator who reads "Governed ✓" and stops will meet a failed action
+        // that looks like a credential problem.
+        this.notify('Onboarding as a Password Safe managed system. TWO STEPS STILL NEED A '
+                    + 'HUMAN afterwards — the functional account holding the PKCS#12, and '
+                    + 'the SpiffeTrustDomain attribute. Open Onboarding for both.');
+        await this.load();
+      } catch (e) {
+        this.notify('Could not onboard: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
     },
 
     async showOnboarding(lab) {

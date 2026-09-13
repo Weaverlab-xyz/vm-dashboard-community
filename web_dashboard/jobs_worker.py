@@ -67,6 +67,7 @@ HANDLED_TYPES = (
     "clouddb_adapter_pair", "clouddb_dbops_deploy",
     "certca_provision", "certca_decommission", "cert_ps_register",
     "spirelab_provision", "spirelab_decommission", "spirelab_k8s_link",
+    "spirelab_ps_register",
     "workload_k8s_token",
     "ansible_cloud_run", "ansible_local", "epml_sync",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
@@ -142,6 +143,11 @@ MEDIUM_TYPES = (
     # NOT light: light is for a parent awaiting HEAVY children, or a job with no local
     # process at all, and this one runs two.
     "workload_k8s_token",
+    # One short terraform for the SPIFFE SVID managed system (ps_resource_service) plus a
+    # few Password Safe REST lookups. No kubectl and no children — but a terraform apply in
+    # a tempdir is what MEDIUM exists for, and it shares the plugin cache with every other
+    # one, so it is not LIGHT either.
+    "spirelab_ps_register",
     # cloud SDK + HTTP readiness poll + an OPT-IN short terraform for the PRA Web Jump
     "rancher_node_deploy", "rancher_node_teardown",
     "portainer_node_deploy", "portainer_node_teardown",
@@ -519,6 +525,14 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             from .services import spire_lab_service
             await spire_lab_service.run_k8s_link(
                 db, lab_id=meta["lab_id"], job_id=job_id)
+        elif job_type == "spirelab_ps_register":
+            # Onboards the trust domain as a "SPIFFE SVID" managed system, or removes it.
+            # Creates NO managed account: the plugin discovers its accounts as registration
+            # entries, and one made here would move the count the lab asserts on.
+            from .services import spire_lab_service
+            await spire_lab_service.run_ps_register(
+                db, lab_id=meta["lab_id"], job_id=job_id,
+                action=meta.get("action", "register"))
         elif job_type == "workload_k8s_token":
             # One job type with an action, as `k8s_ps_token` does: register applies the
             # workload RBAC and the rotator's, onboards the managed system and rotates
