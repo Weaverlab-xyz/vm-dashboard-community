@@ -1968,6 +1968,93 @@ class WorkloadK8sToken(Base):
     expiry_warned_at = Column(DateTime, nullable=True)
 
 
+class WorkloadCloudCredential(Base):
+    """A short-lived AWS or Azure credential for a workload, minted by Workload Credentials.
+
+    The Workload Lab's fourth answer, and the one that replaces the most common non-human
+    credential in existence: an `AWS_ACCESS_KEY_ID` sitting in a CI secret store with no
+    expiry, no revocation, and no record of who read it. Workload Credentials mints an
+    assumed-role triple (AWS) or a service-principal secret (Azure) on demand, against a
+    **dynamic secret** an operator defined in WC, and hands back a LEASE.
+
+    **THE SCOPE IS NOT DEFINED HERE, and that is the honest difference from the sibling
+    tabs.** The Kubernetes tab picks a RoleBinding and the Certificate tab picks a profile,
+    so the dashboard decides what the identity may do. Here the dynamic secret's own
+    definition in Workload Credentials decides — which role is assumed, which subscription,
+    which permissions. This row names the secret it draws from; it cannot widen or narrow
+    it, and it must not pretend to.
+
+    **NOT the dashboard's own lease.** ``workload_credential_lease`` is a singleton per
+    ``(cloud, purpose)`` holding the credential THIS APPLICATION uses for its own cloud
+    calls, configured by ``wlc_{cloud}_secret_name``. Minting into it from here would
+    overwrite a working credential the dashboard is mid-deployment with — and issuance is
+    billed, so it would also charge for the privilege. Rows here call
+    ``workload_credentials_service`` directly and share none of that state.
+
+    **Nothing secret lives on this row.** ``lease_id`` is a correlation handle, not a
+    credential: it identifies an issuance in Workload Credentials' own audit log and is
+    what a revoke acts on. The access key, secret, session token, client secret and tenant
+    id are returned to the caller that asked and are never written here.
+
+    **REVOCATION IS ASYMMETRIC AND THE ROW RECORDS WHICH.** Azure leases can be released
+    early. AWS cannot — STS refuses with ``lease_not_revocable``, because a credential it
+    has already signed cannot be withdrawn before its expiry. So on AWS the TTL is the only
+    control, which makes a short one matter more there rather than less. ``revocable`` is
+    stored rather than inferred at render time so the page cannot promise a kill switch the
+    provider does not have.
+    """
+    __tablename__ = "workload_cloud_credentials"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(120), nullable=False)
+
+    # aws | azure. Decides the credential SHAPE (an assumed-role triple versus a
+    # service-principal secret) and whether a lease can be revoked at all.
+    cloud = Column(String(20), nullable=False, index=True)
+
+    # The Workload Credentials dynamic secret this identity draws from — a FOLDER and a
+    # NAME, which are addresses and not secrets. The scope lives behind them, in WC.
+    secret_name = Column(String(255), nullable=False)
+    secret_folder = Column(String(255), nullable=True)
+    # What this identity is for, in the operator's words. Free text on purpose: the
+    # dashboard cannot enforce a purpose here (see the class docstring), so claiming a
+    # closed vocabulary would imply a guarantee it cannot make.
+    purpose = Column(String(120), nullable=True)
+    # The TTL asked for. Recorded because what comes BACK may differ — the provider clamps,
+    # and AWS caps a role-chained credential at one hour — so the gap between requested and
+    # actual is worth being able to see.
+    ttl_seconds = Column(Integer, nullable=True)
+
+    # ── the current lease ────────────────────────────────────────────────────
+    # A correlation handle to a LIVE credential, not the credential. Cleared when the lease
+    # is revoked or retired so the row never names an issuance that no longer exists.
+    lease_id = Column(String(128), nullable=True, index=True)
+    lease_issued_at = Column(DateTime, nullable=True)
+    # The provider's OWN expiry, as returned. Never computed from the requested TTL: the two
+    # disagree whenever the provider clamps, and a page showing the ask rather than the
+    # answer would tell an operator the credential lives longer than it does.
+    lease_expires_at = Column(DateTime, nullable=True)
+    # Whether THIS cloud's leases can be released early. See the class docstring.
+    revocable = Column(Boolean, nullable=True)
+    # How many times this identity has minted. Issuance is METERED, so this is a cost
+    # figure as much as an audit one — and a number climbing on an identity nobody is using
+    # is the specific shape of a misconfigured consumer retrying.
+    issue_count = Column(Integer, nullable=False, default=0)
+
+    status = Column(String(32), nullable=False, default="registered", index=True)
+    error_message = Column(Text, nullable=True)
+    # The issue/revoke job ids, in order, so each attempt's output stays readable.
+    job_ids = Column(Text, nullable=True)
+
+    workgroup = Column(String(100), nullable=True, index=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+    # Auto-delete timer — NULL = never, never "inherit the default" (see Job.expires_at).
+    expires_at = Column(DateTime, nullable=True, index=True)
+    expiry_warned_at = Column(DateTime, nullable=True)
+
+
 class CloudFunction(Base):
     """Inventory of dashboard-deployed cloud functions — Cloud Functions, Phase 1
     (docs/design/cloud-functions.md).
@@ -3404,6 +3491,13 @@ def init_db():
             "ALTER TABLE pov_environments ADD COLUMN pra_vendor_policy_id VARCHAR(36)",
             "ALTER TABLE pov_environments ADD COLUMN pra_vendor_group_id VARCHAR(36)",
             "ALTER TABLE pov_environments ADD COLUMN pra_vendor_expires_at TIMESTAMP",
+            # `workload_cloud_credentials` needs no entry either, for the same two reasons
+            # create_all covers: new table, and empty means no workload has been given a
+            # dynamic cloud credential yet. Explicitly NOT backfilled from
+            # `workload_credential_lease`'s rows, which look like they belong here and do
+            # not: those are the credential THIS APPLICATION uses for its own cloud calls,
+            # one per (cloud, purpose), and copying them in would make the dashboard's own
+            # lease appear as a governed workload identity.
             # `workload_k8s_tokens` needs no entry: create_all makes new tables, and empty
             # means no workload identity has been onboarded yet — which is the state every
             # install is in before an operator uses the tab. Worth naming here rather than

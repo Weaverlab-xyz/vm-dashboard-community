@@ -106,6 +106,32 @@ trust domain above wins on, and it is why both live on one page.
 
 **Guide:** [Workload access to Kubernetes](../../../workload-kubernetes.md)
 
+### A build that reaches AWS with no access key anywhere
+
+The two stories above give a workload an identity inside a cluster. This one gives it access
+to the cloud account — and it is the credential most customers actually have a problem with.
+Ask how a build server reaches AWS and the answer is an access key pasted into a CI secret
+store: no expiry, no revocation in practice, and no record of which build ever read it.
+
+Mint one per run instead. Workload Credentials issues a short-lived assumed-role credential
+against a dynamic secret, hands back a lease, and bills for the issuance — so the credential
+that existed for that build stops existing afterwards.
+
+The demonstration is the *second* run. Wait out the lease and make the same call: it is
+refused, with nothing revoked and nobody rotating anything. An access key would still be
+working. That refusal is asserted inside the shipped playbook rather than described, and the
+wait is real — a demo that faked the clock would prove it can print an error, not that the
+credential died.
+
+Two things to say out loud while you are there. The scope lives in the dynamic secret's own
+definition, not in the dashboard — so a secret that assumes an administrator role produces a
+short-lived skeleton key and demonstrates nothing. And revocation is asymmetric: Azure leases
+can be released early, **AWS leases cannot**, because STS will not withdraw a credential it
+has already signed. On AWS the TTL is the only control there is, which makes a short one
+matter more rather than less.
+
+**Guide:** [Short-lived cloud credentials](../../../workload-cloud.md)
+
 ### A serverless function that fetches its secret at cold start
 
 Deploy a cloud function with no environment secret and show it pull what it needs on first

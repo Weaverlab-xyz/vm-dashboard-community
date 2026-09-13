@@ -76,6 +76,7 @@ VALID_PERSONAS = (
 _FLAG_LABELS = {
     "pra_enabled": "Privileged Remote Access",
     "password_safe_enabled": "Password Safe",
+    "workload_credentials_enabled": "Workload Credentials",
     "entitle_enabled": "Entitle",
     "entitle_registration_enabled": "Entitle resource registration",
     "entitle_user_jit_enabled": "Entitle user JIT",
@@ -454,6 +455,24 @@ _DEVOPS = Persona(
             # the entry above, and a visitor reading one wants the other.
             requires_flags=("k8s_management_enabled", "password_safe_enabled",
                             "spire_lab_enabled"),
+        ),
+        UseCase(
+            id="devops-dynamic-cloud-credential",
+            title="A build that reaches AWS with no access key anywhere",
+            summary="A pipeline mints a short-lived cloud credential per run instead of "
+                    "holding an access key in a CI secret store — then watch the same call "
+                    "be refused once the lease expires, with nothing revoked and nobody "
+                    "rotating anything.",
+            target="/workload-lab#cloud",
+            minutes=10,
+            docs="workload-cloud",
+            # The Workload Credentials integration's own flag plus a PREVIEW flag, for the
+            # reason test_personas.py enforces: /workload-lab is gated on the derived
+            # `workload_lab_enabled`, so a card naming only the first would link to a page
+            # that 404s. Paired with the SPIRE flag because that is the story an operator
+            # reading this one wants next — it is the path that fixes the axis this one
+            # cannot (anyone who can mint is the workload).
+            requires_flags=("workload_credentials_enabled", "spire_lab_enabled"),
         ),
         UseCase(
             id="devops-function-secret",

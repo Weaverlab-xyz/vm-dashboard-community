@@ -68,7 +68,7 @@ HANDLED_TYPES = (
     "certca_provision", "certca_decommission", "cert_ps_register",
     "spirelab_provision", "spirelab_decommission", "spirelab_k8s_link",
     "spirelab_ps_register",
-    "workload_k8s_token",
+    "workload_k8s_token", "workload_cloud_credential",
     "ansible_cloud_run", "ansible_local", "epml_sync",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     "packer_aws_build", "packer_azure_build", "packer_gcp_build", "packer_oci_build",
@@ -220,6 +220,12 @@ LIGHT_TYPES = (
     # parent that held a HEAVY slot while waiting on a HEAVY child would wait forever.
     # The parent itself runs no local process and streams no output; the children do.
     "spirelab_provision", "spirelab_decommission", "spirelab_k8s_link",
+    # One or two HTTPS calls to Workload Credentials and a row update. No local process, no
+    # terraform, no children. The one tier note here that is about COST rather than
+    # concurrency: `generate` is BILLED PER ISSUANCE, so this job must never be retried
+    # speculatively — if the issuance count ever climbs faster than the button is pressed,
+    # job_service's retry path is the first place to look.
+    "workload_cloud_credential",
     # One metadata write, then up to fourteen minutes of polling our own agent row for an
     # enrolment that happens in the APP process. Nothing local, nothing streamed -- and
     # tiering it heavier would let one POV's enrolment wait block another POV's provision.
@@ -533,6 +539,14 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             await spire_lab_service.run_ps_register(
                 db, lab_id=meta["lab_id"], job_id=job_id,
                 action=meta.get("action", "register"))
+        elif job_type == "workload_cloud_credential":
+            # Mints, revokes or retires a dynamic AWS/Azure credential. `issue` is the
+            # metered call; `revoke` is refused up front on AWS, where STS will not withdraw
+            # a credential it has already signed.
+            from .services import workload_cloud_service
+            await workload_cloud_service.run(
+                db, row_id=meta["row_id"], job_id=job_id,
+                action=meta.get("action", "issue"))
         elif job_type == "workload_k8s_token":
             # One job type with an action, as `k8s_ps_token` does: register applies the
             # workload RBAC and the rotator's, onboards the managed system and rotates

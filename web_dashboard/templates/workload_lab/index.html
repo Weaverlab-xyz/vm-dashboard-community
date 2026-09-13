@@ -60,6 +60,12 @@
 {% if k8s_management_enabled and password_safe_enabled %}
   {% set _ = tabs.append({'slug': 'kubernetes', 'label': 'Kubernetes'}) %}
 {% endif %}
+{# The fourth tab, and the only one whose authority is NOT Password Safe: Workload
+   Credentials mints and holds these, so it rides that integration's own flag. Still no new
+   preview toggle — Settings owns two here and that has not changed. #}
+{% if workload_credentials_enabled %}
+  {% set _ = tabs.append({'slug': 'cloud', 'label': 'Cloud'}) %}
+{% endif %}
 {# ONE CONSEQUENCE WORTH KNOWING: with BOTH preview flags off this whole page 404s at the
    route gate, so the Kubernetes tab is unreachable no matter how its own two flags are
    set. That is deliberate and not a gap to plug. The page is the Workload Lab preview;
@@ -84,8 +90,10 @@
   <p class="text-sm text-gray-500 mb-6">
     The labs for identities that belong to machines. <strong>There is no human in any of
     these workflows by design</strong> &mdash; the consumer is a pipeline, a broker or a
-    cluster, not a person. A certificate identity and a SPIFFE identity are two answers to
-    the same question, which is why they share a page.
+    cluster, not a person. A certificate, a SPIFFE identity, a Kubernetes token and a
+    short-lived cloud credential are four answers to the same question, which is why they
+    share a page &mdash; and which one an operator can actually use depends on what the
+    consumer is and who runs the thing it is reaching.
   </p>
 
   {% if tabs | length > 1 %}
@@ -116,6 +124,12 @@
   {% if k8s_management_enabled and password_safe_enabled %}
   <div x-show="activeTab === 'kubernetes'" x-cloak role="tabpanel">
     {% include "workload_lab/_kubernetes.html" %}
+  </div>
+  {% endif %}
+
+  {% if workload_credentials_enabled %}
+  <div x-show="activeTab === 'cloud'" x-cloak role="tabpanel">
+    {% include "workload_lab/_cloud.html" %}
   </div>
   {% endif %}
 

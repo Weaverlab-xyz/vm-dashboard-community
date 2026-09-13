@@ -21,7 +21,8 @@ from sqlalchemy.orm import Session
 
 from ..database import (CertLab, CloudDatabase, CloudFunction,
                         HypervisorConnection, HypervisorVMCache, Job, K8sCluster,
-                        PovEnvironment, SpireLab, VirtualDesktop, WorkloadK8sToken)
+                        PovEnvironment, SpireLab, VirtualDesktop, WorkloadCloudCredential,
+                        WorkloadK8sToken)
 from . import expiry_policy, hypervisor_view_service
 
 logger = logging.getLogger(__name__)
@@ -290,6 +291,35 @@ def _workloadk8s_item(row) -> dict:
         "expires_at": _iso(row.expires_at),
         "job_id": None,
         "detail_href": "/workload-lab#kubernetes",
+    }
+
+
+def _workloadcloud_item(row) -> dict:
+    """A dynamic cloud credential for a workload, as one inventory row.
+
+    `name` carries the CLOUD and the dynamic secret it draws from, because that secret's
+    definition in Workload Credentials is what decides the scope — this row cannot widen or
+    narrow it, so naming it is the only honest way to say what the identity can do.
+
+    `state` is the row's own status and not the lease's. A lease that has expired is normal
+    and expected — that is the whole point of the mechanism — so an expired lease must not
+    make the identity read as broken here.
+    """
+    label = f"{row.name} ({row.cloud} · {row.secret_name})"
+    return {
+        "id": f"workloadcloud:{row.id}",
+        "cloud": row.cloud,
+        "kind": "workloadcloud",
+        "source": "provisioned",
+        "name": label,
+        "region": row.purpose or "",
+        "state": row.status,
+        "workgroup": row.workgroup,
+        "deployed_by": row.created_by,
+        "created_at": _iso(row.created_at),
+        "expires_at": _iso(row.expires_at),
+        "job_id": None,
+        "detail_href": "/workload-lab#cloud",
     }
 
 
@@ -570,6 +600,14 @@ def collect(db: Session) -> list:
     for row in (db.query(WorkloadK8sToken)
                 .filter(WorkloadK8sToken.status != "deleted").all()):
         items.append(_workloadk8s_item(row))
+
+    # Queried unconditionally, like every kind above. Turning Workload Credentials off
+    # hides the tab; it does not release an outstanding lease, and on AWS nothing CAN
+    # release one before it expires — so a credential nobody can see is still valid until
+    # its TTL runs out, which is precisely the row most worth a timer.
+    for row in (db.query(WorkloadCloudCredential)
+                .filter(WorkloadCloudCredential.status != "deleted").all()):
+        items.append(_workloadcloud_item(row))
 
     for row in (db.query(VirtualDesktop)
                 .filter(VirtualDesktop.status.notin_(("deprovisioning", "deleted"))).all()):

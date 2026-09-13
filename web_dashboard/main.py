@@ -886,6 +886,7 @@ from .api import cloud_databases  # noqa: E402
 from .api import cert_lab as cert_lab_api  # noqa: E402
 from .api import spire_lab as spire_lab_api  # noqa: E402
 from .api import workload_k8s as workload_k8s_api  # noqa: E402
+from .api import workload_cloud as workload_cloud_api  # noqa: E402
 from .api import cloud_functions as cloud_functions_api  # noqa: E402
 from .api import entitle_rest as entitle_rest_api  # noqa: E402
 from .api import pra as pra_api  # noqa: E402
@@ -1078,6 +1079,12 @@ app.include_router(spire_lab_api.router,
 # lab, and this is a capability of the page rather than a lab of its own.
 app.include_router(workload_k8s_api.router,
                    dependencies=[_feature_gate("k8s_management_enabled")])
+# The Workload Lab's Cloud tab. Gated on the Workload Credentials integration's OWN flag —
+# not a new one, because Settings owns two toggles for this page and this is a capability of
+# an existing integration rather than a fourth lab. Its endpoints additionally require the
+# site id and token that integration needs (`_require_enabled`).
+app.include_router(workload_cloud_api.router,
+                   dependencies=[_feature_gate("workload_credentials_enabled")])
 # The one Entitle adapter the dashboard hosts itself, because here the dashboard IS
 # the target system. Gated by entitle_user_jit_enabled, and additionally closed
 # (503) whenever entitle_rest_secret is unset — see the router's _require_secret.

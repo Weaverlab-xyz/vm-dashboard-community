@@ -81,7 +81,15 @@ _DESTROY_FOR = {
 # serving a fresh token from, to anyone who can retrieve it. Its teardown deletes the
 # ServiceAccount, which is the one hard kill switch the mechanism has — every token ever
 # issued is bound to that account's uid and dies with it.
-REAPABLE_KINDS = ("vm", "database", "k8s", "pov", "certlab", "spirelab", "workloadk8s")
+#
+# "workloadcloud" is a dynamic AWS or Azure credential minted for a workload, and its
+# argument is the sharpest of the lot BECAUSE the credential is short-lived. Reaping it does
+# not stop a live lease — on AWS nothing can, since STS will not withdraw a credential it
+# has already signed — so what the reap ends is the IDENTITY'S ABILITY TO MINT ANOTHER. An
+# identity left behind keeps drawing a fresh credential every time its consumer asks, each
+# issuance billed, indefinitely. The teardown revokes what it can and retires the row.
+REAPABLE_KINDS = ("vm", "database", "k8s", "pov", "certlab", "spirelab", "workloadk8s",
+                  "workloadcloud")
 
 # Clouds whose VM teardown is a claimable job (the keys of _DESTROY_FOR, as inventory
 # `cloud` values).
@@ -121,6 +129,12 @@ _REAPABLE_STATES = {
     # really is there. Destroying on that record would leave the binding behind and report
     # success. A human looks at it.
     "workloadk8s": frozenset({"active"}),
+    # workload_cloud_service marks a usable identity "registered" once it exists and
+    # "issued" once it has minted at least once; both are healthy and idle. "failed" is
+    # excluded for the reason every sibling gives, plus one specific here: a failed issue
+    # may still have produced a lease the response never reached us with, and the teardown
+    # can only revoke a lease it knows the id of.
+    "workloadcloud": frozenset({"registered", "issued"}),
     # k8s_service lands a finished provision on "registered", and the management-plane
     # path also produces "managed" / "awaiting_agent".
     "k8s":      frozenset({"registered", "managed", "awaiting_agent"}),
