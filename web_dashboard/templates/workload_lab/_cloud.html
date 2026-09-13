@@ -1,0 +1,535 @@
+{# Workload Lab → Cloud. A short-lived AWS/Azure credential for a workload, minted by
+   Workload Credentials. Backed by /api/workload-cloud.
+
+   THIS REPLACES THE MOST COMMON NON-HUMAN CREDENTIAL THERE IS. Ask how a build server
+   reaches AWS and the answer is an access key in a CI secret store: no expiry, no
+   revocation, no record of who read it. The other three tabs replace a certificate, a
+   SPIFFE identity and a Kubernetes token; this one replaces that key.
+
+   Three things here are load-bearing and easy to mistake for decoration:
+
+     * THE SCOPE IS NOT SET HERE. The dynamic secret's definition in Workload Credentials
+       decides which role is assumed and what it may do. This page NAMES the secret and
+       cannot widen or narrow it — unlike the Kubernetes tab, which picks the RoleBinding
+       itself. Saying so is the difference between a control surface and a claim.
+     * REVOCATION IS ASYMMETRIC. Azure leases can be released early; AWS cannot, because STS
+       will not withdraw a credential it has already signed. So on AWS the TTL is the only
+       control there is, which makes a short one matter MORE there, not less. The page must
+       never offer a Revoke button it cannot honour.
+     * AN EXPIRED LEASE IS THE MECHANISM WORKING. `lease_state` is deliberately separate
+       from `status`: a credential ageing out is the whole point, so it renders as a normal
+       state and not as a fault.
+
+   ISSUANCE IS METERED. Registering mints nothing, every Issue is one billed call, and the
+   count is shown — a number climbing on an identity nobody is using is the signature of a
+   consumer stuck in a retry loop. #}
+
+<div x-data="workloadCloudTab()" x-init="init()">
+
+  <div class="flex justify-end mb-3 sm:mb-1">
+    <button @click="openRegister()" :disabled="!enabledClouds().length"
+            :class="enabledClouds().length ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-300 cursor-not-allowed'"
+            class="text-white text-sm font-medium px-3 py-1.5 rounded-lg">
+      Register a workload identity
+    </button>
+  </div>
+  <p class="text-sm text-gray-500 mb-6">
+    A <strong>short-lived AWS or Azure credential</strong> for a workload, minted on demand
+    by <strong>Workload Credentials</strong> against a dynamic secret and handed out as a
+    lease. This is the tab that replaces the access key in a CI secret store &mdash; the one
+    with no expiry, no revocation and no record of who read it.
+    <a href="/docs/workload-cloud" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>.
+  </p>
+
+  <!-- Toast -->
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm whitespace-pre-line" x-text="toast"></div>
+
+  <div x-show="missing.length" x-cloak
+       class="mb-6 border border-amber-200 bg-amber-50 rounded-lg px-4 py-3">
+    <p class="text-sm font-medium text-amber-800 mb-1">Not configured yet</p>
+    <ul class="text-sm text-amber-700 list-disc list-inside space-y-0.5">
+      <template x-for="m in missing" :key="m"><li x-text="m"></li></template>
+    </ul>
+  </div>
+
+  <!-- THE ASYMMETRY, stated once at the top rather than only on the button. An operator who
+       learns this after promising a kill switch in a demo has a bad afternoon. -->
+  <div x-show="!loading && enabledClouds().length" x-cloak
+       class="mb-6 border border-gray-200 rounded-lg px-4 py-3 text-xs text-gray-600">
+    <p class="font-medium text-gray-700 mb-1">Before you choose a cloud</p>
+    <template x-for="c in enabledClouds()" :key="c.key">
+      <p class="mb-0.5">
+        <strong x-text="c.key"></strong> &mdash;
+        <template x-if="c.revocable">
+          <span>a lease <strong>can be released early</strong>, so there is a real kill
+            switch.</span>
+        </template>
+        <template x-if="!c.revocable">
+          <span><strong>a lease cannot be revoked.</strong> STS will not withdraw a
+            credential it has already signed, so the TTL is the only control &mdash; which
+            makes a short one matter more here, not less.</span>
+        </template>
+      </p>
+    </template>
+  </div>
+
+  <div x-show="loading" class="text-sm text-gray-500">Loading…</div>
+
+  <div x-show="!loading && !identities.length" x-cloak
+       class="border border-dashed border-gray-300 rounded-lg p-8 text-center">
+    <p class="text-sm text-gray-600 mb-1">No workload identity is registered.</p>
+    <p class="text-xs text-gray-500">
+      Register one against a Workload Credentials <strong>dynamic secret</strong>, then press
+      Issue to mint. Registering alone costs nothing &mdash; issuance is metered.
+    </p>
+  </div>
+
+  <!-- Identities -->
+  <div x-show="!loading && identities.length" x-cloak class="space-y-4">
+    <template x-for="row in identities" :key="row.id">
+      <div class="border border-gray-200 rounded-lg p-4">
+
+        <div class="flex flex-wrap items-start justify-between gap-2 mb-2">
+          <div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="font-medium text-gray-800" x-text="row.name"></span>
+              <span class="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-700"
+                    x-text="row.cloud"></span>
+              <span class="text-xs px-2 py-0.5 rounded-full" :class="statusClass(row.status)"
+                    x-text="row.status"></span>
+              <!-- The lease, as its own badge. An expired one is NORMAL — see the header. -->
+              <span class="text-xs px-2 py-0.5 rounded-full" :class="leaseClass(row)"
+                    x-text="leaseLabel(row)"></span>
+              <span x-show="!row.revocable" x-cloak
+                    class="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800"
+                    title="STS will not withdraw a credential it has already signed. The TTL is the only control.">
+                not revocable
+              </span>
+            </div>
+            <p class="text-xs text-gray-500 mt-1">
+              <code x-text="(row.dynamic_folder ? row.dynamic_folder + '/' : '') + row.dynamic_name"></code>
+              <span x-show="row.purpose" x-cloak> · <span x-text="row.purpose"></span></span>
+              ·
+              <!-- Metered: the count is a cost figure as much as an audit one. -->
+              <span x-text="row.issue_count"></span>
+              issuance<span x-show="row.issue_count !== 1" x-cloak>s</span>
+            </p>
+          </div>
+          <div class="flex gap-2">
+            <button @click="showLease(row)" :disabled="!row.lease_id"
+                    class="text-xs border border-gray-300 hover:bg-gray-50 px-2 py-1 rounded disabled:opacity-50">
+              Lease
+            </button>
+            <button @click="issue(row)" :disabled="busy"
+                    class="text-xs border border-blue-300 text-blue-700 hover:bg-blue-50 px-2 py-1 rounded disabled:opacity-50">
+              Issue
+            </button>
+            <!-- Rendered ONLY where the provider can honour it. A disabled-but-present
+                 button would still read as "this is possible, just not now". -->
+            <button x-show="row.revocable" x-cloak @click="revoke(row)"
+                    :disabled="busy || !row.lease_id"
+                    class="text-xs border border-gray-300 hover:bg-gray-50 px-2 py-1 rounded disabled:opacity-50">
+              Revoke
+            </button>
+            <button @click="destroy(row)" :disabled="busy"
+                    class="text-xs border border-red-300 text-red-700 hover:bg-red-50 px-2 py-1 rounded disabled:opacity-50">
+              Delete
+            </button>
+          </div>
+        </div>
+
+        <!-- What the scope is, and where it is decided. -->
+        <p class="text-xs text-gray-600 bg-gray-50 border border-gray-200 rounded px-2 py-1.5 mb-2">
+          Scope is set by the dynamic secret in Workload Credentials, not here. A mint
+          returns
+          <code x-text="row.credential_fields.join(', ')"></code>
+          to the consumer that asked for it.
+        </p>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-xs">
+          <div x-show="row.lease_expires_at" x-cloak>
+            <span class="text-gray-500">Lease expires</span>
+            <span class="ml-1" :class="expiryClass(row.lease_expires_at)"
+                  x-text="fmt(row.lease_expires_at)"></span>
+          </div>
+          <div x-show="row.ttl_seconds" x-cloak>
+            <span class="text-gray-500">TTL requested</span>
+            <span class="ml-1" x-text="row.ttl_seconds + 's'"></span>
+            <span class="text-gray-400">(the provider may clamp it)</span>
+          </div>
+          <div x-show="row.expires_at" x-cloak>
+            <span class="text-gray-500">Auto-delete</span>
+            <span class="ml-1" :class="expiryClass(row.expires_at)"
+                  x-text="fmt(row.expires_at)"></span>
+          </div>
+        </div>
+
+        <div class="flex flex-wrap gap-2 mt-2">
+          <template x-for="jid in row.job_ids" :key="jid">
+            <a :href="'/jobs/' + jid" target="_blank"
+               class="text-xs text-blue-600 hover:underline">job</a>
+          </template>
+        </div>
+
+        <p x-show="row.error_message" x-cloak
+           class="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1.5 whitespace-pre-line"
+           x-text="row.error_message"></p>
+      </div>
+    </template>
+  </div>
+
+  <!-- ── Register ─────────────────────────────────────────────────────────── -->
+  <div x-show="registerOpen" x-cloak
+       class="fixed inset-0 bg-black/40 flex items-start justify-center p-4 overflow-y-auto z-50">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-lg my-8 p-5" @click.outside="registerOpen = false">
+      <h3 class="text-lg font-semibold text-gray-800 mb-1">Register a workload identity</h3>
+      <p class="text-xs text-gray-500 mb-4">
+        Records that this workload draws from a dynamic secret. <strong>Mints
+        nothing</strong> &mdash; issuance is metered, so the first credential appears when
+        you press Issue.
+      </p>
+
+      <div class="space-y-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Name</label>
+          <input x-model="form.name" type="text" placeholder="ci-deployer"
+                 class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Cloud</label>
+          <div class="space-y-2">
+            <template x-for="c in enabledClouds()" :key="c.key">
+              <label class="flex items-start gap-2 border border-gray-200 rounded px-2 py-1.5 cursor-pointer"
+                     :class="form.cloud === c.key ? 'border-blue-400 bg-blue-50' : ''">
+                <input type="radio" :value="c.key" x-model="form.cloud" class="mt-0.5">
+                <span>
+                  <span class="text-sm font-medium text-gray-800" x-text="c.key"></span>
+                  <span class="block text-xs text-gray-600"
+                        x-text="c.revocable
+                                  ? 'leases can be released early'
+                                  : 'leases CANNOT be revoked — the TTL is the only control'"></span>
+                </span>
+              </label>
+            </template>
+          </div>
+          <p x-show="disabledClouds().length" x-cloak class="text-xs text-gray-500 mt-1">
+            Not available (no Workload Credentials configuration):
+            <span x-text="disabledClouds().map(c => c.key).join(', ')"></span>
+          </p>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Dynamic secret</label>
+          <input x-model="form.dynamic_name" type="text"
+                 class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+          <p class="text-xs text-gray-500 mt-1">
+            <strong>This decides the scope</strong> &mdash; which role is assumed and what it
+            may do. Defined in Workload Credentials; this page cannot change it, which is why
+            there is no default.
+          </p>
+          <!-- Offered as a hint, with the reason not to use it. Registering the lab against
+               the dashboard's own secret works and is almost never the intent. -->
+          <p x-show="selectedCloud()?.dashboard_secret" x-cloak
+             class="text-xs text-gray-500 mt-1">
+            The dashboard uses
+            <code x-text="selectedCloud().dashboard_secret"></code>
+            for its own cloud calls. A lab identity is usually a
+            <em>different</em> secret with a narrower scope.
+          </p>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Folder</label>
+          <input x-model="form.dynamic_folder" type="text" list="wc-folders"
+                 :placeholder="selectedCloud()?.default_folder || '(root)'"
+                 class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+          <datalist id="wc-folders">
+            <template x-for="f in options.folders" :key="f">
+              <option :value="f"></option>
+            </template>
+          </datalist>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">Purpose</label>
+            <input x-model="form.purpose" type="text" placeholder="nightly build"
+                   class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">TTL (seconds)</label>
+            <input x-model.number="form.ttl_seconds" type="number" min="0" step="60"
+                   class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+            <p class="text-xs text-gray-500 mt-1">
+              A request, not a guarantee &mdash; AWS caps a role-chained credential at one
+              hour and the provider may clamp.
+            </p>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">
+            Auto-delete after (hours, blank = never)
+          </label>
+          <input x-model.number="form.expires_in_hours" type="number" min="1"
+                 class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+          <p class="text-xs text-gray-500 mt-1">
+            Retiring the identity stops it minting <em>another</em> credential. An
+            outstanding one lives out its TTL regardless.
+          </p>
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-2 mt-5">
+        <button @click="registerOpen = false"
+                class="text-sm px-3 py-1.5 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
+        <button @click="submitRegister()" :disabled="busy"
+                class="text-sm px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50">
+          Register
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Lease ────────────────────────────────────────────────────────────── -->
+  <div x-show="leaseOpen" x-cloak
+       class="fixed inset-0 bg-black/40 flex items-start justify-center p-4 overflow-y-auto z-50">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl my-8 p-5" @click.outside="leaseOpen = false">
+      <h3 class="text-lg font-semibold text-gray-800 mb-1">The current lease</h3>
+      <p class="text-xs text-gray-500 mb-4">
+        Read live from Workload Credentials, not from this dashboard's record &mdash; the two
+        diverge exactly when it matters, if the lease was released elsewhere.
+        <strong>No credential is shown here and none ever will be:</strong> the values went
+        to the consumer that asked for them, which is what puts that consumer in the audit
+        log rather than this page.
+      </p>
+
+      <div x-show="lease" x-cloak class="space-y-2 text-sm">
+        <div class="flex items-start gap-2">
+          <span class="text-xs text-gray-500 w-32 shrink-0 pt-1">Lease id</span>
+          <code class="flex-1 text-xs bg-gray-50 border border-gray-200 rounded px-2 py-1 break-all"
+                x-text="lease.lease_id || '(none)'"></code>
+        </div>
+        <div class="flex items-start gap-2">
+          <span class="text-xs text-gray-500 w-32 shrink-0 pt-1">State</span>
+          <span class="text-xs pt-1" x-text="lease.state"></span>
+        </div>
+        <div class="flex items-start gap-2" x-show="lease.expires_at" x-cloak>
+          <span class="text-xs text-gray-500 w-32 shrink-0 pt-1">Expires</span>
+          <span class="text-xs pt-1" :class="expiryClass(lease.expires_at)"
+                x-text="fmt(lease.expires_at)"></span>
+        </div>
+        <div class="flex items-start gap-2">
+          <span class="text-xs text-gray-500 w-32 shrink-0 pt-1">Revocable</span>
+          <span class="text-xs pt-1"
+                x-text="lease.revocable ? 'yes' : 'no — the TTL is the only control'"></span>
+        </div>
+        <p x-show="lease.note" x-cloak class="text-xs text-gray-600 pt-2" x-text="lease.note"></p>
+        <div x-show="lease.provider && Object.keys(lease.provider).length" x-cloak>
+          <p class="text-xs text-gray-500 mt-3 mb-1">The provider's own view</p>
+          <pre class="text-xs bg-gray-50 border border-gray-200 rounded p-2 overflow-x-auto"
+               x-text="JSON.stringify(lease.provider, null, 2)"></pre>
+        </div>
+      </div>
+
+      <div class="flex justify-end mt-5">
+        <button @click="leaseOpen = false"
+                class="text-sm px-3 py-1.5 border border-gray-300 rounded hover:bg-gray-50">Close</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// Every call goes through window.API, which attaches the bearer token from the auth store.
+// The browser's own fetch against an /api route would be ANONYMOUS and 401 -- there is no
+// auth cookie on this app.
+function workloadCloudTab() {
+  return {
+    loading: true,
+    busy: false,
+    identities: [],
+    options: { clouds: [], folders: [], missing: [] },
+    missing: [],
+    toast: '',
+    toastType: 'info',
+
+    registerOpen: false,
+    // Kept in step with blankForm() below. Two initialisers that drift apart is how a field
+    // ends up undefined on the second registration of a session.
+    form: { name: '', cloud: '', dynamic_name: '', dynamic_folder: '', purpose: '',
+            ttl_seconds: 0, expires_in_hours: null },
+
+    leaseOpen: false,
+    lease: null,
+
+    async init() {
+      await Promise.all([this.load(), this.loadOptions()]);
+      this.loading = false;
+    },
+
+    async load() {
+      try {
+        const out = await API.get('/api/workload-cloud');
+        this.identities = (out && out.identities) || [];
+      } catch (e) {
+        this.notify('Could not load workload identities: ' + (e.message || e), 'error');
+      }
+    },
+
+    async loadOptions() {
+      try {
+        const out = await API.get('/api/workload-cloud/options');
+        if (out) {
+          this.options = out;
+          this.missing = out.missing || [];
+          // Preselect the only usable cloud, so the common case is one fewer click.
+          const on = this.enabledClouds();
+          if (on.length === 1) this.form.cloud = on[0].key;
+        }
+      } catch (e) { /* the tab still lists what exists without the hints */ }
+    },
+
+    enabledClouds() { return (this.options.clouds || []).filter(c => c.enabled); },
+    disabledClouds() { return (this.options.clouds || []).filter(c => !c.enabled); },
+    selectedCloud() {
+      return (this.options.clouds || []).find(c => c.key === this.form.cloud) || null;
+    },
+
+    notify(msg, type) {
+      this.toast = msg;
+      this.toastType = type || 'info';
+      setTimeout(() => { this.toast = ''; }, 11000);
+    },
+
+    statusClass(s) {
+      if (s === 'issued') return 'bg-green-100 text-green-800';
+      if (s === 'registered') return 'bg-blue-100 text-blue-800';
+      if (s === 'failed') return 'bg-red-100 text-red-800';
+      if (s === 'deleted') return 'bg-gray-100 text-gray-600';
+      return 'bg-blue-100 text-blue-800';
+    },
+
+    // An EXPIRED lease is the mechanism working, so it is grey rather than red. Only the
+    // row's own `status` gets to mean "something is wrong".
+    leaseLabel(row) {
+      if (row.lease_state === 'live') return 'lease live';
+      if (row.lease_state === 'expired') return 'lease expired';
+      return 'no lease';
+    },
+    leaseClass(row) {
+      if (row.lease_state === 'live') return 'bg-emerald-100 text-emerald-800';
+      if (row.lease_state === 'expired') return 'bg-gray-100 text-gray-600';
+      return 'bg-gray-50 text-gray-500';
+    },
+
+    fmt(iso) {
+      if (!iso) return '';
+      try { return new Date(iso).toLocaleString(); } catch (e) { return iso; }
+    },
+
+    // Amber inside an hour, red once lapsed. Used for both the lease and the auto-delete
+    // timer, which is fine -- both mean "this stops working at that time".
+    expiryClass(iso) {
+      if (!iso) return 'text-gray-400';
+      const hours = (new Date(iso) - new Date()) / 3600000;
+      if (hours < 0) return 'text-gray-500';
+      if (hours < 1) return 'text-amber-600 font-medium';
+      return 'text-gray-600';
+    },
+
+    // ONE shape, used by openRegister() and matching the `form` literal above.
+    blankForm() {
+      const on = this.enabledClouds();
+      return { name: '', cloud: on.length === 1 ? on[0].key : '', dynamic_name: '',
+               dynamic_folder: '', purpose: '', ttl_seconds: 0, expires_in_hours: null };
+    },
+
+    openRegister() {
+      this.form = this.blankForm();
+      this.registerOpen = true;
+    },
+
+    async submitRegister() {
+      this.busy = true;
+      try {
+        const body = Object.assign({}, this.form);
+        // Blank means "never", and the API takes null rather than 0 -- 0 hours would be an
+        // expiry in the past, which the reaper would act on immediately.
+        if (!body.expires_in_hours) body.expires_in_hours = null;
+        const out = await API.post('/api/workload-cloud', body);
+        this.registerOpen = false;
+        this.notify('Registered. Nothing has been minted yet — issuance is metered, so press '
+                    + 'Issue when a credential is actually needed.'
+                    + (out && out.revocable === false
+                         ? '\n\nNote: ' + body.cloud + ' leases cannot be revoked. The TTL '
+                           + 'is the only control.'
+                         : ''));
+        await this.load();
+      } catch (e) {
+        this.notify('Register failed: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+
+    async issue(row) {
+      this.busy = true;
+      try {
+        await API.post('/api/workload-cloud/' + row.id + '/issue', {});
+        // Said plainly: this is a billed call, and the credential does not come back here.
+        this.notify('Minting. This is one metered issuance. The credential goes to the '
+                    + 'consumer that asked for it and is never stored here — watch the job '
+                    + 'for the lease id and its expiry.');
+        await this.load();
+      } catch (e) {
+        this.notify('Issue failed: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+
+    async revoke(row) {
+      this.busy = true;
+      try {
+        await API.post('/api/workload-cloud/' + row.id + '/revoke', {});
+        this.notify('Releasing the lease. The credential stops working immediately — but the '
+                    + 'identity can still mint another, so delete it to stop that too.');
+        await this.load();
+      } catch (e) {
+        // The AWS refusal arrives here as a 400 and it is the correct answer, not a fault.
+        this.notify('Revoke refused: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+
+    async destroy(row) {
+      let warn = 'Delete ' + row.name + '?\n\nThis stops the identity minting any further '
+               + 'credentials.';
+      warn += row.revocable
+        ? '\n\nAny outstanding lease is released immediately.'
+        : '\n\nAn outstanding ' + row.cloud + ' lease CANNOT be revoked and stays valid '
+          + 'until it expires — STS will not withdraw a credential it has already signed.';
+      if (!confirm(warn)) return;
+      this.busy = true;
+      try {
+        await API.del('/api/workload-cloud/' + row.id);
+        this.notify('Retiring. The identity can no longer mint.');
+        await this.load();
+      } catch (e) {
+        this.notify('Delete failed: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+
+    async showLease(row) {
+      this.lease = null;
+      this.leaseOpen = true;
+      try {
+        this.lease = await API.get('/api/workload-cloud/' + row.id + '/lease');
+      } catch (e) {
+        this.leaseOpen = false;
+        this.notify('Could not read the lease: ' + (e.message || e), 'error');
+      }
+    },
+  };
+}
+</script>

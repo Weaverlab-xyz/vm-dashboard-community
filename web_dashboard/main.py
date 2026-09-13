@@ -886,6 +886,7 @@ from .api import cloud_databases  # noqa: E402
 from .api import cert_lab as cert_lab_api  # noqa: E402
 from .api import spire_lab as spire_lab_api  # noqa: E402
 from .api import workload_k8s as workload_k8s_api  # noqa: E402
+from .api import workload_cloud as workload_cloud_api  # noqa: E402
 from .api import cloud_functions as cloud_functions_api  # noqa: E402
 from .api import entitle_rest as entitle_rest_api  # noqa: E402
 from .api import pra as pra_api  # noqa: E402
@@ -1078,6 +1079,12 @@ app.include_router(spire_lab_api.router,
 # lab, and this is a capability of the page rather than a lab of its own.
 app.include_router(workload_k8s_api.router,
                    dependencies=[_feature_gate("k8s_management_enabled")])
+# The Workload Lab's Cloud tab. Gated on the Workload Credentials integration's OWN flag —
+# not a new one, because Settings owns two toggles for this page and this is a capability of
+# an existing integration rather than a fourth lab. Its endpoints additionally require the
+# site id and token that integration needs (`_require_enabled`).
+app.include_router(workload_cloud_api.router,
+                   dependencies=[_feature_gate("workload_credentials_enabled")])
 # The one Entitle adapter the dashboard hosts itself, because here the dashboard IS
 # the target system. Gated by entitle_user_jit_enabled, and additionally closed
 # (503) whenever entitle_rest_secret is unset — see the router's _require_secret.
@@ -1505,13 +1512,21 @@ async def oci_page(request: Request):
 async def workload_lab_page(request: Request):
     """Workload Lab: the labs for identities that belong to machines, as one page.
 
-    Tabs over the Certificate Lab (a private CA for the Password Safe "Certificate" plugin)
-    and the SPIRE Lab (a trust domain for the "SPIFFE SVID" plugin), plus a static explainer
-    for the Kubernetes short-lived-token pattern that nothing here builds yet.
+    Four tabs, one per credential a machine is given:
 
-    Gated on the DERIVED workload_lab_enabled -- either lab being on -- while each tab is
-    gated on its own preview flag inside the template. The two routers stay separate and
-    keep their own gates, so a tab can never render against a router that 404s.
+      * **Certificates** -- a private CA for the Password Safe "Certificate" plugin;
+      * **SPIRE** -- a trust domain for the "SPIFFE SVID" plugin, where the workload attests
+        itself and nothing is held at rest;
+      * **Kubernetes** -- a bound ServiceAccount token vaulted in Password Safe, which is the
+        answer for the managed clusters SPIFFE cannot reach;
+      * **Cloud** -- a short-lived AWS or Azure credential minted by Workload Credentials.
+
+    Gated on the DERIVED workload_lab_enabled -- either LAB being on -- while each tab is
+    gated inside the template on the flags its own mechanism needs. The routers stay separate
+    and keep their own gates, so a tab can never render against a router that 404s. Note the
+    asymmetry that follows: the page can be reachable with the Kubernetes or Cloud tab
+    hidden, because neither has a preview flag of its own -- "do not change the settings
+    menu" holds, so they ride the flags of the integrations they drive.
     """
     return templates.TemplateResponse("workload_lab/index.html", {"request": request})
 

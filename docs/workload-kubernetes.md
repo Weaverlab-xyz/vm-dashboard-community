@@ -175,6 +175,8 @@ short version:
 Neither row is the winner everywhere, which is why the Workload Lab shows both and the two
 tabs link to each other.
 
+A third row belongs beside them for a workload that needs **cloud** rather than cluster access: [short-lived cloud credentials](workload-cloud.md), minted by Workload Credentials. It shares this path's limitation — the vault authenticates whoever can retrieve or mint — and adds one of its own worth knowing: on AWS a lease **cannot be revoked** at all, so the TTL is the only control there is.
+
 ## What is not built
 
 * **No audience scoping.** Bound ServiceAccount tokens take an audience and nothing here

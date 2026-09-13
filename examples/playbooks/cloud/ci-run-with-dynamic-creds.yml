@@ -1,0 +1,259 @@
+# Reach AWS or Azure with a credential that did not exist a minute ago
+# Target: localhost. The play reaches OUT to the cloud, as the k8s consumer plays do.
+#
+# THE POINT OF THIS PLAY IS THE LAST TASK, NOT THE FIRST. Retrieving a short-lived credential
+# and using it successfully proves very little — a long-lived key does that too. What proves
+# something is that **the same call fails once the lease expires**, with nothing having been
+# revoked and nobody having rotated anything. That is asserted here, not described, because a
+# step in a runbook gets skipped and an assertion does not.
+#
+# Register the identity first: Workload Lab → Cloud → "Register a workload identity", then
+# Issue. The identity names a Workload Credentials **dynamic secret**, and that secret's own
+# definition decides what the credential can do — which role is assumed, which subscription.
+# This play cannot widen or narrow it and does not try.
+#
+# NEVER LIVE-VALIDATED — see docs/workload-cloud.md.
+#
+# ── THE INJECTED CLOUD CREDENTIALS ARE CLEARED ON PURPOSE, and this is the trap that would
+# otherwise make the whole play prove nothing. A dashboard runner may already carry
+# AWS_ACCESS_KEY_ID / AZURE_CLIENT_ID in its environment — that is how every other cloud play
+# here authenticates. Left set, the CLI would fall back to them: every task would pass, the
+# expiry assertion below would never fire, and the play would report a successful
+# demonstration of a mechanism it never used. The `environment:` block blanks them.
+#
+# ── AND THE EXPIRY IS NOT SIMULATED. `wait_for_expiry: true` sleeps until the lease's own
+# expiry and then re-runs the same call. That is slow by design: a demonstration that faked
+# the clock would prove the play can print a failure message, not that the credential died.
+# Leave it false for a quick smoke test and true when demonstrating.
+#
+# ── REVOCATION IS ASYMMETRIC and the play says which. Azure leases can be released early;
+# AWS cannot, because STS will not withdraw a credential it has already signed. So on AWS the
+# expiry below is the ONLY control, which is why a short TTL matters more there, not less.
+#
+# extra_vars:
+#   cloud: aws                       # aws | azure
+#   credential_file: ""              # REQUIRED — JSON the consumer wrote after minting
+#                                    #   (see "Where the credential comes from" below)
+#   wait_for_expiry: false           # sleep to the lease expiry and prove the call fails
+#   max_wait_seconds: 4200           # ceiling on that sleep; AWS caps a chained role at 1h
+#   azure_scope: ""                  # optional subscription id for the Azure read
+- name: Use a short-lived cloud credential, then prove it expires
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  environment:
+    # See the header. Blanking these is what makes the dynamic credential the only thing in
+    # play. Both families, because the runner image carries whichever its cloud needs.
+    AWS_ACCESS_KEY_ID: ""
+    AWS_SECRET_ACCESS_KEY: ""
+    AWS_SESSION_TOKEN: ""
+    AWS_PROFILE: ""
+    AZURE_CLIENT_ID: ""
+    AZURE_CLIENT_SECRET: ""
+    AZURE_TENANT_ID: ""
+  vars:
+    cloud: "aws"
+    credential_file: ""
+    wait_for_expiry: false
+    max_wait_seconds: 4200
+    azure_scope: ""
+  tasks:
+    - name: Require a cloud and a credential file
+      ansible.builtin.assert:
+        that:
+          - cloud in ["aws", "azure"]
+          - credential_file | length > 0
+        fail_msg: >-
+          cloud must be aws or azure, and credential_file must point at the JSON your
+          consumer wrote when it minted. THIS PLAY DELIBERATELY DOES NOT MINT: issuance is
+          metered, and a play that minted on every run would bill per run and make the
+          expiry assertion below meaningless — it would always be testing a fresh
+          credential. Mint once (Workload Lab → Cloud → Issue, or your own call to
+          Workload Credentials), write the result, then run this.
+
+    # ── Where the credential comes from ──────────────────────────────────────
+    # A file the CONSUMER wrote, not a lookup this play performs. Two reasons, and the
+    # second is the important one:
+    #
+    #   1. issuance is metered, so minting per run is a per-run charge;
+    #   2. the consumer retrieving with ITS OWN Workload Credentials token is what puts that
+    #      consumer in WC's audit log. A play that minted on the operator's behalf would
+    #      record the operator, which is the property this whole mechanism exists to remove.
+    #
+    # Expected shape — exactly what `generate` returns, so a consumer can write it verbatim:
+    #   {"values": {...}, "lease_id": "...", "expires_at": "2026-09-13T01:23:45Z"}
+    - name: Read the minted credential
+      ansible.builtin.slurp:
+        src: "{{ credential_file }}"
+      register: cred_raw
+      no_log: true
+
+    - name: Parse it
+      ansible.builtin.set_fact:
+        _wc: "{{ cred_raw.content | b64decode | from_json }}"
+      no_log: true
+
+    - name: Confirm it carries what this cloud needs
+      ansible.builtin.assert:
+        that:
+          - _wc.values is defined
+          - (cloud == 'aws') | ternary(_wc.values.access_key_id is defined,
+                                       _wc.values.client_id is defined)
+          - _wc.expires_at is defined
+        fail_msg: >-
+          The credential file does not look like a Workload Credentials issuance. Expected
+          {"values": {...}, "lease_id": "...", "expires_at": "..."} — an AWS issuance carries
+          access_key_id, an Azure one carries client_id. Without `expires_at` this play
+          cannot prove the thing it exists to prove.
+
+    - name: Note the lease
+      ansible.builtin.debug:
+        msg:
+          - "Lease:   {{ _wc.lease_id | default('(none returned)') }}"
+          - "Expires: {{ _wc.expires_at }}"
+          - "{{ 'This lease CAN be released early.' if cloud == 'azure'
+                else 'This lease CANNOT be revoked — on AWS the expiry is the only control.' }}"
+
+    # ── While it is valid ────────────────────────────────────────────────────
+    - name: Call AWS with the dynamic credential
+      ansible.builtin.command: aws sts get-caller-identity --output json
+      environment:
+        AWS_ACCESS_KEY_ID: "{{ _wc.values.access_key_id }}"
+        AWS_SECRET_ACCESS_KEY: "{{ _wc.values.secret_access_key }}"
+        AWS_SESSION_TOKEN: "{{ _wc.values.session_token }}"
+      register: aws_who
+      changed_when: false
+      no_log: true                  # the task environment carries the credential
+      when: cloud == "aws"
+
+    - name: Show which identity AWS resolved it to
+      ansible.builtin.debug:
+        # The ARN, which is the useful half: it names the role the dynamic secret assumed,
+        # so an operator can see the scope they configured in Workload Credentials rather
+        # than taking it on trust.
+        msg: "AWS resolved the credential to {{ (aws_who.stdout | from_json).Arn }}"
+      when:
+        - cloud == "aws"
+        - not aws_who.failed | default(false)
+
+    - name: Call Azure with the dynamic credential
+      ansible.builtin.command: >-
+        az login --service-principal
+        --username {{ _wc.values.client_id }}
+        --password {{ _wc.values.client_secret }}
+        --tenant {{ _wc.values.tenant_id }}
+        --output none
+      register: az_login
+      changed_when: true
+      no_log: true
+      when: cloud == "azure"
+
+    - name: Read something with it
+      ansible.builtin.command: >-
+        az account show --output json
+        {{ ('--subscription ' ~ azure_scope) if azure_scope | length > 0 else '' }}
+      register: az_who
+      changed_when: false
+      when:
+        - cloud == "azure"
+        - not az_login.failed | default(false)
+
+    - name: Confirm the credential worked
+      ansible.builtin.assert:
+        that:
+          - (cloud == 'aws') | ternary(not aws_who.failed | default(false),
+                                       not az_who.failed | default(false))
+        fail_msg: >-
+          The dynamic credential did not authenticate. If it has already expired that is not
+          a failure of the mechanism — check `expires_at` above and mint a fresh one. If it
+          has not, the dynamic secret's own configuration in Workload Credentials is the
+          place to look: this play cannot see what role it assumes.
+        success_msg: >-
+          Authenticated with a credential that did not exist before it was minted, and that
+          nothing on this host holds a long-lived key for.
+
+    # ── The assertion that makes this a demonstration ────────────────────────
+    - name: Wait for the lease to expire
+      ansible.builtin.wait_for:
+        # Not a sleep on a computed number: the provider's own expiry, plus a small margin
+        # for clock skew between here and the cloud's token service. A margin that is too
+        # small makes this flap; too large just wastes wall clock.
+        timeout: >-
+          {{ [ (((_wc.expires_at | to_datetime('%Y-%m-%dT%H:%M:%S%z'))
+                 - (ansible_date_time.iso8601 | to_datetime('%Y-%m-%dT%H:%M:%SZ'))
+                ).total_seconds() | int) + 30, max_wait_seconds | int ] | min }}
+        # Nothing to watch for — this is a deliberate wait, and `wait_for` with no condition
+        # is the idiomatic way to say so.
+        host: 127.0.0.1
+        port: 1
+        state: stopped
+      when: wait_for_expiry | bool
+
+    - name: Call AWS again, after expiry — this MUST fail
+      ansible.builtin.command: aws sts get-caller-identity --output json
+      environment:
+        AWS_ACCESS_KEY_ID: "{{ _wc.values.access_key_id }}"
+        AWS_SECRET_ACCESS_KEY: "{{ _wc.values.secret_access_key }}"
+        AWS_SESSION_TOKEN: "{{ _wc.values.session_token }}"
+      register: aws_after
+      # `failed_when: false` so the NEXT task judges the result. Deliberately not
+      # `ignore_errors`, which would also swallow a missing binary or a DNS failure and let
+      # the assertion below pass on the wrong error — the same distinction the k8s consumer
+      # plays draw.
+      failed_when: false
+      changed_when: false
+      no_log: true
+      when:
+        - cloud == "aws"
+        - wait_for_expiry | bool
+
+    - name: Call Azure again, after expiry — this MUST fail
+      ansible.builtin.command: az account show --output json
+      register: az_after
+      failed_when: false
+      changed_when: false
+      when:
+        - cloud == "azure"
+        - wait_for_expiry | bool
+
+    - name: The expired credential must be refused
+      ansible.builtin.assert:
+        that:
+          # BOTH halves, and neither is redundant. The first is the finding; the second pins
+          # that it failed for the RIGHT REASON — a missing CLI, a broken proxy or a typo in
+          # a scope also fail, and a check that only asserted "it failed" would report a
+          # passing demonstration on any of them.
+          - _after.rc | default(1) != 0
+          - >-
+            ('xpired' in (_after.stderr | default('')))
+            or ('nvalid' in (_after.stderr | default('')))
+            or ('AccessDenied' in (_after.stderr | default('')))
+            or ('AuthenticationFailed' in (_after.stderr | default('')))
+            or ('not logged in' in (_after.stderr | default('') | lower))
+        fail_msg: >-
+          The credential still worked after its lease expired, or it failed for an unrelated
+          reason. If it still worked, check that the runner's own cloud credentials really
+          were cleared — the `environment:` block at the top of this play is what stops the
+          CLI silently falling back to them, and a fallback makes every assertion here
+          meaningless. The stderr was: {{ _after.stderr | default('(none)') }}
+        success_msg: >-
+          Refused after expiry, with nothing revoked and nobody rotating anything. THAT is
+          the demonstration — an access key in a CI secret store would still be working.
+      vars:
+        _after: "{{ aws_after if cloud == 'aws' else az_after }}"
+      when: wait_for_expiry | bool
+
+    - name: What this proved
+      ansible.builtin.debug:
+        msg:
+          - "A {{ cloud }} credential authenticated, and no long-lived key exists on this host."
+          - "Lease {{ _wc.lease_id | default('(none)') }} expired at {{ _wc.expires_at }}."
+          - "{{ 'It was then refused — proven above.' if wait_for_expiry | bool
+                else 'Re-run with wait_for_expiry=true to prove it is then refused.' }}"
+          - "{{ 'On Azure the lease could also have been released early.' if cloud == 'azure'
+                else 'On AWS nothing could have revoked it sooner — STS will not withdraw a' }}"
+          - "{{ '' if cloud == 'azure'
+                else 'credential it has already signed. The TTL is the only control.' }}"
+          - "What this does NOT prove: that the WORKLOAD is who it says it is. Workload"
+          - "Credentials authenticated whoever held the token that minted this, so anyone"
+          - "who can mint is this workload. The SPIRE tab is the path that fixes that axis."

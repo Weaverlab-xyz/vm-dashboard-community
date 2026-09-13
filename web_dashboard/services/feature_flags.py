@@ -213,6 +213,15 @@ def flags() -> dict:
         "spire_lab_enabled":    enabled("spire_lab_enabled",     settings.spire_lab_enabled),
         # Derived from the two above -- see _DERIVED. Gates the nav link and /workload-lab.
         "workload_lab_enabled": enabled("workload_lab_enabled"),
+        # Workload Credentials. Present here because `main._feature_gate` already gates the
+        # /api/workload-cloud router on it, and a flag one reader can see and the other
+        # cannot is the exact drift this module's `enabled` docstring warns about -- it was
+        # missing, so the Workload Lab's Cloud tab could not render against a router that
+        # was serving. Deliberately NOT added to _DERIVED: `workload_lab_enabled` must keep
+        # resolving as all-preview, or tests/test_permission_catalog.py demands an RBAC
+        # scope for the page.
+        "workload_credentials_enabled": enabled(
+            "workload_credentials_enabled", settings.workload_credentials_enabled),
         "cost_explorer_enabled": enabled("cost_explorer_enabled", settings.cost_explorer_enabled),
         "cloud_unmanaged_discovery_enabled": enabled(
             "cloud_unmanaged_discovery_enabled", settings.cloud_unmanaged_discovery_enabled),

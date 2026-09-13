@@ -1,22 +1,30 @@
-"""Every Workload Lab tab onboards its machine identity to Password Safe.
+"""Every Workload Lab tab governs the machine identity it creates.
 
 **This is the cross-cutting invariant of the whole feature**, and the reason it gets a file
 of its own rather than an assertion inside each tab's suite: the Workload Lab exists to
-demonstrate *governance of credentials used by machine identities* — a token or a
-certificate, it does not matter which — and a tab that stands up an identity nothing
-governs is a demo of the underlying technology instead. The SPIRE tab was exactly that for
-a while: it built a trust domain and handed the operator a list of values to paste.
+demonstrate *governance of credentials used by machine identities* — a token, a certificate
+or a cloud credential, it does not matter which — and a tab that stands up an identity
+nothing governs is a demo of the underlying technology instead. The SPIRE tab was exactly
+that for a while: it built a trust domain and handed the operator a list of values to paste.
 
-So these assert, for all three tabs at once:
+**THE AUTHORITY IS NOT ALWAYS PASSWORD SAFE, and widening this file to admit that was a
+deliberate decision rather than a concession.** Three tabs vault their credential in Password
+Safe. The Cloud tab's is minted and held by **Workload Credentials**, which has its own
+issuance audit, its own leases and its own per-issuance billing — governed, by a different
+BeyondTrust product. The invariant that actually matters is not "calls Password Safe"; it is:
 
-  * each has a Password Safe onboarding path that WRITES (not a read-only list of strings);
-  * each records the managed system it created, and can remove it;
-  * none of them writes a credential onto its own row;
-  * a FOURTH tab cannot ship without one, because the roster here is derived from the
-    template directory rather than hand-listed.
+  * something ISSUES the credential — a write, not a read-only list of strings to paste;
+  * the row RECORDS what was issued, so it is a governance record and not just a button;
+  * the identity can be REMOVED, so nothing creates objects that cannot be cleaned up;
+  * and no tab writes a credential onto its own row.
 
-That last point is what makes this more than three assertions. `_TABS` is built by reading
-`templates/workload_lab/`, so adding `_vault.html` without an onboarding path fails here.
+Plus the property that makes this more than four assertions: **a FIFTH tab cannot ship
+without an authority**, because the roster is derived by reading `templates/workload_lab/`
+rather than hand-listed. Adding `_vault.html` fails here until somebody says what governs it.
+
+The widening is checked against becoming vacuous: `test_the_authorities_are_distinct` pins
+that the four do not all collapse onto one call, and each tab's `writes` is the specific
+function that issues for THAT mechanism.
 
 Runs under pytest or standalone:  python tests/test_workload_lab_governance.py
 """
@@ -50,32 +58,66 @@ def _code(path) -> str:
                      if ln.strip() and not ln.lstrip().startswith("#"))
 
 
+def _schema():
+    """Create the tables this file's DB-backed tests need, and return the module.
+
+    Per-test rather than at module level on purpose. Most assertions here read SOURCE and
+    need no app import at all, so a module-level `import web_dashboard.database` would make
+    the whole file unrunnable wherever the app's dependencies are missing — and the tests
+    that would then be skipped are precisely the cross-cutting invariants this file exists
+    for. The cost is this call at the top of the two tests that touch a database.
+
+    Needed at all because `config_service` reads `app_config`, and running this file FIRST
+    against a clean database is the one order in which nothing else has created it. That is
+    also the order CI's per-file loop uses for whichever file happens to be first.
+    """
+    import web_dashboard.database as d
+
+    d.Base.metadata.create_all(bind=d.engine)
+    return d
+
+
 def _tabs() -> list:
     """The tab slugs, read off disk rather than hand-listed. See the module docstring."""
     return sorted(f[1:-5] for f in os.listdir(_TAB_DIR)
                   if f.startswith("_") and f.endswith(".html"))
 
 
-# Per tab: the service that owns its Password Safe onboarding, and the call that WRITES.
+# Per tab: the service that owns its credential authority, and the three calls that make it
+# governance rather than issuance — what ISSUES, what the row RECORDS, and what REMOVES.
 # A tab absent from here fails `test_every_tab_is_accounted_for`, which is the point.
 _ONBOARDING = {
     "certificates": {
         "service": ("web_dashboard", "services", "cert_lab_service.py"),
+        "authority": "Password Safe",
         "writes": "cert_ps_service.register(",
         "records": "row.ps_system_id",
         "removes": "cert_ps_service.deregister(",
     },
     "spire": {
         "service": ("web_dashboard", "services", "spire_lab_service.py"),
+        "authority": "Password Safe",
         "writes": "ps_resource_service.register_managed_system(",
         "records": "row.ps_system_id",
         "removes": "ps_resource_service.deregister(",
     },
     "kubernetes": {
         "service": ("web_dashboard", "services", "workload_k8s_service.py"),
+        "authority": "Password Safe",
         "writes": "ps_resource_service.register_managed_system(",
         "records": "row.ps_system_id",
         "removes": "ps_resource_service.deregister(",
+    },
+    # The one whose authority is NOT Password Safe. `generate` is the issuance (metered),
+    # `row.lease_id` is the record of it, and `revoke_lease` is the removal — which the
+    # provider honours on Azure and refuses on AWS, a fact the service reports rather than
+    # swallows. See `test_the_cloud_tab_never_claims_an_aws_revoke`.
+    "cloud": {
+        "service": ("web_dashboard", "services", "workload_cloud_service.py"),
+        "authority": "Workload Credentials",
+        "writes": "wlc.generate,",
+        "records": "row.lease_id",
+        "removes": "wlc.revoke_lease,",
     },
 }
 
@@ -90,22 +132,23 @@ def test_every_tab_is_accounted_for():
     assert found, f"no tab partials found in {_TAB_DIR}"
     missing = [t for t in found if t not in _ONBOARDING]
     assert not missing, (
-        f"Workload Lab tab(s) {missing} have no Password Safe onboarding recorded here. "
-        f"Every tab must govern the identity it creates — that is what the page is for. "
-        f"Add the tab to _ONBOARDING with the call that writes its managed system.")
+        f"Workload Lab tab(s) {missing} name no credential authority here. Every tab must "
+        f"govern the identity it creates — that is what the page is for. Add the tab to "
+        f"_ONBOARDING with what issues, records and removes its credential. The authority "
+        f"need not be Password Safe: the cloud tab's is Workload Credentials.")
     stale = [t for t in _ONBOARDING if t not in found]
     assert not stale, f"_ONBOARDING names tab(s) that no longer exist: {stale}"
 
 
-def test_every_tab_writes_a_managed_system():
+def test_every_tab_issues_through_an_authority():
     """A WRITE, not a list of strings to paste. The SPIRE tab was read-only for a while,
     which is the regression this exists to prevent."""
     for tab, spec in _ONBOARDING.items():
         code = _code(spec["service"])
         assert spec["writes"] in code, (
-            f"the {tab} tab's service never calls {spec['writes']} — it does not onboard "
-            f"its identity to Password Safe, so the lab demonstrates the technology rather "
-            f"than governance of it")
+            f"the {tab} tab's service never calls {spec['writes']} — nothing issues its "
+            f"identity through {spec['authority']}, so the lab demonstrates the technology "
+            f"rather than governance of it")
 
 
 def test_every_tab_records_and_can_remove_what_it_created():
@@ -116,8 +159,8 @@ def test_every_tab_records_and_can_remove_what_it_created():
         assert spec["records"] in code, (
             f"the {tab} tab does not record the managed system it created")
         assert spec["removes"] in code, (
-            f"the {tab} tab cannot remove its Password Safe objects — every create needs a "
-            f"destroy, and the state to destroy from")
+            f"the {tab} tab cannot remove what it created in {spec['authority']} — every "
+            f"create needs a destroy, and the state to destroy from")
 
 
 def test_no_tab_stores_a_credential_on_its_row():
@@ -129,7 +172,7 @@ def test_no_tab_stores_a_credential_on_its_row():
     promises the absence of.
     """
     db = _read("web_dashboard", "database.py")
-    for model in ("CertLab", "SpireLab", "WorkloadK8sToken"):
+    for model in ("CertLab", "SpireLab", "WorkloadK8sToken", "WorkloadCloudCredential"):
         start = db.index(f"class {model}(Base):")
         end = db.index(chr(10) + "class ", start + 10)
         columns = [ln.strip() for ln in db[start:end].splitlines() if "= Column(" in ln]
@@ -249,6 +292,282 @@ def test_the_spire_job_type_is_registered_in_all_three_places():
     assert "spire_lab_service.run_ps_register(" in worker
     api = _read("web_dashboard", "api", "spire_lab.py")
     assert '"/{lab_id}/ps-register"' in api and "start_ps_register(" in api
+
+
+# ── the Cloud tab's authority, and the honesty it turns on ───────────────────
+
+def test_the_authorities_are_distinct():
+    """The widening must not collapse. If every tab's `writes` were the same call, this file
+    would assert "some function is called somewhere" and pass forever — which is exactly what
+    generalising an invariant usually costs. Two authorities, at least two distinct issuance
+    calls, and the cloud tab's is not a Password Safe one."""
+    authorities = {spec["authority"] for spec in _ONBOARDING.values()}
+    assert len(authorities) >= 2, (
+        f"every tab now claims the same authority ({authorities}) — the generalisation has "
+        f"collapsed and this file no longer distinguishes anything")
+    writes = {spec["writes"] for spec in _ONBOARDING.values()}
+    assert len(writes) >= 2, f"every tab issues through the same call: {writes}"
+    cloud = _ONBOARDING["cloud"]
+    assert "ps_" not in cloud["writes"] and "ps_" not in cloud["removes"], (
+        "the cloud tab is recorded as issuing through Password Safe; its authority is "
+        "Workload Credentials, and conflating them hides the one tab whose credential this "
+        "dashboard's Password Safe integration never touches")
+
+
+def test_the_cloud_tab_never_touches_the_dashboards_own_lease():
+    """`workload_credential_lease` is a singleton per (cloud, purpose) holding the credential
+    THIS APPLICATION uses for its own cloud calls, configured by `wlc_{cloud}_secret_name`.
+
+    Minting into it from the lab would overwrite a credential the dashboard may be
+    mid-deployment with — its own docstring warns that a cleared one is indistinguishable
+    from a deployment that was never on the dynamic tier — and issuance is billed, so it
+    would charge for the privilege. The lab calls `workload_credentials_service` directly and
+    shares none of that state.
+    """
+    code = _code(("web_dashboard", "services", "workload_cloud_service.py"))
+    for banned in ("workload_credential_lease", "aws_subprocess_env", "azure_credentials",
+                   "azure_subprocess_env"):
+        assert banned not in code, (
+            f"workload_cloud_service references {banned!r} — that is the DASHBOARD's own "
+            f"credential store, one lease per (cloud, purpose). Minting into it would "
+            f"overwrite a credential the application is using and bill for doing so.")
+    # And it does reach the client it is supposed to.
+    assert "workload_credentials_service" in code, (
+        "the cloud tab reaches no Workload Credentials client at all")
+
+
+def test_the_cloud_tab_never_claims_an_aws_revoke():
+    """The single most important honesty in this tab.
+
+    `workload_credentials_service.revoke_lease` SWALLOWS the provider's refusal by design —
+    "callers revoke unconditionally and let the provider decide" — which is right for the
+    dashboard's own housekeeping and catastrophic for a page that has to tell an operator
+    whether access actually stopped. A job that reported success on its return value would
+    say an AWS credential was dead while it kept working for up to an hour.
+
+    So the service must decide from the CLOUD, before calling, and AWS must not be revocable.
+    """
+    from web_dashboard.services import workload_cloud_service as svc
+    assert svc.revocable("azure") is True, "azure leases are revocable"
+    assert svc.revocable("aws") is False, (
+        "AWS is marked revocable — STS will not withdraw a credential it has already "
+        "signed, so a revoke would appear to succeed while the credential kept working")
+    for cloud in svc.VALID_CLOUDS:
+        assert isinstance(svc.revocable(cloud), bool), cloud
+    # The refusal has to happen in the service, not only in the template: an API caller
+    # bypasses the page entirely.
+    code = _code(("web_dashboard", "services", "workload_cloud_service.py"))
+    assert "def start_revoke(" in code
+    body = code[code.index("def start_revoke("):]
+    body = body[:body.index("def start_decommission(")]
+    assert "revocable(" in body, (
+        "start_revoke does not check revocability, so an AWS revoke would be enqueued and "
+        "the job would report success on a live credential")
+    # And re-checked in the worker, because a job can sit in the queue while the row changes.
+    worker = code[code.index("async def _run_revoke("):]
+    worker = worker[:worker.index("async def _run_retire(")]
+    assert "revocable(" in worker, (
+        "_run_revoke trusts the enqueue-time check; a job that ran after the row changed "
+        "would swallow the provider's refusal and report success")
+
+
+def test_a_disabled_cloud_is_refused():
+    """`bool("false")` is True, and that bug shipped in the first draft of this tab.
+
+    Config values are stored as TEXT, so `bool(_cfg("wlc_azure_enabled"))` reads every
+    disabled flag as enabled — which let an identity be registered against a cloud with no
+    Workload Credentials configuration, failing later at the first mint with a message about
+    the site rather than about the cloud. Found by resolving a real row.
+    """
+    _schema()                                      # config_service reads a table
+    from web_dashboard.services import config_service
+    from web_dashboard.services import workload_cloud_service as svc
+
+    saved = config_service.get("wlc_azure_enabled")
+    try:
+        for value, want in (("false", False), ("true", True), ("", False), ("0", False)):
+            config_service.set("wlc_azure_enabled", value)
+            got = svc.cloud_enabled("azure")
+            assert got is want, (
+                f"wlc_azure_enabled={value!r} reads as {got} — a boolean config read must go "
+                f"through get_bool, because every non-empty string is truthy")
+    finally:
+        config_service.set("wlc_azure_enabled", saved or "")
+    # And the shortcut must not reappear.
+    code = _code(("web_dashboard", "services", "workload_cloud_service.py"))
+    assert "bool(_cfg(" not in code, (
+        'bool(_cfg(...)) is back — it is True for the string "false"')
+
+
+def test_registering_a_cloud_identity_mints_nothing():
+    """Issuance is METERED, so registering must be inert. A register that minted would bill
+    per registration and would make the issue count meaningless as a cost signal."""
+    code = _code(("web_dashboard", "services", "workload_cloud_service.py"))
+    reg = code[code.index("def register("):code.index("def start_issue(")]
+    for minting in ("generate", "issue_count=1", "_run_issue"):
+        assert minting not in reg, (
+            f"register() references {minting!r} — registering must mint nothing, because "
+            f"issuance is billed per call")
+    assert "issue_count=0" in reg, "register() should start the issuance count at zero"
+
+
+def test_the_cloud_tab_stores_no_credential_and_says_where_scope_lives():
+    """The row names a lease; it never holds the credential. And the tab has to say that the
+    SCOPE is set by the dynamic secret rather than by the dashboard — unlike every sibling
+    tab, this one cannot choose what the identity may do, and implying otherwise would be
+    claiming a control it does not have."""
+    db = _read("web_dashboard", "database.py")
+    start = db.index("class WorkloadCloudCredential(Base):")
+    end = db.index(chr(10) + "class ", start + 10)
+    columns = [ln.strip() for ln in db[start:end].splitlines() if "= Column(" in ln]
+    assert columns
+    declared = "\n".join(columns).lower()
+    for banned in ("access_key", "secret_access", "session_token", "client_secret",
+                   "password", "credential_value"):
+        assert banned not in declared, (
+            f"WorkloadCloudCredential declares a column matching {banned!r} — the row names "
+            f"the lease, it does not hold the credential")
+    assert "lease_id" in declared, "the row records no lease, so it is not a governance record"
+    tab = _read("web_dashboard", "templates", "workload_lab", "_cloud.html")
+    assert "dynamic secret" in tab.lower()
+    assert "not here" in tab.lower() or "cannot change it" in tab.lower(), (
+        "the tab does not say that the scope is set in Workload Credentials rather than by "
+        "the dashboard")
+    # And it must not offer a revoke button on a cloud that cannot honour one.
+    assert 'x-show="row.revocable"' in tab, (
+        "the Revoke button is not gated on revocability, so it would be offered on AWS where "
+        "the provider refuses")
+
+
+def test_an_expired_lease_is_not_a_failure():
+    """`lease_state` is separate from `status` on purpose: a credential ageing out is the
+    mechanism WORKING, and it is the common case. Collapsing the two would make a correctly
+    behaving identity render as broken most of the time."""
+    from datetime import datetime, timedelta
+
+    from web_dashboard.services import workload_cloud_service as svc
+
+    class _Row:
+        lease_id = "lease-1"
+        lease_expires_at = datetime.utcnow() + timedelta(minutes=30)
+
+    assert svc.lease_state(_Row()) == "live"
+    _Row.lease_expires_at = datetime.utcnow() - timedelta(seconds=1)
+    assert svc.lease_state(_Row()) == "expired"
+    _Row.lease_id = None
+    assert svc.lease_state(_Row()) == "none"
+    # The reapable states must NOT exclude a row whose lease has expired — that is normal.
+    policy = _read("web_dashboard", "services", "expiry_policy.py")
+    start = policy.index('"workloadcloud": frozenset(')
+    entry = policy[start:policy.index("}", start) + 1]
+    assert '"registered"' in entry and '"issued"' in entry, (
+        f"a row whose lease expired sits in one of these states and must stay reapable: {entry}")
+    assert '"failed"' not in entry
+
+
+def test_the_cloud_job_is_registered_and_light():
+    """LIGHT because it is one or two HTTPS calls — but the note that matters is about COST:
+    `generate` is billed per issuance, so this job must never be retried speculatively."""
+    worker = _read("web_dashboard", "jobs_worker.py")
+    assert worker.count('"workload_cloud_credential"') >= 3, (
+        "workload_cloud_credential must be in the handled-types tuple, a tier tuple and the "
+        "dispatch chain")
+    assert 'job_type == "workload_cloud_credential"' in worker
+    assert "workload_cloud_service.run(" in worker
+    light = worker.index("LIGHT_TYPES = (")
+    medium = worker.index("MEDIUM_TYPES = (")
+    assert medium < light
+    # In LIGHT, and NOT also in MEDIUM — _TIER_OF is built tier by tier and the last wins, so
+    # an entry in both would silently resolve to LIGHT while the MEDIUM one looked deliberate.
+    assert '"workload_cloud_credential"' in worker[light:], "not in LIGHT_TYPES"
+    assert '"workload_cloud_credential"' not in worker[medium:light], (
+        "workload_cloud_credential is ALSO in MEDIUM_TYPES")
+
+
+def test_a_provider_failure_never_carries_its_text_into_a_response():
+    """A caught exception's MESSAGE must not reach a browser. The type name, never the text.
+
+    Both sites exercised here return a dict that becomes an HTTP response body, and an
+    HTTP-client exception stringifies to the request URL plus whatever the provider put in
+    its body — an internal hostname, a query string, sometimes a token. That is a stack
+    trace flowing to an external user, which is what CodeQL's py/stack-trace-exposure fires
+    on, and it flagged the folder listing on the first draft of this tab.
+
+    The TYPE is kept rather than dropped, and it is worth being exact about what it buys.
+    The client wraps every provider-side failure in one `WorkloadCredentialsError`, so the
+    type does NOT separate a timeout from a rejected token. It separates "the call to the
+    provider failed" from "this dashboard raised something unexpected" — the first fork an
+    operator takes, and the one a bare "could not be reached" hides. The message itself goes
+    to the log, where an operator can reach it and a browser cannot.
+
+    Exercised rather than grepped, because the shape that leaks is an f-string and the shape
+    that does not is also an f-string — a source search cannot tell them apart.
+    """
+    import asyncio
+
+    from web_dashboard.api import workload_cloud as api
+    from web_dashboard.services import workload_cloud_service as svc
+    from web_dashboard.services import workload_credentials_service as wlc
+
+    d = _schema()
+
+    class _Leaky(RuntimeError):
+        """Stands in for the client's own error type. What matters is that its MESSAGE is
+        the sort of thing an HTTP client puts there."""
+
+    leak = "https://wc.internal.example/BeyondTrust/api/public/v3/dynamic?pat=s3cr3t-pat"
+
+    def _boom(*_a, **_kw):
+        raise _Leaky(leak)
+
+    class _User:
+        username = "tests"
+        is_admin = True
+
+    db = d.SessionLocal()
+    row = d.WorkloadCloudCredential(
+        name="codeql-regression", cloud="aws", dynamic_name="ci-deploy",
+        lease_id="lease-abc", status="issued", created_by="tests")
+    saved = (wlc.get_lease, wlc.list_folders, api._require_enabled)
+    try:
+        db.add(row)
+        db.commit()
+
+        # ── 1. the live lease read, served by GET /api/workload-cloud/{id}/lease
+        wlc.get_lease = _boom
+        out = asyncio.run(svc.inspect_lease(db, row_id=row.id))
+        assert leak not in repr(out), f"the provider's URL reached the response: {out}"
+        assert "s3cr3t" not in repr(out), f"a credential reached the response: {out}"
+        assert "_Leaky" in out["note"], (
+            f"the note names no exception type, so a provider that failed and a bug in this "
+            f"dashboard read identically: {out['note']!r}")
+        # `unknown`, NOT `expired`. The provider did not say the lease was gone — this
+        # dashboard failed to ask. Reporting that as expired would call a live credential
+        # dead, which is the more dangerous of the two wrong answers.
+        assert out["state"] == "unknown", (
+            f"a provider this dashboard could not reach reads as {out['state']!r}")
+
+        # ── 2. the folder list on the register form, served by GET /options
+        api._require_enabled = lambda: None            # the gate is not what is under test
+        wlc.list_folders = _boom
+        opts = api.register_options(db=db, user=_User())
+        assert leak not in repr(opts), f"the provider's URL reached the response: {opts}"
+        folder_note = [m for m in opts["missing"] if "folder" in m]
+        assert folder_note, (
+            f"a failed browse is not reported at all, so the form silently offers no "
+            f"folders: {opts['missing']}")
+        assert "_Leaky" in folder_note[0], folder_note[0]
+        # And the call still succeeds: a browse is a convenience, and failing the whole
+        # options request over it would make the tab unusable whenever WC is unreachable.
+        assert opts["clouds"], "the options call returned no clouds"
+    finally:
+        wlc.get_lease, wlc.list_folders, api._require_enabled = saved
+        try:
+            db.delete(row)
+            db.commit()
+        except Exception:                              # noqa: BLE001 — teardown only
+            db.rollback()
+        db.close()
 
 
 # ── the k3s link teardown ─────────────────────────────────────────────────────
