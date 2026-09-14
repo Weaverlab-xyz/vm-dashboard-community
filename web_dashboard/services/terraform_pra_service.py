@@ -375,55 +375,6 @@ def _provision_sync(
         }
 
 
-def _remove_sync(tf_state_json: str, tenant: Optional[dict] = None) -> None:
-    """Synchronous worker — run in asyncio.to_thread."""
-    try:
-        state = json.loads(tf_state_json)
-    except json.JSONDecodeError as e:
-        raise TerraformPRAError(f"tf_state_json is not valid JSON: {e}") from e
-
-    # Re-derive HCL from state resources so we can re-run destroy
-    resources = state.get("resources", [])
-    shell_jump_res = next(
-        (r for r in resources if r.get("type") == "sra_shell_jump"), None
-    )
-    if shell_jump_res is None:
-        logger.warning("No sra_shell_jump resource found in Terraform state — nothing to destroy")
-        return
-
-    instances = shell_jump_res.get("instances", [])
-    if not instances:
-        logger.warning("sra_shell_jump resource has no instances in state — nothing to destroy")
-        return
-
-    attrs = instances[0].get("attributes", {})
-    vm_name      = attrs.get("name", "unknown")
-    hostname     = attrs.get("hostname", "")
-    port         = int(attrs.get("port", 22))
-    tag          = attrs.get("tag", "")
-
-    # Read jump group / jumpoint names from provider config embedded in state
-    # (stored under root_module outputs or as data source in state).
-    # We can't reconstruct them from attrs alone, so fall back to config.
-    jump_group_name = _cfg("bt_jump_group_name")
-    jumpoint_name   = _cfg("bt_jumpoint_name")
-
-    with tempfile.TemporaryDirectory(prefix="pra_tf_destroy_") as work_dir:
-        Path(work_dir, "main.tf").write_text(
-            _generate_hcl(vm_name, hostname, jump_group_name, jumpoint_name, port, tag)
-        )
-        # Restore state so Terraform knows what to destroy
-        Path(work_dir, "terraform.tfstate").write_text(tf_state_json)
-
-        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
-        if init.returncode != 0:
-            raise TerraformPRAError(
-                f"terraform init (destroy) failed: {init.stderr.strip() or init.stdout.strip()}"
-            )
-
-        _destroy_sync(work_dir)
-
-
 # ── Public async API ──────────────────────────────────────────────────────────
 
 class TerraformPRAError(Exception):
@@ -462,8 +413,17 @@ async def remove_jump(tf_state_json: str, tenant: Optional[dict] = None) -> None
     Pass the tf_state_json value returned by provision_jump (stored in job extra_data).
     ``tenant`` must be the SAME one the jump was created against — a destroy pointed at
     another appliance authenticates fine and deletes nothing, reporting success.
+
+    **State-driven, with a provider-only config**, exactly as :func:`remove_rdp_jump` is.
+    It used to regenerate the creation HCL, and that regeneration re-read the GLOBAL
+    ``bt_jump_group_name`` and ``bt_jumpoint_name`` from config — names that are simply
+    wrong for anything whose Jump Group is not the global one. A POV's items sit in its
+    own tenant's group (or in its own ``pov-<name>`` group) behind its own Gateway, in an
+    appliance where the global names may not exist at all; a VDI seat's sit somewhere
+    else again, which is why ``vdesktop_service`` routed around this function rather than
+    calling it. A destroy needs no names: it deletes the ids the state holds.
     """
-    await asyncio.to_thread(_remove_sync, tf_state_json, tenant)
+    await asyncio.to_thread(_destroy_state_only_sync, tf_state_json, tenant)
 
 
 # ── Database protocol-tunnel jumps (managed-database feature) ─────────────────
