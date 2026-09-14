@@ -133,6 +133,13 @@ appliance refuses a login, the red banner now carries PRA's own field-level reas
 *Validation Failed* — "the email address has already been taken", a password-policy
 complaint, and so on — which is the thing to act on.
 
+The password the dashboard generates satisfies PRA's **default** policy by construction:
+twenty characters with at least one upper, one lower, one digit and one symbol, and none of
+`Il1O0` so it survives being read down a phone line. If your appliance's policy is
+*stricter* than the default — a longer minimum, a banned character — the create will still
+fail, and the banner will carry the appliance's own wording under `password:`. That is a
+site setting; loosen it, or say so and the generator can be widened.
+
 They sign in to **PRA itself**, not to this dashboard, and see this POV's jump items only.
 
 If you have built a self-registration portal in `/login`, paste its URL on the PRA tenant

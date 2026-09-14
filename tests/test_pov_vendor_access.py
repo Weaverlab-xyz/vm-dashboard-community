@@ -691,6 +691,33 @@ def test_a_vendor_login_carries_the_prefix_and_its_password_comes_back_once():
         db.close()
 
 
+def test_every_minted_password_satisfies_pras_policy_by_construction():
+    """PRA's default policy wants upper + lower + digit + special, and the generator this
+    module started with had no symbol in its alphabet at all — so every vendor login was
+    refused with a 422 naming `password`, every time. Drawn many times because a generator
+    that only *usually* covers the four classes fails in front of a customer.
+    """
+    seen_upper = seen_lower = seen_digit = seen_symbol = False
+    for _ in range(300):
+        pw = pv._generate_password()
+        assert len(pw) >= 8
+        assert any(c.isupper() for c in pw), pw
+        assert any(c.islower() for c in pw), pw
+        assert any(c.isdigit() for c in pw), pw
+        assert any(c in "".join(pv._PW_SYMBOLS) for c in pw), pw
+        # Read down a phone line, so the lookalikes stay out.
+        assert not any(c in "Il1O0" for c in pw), pw
+        # Handed over by hand and typed into a form: nothing that needs escaping.
+        assert not any(c in ("'", '"', "`", "\\", " ") for c in pw), pw
+        seen_upper |= pw[0].isupper()
+        seen_lower |= pw[0].islower()
+        seen_digit |= pw[0].isdigit()
+        seen_symbol |= pw[0] in "".join(pv._PW_SYMBOLS)
+    # Shuffled, not "guaranteed four then filler" — otherwise the first four characters
+    # are a known class order and the search space is smaller than the length suggests.
+    assert seen_upper and seen_lower and seen_digit and seen_symbol
+
+
 def test_a_vendor_login_inherits_the_groups_clock_rather_than_keeping_its_own():
     """PRA's VendorUser.account_expiration is read-only and derived from the group, so a
     per-user date here could only ever disagree with the appliance."""
