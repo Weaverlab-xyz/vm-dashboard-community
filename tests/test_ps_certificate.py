@@ -20,6 +20,7 @@ Runs under pytest or standalone:  python tests/test_ps_certificate.py
 """
 import logging
 import os
+import re
 import sys
 import types
 
@@ -417,28 +418,54 @@ def test_the_leaf_only_options_are_refused_on_an_issuer():
     _sub_bad(f"{_SUBCA}&retain=2", "retain=", "subordinate ca")
 
 
+# The origin a `url=` refusal tells the operator to retype, which both messages carry in
+# repr quotes. Pulled out and compared by EQUALITY, deliberately: a substring containment
+# check against a URL literal is the shape CodeQL flags as incomplete URL sanitization,
+# and it is right to — `"https://host" in value` is a classic auth bypass in production
+# code, so a test written that way teaches the wrong pattern. Equality is also the
+# stronger assertion here, because it proves the remedy is EXACTLY the origin and carries
+# no path rather than merely containing one somewhere.
+_SUGGESTED_ORIGIN = re.compile(r"'(https?://[^']+)'")
+
+
+def _suggested_origin(msg):
+    """The last quoted origin in a refusal — the remedy, not the offending value.
+
+    Both messages quote the offending url= first, so the LAST match is the suggestion.
+    On the no-scheme message the offending value has no scheme at all and cannot match,
+    which is why taking the last works for both rather than needing two readers."""
+    found = _SUGGESTED_ORIGIN.findall(msg)
+    assert found, f"no origin suggested in: {msg}"
+    return found[-1]
+
+
 def test_the_service_url_is_an_origin_over_https():
     # Three separate mistakes, each with its own message, because they are made for
     # different reasons and the remedies differ.
-    base = f"est?label=pipelines&{_STORE}"
-    _ok(f"est?url=https://ca.corp.example.com&{_STORE}")
-    _ok(f"est?url=https://ca.corp.example.com:8443&{_STORE}")
+    host = "ca.corp.example.com"
+    _ok(f"est?url=https://{host}&{_STORE}")
+    _ok(f"est?url=https://{host}:8443&{_STORE}")
     # A path: the plugin appends its OWN API path, so this yields a doubled one and a 404
     # at the first credential change rather than at registration. Same trap as biurl=.
-    msg = _bad(f"est?url=https://ca.corp.example.com/.well-known/est&{_STORE}",
+    msg = _bad(f"est?url=https://{host}/.well-known/est&{_STORE}",
                "url", "path", "origin")
-    assert "https://ca.corp.example.com" in msg, "name the value they should have typed"
+    assert _suggested_origin(msg) == f"https://{host}", \
+        "the remedy must be the origin with the path DROPPED, not merely contain it"
+    # The port is part of the origin and has to survive into the suggestion.
+    msg = _bad(f"est?url=https://{host}:8443/est&{_STORE}", "url", "path")
+    assert _suggested_origin(msg) == f"https://{host}:8443"
     # Plain http: the request carries the enrollment credential in a header.
-    _bad(f"est?url=http://ca.corp.example.com&{_STORE}", "url", "not https")
+    _bad(f"est?url=http://{host}&{_STORE}", "url", "not https")
     # ...except on Vault, where a development server may legitimately be plain.
     _ok(f"vault?url=http://127.0.0.1:8200&role=pipelines&{_STORE}")
     # A bare host is the commonest of the three, and it leaves the scheme EMPTY — so a
     # check that only compared against "https" would pass it.
-    msg = _bad(f"est?url=ca.corp.example.com&{_STORE}", "url", "no scheme")
-    assert "https://ca.corp.example.com" in msg
+    msg = _bad(f"est?url={host}&{_STORE}", "url", "no scheme")
+    assert _suggested_origin(msg) == f"https://{host}", \
+        "the remedy must add the scheme to the host they typed"
     _bad(f"est?url=https://&{_STORE}", "url", "no host")
-    assert base  # the label-only address is not a valid profile; url= is required
-    _bad(base, "url=")
+    # And url= is required on est at all — the label alone is not a profile.
+    _bad(f"est?label=pipelines&{_STORE}", "url=")
 
 
 def test_profile_and_template_are_one_option_and_may_not_disagree():

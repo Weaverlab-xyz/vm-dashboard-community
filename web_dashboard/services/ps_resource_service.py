@@ -857,8 +857,9 @@ def _validate_certificate_service(backend: str, options: dict) -> None:
         if not scheme:
             raise PSResourceError(
                 f"url {url!r} has no scheme — give the full origin, "
-                f"https://{parts.netloc}. A bare host leaves the plugin to pick a scheme "
-                f"nobody chose, for a request that carries the enrollment credential")
+                f"{'https://' + parts.netloc!r}. A bare host leaves the plugin to pick a "
+                f"scheme nobody chose, for a request that carries the enrollment "
+                f"credential")
         if scheme != "https" and not (backend == "vaultpki" and scheme == "http"):
             raise PSResourceError(
                 f"url {url!r} is not https — the request carries the functional "
@@ -873,7 +874,7 @@ def _validate_certificate_service(backend: str, options: dict) -> None:
                 f"url {url!r} carries a path — this is the service's ORIGIN, and the "
                 f"plugin appends its own API path ({'/.well-known/est/simpleenroll' if backend == 'est' else 'the backend API path'}). "
                 f"A path here yields a doubled one and a 404 at the first credential "
-                f"change. Use {parts.scheme or 'https'}://{parts.netloc}")
+                f"change. Use {(parts.scheme or 'https') + '://' + parts.netloc!r}")
 
     auth = _val("auth").lower()
     if auth and auth not in _CERT_VAULT_AUTH:
