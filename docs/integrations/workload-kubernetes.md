@@ -69,7 +69,7 @@ an upstream property rather than a claim this repo makes.
 
 ### Why not reuse the existing `ps-token` path?
 
-The [Kubernetes](kubernetes.md#access--identity) page already onboards a ServiceAccount
+The [Kubernetes](../kubernetes.md#access--identity) page already onboards a ServiceAccount
 token as a managed account, and it is the right tool for what it does: it serves a human's
 brokered PRA session, so it uses a **cluster-admin** ServiceAccount. A *vaulted*
 cluster-admin token is a vaulted skeleton key — it demonstrates nothing about scoping,
@@ -131,7 +131,7 @@ whatever Password Safe does next. So rotation is *hygiene* and deleting the Serv
 is *containment* — every token the plugin has ever issued is bound to that account's `uid`
 and dies with it. `AppSettings:Kubernetes:OldSecretRetentionMinutes` is tenant-side and
 cannot be read from here, so "rotation revokes" is something to document and never to
-assert (the same wording [the rotation design note](design/k8s-sa-token-rotation.md) already
+assert (the same wording [the rotation design note](../design/k8s-sa-token-rotation.md) already
 uses). The tab says so on every Rotate.
 
 **The vault authenticates whoever can retrieve, not the workload.** Anyone who can retrieve
@@ -185,6 +185,6 @@ A third row belongs beside them for a workload that needs **cloud** rather than 
 * **No Operator/incident profile.** Two profiles cover the two consumers worth
   demonstrating; a break-glass one is a different conversation about approval.
 * **Nothing here replaces the standing cluster-admin kubeconfig the dashboard itself uses**
-  for registered clusters ([Kubernetes](kubernetes.md)). That is the strongest engineering
+  for registered clusters ([Kubernetes](../kubernetes.md)). That is the strongest engineering
   case for this mechanism and it deserves its own change — it alters how every existing
   cluster run authenticates.

@@ -20,13 +20,13 @@ page. Each still has its own preview toggle and its own Settings panel.
 
 The companion docs:
 
-- [Infrastructure as Code](infrastructure-as-code.md) — the closed provision/destroy
+- [Infrastructure as Code](../infrastructure-as-code.md) — the closed provision/destroy
   lifecycle this feature follows
-- [Auto-delete Timer](auto-delete-timer.md) — why a CA pool is exactly the thing that
+- [Auto-delete Timer](../auto-delete-timer.md) — why a CA pool is exactly the thing that
   timer is for
-- [Config Management](config-management.md) — how the mTLS endpoint and the CI runner get
+- [Config Management](../config-management.md) — how the mTLS endpoint and the CI runner get
   configured
-- [`examples/playbooks/certificates/`](../examples/playbooks/certificates/README.md) — the
+- [`examples/playbooks/certificates/`](../../examples/playbooks/certificates/README.md) — the
   endpoint and consumer playbooks
 
 ---
@@ -205,7 +205,7 @@ DevOps tier is about **$20/month** plus roughly $0.30 per certificate; an AWS Pr
 about **$400/month** standing. A forgotten private CA is the expensive mistake, and it is
 invisible on every page this dashboard had before this one — which is why every CA built
 here is a first-class inventory row carrying an
-[auto-delete timer](auto-delete-timer.md).
+[auto-delete timer](../auto-delete-timer.md).
 
 The mTLS endpoint and the CI runner are **ordinary VMs** deployed through the normal cloud
 pages. They already have their own timers, ref-counted NAT and Password Safe onboarding;
@@ -813,7 +813,7 @@ a mid-rotation failure leaves a working identity is what distinguishes this from
 
 For an existing AD CS enterprise CA, the dashboard's job is narrow — the CA already exists,
 so it creates the two things the plugin needs on it. Run
-[`windows/adcs-pipeline-template.yml`](../examples/playbooks/windows/adcs-pipeline-template.yml)
+[`windows/adcs-pipeline-template.yml`](../../examples/playbooks/windows/adcs-pipeline-template.yml)
 over WinRM against the issuing CA. It creates the template and the enrollment account, and
 prints the `ca=` configuration string in the exact form the address wants.
 
@@ -903,5 +903,5 @@ Being straight about the boundary is more persuasive than eliding it.
 | Address + Password Safe objects | `web_dashboard/services/cert_ps_service.py` |
 | Address grammar + registration | `web_dashboard/services/ps_resource_service.py` (`method="certificate"`) |
 | Terraform | `terraform/cert_ca/gcp_cas/main.tf`, `terraform/cert_ca/aws_pca/main.tf` |
-| Playbooks | [`examples/playbooks/certificates/`](../examples/playbooks/certificates/README.md) |
+| Playbooks | [`examples/playbooks/certificates/`](../../examples/playbooks/certificates/README.md) |
 | Tests | `tests/test_ps_certificate.py`, `tests/test_cert_lab_wiring.py`, `tests/test_cert_lab_clouds.py`, `tests/test_cert_lab_functional_account.py` |

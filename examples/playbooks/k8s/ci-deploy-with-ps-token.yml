@@ -12,7 +12,7 @@
 # **RoleBinding in one namespace**, and onboards it as a managed account. Its "Consumer
 # details" panel gives you every string below.
 #
-# NEVER LIVE-VALIDATED — see docs/workload-kubernetes.md.
+# NEVER LIVE-VALIDATED — see docs/integrations/workload-kubernetes.md.
 #
 # ── THE INJECTED KUBECONFIG IS CLEARED ON PURPOSE, and this is the trap that would
 # otherwise make this play prove nothing. When the dashboard runs a play against a

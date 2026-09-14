@@ -43,7 +43,7 @@ PRA Vault can hold a certificate authority and issue **short-lived x.509 certifi
 it at session launch**, with the rest of the chain uploaded alongside it as additional
 trust. That changes what is worth managing.
 
-The instinct, coming from [Certificates](../certificates.md), is to treat a leaf as the
+The instinct, coming from [Certificates](../integrations/certificates.md), is to treat a leaf as the
 managed credential: Password Safe issues it, Secrets Safe holds the bundle, something
 delivers it into a session. For PRA that is wrong twice over. PRA does not need a leaf —
 it mints its own. And the delivery problem that would dominate the work
@@ -239,7 +239,7 @@ system's Network Address because `appsettings.json` ships inside the `.psplugin`
 The tension: **the control that makes this design defensible is name constraints (§5), and
 name constraints are long.** A `permitdns=` subtree list plus a `permitemail=` suffix can
 exceed 100 characters on its own. So the safest configuration is the one least likely to
-fit, and the failure mode is the one [Certificates](../certificates.md) already warns about
+fit, and the failure mode is the one [Certificates](../integrations/certificates.md) already warns about
 — a truncated address loses whatever sat at its end and reads as *absent* rather than as
 damage.
 
@@ -326,7 +326,7 @@ The honest options:
   and should be explicit in config rather than discovered.
 
 Whichever is chosen, it belongs in the docs as a stated limitation, in the register of
-[Certificates § What this feature does not do](../certificates.md). "Cannot revoke the
+[Certificates § What this feature does not do](../integrations/certificates.md). "Cannot revoke the
 issuing CA" is not a footnote.
 
 ### The rule that makes the short-lifetime option actually work
@@ -370,7 +370,7 @@ The Certificate plugin requires `msPKI-Enrollment-Flag = 0` — **no CA certific
 approval** — because otherwise every rotation returns `CR_DISP_UNDER_SUBMISSION` and a
 rotation job cannot block on a human clicking Issue. The ADCS playbook sets it
 (`examples/playbooks/windows/adcs-pipeline-template.yml:89-90`) and
-[Certificates](../certificates.md) explains why.
+[Certificates](../integrations/certificates.md) explains why.
 
 For a client-auth leaf that constraint is a mild operational annoyance. For a **subordinate
 CA, issued unattended, on a rotation schedule**, it is the thing most PKI teams gate
@@ -518,7 +518,7 @@ backend TLS plus a client certificate on the two dedicated tunnel resources, and
 Today a leaf is split on purpose: the managed account holds the PKCS#12 passphrase, Secrets
 Safe holds the bundle, and both halves are governed. The docs are explicit that the folder
 ACL and the account's access policy are both live controls and *"the weaker of the two is
-your real access boundary"* ([certificates.md:47-49](../certificates.md)).
+your real access boundary"* ([certificates.md:47-49](../integrations/certificates.md)).
 
 For a leaf that is a sound design and a good demonstration. For a **CA signing key** the
 same sentence stops being a caution and becomes a finding: a folder-permission mistake would

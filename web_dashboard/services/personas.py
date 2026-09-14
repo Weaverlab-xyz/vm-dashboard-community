@@ -419,7 +419,7 @@ _DEVOPS = Persona(
                     "handshake — then rotate and show the build never notices.",
             target="/workload-lab#certificates",
             minutes=15,
-            docs="certificates",
+            docs="integrations/certificates",
             requires_flags=("cert_lab_enabled",),
         ),
         UseCase(
@@ -431,7 +431,7 @@ _DEVOPS = Persona(
                     "the one consumer that cannot run an agent.",
             target="/workload-lab#spire",
             minutes=20,
-            docs="spiffe",
+            docs="integrations/spiffe",
             requires_flags=("spire_lab_enabled",),
         ),
         UseCase(
@@ -444,7 +444,7 @@ _DEVOPS = Persona(
                     "SPIFFE route above cannot be configured at all.",
             target="/workload-lab#kubernetes",
             minutes=10,
-            docs="workload-kubernetes",
+            docs="integrations/workload-kubernetes",
             # THREE flags, and `spire_lab_enabled` is the one that looks wrong. The tab
             # needs k8s + Password Safe, but /workload-lab itself is gated on the derived
             # `workload_lab_enabled` — either PREVIEW flag — so a card that named only the
@@ -465,7 +465,7 @@ _DEVOPS = Persona(
                     "rotating anything.",
             target="/workload-lab#cloud",
             minutes=10,
-            docs="workload-cloud",
+            docs="integrations/workload-cloud",
             # The Workload Credentials integration's own flag plus a PREVIEW flag, for the
             # reason test_personas.py enforces: /workload-lab is gated on the derived
             # `workload_lab_enabled`, so a card naming only the first would link to a page

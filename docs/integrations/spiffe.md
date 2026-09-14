@@ -27,10 +27,10 @@ attests itself and reaches a real relying party with a token stored nowhere.
 
 The companion docs:
 
-- [`examples/playbooks/spire/`](../examples/playbooks/spire/README.md) — the playbooks
+- [`examples/playbooks/spire/`](../../examples/playbooks/spire/README.md) — the playbooks
   that build the lab, and what each one is actually proving
-- [Config Management](config-management.md) — how those playbooks get run
-- [Cloud VMs](cloud-vms.md) — where the SPIRE server lives
+- [Config Management](../config-management.md) — how those playbooks get run
+- [Cloud VMs](../cloud-vms.md) — where the SPIRE server lives
 - [Certificates](certificates.md) — the sibling feature, for a plugin that has a human
   approval in its path
 
@@ -158,13 +158,13 @@ The **Onboarding** panel still resolves every value, and after Govern it shows w
 and what is left. `SpiffeTrustBundlePem` comes from the **Bundle** button.
 
 Then run *Verify Functional Account* and read the `Attributes received:` line.
-[The standup runbook](runbooks/spire-lab-standup.md) §5 is that procedure and what each
+[The standup runbook](../runbooks/spire-lab-standup.md) §5 is that procedure and what each
 answer means.
 
 ### By hand
 
 Full detail, including what each playbook proves, is in
-[`examples/playbooks/spire/`](../examples/playbooks/spire/README.md). The playbooks are
+[`examples/playbooks/spire/`](../../examples/playbooks/spire/README.md). The playbooks are
 cloud-agnostic — they configure a Linux host over SSH — so only step 1 differs between
 Azure, GCP and AWS. Run them from Config Management on the **`ansible-winrm`** runner
 image: `spire-open-ports.yml` needs `ansible.posix` and `spire-admin-identity.yml` needs
@@ -281,7 +281,7 @@ claiming to demonstrate the upgrade.
 ### Why it is k3s, and why that is a real limit
 
 `--authentication-config` is a **kube-apiserver flag**. EKS, AKS and GKE do not expose it, so
-none of the clusters on the [Kubernetes](kubernetes.md) page can do this at all — k3s takes
+none of the clusters on the [Kubernetes](../kubernetes.md) page can do this at all — k3s takes
 arbitrary API server flags, which is why the lab's second VM runs k3s. Structured
 Authentication is GA in Kubernetes **1.34** (`apiserver.config.k8s.io/v1`), and the play
 refuses an older cluster rather than writing a config the API server will reject and fail to
@@ -293,8 +293,8 @@ pattern, and finding that out mid-demonstration is worse than saying it first.
 ### What it is being compared against
 
 The dashboard already ships a short-lived Kubernetes token: `POST /clusters/{id}/ps-token`
-in **Bound mode**, described in [Kubernetes](kubernetes.md#access--identity) with its
-reasoning in [the design note](design/k8s-sa-token-rotation.md). This does **not** replace
+in **Bound mode**, described in [Kubernetes](../kubernetes.md#access--identity) with its
+reasoning in [the design note](../design/k8s-sa-token-rotation.md). This does **not** replace
 it — a cluster whose broker needs a vaulted credential still needs Bound mode. The two
 answer different questions, and the interesting claim is not "short-lived tokens are good"
 but *what each one still leaves lying around*:
@@ -342,7 +342,7 @@ journalctl -u k3s | grep -i 'authentication\|oidc\|jwt'
 ```
 
 The full argument, including the four traps the playbooks encode, is in
-[the design note](design/workload-k8s-short-lived-token.md).
+[the design note](../design/workload-k8s-short-lived-token.md).
 
 ## Boundaries
 

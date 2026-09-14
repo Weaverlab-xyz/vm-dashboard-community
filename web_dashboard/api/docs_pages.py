@@ -222,6 +222,12 @@ _TITLE_OVERRIDES = {
     "onboarding/feature-test":           "Feature-test checklist",
     "onboarding/troubleshooting":        "Onboarding troubleshooting",
     "integrations/entra-oauth":          "Sign in with Microsoft (Entra)",
+    # The four Workload Lab tab guides. Derived titles read as filenames here -- "Spiffe",
+    # "Workload Cloud", "Workload Kubernetes" -- and the index sits them among the
+    # integrations, where a reader has no tab bar to tell them what they are looking at.
+    "integrations/spiffe":               "SPIFFE and SPIRE",
+    "integrations/workload-cloud":       "Short-lived cloud credentials",
+    "integrations/workload-kubernetes":  "Workload access to Kubernetes",
     "integrations/ansible/config-reference":  "Config field reference",
     "integrations/ansible/shared-cloud":      "Shared cloud infrastructure",
     "integrations/ansible/ansible-runner":    "The Ansible runner",
