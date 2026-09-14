@@ -807,14 +807,20 @@ class Settings(BaseSettings):
     clouddb_ps_gcp_auth_mode: str = "ADC"          # ADC | IMP | SA
     clouddb_ps_gcp_impersonate_target: str = ""    # IMP mode: service account to impersonate
     # SA mode only, and only on the "create" path — in "reference" mode the operator's
-    # own account already carries the key. The rotator's service-account key, as either
-    # the JSON document or its base64; _gcp_sa_key_segment normalises to base64, because
-    # raw JSON reaching the plugin is shape-sniffed as the WHOLE credential and silently
-    # drops the database password in segment 3.
+    # own account already carries the key. OPTIONAL: left blank, the dashboard mints a
+    # key for clouddb_ps_gcp_rotator_service_account per database and deletes it at
+    # teardown, which is the normal path (GCP returns a key's private half only at
+    # creation, so an existing key cannot be fetched). Set it to override that — for a
+    # rotation identity the dashboard has no rights over, or under
+    # constraints/iam.disableServiceAccountKeyCreation. Either the JSON document or its
+    # base64; _normalise_gcp_sa_key normalises to base64, because raw JSON reaching the
+    # plugin is shape-sniffed as the WHOLE credential and silently drops the database
+    # password in segment 3.
     clouddb_ps_gcp_sa_key: str = ""                # JSON or base64; encrypted at rest
     # The operator-created rotation identity. The dashboard registers this as an IAM
     # database user on each instance it onboards and reads back the name the database
-    # actually stored. KEEP IT SHORT: MySQL truncates an IAM database username at the
+    # actually stored, and in SA mode it is also the account a functional-account key is
+    # minted for. KEEP IT SHORT: MySQL truncates an IAM database username at the
     # "@" and caps it at 32 characters, so "bt-rotator" is safe and
     # "bt-passwordsafe-cloudsql-rotator-prod" is not.
     clouddb_ps_gcp_rotator_service_account: str = ""  # e.g. bt-rotator@<project>.iam.gserviceaccount.com

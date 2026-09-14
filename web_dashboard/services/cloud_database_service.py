@@ -2527,7 +2527,101 @@ def _dbssm_fa_fields(*, admin_user: str, admin_password: str,
             f"{access_key_id or 'x'}:{secret_access_key or 'x'}:{admin_password}")
 
 
-def _gcp_sa_key_segment(auth_mode: str) -> str:
+def _normalise_gcp_sa_key(raw: str, *, source: str) -> tuple:
+    """Validate a service-account key and return ``(base64, client_email)``.
+
+    Raw JSON (what ``keys create`` writes) and base64-of-JSON are both accepted, and JSON
+    is encoded HERE rather than passed through. It must not reach Password Safe unencoded:
+    the plugin's ``GcpKeyReader`` shape-sniffs a leading ``{`` and treats the WHOLE
+    password as key material, silently discarding the database password in segment 3 —
+    and the key's own colons would mis-split the composite before that anyway.
+
+    The checks mirror ``GcpKeyReader.Validate`` deliberately, so a bad key fails at the
+    click with its source named, rather than days later inside the plugin. Length is NOT
+    one of them: the plugin's 1000-character cap fires only from ``ChangeFunctionalAccount``
+    (the write-back), no GCP key can get under it (``keys create`` offers RSA-2048 alone
+    and its PEM is ~1.7 KB by itself), and Password Safe has been observed storing a
+    3212-character composite intact. Nor does the dashboard hit the OTHER 1000-character
+    cap: that one is client-side in ``ps-cli``/``secrets_safe_library``, and this account
+    is created by a REST ``POST FunctionalAccounts`` in ``ps_api_service`` — the same
+    route ``ps-cli raw POST`` takes, which is exactly why it is not subject to it.
+
+    ``source`` names where the key came from, because both sources reach this validator
+    and an operator needs to know which one to go and fix.
+    """
+    if raw.startswith("{"):
+        try:
+            key = json.loads(raw)
+        except ValueError as exc:
+            raise CloudDatabaseError(
+                f"{source} starts with '{{' but is not valid JSON: {exc}") from exc
+        b64 = base64.b64encode(
+            json.dumps(key, separators=(",", ":")).encode("utf-8")).decode("ascii")
+    else:
+        # Strip a line-wrapped paste, as GcpKeyReader.StripWhitespace does on the way in.
+        b64 = "".join(raw.split())
+        try:
+            key = json.loads(base64.b64decode(b64, validate=True).decode("utf-8"))
+        except Exception as exc:
+            raise CloudDatabaseError(
+                f"{source} is neither raw JSON nor the base64 of a JSON key file ({exc}) "
+                f"— which is the plugin's own late error, checked here instead. Paste the "
+                f"key document, or its base64 (base64 -w0 key.json)") from exc
+    if not isinstance(key, dict):
+        raise CloudDatabaseError(
+            f"{source} is not a JSON object — it must be the whole key document written "
+            f"by 'gcloud iam service-accounts keys create'")
+    key_type = key.get("type") or "service_account"
+    if key_type != "service_account":
+        raise CloudDatabaseError(
+            f"{source} has type {key_type!r}, not 'service_account'. The plugin "
+            f"authenticates AS a service account, so an authorized_user (end-user) "
+            f"credential cannot mint the audience-scoped ID token the cloud-run channel "
+            f"requires")
+    if not key.get("client_email") or not key.get("private_key"):
+        raise CloudDatabaseError(
+            f"{source} carries no 'client_email'/'private_key' — it does not look like a "
+            f"key downloaded from 'gcloud iam service-accounts keys create'")
+    return b64, str(key.get("client_email") or "")
+
+
+def _warn_if_not_a_dbops_invoker(db: Session, log_job_id: str, *, client_email: str,
+                                 channel: str) -> None:
+    """Say so on the job when the SA: identity is not an allowed DB-Ops caller.
+
+    Only the ``cloud-run`` channel has a front door to be refused at: the plugin mints an
+    audience-scoped ID token AS this service account and calls the DB-Ops service, which
+    is deployed ``--no-allow-unauthenticated`` with ``roles/run.invoker`` granted to the
+    named principals in ``clouddb_ps_gcp_dbops_invokers`` and nobody else. An identity
+    missing from that list onboards perfectly and then 403s at the first rotation — a
+    failure that reads like a plugin or a network problem and is neither.
+
+    A warning, not a refusal: the service may be an operator's own (the config-key
+    audience), in which case this list describes nothing and the real bindings are
+    somewhere the dashboard cannot see.
+    """
+    if channel != "cloud-run" or not client_email:
+        return
+    try:
+        from . import clouddb_dbops_service
+        members = {m.split(":", 1)[1].strip().lower()
+                   for m in clouddb_dbops_service.invoker_members() if ":" in m}
+    except Exception as exc:  # noqa: BLE001 — advisory only, never fatal
+        logger.warning("clouddb: could not read the DB-Ops invoker list: %s", exc)
+        return
+    if not members or client_email.strip().lower() in members:
+        return
+    job_service.append_job_log(
+        db, log_job_id,
+        f"{client_email} is not in clouddb_ps_gcp_dbops_invokers, and on the cloud-run "
+        f"channel that is the identity Password Safe calls the DB-Ops service AS. Unless "
+        f"it holds roles/run.invoker some other way, every rotation for this database "
+        f"will be refused at the front door with 403. Add it on the Password Safe panel "
+        f"and redeploy the service.")
+
+
+async def _gcp_sa_key_segment(db: Session, *, job_id: str, log_job_id: str,
+                              auth_mode: str, channel: str) -> str:
     """Segment 1 of the dbgcp functional-account password: the base64 service-account key.
 
     Only ``SA:`` has one. ``ADC:`` resolves the Resource Broker's own credentials and
@@ -2543,66 +2637,79 @@ def _gcp_sa_key_segment(auth_mode: str) -> str:
     ``create`` is therefore the ONLY way to onboard Cloud SQL SQL Server from a broker
     with no GCP identity of its own — which is why this is a fix and not a removal.
 
-    Raw JSON (what ``keys create`` writes) and base64-of-JSON are both accepted, and JSON
-    is encoded HERE rather than passed through. It must not reach Password Safe unencoded:
-    the plugin's ``GcpKeyReader`` shape-sniffs a leading ``{`` and treats the WHOLE
-    password as key material, silently discarding the database password in segment 3 —
-    and the key's own colons would mis-split the composite before that anyway.
+    Two sources, in this order:
 
-    The checks mirror ``GcpKeyReader.Validate`` deliberately, so a bad paste fails at the
-    click with the field named, rather than days later inside the plugin. Length is NOT
-    one of them: the plugin's 1000-character cap fires only from ``ChangeFunctionalAccount``
-    (the write-back), no GCP key can get under it (``keys create`` offers RSA-2048 alone
-    and its PEM is ~1.7 KB by itself), and Password Safe has been observed storing a
-    3212-character composite intact.
+    1. ``clouddb_ps_gcp_sa_key``, a key an operator pasted on the panel. An explicit
+       value always wins — it is the escape hatch for a rotation identity the dashboard
+       has no rights over, and for an org that disables key creation outright.
+    2. otherwise the dashboard MINTS one for ``clouddb_ps_gcp_rotator_service_account``,
+       the rotation identity this feature already names everywhere else. This is the
+       normal path, and it is a mint rather than a fetch because it has to be: GCP
+       returns a key's private half exactly once, in the create response, so "use the
+       rotator's existing key" is not an operation that exists. The choice is mint one
+       or make a human paste one.
+
+    A minted key is recorded on the provisioning job as ``ps_db_fa_sa_key_name`` BEFORE
+    anything else is attempted, and deleted at teardown. It is a working credential for
+    the account Password Safe rotates with, so an onboarding that fails three steps later
+    must still leave a handle to it.
     """
     if auth_mode != "SA":
         return "-"
     raw = (_cfg("clouddb_ps_gcp_sa_key") or "").strip()
-    if not raw:
+    if raw:
+        b64, client_email = _normalise_gcp_sa_key(raw, source="clouddb_ps_gcp_sa_key")
+        _warn_if_not_a_dbops_invoker(db, log_job_id, client_email=client_email,
+                                     channel=channel)
+        return b64
+    rotator = (_cfg("clouddb_ps_gcp_rotator_service_account") or "").strip()
+    if not rotator:
         raise CloudDatabaseError(
-            "the GCP identity mode is 'SA' but clouddb_ps_gcp_sa_key is blank: the "
-            "functional account would be minted as 'SA:<login>' with no key in the first "
-            "password segment, and every credential action — Verify Functional Account "
-            "included — would fail inside the plugin with \"'SA:' requires the "
-            "service-account JSON key in the first segment\". Paste the rotator's "
-            "service-account key on the Password Safe panel, or set the identity mode to "
-            "ADC/IMP so the broker's own credentials are used")
-    if raw.startswith("{"):
-        try:
-            key = json.loads(raw)
-        except ValueError as exc:
-            raise CloudDatabaseError(
-                f"clouddb_ps_gcp_sa_key starts with '{{' but is not valid JSON: {exc}"
-            ) from exc
-        b64 = base64.b64encode(
-            json.dumps(key, separators=(",", ":")).encode("utf-8")).decode("ascii")
-    else:
-        # Strip a line-wrapped paste, as GcpKeyReader.StripWhitespace does on the way in.
-        b64 = "".join(raw.split())
-        try:
-            key = json.loads(base64.b64decode(b64, validate=True).decode("utf-8"))
-        except Exception as exc:
-            raise CloudDatabaseError(
-                f"clouddb_ps_gcp_sa_key is neither raw JSON nor the base64 of a JSON key "
-                f"file ({exc}) — which is the plugin's own late error, checked here "
-                f"instead. Paste the key document, or its base64 (base64 -w0 key.json)"
-            ) from exc
-    if not isinstance(key, dict):
+            "the GCP identity mode is 'SA' but there is no service-account key to put in "
+            "the functional account's first password segment: clouddb_ps_gcp_sa_key is "
+            "blank and clouddb_ps_gcp_rotator_service_account names no account to mint "
+            "one for. The account would be created as 'SA:<login>' with no key, and every "
+            "credential action — Verify Functional Account included — would fail inside "
+            "the plugin with \"'SA:' requires the service-account JSON key in the first "
+            "segment\". Set the rotator service account on the Password Safe panel so the "
+            "dashboard can mint a key for it, paste one into clouddb_ps_gcp_sa_key "
+            "yourself, or set the identity mode to ADC/IMP so the broker's own "
+            "credentials are used")
+    from . import gcp_service
+    try:
+        resource_name, material = await gcp_service.mint_service_account_key(rotator)
+    except Exception as exc:  # noqa: BLE001 — re-raised as this feature's own error
         raise CloudDatabaseError(
-            "clouddb_ps_gcp_sa_key is not a JSON object — it must be the whole key "
-            "document written by 'gcloud iam service-accounts keys create'")
-    key_type = key.get("type") or "service_account"
-    if key_type != "service_account":
-        raise CloudDatabaseError(
-            f"clouddb_ps_gcp_sa_key has type {key_type!r}, not 'service_account'. The "
-            f"plugin authenticates AS a service account, so an authorized_user (end-user) "
-            f"credential cannot mint the audience-scoped ID token the cloud-run channel "
-            f"requires")
-    if not key.get("client_email") or not key.get("private_key"):
-        raise CloudDatabaseError(
-            "clouddb_ps_gcp_sa_key carries no 'client_email'/'private_key' — it does not "
-            "look like a key downloaded from 'gcloud iam service-accounts keys create'")
+            f"could not mint a service-account key for the rotation identity {rotator}, "
+            f"which SA mode has to embed in the functional account: {exc}. Paste a key "
+            f"into clouddb_ps_gcp_sa_key instead, or set the identity mode to ADC/IMP so "
+            f"the broker's own credentials are used") from exc
+    # Recorded BEFORE validation, not after: the key exists in GCP the moment that call
+    # returned, and a malformed response would otherwise leave a live credential with
+    # nothing anywhere recording how to delete it.
+    #
+    # A LIST, and appended to rather than replaced, because a retry can mint a second key
+    # for the same database: onboarding that fails at the managed-system create leaves a
+    # real functional account behind, and the retry's create resolves that DUPLICATE by
+    # (platform, account name, display name) and returns it **without updating its
+    # password** — so the account goes on using the FIRST key while the second is the one
+    # just minted. Overwriting the name here would strand whichever key the account is
+    # actually using, permanently. Teardown deletes every key in the list.
+    prior = db.query(Job).filter(Job.id == job_id).first()
+    recorded = _recorded_sa_key_names(prior.metadata_dict if prior is not None else {})
+    _stash_on_job(db, job_id,
+                  {"ps_db_fa_sa_key_names": recorded + [resource_name]})
+    b64, client_email = _normalise_gcp_sa_key(
+        material, source=f"the service-account key minted for {rotator}")
+    _warn_if_not_a_dbops_invoker(db, log_job_id, client_email=client_email,
+                                 channel=channel)
+    job_service.append_job_log(
+        db, log_job_id,
+        f"Minted a service-account key for {rotator} and embedded it in this database's "
+        f"functional account — SA mode carries the key in the credential itself, because "
+        f"the Resource Broker has no GCP identity of its own. It is deleted when this "
+        f"database is deregistered or decommissioned, and nothing else holds a copy: GCP "
+        f"returns a key's private half only at creation.")
     return b64
 
 
@@ -2964,7 +3071,9 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
             fa_username = f"{auth_mode}:{ctx.get('fa_db_user') or ''}"
             impersonate = (_cfg("clouddb_ps_gcp_impersonate_target")
                            if auth_mode == "IMP" else "")
-            sa_key = _gcp_sa_key_segment(auth_mode)
+            sa_key = await _gcp_sa_key_segment(
+                db, job_id=job_id, log_job_id=log_job_id,
+                auth_mode=auth_mode, channel=channel)
             # Segment 1 is the base64 service-account key, and only SA: mode has one
             # — see _gcp_sa_key_segment, including why SA is the only mode open to a
             # broker that has no GCP identity of its own. Segment
@@ -3826,12 +3935,34 @@ _PS_CONTEXT_KEYS = (
     "ps_pravault_system_id", "ps_pravault_account_id",
     "ps_db_functional_account_ref", "ps_pravault_functional_account_ref",
     "ps_db_fa_sm_resource", "ps_db_fa_sm_project", "ps_db_fa_db_user",
+    "ps_db_fa_sa_key_names",
 )
 
 
+def _recorded_sa_key_names(meta) -> list:
+    """The GCP service-account keys SA: mode minted for this database.
+
+    Tolerates a bare string as well as a list: ``ps_db_fa_sa_key_names`` is metadata on a
+    job row, which outlives any one release, and a row written by a build that recorded a
+    single name must still be readable — the value it names is a live credential.
+    """
+    value = (meta or {}).get("ps_db_fa_sa_key_names")
+    if isinstance(value, str):
+        return [value] if value else []
+    return [str(v) for v in (value or []) if v]
+
+
 def _has_ps_onboarding(meta: dict) -> bool:
-    """Whether a provisioning job's metadata records Password Safe objects to remove."""
-    return any((meta or {}).get(k) for step in _PS_TEARDOWN_STEPS for k in step[:2])
+    """Whether a provisioning job's metadata records Password Safe objects to remove.
+
+    A minted service-account key counts even though it is not a Password Safe object at
+    all. SA: mode records it BEFORE the functional account exists — so an onboarding that
+    died in between records nothing else, and without this the teardown would report
+    "nothing to remove" and leave a live credential behind.
+    """
+    meta = meta or {}
+    return bool(_recorded_sa_key_names(meta)) or any(
+        meta.get(k) for step in _PS_TEARDOWN_STEPS for k in step[:2])
 
 
 async def _teardown_ps_onboarding(db: Session, *, row: Optional[CloudDatabase],
@@ -3929,14 +4060,58 @@ async def _teardown_ps_onboarding(db: Session, *, row: Optional[CloudDatabase],
             logger.info("clouddb: functional-account regional SM entry %s removed "
                         "db_id=%s", resource_id, db_id)
 
+    # The second thing with something to DELETE remotely: the service-account key the
+    # SA: identity mode minted for this database's functional account. Last, and gated on
+    # BOTH the managed system and the functional account having gone — the key is the
+    # credential that account authenticates with, so removing it while either still
+    # exists breaks every rotation in the window between. A missing
+    # ps_db_functional_account_id is a referenced account, which never had a minted key.
+    sa_key_names = _recorded_sa_key_names(meta)
+    sa_keys_gone = True
+    # "gone" rather than "deregistered in this run": a key is recorded the instant GCP
+    # mints it, which is BEFORE either object exists, so a failure part-way through
+    # onboarding leaves a key whose functional account and managed system were never
+    # created. That is precisely the case it must still be deleted in.
+    system_gone = ("ps_db_registration_tf_state" in done
+                   or not meta.get("ps_db_registration_tf_state"))
+    fa_gone = ("ps_db_functional_account_id" in done
+               or not meta.get("ps_db_functional_account_id"))
+    if sa_key_names and system_gone and fa_gone:
+        from . import gcp_service
+        left = []
+        for name in sa_key_names:
+            if await gcp_service.delete_service_account_key(name):
+                logger.info("clouddb: functional-account service-account key %s removed "
+                            "db_id=%s", name, db_id)
+                continue
+            left.append(name)
+            errors.append(
+                f"the service-account key {name} minted for this database's functional "
+                f"account was not deleted — it is a working credential for the rotation "
+                f"identity, remove it by hand")
+        sa_keys_gone = not left
+        if sa_keys_gone:
+            # Recorded here as well as in the context-key sweep below, which only runs
+            # when a managed system was deregistered — and in the part-way case there was
+            # none. Without this the names would survive a teardown that deleted them.
+            done.append("ps_db_fa_sa_key_names")
+        elif prov_job is not None:
+            # Narrow the record to what is still live, so a retry does not re-attempt
+            # deletes that already succeeded and, more to the point, so the list an
+            # operator is told to clean up by hand is exactly the list that needs it.
+            _stash_on_job(db, prov_job.id, {"ps_db_fa_sa_key_names": left})
+
     if prov_job is not None and done:
         # Clear only what came off cleanly; the context keys go with the DB managed
-        # system, since they exist to describe it. The secret keys are the exception:
-        # they name something that still EXISTS when its delete failed, so clearing them
-        # would leave a live database password in Secret Manager that nothing ever
-        # retries — the same rule the per-step clearing above follows.
+        # system, since they exist to describe it. The two credential keys are the
+        # exception: they name something that still EXISTS when its delete failed, so
+        # clearing them would leave a live database password in Secret Manager, or a live
+        # service-account key in IAM, that nothing ever retries — the same rule the
+        # per-step clearing above follows.
         if "ps_db_registration_tf_state" in done:
-            keep = () if secret_gone else ("ps_db_fa_sm_resource", "ps_db_fa_sm_project")
+            keep = ((() if secret_gone
+                     else ("ps_db_fa_sm_resource", "ps_db_fa_sm_project"))
+                    + (() if sa_keys_gone else ("ps_db_fa_sa_key_names",)))
             done += [k for k in _PS_CONTEXT_KEYS if k in meta and k not in keep]
         fresh = dict(prov_job.metadata_dict or {})
         for key in done:

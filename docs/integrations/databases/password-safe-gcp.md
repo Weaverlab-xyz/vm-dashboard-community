@@ -269,10 +269,16 @@ with `OLD_PASSWORD` and the functional account needs no privilege over it at all
   `GOOGLE_APPLICATION_CREDENTIALS` on each broker, or use `IMP:` and grant the broker's
   identity `roles/iam.serviceAccountTokenCreator` on the rotator. A broker with no GCP
   identity at all takes `SA:` instead, which carries the base64 of the rotator's key in
-  the functional account — set `clouddb_ps_gcp_sa_key` and the dashboard embeds it on the
-  `create` path. The composite is then ~3.2 KB, which Password Safe stores; what it cannot
-  survive is a **write-back**, which the plugin refuses over 1000 characters, so leave
-  password management off for that account.
+  the functional account. **Nothing to paste:** on the `create` path the dashboard mints a
+  key for `clouddb_ps_gcp_rotator_service_account` per database and deletes it when that
+  database is deregistered or decommissioned. It needs `roles/iam.serviceAccountKeyAdmin`
+  on the rotator, and a project not under
+  `constraints/iam.disableServiceAccountKeyCreation`; where either is out of reach, paste
+  a key into `clouddb_ps_gcp_sa_key` and that wins. The composite is then ~3.2 KB, which
+  Password Safe stores — the dashboard creates the account with a REST
+  `POST FunctionalAccounts`, not `ps-cli`, so the 1000-character cap `ps-cli` enforces
+  client-side does not apply. What it cannot survive is a **write-back**, which the plugin
+  refuses over 1000 characters, so leave password management off for that account.
 - Grant the functional account rights over each managed principal — **unless you use
   self-rotation on `cloud-run`, which needs none of this.** On the `data-api` channel the
   dashboard issues these itself, as the built-in admin, and prints them on the
@@ -345,8 +351,8 @@ there are no client-image or key-material keys here):
 | `clouddb_ps_functional_account_gcp_postgres` / `_mysql` / `_sqlserver` | — | `reference` mode: the operator-created account on each Cloud SQL platform |
 | `clouddb_ps_gcp_auth_mode` | `ADC` | `ADC` / `IMP` / `SA` — the functional-account username prefix, and with it how the **broker** authenticates to GCP |
 | `clouddb_ps_gcp_impersonate_target` | — | `IMP` mode: the service account to impersonate |
-| `clouddb_ps_gcp_sa_key` | — | **`SA` mode, `create` path only.** The rotator's key, as the JSON document or its base64; it is base64 either way by the time it reaches Password Safe. A `reference`-mode account carries its own, so this is ignored there |
-| `clouddb_ps_gcp_rotator_service_account` | — | **`data-api` only, and not SQL Server.** The rotation identity, registered as an IAM database user per instance — under the name each engine takes, which is not the same string: MySQL gets the full email and truncates it at the `@` to **32 characters** itself, PostgreSQL gets the email minus `.gserviceaccount.com` because a Postgres role name is capped at **63** and the email overflows it. Keep the local part short for both |
+| `clouddb_ps_gcp_sa_key` | — | **`SA` mode, `create` path only — and an OVERRIDE, not a prerequisite.** Blank, the dashboard mints a key for the rotator per database and deletes it at teardown (GCP returns a key's private half only at creation, so an existing key cannot be reused). Set it for an identity the dashboard cannot mint for: the JSON document or its base64, base64 either way by the time it reaches Password Safe. A `reference`-mode account carries its own, so this is ignored there |
+| `clouddb_ps_gcp_rotator_service_account` | — | The rotation identity. On `data-api` (not SQL Server) it is, registered as an IAM database user per instance — under the name each engine takes, which is not the same string: MySQL gets the full email and truncates it at the `@` to **32 characters** itself, PostgreSQL gets the email minus `.gserviceaccount.com` because a Postgres role name is capped at **63** and the email overflows it. Keep the local part short for both |
 | `clouddb_ps_functional_account_mode_gcp_sqlserver` | — | `create` or `reference` for **this cell only**, above the per-engine and per-cloud rungs. Blank falls through. The one combination those cannot express: `..._mode_sqlserver` governs AWS and Azure too, and they want `reference` |
 | `clouddb_ps_gcp_fa_secret_version` | — | **`data-api` + SQL Server only.** Address option `fasecret=` — a **regional** Secret Manager version holding the functional account's password. Blank is fine in `create` mode (the dashboard stages one per database); **required** in `reference` mode |
 | `clouddb_ps_gcp_dbops_audience` | — | **`cloud-run` only.** An **override** — address field 4 for a service you deployed yourself, or one behind a custom domain / PSC. A dashboard-deployed service in the database's own region **beats it**, because Direct VPC egress is region-locked and one global value would address a rotation at a service that cannot reach the instance. With neither, SQL Server onboarding stays off |

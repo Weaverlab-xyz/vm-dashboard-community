@@ -123,6 +123,36 @@ async def _fake_register_managed_system(**kw):
     return {"tf_state_json": "{}", "managed_system_id": 1, "managed_account_id": 2}
 
 
+# ── fake GCP IAM (service-account keys) ───────────────────────────────────────
+#
+# What `keys.create` returns: the resource name, and privateKeyData — the key document
+# ALREADY base64-encoded, which is the one form the plugin's GcpKeyReader accepts.
+MINTED_KEY_NAME = ("projects/acme-data-prod/serviceAccounts/"
+                   "bt-rotator@acme-data-prod.iam.gserviceaccount.com/keys/deadbeef01")
+DELETED_KEYS = []
+
+
+async def _fake_mint_sa_key(service_account_email):
+    CALLS.append(("mint_sa_key", service_account_email))
+    # Driven off config rather than a module list, because _reset() runs INSIDE the
+    # onboarding helper and would clear anything a test armed beforehand.
+    if CONF.get("_mint_fails"):
+        raise RuntimeError(CONF["_mint_fails"])
+    return MINTED_KEY_NAME, base64.b64encode(
+        json.dumps(dict(_SA_KEY, client_email=service_account_email)).encode()).decode()
+
+
+async def _fake_delete_sa_key(resource_name):
+    DELETED_KEYS.append(resource_name)
+    return True
+
+
+def _fake_invoker_members():
+    entries = [e.strip() for e in
+               (CONF.get("clouddb_ps_gcp_dbops_invokers") or "").split(",")]
+    return [e if ":" in e else f"serviceAccount:{e}" for e in entries if e]
+
+
 def _install_stubs():
     confmod = types.ModuleType("web_dashboard.config")
     confmod.settings = _Settings()
@@ -151,6 +181,23 @@ def _install_stubs():
     psr.register_managed_system = _fake_register_managed_system
     psr.PSResourceError = type("PSResourceError", (Exception,), {})
     sys.modules["web_dashboard.services.ps_resource_service"] = psr
+
+    # SA: identity mode mints a service-account key per database when no key is pasted
+    # on the panel, so the GCP leg is now reachable from these tests.
+    gcp = types.ModuleType("web_dashboard.services.gcp_service")
+    gcp.GCPError = type("GCPError", (Exception,), {})
+    gcp.mint_service_account_key = _fake_mint_sa_key
+    gcp.delete_service_account_key = _fake_delete_sa_key
+    sys.modules["web_dashboard.services.gcp_service"] = gcp
+
+    # Stubbed rather than left real: the real module imports CloudFunction off the
+    # stubbed database module and cannot load here at all. audience_for_region answers
+    # "nothing recorded", which is what makes _dbops_audience fall back to the flat
+    # config key these tests set.
+    dbops = types.ModuleType("web_dashboard.services.clouddb_dbops_service")
+    dbops.audience_for_region = lambda _db, _region: ""
+    dbops.invoker_members = _fake_invoker_members
+    sys.modules["web_dashboard.services.clouddb_dbops_service"] = dbops
 
     # ps_vm_hook is deliberately NOT stubbed: the helper imports it lazily and must use
     # the real _platform_name_ok, since reusing that check is half the point.
@@ -212,6 +259,7 @@ def _reset(**conf):
     CALLS.clear()
     LAST_REGISTER.clear()
     JOB_LOGS.clear()
+    DELETED_KEYS.clear()
     CONF.update(conf)
 
 
@@ -646,9 +694,10 @@ _FA_LOGIN_PW = "Gen3rated-psfa-pw"
 
 
 def _onboard_gcp(engine="postgres", channel=None, ctx_extra=None, tf_extra=None,
-                 **conf):
+                 job_meta=None, **conf):
     _reset(**conf)
     job_row = _FakeJobRow()
+    job_row.metadata_dict.update(job_meta or {})
     row = _CloudDatabase(id="abcdef0123456789abcd", cloud="gcp",
                          private_host="10.102.0.3", engine=engine,
                          region="us-central1", instance_id="clouddb-abcdef01")
@@ -951,17 +1000,167 @@ def test_gcp_sa_mode_takes_the_key_already_base64():
     assert password.split(":", 2)[0] == raw, password
 
 
-def test_gcp_sa_mode_refuses_a_blank_key():
+def test_gcp_sa_mode_refuses_a_blank_key_with_no_rotator_to_mint_one_for():
     """The live failure, 2026-09-11: the panel said SA, no key existed anywhere in the
     dashboard, and the account was minted anyway. Refuse it here, where the message can
-    still name the field -- the alternative is a green job and an opaque plugin error on
-    every credential action afterwards."""
+    still name the fields -- the alternative is a green job and an opaque plugin error on
+    every credential action afterwards.
+
+    Both sources have to be empty now. A blank key alone is the NORMAL configuration:
+    the dashboard mints one for the rotator service account (below)."""
     try:
         _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
                      clouddb_ps_gcp_auth_mode="SA")
         raise AssertionError("expected SA mode with no key to be refused")
     except svc.CloudDatabaseError as exc:
         assert "clouddb_ps_gcp_sa_key" in str(exc), exc
+        assert "clouddb_ps_gcp_rotator_service_account" in str(exc), exc
+    assert not [c for c in CALLS if c[0] == "create"], CALLS
+
+
+# -- SA: mode, minting the key ---------------------------------------------------
+#
+# The panel field is an OVERRIDE, not a prerequisite. GCP hands back a key's private half
+# exactly once, in the create response, so "use the rotator's existing key" is not an
+# operation that exists anywhere -- the choice is mint one per database or make a human
+# paste one. Minting is the normal path.
+
+_ROTATOR = "bt-rotator@acme-data-prod.iam.gserviceaccount.com"
+
+
+def test_sa_mode_mints_a_key_for_the_rotator_when_none_is_pasted():
+    meta = _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                        clouddb_ps_gcp_auth_mode="SA",
+                        clouddb_ps_gcp_rotator_service_account=_ROTATOR)
+    assert ("mint_sa_key", _ROTATOR) in CALLS, CALLS
+    _, _, account_name, password = [c for c in CALLS if c[0] == "create"][0]
+    assert account_name.startswith("SA:"), account_name
+    key = json.loads(base64.b64decode(password.split(":", 2)[0]))
+    assert key["client_email"] == _ROTATOR, key
+    # Recorded for teardown: it is a working credential for the identity Password Safe
+    # rotates with, and GCP will never show it again.
+    assert meta["ps_db_fa_sa_key_names"] == [MINTED_KEY_NAME], meta
+
+
+def test_a_retry_appends_its_key_rather_than_replacing_the_first():
+    """The functional-account create resolves a DUPLICATE by (platform, account name,
+    display name) and returns it WITHOUT updating its password -- so after a retry the
+    account still authenticates with the first key. Replacing the record would strand
+    exactly the one that is live."""
+    meta = _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                        clouddb_ps_gcp_auth_mode="SA",
+                        clouddb_ps_gcp_rotator_service_account=_ROTATOR,
+                        job_meta={"ps_db_fa_sa_key_names": ["keys/anearlierone"]})
+    assert meta["ps_db_fa_sa_key_names"] == ["keys/anearlierone", MINTED_KEY_NAME], meta
+
+
+def test_a_pasted_key_beats_the_mint():
+    """The escape hatch has to win, or it is not one: an operator sets this exactly when
+    the dashboard cannot mint (no serviceAccountKeyAdmin, or the project is under
+    constraints/iam.disableServiceAccountKeyCreation)."""
+    meta = _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                        clouddb_ps_gcp_auth_mode="SA",
+                        clouddb_ps_gcp_rotator_service_account=_ROTATOR,
+                        clouddb_ps_gcp_sa_key=json.dumps(_SA_KEY))
+    assert not [c for c in CALLS if c[0] == "mint_sa_key"], CALLS
+    assert "ps_db_fa_sa_key_names" not in meta, meta
+    _, _, _, password = [c for c in CALLS if c[0] == "create"][0]
+    assert json.loads(base64.b64decode(password.split(":", 2)[0])) == _SA_KEY, password
+
+
+def test_the_key_is_recorded_before_the_functional_account_is_created():
+    """Ordering is the whole safety property. The key EXISTS in GCP the moment the mint
+    returns, so if the Password Safe create then fails -- which it has, live, more than
+    once -- teardown still has to find a handle to it. Stash first, create second."""
+    stash_order = []
+    real_stash = svc._stash_on_job
+    svc._stash_on_job = lambda db, job_id, update: (
+        stash_order.append(sorted(update)), real_stash(db, job_id, update))[1]
+    real_create = sys.modules["web_dashboard.services.ps_api_service"].create_functional_account_on_platform
+
+    async def _boom(**kw):
+        stash_order.append("create")
+        raise RuntimeError("Password Safe said no")
+
+    sys.modules["web_dashboard.services.ps_api_service"].create_functional_account_on_platform = _boom
+    try:
+        _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                     clouddb_ps_gcp_auth_mode="SA",
+                     clouddb_ps_gcp_rotator_service_account=_ROTATOR)
+        raise AssertionError("expected the functional-account create to fail")
+    except RuntimeError:
+        pass
+    finally:
+        svc._stash_on_job = real_stash
+        sys.modules["web_dashboard.services.ps_api_service"].create_functional_account_on_platform = real_create
+    assert stash_order == [["ps_db_fa_sa_key_names"], "create"], stash_order
+
+
+def test_a_minted_key_makes_teardown_run_at_all():
+    """_has_ps_onboarding used to read only the Password Safe teardown steps, so the
+    part-way case above -- a key minted, nothing else created -- reported "nothing to
+    remove" and left the credential behind."""
+    assert svc._has_ps_onboarding({"ps_db_fa_sa_key_names": [MINTED_KEY_NAME]})
+    assert not svc._has_ps_onboarding({"ps_db_fa_db_user": "psfa"})
+
+
+def test_a_mint_failure_names_the_two_ways_out():
+    try:
+        _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                     clouddb_ps_gcp_auth_mode="SA",
+                     clouddb_ps_gcp_rotator_service_account=_ROTATOR,
+                     _mint_fails="HTTP 403: caller lacks iam.serviceAccountKeys.create")
+        raise AssertionError("expected the mint failure to be fatal")
+    except svc.CloudDatabaseError as exc:
+        assert "clouddb_ps_gcp_sa_key" in str(exc) and "ADC/IMP" in str(exc), exc
+    # Nothing was created against a key that does not exist.
+    assert not [c for c in CALLS if c[0] == "create"], CALLS
+
+
+def test_cloud_run_warns_when_the_sa_identity_cannot_invoke_dbops():
+    """The 403 that reads like a plugin fault. On cloud-run the plugin calls the DB-Ops
+    service AS this service account, and the service is deployed
+    --no-allow-unauthenticated: an identity missing from the invoker list onboards
+    perfectly and is refused at the first rotation."""
+    _onboard_gcp(engine="sqlserver",
+                 clouddb_ps_platform_gcp_sqlserver="GCP Cloud SQL SQL Server",
+                 clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal",
+                 clouddb_ps_gcp_auth_mode="SA",
+                 clouddb_ps_gcp_rotator_service_account=_ROTATOR,
+                 clouddb_ps_gcp_dbops_invokers="someone-else@acme-data-prod.iam.gserviceaccount.com")
+    assert any("clouddb_ps_gcp_dbops_invokers" in line for line in JOB_LOGS), JOB_LOGS
+
+
+def test_no_invoker_warning_when_the_identity_is_on_the_list():
+    _onboard_gcp(engine="sqlserver",
+                 clouddb_ps_platform_gcp_sqlserver="GCP Cloud SQL SQL Server",
+                 clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal",
+                 clouddb_ps_gcp_auth_mode="SA",
+                 clouddb_ps_gcp_rotator_service_account=_ROTATOR,
+                 clouddb_ps_gcp_dbops_invokers=f"serviceAccount:{_ROTATOR}")
+    assert not any("clouddb_ps_gcp_dbops_invokers" in line for line in JOB_LOGS), JOB_LOGS
+
+
+def test_the_data_api_channel_never_warns_about_invokers():
+    """There is no front door on the control plane -- data-api talks to Cloud SQL, not to
+    the DB-Ops service -- so the invoker list describes nothing there and a warning would
+    only send an operator to change a setting that cannot help."""
+    _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                 clouddb_ps_gcp_auth_mode="SA",
+                 clouddb_ps_gcp_rotator_service_account=_ROTATOR,
+                 clouddb_ps_gcp_dbops_invokers="someone-else@acme-data-prod.iam.gserviceaccount.com")
+    assert not any("clouddb_ps_gcp_dbops_invokers" in line for line in JOB_LOGS), JOB_LOGS
+
+
+def test_the_other_gcp_modes_never_mint_a_key():
+    """ADC and IMP resolve the broker's own credentials. A key minted for them would be
+    a live credential created for nothing, per database."""
+    for mode in ("ADC", "IMP"):
+        meta = _onboard_gcp(clouddb_ps_platform_gcp_postgres="GCP Cloud SQL PostgreSQL",
+                            clouddb_ps_gcp_auth_mode=mode,
+                            clouddb_ps_gcp_rotator_service_account=_ROTATOR)
+        assert not [c for c in CALLS if c[0] == "mint_sa_key"], (mode, CALLS)
+        assert "ps_db_fa_sa_key_names" not in meta, (mode, meta)
 
 
 def test_gcp_sa_mode_refuses_a_key_that_is_neither_json_nor_base64():
