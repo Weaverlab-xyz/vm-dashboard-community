@@ -197,6 +197,11 @@ def _install_stubs():
     dbops = types.ModuleType("web_dashboard.services.clouddb_dbops_service")
     dbops.audience_for_region = lambda _db, _region: ""
     dbops.invoker_members = _fake_invoker_members
+    # Whether the DASHBOARD deployed this region's service. None = it did not, which is
+    # the BYO case: an empty invoker list then describes nothing about the real IAM
+    # policy, and the warning stays quiet. The one test that needs the other answer
+    # swaps this out for itself.
+    dbops.find_for_region = lambda _db, _region: None
     sys.modules["web_dashboard.services.clouddb_dbops_service"] = dbops
 
     # ps_vm_hook is deliberately NOT stubbed: the helper imports it lazily and must use
@@ -1129,6 +1134,62 @@ def test_cloud_run_warns_when_the_sa_identity_cannot_invoke_dbops():
                  clouddb_ps_gcp_rotator_service_account=_ROTATOR,
                  clouddb_ps_gcp_dbops_invokers="someone-else@acme-data-prod.iam.gserviceaccount.com")
     assert any("clouddb_ps_gcp_dbops_invokers" in line for line in JOB_LOGS), JOB_LOGS
+
+
+def test_an_empty_invoker_list_on_a_DEPLOYED_service_warns_loudest():
+    """The case the check used to skip, and the one that is CERTAIN.
+
+    It returned early on an empty list, reasoning that a list describing nothing cannot
+    be compared against. But when the dashboard deployed the service itself, an empty
+    list is not "unknown" — it is an IAM policy naming NOBODY, and the answer is known
+    before any identity is looked at. Live on 2026-09-14: a clean onboarding, and a
+    Verify Functional Account refused by Cloud Run with 403 and an empty body.
+    """
+    dbops = sys.modules["web_dashboard.services.clouddb_dbops_service"]
+    previous = dbops.find_for_region
+    dbops.find_for_region = lambda _db, _region: object()   # a deployed service
+    try:
+        _onboard_gcp(engine="sqlserver",
+                     clouddb_ps_platform_gcp_sqlserver="GCP Cloud SQL SQL Server",
+                     clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal",
+                     clouddb_ps_gcp_auth_mode="SA",
+                     clouddb_ps_gcp_rotator_service_account=_ROTATOR,
+                     clouddb_ps_gcp_dbops_invokers="")
+    finally:
+        dbops.find_for_region = previous
+    assert any("EMPTY" in line and "roles/run.invoker" in line for line in JOB_LOGS),         JOB_LOGS
+
+
+def test_the_empty_list_says_nothing_about_a_service_we_did_not_deploy():
+    """A BYO service's bindings are somewhere the dashboard cannot see, so an empty key
+    is not evidence of anything. find_for_region answers None here."""
+    _onboard_gcp(engine="sqlserver",
+                 clouddb_ps_platform_gcp_sqlserver="GCP Cloud SQL SQL Server",
+                 clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal",
+                 clouddb_ps_gcp_auth_mode="SA",
+                 clouddb_ps_gcp_rotator_service_account=_ROTATOR,
+                 clouddb_ps_gcp_dbops_invokers="")
+    assert not any("run.invoker" in line for line in JOB_LOGS), JOB_LOGS
+
+
+def test_the_ADC_mode_reaches_the_empty_check_though_it_names_no_identity():
+    """ADC/IMP resolve the BROKER's own identity, which the dashboard cannot name, so
+    they never reach _gcp_sa_key_segment's warning — and used to onboard against a
+    service nobody could call in complete silence. "Nobody at all" needs no identity."""
+    dbops = sys.modules["web_dashboard.services.clouddb_dbops_service"]
+    previous = dbops.find_for_region
+    dbops.find_for_region = lambda _db, _region: object()
+    try:
+        _onboard_gcp(engine="sqlserver",
+                     clouddb_ps_platform_gcp_sqlserver="GCP Cloud SQL SQL Server",
+                     clouddb_ps_gcp_dbops_audience="https://bt-dbops.acme.internal",
+                     clouddb_ps_gcp_auth_mode="ADC",
+                     clouddb_ps_gcp_dbops_invokers="")
+    finally:
+        dbops.find_for_region = previous
+    assert any("EMPTY" in line and "roles/run.invoker" in line for line in JOB_LOGS),         JOB_LOGS
+    # ...and still mints no key: the mode is what decides that, not the warning.
+    assert not [c for c in CALLS if c[0] == "mint_sa_key"], CALLS
 
 
 def test_no_invoker_warning_when_the_identity_is_on_the_list():

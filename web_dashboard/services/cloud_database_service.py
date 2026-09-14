@@ -2586,21 +2586,31 @@ def _normalise_gcp_sa_key(raw: str, *, source: str) -> tuple:
 
 
 def _warn_if_not_a_dbops_invoker(db: Session, log_job_id: str, *, client_email: str,
-                                 channel: str) -> None:
-    """Say so on the job when the SA: identity is not an allowed DB-Ops caller.
+                                 channel: str, region: str = "") -> None:
+    """Say so on the job when nothing — or the wrong thing — can call the DB-Ops service.
 
     Only the ``cloud-run`` channel has a front door to be refused at: the plugin mints an
-    audience-scoped ID token AS this service account and calls the DB-Ops service, which
-    is deployed ``--no-allow-unauthenticated`` with ``roles/run.invoker`` granted to the
-    named principals in ``clouddb_ps_gcp_dbops_invokers`` and nobody else. An identity
-    missing from that list onboards perfectly and then 403s at the first rotation — a
-    failure that reads like a plugin or a network problem and is neither.
+    audience-scoped ID token and calls the DB-Ops service, which is deployed
+    ``--no-allow-unauthenticated`` with ``roles/run.invoker`` granted to the named
+    principals in ``clouddb_ps_gcp_dbops_invokers`` and nobody else. An identity missing
+    from that list onboards perfectly and then 403s at the first rotation — a failure
+    that reads like a plugin or a network problem and is neither.
 
-    A warning, not a refusal: the service may be an operator's own (the config-key
-    audience), in which case this list describes nothing and the real bindings are
-    somewhere the dashboard cannot see.
+    **Two cases, and the one this used to skip is the certain one.** It returned early
+    on an empty list, reasoning that a list describing nothing cannot be checked
+    against. But an empty list is not "unknown" when the dashboard deployed the service
+    ITSELF: it is a service whose IAM policy names NOBODY, so the answer is known before
+    any identity is compared. That silence is exactly what happened live on 2026-09-14 —
+    a clean onboarding, and a Verify Functional Account refused with 403 and an empty
+    body. So the empty case now warns whenever there is a deployed service to warn
+    about, and does not when the audience came from the config key, where the bindings
+    really are somewhere the dashboard cannot see.
+
+    ``client_email`` is known only in ``SA:`` mode. ``ADC:``/``IMP:`` resolve the Resource
+    Broker's own identity, which the dashboard cannot name — but "nobody at all" is still
+    checkable, so those modes reach the first case and skip the second.
     """
-    if channel != "cloud-run" or not client_email:
+    if channel != "cloud-run":
         return
     try:
         from . import clouddb_dbops_service
@@ -2609,7 +2619,32 @@ def _warn_if_not_a_dbops_invoker(db: Session, log_job_id: str, *, client_email: 
     except Exception as exc:  # noqa: BLE001 — advisory only, never fatal
         logger.warning("clouddb: could not read the DB-Ops invoker list: %s", exc)
         return
-    if not members or client_email.strip().lower() in members:
+    # SEPARATE, and deliberately so: "is there a service the dashboard deployed" is a
+    # second, independent fact, and failing to answer it must not swallow a warning
+    # about an identity that CAN be checked against a list we already read.
+    deployed = None
+    try:
+        if region:
+            deployed = clouddb_dbops_service.find_for_region(db, region)
+    except Exception as exc:  # noqa: BLE001 — advisory only, never fatal
+        logger.warning("clouddb: could not look up the %s DB-Ops service: %s",
+                       region, exc)
+
+    if not members:
+        if deployed is None:
+            return      # a BYO service: this list describes nothing about its policy
+        job_service.append_job_log(
+            db, log_job_id,
+            f"clouddb_ps_gcp_dbops_invokers is EMPTY and the {region} DB-Ops service "
+            f"was deployed from it, so no principal holds roles/run.invoker on it and "
+            f"EVERY credential action for this database — Verify Functional Account "
+            f"included — will be refused by Cloud Run with 403 and an empty response "
+            f"body, before the service runs. Set the invoker service accounts on the "
+            f"Password Safe panel and use Sync invokers; the service does not need to "
+            f"be redeployed.")
+        return
+
+    if not client_email or client_email.strip().lower() in members:
         return
     job_service.append_job_log(
         db, log_job_id,
@@ -2617,11 +2652,12 @@ def _warn_if_not_a_dbops_invoker(db: Session, log_job_id: str, *, client_email: 
         f"channel that is the identity Password Safe calls the DB-Ops service AS. Unless "
         f"it holds roles/run.invoker some other way, every rotation for this database "
         f"will be refused at the front door with 403. Add it on the Password Safe panel "
-        f"and redeploy the service.")
+        f"and use Sync invokers.")
 
 
 async def _gcp_sa_key_segment(db: Session, *, job_id: str, log_job_id: str,
-                              auth_mode: str, channel: str) -> str:
+                              auth_mode: str, channel: str,
+                              region: str = "") -> str:
     """Segment 1 of the dbgcp functional-account password: the base64 service-account key.
 
     Only ``SA:`` has one. ``ADC:`` resolves the Resource Broker's own credentials and
@@ -2660,7 +2696,7 @@ async def _gcp_sa_key_segment(db: Session, *, job_id: str, log_job_id: str,
     if raw:
         b64, client_email = _normalise_gcp_sa_key(raw, source="clouddb_ps_gcp_sa_key")
         _warn_if_not_a_dbops_invoker(db, log_job_id, client_email=client_email,
-                                     channel=channel)
+                                     channel=channel, region=region)
         return b64
     rotator = (_cfg("clouddb_ps_gcp_rotator_service_account") or "").strip()
     if not rotator:
@@ -2702,7 +2738,7 @@ async def _gcp_sa_key_segment(db: Session, *, job_id: str, log_job_id: str,
     b64, client_email = _normalise_gcp_sa_key(
         material, source=f"the service-account key minted for {rotator}")
     _warn_if_not_a_dbops_invoker(db, log_job_id, client_email=client_email,
-                                 channel=channel)
+                                 channel=channel, region=region)
     job_service.append_job_log(
         db, log_job_id,
         f"Minted a service-account key for {rotator} and embedded it in this database's "
@@ -3073,7 +3109,15 @@ async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id
                            if auth_mode == "IMP" else "")
             sa_key = await _gcp_sa_key_segment(
                 db, job_id=job_id, log_job_id=log_job_id,
-                auth_mode=auth_mode, channel=channel)
+                auth_mode=auth_mode, channel=channel, region=row.region or "")
+            if auth_mode != "SA":
+                # ADC and IMP resolve the Resource Broker's OWN identity, which the
+                # dashboard cannot name — so _gcp_sa_key_segment returns "-" without
+                # ever reaching the invoker check, and these two modes used to onboard
+                # against a service nobody could call with nothing said. "Nobody at
+                # all" needs no identity to check against, so it is checked here.
+                _warn_if_not_a_dbops_invoker(db, log_job_id, client_email="",
+                                             channel=channel, region=row.region or "")
             # Segment 1 is the base64 service-account key, and only SA: mode has one
             # — see _gcp_sa_key_segment, including why SA is the only mode open to a
             # broker that has no GCP identity of its own. Segment

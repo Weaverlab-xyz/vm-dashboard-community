@@ -254,6 +254,15 @@ with `OLD_PASSWORD` and the functional account needs no privilege over it at all
   `--no-allow-unauthenticated`, and records the audience itself: it is the service's own
   URL, so there is no custom audience to invent. Not a manual step any more, and no
   `clouddb_ps_gcp_dbops_audience` to fill in unless you deployed the service yourself.
+  **If you deploy before you know the broker identities** — the usual order — fill the
+  key in afterwards, save, and press **Sync invokers**. The bindings are written at
+  deploy time, so changing the key alone reaches nothing; the button re-applies it to the
+  running service without redeploying, which matters because a redeploy changes the URL
+  and the URL *is* the audience. A service whose IAM policy names nobody answers every
+  call with **403 and an empty response body** — the plugin reports that as an audience
+  problem *or* a missing `roles/run.invoker`, and the empty policy is the one to rule out
+  first (`gcloud run services get-iam-policy bt-dbops --region <r>` printing only an
+  `etag` is the tell).
 - Create the **rotator service account** and name it in the panel. **Keep the name
   short**: MySQL truncates an IAM database username at the `@` and caps it at **32
   characters**, so `bt-rotator` is safe and `bt-passwordsafe-cloudsql-rotator-prod` is not.
@@ -357,7 +366,7 @@ there are no client-image or key-material keys here):
 | `clouddb_ps_gcp_fa_secret_version` | — | **`data-api` + SQL Server only.** Address option `fasecret=` — a **regional** Secret Manager version holding the functional account's password. Blank is fine in `create` mode (the dashboard stages one per database); **required** in `reference` mode |
 | `clouddb_ps_gcp_dbops_audience` | — | **`cloud-run` only.** An **override** — address field 4 for a service you deployed yourself, or one behind a custom domain / PSC. A dashboard-deployed service in the database's own region **beats it**, because Direct VPC egress is region-locked and one global value would address a rotation at a service that cannot reach the instance. With neither, SQL Server onboarding stays off |
 | `clouddb_ps_gcp_dbops_ssl` | `true` | `sslTRUE` / `sslFALSE` — address field 5, the service→database TLS choice |
-| `clouddb_ps_gcp_dbops_invokers` | — | Comma-separated IAM members granted `roles/run.invoker` on the deployed service — the Resource Brokers' identities. A bare email is accepted and prefixed. Named principals only |
+| `clouddb_ps_gcp_dbops_invokers` | — | Comma-separated IAM members granted `roles/run.invoker` on the deployed service — the Resource Brokers' identities. A bare email is accepted and prefixed. Named principals only. Applied at deploy; changing it afterwards needs **Sync invokers** |
 | `clouddb_ps_gcp_dbops_ingress` | `all` | `all` (public + IAM; the only thing an **on-premises** broker can reach) or `internal` |
 | `clouddb_ps_gcp_dbops_min_instances` | `1` | Warm instances. A **correctness** setting — see above. Bills continuously |
 | `clouddb_ps_gcp_dbops_concurrency` | `8` | Requests per instance, well under Cloud Run's default of 80: each one holds a database connection |

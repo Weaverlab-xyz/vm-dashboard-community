@@ -1175,8 +1175,25 @@ def merged_environment(current: dict, changes: dict) -> dict:
             if value is not None}
 
 
+def deployed_tf_variables(db: Session, fn_id: str) -> dict:
+    """The secret-stripped variables the ORIGINAL deploy applied, or ``{}``.
+
+    An in-place update re-applies in that job's directory and INHERITS its variables,
+    so this is also the only record of what a deployed function's non-environment
+    settings — its scaling, its ingress, its invoker bindings — actually are. A caller
+    deciding whether an update would change anything has to compare against this, not
+    against the config it would like to apply.
+    """
+    row = get_function(db, fn_id)
+    if not row or not row.deploy_job_id:
+        return {}
+    job = db.query(Job).filter(Job.id == row.deploy_job_id).first()
+    return ((job.metadata_dict or {}).get("tf_variables") if job else None) or {}
+
+
 def update_environment(db: Session, *, fn_id: str, environment: dict,
-                       created_by: str = "") -> dict:
+                       created_by: str = "",
+                       invoker_members: Optional[list] = None) -> dict:
     """Change a deployed function's NON-SECRET settings and re-apply in place.
 
     Exists because the alternative is destroy-and-redeploy, and three things do not
@@ -1189,10 +1206,25 @@ def update_environment(db: Session, *, fn_id: str, environment: dict,
     package is rebuilt from the running image, so an update also brings the function
     up to the code that image ships — deterministically a no-op when it is the same
     image, and never a silent downgrade when it is not.
+
+    ``invoker_members`` is the ONE non-environment setting an update may change, and it
+    is here because the alternative was destroy-and-redeploy over a list of service
+    accounts — which changes the endpoint URL, and so every address already registered
+    against it. Everything else stays as the deploy left it: the variables are
+    inherited, so a setting this function does not name cannot drift from what was
+    applied. ``None`` means "leave the bindings alone"; an EMPTY LIST is a real request
+    to revoke every one of them, and the module will.
     """
     row = get_function(db, fn_id)
     if not row:
         raise CloudFunctionError(f"unknown function {fn_id!r}")
+    # Checked BEFORE anything is written: only the GCP module declares the variable,
+    # and handing an unknown one to the AWS or Azure module is an apply error three
+    # minutes later rather than a no-op.
+    if invoker_members is not None and row.cloud != "gcp":
+        raise CloudFunctionError(
+            f"invoker bindings are a GCP module variable and this function is on "
+            f"{row.cloud} — nothing here can change them")
     if row.status not in ("available", "failed"):
         raise CloudFunctionError(
             f"function is {row.status} — wait for the current job to finish")
@@ -1200,8 +1232,7 @@ def update_environment(db: Session, *, fn_id: str, environment: dict,
         raise CloudFunctionError(
             "this function has no deploy job recorded, so terraform has nothing to "
             "update in place; redeploy it instead")
-    job = db.query(Job).filter(Job.id == row.deploy_job_id).first()
-    persisted = ((job.metadata_dict or {}).get("tf_variables") if job else None) or {}
+    persisted = deployed_tf_variables(db, fn_id)
     if not persisted:
         raise CloudFunctionError(
             "the original deploy job's variables are gone, so the function cannot be "
@@ -1230,6 +1261,8 @@ def update_environment(db: Session, *, fn_id: str, environment: dict,
 
     tf_variables = {**persisted, "environment": environment_vars,
                     **_package_variables(row.cloud, row.id, sha256_hex, sha256_b64)}
+    if invoker_members is not None:
+        tf_variables["invoker_members"] = _csv(invoker_members)
     update_job = job_service.create_job(
         db, job_type="cloudfn_update", created_by=created_by,
         metadata={"fn_id": row.id, "cloud": row.cloud, "workload": row.workload,

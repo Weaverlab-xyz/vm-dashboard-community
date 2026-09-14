@@ -10,6 +10,7 @@ Database infrastructure API — Phase 1 (gated by ``cloud_database_enabled``).
   POST   /api/databases/{id}/ps-register — onboard into Password Safe (or remove that)
   POST   /api/databases/{id}/adapter-pair — deploy the db_grant Entitle adapter beside it
   POST   /api/databases/dbops/deploy    — deploy the Password Safe DB-Ops service (per region)
+  POST   /api/databases/dbops/invokers  — re-apply roles/run.invoker from config, in place
   GET    /api/databases/dbops/status    — per-region DB-Ops services + resolved audience
 
 Provisioning is cloud-only because it needs a Terraform module; registering needs
@@ -1145,6 +1146,42 @@ async def deploy_dbops_service(
             "job_id": result["job_id"]}
 
 
+@router.post("/dbops/invokers", status_code=202)
+async def sync_dbops_invokers(
+    payload: DbOpsDeployRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("cloud_database", "write")),
+):
+    """Re-apply ``clouddb_ps_gcp_dbops_invokers`` to a deployed DB-Ops service.
+
+    The bindings were written once, at deploy, from whatever the key held then — so
+    filling the key in afterwards (the normal order, since the brokers are often not
+    known yet) changed nothing, and the only way to grant ``roles/run.invoker`` was to
+    destroy the service, which changes its URL and invalidates every managed-system
+    address registered against it. This applies in place: same service, same URL, same
+    audience.
+
+    Async when there is anything to do — enqueues a ``cloudfn_update`` job. A no-op
+    returns 202 with ``changed: false`` and no job, because the deployed bindings
+    already match.
+    """
+    _require_enabled()
+    _require_function_write(current_user)
+    region = region_catalog.normalize("gcp", payload.region or "")
+    try:
+        result = clouddb_dbops_service.sync_invokers(
+            db, region=region, created_by=current_user.username)
+    except cloud_function_service.CloudFunctionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not result.get("ok"):
+        # No service to bind anything on. 409 rather than 404: the region is a real
+        # one, it simply has nothing deployed — deploy it first.
+        raise HTTPException(status_code=409, detail=result.get("reason", ""))
+    return {"ok": True, "region": region, "changed": bool(result.get("changed")),
+            "invokers": result.get("invokers", 0),
+            "job_id": result.get("job_id")}
+
+
 @router.get("/dbops/status")
 async def dbops_status(
     db: Session = Depends(get_db),
@@ -1172,6 +1209,12 @@ async def dbops_status(
                                     "clouddb_ps_gcp_dbops_audience") else "none")),
             "deployable": clouddb_dbops_service.deploy_ineligible_reason(db, region) is None,
             "reason": clouddb_dbops_service.deploy_ineligible_reason(db, region),
+            # What the service's IAM policy actually holds, and whether config
+            # disagrees. Two facts, not one: the key is what an operator typed, the
+            # other is what was applied, and the whole reason this endpoint reports
+            # both is that they were silently allowed to differ forever.
+            "deployed_invokers": len(clouddb_dbops_service.deployed_invokers(db, region)),
+            "invokers_drifted": clouddb_dbops_service.invokers_drifted(db, region),
         })
     return {"ok": True, "invokers": len(clouddb_dbops_service.invoker_members()),
             "regions": out}
