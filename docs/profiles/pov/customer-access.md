@@ -127,6 +127,12 @@ shows you a username and password **once**, which you hand over — and the acco
 require a password change at first sign-in, so the value you sent stops working as soon as
 they have used it. The email you type is a label, and what PRA shows on the account.
 
+The email is **required** — PRA's vendor user has four mandatory fields and the address is
+one of them, alongside a display name (left blank, the dashboard uses the address). If the
+appliance refuses a login, the red banner now carries PRA's own field-level reason after
+*Validation Failed* — "the email address has already been taken", a password-policy
+complaint, and so on — which is the thing to act on.
+
 They sign in to **PRA itself**, not to this dashboard, and see this POV's jump items only.
 
 If you have built a self-registration portal in `/login`, paste its URL on the PRA tenant
