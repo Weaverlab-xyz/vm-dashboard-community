@@ -5,10 +5,12 @@
 One page per external system. Each covers what the integration does, what it needs from
 you before it will work, the config keys it reads, and how it fails.
 
-Two groups worth telling apart. The **BeyondTrust** pages are the four layers the
+Three groups worth telling apart. The **BeyondTrust** pages are the four layers the
 dashboard puts on top of anything it provisions — a route in, a vaulted credential, a
-just-in-time grant, and the endpoint agent. The **platform** pages are places
-infrastructure lives, or things that run work on it.
+just-in-time grant, and the endpoint agent. The **Workload Lab** pages are one per tab of
+[`/workload-lab`](../workload-lab.md), the four mechanisms for giving a credential to
+something that is not a person. The **platform** pages are places infrastructure lives, or
+things that run work on it.
 
 ## BeyondTrust
 
@@ -23,6 +25,19 @@ infrastructure lives, or things that run work on it.
 | [Entitle dashboard permissions](entitle-dashboard-permissions.md) | you want dashboard access without standing admins, or you need to tell the two mechanisms apart. |
 | [Workload Credentials](workload-credentials.md) | a workload needs a credential minted at run time rather than one stored for it. |
 | [EPM for Linux](epml.md) | you are rolling Endpoint Privilege Management for Linux onto provisioned hosts. |
+
+## Workload Lab
+
+One page per tab of the [Workload Lab](../workload-lab.md) — read the hub first if you
+have not chosen a mechanism yet, because which of these you can actually use turns on what
+the consumer is and who runs the thing it is reaching.
+
+| Page | Read this when |
+|---|---|
+| [Certificates](certificates.md) | you are onboarding certificate identities, and need a private CA to issue them from. |
+| [SPIFFE and SPIRE](spiffe.md) | you are governing non-human identities in a SPIRE trust domain, and need a lab to prove it against. |
+| [Workload access to Kubernetes](workload-kubernetes.md) | a machine OUTSIDE a cluster needs to reach its API server, and the cluster is managed (EKS/AKS/GKE) so the SPIFFE path is unavailable. |
+| [Short-lived cloud credentials](workload-cloud.md) | a workload needs AWS or Azure access and today it has a long-lived access key in a CI secret store. |
 
 ## On-premises hypervisors
 

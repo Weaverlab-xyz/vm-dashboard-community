@@ -29,7 +29,7 @@
     Password Safe <strong>SPIFFE SVID</strong> plugin has workload identities to govern.
     The lab is four Ansible playbooks against an ordinary Linux host &mdash; there is no
     Terraform module, because a SPIRE server is a Go binary and a sqlite file.
-    <a href="/docs/spiffe" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>
+    <a href="/docs/integrations/spiffe" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>
     &middot;
     <a href="/docs/runbooks/spire-lab-standup" target="_blank" class="text-blue-600 hover:underline">Standup runbook</a>.
   </p>
@@ -347,7 +347,7 @@
        The un-downgraded path: a workload attests itself and reaches a real relying party
        with a token stored nowhere. Deliberately a panel on the lab's own row rather than a
        tab of its own -- a tab explaining a by-hand procedure is what this page exists to
-       replace. docs/spiffe.md#reaching-a-kubernetes-cluster-with-a-jwt-svid. -->
+       replace. docs/integrations/spiffe.md#reaching-a-kubernetes-cluster-with-a-jwt-svid. -->
   <div x-show="k8sOpen" x-cloak
        class="fixed inset-0 bg-black/40 flex items-start justify-center z-40 overflow-y-auto p-4"
        @click.self="k8sOpen = false">
@@ -364,7 +364,7 @@
         with a token that lives
         <span x-text="k8sLab?.k8s_jwt_svid_ttl || 300"></span>s and is written to no disk
         and no vault.
-        <a href="/docs/spiffe#reaching-a-kubernetes-cluster-with-a-jwt-svid" target="_blank"
+        <a href="/docs/integrations/spiffe#reaching-a-kubernetes-cluster-with-a-jwt-svid" target="_blank"
            class="text-blue-600 hover:underline">What this proves</a>.
       </p>
 

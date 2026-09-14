@@ -1928,7 +1928,7 @@ class WorkloadK8sToken(Base):
     credential with no expiry and no audit trail, which is the artefact this feature
     exists to remove. The consumer assembles one at run time from what it retrieved.
 
-    **The timer is not about cost.** It is the same argument ``docs/spiffe.md`` makes for
+    **The timer is not about cost.** It is the same argument ``docs/integrations/spiffe.md`` makes for
     the SPIRE lab: a forgotten workload token keeps authenticating, and this row is the
     only page it appears on.
     """
