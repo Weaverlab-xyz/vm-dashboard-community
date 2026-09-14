@@ -59,6 +59,8 @@ JOB_LOGS = []
 CERT_PATH = "/opt/bt/public_ssm.pem"
 FAIL_ON_REGISTER = []      # names that register_managed_system should blow up on
 FAIL_ON_DEREGISTER = []    # tf_state values that deregister should blow up on
+DELETED_KEYS = []          # GCP service-account keys teardown removed
+FAIL_ON_KEY_DELETE = []    # key resource names that the IAM delete should refuse
 
 
 class _Settings:
@@ -143,6 +145,19 @@ async def _fake_deregister(state):
         raise RuntimeError(f"boom on {state}")
 
 
+async def _fake_delete_sa_key(resource_name):
+    CALLS.append(("delete_sa_key", resource_name))
+    if resource_name in FAIL_ON_KEY_DELETE:
+        return False
+    DELETED_KEYS.append(resource_name)
+    return True
+
+
+async def _fake_delete_regional_secret(project, region, resource_id):
+    CALLS.append(("delete_regional_secret", project, region, resource_id))
+    return True
+
+
 def _install_stubs():
     confmod = types.ModuleType("web_dashboard.config")
     confmod.settings = _Settings()
@@ -181,6 +196,13 @@ def _install_stubs():
     js.set_completed = lambda *a, **k: None
     js.create_job = lambda *a, **k: None
     sys.modules["web_dashboard.services.job_service"] = js
+
+    # Reached only when a row recorded a minted service-account key (GCP SA: mode) or a
+    # staged regional secret — both are teardown steps with something to delete in GCP.
+    gcp = types.ModuleType("web_dashboard.services.gcp_service")
+    gcp.delete_service_account_key = _fake_delete_sa_key
+    gcp.delete_regional_secret = _fake_delete_regional_secret
+    sys.modules["web_dashboard.services.gcp_service"] = gcp
 
     for name in ("terraform", "terraform_provider_env"):
         sys.modules[f"web_dashboard.services.{name}"] = types.ModuleType(
@@ -239,6 +261,8 @@ def _reset(**conf):
     JOB_LOGS.clear()
     FAIL_ON_REGISTER.clear()
     FAIL_ON_DEREGISTER.clear()
+    DELETED_KEYS.clear()
+    FAIL_ON_KEY_DELETE.clear()
     CONF.update(conf)
 
 
@@ -667,6 +691,112 @@ def test_nothing_recorded_means_nothing_attempted():
     assert _teardown(row, job) == []
     assert CALLS == []
     assert svc._has_ps_onboarding(job.metadata_dict) is False
+
+
+# ── the minted service-account key (GCP SA: identity mode) ────────────────────
+#
+# SA: mode embeds a service-account key in the functional account's password, because a
+# Resource Broker with no GCP identity of its own has nothing else to authenticate with.
+# The dashboard mints that key per database, so teardown owns deleting it: GCP hands back
+# a key's private half exactly once, and nothing else in the system is tracking it.
+
+_KEY_NAME = ("projects/acme/serviceAccounts/bt-rotator@acme.iam.gserviceaccount.com"
+             "/keys/deadbeef01")
+
+
+def test_the_minted_key_is_deleted_and_its_name_cleared():
+    _reset()
+    row, job = _row(ps_managed_system_id="1"), _FakeJobRow(
+        dict(_full_meta(), ps_db_fa_sa_key_names=[_KEY_NAME]))
+    assert _teardown(row, job) == []
+    assert DELETED_KEYS == [_KEY_NAME], CALLS
+    assert not svc._recorded_sa_key_names(job.metadata_dict)
+
+
+def test_the_key_outlives_the_account_it_authenticates():
+    """Order, not tidiness. The key IS the functional account's credential, so deleting
+    it first would break every rotation in the window before the account goes — and if
+    the managed system's deregister fails, that window never closes."""
+    _reset()
+    FAIL_ON_DEREGISTER.append("db-state")
+    row, job = _row(ps_managed_system_id="1"), _FakeJobRow(
+        dict(_full_meta(), ps_db_fa_sa_key_names=[_KEY_NAME]))
+    errors = _teardown(row, job)
+    assert errors and "DB managed system" in errors[0]
+    assert DELETED_KEYS == [], CALLS
+    assert svc._recorded_sa_key_names(job.metadata_dict) == [_KEY_NAME]
+
+
+def test_a_key_minted_before_anything_else_existed_is_still_deleted():
+    """The part-way failure. The key is recorded the instant GCP mints it, which is
+    BEFORE the functional account is created — so an onboarding that died in between
+    leaves this as the only artifact, and it is a working credential."""
+    _reset()
+    row, job = _row(), _FakeJobRow({"ps_db_fa_sa_key_names": [_KEY_NAME],
+                                    "name": "clouddb-abc"})
+    assert _teardown(row, job) == []
+    assert DELETED_KEYS == [_KEY_NAME], CALLS
+    assert not svc._recorded_sa_key_names(job.metadata_dict)
+    assert job.metadata_dict["name"] == "clouddb-abc"
+
+
+def test_a_key_that_would_not_delete_keeps_its_name_and_is_reported():
+    _reset()
+    FAIL_ON_KEY_DELETE.append(_KEY_NAME)
+    row, job = _row(ps_managed_system_id="1"), _FakeJobRow(
+        dict(_full_meta(), ps_db_fa_sa_key_names=[_KEY_NAME]))
+    errors = _teardown(row, job)
+    assert errors and _KEY_NAME in errors[0], errors
+    assert svc._recorded_sa_key_names(job.metadata_dict) == [_KEY_NAME], \
+        "a key that is still live must keep the handle that can remove it"
+
+
+_KEY_NAME_2 = _KEY_NAME.replace("deadbeef01", "deadbeef02")
+
+
+def test_every_key_a_retry_minted_is_deleted():
+    """Why the record is a LIST. Onboarding that fails at the managed-system create
+    leaves a real functional account behind; the retry mints a fresh key and then its
+    create resolves that DUPLICATE and returns it **without updating the password** -- so
+    the account goes on using the FIRST key. Recording one name would strand whichever
+    of the two is live."""
+    _reset()
+    row, job = _row(ps_managed_system_id="1"), _FakeJobRow(
+        dict(_full_meta(), ps_db_fa_sa_key_names=[_KEY_NAME, _KEY_NAME_2]))
+    assert _teardown(row, job) == []
+    assert DELETED_KEYS == [_KEY_NAME, _KEY_NAME_2], CALLS
+    assert not svc._recorded_sa_key_names(job.metadata_dict)
+
+
+def test_a_partly_failed_sweep_narrows_the_record_to_what_is_still_live():
+    """The list an operator is told to clean up by hand has to be exactly the list that
+    needs it -- and a retry must not re-attempt deletes that already worked."""
+    _reset()
+    FAIL_ON_KEY_DELETE.append(_KEY_NAME_2)
+    row, job = _row(ps_managed_system_id="1"), _FakeJobRow(
+        dict(_full_meta(), ps_db_fa_sa_key_names=[_KEY_NAME, _KEY_NAME_2]))
+    errors = _teardown(row, job)
+    assert len(errors) == 1 and _KEY_NAME_2 in errors[0], errors
+    assert svc._recorded_sa_key_names(job.metadata_dict) == [_KEY_NAME_2]
+
+
+def test_a_single_name_from_an_older_row_is_still_read():
+    """Job metadata outlives a release. A row written when this recorded one name must
+    still hand teardown something to delete -- the value is a live credential."""
+    assert svc._recorded_sa_key_names({"ps_db_fa_sa_key_names": _KEY_NAME}) == [_KEY_NAME]
+    assert svc._recorded_sa_key_names({"ps_db_fa_sa_key_names": ""}) == []
+    assert svc._recorded_sa_key_names({}) == []
+
+
+def test_a_referenced_account_never_has_a_key_to_delete():
+    """reference mode composes the whole credential operator-side, so the dashboard
+    minted nothing and must delete nothing."""
+    _reset()
+    meta = dict(_full_meta(), ps_db_functional_account_ref=4242)
+    meta.pop("ps_db_functional_account_id")
+    row, job = _row(ps_managed_system_id="1"), _FakeJobRow(meta)
+    assert _teardown(row, job) == []
+    assert DELETED_KEYS == [], CALLS
 
 
 # ── the page ──────────────────────────────────────────────────────────────────

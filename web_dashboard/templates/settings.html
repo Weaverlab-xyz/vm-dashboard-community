@@ -1943,12 +1943,16 @@
                     </p>
                   </div>
                   <div x-show="(panelCfg.clouddb_ps_gcp_auth_mode || 'ADC') === 'SA'">
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Rotator Service-Account Key</label>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Rotator Service-Account Key <span class="text-gray-400 font-normal">(optional)</span></label>
                     <textarea x-model="panelCfg.clouddb_ps_gcp_sa_key" rows="3"
                               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                              placeholder="the JSON key document, or its base64"></textarea>
+                              placeholder="leave blank to have the dashboard mint one"></textarea>
                     <p class="text-xs text-gray-400 mt-1">
-                      Used on the <strong>create</strong> path only &mdash; a <strong>reference</strong>-mode account already carries its own key. Paste the file from
+                      Used on the <strong>create</strong> path only &mdash; a <strong>reference</strong>-mode account already carries its own key.
+                      <strong>Leave this blank</strong> and the dashboard mints a key for the Rotator Service Account below, per database, and deletes it when the database is
+                      deregistered or decommissioned. Set it to override that: for an identity the dashboard holds no
+                      <code class="bg-gray-100 px-1 rounded">roles/iam.serviceAccountKeyAdmin</code> on, or a project under
+                      <code class="bg-gray-100 px-1 rounded">constraints/iam.disableServiceAccountKeyCreation</code>. Paste the file from
                       <code class="bg-gray-100 px-1 rounded">gcloud iam service-accounts keys create</code> or its base64; either way it reaches Password Safe base64-encoded,
                       since raw JSON is read as the whole credential and would drop the database password. The composite runs to roughly 3.2&nbsp;KB, which stores fine
                       &mdash; but <strong>leave that account&#39;s own password management off</strong>, because the plugin refuses a write-back over 1000 characters.

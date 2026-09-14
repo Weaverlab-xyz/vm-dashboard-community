@@ -5213,6 +5213,101 @@ async def delete_regional_secret(project: str, region: str, resource_id: str) ->
     return await _to_thread(_delete_regional_secret_sync, project, region, resource_id)
 
 
+# ── Service-account keys, for Password Safe's SA: identity mode ───────────────
+#
+# The "GCP Cloud SQL {engine}" plugin's SA: mode carries a base64 service-account key in
+# the FIRST segment of the functional account's password — the only mode open to a
+# Resource Broker with no GCP identity of its own, and therefore the only one Cloud SQL
+# SQL Server can use (see cloud_database_service._gcp_sa_key_segment).
+#
+# `keys.create` is the only way to obtain that material: a key's private half is returned
+# exactly ONCE, in the create response, and no API reads it back afterwards. That is also
+# why the delete below is not optional — an un-deleted key is a live credential that
+# nothing else in the system is tracking.
+#
+# Plain REST on the authed session, like the regional-secret pair above:
+# google-api-python-client is not a dependency here and this is two calls.
+
+_IAM_V1 = "https://iam.googleapis.com/v1"
+
+
+def _mint_service_account_key_sync(service_account_email: str) -> tuple:
+    """Create a JSON key for ``service_account_email`` → ``(resource_name, material)``.
+
+    ``material`` is ``privateKeyData`` verbatim, which the IAM API returns ALREADY
+    base64-encoded — and base64-of-the-JSON-document is exactly the encoding the
+    plugin's ``GcpKeyReader`` expects, so the key document is never decoded, never
+    written to disk and never held in clear on this path. The caller still runs it
+    through the same validator an operator-pasted key goes through; sharing one
+    validator is what keeps the two sources from drifting.
+
+    ``resource_name`` is ``projects/<p>/serviceAccounts/<email>/keys/<id>`` — the
+    handle the delete takes, and the only part of this that is safe to log or persist.
+
+    ``projects/-`` rather than a project id, deliberately: the rotator service account
+    may live in a different project from the Cloud SQL instance being onboarded (a
+    shared-identity project is a normal layout), and ``-`` resolves the account by email
+    wherever it is. Synchronous; callers wrap in ``_to_thread``.
+    """
+    email = (service_account_email or "").strip()
+    if not email:
+        raise GCPError("no service account was named to mint a key for")
+    s = _authed_session()
+    r = s.post(f"{_IAM_V1}/projects/-/serviceAccounts/{email}/keys",
+               json={"privateKeyType": "TYPE_GOOGLE_CREDENTIALS_FILE",
+                     "keyAlgorithm": "KEY_ALG_RSA_2048"})
+    if not r.ok:
+        # 403 here is usually one of two things, and the operator cannot tell them apart
+        # from the raw body: no roles/iam.serviceAccountKeyAdmin on the account, or the
+        # org policy constraints/iam.disableServiceAccountKeyCreation. Name both.
+        raise GCPError(
+            f"could not create a service-account key for {email} (HTTP {r.status_code}): "
+            f"{(r.text or '')[:300]}. The dashboard's own credentials need "
+            f"roles/iam.serviceAccountKeyAdmin on that account, and the project must not "
+            f"be under constraints/iam.disableServiceAccountKeyCreation")
+    body = r.json() if (r.text or "").strip() else {}
+    resource_name = str(body.get("name") or "")
+    material = str(body.get("privateKeyData") or "")
+    if not resource_name or not material:
+        # No body here: this is the one response that CARRIED the credential.
+        raise GCPError(
+            f"the service-account key create for {email} returned HTTP {r.status_code} "
+            f"with no name/privateKeyData, so no key can be confirmed to exist — check "
+            f"for one on that account by hand before retrying")
+    logger.info("gcp: minted service-account key %s for %s", resource_name, email)
+    return resource_name, material
+
+
+async def mint_service_account_key(service_account_email: str) -> tuple:
+    """Async wrapper for :func:`_mint_service_account_key_sync`."""
+    return await _to_thread(_mint_service_account_key_sync, service_account_email)
+
+
+def _delete_service_account_key_sync(resource_name: str) -> bool:
+    """Best-effort delete of a service-account key by resource name. Returns whether it
+    is gone.
+
+    Never raises: this only ever runs in a cleanup path, and a failure here must not
+    mask the outcome of the teardown it is part of. It IS logged loudly, because what is
+    left behind is a working credential for the account Password Safe rotates with."""
+    try:
+        s = _authed_session()
+        r = s.delete(f"{_IAM_V1}/{resource_name}")
+        if r.ok or r.status_code == 404:
+            return True
+        logger.warning("gcp: service-account key %s not deleted (HTTP %s) — it is a live "
+                       "credential, remove it by hand", resource_name, r.status_code)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gcp: service-account key %s not deleted (%s) — it is a live "
+                       "credential, remove it by hand", resource_name, exc)
+    return False
+
+
+async def delete_service_account_key(resource_name: str) -> bool:
+    """Async wrapper for :func:`_delete_service_account_key_sync`."""
+    return await _to_thread(_delete_service_account_key_sync, resource_name)
+
+
 # ── Inbound access to an instance the dashboard already launched ──────────────
 # `ensure_rancher_firewall` / `ensure_portainer_firewall` above each hard-code their
 # feature's ports and expect the LAUNCHER to have put the matching network tag on a new
