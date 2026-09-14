@@ -752,12 +752,16 @@
               password is shown once and they must change it on first sign-in.
             </p>
             <div class="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <input type="email" x-model="vendorInvite.email" placeholder="their email"
+              <input type="email" x-model="vendorInvite.email" placeholder="their email (required)"
                      class="sm:col-span-2 border border-gray-300 rounded-lg px-3 py-2 text-sm">
-              <input type="text" x-model="vendorInvite.full_name" placeholder="name (optional)"
+              <input type="text" x-model="vendorInvite.full_name" placeholder="name (we use the email)"
                      class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
             </div>
-            <button @click="mintVendorUser()" :disabled="vendorBusy"
+            <p class="mt-2 text-xs text-gray-400">
+              PRA requires an address on a vendor account, so this one is not optional. Nothing
+              is emailed to it — it is how the vendor is identified in the appliance.
+            </p>
+            <button @click="mintVendorUser()" :disabled="vendorBusy || !vendorInvite.email.trim()"
                     class="mt-3 px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
                     x-text="vendorBusy ? 'Creating…' : 'New vendor login'"></button>
 
@@ -1510,6 +1514,12 @@
       },
 
       async mintVendorUser() {
+        // PRA's VendorUser schema makes email_address required; without this the appliance
+        // answers "Validation Failed" and names no field.
+        if (!this.vendorInvite.email.trim()) {
+          this.error = "PRA needs the vendor's email address on the account.";
+          return;
+        }
         this.vendorBusy = true;
         this.vendorMinted = null;
         try {

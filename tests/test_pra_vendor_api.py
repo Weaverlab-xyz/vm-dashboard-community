@@ -279,13 +279,66 @@ def test_a_created_vendor_user_id_is_recovered_from_the_list():
     assert sent["email_address"] == "a@b.c"
 
 
+def test_every_required_vendor_user_field_is_sent():
+    """`VendorUser` requires username, password, email_address AND public_display_name,
+    all four with minLength 1. The last two read like optional labels and are not: a
+    create that drops one is a 422 whose entire text is "Validation Failed"."""
+    handler, calls = _recorder([
+        httpx.Response(200),
+        httpx.Response(200, json=[{"id": 4, "username": "povvnd_acme_cccc"}])])
+    real = _serve(handler)
+    try:
+        _run(v.create_vendor_user(_Tenant(), "9", username="povvnd_acme_cccc",
+                                  password="pw", email="vendor@acme.example",
+                                  display_name="Dana"))
+    finally:
+        _restore(real)
+    sent = _body(calls[0])
+    for field in ("username", "password", "email_address", "public_display_name"):
+        assert sent.get(field), f"{field} missing from the create"
+    assert sent["public_display_name"] == "Dana"
+
+
+def test_a_blank_display_name_falls_back_to_the_address():
+    """The form calls the name optional, and PRA does not. Falling back is what keeps
+    those two true at once — an empty string would fail minLength anyway."""
+    handler, calls = _recorder([
+        httpx.Response(200),
+        httpx.Response(200, json=[{"id": 4, "username": "povvnd_acme_dddd"}])])
+    real = _serve(handler)
+    try:
+        _run(v.create_vendor_user(_Tenant(), "9", username="povvnd_acme_dddd",
+                                  password="pw", email="vendor@acme.example",
+                                  display_name="   "))
+    finally:
+        _restore(real)
+    assert _body(calls[0])["public_display_name"] == "vendor@acme.example"
+
+
+def test_a_vendor_user_without_an_address_is_refused_before_the_request():
+    """PRA cannot say anything useful about this, so it never gets asked: its answer is
+    "Validation Failed" with no field in it."""
+    handler, calls = _recorder([httpx.Response(200)])
+    real = _serve(handler)
+    try:
+        _run(v.create_vendor_user(_Tenant(), "9", username="povvnd_x", password="pw",
+                                  email="  "))
+        raise AssertionError("a vendor user with no address was sent")
+    except PRATenantError as exc:
+        assert "email" in str(exc).lower()
+    finally:
+        _restore(real)
+    assert not calls, "the appliance was called anyway"
+
+
 def test_a_created_user_that_does_not_appear_is_reported_rather_than_recorded_blank():
     """A row that cannot be deleted later is worse than a failed create — the account
     exists either way."""
     handler, _calls = _recorder([httpx.Response(200), httpx.Response(200, json=[])])
     real = _serve(handler)
     try:
-        _run(v.create_vendor_user(_Tenant(), "9", username="povvnd_x", password="pw"))
+        _run(v.create_vendor_user(_Tenant(), "9", username="povvnd_x", password="pw",
+                                  email="a@b.c"))
         raise AssertionError("a missing user was accepted")
     except PRATenantError as exc:
         assert "does not list it" in str(exc)
@@ -333,6 +386,42 @@ def test_a_404_on_a_vendor_path_names_the_appliance_version():
         raise AssertionError("a 404 on /vendor was accepted")
     except PRATenantError as exc:
         assert "newer appliance" in str(exc) and "vendor API" in str(exc)
+    finally:
+        _restore(real)
+
+
+def test_a_422_shows_the_field_bag_and_not_just_validation_failed():
+    """The spec's 422 is an ErrorMessageResponse AND an ErrorBagResponse beside it, and
+    the message half is the same four words on every validation failure there is. Stopping
+    at it hands an SE a banner with no field in it — which is exactly how a live
+    "PRA refused POST /vendor/6/user (422): Validation Failed" got reported."""
+    handler, _calls = _recorder([httpx.Response(422, json={
+        "message": "Validation Failed",
+        "errors": {"email_address": ["The email address has already been taken."],
+                   "password": ["The password must contain at least one symbol."]}})])
+    real = _serve(handler)
+    try:
+        _run(v.create_vendor_user(_Tenant(), "6", username="povvnd_x", password="pw",
+                                  email="a@b.c"))
+        raise AssertionError("a 422 was accepted")
+    except PRATenantError as exc:
+        said = str(exc)
+        assert "Validation Failed" in said
+        assert "email_address" in said and "already been taken" in said
+        assert "password" in said and "at least one symbol" in said
+    finally:
+        _restore(real)
+
+
+def test_a_422_with_no_bag_still_reads_as_a_sentence():
+    handler, _calls = _recorder([httpx.Response(422, json={"message": "Validation Failed"})])
+    real = _serve(handler)
+    try:
+        _run(v.create_vendor_user(_Tenant(), "6", username="povvnd_x", password="pw",
+                                  email="a@b.c"))
+        raise AssertionError("a 422 was accepted")
+    except PRATenantError as exc:
+        assert str(exc).rstrip().endswith("Validation Failed")
     finally:
         _restore(real)
 

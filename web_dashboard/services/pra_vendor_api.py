@@ -18,7 +18,7 @@ ordered chain across two toolchains is how an orphan happens, so all four are RE
 ``openapi/bt-pra-configuration.openapi.yaml`` in BeyondTrust's ``terraform-provider-sra``
 repository, which is the same document an appliance serves at
 ``/api/config/v1/openapi.yaml``. Each path constant below carries the schema name so the
-next person can find it. Three things in that spec shape this module and are not guessable
+next person can find it. Four things in that spec shape this module and are not guessable
 from the product UI:
 
 * ``POST /vendor/{id}/user`` answers **200 with no body**, so a created user's id has to be
@@ -30,6 +30,11 @@ from the product UI:
 * The **Email Domain Allow List and the self-registration portal are not in the API**.
   They are ``/login`` settings. Nothing here can create one, and a caller that wants the
   portal link reads it off the tenant as a string somebody pasted.
+* ``VendorUser`` **requires four fields**: ``username``, ``password``, ``email_address``
+  *and* ``public_display_name``, all with ``minLength: 1``. The last two read as optional
+  labels and are not — dropping either when the SE left a box empty is a 422 whose whole
+  text is "Validation Failed", because the ``errors`` bag is the only part that names a
+  field. :func:`_detail` renders that bag, and it is the reason to.
 
 **No retries**, matching every other PRA path in this codebase. And no caught exception's
 text ever reaches a user-facing message — see ``bt_tenant_verify._http_reason`` for why.
@@ -59,6 +64,8 @@ _VENDOR_PATH = "/api/config/v1/vendor"                  # Vendor / VendorUser
 NAME_MAX = 255            # JumpGroup.name, GroupPolicy.name, Vendor.name
 CODE_NAME_MAX = 64        # CodeName, pattern ^[a-zA-Z0-9_\-]+$
 USERNAME_MAX = 64         # VendorUser.username
+DISPLAY_NAME_MAX = 64     # VendorUser.public_display_name, minLength 1
+EMAIL_MAX = 256           # VendorUser.email_address, minLength 1
 EXPIRATION_MIN = 1        # Vendor.account_expiration
 EXPIRATION_MAX = 365
 
@@ -144,20 +151,45 @@ def _raise_for_status(tenant, method: str, path: str, resp: httpx.Response) -> N
 
 
 def _detail(resp: httpx.Response) -> str:
-    """The appliance's own explanation, trimmed. ``ErrorMessageResponse.message`` when the
-    body is shaped, the first 300 characters otherwise."""
+    """The appliance's own explanation, trimmed.
+
+    A 422 body is ``ErrorMessageResponse`` **and** an ``ErrorBagResponse`` beside it:
+    ``{"message": "Validation Failed", "errors": {"<field>": ["<why>"]}}``. The message is
+    the same four words on every single validation failure the appliance can have, so
+    stopping at it — as this did — hands an SE a sentence with no field in it and no way to
+    tell a password-policy refusal from a duplicate email. ``errors`` is the half worth
+    reading, so both are rendered and the fields come last, where the eye lands.
+    """
     try:
         body = resp.json()
     except ValueError:
         return f": {resp.text[:300]}" if resp.text else ""
     if isinstance(body, dict):
-        msg = body.get("message") or body.get("error") or ""
-        if msg:
-            return f": {msg}"
-        errors = body.get("errors")
-        if errors:
-            return f": {str(errors)[:300]}"
+        parts = [str(body.get("message") or body.get("error") or "").strip()]
+        parts.append(_fields(body.get("errors")))
+        said = " — ".join(p for p in parts if p)
+        if said:
+            return f": {said[:400]}"
     return f": {str(body)[:300]}" if body else ""
+
+
+def _fields(errors: Any) -> str:
+    """An ``ErrorBagResponse`` as one line: ``field: why; field: why``.
+
+    The keys are the appliance's own field names — ``email_address``, ``password`` — which
+    is what makes the difference between "Validation Failed" and knowing whether to change
+    the address, the site password policy, or the POV's name.
+    """
+    if isinstance(errors, dict):
+        out = []
+        for field, why in errors.items():
+            if isinstance(why, (list, tuple)):
+                why = "; ".join(str(w) for w in why)
+            out.append(f"{field}: {why}")
+        return " | ".join(out)
+    if isinstance(errors, (list, tuple)):
+        return "; ".join(str(e) for e in errors)
+    return str(errors).strip() if errors else ""
 
 
 async def _paged(tenant, path: str, *, params: dict | None = None) -> list[dict]:
@@ -368,18 +400,29 @@ async def create_vendor_user(tenant, vendor_id: str, *, username: str, password:
     cannot be deleted later is worse than a failed create, because the account exists
     either way.
     """
+    address = (email or "").strip()[:EMAIL_MAX]
+    if not address:
+        # Refused here rather than on the wire: PRA answers a missing required field with
+        # "Validation Failed", and an SE reading that has no way to know the form called
+        # the field optional.
+        raise PRATenantError(
+            "PRA requires an email address on a vendor user — its schema makes "
+            "email_address and public_display_name mandatory, the same as the username. "
+            "Enter the vendor's address and create the login again.")
     payload: dict[str, Any] = {
         "username": username[:USERNAME_MAX],
         "password": password,
+        # Both are REQUIRED by VendorUser with minLength 1, so neither may be dropped when
+        # it is empty. A blank display name falls back to the address rather than failing:
+        # it is a label PRA shows, and the address is the one the SE already typed.
+        "email_address": address,
+        "public_display_name": ((display_name or "").strip()
+                                or address)[:DISPLAY_NAME_MAX],
         "enabled": True,
         # PRA has no "send an invite" call; the dashboard hands over the password, so the
         # one thing it can insist on is that the vendor replaces it immediately.
         "password_reset_next_login": True,
     }
-    if email:
-        payload["email_address"] = email[:256]
-    if display_name:
-        payload["public_display_name"] = display_name[:64]
     await _request(tenant, "POST", f"{_VENDOR_PATH}/{vendor_id}/user", json=payload)
 
     for row in await list_vendor_users(tenant, vendor_id):
