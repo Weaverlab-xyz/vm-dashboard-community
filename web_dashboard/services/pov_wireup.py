@@ -178,8 +178,10 @@ async def ensure_jump_group(db: Session, env: PovEnvironment) -> str:
                                PovEnvironmentVM.pra_jump_id.isnot(None)).count())
     if already_wired and not (env.pra_jump_group_name or "").strip():
         return ("This POV's jump items are in the PRA tenant's appliance-wide Jump Group. "
-                "They are left there — a vendor group cannot be scoped to it, so tear the "
-                "wiring down and wire up again if you need per-POV vendor access.")
+                "They are left there — moving them means destroying and rebuilding every "
+                "one, which is not something a re-run of Wire up should do quietly. Press "
+                "Move to its own Jump Group on the Access tab if you need per-POV vendor "
+                "access.")
 
     tenant = pov_gateway.pra_tenant(db, env)
     wanted = pov_vendor_access.JUMP_GROUP_FMT.format(name=env.name)
@@ -932,7 +934,187 @@ async def run_env_wireup(job_id: str, meta: dict) -> None:
         db.close()
 
 
+async def run_env_jump_group_move(job_id: str, meta: dict) -> None:
+    """Move a POV's jump items out of the tenant's shared Jump Group into its own.
+
+    **The remedy ``pov_vendor_access.blocker`` names**, and it exists because pressing
+    Wire up again cannot be that remedy: :func:`ensure_jump_group` deliberately leaves an
+    already-wired POV's items where they are, since moving them means destroying and
+    rebuilding every one. That is this job, asked for explicitly — not a side effect of a
+    button whose job is to fill gaps.
+
+    **Destroy, then create the group, then rebuild.** In that order, because a jump item
+    names its Jump Group at creation and there is no update path here: each item is its
+    own Terraform workspace, so re-homing one means a new item in the new group.
+
+    Only the jump items are touched. This POV's managed systems, Entitle integrations,
+    accessors, Gateway and VMs are all left exactly as they are — the only thing that
+    changes is which PRA Jump Group its items live in, plus the Vault account a Windows
+    guest keeps in the same workspace, which is rebuilt with it.
+
+    **A partial destroy stops the run before the group is created.** Items split across
+    two groups would be the one state worse than the one this fixes: a vendor scoped to
+    the new group would reach some of the POV, and nothing on the screen would say which
+    part. So that failure leaves everything in the tenant's group and says so.
+    """
+    from ..database import SessionLocal
+    from . import pov_env_service
+
+    db = SessionLocal()
+    try:
+        env = pov_env_service.get(db, meta.get("environment_id", ""))
+        if env is None:
+            job_service.set_failed(db, job_id, "the POV environment row is gone")
+            return
+        if (env.pra_jump_group_name or "").strip():
+            # Not an error worth a stack trace, and not a success either: something has to
+            # explain why a job queued to move items moved none.
+            job_service.set_failed(
+                db, job_id,
+                f"this POV's jump items are already in its own Jump Group "
+                f"{env.pra_jump_group_name}, so there is nothing to move.")
+            return
+
+        try:
+            gateway = gateway_name(env)
+            shared = tenant_override(db, env)   # still answers the tenant's shared group
+        except (WireupError, pov_gateway.GatewayInstallError,
+                bt_tenant_service.BTTenantError, PRATenantError) as exc:
+            job_service.set_failed(db, job_id, str(exc))
+            return
+
+        rows = (db.query(PovEnvironmentVM)
+                  .filter(PovEnvironmentVM.environment_id == env.id)
+                  .order_by(PovEnvironmentVM.name).all())
+        wired = [r for r in rows if r.pra_jump_tf_state]
+        if not wired:
+            job_service.set_failed(
+                db, job_id,
+                "this POV has no jump items to move. Press Wire up instead — on a POV "
+                "with nothing wired yet it creates the Jump Group itself.")
+            return
+
+        job_service.update_progress(db, job_id, 5, "Removing the jump items…")
+        job_service.append_job_log(
+            db, job_id,
+            f"Removing {len(wired)} jump item(s) from Jump Group "
+            f"{shared['jump_group_name']} in PRA tenant {shared['label']}, to rebuild "
+            f"them in a group belonging to this POV alone. Nothing else this POV holds is "
+            f"touched — its managed systems, Entitle integrations and Gateway stay as "
+            f"they are. A Windows guest's Vault account is destroyed and rebuilt with its "
+            f"jump item, because the two share one Terraform workspace.")
+        removed, problems = await unwire_jump_items(db, env, wired, tenant=shared)
+        if problems:
+            job_service.set_failed(
+                db, job_id,
+                f"{problems} of {len(wired)} jump item(s) could not be removed from "
+                f"{shared['jump_group_name']}, so nothing was moved — items split across "
+                f"two Jump Groups would leave a vendor reaching part of this POV with "
+                f"nothing on the screen saying which part. Press Wire up to rebuild the "
+                f"{removed} that did come out; they go back into the tenant's group, "
+                f"where the rest still are. Then fix the failures in PRA and move again.")
+            return
+        job_service.append_job_log(
+            db, job_id,
+            f"Removed {removed} jump item(s) from {shared['jump_group_name']}.")
+
+        job_service.update_progress(db, job_id, 35, "Creating this POV's Jump Group…")
+        # Every exception class, not the four refusals the preflight catches: by this
+        # point the items are GONE, and the operator has to be told how to get them back
+        # whatever went wrong. A message naming Wire up is worth more here than a stack
+        # trace's fidelity, and the trace is logged either way.
+        try:
+            note = await ensure_jump_group(db, env)
+            tenant = tenant_override(db, env)   # now answers this POV's own group
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("POV %s: creating the POV's own Jump Group failed after its "
+                           "jump items were removed", env.id, exc_info=True)
+            job_service.set_failed(
+                db, job_id,
+                f"the {removed} jump item(s) were removed and this POV's own Jump Group "
+                f"could not be created ({exc}). Press Wire up to rebuild them — they go "
+                f"back into the tenant's shared group until this is fixed.")
+            return
+        if note:
+            job_service.append_job_log(db, job_id, note)
+
+        rebuilt = failed = 0
+        for index, vm in enumerate(wired):
+            job_service.update_progress(
+                db, job_id, int(40 + 55 * index / max(len(wired), 1)),
+                f"Rebuilding {vm.name}…")
+            line = await wire_vm(db, env, vm, tenant=tenant, gateway=gateway)
+            job_service.append_job_log(db, job_id, line)
+            if "FAILED" in line or "skipped" in line:
+                failed += 1
+            else:
+                rebuilt += 1
+
+        if failed and not rebuilt:
+            job_service.set_failed(
+                db, job_id,
+                f"this POV's Jump Group {env.pra_jump_group_name} was created and no jump "
+                f"item could be rebuilt in it ({failed} failed). Open the POV to see each "
+                f"row's reason, then press Wire up.")
+            return
+        if failed:
+            job_service.append_job_log(
+                db, job_id,
+                f"{failed} item(s) could not be rebuilt — press Wire up to retry those "
+                f"rows. Until it succeeds they are in no Jump Group at all, and a vendor "
+                f"group created now would not reach them.")
+        job_service.append_job_log(
+            db, job_id,
+            f"This POV's jump items are now in {env.pra_jump_group_name}, which no other "
+            f"POV shares, so a Vendor Group can be scoped to it from the Access tab.")
+        job_service.set_completed(db, job_id, {"environment_id": env.id,
+                                               "jump_group": env.pra_jump_group_name or "",
+                                               "removed": removed,
+                                               "rebuilt": rebuilt, "failed": failed})
+    finally:
+        db.close()
+
 # ── teardown ─────────────────────────────────────────────────────────────────
+
+async def unwire_jump_items(db: Session, env: PovEnvironment, rows: list, *,
+                            tenant: dict) -> tuple[int, int]:
+    """Destroy the jump items on ``rows``. Returns ``(removed, problems)``.
+
+    Shared by :func:`teardown` and by the Jump Group move, which is the reason it is its
+    own function: the move destroys exactly these items and nothing else this POV holds —
+    its managed systems, Entitle integrations, Gateway and accessors all stay — so it
+    cannot go through ``teardown``, and a second copy of this loop is a second place for
+    the "clear the column only on success" rule to be got wrong.
+
+    Best-effort per VM: one item that will not destroy must not stop the other seven.
+    ``tenant`` is :func:`tenant_override`'s dict, and it must be the one the items were
+    created against — a destroy pointed at another appliance authenticates fine, deletes
+    nothing, and reports success.
+    """
+    removed = problems = 0
+    for vm in rows:
+        windows = (vm.os_family or "").strip().lower() == "windows"
+        try:
+            if windows:
+                await terraform_pra_service.remove_rdp_jump(vm.pra_jump_tf_state,
+                                                            tenant=tenant["env"])
+            else:
+                await terraform_pra_service.remove_jump(vm.pra_jump_tf_state,
+                                                        tenant=tenant["env"])
+        except Exception:  # noqa: BLE001
+            logger.warning("POV %s: removing the jump item for %s failed", env.id, vm.name,
+                           exc_info=True)
+            problems += 1
+            continue
+        # Cleared only on success. A row that still holds its state is a row a re-run can
+        # finish; clearing it optimistically is how an item becomes unreachable.
+        vm.pra_jump_id = None
+        vm.pra_jump_tf_state = None
+        vm.vault_account_id = None
+        removed += 1
+    db.commit()
+    return removed, problems
+
 
 async def teardown(db: Session, env: PovEnvironment) -> str:
     """Destroy every jump item this POV created. Returns a line for the job log.
@@ -967,28 +1149,7 @@ async def teardown(db: Session, env: PovEnvironment) -> str:
                      f"jump item(s) were left in place — remove them by hand.")
         return " ".join(l for l in lines if l)
 
-    removed = problems = 0
-    for vm in wired:
-        windows = (vm.os_family or "").strip().lower() == "windows"
-        try:
-            if windows:
-                await terraform_pra_service.remove_rdp_jump(vm.pra_jump_tf_state,
-                                                            tenant=tenant["env"])
-            else:
-                await terraform_pra_service.remove_jump(vm.pra_jump_tf_state,
-                                                        tenant=tenant["env"])
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("POV %s: removing the jump item for %s failed", env.id, vm.name,
-                           exc_info=True)
-            problems += 1
-            continue
-        # Cleared only on success. A row that still holds its state is a row a re-run can
-        # finish; clearing it optimistically is how an item becomes unreachable.
-        vm.pra_jump_id = None
-        vm.pra_jump_tf_state = None
-        vm.vault_account_id = None
-        removed += 1
-    db.commit()
+    removed, problems = await unwire_jump_items(db, env, wired, tenant=tenant)
 
     if problems:
         lines.append(f"Removed {removed} PRA jump item(s); {problems} could not be "

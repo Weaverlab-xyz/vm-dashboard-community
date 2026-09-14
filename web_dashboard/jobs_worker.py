@@ -60,7 +60,8 @@ HANDLED_TYPES = (
     "portainer_node_deploy", "portainer_node_teardown", "portainer_import",
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
     "pov_env_provision", "pov_env_destroy", "pov_env_power", "pov_env_broker",
-    "pov_env_wireup", "pov_template_build", "pov_env_reconcile", "pov_env_add_vms",
+    "pov_env_wireup", "pov_env_jump_group_move", "pov_template_build",
+    "pov_env_reconcile", "pov_env_add_vms",
     "clouddb_ps_register",
     "cloudfn_deploy", "cloudfn_update", "cloudfn_decommission",
     "cloudfn_entitle_register",
@@ -179,6 +180,9 @@ MEDIUM_TYPES = (
     # ot_cell_deploy's shape, and the tier that admits a local terraform process without
     # granting it light-tier concurrency.
     "pov_env_wireup",
+    # Same shape, one step longer: a destroy and a create per VM against the same
+    # appliance, for a POV moving its jump items into a Jump Group of its own.
+    "pov_env_jump_group_move",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     # Polls a CLOUD runner, but its cloud="local" branch shells out to `docker run` and
     # reads the container's output line by line. MEDIUM is the tier that admits a local
@@ -467,7 +471,8 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             from .services import portainer_import_service
             await portainer_import_service.run_import(db, job_id=job_id, meta=meta)
         elif job_type in ("pov_env_provision", "pov_env_destroy", "pov_env_power",
-                          "pov_env_broker", "pov_env_wireup", "pov_template_build",
+                          "pov_env_broker", "pov_env_wireup",
+                          "pov_env_jump_group_move", "pov_template_build",
                           "pov_env_reconcile", "pov_env_add_vms"):
             from .services import (pov_broker, pov_env_service, pov_reconcile,
                                    pov_template_builder, pov_wireup)
@@ -478,6 +483,7 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
                 "pov_env_add_vms": pov_env_service.run_env_add_vms,
                 "pov_env_broker": pov_broker.run_env_broker,
                 "pov_env_wireup": pov_wireup.run_env_wireup,
+                "pov_env_jump_group_move": pov_wireup.run_env_jump_group_move,
                 "pov_template_build": pov_template_builder.run_template_build,
                 "pov_env_reconcile": pov_reconcile.run_reconcile,
             }[job_type]

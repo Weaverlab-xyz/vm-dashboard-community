@@ -24,7 +24,9 @@ the mechanism — Vendor Onboarding — and this module drives it.
 grants access BY JUMP GROUP, and until now a POV's jump items went into the tenant's
 appliance-wide group. A vendor scoped to that would reach every POV on the appliance. So a
 POV whose items are still in the shared group is REFUSED here, with the reason, rather than
-quietly given a policy that over-grants — see :func:`blocker`.
+quietly given a policy that over-grants — see :func:`blocker`. The way out is
+``pov_wireup.run_env_jump_group_move``, which destroys that POV's jump items and rebuilds
+them in a group of its own; the card offers it wherever :func:`can_move_jump_group` is true.
 
 **The safety prefix, twice.** ``pov-`` on the two objects this module may delete, and
 ``povvnd_`` on the users. Same rule as ``pov_accessor_service.USERNAME_PREFIX``: a
@@ -205,12 +207,38 @@ def blocker(db: Session, env: PovEnvironment) -> str:
         # The compatibility case, and the whole reason a per-POV Jump Group had to come
         # first. Saying it here costs a sentence; not saying it costs a vendor who can see
         # another customer's lab.
+        #
+        # The remedy names the button beside this message, and that is the second version
+        # of this sentence. The first one said to tear the wiring down and press Wire up
+        # again, which was wrong twice over: there is no wiring teardown short of
+        # destroying the POV, and `pov_wireup.ensure_jump_group` deliberately leaves an
+        # already-wired POV's items where they are, so pressing Wire up again could only
+        # ever repeat this message. `can_move_jump_group` is what puts the button there.
         return ("this POV's jump items are in the PRA tenant's appliance-wide Jump Group, "
                 "which every POV on that appliance shares — a vendor scoped to it would "
                 "reach all of them. This POV was wired before POVs had their own Jump "
-                "Group. Tear down its wiring and press Wire up again to move it, or use "
-                "the dashboard login below instead.")
+                "Group. Press Move to its own Jump Group below to rebuild its jump items "
+                "in a group nothing else shares, or use the dashboard login instead.")
     return ""
+
+
+def can_move_jump_group(db: Session, env: PovEnvironment) -> bool:
+    """Whether the Jump Group move is offered for this POV.
+
+    The one blocker with a button rather than only a sentence, so the card needs to know
+    *which* blocker it is showing — and it reads this instead of matching on the message
+    text, which is how a copy edit silently removes a remedy.
+
+    The same conditions :func:`blocker` checks — everything the move needs is something
+    the vendor group needed anyway — but the columns first and the COUNT last, which is
+    the opposite of that function's order. This runs once per row on the POV list and the
+    Jump Group column is what disqualifies nearly every POV, so putting it ahead of the
+    query means the query is usually never made.
+    """
+    return bool(env.pra_tenant_id
+                and not (env.pra_jump_group_name or "").strip()
+                and env.status not in ("destroying", "destroyed")
+                and _wired_vms(db, env.id))
 
 
 def describe_user(row: PovVendorUser) -> dict:
@@ -272,6 +300,7 @@ def describe(db: Session, env: PovEnvironment) -> dict:
                               if env.pra_vendor_expires_at else ""),
         "vendor_portal_url": _portal_url(db, env),
         "vendor_blocker": blocker(db, env),
+        "vendor_can_move_jump_group": can_move_jump_group(db, env),
         "vendor_users": [describe_user(r) for r in rows],
         "vendor_user_count": len(rows),
     }

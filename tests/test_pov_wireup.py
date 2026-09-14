@@ -1706,6 +1706,198 @@ def test_the_job_type_runs_locally_and_not_on_an_agent():
     assert "pov_env_wireup" not in agent_service.AGENT_JOB_TYPES
 
 
+
+# ── moving a POV onto its own Jump Group ────────────────────────────────────
+#
+# The remedy `pov_vendor_access.blocker` names. It exists because `ensure_jump_group`
+# deliberately will not do it: a jump item names its Jump Group at creation, so moving one
+# means destroying and rebuilding it, and a re-run of Wire up must not do that quietly to
+# a POV that is working. What is pinned here is the order (destroy, create the group,
+# rebuild) and the one state worse than the one it fixes — items split across two groups.
+
+def _move_job(env_id):
+    db = d.SessionLocal()
+    job = job_service.create_job(db, job_type="pov_env_jump_group_move", created_by="t",
+                                 metadata={"environment_id": env_id})
+    jid = job.id
+    db.close()
+    return jid
+
+
+def _job_lines(job_id):
+    db = d.SessionLocal()
+    lines = [line for _, line in job_service.get_job_logs(db, job_id)]
+    db.close()
+    return lines
+
+
+def _wired(db, env, **kw):
+    """A VM whose jump item already exists — which is what "wired before per-POV Jump
+    Groups" means on this row."""
+    vm = _vm(db, env, **kw)
+    vm.pra_jump_id = "999"
+    vm.pra_jump_tf_state = '{"resources":[]}'
+    db.commit()
+    return vm
+
+
+def test_the_move_rebuilds_the_items_in_the_povs_own_group():
+    db = d.SessionLocal()
+    env = _env(db, tenant=_tenant(db))
+    _wired(db, env, name="web01")
+    _wired(db, env, name="web02", ip="10.9.0.11")
+    eid, ename = env.id, env.name
+    db.close()
+    jid = _move_job(eid)
+    fake = _FakeTF()
+    jg = _FakeJumpGroups(group_id=77)
+    original = _install(fake, jg)
+    try:
+        asyncio.run(w.run_env_jump_group_move(jid, {"environment_id": eid}))
+    finally:
+        _restore(original)
+
+    assert _job_status(jid)[0] == "completed", _job_status(jid)
+    # Destroy before create: an item rebuilt before the old one came out would be a
+    # duplicate in the appliance, and the group cannot be created while items are in the
+    # old one either.
+    kinds = [c[0] for c in fake.calls]
+    assert kinds[:2] == ["remove_shell", "remove_shell"], kinds
+    assert ("create", "pov-" + ename) in [(c[0], c[1]) for c in jg.calls]
+    # And the rebuilt items name the NEW group, which is the whole point.
+    built = [kw for kind, kw in fake.calls if kind == "shell"]
+    assert len(built) == 2
+    assert {kw["jump_group_name"] for kw in built} == {"pov-" + ename}
+
+    db = d.SessionLocal()
+    env = db.query(d.PovEnvironment).filter(d.PovEnvironment.id == eid).first()
+    assert env.pra_jump_group_name == "pov-" + ename
+    assert env.pra_jump_group_id == "77"
+    rows = db.query(d.PovEnvironmentVM).filter(
+        d.PovEnvironmentVM.environment_id == eid).all()
+    assert all(r.pra_jump_id for r in rows), "an item was left unwired"
+    db.close()
+
+
+def test_a_partial_destroy_stops_before_the_group_is_created():
+    """Items split across two Jump Groups is the state worse than the one being fixed: a
+    vendor would reach part of the POV with nothing on the screen saying which part."""
+    db = d.SessionLocal()
+    env = _env(db, tenant=_tenant(db))
+    _wired(db, env, name="web01")
+    eid = env.id
+    db.close()
+    jid = _move_job(eid)
+    jg = _FakeJumpGroups()
+    original = _install(_FakeTF(remove_raises="403"), jg)
+    try:
+        asyncio.run(w.run_env_jump_group_move(jid, {"environment_id": eid}))
+    finally:
+        _restore(original)
+
+    status, error = _job_status(jid)
+    assert status == "failed"
+    assert "could not be removed" in error
+    assert "Wire up" in error, "the operator is not told how to get back to working items"
+    assert jg.calls == [], "a Jump Group was created with items still in the old one"
+    db = d.SessionLocal()
+    env = db.query(d.PovEnvironment).filter(d.PovEnvironment.id == eid).first()
+    assert env.pra_jump_group_name is None
+    db.close()
+
+
+def test_a_pov_that_already_has_its_own_group_is_refused():
+    db = d.SessionLocal()
+    env = _env(db, tenant=_tenant(db), pra_jump_group_name="pov-own",
+               pra_jump_group_id="44")
+    _wired(db, env, name="web01")
+    eid = env.id
+    db.close()
+    jid = _move_job(eid)
+    fake = _FakeTF()
+    original = _install(fake)
+    try:
+        asyncio.run(w.run_env_jump_group_move(jid, {"environment_id": eid}))
+    finally:
+        _restore(original)
+    status, error = _job_status(jid)
+    assert status == "failed"
+    assert "nothing to move" in error
+    assert fake.calls == [], "a working POV's jump items were destroyed"
+
+
+def test_a_pov_with_nothing_wired_is_sent_to_wire_up():
+    """Wire up creates the group itself on a POV with no items, so the move would be a
+    destroy of nothing followed by a rebuild of nothing."""
+    db = d.SessionLocal()
+    env = _env(db, tenant=_tenant(db))
+    _vm(db, env, name="web01")
+    eid = env.id
+    db.close()
+    jid = _move_job(eid)
+    original = _install(_FakeTF())
+    try:
+        asyncio.run(w.run_env_jump_group_move(jid, {"environment_id": eid}))
+    finally:
+        _restore(original)
+    status, error = _job_status(jid)
+    assert status == "failed"
+    assert "Wire up" in error
+
+
+def test_a_group_that_cannot_be_created_says_how_to_get_the_items_back():
+    """The window this job cannot avoid: the items are already gone, so the failure has to
+    name the button that rebuilds them rather than leaving a POV nobody can reach."""
+    db = d.SessionLocal()
+    env = _env(db, tenant=_tenant(db))
+    _wired(db, env, name="web01")
+    eid = env.id
+    db.close()
+    jid = _move_job(eid)
+    jg = _FakeJumpGroups(create_raises="the OAuth client cannot create Jump Groups")
+    original = _install(_FakeTF(), jg)
+    try:
+        asyncio.run(w.run_env_jump_group_move(jid, {"environment_id": eid}))
+    finally:
+        _restore(original)
+    status, error = _job_status(jid)
+    assert status == "failed"
+    assert "Wire up" in error
+    db = d.SessionLocal()
+    rows = db.query(d.PovEnvironmentVM).filter(
+        d.PovEnvironmentVM.environment_id == eid).all()
+    assert all(r.pra_jump_id is None for r in rows), "a destroyed item is still recorded"
+    db.close()
+
+
+def test_wire_up_alone_never_moves_a_wired_povs_items():
+    """The reason this job exists. Pressing Wire up again on a POV whose items are in the
+    tenant's group used to be the documented remedy, and it could only ever repeat the
+    refusal — so the note it logs now names the button that does move them."""
+    db = d.SessionLocal()
+    env = _env(db, tenant=_tenant(db))
+    _wired(db, env, name="web01")
+    eid = env.id
+    db.close()
+    jid = _job(eid)
+    jg = _FakeJumpGroups()
+    original = _install(_FakeTF(), jg)
+    try:
+        asyncio.run(w.run_env_wireup(jid, {"environment_id": eid}))
+    finally:
+        _restore(original)
+    assert jg.calls == [], "Wire up moved a working POV's jump items"
+    note = [l for l in _job_lines(jid) if "appliance-wide Jump Group" in l]
+    assert note, _job_lines(jid)
+    assert "Move to its own Jump Group" in note[0]
+
+
+def test_the_move_job_type_is_handled_and_runs_locally():
+    from web_dashboard import jobs_worker
+    from web_dashboard.services import agent_service
+    assert "pov_env_jump_group_move" in jobs_worker.HANDLED_TYPES
+    assert "pov_env_jump_group_move" not in agent_service.AGENT_JOB_TYPES
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

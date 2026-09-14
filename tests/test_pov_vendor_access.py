@@ -189,7 +189,48 @@ def test_a_pov_on_the_shared_jump_group_is_refused_and_the_reason_names_the_leak
         why = pv.blocker(db, env)
         assert "appliance-wide Jump Group" in why
         assert "reach all of them" in why
-        assert "Wire up again" in why
+        # The remedy has to be one this page can perform. It used to say to tear the
+        # wiring down and press Wire up again, and neither half was true: there is no
+        # wiring teardown short of destroying the POV, and `ensure_jump_group` leaves an
+        # already-wired POV's items where they are — so following it returned to this
+        # same message, forever.
+        assert "Move to its own Jump Group" in why
+        assert "Wire up again" not in why
+        assert pv.can_move_jump_group(db, env) is True
+    finally:
+        db.close()
+
+
+def test_the_move_is_offered_only_where_it_is_the_blocker():
+    """The card reads this rather than matching the message text, so the two cannot drift
+    — and every other blocker must not grow a button that would not fix it."""
+    db = d.SessionLocal()
+    try:
+        tenant = _tenant(db)
+        shared = _env(db, tenant=tenant, jump_group=None, jump_group_id=None)
+        _wire(db, shared)
+        assert pv.can_move_jump_group(db, shared) is True
+        assert pv.describe(db, shared)["vendor_can_move_jump_group"] is True
+
+        # Already has its own group: there is nothing to move.
+        own = _env(db, tenant=tenant)
+        _wire(db, own)
+        assert pv.can_move_jump_group(db, own) is False
+
+        # Nothing wired: Wire up creates the group itself.
+        bare = _env(db, tenant=tenant, jump_group=None, jump_group_id=None)
+        assert pv.can_move_jump_group(db, bare) is False
+
+        # No tenant: there is no appliance to move anything in.
+        orphan = _env(db, jump_group=None, jump_group_id=None)
+        _wire(db, orphan)
+        assert pv.can_move_jump_group(db, orphan) is False
+
+        # Going away: rebuilding jump items for it is work nobody will use.
+        dying = _env(db, tenant=tenant, jump_group=None, jump_group_id=None,
+                     status="destroying")
+        _wire(db, dying)
+        assert pv.can_move_jump_group(db, dying) is False
     finally:
         db.close()
 
@@ -843,7 +884,8 @@ def test_every_key_the_card_reads_is_one_describe_returns():
         db.close()
     src = _read(os.path.join(_TPL, "pov", "detail.html"))
     for key in ("vendor_registered", "vendor_blocker", "vendor_jump_group",
-                "vendor_portal_url", "vendor_users", "vendor_expires_at"):
+                "vendor_portal_url", "vendor_users", "vendor_expires_at",
+                "vendor_can_move_jump_group"):
         assert key in described, f"describe() omits {key}"
         assert f"env.{key}" in src, f"the card never reads env.{key}"
 
@@ -857,11 +899,23 @@ def test_the_card_shows_the_blocker_instead_of_the_button():
         "the controls are not hidden when something blocks them"
 
 
+def test_the_one_blocker_with_a_remedy_shows_its_button():
+    """The blocker paragraph is shown INSTEAD of the controls, so a remedy that lives
+    inside `x-show="!env.vendor_blocker"` would never be visible to the POV that needs
+    it."""
+    src = _read(os.path.join(_TPL, "pov", "detail.html"))
+    assert 'x-show="env.vendor_can_move_jump_group"' in src,         "the move is never offered, so the blocker names a button that is not there"
+    move = src.split('x-show="env.vendor_can_move_jump_group"', 1)[1]
+    assert "moveJumpGroup()" in move.split("</div>", 1)[0]
+    assert "jump-group/move" in src, "the card posts to no move endpoint"
+
+
 def test_the_card_never_makes_an_anonymous_request():
     """/api authenticates off the Authorization header and this app sets no cookie, so a
     bare fetch() is an anonymous request."""
     src = _read(os.path.join(_TPL, "pov", "detail.html"))
-    for fn in ("registerVendor", "removeVendor", "mintVendorUser", "revokeVendorUser"):
+    for fn in ("registerVendor", "removeVendor", "mintVendorUser", "revokeVendorUser",
+               "moveJumpGroup"):
         body = src.split(f"async {fn}(", 1)[1].split("\n      },", 1)[0]
         assert "this.apiFetch(" in body, f"{fn} does not go through apiFetch"
         assert "await fetch(" not in body, f"{fn} makes a bare fetch"
