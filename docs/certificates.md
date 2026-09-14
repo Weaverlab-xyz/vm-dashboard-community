@@ -2,15 +2,15 @@
 
 > **Audience:** operator · **Profile:** `demo` · **Read this when:** you need a private certificate authority to onboard certificate identities against, and want it gone again when the demo ends.
 
-> **Preview.** The plugin's shared core is covered by its own 307-assertion suite, but
-> **none of its four submission paths has been proven against a live authority** — ADCS,
-> AWS Private CA, GCP CAS and the two Entra publishers can only be exercised against a
-> real CA, cloud account or tenant. That is what this feature exists to make cheap. Off by
-> default; enable it under **Settings → Preview features → Certificate Lab**.
+> **Preview.** The plugin's shared core is covered by its own 624-assertion suite, but
+> **none of its submission paths has been proven against a live authority** — the nine
+> backends and the two Entra publishers can only be exercised against a real CA, cloud
+> account or tenant. That is what this feature exists to make cheap. Off by default;
+> enable it under **Settings → Preview features → Certificate Lab**.
 
-This page builds the lab for the Password Safe **Certificate** custom platform plugin, and
-tears it down again. Two things happen here and nothing else does: a private certificate
-authority is **provisioned and destroyed**, and certificate identities are **onboarded**
+This page builds the lab for the Password Safe **Certificate** custom platform plugin
+family, and tears it down again. Two things happen here and nothing else does: a private
+certificate authority is **provisioned and destroyed**, and identities are **onboarded**
 onto it as Password Safe managed accounts. Issuance itself belongs in BeyondInsight, behind
 an approval — see [Why nothing is issued from here](#why-nothing-is-issued-from-here).
 
@@ -53,6 +53,148 @@ population, or the weaker of the two is your real access boundary.
 
 ---
 
+## Two packages, two platforms
+
+The plugin ships as **two `.psplugin` packages over a shared core**, with different plugin
+ids — so both install side by side and neither overwrites the other. They appear in
+BeyondInsight as two **platforms**, and that is the part that matters operationally.
+
+| | Certificate | Subordinate CA |
+|---|---|---|
+| Managed credential | an **end-entity certificate** | a **subordinate certificate authority** |
+| Who consumes it | the identity itself — a pipeline, an agent, a service | another system, which mints its own short-lived certificates beneath it |
+| Backends | all nine | only the four that can sign a subordinate |
+| `isca` defaults to | `false` | `true` |
+| `bundle` defaults to | `Pkcs12` | `PemBundle` |
+
+**Which one you want.** If the thing that will present the certificate is the identity
+named in it, the Certificate platform. If the thing that holds it will mint *further*
+certificates — PRA Vault issuing session certificates is the case this was built for — the
+other one.
+
+**Why it is a split and not a flag.** A subordinate CA is a *delegation of issuing
+authority*, not one more credential. Two platforms mean the team that may request a leaf is
+not automatically the team that may request an issuer, and that separation is expressible
+in Password Safe's own access model rather than by convention. The dashboard follows the
+split rather than papering over it, and the refusal you get differs by platform — see
+[Two refusals, and which one you get](#two-refusals-and-which-one-you-get).
+
+They are the same code. The shared core is the overwhelming majority of it — key
+generation, CSR construction, bundling, storage, verification, the configuration grammar,
+every backend — so the two cannot drift apart in behaviour, and everything this page says
+about configuration applies to both.
+
+### One functional account per platform
+
+A functional account is **platform-bound**, and a managed system inherits its functional
+account's platform. So an account on `Certificate` cannot carry a managed system on
+`Subordinate CA`: it onboards green and then fails every credential action. A CA serving
+both therefore holds **two** functional accounts, one on each platform, carrying the same
+CA credential.
+
+The dashboard mints them at different times, on purpose:
+
+- the **Certificate** one during the CA build, because the enrollment credential exists in
+  the apply's outputs and nowhere else a person can reach;
+- the **Subordinate CA** one **lazily**, on the first subordinate onboarded — a CA that
+  never issues an authority should not carry an account on the platform that would. It is
+  recovered from the enrollment credential still in the CA's own terraform state, so it
+  needs no rebuild, which matters because CAS never hands a deleted pool id back.
+
+Teardown deletes both, and only ones the dashboard minted. Missing the second would leave
+an orphan holding a live enrollment credential after the CA it belonged to is gone.
+
+### The nine backends
+
+The Certificate platform's full list. The dashboard **provisions** the two cloud ones; the
+rest are certificate authorities a customer already runs, so the dashboard validates their
+addresses but has no build path for them.
+
+| Backend | Names accepted | Required | Can sign a sub-CA |
+|---|---|---|---|
+| Microsoft ADCS | `adcs`, `ad`, `microsoft-ca` | `ca=`, `template=` | refused on policy |
+| EST (RFC 7030) | `est`, `rfc7030` | `url=` | no — the protocol has no mechanism |
+| EJBCA | `ejbca`, `keyfactor-ejbca` | `url=`, `ca=`, and `profile=` or `subcaprofile=` | **yes** |
+| HashiCorp Vault PKI | `vault`, `vaultpki`, `hashicorp-vault` | `url=`, and `role=` for a leaf | **yes** |
+| Smallstep step-ca | `stepca`, `step`, `smallstep` | `url=`, `fingerprint=` | no |
+| DigiCert ONE | `digicert`, `digicert-one` | `url=`, `profile=` | no |
+| Sectigo | `sectigo`, `sectigo-cm` | `url=`, `profile=` | no |
+| AWS Private CA | `awspca`, `aws`, `acm-pca` | `arn=` | **yes** |
+| Google Cloud CAS | `gcpcas`, `gcp`, `cas`, `google-cas` | `project=`, `location=`, `pool=` | **yes** |
+| Self-signed | `selfsigned`, `self` | none | no — a new trust root, not a subordinate |
+
+### How each of the four signs one, and the grant that follows
+
+| Backend | How | Grant it separately? |
+|---|---|---|
+| `awspca` | the issuance template is switched to `SubordinateCACertificate_PathLen{0-3}`, chosen from `pathlen=`. ACM PCA **ignores the CSR's basic constraints** and builds from the template, so this is the only thing that decides whether a CA comes back | yes — restrict `acm-pca:IssueCertificate` to the subordinate template ARNs |
+| `gcpcas` | the CSR's own extensions are honoured, subject to the pool's issuance policy. The parent needs `--max-chain-length=1` or higher | **no** — see below |
+| `ejbca` | a CA-type certificate profile, named with `subcaprofile=` | yes — a CA-type profile is a distinct grant |
+| `vaultpki` | a dedicated endpoint, `<mount>/root/sign-intermediate` — not a flag on the ordinary signing path, so the two operations cannot be confused | yes — `update` on that path alone |
+
+Granting only that is the difference between a compromised functional account minting one
+bounded authority and minting anything.
+
+**GCP is the exception, and it changes where the boundary goes.** Issuing a subordinate
+uses the *same* `privateca.certificates.create` as issuing a leaf — what differs is the CSR
+and the pool's issuance policy, not the permission. So the separation has to be made with a
+**dedicated CA pool** whose policy permits CA certificates, and the grant scoped to that
+pool. There the boundary is the **resource rather than the verb**.
+
+That is why the path-length choice produces its own CA row rather than being a setting that
+widens an existing pool: a leaf-only pool and a subordinate-capable one being separate
+resources, with separate pool-scoped enrollment identities, *is* the control.
+
+### Two refusals, and which one you get
+
+Which refusal an operator sees depends on which platform they are standing on, and the
+difference is deliberate.
+
+**On the Subordinate CA platform**, a backend outside the four is declined **by name**,
+before any policy is consulted: it says the platform does not support that backend, lists
+the four it does, and points at the Certificate platform for an end-entity certificate.
+That names what to use instead, which is what someone who picked the wrong platform needs.
+
+**On the Certificate platform**, `isca=` and the constraint options get the backend's *own
+reasoning* — because that is the only platform those backends are offered on at all, so
+"why not ADCS?" is answered there or nowhere:
+
+- **ADCS.** Capable, but refused on policy. A sub-CA template that issues unattended means
+  turning *off* CA certificate manager approval, which many organisations forbid outright
+  — and with approval on, every rotation returns `CR_DISP_UNDER_SUBMISSION` and can never
+  complete. A cloud backend's equivalent permission is IAM-scoped, reviewable, revocable
+  and logged.
+- **Self-signed.** A self-signed CA certificate is a new **trust root**, not a subordinate.
+  Nothing above it constrains what it may assert, and every relying party would have to be
+  visited to trust it and visited again to stop.
+- **EST.** RFC 7030 has no mechanism for requesting a CA certificate at all — `simpleenroll`
+  issues end-entity certificates and that is the whole of it. EST remains the route for
+  *leaf* issuance against the same CA across a firewall.
+- **step-ca, DigiCert ONE, Sectigo.** The sign endpoint issues end-entity certificates; a
+  managed or public CA will not sign you a subordinate off its own hierarchy outside a
+  dedicated, heavily audited programme.
+
+On a backend that *can* sign one, `isca=true` here is legal and does nothing useful, so the
+answer is the other package — putting an issuer under the access control meant for a leaf is
+exactly what the split prevents.
+
+Underneath the package's own list sits a **second gate**: the backend's own capability flag,
+which **fails closed**. A backend added later is refused for subordinate issuance until it
+declares the capability. That direction is deliberate — most certificate authorities cannot
+sign a subordinate at all, so the unrecognised case is far more likely to be one that should
+be refused.
+
+`selfsignedtest` exists in the plugin for its own harness and is refused outright here: it
+generates and persists its own CA private key **unencrypted** beside the plugin.
+
+Three of the nine cannot revoke at all — EST has no revocation operation in RFC 7030,
+step-ca's needs a credential the plugin no longer holds after issuance, and `selfsigned`
+publishes nothing to revoke against. On those, **Disable Managed Account** succeeds and
+says the certificate stays valid until it expires. That is a success rather than a failure:
+the backend never could have done it.
+
+---
+
 ## What this page is actually for
 
 Standing the lab up by hand is the bottleneck, and its cloud half has a standing cost that
@@ -79,9 +221,14 @@ nothing here re-implements any of that.
    26.1.0.878, file secrets downloaded through the API were larger than the original and
    did not match the copy downloaded from the web console — so a PKCS#12 retrieved by a
    non-human identity on an earlier build would have been **corrupt**.
-2. **The `.psplugin` imported** and the `Certificate` platform created. The dashboard
-   resolves the platform live by name through `GET /Platforms`, so a renamed platform just
-   needs its new name in Settings.
+2. **The `.psplugin` imported** and the `Certificate` platform created — and, to onboard a
+   subordinate CA, the **second** package too, which creates the `Subordinate CA`
+   platform. They carry different plugin ids, so both install side by side and neither
+   overwrites the other; upload each at **Configuration → Privileged Access Management →
+   Platform Plugins → Create New Platform Plugin**. The dashboard resolves both platforms
+   live by name through `GET /Platforms`, so a renamed platform just needs its new name in
+   Settings (`cert_ps_platform`, `cert_ps_subca_platform`). See
+   [Two packages, two platforms](#two-packages-two-platforms).
 3. **A BeyondInsight API registration**, set as `cert_ps_bi_api_key` in Settings →
    Certificate Lab. The dashboard builds the functional account itself; this is the one
    half it cannot derive, because its own API sign-in uses OAuth2 client credentials and
@@ -115,13 +262,25 @@ subnet or has to cross the firewall at its edge.
 |---|---|---|
 | `gcpcas` | `privateca.googleapis.com`, `oauth2.googleapis.com` (the JWT-bearer exchange that authenticates it) | 443 |
 | `awspca` | `acm-pca.<region>.amazonaws.com` | 443 |
+| `est`, `ejbca`, `vaultpki`, `stepca`, `digicert`, `sectigo` | the service's own host, from `url=` — administrator-supplied, so there is no fixed hostname to pre-approve | 443 |
+| `selfsigned` | nothing. There is no certificate authority to reach | — |
 | Entra publishers | `login.microsoftonline.com`, `graph.microsoft.com` | 443 |
 | every backend | the BeyondInsight host from `biurl=`, to write the bundle | 443 |
 | `adcs` | see below — this is the one that is not 443 | 135 + 49152–65535 |
 
-Four of the five backends need nothing beyond outbound 443, so **a broker that can already
-reach BeyondInsight can usually reach GCP, AWS and Entra with no new rule**. The Certificate
-Lab's GCP path is in that group.
+**Every backend but ADCS needs nothing beyond outbound 443**, so a broker that can already
+reach BeyondInsight can usually reach AWS, GCP, Entra or an HTTPS CA with no new rule. The
+Certificate Lab's GCP and AWS paths are both in that group, and the self-signed backends
+need no egress at all. ADCS is the single exception, and it is the next section.
+
+`url=` is the service's **origin**, not an API path — the plugin appends its own, so a path
+here yields a doubled one and a 404 at the first credential change. The dashboard refuses
+one, and refuses plain `http` on everything but Vault (where a development server may
+legitimately be plain): the request carries the functional account's enrollment credential
+in a header. `insecure=true` exists for one real moment — a private CA's own management
+endpoint presented on a certificate chaining to that very CA, which the broker does not
+trust until the chain is installed — and it is logged as the footgun it is. Installing the
+chain is the actual fix.
 
 **ADCS is the exception, and it is a subnet question.** `ICertRequest3` is DCOM: the broker
 opens TCP 135 to the CA's endpoint mapper, and the CA answers on a *dynamic high port* in
@@ -236,6 +395,36 @@ self-signed root certificate, and the IAM user the plugin authenticates as.
 
 The cloud selector only appears when more than one module is built — the list comes from
 the modules that actually exist, so a cloud can never be offered without one behind it.
+
+### What the root may sign is decided here, once
+
+The build form asks what the root permits beneath it, and **it cannot be changed after the
+root is created**.
+
+| Choice | The root's path length | Serves |
+|---|---|---|
+| End-entity certificates only *(default)* | 0 | the Certificate platform |
+| Can also sign a subordinate CA | 1 | both platforms |
+
+This is **the one prerequisite that stops a subordinate-CA build dead.** A root created to
+issue leaves has a path length of zero and will refuse to sign a subordinate at all — and
+it is the *certificate authority* that refuses, with a policy error naming neither this
+choice nor the flag behind it. On GCP that flag is `--max-chain-length=1` at root creation
+(`max_issuer_path_length` in the module); on AWS it also decides whether the enrollment
+IAM policy permits a `SubordinateCACertificate` template at all.
+
+So the dashboard records it on the CA row, shows it in the **Signs** column, and refuses a
+subordinate against a leaf-only root **at the click** rather than letting it fail at the CA
+hours later. Every CA built before this choice existed reads as leaf-only, which is what
+those roots genuinely are.
+
+Leaf-only stays the default: a root that permits a CA beneath it is a wider grant than a
+lab needs by default, and widening it for every existing-style build would be a silent
+change to what the button produces. A subordinate-capable root still issues end-entity
+certificates exactly as before, so there is no downside to picking it when you intend to
+demonstrate both — and demonstrating both from one CA is the clearest way to show why the
+split exists, since the *same* address on the other platform issues the other kind of
+thing.
 
 ### The build also creates the functional account
 
@@ -387,6 +576,214 @@ fails — no bundle exists yet. That failure is step 1 of the demonstration, not
 
 ---
 
+## Onboarding a subordinate CA
+
+**Workload Lab → Certificates → Add subordinate CA**, offered only on a CA whose root can
+sign one. Everything above still applies — the same grammar, the same store, the same
+two-halves split — with one inversion that changes what the demonstration is about.
+
+**The managed credential here is the issuer, not a certificate.** Password Safe obtains a
+subordinate CA from the root, something else holds it and mints its own short-lived leaves
+beneath it, and Password Safe rotates the subordinate on a schedule. One governed
+credential instead of N, and **no delivery problem at all** — because nothing has to move
+the leaves.
+
+The pitch is governance rather than threat mitigation, and it collapses under the first
+informed question if put the other way. A certificate authority is a privileged account
+that nobody treats as one: high privilege, created once, an unknown number of copies in
+unknown hands, never rotated, outliving the person who made it. That is the profile of the
+shared local admin password — the exact thing PAM exists to fix. The category simply never
+got pointed at PKI.
+
+### The topology is the whole design
+
+Get this wrong and the rotation schedule becomes an estate-wide outage schedule.
+
+| Targets trust | Rotating the CA means | Automatable |
+|---|---|---|
+| the sub-CA directly | a coordinated trust-store push to every host, in lockstep | **No** |
+| the root, with the sub-CA chaining to it | nothing — targets never move | **Yes** |
+
+**Install the root chain into every target's trust store once, before anything else.** That
+is what makes rotation safe, and it is the step nothing here automates — the *Chain* button
+on the CA row is where that PEM comes from.
+
+One consequence is pleasant: because leaves chain to the root, rotation is graceful for
+in-flight work. There is no drain step and no break window.
+
+### Rotation does not revoke, and the lifetime is what bounds you
+
+The most important thing on this page. A relying party validates a leaf by walking its
+chain to the root; it neither knows nor cares which subordinate was current when that leaf
+was minted. So after a rotation, certificates already issued from the previous subordinate
+keep working until *that subordinate's own certificate* expires — and anyone holding a copy
+of the previous subordinate's key can keep minting new, perfectly valid certificates for
+exactly as long.
+
+Rotation replaces what the holder has. It takes nothing away from anyone else who may have
+it. So the security bound is the subordinate's **validity period**, not the rotation
+interval, and conflating the two makes the control illusory:
+
+| Sub-CA validity | Rotating every | Concurrently valid authorities | Exposure after a key leak |
+|---|---|---|---|
+| 1 year | 7 days | ~52 | up to a year |
+| 8 days | 7 days | 2, briefly | at most 8 days |
+
+Issue the subordinate with a validity just longer than the rotation interval — enough
+overlap that certificates from the outgoing one stay valid until the new one is in place,
+and no more. Size the overlap to the longest expected session rather than picking a round
+number. The dashboard cautions in the action log above 45 days rather than enforcing a rule
+it has half the inputs for: the rotation interval lives in a Password Safe account policy
+it cannot see. `cert_subca_default_lifetime` in Settings is where to put the value you
+settle on.
+
+**"If this key leaked, what is our exposure window?" answers *eight days, by policy*.**
+That sentence is the deliverable. What the automation does is not prevent an attack — it is
+what makes a short validity period sustainable, because nobody reissues a certificate
+authority by hand every week.
+
+### Name constraints are the control that makes it defensible
+
+A vaulted CA key is not a credential to one system; it is the authority to mint an identity
+for *anything* the CA may assert. Constraints turn a compromise from **mint anything** into
+**mint within a bounded namespace**. They are encoded per RFC 5280 §4.2.1.10 and marked
+**critical**, so a relying party that cannot interpret them rejects the certificate rather
+than ignoring the boundary.
+
+`permitdns=`, `permitemail=`, `permitip=` and `excludedns=` are on the *Add subordinate CA*
+form. A permitted-IP subtree is a **network**: `10.0.0.0/8`, never `10.1.2.3/8` — the
+dashboard refuses host bits, because nothing downstream can detect a subordinate
+constrained to something other than what was meant.
+
+Issuing one with no constraints at all is **allowed and warned about**, not refused:
+constraints belong on the *parent* CA pool's issuance policy where the backend supports it,
+so their absence here is not necessarily a mistake. Prefer the parent for two reasons — the
+subordinate inherits a boundary it cannot widen, which is a stronger statement than one it
+merely happens to carry; and constraints are long. **This is the one topology where the
+255-character budget and the security control pull against each other:** a permitted-DNS
+list plus an email suffix can exceed 100 characters on its own, competing with the project,
+location and pool names.
+
+### What the certificate looks like, and what the form does not offer
+
+Three differences from a leaf, each deliberate, and the dashboard refuses anything that
+would contradict them:
+
+- `basicConstraints` is `CA:TRUE` with the requested path length, marked critical.
+- `keyUsage` becomes `keyCertSign`, `cRLSign` and `digitalSignature`, also critical.
+  `keyEncipherment` is dropped: a signing key should not also be doing TLS key exchange.
+- **No extended key usage at all.** An EKU on a CA certificate constrains the whole subtree
+  beneath it, and implementations disagree about whether it applies to the CA itself or to
+  its issued leaves. Asserting one would silently narrow what the holder can mint and would
+  surface as an unrelated validation failure at a relying party. So `eku=` is refused here
+  — and `cert_default_eku`, being a config default that applies to every profile, is
+  dropped from this path rather than blocking it with an option nobody chose.
+
+`publisher=`, `tenant=`, `appid=`, `spid=`, `retain=` and the SAN options are in the
+*shared* grammar because the core is shared, and they do nothing on an issuer: a publisher
+exists for a relying party that pins a certificate by thumbprint, and an issuer has none.
+The dashboard refuses them rather than letting them be silently dropped.
+
+Two options the address normally **omits**, because the Subordinate CA package already
+defaults them: `isca=true` and `bundle=PemBundle`. Restating them is harmless and reads as
+documentation — it just spends budget the permitted-DNS list is competing for. An explicit
+`isca=false` is a real override and survives; it makes that platform behave as the
+Certificate platform does, which is legal and logged, and points at using the other
+package.
+
+### Handing the subordinate to PRA Vault
+
+PRA takes **three separate PEM fields**, not one PKCS#12. In PRA, go to **Vault → Accounts
+→ Add Shared Account** and choose **X.509 Parent Certificate Authority** under
+*Authentication*. Its own help text explains why that is the right account type: an X.509
+Parent Certificate Authority is the trust for client validation, and at least one must
+exist before a client certificate can be created.
+
+Under *Private Key Options*, **do not** choose *Generated by BeyondTrust Privileged Remote
+Access*. That has PRA create the key itself — a perfectly sensible thing to do, and the
+opposite of this design: a key PRA generated is one Password Safe never held and cannot
+rotate. Choose the upload path.
+
+| PRA field | What goes in it | Where it comes from |
+|---|---|---|
+| Private key (PEM) | the encrypted PKCS#8 private key | `key.pem` from the bundle |
+| Key Passphrase | the passphrase that decrypts it | the managed account's credential |
+| X.509 Certificate | the subordinate's certificate | `cert.pem` from the bundle |
+
+`chain.pem` is the fourth artifact and does **not** go in this account — it is the trust
+material uploaded alongside as PRA's additional chain trust, and installed in every
+target's store.
+
+This is why the package defaults to `bundle=PemBundle`: PRA's key field accepts PEM only,
+and a PKCS#12 would have to be taken apart with `openssl` before any of it could be pasted
+in. The PEM bundle emits precisely these pieces:
+
+```bash
+unzip -o subca-bundle.zip          # cert.pem  key.pem  chain.pem  fullchain.pem
+```
+
+One thing to watch, and the escape hatch for it. The key is an encrypted PKCS#8,
+AES-256-CBC by default. The presence of a *Key Passphrase* field says encrypted keys are
+expected, but which ciphers PRA's PEM parser accepts is not documented. If the upload is
+rejected, set `pbe=Legacy`: that switches the key to 3DES with the PKCS#12 KDF, which every
+OpenSSL-era parser reads. It is weaker, and it is a compatibility lever rather than a
+default.
+
+### The demonstration, and the step to build it around
+
+1. **The CA is an inventory row.** Owner, expiry, standing cost. It is on the books, which
+   no CA in the estate currently is.
+2. **Its credential is governed.** Request it: approval required, reason recorded,
+   retrieval audited. Contrast with *"whoever holds a copy, and we do not know who that
+   is."*
+3. **Rotate it.** A new subordinate is issued, the holder receives it, sessions keep
+   working, **no target was touched**. PKI practitioners assume rotating an issuing CA is
+   an estate-wide change; watching it not be one is the argument.
+4. **Show the leaf still validates.** A certificate minted from the *previous* subordinate
+   is still valid, because it chains to the root. That is the graceful-rotation property —
+   and the same mechanism that means rotation does not revoke.
+5. **Give the risk register a number.** Eight days, by policy, enforced by the schedule.
+6. **Retire it.** Retire the managed account: Password Safe stops issuing, so the holder
+   receives no replacement, and the authority expires on its own. Say **"expires"**, not
+   "revoked" — see below.
+
+Step 3 is the one to spend time on. Verify the certificate rather than the plugin's word
+for it:
+
+```bash
+openssl pkcs12 -in subca.pfx -nodes -passin pass:'<passphrase>' | openssl x509 -noout -text
+```
+
+Expect `CA:TRUE, pathlen:0` critical, `Key Usage: critical` with *Certificate Sign* and
+*CRL Sign* and **no** *Key Encipherment*, `X509v3 Name Constraints: critical`, and **no**
+Extended Key Usage at all. Then `openssl verify -CAfile ca-chain.pem subca.pem` — if that
+fails, the root's path length was wrong and nothing downstream will work.
+
+### The revocation caveat that matters most here
+
+Short lifetimes make *leaf* revocation close to irrelevant, which is the usual answer to
+this plugin consulting neither CRLs nor OCSP. A compromised **subordinate** is a different
+question, and on some CA configurations there is no answer at all.
+
+**A GCP CAS DevOps-tier pool keeps no certificate records and publishes no CRL.** A
+subordinate issued from one therefore cannot be revoked in any way a relying party will
+observe: the only real remedy is rotating the root and re-establishing trust on every
+target — precisely the estate-wide operation this design exists to avoid, now happening
+under incident conditions. The honest options:
+
+- **Enterprise tier** for this path, which buys certificate records and CRL publishing at
+  roughly an order of magnitude more than DevOps tier's standing fee
+  (`cert_gcp_cas_tier` in Settings).
+- **Accept it with a very short subordinate lifetime**, so the un-revokable window is
+  bounded by expiry. Defensible, and probably right for a lab — but write it down rather
+  than assuming it.
+- **Keep the lab and any real deployment on different tiers**, which is the likely outcome
+  and should be explicit in configuration rather than discovered.
+
+Whichever is chosen, *"cannot revoke the issuing CA"* is not a footnote.
+
+---
+
 ## Proving it works
 
 Run these in order; each is cheap and fails fast.
@@ -455,6 +852,30 @@ Being straight about the boundary is more persuasive than eliding it.
 
 - **No revocation checking.** The plugin consults neither CRLs nor OCSP. Short lifetimes are
   the mitigation, and that is a deliberate design position.
+- **Revocation itself works, but only on six of the nine backends.** `RevokeOnDisable`
+  defaults on, so **Disable Managed Account** revokes the certificate the account holds,
+  and `RevokeOnRenewal` withdraws a superseded one. EST, step-ca and `selfsigned` have no
+  revocation operation, so on those Disable succeeds and says the certificate stays valid
+  until it expires. Worth demonstrating on a backend that can, and worth being explicit
+  about on one that cannot.
+- **No revocation of a subordinate CA on a DevOps-tier pool** — worse than the above,
+  because the remedy is larger. See
+  [the revocation caveat](#the-revocation-caveat-that-matters-most-here).
+- **No build path for six of the nine backends.** EST, EJBCA, Vault PKI, step-ca, DigiCert
+  ONE and Sectigo are certificate authorities a customer already runs, so there is nothing
+  for this page to provision. Their addresses are validated — the grammar, the required
+  options, the `url=` shape, the per-backend authentication — but onboarding an identity
+  against one means a managed system created by hand.
+- **No live subordinate-CA round trip.** The upload format is settled and the plugin emits
+  exactly the three PEM pieces PRA's account type takes, with the suite checking that the
+  passphrase opens the key and that the key and certificate are a pair. What is untested is
+  uploading it to a real PRA, minting a client certificate beneath it, and connecting — as
+  is which PKCS#8 ciphers PRA's PEM parser accepts.
+- **Whether the two platforms can be granted to different teams in practice.** The split is
+  what makes it possible — separate platforms, separate access control, separate functional
+  accounts — but the access-policy modelling is a BeyondInsight exercise this page does not
+  cover. Confirm it against the customer's own role model before promising the
+  separation-of-duties story.
 - **No deployment.** The plugin delivers to Password Safe. Getting the certificate into an
   nginx config, a Java keystore or an IIS binding is the consumer's job —
   `ci-fetch-cert.yml` does it with a script. **Entra is the one exception**: its publisher
@@ -476,11 +897,11 @@ Being straight about the boundary is more persuasive than eliding it.
 
 | | |
 |---|---|
-| Page | `/workload-lab#certificates` → `web_dashboard/templates/workload_lab/` (`index.html` + `_certificates.html` + `_certificates_scripts.html`) |
+| Page | `/workload-lab#certificates` → `web_dashboard/templates/workload_lab/` (`index.html` + `_certificates.html`) |
 | API | `web_dashboard/api/cert_lab.py` (`/api/cert-lab/*`) |
 | CA lifecycle | `web_dashboard/services/cert_lab_service.py` |
 | Address + Password Safe objects | `web_dashboard/services/cert_ps_service.py` |
 | Address grammar + registration | `web_dashboard/services/ps_resource_service.py` (`method="certificate"`) |
 | Terraform | `terraform/cert_ca/gcp_cas/main.tf`, `terraform/cert_ca/aws_pca/main.tf` |
 | Playbooks | [`examples/playbooks/certificates/`](../examples/playbooks/certificates/README.md) |
-| Tests | `tests/test_ps_certificate.py`, `tests/test_cert_lab_wiring.py`, `tests/test_cert_lab_clouds.py` |
+| Tests | `tests/test_ps_certificate.py`, `tests/test_cert_lab_wiring.py`, `tests/test_cert_lab_clouds.py`, `tests/test_cert_lab_functional_account.py` |

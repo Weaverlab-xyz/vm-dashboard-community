@@ -59,6 +59,25 @@ _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
 PROVISION_JOB_TYPE = "certca_provision"
 DECOMMISSION_JOB_TYPE = "certca_decommission"
 
+# ── What a root may sign, and why it is a build-time choice ──────────────────
+#
+# The Certificate plugin ships as two packages: "Certificate" issues an end-entity
+# certificate, "Subordinate CA" issues an issuing authority. A CA built here can serve the
+# first unconditionally. It can serve the second ONLY if its root permits a CA beneath it,
+# and that is decided when the root is created and cannot be changed afterwards.
+#
+# A root created to issue leaves has a path length of ZERO and refuses to sign a
+# subordinate at all — and the refusal comes from the CA, arriving as a policy error a
+# long way from the missing flag. So the choice is made on the build form, recorded on the
+# row, and checked before an identity is onboarded rather than discovered at the CA.
+#
+# 0 stays the default. A root that permits a CA beneath it is a wider grant than a lab
+# needs by default, and widening it for every existing-style build would be a silent
+# change to what the button produces.
+CA_PATH_LENGTH_LEAF_ONLY = 0
+CA_PATH_LENGTH_SUBCA_CAPABLE = 1
+CA_PATH_LENGTHS = (CA_PATH_LENGTH_LEAF_ONLY, CA_PATH_LENGTH_SUBCA_CAPABLE)
+
 # The inventory kind. Mirrors "database" and "k8s": a first-class reapable resource with
 # a row of its own, not a Job row like a VM.
 INVENTORY_KIND = "certlab"
@@ -165,6 +184,21 @@ def _enroll_identity_id(row) -> str:
     return f"certauth-{token}" if len(token) >= 6 else "certauth-plugin"
 
 
+def ca_path_length(row) -> int:
+    """How many CAs this root permits beneath it, read defensively.
+
+    ``or 0`` rather than a bare read: the column arrives by migration with a DEFAULT, so a
+    row inserted by anything that bypassed the ORM can hold NULL — and a NULL that reads
+    as truthy-unknown would let a subordinate be offered against a root that refuses one.
+    Nothing here should ever treat "we do not know" as "yes"."""
+    return int(getattr(row, "ca_path_length", 0) or 0)
+
+
+def can_sign_subordinate(row) -> bool:
+    """Whether this CA's root can sign a subordinate at all. See ``CA_PATH_LENGTHS``."""
+    return ca_path_length(row) >= CA_PATH_LENGTH_SUBCA_CAPABLE
+
+
 def _tf_variables(row: CertLab) -> dict:
     """The -var set for this row's cloud. ``terraform destroy`` evaluates the module
     config too, so it needs the identical set — a required variable left unset fails the
@@ -185,6 +219,12 @@ def _tf_variables(row: CertLab) -> dict:
                 # Per row, not the module's constant default: an IAM user name is unique
                 # per ACCOUNT, so two labs would collide on it. See _enroll_identity_id.
                 "iam_user_name": _enroll_identity_id(row),
+                # ACM PCA derives no structural flag from this — it builds every
+                # certificate from one of its own templates — but it does bound which
+                # SubordinateCACertificate_PathLen{N} template an address may name, and
+                # the module uses it to decide whether the enrollment policy needs the
+                # subordinate templates at all.
+                "ca_path_length": ca_path_length(row),
                 "tags": {"managed-by": "vm-dashboard", "purpose": "certificate-lab"}}
     return {"project": row.project or "",
             "location": row.location or "",
@@ -192,6 +232,10 @@ def _tf_variables(row: CertLab) -> dict:
             "tier": _cfg("cert_gcp_cas_tier", "DEVOPS"),
             "ca_id": f"{row.pool_id}-root",
             "ca_common_name": f"{row.name} Root CA",
+            # The root's own max_issuer_path_length. 0 signs leaves only and REFUSES a
+            # subordinate outright — the prerequisite that stops a sub-CA build dead, and
+            # unchangeable after the root exists.
+            "ca_max_path_length": ca_path_length(row),
             # Per row, for the same reason — a service account id is unique per PROJECT.
             "service_account_id": _enroll_identity_id(row),
             "labels": {"managed-by": "vm-dashboard", "purpose": "certificate-lab"}}
@@ -208,6 +252,20 @@ def _read_outputs(row: CertLab, outputs: dict) -> None:
     # Public by definition — a CA certificate is not a secret — and the mTLS endpoint
     # playbook needs it as an extra_var, so it is stored rather than re-fetched.
     row.ca_chain_pem = str(outputs.get("ca_chain_pem") or "")
+    # Both modules echo what they actually built, under their own names, so the recorded
+    # row and the real root cannot disagree about whether a subordinate is possible. That
+    # matters more here than for a cosmetic field: this value gates the Subordinate CA
+    # platform, and a row claiming a capability the root does not have would fail at the
+    # CA with a policy error naming nothing.
+    for key in ("ca_max_path_length", "ca_path_length"):
+        if key in outputs:
+            try:
+                row.ca_path_length = int(outputs[key])
+            except (TypeError, ValueError):
+                logger.warning("cert-lab: %s echoed a non-numeric %s (%r) — keeping the "
+                               "requested %s", row.id, key, outputs[key],
+                               ca_path_length(row))
+            break
     if (row.cloud or "").lower() == "aws":
         row.ca_arn = str(outputs.get("ca_arn") or row.ca_arn or "")
         row.location = str(outputs.get("region") or row.location or "")
@@ -218,7 +276,42 @@ def _read_outputs(row: CertLab, outputs: dict) -> None:
     row.enroll_account = str(outputs.get("service_account_email") or "")
 
 
-async def _wire_up_functional_account(row: CertLab, outputs: dict) -> str:
+# Re-exported so the API layer and the page can name a package without importing the
+# grammar module. Same two values as ps_resource_service.CERT_PACKAGES.
+LEAF_PACKAGE = "certificate"
+SUBCA_PACKAGE = "subca"
+
+# Which pair of row columns holds a package's functional account. Two pairs because a
+# functional account is PLATFORM-bound and a managed system inherits its platform, so an
+# account on "Certificate" cannot carry a managed system on "Subordinate CA" — see the
+# columns' own comment on CertLab.
+_FA_COLUMNS = {
+    LEAF_PACKAGE: ("ps_functional_account", "ps_functional_account_id"),
+    SUBCA_PACKAGE: ("ps_subca_functional_account", "ps_subca_functional_account_id"),
+}
+
+
+def functional_account_for(row, package: str = "certificate") -> str:
+    """The NAME of the functional account this CA onboards a ``package`` identity with."""
+    from . import cert_ps_service
+    name_col, _ = _FA_COLUMNS[cert_ps_service.cert_normalise_package(package)]
+    return str(getattr(row, name_col, "") or "")
+
+
+def _set_functional_account(row, package: str, fa: dict) -> None:
+    """Record a minted-or-referenced account on the row's columns for its package.
+
+    Both modes record the NAME, so onboarding reads the account this CA was built against
+    rather than whatever the global config key says now. Only a MINTED account carries an
+    id, and that is what teardown keys its delete on — reference mode leaves it None,
+    which is what stops teardown deleting an operator's own account."""
+    name_col, id_col = _FA_COLUMNS[package]
+    setattr(row, name_col, fa.get("account_name") or "")
+    setattr(row, id_col, fa.get("id"))
+
+
+async def _wire_up_functional_account(row: CertLab, outputs: dict,
+                                      package: str = "certificate") -> str:
     """Mint the CA's functional account from the apply's outputs, onto the row.
 
     Returns "" on success, or the failure explained — which the caller stores on the row
@@ -232,37 +325,28 @@ async def _wire_up_functional_account(row: CertLab, outputs: dict) -> str:
     already how a failed identity registration surfaces here.
     """
     from . import cert_ps_service
+    package = cert_ps_service.cert_normalise_package(package)
     try:
-        fa = await cert_ps_service.ensure_functional_account(row, outputs)
+        fa = await cert_ps_service.ensure_functional_account(row, outputs, package)
     except Exception as exc:                                        # noqa: BLE001
         # str(exc) only. The composed password is never in a CertPSError, and nothing
         # from `outputs` may reach error_message, which the page renders verbatim.
-        logger.error("cert-lab: functional account failed for %s: %s", row.id, exc)
+        logger.error("cert-lab: %s functional account failed for %s: %s",
+                     package, row.id, exc)
         row.error_message = str(exc)[:2000]
         return str(exc)
-    # Both modes record the NAME, so Add identity reads the account this CA was built
-    # against rather than whatever the global key says now. Only a minted account
-    # carries an id, and that is what teardown keys its delete on — reference mode
-    # returns None there, which is what stops it deleting an operator's own account.
-    row.ps_functional_account = fa.get("account_name") or ""
-    row.ps_functional_account_id = fa.get("id")
+    _set_functional_account(row, package, fa)
     return ""
 
 
-async def rewire_functional_account(db: Session, *, lab_id: str) -> dict:
-    """Retry the functional account for a CA whose build could not create one.
+async def _read_ca_outputs(row: CertLab) -> dict:
+    """The build's outputs, read back out of the terraform state.
 
-    The enrollment credential is long gone from this process, but it IS in the state
-    terraform wrote — so this reads the outputs back out of it rather than asking for a
-    rebuild. That is the whole reason the retry can exist.
-
-    Synchronous on purpose: it is one API call against Password Safe plus a state read,
-    both of which the operator is sitting and watching.
-    """
-    from . import cert_ps_service
-    row = get_lab(db, lab_id)
-    if not row:
-        raise CertLabError("that certificate authority no longer exists")
+    This is the only reachable copy of the enrollment credential once the apply has
+    finished: a GCP service-account key is returned once by the API and an AWS secret
+    access key likewise. Being able to read it back is what makes minting a functional
+    account a RETRY rather than a rebuild — which matters here more than usual, because
+    CAS never hands a deleted pool id back, so a rebuild is a one-way door."""
     if not row.deploy_job_id:
         raise CertLabError(
             "this CA has no terraform state recorded, so its enrollment credential "
@@ -271,30 +355,84 @@ async def rewire_functional_account(db: Session, *, lab_id: str) -> dict:
     # state that was never written. Those are not CertPSError, and letting them out raw
     # turns an operator-fixable problem into a 500.
     try:
-        outputs = await terraform.read_state_outputs(row.deploy_job_id)
+        return await terraform.read_state_outputs(row.deploy_job_id)
     except Exception as exc:                                        # noqa: BLE001
         raise CertLabError(
             f"could not read {row.name}'s terraform state, which is where its "
             f"enrollment credential still is: {exc}") from exc
-    fa = await cert_ps_service.ensure_functional_account(row, outputs)
-    row.ps_functional_account = fa.get("account_name") or ""
-    row.ps_functional_account_id = fa.get("id")
+
+
+async def rewire_functional_account(db: Session, *, lab_id: str,
+                                    package: str = "certificate") -> dict:
+    """Retry the functional account for a CA that has none on ``package``.
+
+    Two reasons it can be missing, and this one call serves both: the build could not
+    create the leaf one, or the CA has simply never issued on the subordinate package
+    before, whose account is minted lazily.
+
+    Synchronous on purpose: it is one API call against Password Safe plus a state read,
+    both of which the operator is sitting and watching.
+    """
+    from . import cert_ps_service
+    package = cert_ps_service.cert_normalise_package(package)
+    row = get_lab(db, lab_id)
+    if not row:
+        raise CertLabError("that certificate authority no longer exists")
+    if package == cert_ps_service.CERT_PACKAGE_SUBCA and not can_sign_subordinate(row):
+        raise CertLabError(_subca_refusal(row))
+    outputs = await _read_ca_outputs(row)
+    fa = await cert_ps_service.ensure_functional_account(row, outputs, package)
+    _set_functional_account(row, package, fa)
     row.error_message = None
     row.updated_at = datetime.utcnow()
     db.commit()
-    return {"lab_id": row.id, "functional_account": row.ps_functional_account,
+    return {"lab_id": row.id, "package": package,
+            "platform": cert_ps_service.platform_name(package),
+            "functional_account": functional_account_for(row, package),
             "mode": fa.get("mode")}
+
+
+def _subca_refusal(row) -> str:
+    """Why this CA cannot serve the Subordinate CA platform, said at the click.
+
+    The CA is the one that refuses, not the plugin, and it refuses with a policy error
+    that names neither the flag nor the build choice — so without this the operator gets
+    a failed rotation hours later and nothing pointing at the cause."""
+    return (f"{row.name} was built as a leaf-only certificate authority: its root has a "
+            f"path length of {ca_path_length(row)}, so it will REFUSE to sign a "
+            f"subordinate CA. That is fixed when the root is created and cannot be "
+            f"widened afterwards — the refusal comes from the CA itself, as a policy "
+            f"error naming no flag. Build a second CA with 'can sign a subordinate CA' "
+            f"selected to demonstrate the Subordinate CA platform. This one still serves "
+            f"the Certificate platform normally.")
 
 
 def provision(db: Session, *, name: str, project: str, created_by: str,
               cloud: str = "gcp", location: str = "", pool_id: str = "",
+              path_length: int = CA_PATH_LENGTH_LEAF_ONLY,
               workgroup: Optional[str] = None) -> dict:
-    """Record the CA and enqueue its build. Returns ``{lab_id, job_id}``."""
+    """Record the CA and enqueue its build. Returns ``{lab_id, job_id}``.
+
+    ``path_length`` is what the root permits beneath it, and it is a one-way decision:
+    0 signs leaves only and cannot be widened after the root exists, so a CA meant to
+    demonstrate the Subordinate CA platform has to be built as one. See
+    ``CA_PATH_LENGTHS``."""
     cloud = (cloud or "gcp").lower()
     template_dir(cloud)                       # fail here, not in the worker
     name = (name or "").strip()
     if not name:
         raise CertLabError("a certificate authority needs a name")
+    try:
+        path_length = int(path_length)
+    except (TypeError, ValueError):
+        path_length = -1
+    if path_length not in CA_PATH_LENGTHS:
+        raise CertLabError(
+            f"path length {path_length!r} is not offered — {CA_PATH_LENGTH_LEAF_ONLY} "
+            f"builds a root that signs end-entity certificates only, and "
+            f"{CA_PATH_LENGTH_SUBCA_CAPABLE} one that can also sign a subordinate CA for "
+            f"the Subordinate CA platform. Deeper hierarchies are a real PKI design "
+            f"rather than a lab, and this is not the tool for one.")
     # NULL would mean "never" and never "inherit the default", so the timer is resolved
     # here, in the provision's own transaction. Extending or pinning it afterwards is the
     # existing /api/expiry/set path.
@@ -371,6 +509,7 @@ def provision(db: Session, *, name: str, project: str, created_by: str,
 
     row = CertLab(name=name, cloud=cloud, backend=_BACKENDS[cloud], project=project or "",
                   location=location, pool_id=pool_id, status="provisioning",
+                  ca_path_length=path_length,
                   workgroup=workgroup, created_by=created_by,
                   expires_at=expires_at)
     db.add(row)
@@ -379,11 +518,12 @@ def provision(db: Session, *, name: str, project: str, created_by: str,
     job = job_service.create_job(
         db, PROVISION_JOB_TYPE, created_by, workgroup=workgroup,
         metadata={"lab_id": row.id, "name": name, "cloud": cloud,
-                  "project": project, "location": location, "pool_id": pool_id})
+                  "project": project, "location": location, "pool_id": pool_id,
+                  "path_length": path_length})
     row.deploy_job_id = job.id
     db.commit()
-    logger.info("cert-lab: queued %s CA %r (%s) as job %s", cloud, name,
-                pool_id or location, job.id)
+    logger.info("cert-lab: queued %s CA %r (%s, pathlen %d) as job %s", cloud, name,
+                pool_id or location, path_length, job.id)
     return {"lab_id": row.id, "job_id": job.id}
 
 
@@ -624,36 +764,44 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str) -> None:
                     job_id, 15,
                     f"Password Safe deregister failed, continuing to the CA: {exc}")
 
-        # Only ever the account this dashboard minted. A NULL id means an operator named
-        # their own in reference mode, and deleting that would take out every other CA
-        # pointed at it.
-        if row.ps_functional_account_id:
+        # BOTH packages' accounts, and only ever the ones this dashboard minted. A NULL
+        # id means an operator named their own in reference mode, and deleting that would
+        # take out every other CA pointed at it.
+        #
+        # Two accounts because a functional account is platform-bound: a CA that served
+        # both the Certificate and the Subordinate CA platform has one on each, and
+        # forgetting the second leaves an orphan holding a live enrollment credential
+        # after the CA it belonged to is gone.
+        for package, (name_col, id_col) in _FA_COLUMNS.items():
+            fa_id = getattr(row, id_col, None)
+            if not fa_id:
+                continue
+            label = getattr(row, name_col, "") or package
             if not deregistered:
                 # Its managed system still references it, so the delete would be refused
                 # anyway \u2014 and saying why beats a 400 in the log.
                 await broadcast_progress(
                     job_id, 18,
-                    "Leaving the functional account: its managed system is still "
-                    "registered, so it cannot be deleted yet.")
-            else:
+                    f"Leaving the functional account {label}: its managed system is "
+                    f"still registered, so it cannot be deleted yet.")
+                continue
+            await broadcast_progress(
+                job_id, 18,
+                f"Deleting the Password Safe functional account {label}\u2026")
+            try:
+                from . import ps_api_service
+                await ps_api_service.delete_functional_account(int(fa_id))
+                # Cleared only on success, so a retried teardown reattempts exactly
+                # the step that failed and skips the one that did not.
+                setattr(row, id_col, None)
+                setattr(row, name_col, None)
+                db.commit()
+            except Exception as exc:
+                logger.warning("cert-lab: %s functional account delete failed for %s "
+                               "(continuing to the CA): %s", package, lab_id, exc)
                 await broadcast_progress(
-                    job_id, 18,
-                    "Deleting the Password Safe functional account\u2026")
-                try:
-                    from . import ps_api_service
-                    await ps_api_service.delete_functional_account(
-                        int(row.ps_functional_account_id))
-                    # Cleared only on success, so a retried teardown reattempts exactly
-                    # the step that failed and skips the one that did not.
-                    row.ps_functional_account_id = None
-                    row.ps_functional_account = None
-                    db.commit()
-                except Exception as exc:
-                    logger.warning("cert-lab: functional account delete failed for %s "
-                                   "(continuing to the CA): %s", lab_id, exc)
-                    await broadcast_progress(
-                        job_id, 20,
-                        f"Functional account delete failed, continuing to the CA: {exc}")
+                    job_id, 20,
+                    f"Functional account delete failed, continuing to the CA: {exc}")
 
         await broadcast_progress(job_id, 25, "Destroying the certificate authority\u2026")
         await terraform.destroy(
@@ -685,14 +833,22 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str) -> None:
 
 # ── the certificate identity on this CA ───────────────────────────────────────
 
-def address_for(row: CertLab, overrides: Optional[dict] = None) -> str:
-    """The managed-system address for a certificate identity issued by THIS CA.
+def address_for(row: CertLab, overrides: Optional[dict] = None,
+                package: str = "certificate") -> str:
+    """The managed-system address for an identity issued by THIS CA.
 
     Composed from the row rather than typed, so the keys that identify the CA — `project=`,
     `location=` and `pool=` on gcpcas, `arn=` and `region=` on awspca — can never drift
     from what was actually built. A mismatch there is a 404 at the first rotation and
-    reads like a permissions problem."""
+    reads like a permissions problem.
+
+    ``package`` decides which of the two platforms the address is destined for, and with
+    it what ``isca=`` and ``bundle=`` already default to — so a subordinate profile
+    composed here normally carries neither."""
     from . import cert_ps_service
+    package = cert_ps_service.cert_normalise_package(package)
+    if package == cert_ps_service.CERT_PACKAGE_SUBCA and not can_sign_subordinate(row):
+        raise CertLabError(_subca_refusal(row))
     backend = row.backend or ""
     if backend == "awspca":
         # `arn=` is the one option an awspca address cannot be built without, and it is
@@ -706,19 +862,22 @@ def address_for(row: CertLab, overrides: Optional[dict] = None) -> str:
         return cert_ps_service.build_address(
             "awspca",
             {"arn": row.ca_arn, "region": row.location or ""},
-            overrides)
+            overrides, package)
     if backend != "gcpcas":
         raise CertLabError(f"no address builder for backend {backend!r}")
     return cert_ps_service.build_address(
         "gcpcas",
         {"project": row.project or "", "location": row.location or "",
          "pool": row.pool_id or ""},
-        overrides)
+        overrides, package)
 
 
 def start_ps_register(db: Session, *, lab_id: str, account_name: str, created_by: str,
-                      action: str = "register", overrides: Optional[dict] = None) -> dict:
-    """Enqueue onboarding one certificate identity against this CA."""
+                      action: str = "register", overrides: Optional[dict] = None,
+                      package: str = "certificate") -> dict:
+    """Enqueue onboarding one identity against this CA, on one of the two packages."""
+    from . import cert_ps_service
+    package = cert_ps_service.cert_normalise_package(package)
     row = get_lab(db, lab_id)
     if not row:
         raise CertLabError(f"certificate authority {lab_id} not found")
@@ -727,12 +886,24 @@ def start_ps_register(db: Session, *, lab_id: str, account_name: str, created_by
             f"{row.name} is {row.status}, not available — onboarding an identity against a "
             f"CA that is not built yet produces a managed system that fails every rotation")
     if action == "register":
+        # Refuse a subordinate against a root that cannot sign one, here, at the click.
+        # See _subca_refusal: the CA is what refuses, and it does so with a policy error
+        # naming neither the flag nor the build choice.
+        if package == cert_ps_service.CERT_PACKAGE_SUBCA and not can_sign_subordinate(row):
+            raise CertLabError(_subca_refusal(row))
         # Same reason as the address below: fail at the click. Both sources are checked
         # because a CA built before the dashboard minted these has a NULL column and an
         # operator-configured account that works perfectly — refusing that would break a
         # lab that is running today.
+        #
+        # On the subordinate package a missing account is NOT a failure: it is minted
+        # lazily by the worker, from the enrollment credential still in the CA's own
+        # terraform state, because a CA that never issues a subordinate should not carry
+        # a functional account on a platform it never uses. So only the leaf package is
+        # refused for its absence.
         from . import config_service
-        if not (row.ps_functional_account
+        if package == cert_ps_service.CERT_PACKAGE_LEAF and not (
+                functional_account_for(row, package)
                 or config_service.get("cert_ps_functional_account")):
             raise CertLabError(
                 f"{row.name} has no Password Safe functional account, so an identity "
@@ -740,28 +911,33 @@ def start_ps_register(db: Session, *, lab_id: str, account_name: str, created_by
                 f"Use 'Wire up Password Safe' on the CA first.")
         # Compose here, in the request, so a bad profile is a 400 the operator can fix
         # while the form is still open rather than a failed job ten seconds later.
-        address = address_for(row, overrides)
+        address = address_for(row, overrides, package)
     else:
         address = row.ps_address or ""
+        package = cert_ps_service.cert_normalise_package(row.ps_package or package)
     job = job_service.create_job(
         db, "cert_ps_register", created_by, workgroup=row.workgroup,
         metadata={"lab_id": row.id, "account_name": account_name,
-                  "action": action, "address": address})
+                  "action": action, "address": address, "package": package})
     db.commit()
-    return {"lab_id": row.id, "job_id": job.id, "address": address}
+    return {"lab_id": row.id, "job_id": job.id, "address": address,
+            "package": package, "platform": cert_ps_service.platform_name(package)}
 
 
 async def run_ps_register(db: Session, *, lab_id: str, job_id: str, account_name: str,
-                          action: str = "register", address: str = "") -> None:
+                          action: str = "register", address: str = "",
+                          package: str = "certificate") -> None:
     """Worker entry point for ``cert_ps_register``.
 
     ``address`` is the profile ``start_ps_register`` already composed and validated,
     carried on the job. Recomposing it here would silently drop the per-identity
     overrides the form supplied -- the request holds them, the row does not -- so the
     identity would get a certificate with the CA's defaults instead of the one asked
-    for."""
+    for. ``package`` rides the job for the same reason, and it also decides which of the
+    row's two functional accounts is used."""
     from ..api.websocket import broadcast_progress
     from . import cert_ps_service
+    package = cert_ps_service.cert_normalise_package(package)
     row = get_lab(db, lab_id)
     if not row:
         logger.warning("cert-lab: row %s vanished before Password Safe registration", lab_id)
@@ -773,23 +949,50 @@ async def run_ps_register(db: Session, *, lab_id: str, job_id: str, account_name
             if row.ps_tf_state:
                 await cert_ps_service.deregister(row.ps_tf_state)
             row.ps_tf_state = row.ps_system_id = row.ps_account_id = None
+            row.ps_package = None
             db.commit()
             job_service.set_completed(db, job_id, result={"lab_id": row.id})
             return
 
-        # Fall back to recomposing only for a job queued before this argument existed.
-        address = address or address_for(row)
+        # Fall back to recomposing only for a job queued before these arguments existed.
+        address = address or address_for(row, package=package)
+
+        # The subordinate package's functional account is minted on first use rather than
+        # at build time: a CA that never issues a subordinate should not carry an account
+        # on a platform it never touches. The enrollment credential is still in the CA's
+        # own terraform state, so this needs no rebuild \u2014 which matters, because CAS never
+        # hands a deleted pool id back.
+        if not functional_account_for(row, package):
+            await broadcast_progress(
+                job_id, 10,
+                f"Wiring up the {cert_ps_service.platform_name(package)} functional "
+                f"account\u2026")
+            outputs = await _read_ca_outputs(row)
+            note = await _wire_up_functional_account(row, outputs, package)
+            db.commit()
+            if note:
+                # Not swallowed: a managed system on this package cannot be created
+                # without an account on this package's platform, so there is nothing to
+                # carry on to.
+                raise CertLabError(
+                    f"could not create the {cert_ps_service.platform_name(package)} "
+                    f"functional account this identity needs: {note}")
+
         await broadcast_progress(job_id, 20, "Creating the Secrets Safe folder\u2026")
-        # This CA's OWN functional account, not the global config key. In create mode
-        # it is the one minted from this CA's enrollment credential, and no other
-        # account can rotate these certificates; falling through to config would onboard
-        # against a different CA's identity and fail every credential action.
+        # This CA's OWN functional account for this package, not the global config key.
+        # In create mode it is the one minted from this CA's enrollment credential, and
+        # no other account can rotate these certificates; falling through to config would
+        # onboard against a different CA's identity and fail every credential action. The
+        # PACKAGE matters as much as the CA: an account on the wrong platform onboards
+        # green and then fails every credential action.
         reg = await cert_ps_service.register(
             system_name=row.name, account_name=account_name, address=address,
-            functional_account=row.ps_functional_account or "")
+            functional_account=functional_account_for(row, package),
+            package=package)
         row.ps_system_id = str(reg.get("managed_system_id") or "")
         row.ps_account_id = str(reg.get("managed_account_id") or "")
         row.ps_address = address
+        row.ps_package = package
         row.ps_tf_state = reg.get("tf_state_json")
         row.updated_at = datetime.utcnow()
         db.commit()
@@ -798,15 +1001,19 @@ async def run_ps_register(db: Session, *, lab_id: str, job_id: str, account_name
         # be gated by an approval with a reason, and that record is the first thing the
         # demonstration shows. Firing a rotation from the dashboard would produce a
         # certificate nobody approved and quietly remove the point.
+        what = ("subordinate certificate authority"
+                if package == cert_ps_service.CERT_PACKAGE_SUBCA else "certificate")
         await broadcast_progress(
             job_id, 95,
-            "Registered. Run Change Password in BeyondInsight to issue the first "
-            "certificate \u2014 Test password correctly fails until then, because no bundle "
-            "exists yet.")
+            f"Registered on the {cert_ps_service.platform_name(package)} platform. Run "
+            f"Change Password in BeyondInsight to issue the first {what} \u2014 Test "
+            f"password correctly fails until then, because no bundle exists yet.")
         job_service.set_completed(db, job_id, result={
             "lab_id": row.id, "account_name": account_name,
             "managed_system_id": row.ps_system_id,
-            "managed_account_id": row.ps_account_id, "address": address})
+            "managed_account_id": row.ps_account_id, "address": address,
+            "package": package,
+            "platform": cert_ps_service.platform_name(package)})
     except Exception as exc:
         row.error_message = str(exc)[:2000]
         row.updated_at = datetime.utcnow()

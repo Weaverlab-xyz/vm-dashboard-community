@@ -1,17 +1,29 @@
 {# Certificate Lab page (PREVIEW, gated by cert_lab_enabled).
    Builds a private CA — a GCP CAS DevOps-tier pool or an AWS Private CA — and onboards
-   certificate identities onto the Password Safe "Certificate" custom plugin. Backed by
+   identities onto the Password Safe Certificate custom plugin family. Backed by
    /api/cert-lab.
 
    The cloud selector only appears when more than one module is built: it is filled from
    /api/cert-lab/options, which derives the list from the modules that actually exist
    rather than naming them here.
 
-   Two things on this page are load-bearing and easy to mistake for decoration:
+   TWO PACKAGES. The plugin ships as two .psplugin files over a shared core with different
+   plugin ids, appearing in BeyondInsight as separate platforms with separate access
+   control: "Certificate" issues an end-entity certificate, "Subordinate CA" issues an
+   issuing authority that some other system (PRA Vault) holds and mints leaves beneath.
+   An identity therefore carries a `package`, and the two are not a flag on one profile.
+
+   Three things on this page are load-bearing and easy to mistake for decoration:
      * the address character counter. The managed system's Network Address is the ENTIRE
        configuration surface for this plugin (a Password Safe Cloud tenant cannot edit the
        appsettings.json inside the .psplugin) and Password Safe's column is 255 characters.
-       The fully spelled-out ADCS profile from the plugin's documentation is 269.
+       The fully spelled-out ADCS profile from the plugin's documentation is 269 — and the
+       subordinate topology is where the budget and the SAFETY CONTROL pull against each
+       other, since a permitted-DNS list can exceed 100 characters on its own.
+     * the path-length choice on the build form. A root created to issue leaves has a path
+       length of zero and REFUSES to sign a subordinate at all — and it is the CA that
+       refuses, with a policy error naming neither the flag nor this choice. It cannot be
+       widened after the root exists, so it is a build question rather than a setting.
      * the cost line on each CA. The pool bills whether or not it ever issues anything,
        which is the entire reason this row has an auto-delete timer. #}
 
@@ -27,7 +39,11 @@
     Password Safe as a certificate <strong>registrar and broker</strong> — it never becomes
     a certificate authority. The managed account holds the PKCS#12 passphrase, Secrets Safe
     holds the bundle it opens, and both halves are governed. Build a private CA here, onboard
-    an identity onto it, then rotate from BeyondInsight.
+    an identity onto it, then rotate from BeyondInsight. The plugin ships as
+    <strong>two platforms</strong>: <em>Certificate</em> for an end-entity certificate, and
+    <em>Subordinate CA</em> for an issuing authority another system mints beneath — a
+    delegation of issuing authority rather than one more credential, which is why its access
+    control is separate.
     <a href="/docs/certificates" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>.
   </p>
 
@@ -66,6 +82,7 @@
           <th class="text-left font-medium px-4 py-2">Name</th>
           <th class="text-left font-medium px-4 py-2">Pool</th>
           <th class="text-left font-medium px-4 py-2">Location</th>
+          <th class="text-left font-medium px-4 py-2">Signs</th>
           <th class="text-left font-medium px-4 py-2">Status</th>
           <th class="text-left font-medium px-4 py-2">Identity</th>
           <th class="text-left font-medium px-4 py-2">Expires</th>
@@ -78,6 +95,18 @@
             <td class="px-4 py-2 font-medium text-gray-800" x-text="ca.name"></td>
             <td class="px-4 py-2 font-mono text-xs text-gray-600" x-text="ca.pool_id"></td>
             <td class="px-4 py-2 text-gray-600" x-text="ca.location"></td>
+            <!-- What the root permits beneath it, which decides whether this CA can serve
+                 the Subordinate CA platform at all. Shown rather than inferred from a
+                 hidden button, because it is fixed at create and an operator wondering
+                 why "Add subordinate CA" is missing should be able to see the answer. -->
+            <td class="px-4 py-2">
+              <span x-show="ca.can_sign_subordinate" x-cloak
+                    class="text-xs px-2 py-0.5 rounded-full bg-purple-100 text-purple-800"
+                    title="Root path length 1 — the Subordinate CA platform can obtain an issuing authority from this CA. It still issues leaves.">leaves + sub-CA</span>
+              <span x-show="!ca.can_sign_subordinate" x-cloak
+                    class="text-xs text-gray-500"
+                    title="Root path length 0 — this CA will refuse to sign a subordinate CA, and that cannot be changed after the root is created.">leaves only</span>
+            </td>
             <td class="px-4 py-2">
               <span class="text-xs px-2 py-0.5 rounded-full"
                     :class="statusClass(ca.status)" x-text="ca.status"></span>
@@ -85,7 +114,10 @@
                     class="block text-xs text-red-600 mt-1" x-text="ca.error_message"></span>
             </td>
             <td class="px-4 py-2 text-gray-600">
-              <span x-show="ca.ps_account_id" x-cloak class="text-xs">onboarded</span>
+              <!-- Which platform it landed on matters as much as whether it did: a leaf
+                   and an issuer are not interchangeable credentials. -->
+              <span x-show="ca.ps_account_id" x-cloak class="text-xs"
+                    x-text="ca.ps_package === 'subca' ? 'onboarded (Subordinate CA)' : 'onboarded'"></span>
               <span x-show="!ca.ps_account_id" x-cloak class="text-xs text-gray-400">—</span>
               <!-- The functional account is what makes Add identity possible at all, so
                    its absence has to be visible before the button is clicked. -->
@@ -101,11 +133,19 @@
               <button x-show="ca.has_chain" x-cloak @click="showChain(ca)"
                       class="text-blue-600 hover:underline text-xs mr-3">Chain</button>
               <button x-show="ca.status === 'available' && !ca.functional_account" x-cloak
-                      @click="wireUp(ca)" :disabled="busy"
+                      @click="wireUp(ca, 'certificate')" :disabled="busy"
                       class="text-blue-600 hover:underline text-xs mr-3 disabled:opacity-50">Wire up Password Safe</button>
               <button x-show="ca.status === 'available' && !ca.ps_account_id && ca.functional_account" x-cloak
-                      @click="openIdentity(ca)"
+                      @click="openIdentity(ca, 'certificate')"
                       class="text-blue-600 hover:underline text-xs mr-3">Add identity</button>
+              <!-- Offered only where the root can actually sign one. The subordinate
+                   package's functional account is NOT required here: it is minted on
+                   first use, from the enrollment credential still in the CA's terraform
+                   state, so a CA that never issues an authority carries no account on
+                   the platform that would. -->
+              <button x-show="ca.status === 'available' && !ca.ps_account_id && ca.can_sign_subordinate" x-cloak
+                      @click="openIdentity(ca, 'subca')"
+                      class="text-purple-700 hover:underline text-xs mr-3">Add subordinate CA</button>
               <button @click="destroy(ca)"
                       class="text-red-600 hover:underline text-xs">Destroy</button>
             </td>
@@ -178,6 +218,25 @@
             available in far more regions than CAS is.
           </p>
         </div>
+
+        <!-- The one-way decision on this form. See the note at the top of the file. -->
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">What the root may sign</label>
+          <select x-model.number="form.path_length"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+            <template x-for="p in (options.path_lengths || [])" :key="p.value">
+              <option :value="p.value" x-text="p.label"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1">
+            <strong>Fixed when the root is created and not widenable afterwards.</strong>
+            A root built to issue leaves has a path length of 0 and will <em>refuse</em> to
+            sign a subordinate CA — and it is the certificate authority that refuses, with a
+            policy error naming neither this choice nor the flag behind it. Pick
+            <em>can also sign a subordinate CA</em> to demonstrate the Subordinate CA
+            platform; it still issues end-entity certificates exactly as before.
+          </p>
+        </div>
       </div>
       <div class="flex justify-end gap-2 mt-6">
         <button @click="buildOpen = false"
@@ -194,23 +253,49 @@
   <div x-show="identityOpen" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-40"
        @click.self="identityOpen = false">
     <div class="bg-white rounded-xl shadow-lg w-full max-w-2xl p-6">
-      <h2 class="text-lg font-semibold text-gray-800 mb-1">Add a certificate identity</h2>
-      <p class="text-xs text-gray-500 mb-4">
+      <h2 class="text-lg font-semibold text-gray-800 mb-1"
+          x-text="ident.package === 'subca' ? 'Add a subordinate certificate authority'
+                                            : 'Add a certificate identity'"></h2>
+      <p class="text-xs text-gray-500 mb-4" x-show="ident.package !== 'subca'">
         One managed account per identity. The account name becomes the subject CN by default,
-        and the whole profile below becomes the managed system's Network Address.
+        and the whole profile below becomes the managed system's Network Address on the
+        <strong>Certificate</strong> platform.
+      </p>
+      <!-- Not a variant of the paragraph above. The credential is a different KIND of
+           thing, the delivery target is different, and the rotation arithmetic is
+           different — saying so here is the cheapest place to stop somebody treating an
+           issuer as one more certificate. -->
+      <p class="text-xs text-gray-500 mb-4" x-show="ident.package === 'subca'" x-cloak>
+        The managed credential here is an <strong>issuer</strong>, not a certificate.
+        Password Safe obtains a subordinate CA from this root, something else — PRA Vault,
+        typically — holds it and mints its own short-lived leaves beneath it, and Password
+        Safe rotates the subordinate on a schedule. It lands on the
+        <strong>Subordinate CA</strong> platform, whose access control is separate for that
+        reason. Install the root chain into every target's trust store
+        <em>once, before anything else</em>: that is what makes rotation safe, and nothing
+        here automates it.
       </p>
       <div class="space-y-3">
         <div>
           <label class="block text-xs font-medium text-gray-600 mb-1">Account name</label>
           <input x-model="ident.account_name" @input="refreshPreview()"
-                 placeholder="svc-deploy-pipeline"
+                 :placeholder="ident.package === 'subca' ? 'pra-session-issuer' : 'svc-deploy-pipeline'"
                  class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono">
         </div>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label class="block text-xs font-medium text-gray-600 mb-1">Lifetime</label>
-            <input x-model="ident.lifetime" @input="refreshPreview()" placeholder="24h"
+            <input x-model="ident.lifetime" @input="refreshPreview()"
+                   :placeholder="ident.package === 'subca' ? '8d' : '24h'"
                    class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono">
+            <p class="text-xs text-gray-400 mt-1" x-show="ident.package === 'subca'" x-cloak>
+              <strong>Rotation does not revoke.</strong> A target validates a leaf by walking
+              its chain to the root and neither knows nor cares which subordinate was current
+              when the leaf was minted — so <em>this</em>, not the rotation interval, is the
+              exposure window if the signing key leaks. Issue it just longer than the interval
+              Password Safe rotates it on: <code>8d</code> against a 7-day schedule leaves two
+              concurrently valid authorities briefly, where <code>1y</code> would leave ~52.
+            </p>
           </div>
           <div>
             <label class="block text-xs font-medium text-gray-600 mb-1">Key</label>
@@ -222,7 +307,7 @@
             </select>
           </div>
         </div>
-        <div>
+        <div x-show="ident.package !== 'subca'">
           <label class="block text-xs font-medium text-gray-600 mb-1">
             DNS SANs <span class="font-normal text-gray-400">(comma-separated, optional)</span>
           </label>
@@ -234,10 +319,82 @@
           </p>
         </div>
 
+        <!-- Name constraints: the one control that bounds a compromise here. Their own
+             block rather than reusing the SAN field, because they mean the opposite
+             thing — a SAN is what THIS certificate asserts, a constraint is what
+             everything beneath it may assert. -->
+        <div x-show="ident.package === 'subca'" x-cloak class="space-y-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">
+              Permitted DNS subtrees
+              <span class="font-normal text-gray-400">(comma-separated)</span>
+            </label>
+            <input x-model="ident.permitdns" @input="refreshPreview()"
+                   placeholder="db.corp.example.com,api.corp.example.com"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono">
+            <p class="text-xs text-gray-400 mt-1">
+              A vaulted CA key is not a credential to one system — it is the authority to mint
+              an identity for <em>anything</em> the CA may assert. Constraints turn a
+              compromise from <em>mint anything</em> into <em>mint within a bounded
+              namespace</em>, and the extension is marked critical, so a relying party that
+              cannot interpret it refuses the certificate rather than ignoring the boundary.
+              Leaving this empty is allowed and warned about. Prefer the parent CA pool's own
+              issuance policy where you can: the subordinate then inherits a boundary it
+              cannot widen, and it costs nothing against the 255-character address.
+            </p>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">
+                Permitted IP ranges <span class="font-normal text-gray-400">(CIDR)</span>
+              </label>
+              <input x-model="ident.permitip" @input="refreshPreview()" placeholder="10.0.0.0/8"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono">
+              <p class="text-xs text-gray-400 mt-1">
+                A subtree is a <strong>network</strong>: <code>10.0.0.0/8</code>, never
+                <code>10.1.2.3/8</code>. Host bits set is refused here, because no later
+                action can detect a subordinate constrained to the wrong thing.
+              </p>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Path length</label>
+              <select x-model="ident.pathlen" @change="refreshPreview()"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                <option value="">(default — 0)</option>
+                <option value="0">0 — end-entity certificates only</option>
+              </select>
+              <p class="text-xs text-gray-400 mt-1">
+                How many further CAs may appear beneath the subordinate. 0 is almost always
+                right, and is all this lab's roots permit.
+              </p>
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Bundle format</label>
+            <select x-model="ident.bundle" @change="refreshPreview()"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+              <option value="">(the package default — PemBundle)</option>
+              <option value="PemBundle">PemBundle</option>
+              <option value="Pkcs12">Pkcs12</option>
+            </select>
+            <p class="text-xs text-gray-400 mt-1">
+              The Subordinate CA package already defaults to <code>PemBundle</code>, which is
+              what a consumer of a CA key needs — PRA Vault's <em>X.509 Parent Certificate
+              Authority</em> account takes a PEM key, a passphrase and a PEM certificate as
+              three separate fields, and its key box says "Only PEM encoding is valid".
+              Leaving this alone is both correct and 17 characters of address budget back.
+            </p>
+          </div>
+        </div>
+
         <!-- The address, and its length. Not decoration: see the note at the top. -->
         <div>
           <div class="flex items-center justify-between mb-1">
-            <label class="block text-xs font-medium text-gray-600">Network Address</label>
+            <label class="block text-xs font-medium text-gray-600">
+              Network Address
+              <span class="font-normal text-gray-400" x-show="preview.platform" x-cloak
+                    x-text="'on ' + preview.platform"></span>
+            </label>
             <span class="text-xs font-mono"
                   :class="preview.length > preview.limit ? 'text-red-600 font-semibold' : 'text-gray-400'"
                   x-text="preview.length + ' / ' + preview.limit"></span>
@@ -246,13 +403,24 @@
                     class="w-full border rounded-lg px-3 py-1.5 text-xs font-mono bg-gray-50"
                     :class="preview.error ? 'border-red-300' : 'border-gray-300'"></textarea>
           <p x-show="preview.error" x-cloak class="text-xs text-red-600 mt-1" x-text="preview.error"></p>
+          <!-- Why the subordinate address is shorter than the operator expects. Without
+               this the absent isca= reads as a missing option rather than a default. -->
+          <p x-show="ident.package === 'subca' && !preview.error" x-cloak
+             class="text-xs text-gray-400 mt-1">
+            No <code>isca=</code> and no <code>bundle=</code>: the Subordinate CA package
+            already defaults both, and restating them would spend 27 characters of the budget
+            the permitted-DNS list is competing for. No <code>eku=</code> either — the plugin
+            asserts none on a CA certificate, because an EKU there constrains everything
+            issued beneath it and implementations disagree about how.
+          </p>
         </div>
       </div>
       <div class="flex justify-end gap-2 mt-6">
         <button @click="identityOpen = false"
                 class="text-sm px-3 py-1.5 rounded-lg border border-gray-300">Cancel</button>
         <button @click="addIdentity()" :disabled="busy || !!preview.error"
-                class="text-sm px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50">
+                class="text-sm px-3 py-1.5 rounded-lg text-white disabled:opacity-50"
+                :class="ident.package === 'subca' ? 'bg-purple-700' : 'bg-blue-600'">
           Onboard
         </button>
       </div>
@@ -293,12 +461,19 @@ function certLabPage() {
     toastType: 'info',
 
     buildOpen: false,
-    form: { name: '', cloud: 'gcp', project: '', location: 'us-central1' },
+    // path_length 0 = leaf-issuing only, the default and what every CA built before the
+    // plugin split is. 1 lets the Subordinate CA platform obtain an issuer from it.
+    form: { name: '', cloud: 'gcp', project: '', location: 'us-central1', path_length: 0 },
 
     identityOpen: false,
     identTarget: null,
-    ident: { account_name: '', lifetime: '', key: '', dns: '' },
-    preview: { address: '', length: 0, limit: 255, error: null },
+    // `package` is which of the plugin's two platforms this identity lands on. The
+    // permitdns/permitip/pathlen/bundle fields only apply to the subordinate one; they
+    // are dropped from the overrides on the leaf package, where the validator would
+    // rightly refuse them as silent no-ops.
+    ident: { account_name: '', lifetime: '', key: '', dns: '', package: 'certificate',
+             permitdns: '', permitip: '', pathlen: '', bundle: '' },
+    preview: { address: '', length: 0, limit: 255, error: null, platform: '' },
 
     chainOpen: false,
     chainPem: '',
@@ -322,6 +497,7 @@ function certLabPage() {
         this.missing = o.missing || [];
         this.preview.limit = o.address_limit || 255;
         if (o.default_location) this.form.location = o.default_location;
+        if (typeof o.default_path_length === 'number') this.form.path_length = o.default_path_length;
         // Prefilled rather than left as a placeholder so the project is visible and
         // editable before the click. The module's provider block makes this value
         // authoritative over the credential's own project, so seeing it matters.
@@ -367,19 +543,25 @@ function certLabPage() {
     // is recovered from the CA's own terraform state server-side, so this needs no
     // rebuild — which matters, because CAS never returns a deleted pool id and a
     // rebuild is therefore a one-way door.
-    async wireUp(ca) {
+    // `package` because the two platforms have a functional account each: an account is
+    // platform-bound and a managed system inherits its platform, so the leaf one cannot
+    // carry a Subordinate CA managed system.
+    async wireUp(ca, pkg) {
       this.busy = true;
       try {
-        const r = await API.post(`/api/cert-lab/${encodeURIComponent(ca.id)}/functional-account`, {});
-        this.notify(`Functional account ready: ${r.functional_account}`);
+        const r = await API.post(`/api/cert-lab/${encodeURIComponent(ca.id)}/functional-account`,
+                                 { package: pkg || 'certificate' });
+        this.notify(`Functional account ready on ${r.platform}: ${r.functional_account}`);
         this.load();
       } catch (e) { this.notify(e.message, 'error'); }
       finally { this.busy = false; }
     },
 
-    openIdentity(ca) {
+    openIdentity(ca, pkg) {
       this.identTarget = ca;
-      this.ident = { account_name: '', lifetime: '', key: '', dns: '' };
+      this.ident = { account_name: '', lifetime: '', key: '', dns: '',
+                     package: pkg || 'certificate',
+                     permitdns: '', permitip: '', pathlen: '', bundle: '' };
       this.identityOpen = true;
       this.refreshPreview();
     },
@@ -387,11 +569,26 @@ function certLabPage() {
     // The overrides the address carries. A blank field is DROPPED rather than sent
     // empty, which is what keeps the address inside its 255-character budget: an option
     // left at its default costs nothing absent and 10-30 characters spelled out.
+    //
+    // Split by package rather than sent as one union. Every option here is refused by
+    // the validator on the package that does not read it — a SAN on an issuer and a
+    // name constraint on a leaf are both silent no-ops, which is exactly what that
+    // validator exists to catch — so a union would turn the other package's blank
+    // fields into refusals the operator never typed.
     overrides() {
       const out = {};
       if (this.ident.lifetime) out.lifetime = this.ident.lifetime;
       if (this.ident.key) out.key = this.ident.key;
-      if (this.ident.dns) out.dns = this.ident.dns;
+      if (this.ident.package === 'subca') {
+        if (this.ident.permitdns) out.permitdns = this.ident.permitdns;
+        if (this.ident.permitip) out.permitip = this.ident.permitip;
+        // '0' is a meaningful pathlen, so this tests for a non-empty STRING rather than
+        // for truthiness — `if (out.pathlen)` would drop the one value anybody picks.
+        if (this.ident.pathlen !== '') out.pathlen = this.ident.pathlen;
+        if (this.ident.bundle) out.bundle = this.ident.bundle;
+      } else {
+        if (this.ident.dns) out.dns = this.ident.dns;
+      }
       return out;
     },
 
@@ -406,19 +603,24 @@ function certLabPage() {
             pool: this.identTarget.pool_id,
           },
           overrides: this.overrides(),
+          package: this.ident.package,
         });
       } catch (e) { this.notify(e.message, 'error'); }
     },
 
     async addIdentity() {
       this.busy = true;
+      const subca = this.ident.package === 'subca';
       try {
         await API.post('/api/cert-lab/' + this.identTarget.id + '/identities', {
           account_name: this.ident.account_name,
           overrides: this.overrides(),
+          package: this.ident.package,
         });
         this.identityOpen = false;
-        this.notify('Onboarding — then run Change Password in BeyondInsight to issue the first certificate.');
+        this.notify(subca
+          ? 'Onboarding — then run Change Password in BeyondInsight to issue the subordinate CA, and hand its three PEM pieces to PRA Vault.'
+          : 'Onboarding — then run Change Password in BeyondInsight to issue the first certificate.');
         this.load();
       } catch (e) { this.notify(e.message, 'error'); }
       finally { this.busy = false; }

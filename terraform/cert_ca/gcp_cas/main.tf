@@ -123,6 +123,17 @@ variable "key_algorithm" {
   description = "CA key spec. RSA_PKCS1_2048_SHA256 etc. also valid — the plugin's sigalg= must match this FAMILY, not the subject key it generates"
 }
 
+variable "ca_max_path_length" {
+  type        = number
+  default     = 0
+  description = "How many CAs this root permits beneath it. 0 signs end-entity certificates only and REFUSES a subordinate CA outright; 1 lets the Password Safe Subordinate CA platform obtain one from it. Fixed when the root is created and not widenable afterwards — see the header"
+
+  validation {
+    condition     = var.ca_max_path_length >= 0 && var.ca_max_path_length <= 1
+    error_message = "ca_max_path_length is 0 (leaf-issuing) or 1 (may sign one subordinate CA, which then issues leaves). Deeper hierarchies are a real PKI design rather than a lab."
+  }
+}
+
 variable "service_account_id" {
   type        = string
   default     = "certauth-plugin"
@@ -183,9 +194,18 @@ resource "google_privateca_certificate_authority" "this" {
     x509_config {
       ca_options {
         is_ca = true
-        # One level: this root signs leaf certificates directly, and nothing below it
-        # may itself be a CA.
-        max_issuer_path_length = 0
+        # THE prerequisite for the Subordinate CA platform, and the one that stops a
+        # build dead when it is wrong.
+        #
+        # 0 means this root signs leaf certificates directly and nothing below it may
+        # itself be a CA — so a subordinate request is refused by CAS, not by the plugin,
+        # arriving as a policy error that names neither this flag nor the build choice
+        # that set it. 1 lets Password Safe obtain a subordinate CA from this root, which
+        # then issues leaves of its own.
+        #
+        # It cannot be widened after the root exists, which is why it is a build-form
+        # question rather than a setting.
+        max_issuer_path_length = var.ca_max_path_length
       }
       key_usage {
         base_key_usage {
@@ -224,6 +244,20 @@ resource "google_service_account" "plugin" {
 }
 
 resource "google_privateca_ca_pool_iam_member" "requester" {
+  # Scoped to THIS POOL, and on GCP that scoping is the whole control.
+  #
+  # On the other three sub-CA-capable backends, signing a subordinate is a distinct
+  # operation that can be granted on its own — a subordinate template ARN on AWS, a
+  # CA-type profile on EJBCA, a separate sign-intermediate endpoint on Vault. GCP is the
+  # exception: issuing a subordinate uses the same `privateca.certificates.create` as
+  # issuing a leaf. What differs is the CSR and the pool's issuance policy, not the
+  # permission.
+  #
+  # So the separation has to be made with the RESOURCE rather than the verb: a dedicated
+  # pool whose policy permits CA certificates, with the grant scoped to that pool. That is
+  # why `ca_max_path_length` is a build-time choice producing its own CA row rather than a
+  # setting that widens an existing pool — a leaf-only pool and a sub-CA-capable one being
+  # separate resources with separate enrollment identities IS the boundary.
   ca_pool = google_privateca_ca_pool.this.id
   # certificateRequester covers privateca.certificates.create and nothing else — the
   # plugin submits CSRs and never manages the pool.
@@ -250,6 +284,11 @@ output "pool_resource_name" {
 output "location" {
   value       = var.location
   description = "The `location=` value on the managed-system address"
+}
+
+output "ca_max_path_length" {
+  value       = var.ca_max_path_length
+  description = "What this root permits beneath it. 0 = leaf-issuing only, so the Password Safe Subordinate CA platform cannot be served by it; 1 = it may sign one subordinate CA. Echoed so the recorded row and the built root cannot disagree"
 }
 
 output "ca_chain_pem" {

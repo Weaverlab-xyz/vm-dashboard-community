@@ -140,6 +140,122 @@ def test_the_enrollment_policy_is_scoped_to_this_ca_and_to_issuance():
         assert action in policy, action
 
 
+# ── the two packages, and the root that decides whether the second is possible ──
+#
+# The Certificate plugin split its subordinate-CA half into a second .psplugin, appearing
+# in BeyondInsight as a separate platform with separate access control. That has a
+# prerequisite the dashboard has to build for: a root created to issue leaves has a path
+# length of ZERO and refuses to sign a subordinate at all — and it is the CA that refuses,
+# with a policy error naming neither the flag nor the build choice behind it. It cannot be
+# widened after the root exists.
+
+def test_the_gcp_root_path_length_is_a_variable_and_still_defaults_to_leaf_only():
+    tf = _read("terraform", "cert_ca", "gcp_cas", "main.tf")
+    assert "max_issuer_path_length = var.ca_max_path_length" in tf, \
+        ("hardcoded at 0, the lab's own root can never sign a subordinate — so the "
+         "Subordinate CA platform is undemonstrable on a CA this dashboard built")
+    assert re.search(r'variable "ca_max_path_length"\s*\{[^}]*default\s*=\s*0', tf, re.S), \
+        ("a root that permits a CA beneath it is a wider grant than a lab needs by "
+         "default, and widening it for every existing-style build would be silent")
+    assert 'output "ca_max_path_length"' in tf, \
+        "echoed so the recorded row and the built root cannot disagree"
+
+
+def test_the_aws_root_path_length_gates_the_subordinate_templates():
+    # ACM PCA ignores the CSR's basic constraints and builds from a template, so the
+    # template ARN is the only thing that decides whether a leaf or an AUTHORITY comes
+    # back — which makes it exactly the right thing to scope the enrollment policy on.
+    tf = _read("terraform", "cert_ca", "aws_pca", "main.tf")
+    assert re.search(r'variable "ca_path_length"\s*\{[^}]*default\s*=\s*0', tf, re.S)
+    assert "var.ca_path_length > 0 ? {} : {" in tf, \
+        ("a ternary yielding null encodes as a literal \"Condition\": null, which IAM "
+         "rejects — the key has to be ABSENT")
+    assert "StringNotLikeIfExists" in tf, \
+        ("an absent condition key makes a plain StringNotLike evaluate FALSE, so it "
+         "would deny the ordinary case (no templatearn=, service default EndEntity) and "
+         "the four actions in the statement that carry no TemplateArn to compare")
+    assert 'output "ca_path_length"' in tf
+
+
+def test_the_gcp_grant_is_pool_scoped_because_the_verb_cannot_separate_them():
+    # GCP is the exception among the four sub-CA-capable backends. On AWS, EJBCA and Vault
+    # signing a subordinate is a DISTINCT operation that can be granted on its own — a
+    # subordinate template ARN, a CA-type profile, a separate sign-intermediate endpoint.
+    # On GCP it is the same privateca.certificates.create as a leaf: what differs is the
+    # CSR and the pool's issuance policy, not the permission.
+    #
+    # So the separation has to be the RESOURCE. A grant scoped to the pool, with a
+    # sub-CA-capable root built as its own CA row and its own enrollment identity, IS the
+    # boundary — a project-wide role would erase it.
+    tf = _read("terraform", "cert_ca", "gcp_cas", "main.tf")
+    member = tf.split('resource "google_privateca_ca_pool_iam_member"')[1].split("\n}")[0]
+    assert "ca_pool = google_privateca_ca_pool.this.id" in member, \
+        "a project-scoped grant makes the pool boundary meaningless"
+    assert 'role   = "roles/privateca.certificateRequester"' in member, \
+        "certificateRequester covers certificates.create and nothing else"
+
+
+def test_the_aws_enrollment_policy_can_revoke():
+    # Revocation is a real plugin feature, not a future one: RevokeOnDisable defaults ON,
+    # so Disable Managed Account revokes the certificate the account holds. And the
+    # plugin's succeed-without-revoking path is for a backend with NO revocation
+    # operation — ACM PCA has one, so without the permission Disable fails with an
+    # authorization error that reads like a credential problem.
+    tf = _read("terraform", "cert_ca", "aws_pca", "main.tf")
+    assert '"acm-pca:RevokeCertificate"' in tf
+
+
+def test_the_path_length_rides_the_row_the_form_and_both_modules():
+    svc = _read("web_dashboard", "services", "cert_lab_service.py")
+    db = _read("web_dashboard", "database.py")
+    api = _read("web_dashboard", "api", "cert_lab.py")
+    page = _page("certificates")
+    assert "ca_path_length = Column(Integer" in db
+    # INTEGER DEFAULT 0, not NULL. A NULL backfill would read as "unknown" and let the
+    # identity form offer a subordinate against a root that refuses one — and every root
+    # built before the column existed genuinely has a path length of 0.
+    assert "ALTER TABLE cert_labs ADD COLUMN ca_path_length INTEGER DEFAULT 0" in db
+    assert "ca_max_path_length" in svc and "ca_path_length" in svc
+    assert "path_length: int = cert_lab_service.CA_PATH_LENGTH_LEAF_ONLY" in api, \
+        "a default other than leaf-only would widen what the button already produces"
+    assert "form.path_length" in page and "options.path_lengths" in page
+
+
+def test_a_subordinate_is_refused_against_a_root_that_cannot_sign_one():
+    # At the CLICK. The CA is what refuses otherwise, hours later, with a policy error
+    # naming nothing an operator can act on.
+    svc = _read("web_dashboard", "services", "cert_lab_service.py")
+    for fn in ("def address_for(", "def start_ps_register(",
+               "async def rewire_functional_account("):
+        block = svc.split(fn)[1].split("\ndef ")[0].split("\nasync def ")[0]
+        assert "can_sign_subordinate(row)" in block, fn
+        assert "_subca_refusal(row)" in block, fn
+    assert "getattr(row, \"ca_path_length\", 0) or 0" in svc, \
+        ("a NULL path length must read as 0 — treating 'we do not know' as 'yes' offers "
+         "a subordinate against a root that will refuse it")
+
+
+def test_the_second_platform_is_named_declared_bound_and_token_matched():
+    conf = _read("web_dashboard", "config.py")
+    setup = _read("web_dashboard", "api", "setup.py")
+    panel = _read("web_dashboard", "templates", "settings.html")
+    svc = _read("web_dashboard", "services", "cert_ps_service.py")
+    model = setup.split("class CertLabFeatureConfig(")[1].split("\nclass ")[0]
+    for key in ("cert_ps_subca_platform", "cert_ps_subca_functional_account",
+                "cert_subca_default_lifetime"):
+        assert re.search(rf"^    {key}: ", conf, re.M), f"{key} missing from Settings"
+        assert f"{key}: " in model, f"{key} missing from CertLabFeatureConfig"
+        assert f"panelCfg.{key}" in panel, f"{key} is unbound, so a save discards it"
+    # The platform-token check is the one that bites: "Subordinate CA" does not contain
+    # the word "certificate" at all, so a single ("certificate",) tuple would reject
+    # every functional account on the new platform — a check meant to catch a RENAMED
+    # platform rejecting the correctly-named one.
+    tokens = svc.split("_PLATFORM_TOKENS = {")[1].split("}")[0]
+    assert '"subordinate"' in tokens, \
+        "matching 'certificate' would reject every Subordinate CA functional account"
+    assert '"certificate"' in tokens
+
+
 def test_the_module_is_copied_into_the_image_and_reincluded_in_the_dockerignore():
     # A COPY without the .dockerignore re-include FAILS THE BUILD; a re-include without
     # the COPY fails only at deploy time, in the published image. Both, or neither.

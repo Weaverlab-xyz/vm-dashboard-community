@@ -517,7 +517,11 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
                 db, lab_id=meta["lab_id"], job_id=job_id,
                 account_name=meta["account_name"],
                 action=meta.get("action", "register"),
-                address=meta.get("address", ""))
+                address=meta.get("address", ""),
+                # Which of the plugin's two platforms — "certificate" or "subca". A job
+                # queued before the split carries neither, and the default is the leaf
+                # package, which is what every such job was.
+                package=meta.get("package", "certificate"))
         elif job_type == "spirelab_provision":
             # Opens the cloud ACL on tcp/8081, then drives the four SPIRE playbooks in
             # order as child `ansible_local` rows. One job because the stages are useless
