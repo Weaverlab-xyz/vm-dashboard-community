@@ -73,8 +73,19 @@
    Making it do so would mean putting non-preview flags in _DERIVED, which is exactly the
    change the note above rules out. #}
 
+{% set tab_slugs = tabs | map(attribute='slug') | list %}
 <div class="max-w-6xl mx-auto py-8 px-4"
-     x-data="workloadLabPage({{ tabs | map(attribute='slug') | list | tojson }})"
+     {# SINGLE-QUOTED, AND THAT IS LOAD-BEARING. Jinja's |tojson escapes <, >, & and '
+        so its output is safe inside a script block or a single-quoted attribute -- but
+        does NOT escape ", so in a DOUBLE-quoted attribute the first " of the array ends
+        the attribute. The browser then reads x-data as the truncated `workloadLabPage([`,
+        Alpine throws on it, the root component never initialises, and x-cloak is never
+        lifted: the header and the tab bar render, every panel stays hidden and every tab
+        does nothing. That is a whole dead page from one quote character, with no failing
+        request and no server error -- same symptom as the JS-string bug that
+        tests/test_template_scripts.py was written for. tests/test_templates_parse.py
+        now sweeps every template for it. #}
+     x-data='workloadLabPage({{ tab_slugs | tojson }})'
      x-init="init()"
      {# Cross-tab links. A tab partial has its OWN Alpine component, so it cannot call
         select() directly -- `this` inside it is that component, not the container. It

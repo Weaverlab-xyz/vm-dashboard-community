@@ -68,6 +68,40 @@ def test_x_for_helpers_are_defined_in_their_page():
     assert not failures, "Undefined Alpine helpers:\n  " + "\n  ".join(failures)
 
 
+# `{{ x | tojson }}` sitting inside a DOUBLE-quoted HTML attribute.
+_TOJSON_IN_DQ_ATTR = re.compile(r'=\s*"[^"]*\{\{[^{}]*\|\s*tojson[^{}]*\}\}')
+
+
+def test_tojson_never_sits_in_a_double_quoted_attribute():
+    """|tojson is safe in a <script> body and in a SINGLE-quoted attribute. It is not
+    safe in a double-quoted one.
+
+    Jinja escapes <, >, & and ' on the way out, which is what makes it script-safe --
+    but it leaves " alone, so `x-data="f({{ slugs | tojson }})"` renders as
+
+        x-data="f([" certificates", ...
+
+    and the browser ends the attribute at the array's first quote. Alpine gets the
+    truncated `f([`, throws, and never initialises the component -- so x-cloak is never
+    lifted and the page renders its header and nothing else. No failing request, no
+    server error, and every other template test passes: test_all_templates_parse sees
+    valid Jinja, and test_every_x_data_component_is_defined_somewhere still finds the
+    function name inside the truncated text.
+
+    This shipped on the Workload Lab container and left all four tabs blank.
+    """
+    failures = []
+    for rel, full in _template_files():
+        with open(full, encoding="utf-8") as fh:
+            src = fh.read()
+        for i, line in enumerate(src.splitlines(), 1):
+            if _TOJSON_IN_DQ_ATTR.search(line):
+                failures.append(f"{rel}:{i}: |tojson in a double-quoted attribute "
+                                f"-- single-quote it: {line.strip()[:90]}")
+    assert not failures, ("Unquotable tojson:\n  " +
+                          "\n  ".join(failures))
+
+
 def test_region_filter_pages_define_their_helpers():
     """The Phase-3 region filters specifically: each page that renders a region
     <select> must define the matching distinct-values + filter helpers."""
