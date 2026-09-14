@@ -13,6 +13,7 @@ in either the `secret` object or the response root.
 
 Runs under pytest, or standalone:  python tests/test_workload_credentials.py
 """
+import contextlib
 import importlib.util
 import os
 import sys
@@ -718,6 +719,205 @@ def test_the_pat_field_is_never_prefilled_with_a_mask():
     # value= or a static bullet placeholder standing in for a stored token is not.
     assert ":placeholder" in pat or "placeholder" not in pat, \
         "the stored-token hint must be a bound placeholder, not a pre-filled value"
+
+
+# ── Auth modes: a stored PAT, or this container's own Azure identity ─────────
+#
+# The second mode is the one that removes the last standing credential, so what
+# is guarded here is mostly its FAILURE shapes: a mode that silently falls back
+# to a missing PAT, or a memo that serves a token minted for a different
+# resource, both surface at BeyondTrust as an undifferentiated 401.
+
+@contextlib.contextmanager
+def _config(**values):
+    """Run with `_cfg` answering from `values`. Restores on the way out."""
+    original = wlc._cfg
+    wlc._cfg = lambda key, fallback="": values.get(key, fallback)
+    try:
+        yield
+    finally:
+        wlc._cfg = original
+
+
+def test_the_auth_mode_defaults_to_pat():
+    with _config():
+        assert wlc.auth_mode() == "pat"
+
+
+def test_an_unrecognised_auth_mode_reads_as_pat_not_as_entra():
+    # Degrading to the stored-token path means a typo fails with a plain 401.
+    # Degrading the other way would send an install that never mentioned Azure
+    # looking for a metadata endpoint.
+    with _config(wlc_auth_mode="managed-identity"):
+        assert wlc.auth_mode() == "pat"
+
+
+def test_the_auth_mode_is_case_and_space_insensitive():
+    with _config(wlc_auth_mode=" Entra "):
+        assert wlc.auth_mode() == "entra"
+
+
+def test_pat_mode_still_requires_the_pat():
+    with _config(wlc_site_id="SITE"):
+        assert wlc.missing_settings() == ["wlc_pat"]
+
+
+def test_entra_mode_never_asks_for_a_pat():
+    """The whole point of the mode is that there is no token to hold, so naming
+    `wlc_pat` here would send an operator hunting for one they are right not to
+    have."""
+    with _config(wlc_auth_mode="entra", wlc_site_id="SITE",
+                 wlc_service_name="vm-dashboard",
+                 wlc_entra_resource="api://vm-dashboard-wlc"):
+        assert wlc.missing_settings() == []
+    with _config(wlc_auth_mode="entra", wlc_site_id="SITE"):
+        missing = wlc.missing_settings()
+    assert missing == ["wlc_service_name", "wlc_entra_resource"]
+    assert "wlc_pat" not in missing
+
+
+def test_entra_headers_carry_the_service_name():
+    """Without `X-BT-Service-Name` the platform holds a valid token and no
+    statement of which registration it is meant to satisfy."""
+    original = wlc._entra_token
+    wlc._entra_token = lambda: "IDENTITY-TOKEN"
+    try:
+        with _config(wlc_auth_mode="entra", wlc_service_name="vm-dashboard"):
+            headers = wlc._headers()
+    finally:
+        wlc._entra_token = original
+    assert headers["Authorization"] == "Bearer IDENTITY-TOKEN"
+    assert headers["X-BT-Service-Name"] == "vm-dashboard"
+
+
+def test_pat_headers_send_no_service_name_and_the_stored_token():
+    with _config(wlc_pat="PAT-123"):
+        headers = wlc._headers()
+    assert headers["Authorization"] == "Bearer PAT-123"
+    assert "X-BT-Service-Name" not in headers
+    # The mandatory version header survives the auth split.
+    assert headers["bt-secrets-api-version"] == wlc.DEFAULT_API_VERSION
+
+
+def test_container_apps_identity_endpoint_beats_imds():
+    """169.254.169.254 is not reachable from a Container App, so the injected
+    endpoint is not a preference — it is the only one that works there."""
+    url, headers, params = wlc.build_identity_request(
+        "api://x", env={"IDENTITY_ENDPOINT": "http://localhost:42356/msi/token",
+                        "IDENTITY_HEADER": "secret-value"})
+    assert url == "http://localhost:42356/msi/token"
+    assert headers == {"X-IDENTITY-HEADER": "secret-value"}
+    assert params["resource"] == "api://x"
+
+
+def test_a_half_injected_identity_endpoint_falls_back_to_imds():
+    # An endpoint with no header cannot be called; IMDS at least fails clearly.
+    url, headers, _ = wlc.build_identity_request(
+        "api://x", env={"IDENTITY_ENDPOINT": "http://localhost:42356/msi/token"})
+    assert url == wlc._IMDS_TOKEN_URL
+    assert headers == {"Metadata": "true"}
+
+
+def test_a_system_assigned_identity_sends_no_client_id():
+    # Blank is not the same as absent: it asks for an identity with no client id.
+    _, _, params = wlc.build_identity_request("api://x", "", env={})
+    assert "client_id" not in params
+    _, _, params = wlc.build_identity_request("api://x", "uami-client-id", env={})
+    assert params["client_id"] == "uami-client-id"
+
+
+def test_the_token_expiry_reads_expires_on_as_an_absolute_epoch():
+    token, expires_at = wlc.parse_identity_token(
+        {"access_token": "T", "expires_on": "1789000000"}, now_epoch=1788999000.0)
+    assert token == "T"
+    assert expires_at == 1789000000.0
+
+
+def test_the_token_expiry_falls_back_to_a_relative_expires_in():
+    _, expires_at = wlc.parse_identity_token(
+        {"access_token": "T", "expires_in": "3599"}, now_epoch=1000.0)
+    assert expires_at == 4599.0
+
+
+def test_an_unreadable_expiry_expires_now_rather_than_raising():
+    """The memo is an optimisation. A token with an expiry nobody can read is
+    used once and re-fetched — it must never be the reason a request fails."""
+    _, expires_at = wlc.parse_identity_token(
+        {"access_token": "T", "expires_on": "soon"}, now_epoch=1000.0)
+    assert expires_at == 1000.0
+
+
+def test_a_response_with_no_access_token_is_an_error_not_an_empty_bearer():
+    try:
+        wlc.parse_identity_token({"expires_on": "1789000000"}, now_epoch=0.0)
+    except wlc.WorkloadCredentialsError as exc:
+        assert "access_token" in str(exc)
+    else:
+        raise AssertionError("an empty bearer would 401 at BeyondTrust instead")
+
+
+def test_the_identity_error_names_the_deployment_cause():
+    # The platform says `identity_not_found`; the operator needs to know the
+    # cause is nearly always the container, not this app.
+    msg = wlc.identity_error_message(400, {"error": "invalid_request"})
+    assert "managed identity is assigned" in msg and "400" in msg
+
+
+def test_clearing_the_token_cache_forgets_the_memo():
+    wlc._token_cache.update({"key": "api://old|", "token": "OLD",
+                             "expires_at": 9e18})
+    wlc.clear_token_cache()
+    assert not wlc._token_cache["token"] and not wlc._token_cache["key"]
+
+
+def test_the_token_memo_is_keyed_on_the_resource_and_identity():
+    """A memo keyed on nothing serves a token minted for the previous resource
+    after a settings change, and the failure arrives as an opaque 401."""
+    src = _read("web_dashboard", "services", "workload_credentials_service.py")
+    body = src[src.index("def _entra_token("):]
+    key_line = next(line for line in body.splitlines() if "key = " in line)
+    assert "resource" in key_line and "client_id" in key_line
+
+
+def test_a_panel_save_clears_the_identity_token_too():
+    """Without this a changed resource keeps using the old token for up to an
+    hour, which is indistinguishable from the setting not working."""
+    setup = _read("web_dashboard", "api", "setup.py")
+    hook = setup[setup.index('if feature == "workload_credentials":'):]
+    hook = hook[:hook.index('if feature == "oidc":')]
+    assert "clear_token_cache()" in hook
+
+
+def test_every_bound_entra_field_is_declared_on_the_panel_model():
+    """A field bound in the template but absent from the model is DISCARDED on
+    save, silently — the save returns 200 and the value never lands."""
+    html = _read("web_dashboard", "templates", "settings.html")
+    setup = _read("web_dashboard", "api", "setup.py")
+    config = _read("web_dashboard", "config.py")
+    for field in ("wlc_auth_mode", "wlc_service_name", "wlc_entra_resource",
+                  "wlc_entra_client_id"):
+        assert f"panelCfg.{field}" in html, f"{field} is not on the panel"
+        assert f"{field}: str" in setup, f"{field} is not on the panel model"
+        assert f"{field}: str" in config, f"{field} is not in config.py"
+
+
+def test_the_pat_box_hides_in_entra_mode_and_the_identity_fields_hide_in_pat_mode():
+    html = _read("web_dashboard", "templates", "settings.html")
+    panel = html[html.index("panelCfg.wlc_auth_mode"):]
+    panel = panel[:panel.index("panelCfg.wlc_api_version")]
+    assert "x-show" in panel and "panelCfg.wlc_pat" in panel
+    # x-show rather than x-if on purpose: a removed subtree drops its binding,
+    # and the panel sends what it has bound.
+    assert "x-if" not in panel
+
+
+def test_the_lab_preflight_does_not_hard_code_the_pat():
+    """The Workload Lab's own "not configured" message is the one an operator on
+    a workload identity reads first; naming `wlc_pat` there is a wrong answer."""
+    api = _read("web_dashboard", "api", "workload_cloud.py")
+    svc = _read("web_dashboard", "services", "workload_cloud_service.py")
+    assert 'config_service.get("wlc_pat")' not in api
+    assert "missing_settings()" in api and "missing_settings()" in svc
 
 
 if __name__ == "__main__":

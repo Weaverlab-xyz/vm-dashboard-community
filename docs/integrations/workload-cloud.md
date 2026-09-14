@@ -28,8 +28,9 @@ uses for its own cloud calls — so unlike the SPIRE path, the engine here is
 
 ## What it does
 
-Registering a workload identity records that **this workload draws from that dynamic
-secret**. It mints nothing: issuance is metered, so the first credential appears when
+Registering an identity here records that **this workload draws from that dynamic
+secret**. (It is not the same object as a **Workload Identity** registered in Pathfinder,
+which is an OIDC trust — see Boundaries.) It mints nothing: issuance is metered, so the first credential appears when
 somebody presses **Issue** or a consumer asks Workload Credentials directly.
 
 A mint returns a lease — a credential plus an id and an expiry:
@@ -119,9 +120,14 @@ token that mints *is* the workload, as far as this mechanism can tell. That is t
 limitation the Kubernetes tab has with its Password Safe client, and precisely the axis the
 [SPIRE](spiffe.md) path wins on — there the workload attests itself and nothing is held at all.
 
-**The chain still bottoms out somewhere.** Here it is a Workload Credentials token in the
-consumer's environment. This mechanism moves the problem to something short-lived, audited and
-metered; it does not make it vanish.
+**The chain still bottoms out somewhere — but no longer here.** For the *consumer* being
+demonstrated it is a Workload Credentials token in that workload's environment: this mechanism
+moves the problem to something short-lived, audited and metered, it does not make it vanish.
+For the **dashboard's own** calls it can now bottom out in nothing at all, because Pathfinder
+will trust a registered **Workload Identity** — see
+[Cloud hosting → No PAT](cloud-hosting.md#no-pat-authenticate-to-pathfinder-with-an-entra-workload-identity).
+That is worth saying out loud in a demonstration: the same move is available to the consumer,
+and what closes the gap is a registration in Pathfinder rather than a better secret store.
 
 **AWS caps a role-chained credential at one hour.** A longer TTL request comes back clamped, so
 the page shows the provider's own expiry rather than what was asked for.
@@ -137,12 +143,15 @@ indefinitely.
 
 ## What is not built
 
-- **Federated trust.** The credential chain bottoms out in a Workload Credentials token
-  because that is what this client authenticates with today. If WC accepts an **OIDC trust
-  relationship with an external identity provider**, then a workload could present an
-  attested token — a SPIFFE JWT-SVID, a GitHub Actions OIDC token — and receive a cloud
-  credential with *nothing held anywhere*. That would close the bootstrap gap this page keeps
-  conceding, and it is the single most valuable extension here. **Unverified at the time of
-  writing**; the client only exercises token auth.
+- **Federated trust for the demonstrated workload.** WC *does* accept an OIDC trust
+  relationship: a **Workload Identity** registered in Pathfinder (GitHub Actions, Azure Entra
+  ID, or a Custom IDP with explicit claim conditions) lets a workload present an attested
+  token — a GitHub Actions OIDC token, an Entra identity token, in principle a SPIFFE
+  JWT-SVID — and hold nothing. The dashboard now authenticates that way for its **own** calls.
+  What is not built is doing it *for the identity this tab registers*: the row still names a
+  dynamic secret, and a consumer that wants credentials with nothing held needs its own
+  registration, made by hand in Pathfinder. Registration is a GUI action with no customer API,
+  so this tab cannot create one on an operator's behalf — it could only tell them what to
+  type.
 - **Per-identity TTL enforcement.** The request is passed through and the provider decides.
 - **Reading a credential back.** No endpoint returns one, by design — see the boundaries above.

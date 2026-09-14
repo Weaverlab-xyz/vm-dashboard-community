@@ -2081,6 +2081,27 @@ class Settings(BaseSettings):
     wlc_api_base_url: str = "https://api.beyondtrust.io"
     wlc_site_id: str = ""                           # site (tenant) GUID — the `tenant_id` claim in your access JWT
     wlc_pat: str = ""                               # Personal Access Token; SECRET — registered in secret_hygiene.SECRET_REGISTRY
+    # How this deployment authenticates: "pat" (the stored token above) or
+    # "entra" (this container's own Azure managed identity, trusted by a Workload
+    # Identity registered in Pathfinder's GUI). "entra" stores NO credential at
+    # all — the last standing secret this feature needed — and is only available
+    # where the platform hands the container an identity, i.e. Azure. Default
+    # "pat": an unrecognised value reads as "pat" too, so an install that never
+    # sets this is untouched. See docs/cloud-hosting.md → "No PAT".
+    wlc_auth_mode: str = "pat"
+    # The registration's Service Name, sent as the `X-BT-Service-Name` header on
+    # every call. Required in "entra" mode: it tells the platform WHICH Workload
+    # Identity to evaluate the token against. Not a secret.
+    wlc_service_name: str = ""
+    # The App ID URI the identity token is requested for — it becomes the token's
+    # `aud`. Required in "entra" mode; no default, because the value is one your
+    # own tenant exposes. Not a secret.
+    wlc_entra_resource: str = ""
+    # Client id of a USER-ASSIGNED managed identity. Blank = the container's
+    # system-assigned one. A user-assigned identity is the shareable case: the app
+    # and the worker are separate Container Apps, and one identity across both
+    # means one registration in Pathfinder rather than two.
+    wlc_entra_client_id: str = ""
     # Mandatory `bt-secrets-api-version` header. Date-based; matches the shipping
     # Terraform provider's DefaultAPIVersion. A wrong value fails in a way that
     # reads like an auth error, so it is explicit rather than inferred.

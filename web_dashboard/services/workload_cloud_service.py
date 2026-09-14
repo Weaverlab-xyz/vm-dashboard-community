@@ -199,9 +199,13 @@ def register(db: Session, *, name: str, cloud: str, dynamic_name: str,
     or when a consumer asks for one.
     """
     if not enabled():
+        # Which settings are required depends on the auth mode — an install on a
+        # workload identity has no PAT by design — so the client names them.
+        from . import workload_credentials_service as wlc
+        missing = ", ".join(wlc.missing_settings()) or "its connection settings"
         raise WorkloadCloudError(
-            "Workload Credentials is not configured — set workload_credentials_enabled, "
-            "wlc_site_id and wlc_pat")
+            "Workload Credentials is not configured — set "
+            f"workload_credentials_enabled and {missing}")
     name = (name or "").strip()
     if not name:
         raise WorkloadCloudError("a name is required")

@@ -18,6 +18,12 @@ sync (callers push them off the event loop with ``asyncio.to_thread``), and
 at both. Timeouts stay short because that thread pool is small and one slow
 external call has wedged this app before.
 
+**Two auth modes, and the second one stores nothing.** ``wlc_auth_mode`` is
+either ``pat`` (a stored Personal Access Token) or ``entra`` (this container's
+own Azure managed identity, trusted by a **Workload Identity** registered in
+Pathfinder). The second removes the last standing credential this feature
+needed. See the Auth section below.
+
 **The API version is a header, not a path.** ``bt-secrets-api-version`` is
 mandatory; omit it and requests fail in a way that reads like an auth problem.
 The default matches the shipping Terraform provider's ``DefaultAPIVersion``.
@@ -95,21 +101,269 @@ def configured() -> bool:
     """True when the master flag is on and the required values are set.
 
     Checked before any request so a half-configured install produces one clear
-    message instead of an HTTP error per call site.
+    message instead of an HTTP error per call site. What "required" means depends
+    on the auth mode — see :func:`_missing`.
     """
     if not _enabled():
         return False
-    return bool(_cfg("wlc_site_id") and _cfg("wlc_pat"))
+    return not _missing()
 
 
 def _missing() -> list:
-    """Which required settings are blank, for the error message."""
+    """Which required settings are blank, for the error message.
+
+    **Auth-mode aware.** A message naming ``wlc_pat`` on an install running on a
+    workload identity sends an operator hunting for a token they are deliberately
+    not holding, which is the exact confusion this mode exists to end.
+    """
     out = []
     if not _cfg("wlc_site_id"):
         out.append("wlc_site_id")
-    if not _cfg("wlc_pat"):
+    if auth_mode() == AUTH_MODE_ENTRA:
+        if not _cfg("wlc_service_name"):
+            out.append("wlc_service_name")
+        if not _cfg("wlc_entra_resource"):
+            out.append("wlc_entra_resource")
+    elif not _cfg("wlc_pat"):
         out.append("wlc_pat")
     return out
+
+
+def missing_settings() -> list:
+    """:func:`_missing`, for callers outside this module.
+
+    Its three callers each named ``wlc_pat`` in a literal of their own, which is
+    wrong the moment an install authenticates with a workload identity instead —
+    and a "set wlc_pat" message is the worst possible advice there. They ask here
+    now.
+    """
+    return _missing()
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+#
+# Two ways to present this dashboard to Workload Credentials, and the second one
+# is why this section is long.
+#
+# ``pat``    A Personal Access Token minted in Pathfinder and stored encrypted in
+#            ``app_config``. Long-lived, and the one standing credential this
+#            feature never removed: WC collapsed three cloud keys into one
+#            platform token rather than into nothing.
+#
+# ``entra``  **Nothing stored at all.** The container's own Azure managed
+#            identity produces a short-lived Entra token at call time, and
+#            Pathfinder accepts it because a **Workload Identity** registered
+#            there names that identity's issuer and service-principal object id.
+#            There is no secret in ``app_config``, none in the deployment
+#            template, and nothing to rotate.
+#
+# **Registering the trust is a GUI action in Pathfinder and has no client here,
+# on purpose.** Administration → Workload Identities takes the issuer, the
+# constraint on ``sub`` and the site. A dashboard that could register its own
+# trust would be holding a credential that creates credentials, which is the
+# thing this mode exists to get rid of. The registration's **Service Name** is
+# the only part that comes back here: it travels on every request as
+# ``X-BT-Service-Name``, telling the platform which registration to evaluate the
+# token against.
+#
+# Pathfinder registers three issuer categories — GitHub Actions, Azure Entra ID
+# and a Custom IDP with explicit claim conditions. Only the Azure one is wired
+# here, because the thing being authenticated is an Azure-hosted container. The
+# other two describe workloads that are not this process (a CI job, a third-party
+# IdP) and would need a token source this code has no business owning.
+
+AUTH_MODE_PAT = "pat"
+AUTH_MODE_ENTRA = "entra"
+VALID_AUTH_MODES = (AUTH_MODE_PAT, AUTH_MODE_ENTRA)
+
+# Azure's link-local instance-metadata endpoint. The FALLBACK, not the default:
+# Container Apps and App Service inject a per-replica ``IDENTITY_ENDPOINT`` plus
+# an ``IDENTITY_HEADER`` secret instead, and 169.254.169.254 is not reachable
+# from a Container App at all. Preferring the injected pair is what makes this
+# work on the runtime the reference install actually uses.
+_IMDS_TOKEN_URL = "http://169.254.169.254/metadata/identity/oauth2/token"
+_IDENTITY_API_VERSION = "2019-08-01"
+
+# Re-fetch this long before the platform's stated expiry. Entra tokens run about
+# an hour; five minutes of margin covers a slow call that starts just under the
+# wire. Unlike a dynamic secret, fetching one of these is FREE and unmetered, so
+# the margin can be generous — nothing here is billed.
+_TOKEN_MARGIN_SECONDS = 300
+
+# Process-local, and that is correct here where it would be wrong for a lease.
+# ``workload_credential_lease`` lives in the database because each issuance is
+# BILLED and three processes must not buy three credentials. A managed-identity
+# token costs nothing, so a per-process memo is just a cache; the worst a second
+# process can do is fetch its own copy.
+_token_cache: dict = {"key": "", "token": "", "expires_at": 0.0}
+
+
+def auth_mode() -> str:
+    """``pat`` or ``entra``; anything unrecognised reads as ``pat``.
+
+    Falling back to the stored-token path rather than to the identity path is
+    deliberate: a typo should degrade to the mode whose failure is a plain 401,
+    not to one that goes looking for a metadata endpoint and reports something
+    about Azure on an install that never mentioned Azure.
+    """
+    mode = (_cfg("wlc_auth_mode") or AUTH_MODE_PAT).strip().lower()
+    return mode if mode in VALID_AUTH_MODES else AUTH_MODE_PAT
+
+
+def clear_token_cache() -> None:
+    """Forget the memoised Entra token.
+
+    Called when the Workload Credentials panel is saved, for the same reason the
+    lease memo is cleared there: the resource or the identity may have just
+    changed, and an operator watching their own edit do nothing for up to an hour
+    would reasonably conclude the mode is broken.
+    """
+    _token_cache.update({"key": "", "token": "", "expires_at": 0.0})
+
+
+def build_identity_request(resource: str, client_id: str = "",
+                           env: Optional[dict] = None) -> tuple:
+    """``(url, headers, params)`` for the platform's token endpoint. Pure.
+
+    ``IDENTITY_ENDPOINT`` + ``IDENTITY_HEADER`` when the runtime injects them
+    (Container Apps, App Service), otherwise IMDS. ``client_id`` selects a
+    **user-assigned** identity and is omitted for a system-assigned one — sending
+    it blank is not the same thing, it asks for an identity with no client id and
+    fails.
+    """
+    import os
+    env = os.environ if env is None else env
+    params = {"api-version": _IDENTITY_API_VERSION, "resource": resource}
+    if client_id:
+        params["client_id"] = client_id
+    endpoint = (env.get("IDENTITY_ENDPOINT") or "").strip()
+    header = (env.get("IDENTITY_HEADER") or "").strip()
+    if endpoint and header:
+        return endpoint, {"X-IDENTITY-HEADER": header}, params
+    return _IMDS_TOKEN_URL, {"Metadata": "true"}, params
+
+
+def parse_identity_token(payload: Any, now_epoch: float) -> tuple:
+    """``(token, expires_at_epoch)`` from a managed-identity token response. Pure.
+
+    ``expires_on`` is an absolute epoch **as a string** from IMDS and Container
+    Apps; ``expires_in`` is a relative fallback. An unreadable expiry becomes
+    ``now`` rather than an error, so the token is used once and re-fetched next
+    call — the cache is an optimisation and must never be the reason a request
+    fails.
+    """
+    if not isinstance(payload, dict):
+        raise WorkloadCredentialsError(
+            "managed identity returned "
+            f"{type(payload).__name__}, expected a JSON object")
+    token = payload.get("access_token") or payload.get("accessToken") or ""
+    if not token:
+        raise WorkloadCredentialsError(
+            "managed identity response carried no access_token")
+    expires_at = now_epoch
+    raw = _first(payload, "expires_on", "expiresOn")
+    if raw is not None:
+        try:
+            expires_at = float(str(raw).strip())
+        except (TypeError, ValueError):
+            expires_at = now_epoch
+    else:
+        raw_in = _first(payload, "expires_in", "expiresIn")
+        try:
+            expires_at = now_epoch + float(str(raw_in).strip())
+        except (TypeError, ValueError):
+            expires_at = now_epoch
+    return str(token), expires_at
+
+
+def identity_error_message(status_code: int, body: Any) -> str:
+    """A message for a failed token fetch that names the likely cause.
+
+    The platform's own wording here is thin (``identity_not_found``), and the
+    cause is nearly always one of two deployment facts rather than anything in
+    this app: no identity assigned to the container, or a resource the tenant
+    will not issue a token for. Saying so beats echoing the body.
+    """
+    detail = ""
+    if isinstance(body, dict):
+        detail = str(_first(body, "error_description", "Message", "message",
+                            "error") or "")
+    elif isinstance(body, str):
+        detail = body[:200]
+    hint = ""
+    if status_code in (400, 404):
+        hint = (" — check that a managed identity is assigned to this container "
+                "and that wlc_entra_resource is an App ID URI the tenant will "
+                "issue for")
+    suffix = f": {detail}" if detail else ""
+    return (f"could not get a managed identity token (HTTP {status_code})"
+            f"{hint}{suffix}")
+
+
+def _entra_token() -> str:
+    """A bearer token for this container's own identity, memoised until expiry."""
+    import time
+
+    import httpx
+
+    resource = _cfg("wlc_entra_resource")
+    if not resource:
+        raise WorkloadCredentialsError(
+            "Workload identity auth needs wlc_entra_resource — the App ID URI "
+            "the token is requested for, which becomes its `aud` claim")
+    client_id = _cfg("wlc_entra_client_id")
+
+    # Keyed on what the token is FOR. Without this, changing the resource or
+    # switching identities keeps serving a token minted for the old one, and the
+    # failure lands at BeyondTrust as an opaque 401.
+    key = f"{resource}|{client_id}"
+    now = time.time()
+    if (_token_cache.get("key") == key and _token_cache.get("token")
+            and _token_cache.get("expires_at", 0.0) > now):
+        return str(_token_cache["token"])
+
+    url, headers, params = build_identity_request(resource, client_id)
+    try:
+        with httpx.Client(timeout=_TIMEOUT_SECONDS) as client:
+            resp = client.get(url, headers=headers, params=params)
+    except httpx.HTTPError as exc:
+        raise WorkloadCredentialsError(
+            "no managed identity endpoint reachable — a workload identity needs "
+            f"one assigned to this container: {exc}") from exc
+
+    if resp.status_code >= 400:
+        try:
+            parsed = resp.json()
+        except ValueError:
+            parsed = resp.text
+        raise WorkloadCredentialsError(
+            identity_error_message(resp.status_code, parsed))
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise WorkloadCredentialsError(
+            "managed identity endpoint returned non-JSON "
+            f"(HTTP {resp.status_code})") from exc
+
+    token, expires_at = parse_identity_token(payload, now)
+    _token_cache.update({"key": key, "token": token,
+                         "expires_at": expires_at - _TOKEN_MARGIN_SECONDS})
+    return token
+
+
+def _auth_headers() -> dict:
+    """Authorization, plus whatever routes the request to an identity.
+
+    In ``entra`` mode ``X-BT-Service-Name`` is not optional decoration: without
+    it the platform holds a valid token and no statement of which registered
+    Workload Identity it is supposed to satisfy.
+    """
+    if auth_mode() == AUTH_MODE_ENTRA:
+        return {
+            "Authorization": f"Bearer {_entra_token()}",
+            "X-BT-Service-Name": _cfg("wlc_service_name"),
+        }
+    return {"Authorization": f"Bearer {_cfg('wlc_pat')}"}
 
 
 # ── Pure helpers (stdlib only — unit-testable without config_service) ─────────
@@ -327,10 +581,12 @@ def is_conflict(exc: Exception) -> bool:
 
 def _headers(merge_patch: bool = False) -> dict:
     out = {
-        "Authorization": f"Bearer {_cfg('wlc_pat')}",
         "bt-secrets-api-version": _cfg("wlc_api_version") or DEFAULT_API_VERSION,
         "Accept": "application/json",
     }
+    # Authorization comes from the auth mode, which may mean a live call to the
+    # platform's token endpoint — so it is built per request rather than held.
+    out.update(_auth_headers())
     if merge_patch:
         # Updates are JSON Merge Patch (RFC 7396): a null deletes a field and an
         # omitted field is left alone. These routes reject a plain
@@ -390,8 +646,15 @@ def test_connection() -> dict:
     """Verify credentials and reachability.
 
     ``GET /session`` validates the current authentication, so success here means
-    the PAT, site id and API version are all good — without creating anything or
-    incurring a metered credential issuance.
+    the site id, the API version and whatever the auth mode presents — a stored
+    PAT, or this container's identity token against its registered Workload
+    Identity — are all good, without creating anything or incurring a metered
+    credential issuance.
+
+    In ``entra`` mode this is also the only cheap way to tell a token-fetch
+    failure (the container has no usable identity) from a rejection (the platform
+    has no matching registration): the first names the metadata endpoint, the
+    second is an HTTP 401 from BeyondTrust.
     """
     _request("GET", "/session")
     base = (_cfg("wlc_api_base_url") or DEFAULT_API_URL).rstrip("/")

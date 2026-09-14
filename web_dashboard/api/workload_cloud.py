@@ -44,10 +44,15 @@ def _require_enabled() -> None:
         raise HTTPException(status_code=403,
                             detail="Workload Credentials is disabled")
     if not workload_cloud_service.enabled():
+        # The missing keys come from the client, not from a literal here: which
+        # settings are REQUIRED depends on the auth mode, and telling an operator
+        # running on a workload identity to set `wlc_pat` sends them looking for a
+        # token they are deliberately not holding.
+        from ..services import workload_credentials_service as wlc
+        missing = ", ".join(wlc.missing_settings()) or "its connection settings"
         raise HTTPException(
             status_code=403,
-            detail=("Workload Credentials is enabled but not configured — set wlc_site_id "
-                    "and wlc_pat"))
+            detail=f"Workload Credentials is enabled but not configured — set {missing}")
 
 
 def _visible(row, user: User) -> bool:
@@ -149,10 +154,9 @@ def register_options(db: Session = Depends(get_db),
     if not any(c["enabled"] for c in clouds):
         missing.append("no cloud has Workload Credentials configured — set wlc_aws_enabled "
                        "or wlc_azure_enabled and their dynamic-secret settings")
-    if not config_service.get("wlc_site_id"):
-        missing.append("wlc_site_id is blank")
-    if not config_service.get("wlc_pat"):
-        missing.append("wlc_pat is blank")
+    # Auth-mode aware (see `_require_enabled`): in `entra` mode the required set is
+    # the service name and the token resource, and there is no PAT to be blank.
+    missing.extend(f"{key} is blank" for key in wlc.missing_settings())
 
     # Folders listed live where possible, so an operator picks a real one rather than typing
     # it. Best-effort: the tab is still usable with a typed name if WC is unreachable, and

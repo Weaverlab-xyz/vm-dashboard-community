@@ -1915,7 +1915,8 @@ class WorkloadCredentialsFeatureConfig(BaseModel):
     """Config-only panel (no `enabled`) for the Workload Credentials PREVIEW feature.
 
     The preview toggle owns `workload_credentials_enabled`; this panel holds the
-    site, PAT and per-cloud dynamic-secret wiring. See _CONFIG_ONLY_FEATURES.
+    site, the auth mode (a stored PAT, or this container's Azure managed identity)
+    and the per-cloud dynamic-secret wiring. See _CONFIG_ONLY_FEATURES.
 
     Workload Credentials is not yet generally available and its API may still change,
     which is why it sits behind a preview flag rather than the normal integration
@@ -1928,6 +1929,14 @@ class WorkloadCredentialsFeatureConfig(BaseModel):
     wlc_api_base_url: str = "https://api.beyondtrust.io"
     wlc_site_id: str = ""
     wlc_pat: str = ""
+    # "pat" | "entra". The second authenticates with the container's own Azure
+    # managed identity against a Workload Identity registered in Pathfinder, and
+    # stores no credential at all. The three fields below are its wiring; all are
+    # identifiers, none is a secret, which is the whole point of the mode.
+    wlc_auth_mode: str = "pat"
+    wlc_service_name: str = ""
+    wlc_entra_resource: str = ""
+    wlc_entra_client_id: str = ""
     # Mandatory `bt-secrets-api-version` header value. A wrong version fails in a
     # way that reads like an auth error, so it is explicit, not inferred.
     wlc_api_version: str = "2026-04-28"
@@ -2155,6 +2164,15 @@ def _write_feature(feature: str, payload_dict: dict, touched: set | None = None)
             if cleared:
                 logger.info("Workload Credentials: cleared the retry backoff on %d "
                             "lease row(s) after a configuration change.", cleared)
+        except Exception:
+            pass
+        # And the identity token, for the same reason: in `entra` mode the memo
+        # holds a token minted for the OLD resource or the OLD identity, and it
+        # outlives a save by up to an hour. A changed setting that appears to do
+        # nothing for an hour is indistinguishable from a broken one.
+        try:
+            from ..services import workload_credentials_service as _wlc
+            _wlc.clear_token_cache()
         except Exception:
             pass
 
