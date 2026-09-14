@@ -21,6 +21,9 @@
                                         — configure and install the Password Safe Resource Broker
   POST   /api/pov/managed/{id}/wireup   — PRA jump item, Password Safe managed system and
                                           Entitle integration per VM
+  POST   /api/pov/managed/{id}/jump-group/move
+                                        — rebuild the jump items of a POV wired before
+                                          per-POV Jump Groups in one of its own
   POST   /api/pov/managed/{id}/entitle-key
                                         — the SSH key Entitle's connector authenticates with
   POST   /api/pov/managed/{id}/share    — publish a customer-facing link
@@ -1249,6 +1252,63 @@ async def wireup(env_id: str, db: Session = Depends(get_db),
 
     job = job_service.create_job(
         db, job_type="pov_env_wireup",
+        created_by=getattr(current_user, "username", None),
+        workgroup=env.workgroup,
+        metadata={"environment_id": env.id})
+    return {"job_id": job.id}
+
+
+@router.post("/managed/{env_id}/jump-group/move", status_code=202,
+             dependencies=_POV_WRITE)
+async def move_jump_group(env_id: str, db: Session = Depends(get_db),
+                          current_user: User = Depends(get_current_user)):
+    """Rebuild this POV's jump items in a Jump Group of its own.
+
+    For a POV wired before per-POV Jump Groups existed, whose items are therefore in the
+    group named on its *tenant* — one group every POV on that appliance shares. A PRA
+    Group Policy grants access by Jump Group, so that is the wrong scope for a vendor, and
+    ``pov_vendor_access.blocker`` refuses to create one. This is the way out it names.
+
+    **Not the same button as Wire up, deliberately.** A jump item names its Jump Group at
+    creation, so moving one means destroying and rebuilding it — a POV's items really do
+    disappear from the appliance for the length of this job. That is not something a
+    re-run of Wire up should do quietly to a POV that is working, which is why
+    ``ensure_jump_group`` leaves an already-wired POV alone and this endpoint exists.
+
+    Refused up front for a POV that already has its own group (nothing to move) or has
+    nothing wired (Wire up creates the group itself), so neither becomes a job row whose
+    only content is a refusal.
+    """
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+    if (env.pra_jump_group_name or "").strip():
+        raise HTTPException(
+            status_code=409,
+            detail=f"this POV's jump items are already in its own Jump Group "
+                   f"{env.pra_jump_group_name}, so there is nothing to move.")
+    if not pov_vendor_access.can_move_jump_group(db, env):
+        # The same three conditions the card's button is shown on, checked again here:
+        # the button is a hint, and a POV with nothing wired must not be able to queue a
+        # job whose first act is to destroy nothing.
+        raise HTTPException(
+            status_code=409,
+            detail="this POV has no jump items in the tenant's Jump Group to move. Press "
+                   "Wire up instead — on a POV with nothing wired yet it creates a Jump "
+                   "Group of its own.")
+
+    try:
+        pov_wireup.tenant_override(db, env)
+        pov_wireup.gateway_name(env)
+    except (pov_wireup.WireupError, pov_gateway.GatewayInstallError,
+            bt_tenant_service.BTTenantError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    job = job_service.create_job(
+        db, job_type="pov_env_jump_group_move",
         created_by=getattr(current_user, "username", None),
         workgroup=env.workgroup,
         metadata={"environment_id": env.id})

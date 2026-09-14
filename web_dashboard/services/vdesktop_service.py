@@ -1016,9 +1016,10 @@ async def teardown_seats(seat_ids: list, job_id: str = None) -> None:
             # Remove the seat's PRA jump item (+ vault account for a Windows seat).
             # `remove_rdp_jump` is a misnomer: it delegates to `_destroy_state_only_sync`,
             # which writes a provider-only config and destroys whatever `sra_*` resource
-            # the state holds — so it is correct for a Shell Jump too, and NOT
-            # `remove_jump`, which regenerates HCL and re-reads `bt_jump_group_name`
-            # (the wrong Jump Group for a GCP seat).
+            # the state holds — so it is correct for a Shell Jump too. `remove_jump` now
+            # delegates to the same worker (it used to regenerate HCL and re-read
+            # `bt_jump_group_name`, the wrong Jump Group for a GCP seat), so either call
+            # would do; this one stays because it also destroys the seat's vault account.
             if row.pra_tunnel_state:
                 try:
                     from . import terraform_pra_service as pra

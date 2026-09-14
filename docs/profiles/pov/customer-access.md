@@ -94,9 +94,28 @@ of its own, and the vendor's policy names that one group.
 ### A POV wired before this will say so
 
 If this POV's jump items are still in the tenant's appliance-wide group, the card refuses
-and says why rather than offering a button that over-grants. The fix is to tear its wiring
-down and press **Wire up** again, which moves the items into a group of its own. Or don't —
-the dashboard login below and the share link both still work for it.
+and says why rather than offering a button that over-grants. Underneath the refusal it
+offers **Move to its own Jump Group**, which is the fix: it destroys this POV's jump items
+and rebuilds them in `pov-<name>`, then the vendor group can be created.
+
+Two things to know before pressing it:
+
+* **Nobody can launch a session on this POV while the job runs.** A jump item names its
+  Jump Group when it is created and there is no update for that, so moving one means
+  destroying it and building a new one. A Windows guest's Vault account is rebuilt with its
+  jump item, because the two live in one Terraform workspace.
+* **Nothing else moves.** This POV's managed systems, Entitle integrations, Gateway,
+  accessors and share link are all left exactly as they are.
+
+If an item cannot be destroyed, the job stops before creating the group and says so —
+items split across two Jump Groups would let a vendor reach part of the POV with nothing on
+the screen saying which part. Press **Wire up** to rebuild whatever did come out (back into
+the tenant's group, where the rest still are), sort the failure out in PRA, and move again.
+
+Pressing **Wire up** on its own will *not* move the items, and says so in the job log:
+filling in a POV's gaps should not quietly tear down items that are working. And you can
+decline the whole thing — the dashboard login below and the share link both still work for
+a POV on the shared group.
 
 ### Giving somebody a login
 
