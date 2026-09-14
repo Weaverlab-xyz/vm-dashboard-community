@@ -32,6 +32,7 @@ class _Row:
         self.status = kw.get("status", "available")
         self.invoke_url = kw.get("invoke_url", "")
         self.region = kw.get("region", "us-east1")
+        self.env_ref = kw.get("env_ref", "{}")
 
 
 def _with_service(row):
@@ -166,6 +167,121 @@ def test_ingress_defaults_to_public_because_on_prem_brokers_exist():
         assert clouddb_dbops_service.ingress_setting() == "ALLOW_INTERNAL_AND_GCLB"
     finally:
         restore()
+
+
+# ── Re-applying the invoker bindings ──────────────────────────────────────────
+#
+# The bindings were written ONCE, at deploy, from whatever the config key held then.
+# An in-place update inherits the deploy's variables and a second deploy is refused
+# while a service exists, so filling the key in afterwards — the normal order, since
+# the brokers are often not known yet — reached nothing. Live on 2026-09-14: the
+# service deployed with an empty key, its IAM policy named nobody, and the first
+# Verify Functional Account was refused with 403 and an empty body.
+
+def _with_attr(module, name, value):
+    original = getattr(module, name)
+    setattr(module, name, value)
+    return lambda: setattr(module, name, original)
+
+
+def _sync_harness(*, applied, configured, env_ref):
+    """(restores, calls) for a service holding ``applied`` with ``configured`` set."""
+    calls = []
+    restores = [
+        _with_service(_Row(status="available", env_ref=env_ref)),
+        _with_config({"clouddb_ps_gcp_dbops_invokers": configured}),
+        _with_attr(cloud_function_service, "deployed_tf_variables",
+                   lambda db, fn_id: {"invoker_members": list(applied)}),
+        _with_attr(cloud_function_service, "update_environment",
+                   lambda db, **kw: calls.append(kw) or {"job_id": "job-9",
+                                                        "tf_variables": {}}),
+    ]
+    return (lambda: [r() for r in reversed(restores)]), calls
+
+
+def test_sync_invokers_is_a_noop_when_the_service_already_holds_them():
+    """No job at all, rather than a job that applies nothing: an operator watching for
+    drift must be able to trust that a button that did something says so."""
+    restore, calls = _sync_harness(
+        applied=["serviceAccount:a@p.iam.gserviceaccount.com"],
+        configured="a@p.iam.gserviceaccount.com",
+        env_ref='{"FN_DBOPS_ALLOWED_INVOKERS": "a@p.iam.gserviceaccount.com"}')
+    try:
+        result = clouddb_dbops_service.sync_invokers(None, region="us-east1")
+        assert result["ok"] and result["changed"] is False, result
+        assert calls == [], calls
+    finally:
+        restore()
+
+
+def test_sync_invokers_applies_config_in_place_and_moves_both_gates_together():
+    """IAM and FN_DBOPS_ALLOWED_INVOKERS are two gates in two trust domains ON PURPOSE,
+    but a service holding one list in its policy and another in its environment is not
+    a boundary — it is a 403 whose cause depends on which gate you happen to fail."""
+    restore, calls = _sync_harness(
+        applied=[], configured="a@p.iam.gserviceaccount.com",
+        env_ref="{}")
+    try:
+        result = clouddb_dbops_service.sync_invokers(None, region="us-east1")
+        assert result["ok"] and result["changed"] is True, result
+        assert len(calls) == 1, calls
+        assert calls[0]["invoker_members"] == [
+            "serviceAccount:a@p.iam.gserviceaccount.com"], calls
+        assert calls[0]["environment"] == {
+            "FN_DBOPS_ALLOWED_INVOKERS": "a@p.iam.gserviceaccount.com"}, calls
+        # The SAME function row — the whole point is that the URL, and so every
+        # managed-system address already registered against it, survives.
+        assert calls[0]["fn_id"] == "fn-1", calls
+    finally:
+        restore()
+
+
+def test_sync_invokers_refuses_when_the_region_has_nothing_deployed():
+    restore = _with_service(None)
+    try:
+        result = clouddb_dbops_service.sync_invokers(None, region="us-east1")
+        assert result["ok"] is False and "us-east1" in result["reason"], result
+    finally:
+        restore()
+
+
+def test_drift_is_a_set_comparison_not_a_list_one():
+    """The module wraps the list in toset(), so order is not a difference — and an IAM
+    member is not case-sensitive. Reporting either as drift would offer a button that
+    applies nothing, forever."""
+    restore, _calls = _sync_harness(
+        applied=["serviceAccount:B@p.iam.gserviceaccount.com",
+                 "serviceAccount:a@p.iam.gserviceaccount.com"],
+        configured="a@p.iam.gserviceaccount.com, b@p.iam.gserviceaccount.com",
+        env_ref="{}")
+    try:
+        assert not clouddb_dbops_service.invokers_drifted(None, "us-east1")
+    finally:
+        restore()
+
+
+def test_an_unavailable_service_never_reports_drift():
+    """It has a job running against it; "differs from config" is not actionable while
+    terraform is mid-apply, and the button would race it."""
+    for status in ("deploying", "failed"):
+        restore = _with_service(_Row(status=status))
+        try:
+            assert not clouddb_dbops_service.invokers_drifted(None, "us-east1")
+        finally:
+            restore()
+
+
+def test_bindings_are_the_ONE_non_environment_setting_an_update_may_change():
+    """Everything else is inherited from the deploy job's variables, so a setting the
+    update does not name cannot drift from what was applied. None means "leave them";
+    an empty list is a real request to revoke, and must not be confused with it."""
+    signature = inspect.signature(cloud_function_service.update_environment)
+    assert signature.parameters["invoker_members"].default is None, signature
+    source = inspect.getsource(cloud_function_service.update_environment)
+    assert "if invoker_members is not None:" in source, source
+    # GCP alone declares the variable; handing an unknown one to the AWS or Azure
+    # module is an apply error three minutes in, not a no-op.
+    assert 'row.cloud != "gcp"' in source, source
 
 
 # ── The workload's deploy constraints ─────────────────────────────────────────

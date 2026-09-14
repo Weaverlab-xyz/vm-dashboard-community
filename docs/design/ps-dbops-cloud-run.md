@@ -145,6 +145,34 @@ so with `auth_mode = "none"`, which is recorded on the row and visible in the UI
 allowed and means *nobody can call it yet*: a legitimate intermediate state, flagged on the
 job rather than blocking the deploy.
 
+### Changing the invokers afterwards — **Sync invokers**
+
+The bindings are written once, at deploy, from whatever `clouddb_ps_gcp_dbops_invokers`
+held at that moment. That made the normal order of work — deploy the service, *then* find
+out which service accounts the brokers run as — a dead end: an in-place update inherits
+the deploy job's variables, and a second deploy is refused while a service exists, so the
+only way to grant `roles/run.invoker` was to destroy the service. Destroying it changes
+its URL, and the URL **is** the audience, so every managed-system address already
+registered against it becomes wrong.
+
+`POST /api/databases/dbops/invokers` (the **Sync invokers** button beside each region)
+re-applies the key to the deployed service in place: same service, same URL, same
+audience. The IAM bindings and `FN_DBOPS_ALLOWED_INVOKERS` move **together** — they are
+two gates in two trust domains on purpose, but a service holding one list in its policy
+and a different one in its environment is not a boundary, it is a 403 whose cause depends
+on which gate you happen to fail. `GET /dbops/status` reports `deployed_invokers` and
+`invokers_drifted` so the panel can say which of the two facts it is showing.
+
+**This was found live, on 2026-09-14.** The first real deploy went out with the key blank;
+`gcloud run services get-iam-policy bt-dbops` answered `etag: ACAB` and nothing else — an
+empty policy — and the first *Verify Functional Account* came back from Cloud Run as
+**403 with an empty response body**, before the container ran, so nothing appeared in its
+logs. The plugin cannot tell that apart from an audience mismatch and names both causes;
+an empty policy is the one to check first. Note what arming
+`FN_DBOPS_ALLOWED_INVOKERS` then turns on: the inner gate matches the token's `email`
+claim, which `SA:` mode carries and `IMP:` mode may not — a 403 that starts arriving
+*with* a JSON body has passed IAM and been refused by us.
+
 `min-instances=1` is the one to defend, because it looks like a cost decision and is not.
 Direct VPC egress documents connection-establishment delays over a minute on instance
 start, and a rotation that times out **may already have applied the password change** —

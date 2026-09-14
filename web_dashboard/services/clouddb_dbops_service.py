@@ -321,6 +321,17 @@ async def run_deploy(db: Session, *, region: str, job_id: str) -> None:
                 "will refuse every request until FN_DBOPS_AUDIENCE is set. Re-run "
                 "this deploy")
 
+        if not members:
+            # Repeated at the END, not only at 5%: progress messages scroll away, and a
+            # finished job is what an operator reads. An empty list is not a degraded
+            # deploy, it is a service whose IAM policy names nobody — every call is
+            # refused by Cloud Run with 403 and an empty body.
+            job_service.append_job_log(
+                db, job_id,
+                f"The service is deployed and NOBODY can call it: "
+                f"clouddb_ps_gcp_dbops_invokers is empty, so no principal holds "
+                f"roles/run.invoker on {SERVICE_NAME}. Set it on the Password Safe "
+                f"panel and use Sync invokers — you do NOT have to redeploy.")
         job_service.set_completed(db, job_id, {
             "fn_id": fn_id, "region": region, "audience": audience,
             "invokers": len(members),
@@ -332,6 +343,87 @@ async def run_deploy(db: Session, *, region: str, job_id: str) -> None:
     except Exception as exc:
         logger.error("clouddb dbops deploy failed region=%s: %s", region, exc)
         job_service.set_failed(db, job_id, str(exc))
+
+
+def deployed_invokers(db: Session, region: str) -> list:
+    """The invoker members the region's service was LAST APPLIED with, or ``[]``.
+
+    Read from the deploy job's variables rather than from config, because those are
+    two different facts and the whole point of this trio is that they can disagree.
+    """
+    from . import cloud_function_service
+
+    row = find_for_region(db, region)
+    if not row:
+        return []
+    persisted = cloud_function_service.deployed_tf_variables(db, row.id)
+    return [str(member).strip()
+            for member in (persisted.get("invoker_members") or [])
+            if str(member).strip()]
+
+
+def invokers_drifted(db: Session, region: str) -> bool:
+    """True when config names a different invoker set than the service holds.
+
+    Compared as a SET and case-insensitively: the module wraps the list in ``toset``,
+    so order is not a difference, and an IAM member is not case-sensitive.
+    """
+    row = find_for_region(db, region)
+    if not row or row.status != "available":
+        return False
+    return ({m.lower() for m in deployed_invokers(db, region)}
+            != {m.lower() for m in invoker_members()})
+
+
+def sync_invokers(db: Session, *, region: str, created_by: str = "") -> dict:
+    """Re-apply ``clouddb_ps_gcp_dbops_invokers`` to the deployed service, in place.
+
+    **This exists because setting the config key used to change nothing.** The invoker
+    bindings were written once, at deploy, from whatever the key held at that moment;
+    an in-place update inherits the deploy's variables, and a second deploy is refused
+    while a service exists. So an operator who deployed first and filled the key in
+    afterwards — the normal order, because the brokers are often not known yet — had no
+    way to grant ``roles/run.invoker`` short of destroying the service, which changes
+    its URL and so invalidates every managed-system address already registered against
+    it. Proven live on 2026-09-14: the service deployed with an EMPTY key, its IAM
+    policy named nobody, and the first Verify Functional Account was refused by Cloud
+    Run with 403 and an empty body — before the container ran, which is why nothing
+    appeared in its logs.
+
+    The IAM bindings and ``FN_DBOPS_ALLOWED_INVOKERS`` move TOGETHER, as they do on the
+    deploy path. They are deliberately two gates in two trust domains — the binding
+    authenticates, the env var authorizes — but a service holding one list in IAM and
+    another in its environment is not a boundary, it is a bug, and the difference would
+    surface as a 403 whose cause depends on which gate you happened to fail.
+
+    Note what arming the env var turns on: the inner gate then matches the token's
+    ``email`` claim. ``SA:`` mode mints through the JWT-bearer flow, which carries one;
+    ``IMP:`` mode goes through ``IAMCredentials.generateIdToken``, which omits ``email``
+    unless the caller asks for it. A rotation that starts failing with a 403 carrying a
+    JSON BODY, having previously failed with an empty one, has passed IAM and been
+    refused here.
+    """
+    from . import cloud_function_service
+
+    row = find_for_region(db, region)
+    if not row or row.status != "available":
+        return {"ok": False, "reason": f"no DB-Ops service available in {region}"}
+    members = invoker_members()
+    wanted_env = ",".join(m.split(":", 1)[1] for m in members if ":" in m)
+    import json as _json
+    current_env = (_json.loads(row.env_ref or "{}") or {}).get(
+        "FN_DBOPS_ALLOWED_INVOKERS")
+    if not invokers_drifted(db, region) and current_env == wanted_env:
+        return {"ok": True, "changed": False, "fn_id": row.id,
+                "invokers": len(members)}
+    result = cloud_function_service.update_environment(
+        db, fn_id=row.id, environment={"FN_DBOPS_ALLOWED_INVOKERS": wanted_env},
+        invoker_members=members, created_by=created_by or "clouddb-dbops")
+    logger.info("clouddb dbops invokers synced region=%s fn_id=%s members=%d",
+                region, row.id, len(members))
+    return {"ok": True, "changed": True, "fn_id": row.id, "job_id": result["job_id"],
+            "tf_variables": result["tf_variables"], "invokers": len(members),
+            "members": members}
 
 
 def refresh_allowlist(db: Session, *, region: str, created_by: str = "") -> dict:

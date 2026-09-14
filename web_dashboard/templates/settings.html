@@ -2019,13 +2019,28 @@
                           <p class="text-xs truncate"
                              :class="r.audience_source === 'deployed' ? 'text-green-600' : (r.audience_source === 'config' ? 'text-amber-600' : 'text-gray-400')"
                              x-text="r.audience ? (r.audience + (r.audience_source === 'config' ? ' (from the override below)' : '')) : (r.reason || 'no service')"></p>
+                          <p x-show="r.invokers_drifted" class="text-xs text-amber-600"
+                             x-text="r.deployed_invokers === 0 ? 'No principal holds roles/run.invoker — every call is refused with 403 and an empty body. Save the list below, then Sync invokers.' : ('The ' + r.deployed_invokers + ' invoker(s) applied to this service differ from the list below — Sync invokers.')"></p>
                         </div>
-                        <button type="button" @click="deployDbops(r.region)"
-                                :disabled="dbopsBusy === r.region || !r.deployable"
-                                :title="r.reason || ''"
-                                class="shrink-0 px-2 py-1 text-xs rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
-                          <span x-text="dbopsBusy === r.region ? 'Deploying…' : (r.status === 'available' ? 'Deployed' : 'Deploy')"></span>
-                        </button>
+                        <div class="shrink-0 flex items-center gap-2">
+                          <!-- In place, on the SAME service: the bindings are written once at
+                               deploy, and destroying the service to change them would change
+                               its URL and so every managed-system address already registered
+                               against it. -->
+                          <button type="button" x-show="r.status === 'available'"
+                                  @click="syncDbopsInvokers(r.region)"
+                                  :disabled="dbopsBusy === r.region"
+                                  class="px-2 py-1 text-xs rounded border hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                                  :class="r.invokers_drifted ? 'border-amber-400 text-amber-700' : 'border-gray-300'">
+                            <span x-text="dbopsBusy === r.region ? 'Working…' : 'Sync invokers'"></span>
+                          </button>
+                          <button type="button" @click="deployDbops(r.region)"
+                                  :disabled="dbopsBusy === r.region || !r.deployable"
+                                  :title="r.reason || ''"
+                                  class="px-2 py-1 text-xs rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
+                            <span x-text="dbopsBusy === r.region ? 'Deploying…' : (r.status === 'available' ? 'Deployed' : 'Deploy')"></span>
+                          </button>
+                        </div>
                       </div>
                     </template>
                   </div>
@@ -2040,6 +2055,8 @@
                       <strong>Named service accounts only</strong> &mdash; the Terraform module refuses
                       <code class="bg-gray-100 px-1 rounded">allUsers</code> and <code class="bg-gray-100 px-1 rounded">allAuthenticatedUsers</code>,
                       because this is an API that changes credentials. Blank deploys a service nothing can call.
+                      <strong>Changing this does not reach a deployed service on its own</strong> &mdash; save, then
+                      use <em>Sync invokers</em> above. No redeploy, so the URL and the audience are unchanged.
                     </p>
                   </div>
                   <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -7473,6 +7490,21 @@ function settingsPage() {
         await this.loadDbops();
       } catch (e) {
         this.showToast('Could not deploy the DB-Ops service: ' + e.message, 'error');
+      } finally {
+        this.dbopsBusy = '';
+      }
+    },
+
+    async syncDbopsInvokers(region) {
+      this.dbopsBusy = region;
+      try {
+        const r = await API.post('/api/databases/dbops/invokers', { region });
+        this.showToast(r.changed
+          ? `Applying ${r.invokers} invoker(s) to the ${region} DB-Ops service — job ${r.job_id}.`
+          : `The ${region} DB-Ops service already holds exactly those invokers — nothing to do.`);
+        await this.loadDbops();
+      } catch (e) {
+        this.showToast('Could not sync the DB-Ops invokers: ' + e.message, 'error');
       } finally {
         this.dbopsBusy = '';
       }
