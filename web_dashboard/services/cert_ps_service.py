@@ -1,11 +1,30 @@
 r"""
-Password Safe onboarding for the "Certificate" custom platform plugin.
+Password Safe onboarding for the Certificate custom platform plugin family.
 
 The plugin makes an x.509 certificate a managed credential: the managed account holds the
 PKCS#12 **passphrase**, and a Secrets Safe file secret holds the **bundle** that passphrase
 opens. Password Safe is a registrar and broker, never a certificate authority — the plugin
 generates the keypair in its own process, sends only a PKCS#10 CSR, and the CA never sees
 the private key.
+
+**There are TWO packages, and therefore two platforms.** The family ships as two
+``.psplugin`` files over a shared core assembly, with different plugin ids, so both
+install side by side and neither overwrites the other:
+
+    "Certificate"     an end-entity certificate  — all nine backends
+    "Subordinate CA"  a subordinate authority    — the four that can sign one
+
+That split is the point rather than packaging tidiness. A subordinate CA is a *delegation
+of issuing authority*, not one more credential, so the team that may request a leaf should
+not automatically be the team that may request an issuer — and two platforms express that
+in Password Safe's own access model instead of by convention. The two are the same code;
+what differs is a ``PluginMetadata`` attribute, a small declarative profile, and two
+defaults (``isca`` and ``bundle``), so they cannot drift apart in behaviour.
+
+The practical consequence for this module is that **a functional account is platform-bound
+and a managed system inherits its platform**, so one CA serving both packages needs one
+functional account per package. Hence ``package`` on nearly every function here, and the
+second pair of columns on ``CertLab``.
 
 This module is the dashboard's half: it composes the certificate profile, resolves the
 functional account and platform, and drives ``ps_resource_service.register_managed_system``
@@ -46,6 +65,8 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 from . import ps_resource_service
+from .ps_resource_service import (CERT_PACKAGE_LEAF, CERT_PACKAGE_SUBCA, CERT_PACKAGES,
+                                  cert_normalise_package)
 
 logger = logging.getLogger(__name__)
 
@@ -110,8 +131,12 @@ def workgroup() -> str:
 # the composed string deterministic, so a re-registration produces a byte-identical address
 # and a diff means a real change.
 _OPTION_ORDER = (
-    # backend identity
+    # backend identity. `url=` leads the five service backends for the same reason `ca=`
+    # leads ADCS: it is the thing an operator looks for first when reading the address
+    # back to work out WHICH certificate authority a managed system talks to.
     "ca", "template", "impersonate", "validate",
+    "url", "label", "profile", "subcaprofile", "eeprofile", "issuerdn",
+    "mount", "role", "auth", "approlemount", "fingerprint", "insecure",
     "arn", "region", "sigalg", "templatearn", "wait",
     "project", "location", "pool", "issuer", "certtemplate",
     # what KIND of thing is being issued — first, because isca= changes the meaning of
@@ -123,8 +148,9 @@ _OPTION_ORDER = (
     "bundle", "pbe", "warn", "warndays", "warnminutes",
     # where the bundle goes
     "store", "biurl", "folder", "secret", "owner",
-    # who is told about it
+    # who is told about it, and what happens to what it replaces
     "publisher", "tenant", "appid", "spid", "retain",
+    "revokeondisable", "revokeonrenewal",
 )
 
 # A value carrying one of these would silently redraw the address's own structure — '&'
@@ -143,7 +169,10 @@ def compose_address(backend: str, options: dict) -> str:
     backend = (backend or "").strip()
     if not backend:
         raise CertPSError(
-            "a certificate profile needs a backend — adcs, awspca, gcpcas or selfsigned")
+            "a certificate profile needs a backend — one of adcs, est, ejbca, vaultpki, "
+            "stepca, digicert, sectigo, awspca, gcpcas or selfsigned. Neither package "
+            "ships a default, deliberately: an unset value fails with a configuration "
+            "error rather than silently falling back to the self-signed test CA")
 
     clean: dict = {}
     for key, value in (options or {}).items():
@@ -175,70 +204,139 @@ def store_options() -> dict:
             "owner": _cfg("cert_ps_owner_group_id")}
 
 
-def profile_defaults() -> dict:
+def profile_defaults(package: str = CERT_PACKAGE_LEAF) -> dict:
     """Certificate-shape defaults from config. Blank means 'let the plugin default it',
-    which is also the shortest address."""
-    return {"lifetime": _cfg("cert_default_lifetime"),
-            "key": _cfg("cert_default_key"),
-            "eku": _cfg("cert_default_eku"),
-            "warn": _cfg("cert_default_warn"),
-            "subject": _cfg("cert_default_subject")}
+    which is also the shortest address.
+
+    ``subject`` and ``eku`` are dropped on the subordinate package. A subject template is
+    per-identity and a subordinate has no EKU at all — see ``build_address``."""
+    defaults = {"lifetime": _cfg("cert_default_lifetime"),
+                "key": _cfg("cert_default_key"),
+                "eku": _cfg("cert_default_eku"),
+                "warn": _cfg("cert_default_warn"),
+                "subject": _cfg("cert_default_subject")}
+    if cert_normalise_package(package) == CERT_PACKAGE_SUBCA:
+        # A subordinate's own lifetime is the exposure window after a key leak, and it is
+        # sized against the ROTATION INTERVAL rather than against a leaf's cadence. The
+        # leaf default (24h out of the box) is meaningless here and a 1y one would be
+        # actively wrong, so the subordinate takes its own key and falls through to the
+        # plugin's default when that is unset.
+        defaults["lifetime"] = _cfg("cert_subca_default_lifetime")
+        defaults.pop("eku", None)
+    return defaults
 
 
 def build_address(backend: str, backend_options: dict,
-                  overrides: Optional[dict] = None) -> str:
+                  overrides: Optional[dict] = None,
+                  package: str = CERT_PACKAGE_LEAF) -> str:
     """The composer callers should use: config defaults, then the backend's own required
     options, then whatever the form overrode. Validated before it is returned, so a bad
-    profile fails here rather than at the first scheduled rotation."""
-    options = profile_defaults()
+    profile fails here rather than at the first scheduled rotation.
+
+    ``package`` decides which platform this address is destined for, and with it what
+    ``isca=`` and ``bundle=`` already default to — which is why a subordinate profile
+    composed here normally carries NEITHER. Saying what the package already says costs 10
+    characters for ``isca=true`` and 17 for ``bundle=PemBundle``, out of a 255-character
+    budget the safety-critical option (``permitdns=``) is competing for."""
+    package = cert_normalise_package(package)
+    options = profile_defaults(package)
     options.update(store_options())
     options.update(backend_options or {})
     options.update(overrides or {})
 
     # A subordinate CA carries no extended key usage — the plugin asserts none, because an
     # EKU on a CA certificate constrains everything issued beneath it. The validator
-    # refuses eku= alongside isca=true for that reason, and rightly: on a hand-typed
-    # address it is a visible mistake. But `cert_default_eku` is a CONFIG default that
-    # applies to every profile, so left alone it would block the sub-CA path with an
-    # option the operator never chose for it. Drop it from the defaults layer only — an
-    # eku= passed explicitly in backend_options or overrides still reaches the validator
-    # and is still refused, because there it is a real contradiction.
-    if str(options.get("isca", "")).strip().lower() == "true" and \
-            "eku" not in (backend_options or {}) and "eku" not in (overrides or {}):
+    # refuses eku= on a subordinate for that reason, and rightly: on a hand-typed address
+    # it is a visible mistake. But `cert_default_eku` is a CONFIG default that applies to
+    # every profile, so left alone it would block the sub-CA path with an option the
+    # operator never chose for it. Drop it from the defaults layer only — an eku= passed
+    # explicitly in backend_options or overrides still reaches the validator and is still
+    # refused, because there it is a real contradiction.
+    issuing_ca = (str(options.get("isca", "")).strip().lower() == "true"
+                  or (package == CERT_PACKAGE_SUBCA
+                      and str(options.get("isca", "")).strip().lower() != "false"))
+    if issuing_ca and "eku" not in (backend_options or {}) \
+            and "eku" not in (overrides or {}):
         options.pop("eku", None)
+    # Same reasoning, one layer up: the package IS the isca default, so emitting it again
+    # spends budget to restate it. Only dropped when it agrees with the package — an
+    # explicit isca=false on the subordinate package is a real override and stays.
+    if package == CERT_PACKAGE_SUBCA and \
+            str(options.get("isca", "")).strip().lower() == "true":
+        options.pop("isca", None)
 
     address = compose_address(backend, options)
-    ps_resource_service._validate_certificate_dns_name(address)
+    ps_resource_service._validate_certificate_dns_name(address, package)
     ps_resource_service._check_address_length(address, "certificate")
     return address
 
 
 def address_preview(backend: str, backend_options: dict,
-                    overrides: Optional[dict] = None) -> dict:
+                    overrides: Optional[dict] = None,
+                    package: str = CERT_PACKAGE_LEAF) -> dict:
     """Compose without raising, for a UI that wants to show the address and its length
     while it is still being edited. ``error`` is None when the profile is valid."""
+    package = cert_normalise_package(package)
     try:
-        address = build_address(backend, backend_options, overrides)
+        address = build_address(backend, backend_options, overrides, package)
         error = None
     except (CertPSError, ps_resource_service.PSResourceError) as exc:
         try:
-            address = compose_address(backend, {**profile_defaults(), **store_options(),
+            address = compose_address(backend, {**profile_defaults(package),
+                                                **store_options(),
                                                 **(backend_options or {}),
                                                 **(overrides or {})})
         except Exception:
             address = ""
         error = str(exc)
     return {"address": address, "length": len(address),
-            "limit": ps_resource_service._MAX_MANAGED_SYSTEM_ADDRESS, "error": error}
+            "limit": ps_resource_service._MAX_MANAGED_SYSTEM_ADDRESS,
+            "package": package, "platform": platform_name(package), "error": error}
 
 
 # ── the two Password Safe objects ─────────────────────────────────────────────
 
-# Substring tokens a "Certificate" platform's name must contain. Matched the same way
+# Substring tokens each package's platform name must contain. Matched the same way
 # ps_vm_hook does — all tokens, not a contiguous phrase — because a Password Safe admin
 # renaming an imported plugin platform is a real event that has silently switched
 # onboarding off before ("Azure VM SSH Rotation" -> "Azure Waagent VM SSH Rotation").
-_PLATFORM_TOKENS = ("certificate",)
+#
+# Per package, and "subordinate" rather than "certificate" for the second one, because
+# the platform is called **Subordinate CA** and does not contain the word "certificate"
+# at all. A single ("certificate",) here would reject every functional account on the new
+# platform as being on the wrong one — a check meant to catch a renamed platform
+# rejecting the correctly-named one.
+_PLATFORM_TOKENS = {
+    CERT_PACKAGE_LEAF: ("certificate",),
+    CERT_PACKAGE_SUBCA: ("subordinate",),
+}
+# Per package: the config key naming its platform, that platform's out-of-the-box name,
+# and the config key naming its reference-mode functional account.
+#
+# Separate keys rather than one with a suffix rule: an operator who renamed one platform
+# has not necessarily renamed the other, and deriving the second name from the first would
+# invent a name nobody chose.
+_PLATFORM_CONFIG = {
+    CERT_PACKAGE_LEAF: ("cert_ps_platform", "Certificate",
+                        "cert_ps_functional_account"),
+    CERT_PACKAGE_SUBCA: ("cert_ps_subca_platform", "Subordinate CA",
+                         "cert_ps_subca_functional_account"),
+}
+
+
+def platform_name(package: str = CERT_PACKAGE_LEAF) -> str:
+    """The Password Safe platform name for a package, resolved live through
+    ``GET /Platforms`` by the caller — so a renamed platform needs only its new name in
+    config."""
+    key, default, _ = _PLATFORM_CONFIG[cert_normalise_package(package)]
+    return _cfg(key, default)
+
+
+def package_label(package: str = CERT_PACKAGE_LEAF) -> str:
+    """What to call a package in a message aimed at a human."""
+    return ("Subordinate CA" if cert_normalise_package(package) == CERT_PACKAGE_SUBCA
+            else "Certificate")
+
 
 _FA_MODE_REFERENCE = "reference"
 
@@ -293,12 +391,21 @@ def _ca_credential(cloud: str, outputs: dict) -> tuple:
     return email, private_key
 
 
-async def ensure_functional_account(row, outputs: dict) -> dict:
+async def ensure_functional_account(row, outputs: dict,
+                                    package: str = CERT_PACKAGE_LEAF) -> dict:
     """Mint the functional account carrying BOTH of the plugin's credentials.
 
-    Returns ``{"mode", "account_name", "id"}``; ``id`` is None in reference mode, where
-    nothing is created and the operator's own ``cert_ps_functional_account`` still
-    applies.
+    Returns ``{"mode", "package", "account_name", "id"}``; ``id`` is None in reference
+    mode, where nothing is created and the operator's own ``cert_ps_functional_account``
+    still applies.
+
+    **One per package, because a functional account is platform-bound.** A managed system
+    inherits its functional account's platform, so an account on "Certificate" cannot
+    carry a managed system on "Subordinate CA" — it would onboard green and then fail
+    every credential action. The CA credential is the same one either way; what differs
+    is the platform the account is created on. That is also why the two cannot be
+    collapsed: the whole reason for two platforms is that their access control is
+    separable, and one shared functional account would put both back under one grant.
 
     **This has to happen during the CA build.** The enrollment credential exists in the
     apply's outputs and nowhere else a human can reach: the GCP key is returned once by
@@ -314,10 +421,16 @@ async def ensure_functional_account(row, outputs: dict) -> dict:
     """
     from . import ps_api_service
 
+    package = cert_normalise_package(package)
     mode = functional_account_mode()
     if mode == _FA_MODE_REFERENCE:
-        return {"mode": mode, "account_name": _cfg("cert_ps_functional_account"),
-                "id": None}
+        # The subordinate package gets its own key, and falls back to the leaf one only
+        # if nothing names a separate account. An operator running one platform has one
+        # account; an operator running both almost certainly has two, since the point of
+        # the split is that the grants differ.
+        named = (_cfg(_PLATFORM_CONFIG[package][2])
+                 or _cfg(_PLATFORM_CONFIG[CERT_PACKAGE_LEAF][2]))
+        return {"mode": mode, "package": package, "account_name": named, "id": None}
 
     principal, secret = _ca_credential(row.cloud, outputs)
     if not principal or not secret:
@@ -347,53 +460,65 @@ async def ensure_functional_account(row, outputs: dict) -> dict:
                 f"fields are split on — the CA half may contain colons, this half may "
                 f"not")
 
-    platform_id = await ps_api_service.get_platform_id(
-        _cfg("cert_ps_platform", "Certificate"))
+    platform = platform_name(package)
+    platform_id = await ps_api_service.get_platform_id(platform)
     account_name = f"{principal}:{run_as}"
-    # Uniqueness tenant-side is (platform, domain, account name, display name), and the
-    # account name is already unique per CA here — the enrollment identity is minted per
-    # row for exactly that reason. The display name carries the row anyway, because it
-    # is also what makes a RETRY resolve back to this account rather than fail or mint a
-    # second one.
+    # Uniqueness tenant-side is (platform, domain, account name, display name). The
+    # account name is already unique per CA — the enrollment identity is minted per row
+    # for exactly that reason — and the PLATFORM differs between the two packages, so the
+    # same name on both is not a collision. The display name still carries the row and
+    # now the package too, because it is also what makes a RETRY resolve back to this
+    # account rather than fail or mint a second one.
+    suffix = "-subca" if package == CERT_PACKAGE_SUBCA else ""
     fa_id = await ps_api_service.create_functional_account_on_platform(
         platform_id=int(platform_id),
         account_name=account_name,
-        display_name=f"{row.name}-certauth-{str(row.id)[:8]}",
+        display_name=f"{row.name}-certauth{suffix}-{str(row.id)[:8]}",
         password=f"{secret}:{api_key}",
-        description=(f"Certificate Lab enrollment identity for CA {row.name} "
-                     f"(lab_id={row.id}, {row.cloud})"))
-    logger.info("PS: minted certificate functional account %r (id %s) for CA %s",
-                account_name, fa_id, row.id)
-    return {"mode": "create", "account_name": account_name, "id": str(fa_id)}
+        description=(f"{package_label(package)} Lab enrollment identity for CA "
+                     f"{row.name} (lab_id={row.id}, {row.cloud})"))
+    logger.info("PS: minted %s functional account %r (id %s) on platform %r for CA %s",
+                package_label(package), account_name, fa_id, platform, row.id)
+    return {"mode": "create", "package": package, "account_name": account_name,
+            "id": str(fa_id)}
 
 
-async def resolve_functional_account(name: str = "") -> dict:
+async def resolve_functional_account(name: str = "",
+                                     package: str = CERT_PACKAGE_LEAF) -> dict:
     """The functional account carrying BOTH credentials, with its platform checked.
 
     The managed system inherits its platform from the functional account, so an account on
-    the wrong platform onboards green and then fails every credential action."""
+    the wrong platform onboards green and then fails every credential action. With two
+    platforms in play that stops being a typo-catcher and becomes the check that keeps a
+    subordinate-CA identity off the leaf platform."""
     from . import ps_api_service, ps_vm_hook
-    name = (name or _cfg("cert_ps_functional_account")).strip()
+    package = cert_normalise_package(package)
+    label = package_label(package)
+    name = ((name or "").strip() or _cfg(_PLATFORM_CONFIG[package][2])
+            or _cfg(_PLATFORM_CONFIG[CERT_PACKAGE_LEAF][2])).strip()
     if not name:
         if functional_account_mode() != _FA_MODE_REFERENCE:
             # Create mode: the account should have been minted during the CA build, so
             # the remedy is to finish that, not to go and make one by hand.
             raise CertPSError(
-                "this CA has no Password Safe functional account yet — the build could "
-                "not create one. Use 'Wire up Password Safe' on the CA to retry it, "
-                "which needs cert_ps_bi_api_key set.")
+                f"this CA has no {label} functional account yet — the build could not "
+                f"create one, or it has never issued on this package. Use 'Wire up "
+                f"Password Safe' on the CA to retry it, which needs cert_ps_bi_api_key "
+                f"set.")
         raise CertPSError(
-            "no Password Safe functional account is configured for the Certificate "
-            "platform — set cert_ps_functional_account. It carries two credentials on one "
-            "account: name '<ca-account>:<bi-run-as-user>', password "
-            "'<ca-secret>:<bi-api-key>', both split on the LAST colon.")
+            f"no Password Safe functional account is configured for the {label} platform "
+            f"— set {_PLATFORM_CONFIG[package][2]}. It carries two credentials on one "
+            f"account: name '<ca-account>:<bi-run-as-user>', password "
+            f"'<ca-secret>:<bi-api-key>', both split on the LAST colon.")
     fa = await ps_api_service.get_functional_account(name)
     pname = fa.get("platform_name") or ""
-    if pname and not ps_vm_hook._platform_name_ok(pname, *_PLATFORM_TOKENS):
+    if pname and not ps_vm_hook._platform_name_ok(pname, *_PLATFORM_TOKENS[package]):
         raise CertPSError(
             f"functional account {name!r} is on platform {pname!r}, which is not a "
-            f"Certificate platform — the managed system inherits the functional account's "
-            f"platform, so this would onboard against the wrong plugin")
+            f"{label} platform — the managed system inherits the functional account's "
+            f"platform, so this would onboard against the wrong package. The two are "
+            f"separate plugins with separate access control, and a leaf and an issuer are "
+            f"not interchangeable credentials")
     if ":" not in name:
         # Legal, but only for an on-premises administrator with filesystem access on the
         # plugin host: without the second half the Secrets Safe connection has to come
@@ -441,11 +566,14 @@ async def ensure_secrets_safe_folder(folder_path: str = "") -> dict:
 
 async def register(*, system_name: str, account_name: str, address: str,
                    functional_account: str = "",
+                   package: str = CERT_PACKAGE_LEAF,
                    ensure_folder: bool = True) -> dict:
     """Onboard one certificate identity: a managed system carrying the profile, and one
-    managed account that becomes the certificate.
+    managed account that becomes the certificate — or, on the subordinate package, one
+    managed account that becomes an issuing authority.
 
-    Returns ``{managed_system_id, managed_account_id, tf_state_json, address, folder}``.
+    Returns ``{managed_system_id, managed_account_id, tf_state_json, address, folder,
+    package, platform}``.
 
     **One managed account per certificate identity, and — with an Entra publisher — one
     per app registration.** Graph's PATCH replaces the whole ``keyCredentials`` collection,
@@ -455,17 +583,19 @@ async def register(*, system_name: str, account_name: str, address: str,
     makes it safe, and it is easy to break by accident when copying a platform instance."""
     from . import ps_api_service
 
+    package = cert_normalise_package(package)
     if not system_name or not account_name:
         raise CertPSError("a certificate identity needs both a system name and an account "
                           "name — the account name becomes the subject CN by default")
 
     # Validate before touching anything: a rejected address costs nothing here and a
     # Secrets Safe folder created for a registration that then fails is litter.
-    ps_resource_service._validate_certificate_dns_name(address)
+    ps_resource_service._validate_certificate_dns_name(address, package)
     ps_resource_service._check_address_length(address, "certificate")
 
-    fa = await resolve_functional_account(functional_account)
-    platform_id = await ps_api_service.get_platform_id(_cfg("cert_ps_platform", "Certificate"))
+    fa = await resolve_functional_account(functional_account, package)
+    platform = platform_name(package)
+    platform_id = await ps_api_service.get_platform_id(platform)
     workgroup_id = await ps_api_service.get_workgroup_id(workgroup())
 
     # Only for the SecretsSafe store — `store=FileSystem` is the harness path and writes
@@ -479,7 +609,12 @@ async def register(*, system_name: str, account_name: str, address: str,
         name=system_name, host_name=system_name,
         functional_account_id=fa["id"], platform_id=platform_id,
         workgroup_id=workgroup_id, ip_address="127.0.0.1", port=0,
-        managed_account_name=account_name, method="certificate", dns_name=address)
+        managed_account_name=account_name, method="certificate", dns_name=address,
+        # Not derivable from platform_id, which is an opaque tenant-side number: without
+        # it the second validation pass would read a subordinate profile — which normally
+        # carries no isca= at all, that being the package's own default — as a leaf one
+        # and refuse its name-constraint options.
+        cert_package=package)
     # No `initial_password`, deliberately: the credential is a PKCS#12 passphrase Password
     # Safe generates from the account's password policy and hands to the plugin on the
     # first Change Password. Until that runs the account holds a placeholder that opens
@@ -487,9 +622,11 @@ async def register(*, system_name: str, account_name: str, address: str,
     # of the demonstration, not a fault.
     reg["address"] = address
     reg["folder"] = folder
-    logger.info("PS: registered certificate identity %s/%s (system %s, account %s)",
-                system_name, account_name, reg.get("managed_system_id"),
-                reg.get("managed_account_id"))
+    reg["package"] = package
+    reg["platform"] = platform
+    logger.info("PS: registered %s identity %s/%s on platform %r (system %s, account %s)",
+                package_label(package), system_name, account_name, platform,
+                reg.get("managed_system_id"), reg.get("managed_account_id"))
     return reg
 
 

@@ -1796,11 +1796,19 @@ class CertLabFeatureConfig(BaseModel):
     Nothing secret belongs on the managed system's address or the account name either,
     since neither is protected and both are visible anywhere Password Safe shows the
     object."""
+    # TWO platforms: the plugin ships as two .psplugin packages over a shared core, and
+    # "Subordinate CA" is a separate platform with separate access control. Both names
+    # are declared here because a key bound in the panel but missing from this model is
+    # DISCARDED on save.
     cert_ps_platform: str = "Certificate"
+    cert_ps_subca_platform: str = "Subordinate CA"
     cert_ps_workgroup: str = ""
     # reference mode only — in create mode the dashboard mints one per CA and records
-    # its name on the CertLab row instead.
+    # its name on the CertLab row instead. One per PACKAGE, because a functional account
+    # is platform-bound and a managed system inherits its platform: the leaf account
+    # cannot carry a Subordinate CA managed system. Blank falls back to the leaf one.
     cert_ps_functional_account: str = ""
+    cert_ps_subca_functional_account: str = ""
     cert_ps_functional_account_mode: str = "create"   # "create" | "reference"
     cert_ps_bi_api_key: str = ""                      # SECRET — see _SECRET_FEATURE_KEYS
     cert_ps_bi_run_as_user: str = ""                  # blank → pscli_api_account_name
@@ -1824,6 +1832,10 @@ class CertLabFeatureConfig(BaseModel):
     cert_default_eku: str = "ClientAuth"
     cert_default_warn: str = ""
     cert_default_subject: str = ""
+    # A subordinate's lifetime is the exposure window after a key leak, because rotation
+    # does not revoke — so it is sized against the ROTATION INTERVAL rather than against
+    # a leaf's cadence, and shares nothing with cert_default_lifetime.
+    cert_subca_default_lifetime: str = ""
     cert_gcp_cas_location: str = "us-central1"
     cert_gcp_cas_tier: str = "DEVOPS"
 

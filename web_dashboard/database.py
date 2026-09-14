@@ -1600,6 +1600,17 @@ class CertLab(Base):
     # side has a pool, and a field whose meaning depends on a sibling column is how a
     # reader two years from now gets it wrong. NULL until the apply returns it.
     ca_arn = Column(String(255), nullable=True)
+    # How many CAs this root permits beneath it — GCP's max_issuer_path_length, and on
+    # AWS the ceiling the SubordinateCACertificate_PathLen{N} templates are chosen from.
+    #
+    # **This is the one prerequisite that stops a subordinate-CA build dead.** A root
+    # created to issue leaves has a path length of ZERO and refuses to sign a subordinate
+    # at all, and the refusal comes from the CA rather than from the plugin — so it
+    # arrives as a policy error a long way from the missing flag. Recording it means the
+    # identity form can refuse `isca` against a root that cannot sign one, at the click.
+    #
+    # 0 on every pre-existing row, which is what those roots actually are.
+    ca_path_length = Column(Integer, nullable=False, default=0)
     status = Column(String(32), nullable=False, default="provisioning", index=True)
 
     # Terraform state lives in the active storage backend under terraform-state/<job id>,
@@ -1627,9 +1638,31 @@ class CertLab(Base):
     # therefore means "referenced, or never created" — never "not yet looked up".
     ps_functional_account_id = Column(String(36), nullable=True)
 
+    # The SECOND functional account, on the "Subordinate CA" platform.
+    #
+    # Two pairs of columns rather than one, because a functional account is
+    # **platform-bound** and a managed system inherits its platform: an account on
+    # "Certificate" cannot carry a managed system on "Subordinate CA" — it onboards green
+    # and then fails every credential action. The CA credential inside is the same one;
+    # what differs is the platform it was created on.
+    #
+    # Collapsing them would also undo the reason the plugin split in the first place. The
+    # whole argument for two platforms is that their access control is separable, and one
+    # shared functional account puts a leaf and an issuer back under one grant.
+    #
+    # NULL until the first subordinate identity is onboarded — the leaf account is minted
+    # by the build, this one lazily, from the enrollment credential still sitting in the
+    # CA's own terraform state. See cert_lab_service._ensure_package_functional_account.
+    ps_subca_functional_account = Column(String(255), nullable=True)
+    ps_subca_functional_account_id = Column(String(36), nullable=True)
+
     ps_system_id = Column(String(36), nullable=True)
     ps_account_id = Column(String(36), nullable=True)
     ps_address = Column(Text, nullable=True)                    # the composed profile
+    # Which package ps_system_id was registered against — "certificate" or "subca". The
+    # address alone cannot say: a subordinate profile normally carries no isca= at all,
+    # that being the package's own default.
+    ps_package = Column(String(16), nullable=True)
     ps_tf_state = Column(Text, nullable=True)                   # scrubbed
     error_message = Column(Text, nullable=True)
 
@@ -3235,6 +3268,21 @@ def init_db():
             # The `arn=` an awspca certificate address is built from. See CertLab.ca_arn
             # for why it is not pool_id wearing a second hat.
             "ALTER TABLE cert_labs ADD COLUMN ca_arn VARCHAR(255)",
+            # The Certificate plugin split its subordinate-CA half into a second
+            # .psplugin, so a CA now has TWO Password Safe platforms to serve and a
+            # functional account on each. See the columns' own comments on CertLab.
+            #
+            # `ca_path_length` backfills to 0 by the DEFAULT, and that is correct rather
+            # than merely convenient: every root built before this column existed was
+            # created with max_issuer_path_length = 0 and genuinely cannot sign a
+            # subordinate. A NULL backfill would read as "unknown" and let the identity
+            # form offer a subordinate against a root that will refuse it at the CA.
+            "ALTER TABLE cert_labs ADD COLUMN ca_path_length INTEGER DEFAULT 0",
+            "ALTER TABLE cert_labs ADD COLUMN ps_subca_functional_account VARCHAR(255)",
+            "ALTER TABLE cert_labs ADD COLUMN ps_subca_functional_account_id VARCHAR(36)",
+            # Which package the registered managed system is on. NULL on every existing
+            # row, which the readers treat as the leaf package — what they all are.
+            "ALTER TABLE cert_labs ADD COLUMN ps_package VARCHAR(16)",
             "ALTER TABLE jobs ADD COLUMN suspend_at_local VARCHAR(5)",
             "ALTER TABLE jobs ADD COLUMN resume_at_local VARCHAR(5)",
             "ALTER TABLE jobs ADD COLUMN schedule_timezone VARCHAR(64)",

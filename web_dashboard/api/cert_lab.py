@@ -11,6 +11,13 @@ Certificate Lab API — preview (gated by the ``cert_lab_enabled`` flag).
   DELETE /api/cert-lab/{id}               — destroy the CA (terraform destroy)
   POST   /api/cert-lab/preview-address    — compose + validate a profile without saving
 
+The plugin ships as TWO .psplugin packages over a shared core, appearing in BeyondInsight
+as separate platforms with separate access control: "Certificate" for an end-entity
+certificate and "Subordinate CA" for an issuing authority. So an identity carries a
+``package``, and a CA carries the ``ca_path_length`` that decides whether it can serve the
+second one at all — a root created to issue leaves has a path length of zero and refuses
+to sign a subordinate, and that is fixed when the root is created.
+
 ``preview-address`` exists because the managed system's address is the ENTIRE
 configuration surface for this plugin — a Password Safe Cloud tenant cannot edit the
 appsettings.json inside the .psplugin — and Password Safe's address column is 255
@@ -64,17 +71,35 @@ def _shape(row) -> dict:
     return {"id": row.id, "name": row.name, "cloud": row.cloud, "backend": row.backend,
             "project": row.project, "location": row.location, "pool_id": row.pool_id,
             "status": row.status, "error_message": row.error_message,
+            # What the root permits beneath it, and therefore whether this CA can serve
+            # the "Subordinate CA" platform at all. Fixed when the root was created, so
+            # the page uses it to hide a button rather than to offer one that fails.
+            "ca_path_length": cert_lab_service.ca_path_length(row),
+            "can_sign_subordinate": cert_lab_service.can_sign_subordinate(row),
             # The enrollment identity's EMAIL. Its KEY is never returned by any route
             # here: it goes straight into the Password Safe functional account, which is
             # the protected field built for it.
             "enroll_account": row.enroll_account,
             # The functional account's NAME (never its credential), and whether this
             # dashboard minted it — which is what decides if teardown may delete it.
+            #
+            # One per PACKAGE, because a functional account is platform-bound and a
+            # managed system inherits its platform: the account on "Certificate" cannot
+            # carry a managed system on "Subordinate CA". The subordinate one is NULL
+            # until the CA first issues on that package, which is not a fault — it is
+            # minted lazily, so a CA that never issues an authority carries no account on
+            # the platform that would.
             "functional_account": row.ps_functional_account,
             "functional_account_owned": bool(row.ps_functional_account_id),
+            "subca_functional_account": row.ps_subca_functional_account,
+            "subca_functional_account_owned": bool(row.ps_subca_functional_account_id),
             "has_chain": bool(row.ca_chain_pem),
             "ps_system_id": row.ps_system_id, "ps_account_id": row.ps_account_id,
             "ps_address": row.ps_address,
+            # Which platform the registered managed system is on. NULL on a row that
+            # predates the plugin split, which the readers treat as the leaf package.
+            "ps_package": row.ps_package or (
+                cert_lab_service.LEAF_PACKAGE if row.ps_system_id else None),
             "deploy_job_id": row.deploy_job_id,
             "created_by": row.created_by,
             "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -87,20 +112,40 @@ class BuildRequest(BaseModel):
     cloud: str = "gcp"
     location: str = ""
     pool_id: str = ""
+    # How many CAs the root permits beneath it. 0 (the default, and what every CA built
+    # before this field existed is) signs end-entity certificates only; 1 lets the
+    # "Subordinate CA" platform obtain a subordinate from it. A one-way decision — it is
+    # fixed when the root is created — which is why it is asked here rather than settable.
+    path_length: int = cert_lab_service.CA_PATH_LENGTH_LEAF_ONLY
 
 
 class IdentityRequest(BaseModel):
     account_name: str
-    # Per-identity profile overrides — lifetime, key, subject, dns, eku. Each overrides
-    # the CA's default for this identity alone, which is what removes the need for a
-    # separate platform instance per SAN set.
+    # Per-identity profile overrides — lifetime, key, subject, dns, eku on the leaf
+    # package; lifetime, pathlen and the permit*/exclude* name constraints on the
+    # subordinate one. Each overrides the CA's default for this identity alone, which is
+    # what removes the need for a separate platform instance per SAN set.
     overrides: Optional[dict] = None
+    # Which of the plugin's two packages — "certificate" for an end-entity certificate,
+    # "subca" for an issuing authority. Not a flag on the profile: they are separate
+    # .psplugin packages appearing as separate PLATFORMS with separate access control, so
+    # this decides which platform the managed system lands on and which of the CA's two
+    # functional accounts carries it.
+    package: str = cert_lab_service.LEAF_PACKAGE
 
 
 class AddressPreviewRequest(BaseModel):
     backend: str
     backend_options: dict = {}
     overrides: Optional[dict] = None
+    package: str = cert_lab_service.LEAF_PACKAGE
+
+
+class WireUpRequest(BaseModel):
+    """Which package's functional account to (re)create. The leaf one is minted by the
+    build; the subordinate one lazily on first use, so retrying it by hand is how an
+    operator gets one before onboarding anything."""
+    package: str = cert_lab_service.LEAF_PACKAGE
 
 
 # ── read ──────────────────────────────────────────────────────────────────────
@@ -159,9 +204,37 @@ def build_options(user: User = Depends(require_permission("cloud_function", "rea
                        "CA at ~$400/month standing would keep billing until somebody "
                        "destroys it by hand")
 
+    # The plugin split its subordinate-CA half into a second .psplugin, so there are two
+    # platforms to install and either may be absent from a tenant. Naming both here lets
+    # the page label the choice with what the operator will actually look for in
+    # BeyondInsight, rather than with the dashboard's own word for it.
+    packages = [
+        {"value": cert_lab_service.LEAF_PACKAGE,
+         "platform": cert_ps_service.platform_name(cert_lab_service.LEAF_PACKAGE),
+         "label": "Certificate — an end-entity certificate",
+         "requires_path_length": cert_lab_service.CA_PATH_LENGTH_LEAF_ONLY},
+        {"value": cert_lab_service.SUBCA_PACKAGE,
+         "platform": cert_ps_service.platform_name(cert_lab_service.SUBCA_PACKAGE),
+         "label": "Subordinate CA — an issuing authority",
+         "requires_path_length": cert_lab_service.CA_PATH_LENGTH_SUBCA_CAPABLE},
+    ]
+
     return {"clouds": list(cert_lab_service.PROVISIONING_CLOUDS),
             "locations": ["us-central1", "us-east1", "europe-west1", "asia-east1"],
             "tiers": ["DEVOPS", "ENTERPRISE"],
+            "packages": packages,
+            # What a root may permit beneath it. Offered on the build form because it
+            # cannot be changed once the root exists — a CA built leaf-only can never
+            # serve the Subordinate CA platform, whatever is configured later.
+            "path_lengths": [
+                {"value": cert_lab_service.CA_PATH_LENGTH_LEAF_ONLY,
+                 "label": "End-entity certificates only",
+                 "detail": "The root signs leaves directly. Cannot sign a subordinate CA."},
+                {"value": cert_lab_service.CA_PATH_LENGTH_SUBCA_CAPABLE,
+                 "label": "Can also sign a subordinate CA",
+                 "detail": "Needed for the Subordinate CA platform. Still issues leaves."},
+            ],
+            "default_path_length": cert_lab_service.CA_PATH_LENGTH_LEAF_ONLY,
             "default_location": config_service.get("cert_gcp_cas_location") or "us-central1",
             # The project the dashboard's own GCP credential is scoped to, so the build
             # form can prefill it. `cert_lab_service.provision` falls back to the same two
@@ -213,7 +286,8 @@ def build_authority(req: BuildRequest, db: Session = Depends(get_db),
     try:
         return cert_lab_service.provision(
             db, name=req.name, project=req.project, cloud=req.cloud,
-            location=req.location, pool_id=req.pool_id, created_by=user.username)
+            location=req.location, pool_id=req.pool_id,
+            path_length=req.path_length, created_by=user.username)
     except CertLabError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -225,18 +299,23 @@ def preview_address(req: AddressPreviewRequest,
     profile — it returns the address it would have built plus the reason it is refused,
     so the field can show both while it is still being edited."""
     _require_enabled()
-    return cert_ps_service.address_preview(req.backend, req.backend_options, req.overrides)
+    return cert_ps_service.address_preview(req.backend, req.backend_options,
+                                           req.overrides, req.package)
 
 
 @router.post("/{lab_id}/identities")
 def add_identity(lab_id: str, req: IdentityRequest, db: Session = Depends(get_db),
                  user: User = Depends(require_permission("cloud_function", "write"))):
-    """Onboard one certificate identity onto this CA.
+    """Onboard one identity onto this CA, on either of the plugin's two packages.
 
     One managed account per identity — and with an Entra publisher, one per app
     registration. Graph's PATCH replaces the whole keyCredentials collection, so two
     rotations against the same registration can clobber each other's key; Password Safe
-    serialises per managed account, which is what makes that mapping safe."""
+    serialises per managed account, which is what makes that mapping safe.
+
+    ``package="subca"`` onboards onto the "Subordinate CA" platform instead, where the
+    managed credential is an ISSUER rather than a leaf. That is refused here when this
+    CA's root cannot sign a subordinate — a decision fixed when the root was created."""
     _require_enabled()
     row = _row_or_404(db, lab_id)
     if not _visible(row, user):
@@ -244,20 +323,25 @@ def add_identity(lab_id: str, req: IdentityRequest, db: Session = Depends(get_db
     try:
         return cert_lab_service.start_ps_register(
             db, lab_id=lab_id, account_name=req.account_name,
-            created_by=user.username, overrides=req.overrides)
+            created_by=user.username, overrides=req.overrides, package=req.package)
     except (CertLabError, CertPSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.post("/{lab_id}/functional-account")
 async def wire_up_functional_account(
-        lab_id: str, db: Session = Depends(get_db),
+        lab_id: str, req: Optional[WireUpRequest] = None, db: Session = Depends(get_db),
         user: User = Depends(require_permission("cloud_function", "write"))):
-    """Retry the functional account for a CA whose build could not create one.
+    """Create or retry one of this CA's two functional accounts.
 
     Recovers the enrollment credential from the CA's own terraform state, so this needs
     no rebuild — which matters, because CAS never hands a deleted pool id back and a
     rebuild is therefore not a free retry.
+
+    Two reasons an account can be missing, and this serves both: the build could not
+    create the leaf one, or the CA has never issued on the subordinate package, whose
+    account is minted lazily. The body is optional so a caller that predates the split
+    still asks for the leaf one.
 
     Synchronous rather than a job: it is one Password Safe call plus a state read, and
     the operator who just fixed the setting is watching."""
@@ -265,8 +349,10 @@ async def wire_up_functional_account(
     row = _row_or_404(db, lab_id)
     if not _visible(row, user):
         raise HTTPException(status_code=404, detail="certificate authority not found")
+    package = req.package if req else cert_lab_service.LEAF_PACKAGE
     try:
-        return await cert_lab_service.rewire_functional_account(db, lab_id=lab_id)
+        return await cert_lab_service.rewire_functional_account(
+            db, lab_id=lab_id, package=package)
     except (CertLabError, CertPSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:                                        # noqa: BLE001

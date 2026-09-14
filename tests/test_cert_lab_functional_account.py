@@ -119,6 +119,17 @@ def _install_stubs():
     psr = types.ModuleType("web_dashboard.services.ps_resource_service")
     psr.PSResourceError = type("PSResourceError", (Exception,), {})
     psr._MAX_MANAGED_SYSTEM_ADDRESS = 255
+    # The two packages. cert_ps_service imports these by name, so the stub has to carry
+    # them — and `cert_normalise_package` is copied rather than faked, because every
+    # package-dependent branch under test keys off it and a stub that normalised
+    # differently would prove the wrong thing.
+    psr.CERT_PACKAGE_LEAF = "certificate"
+    psr.CERT_PACKAGE_SUBCA = "subca"
+    psr.CERT_PACKAGES = ("certificate", "subca")
+    psr.cert_normalise_package = lambda package: (
+        "subca" if (package or "").strip().lower() in (
+            "subca", "subordinateca", "subordinate ca", "subordinate", "subordinate-ca")
+        else "certificate")
     sys.modules["web_dashboard.services.ps_resource_service"] = psr
 
 
@@ -292,9 +303,27 @@ def test_reference_mode_creates_nothing_and_uses_the_named_account():
     _reset(cert_ps_functional_account_mode="reference",
            cert_ps_functional_account="svc-adcs:certauth-svc")
     out = _run(svc.ensure_functional_account(_CertLab(), _GCP_OUTPUTS))
-    assert out == {"mode": "reference", "account_name": "svc-adcs:certauth-svc",
-                   "id": None}
+    assert out == {"mode": "reference", "package": "certificate",
+                   "account_name": "svc-adcs:certauth-svc", "id": None}
     assert CALLS == [], "reference mode must not touch Password Safe here"
+
+
+def test_reference_mode_falls_back_to_the_leaf_account_for_the_subordinate_package():
+    """Right for an operator running only one of the two platforms, and wrong for one
+    running both — so the dedicated key wins where it is set."""
+    _reset(cert_ps_functional_account_mode="reference",
+           cert_ps_functional_account="svc-adcs:certauth-svc")
+    out = _run(svc.ensure_functional_account(_CertLab(), _GCP_OUTPUTS, "subca"))
+    assert out["account_name"] == "svc-adcs:certauth-svc"
+    assert out["package"] == "subca"
+    _reset(cert_ps_functional_account_mode="reference",
+           cert_ps_functional_account="svc-adcs:certauth-svc",
+           cert_ps_subca_functional_account="svc-subca:certauth-svc")
+    out = _run(svc.ensure_functional_account(_CertLab(), _GCP_OUTPUTS, "subca"))
+    assert out["account_name"] == "svc-subca:certauth-svc"
+    # ...and the leaf one is unaffected by the presence of the second key.
+    out = _run(svc.ensure_functional_account(_CertLab(), _GCP_OUTPUTS))
+    assert out["account_name"] == "svc-adcs:certauth-svc"
 
 
 def test_reference_mode_reports_no_id_so_teardown_cannot_delete_it():
@@ -392,38 +421,67 @@ def test_the_build_wires_up_the_account_and_never_fails_on_it():
     assert "row.status" not in helper, "the CA stays available when the account fails"
 
 
-def test_add_identity_uses_this_cas_own_account_not_the_global_key():
+def test_add_identity_uses_this_cas_own_account_for_this_package():
     src = _src("web_dashboard/services/cert_lab_service.py")
     block = src.split("async def run_ps_register(")[1].split("\nasync def ")[0]
-    assert "functional_account=row.ps_functional_account" in block, \
-        "onboarding against another CA's identity fails every credential action"
+    assert "functional_account=functional_account_for(row, package)" in block, \
+        ("onboarding against another CA's identity fails every credential action — and "
+         "against the other PACKAGE's identity fails them too, since a managed system "
+         "inherits its functional account's platform")
 
 
-def test_add_identity_is_refused_at_the_click_when_there_is_no_account():
+def test_add_identity_is_refused_at_the_click_when_the_leaf_account_is_missing():
     """And it consults BOTH sources: a CA built before this has a NULL column and an
-    operator-configured account that works, which must not start being refused."""
+    operator-configured account that works, which must not start being refused.
+
+    Only the LEAF package is refused for a missing account. The subordinate one is minted
+    lazily on first use, so its absence is the ordinary state of a CA that has never
+    issued an authority rather than a fault."""
     src = _src("web_dashboard/services/cert_lab_service.py")
     block = src.split("def start_ps_register(")[1].split("\nasync def ")[0]
-    assert "row.ps_functional_account" in block
+    assert "functional_account_for(row, package)" in block
     assert 'config_service.get("cert_ps_functional_account")' in block
     assert "Wire up Password Safe" in block
+    assert "CERT_PACKAGE_LEAF and not (" in block, \
+        "the subordinate account is minted lazily; refusing its absence blocks the path"
 
 
-def test_the_page_shows_the_account_and_offers_the_retry():
+def test_the_subordinate_account_is_minted_lazily_from_the_state():
+    """A CA that never issues an authority should carry no functional account on the
+    platform that would — and the enrollment credential is still in its terraform state,
+    so this needs no rebuild. That matters here more than usual: CAS never hands a
+    deleted pool id back, so a rebuild is a one-way door."""
+    src = _src("web_dashboard/services/cert_lab_service.py")
+    block = src.split("async def run_ps_register(")[1].split("\nasync def ")[0]
+    assert "if not functional_account_for(row, package):" in block
+    assert "_read_ca_outputs(row)" in block
+    assert "_wire_up_functional_account(row, outputs, package)" in block
+    # And it is fatal rather than reported: a managed system cannot exist on a platform
+    # with no functional account, so there is nothing to carry on to.
+    assert "raise CertLabError(" in block.split("_wire_up_functional_account(row, outputs, package)")[1]
+
+
+def test_the_page_shows_both_accounts_and_offers_the_retry_per_package():
     api = _src("web_dashboard/api/cert_lab.py")
     # The Certificate tab of the Workload Lab, markup and Alpine factory in the one file.
     page = _src("web_dashboard/templates/workload_lab/_certificates.html")
     assert '"functional_account": row.ps_functional_account' in api
+    assert '"subca_functional_account": row.ps_subca_functional_account' in api
     assert "/functional-account" in api, "the retry route is missing"
-    assert "wireUp(ca)" in page and "async wireUp(ca)" in page
+    assert "wireUp(ca, 'certificate')" in page and "async wireUp(ca, pkg)" in page
     assert "ca.functional_account" in page, \
         "a missing account has to be visible before Add identity is clicked"
 
 
-def test_teardown_deletes_only_an_account_the_dashboard_minted():
+def test_teardown_deletes_both_accounts_and_only_ones_the_dashboard_minted():
+    """Both, because an account is platform-bound: a CA that served the Certificate AND
+    the Subordinate CA platform has one on each, and forgetting the second leaves an
+    orphan holding a live enrollment credential after the CA it belonged to is gone."""
     src = _src("web_dashboard/services/cert_lab_service.py")
     block = src.split("async def run_decommission(")[1].split("\nasync def ")[0]
-    assert "if row.ps_functional_account_id:" in block, \
+    assert "for package, (name_col, id_col) in _FA_COLUMNS.items():" in block, \
+        "one account is deleted and the other orphaned"
+    assert "if not fa_id:\n                continue" in block, \
         "a NULL id is an operator-owned account and must survive"
     assert "delete_functional_account" in block
     assert "if not deregistered:" in block, \
@@ -436,7 +494,7 @@ def test_the_id_is_cleared_only_after_a_successful_delete():
     src = _src("web_dashboard/services/cert_lab_service.py")
     block = src.split("async def run_decommission(")[1].split("\nasync def ")[0]
     delete_at = block.index("delete_functional_account")
-    clear_at = block.index("row.ps_functional_account_id = None", delete_at)
+    clear_at = block.index("setattr(row, id_col, None)", delete_at)
     except_at = block.index("except Exception as exc:", delete_at)
     assert clear_at < except_at, \
         "clearing before the delete succeeds makes a retried teardown skip it"
@@ -444,15 +502,18 @@ def test_the_id_is_cleared_only_after_a_successful_delete():
 
 def test_the_retry_reads_the_credential_back_out_of_the_state():
     src = _src("web_dashboard/services/cert_lab_service.py")
-    block = src.split("async def rewire_functional_account(")[1].split("\nasync def ")[0]
-    assert "terraform.read_state_outputs(row.deploy_job_id)" in block, \
+    reader = src.split("async def _read_ca_outputs(")[1].split("\nasync def ")[0]
+    assert "terraform.read_state_outputs(row.deploy_job_id)" in reader, \
         "a rebuild is not a retry: CAS never hands a deleted pool id back"
+    block = src.split("async def rewire_functional_account(")[1].split("\nasync def ")[0]
+    assert "_read_ca_outputs(row)" in block
     assert "read_state_outputs" in _src("web_dashboard/services/terraform.py")
 
 
-def test_both_columns_have_a_migration():
+def test_every_account_column_has_a_migration():
     src = _src("web_dashboard/database.py")
-    for col in ("ps_functional_account", "ps_functional_account_id"):
+    for col in ("ps_functional_account", "ps_functional_account_id",
+                "ps_subca_functional_account", "ps_subca_functional_account_id"):
         assert f"ALTER TABLE cert_labs ADD COLUMN {col} " in src, \
             f"{col} has no migration, so it is missing on every existing install"
 

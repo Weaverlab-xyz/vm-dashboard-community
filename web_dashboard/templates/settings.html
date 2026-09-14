@@ -5340,6 +5340,21 @@
                 needs its new name here.
               </p>
             </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Subordinate CA platform name</label>
+              <input type="text" x-model="panelCfg.cert_ps_subca_platform"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="Subordinate CA">
+              <p class="text-[11px] text-gray-400 mt-1">
+                The plugin ships as <strong>two</strong> <code>.psplugin</code> packages over a
+                shared core, with different plugin ids, so both install side by side and
+                neither overwrites the other. <strong>Certificate</strong> issues an end-entity
+                certificate on any of its nine backends; <strong>Subordinate CA</strong> issues
+                an issuing authority on the four that can sign one. The split is what lets the
+                team that may request a leaf not automatically be the team that may request an
+                issuer. Leave it blank unless you renamed the platform in BeyondInsight.
+              </p>
+            </div>
             <!-- The x-init is load-bearing: an unset string key reads back "" from
                  /api/setup/feature, not the model default, so without it the select
                  renders blank and a save would write "". -->
@@ -5377,6 +5392,23 @@
               <input type="text" x-model="panelCfg.cert_ps_functional_account"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
                      placeholder="certauth-plugin@project.iam.gserviceaccount.com:certauth-svc">
+              <p class="text-[11px] text-gray-400 mt-1">On the Certificate platform.</p>
+            </div>
+            <div class="mt-3" x-show="(panelCfg.cert_ps_functional_account_mode || 'create') === 'reference'">
+              <label class="block text-sm font-medium text-gray-700 mb-1">
+                Subordinate CA functional account
+                <span class="font-normal text-gray-400">(optional)</span>
+              </label>
+              <input type="text" x-model="panelCfg.cert_ps_subca_functional_account"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="(blank reuses the account above)">
+              <p class="text-[11px] text-gray-400 mt-1">
+                A functional account is <strong>platform-bound</strong> and a managed system
+                inherits its platform, so the account above cannot carry a Subordinate CA
+                managed system — it would onboard green and then fail every credential action.
+                Blank reuses it anyway, which is right if you run only one of the two
+                platforms and wrong if you run both.
+              </p>
             </div>
             <div class="mt-3" x-show="(panelCfg.cert_ps_functional_account_mode || 'create') !== 'reference'">
               <label class="block text-sm font-medium text-gray-700 mb-1">BeyondInsight API key</label>
@@ -5511,6 +5543,22 @@
                   Tokens <code>{AccountName}</code>, <code>{DomainName}</code>,
                   <code>{SamAccountName}</code>, <code>{Upn}</code>. Values are hex-escaped, so an
                   account name containing a comma cannot inject an extra RDN.
+                </p>
+              </div>
+              <div class="col-span-2">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Subordinate CA lifetime</label>
+                <input type="text" x-model="panelCfg.cert_subca_default_lifetime"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="(blank lets the plugin default it) — e.g. 8d">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  A different quantity from a leaf's lifetime, which is why it has its own field.
+                  <strong>Rotation does not revoke</strong> — a relying party walks the chain to
+                  the root and neither knows nor cares which subordinate was current when a leaf
+                  was minted — so <em>this</em>, not the rotation interval, is the exposure window
+                  if the signing key leaks. Issue it just longer than the interval Password Safe
+                  rotates it on, sizing the overlap to the longest expected session:
+                  <code>8d</code> against a 7-day schedule. A one-year subordinate rotated weekly
+                  leaves ~52 concurrently valid authorities and makes the control illusory.
                 </p>
               </div>
             </div>

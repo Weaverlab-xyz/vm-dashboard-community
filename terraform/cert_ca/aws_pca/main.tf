@@ -92,6 +92,17 @@ variable "usage_mode" {
   description = "GENERAL_PURPOSE issues certificates of any lifetime. SHORT_LIVED_CERTIFICATE is cheaper per certificate but caps them at seven days, which the rotation demo cannot use"
 }
 
+variable "ca_path_length" {
+  type        = number
+  default     = 0
+  description = "How many CAs this root may have beneath it. 0 issues end-entity certificates only; 1 lets the Password Safe Subordinate CA platform obtain a subordinate from it. ACM PCA derives no structural flag from a submitted CSR — it builds every certificate from one of its own templates — so this selects which template ARNs the enrollment policy permits, and a root created with 0 must not be allowed to issue a SubordinateCACertificate"
+
+  validation {
+    condition     = var.ca_path_length >= 0 && var.ca_path_length <= 1
+    error_message = "ca_path_length is 0 (leaf-issuing) or 1 (may sign one subordinate CA, which then issues leaves). Deeper hierarchies are a real PKI design rather than a lab."
+  }
+}
+
 variable "iam_user_name" {
   type        = string
   default     = "certauth-plugin"
@@ -180,26 +191,66 @@ resource "aws_iam_user_policy" "plugin" {
 
   # Scoped to THIS CA and to issuance. The GCP module grants
   # `roles/privateca.certificateRequester`, which covers creating certificates and
-  # nothing else; these four actions are that role's ACM PCA equivalent — submit a CSR,
-  # collect the result, and read the CA enough to build a chain.
+  # nothing else; these actions are that role's ACM PCA equivalent — submit a CSR,
+  # collect the result, read the CA enough to build a chain, and revoke.
   #
-  # No `acm-pca:TemplateArn` condition, deliberately. It would be the tighter policy, but
-  # the plugin's `isca=true` path issues a SUBORDINATE CA certificate under a different
-  # template, and a condition pinning the end-entity template would refuse it with an
-  # authorization error that reads like a credential problem.
+  # `RevokeCertificate` is here because revocation is a real plugin feature rather than a
+  # future one: `RevokeOnDisable` defaults ON, so Disable Managed Account revokes the
+  # certificate the account holds, and `RevokeOnRenewal` withdraws a superseded one.
+  # Without the permission the plugin does not fall back to succeeding-without-revoking —
+  # that path is for a backend with NO revocation operation, and ACM PCA has one — so
+  # Disable fails with an authorization error that reads like a credential problem.
+  #
+  # ── The TemplateArn condition, and why the path length decides it ───────────
+  #
+  # ACM PCA ignores the basic-constraints and key-usage extensions in a submitted CSR and
+  # builds the certificate from its template instead. So the template ARN is the only
+  # thing that decides whether what comes back is a leaf or a certificate AUTHORITY —
+  # which makes it exactly the right thing to scope this policy on, and the scoping is
+  # meaningful rather than decorative.
+  #
+  # On a leaf-only CA the condition pins end-entity templates, so a subordinate request
+  # is refused by IAM, at the CA, naming the template. On a subordinate-capable one the
+  # condition is dropped, because the plugin legitimately names a
+  # SubordinateCACertificate_PathLen{N} template and a condition pinning the end-entity
+  # one would refuse it with an authorization error that reads like a credential problem.
+  # ``StringNotLikeIfExists``, and the ``IfExists`` half is load-bearing twice over. An
+  # absent condition key makes a plain ``StringNotLike`` evaluate FALSE — so it would
+  # deny the ordinary case, where the address names no templatearn= at all and the
+  # service defaults to EndEntityCertificate/V1, and it would also deny the four actions
+  # in this statement that carry no TemplateArn key to compare.
+  #
+  # Built with merge() rather than a ternary on the Condition key: jsonencode writes a
+  # null attribute out as a literal ``"Condition": null``, which IAM rejects, so the key
+  # has to be absent rather than null.
   policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "acm-pca:IssueCertificate",
-        "acm-pca:GetCertificate",
-        "acm-pca:DescribeCertificateAuthority",
-        "acm-pca:GetCertificateAuthorityCertificate",
-      ]
-      Resource = aws_acmpca_certificate_authority.this.arn
-    }]
+    Version   = "2012-10-17"
+    Statement = [merge(local.enroll_statement, local.enroll_template_condition)]
   })
+}
+
+locals {
+  enroll_statement = {
+    Effect = "Allow"
+    Action = [
+      "acm-pca:IssueCertificate",
+      "acm-pca:GetCertificate",
+      "acm-pca:RevokeCertificate",
+      "acm-pca:DescribeCertificateAuthority",
+      "acm-pca:GetCertificateAuthorityCertificate",
+    ]
+    Resource = aws_acmpca_certificate_authority.this.arn
+  }
+
+  # Empty on a subordinate-capable CA, so the key is ABSENT rather than null — jsonencode
+  # writes a null attribute out as a literal `"Condition": null`, which IAM rejects.
+  enroll_template_condition = var.ca_path_length > 0 ? {} : {
+    Condition = {
+      StringNotLikeIfExists = {
+        "acm-pca:TemplateArn" = "arn:${data.aws_partition.current.partition}:acm-pca:::template/SubordinateCACertificate*"
+      }
+    }
+  }
 }
 
 resource "aws_iam_access_key" "plugin" {
@@ -211,6 +262,11 @@ resource "aws_iam_access_key" "plugin" {
 output "ca_arn" {
   value       = aws_acmpca_certificate_authority.this.arn
   description = "The `arn=` value on the managed-system address — the one option an awspca address cannot be built without"
+}
+
+output "ca_path_length" {
+  value       = var.ca_path_length
+  description = "What this root permits beneath it. 0 = leaf-issuing only, and the enrollment policy refuses a SubordinateCACertificate template; 1 = the Password Safe Subordinate CA platform may obtain a subordinate from it. Echoed so the recorded row and the built CA cannot disagree"
 }
 
 output "region" {

@@ -27,12 +27,16 @@ Onboarding shapes (``method`` on register_managed_system):
     user (``adminuser``); no private key is pushed (Change Password mints it). ``ssm``,
     ``azurevm`` and ``gcpvm`` are the cloud-API "plugin" methods (see ``_PLUGIN_METHODS``)
     — no SSH reachability required.
-  - ``certificate`` — the "Certificate" custom plugin: the managed credential is a PKCS#12
-    passphrase and the bundle it opens lives in Secrets Safe, so the managed system carries
-    the whole certificate profile (CA backend, key shape, subject, Secrets Safe destination,
-    optional Entra publisher) in ``dns_name`` and nothing is seeded. With ``isca=true`` on
-    a cloud backend the issued credential is a subordinate CA rather than a leaf — see
-    ``_CERT_SUBCA_KEYS`` and docs/design/pra-session-ca.md.
+  - ``certificate`` — the Certificate custom plugin family: the managed credential is a
+    PKCS#12 passphrase and the bundle it opens lives in Secrets Safe, so the managed
+    system carries the whole certificate profile (CA backend, key shape, subject, Secrets
+    Safe destination, optional Entra publisher) in ``dns_name`` and nothing is seeded.
+    The family ships as TWO packages over a shared core, appearing as two PLATFORMS with
+    separate access control — "Certificate" for an end-entity certificate on any of the
+    nine backends, and "Subordinate CA" for an issuer on the four that can sign one. Which
+    package an address is destined for is the ``package`` argument threaded through the
+    validator, because it decides what ``isca=`` and ``bundle=`` default to and which
+    backends are legal. See ``CERT_PACKAGES`` and docs/design/pra-session-ca.md.
 
 Shaped like entitle_registration_service / terraform_pra_service: inline HCL written
 to an ephemeral workdir, ``terraform apply``, ids pulled from outputs, the full
@@ -67,6 +71,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -310,10 +315,50 @@ _CERTIFICATE_PLUGIN_TIMEOUT_SECONDS = 60
 # accepted in place of '&' for consoles that treat '&' awkwardly, and a bare option with
 # no '=' reads as true.
 
+# ── the two packages ──────────────────────────────────────────────────────────
+#
+# The plugin ships as TWO .psplugin packages over a shared core, with different plugin
+# ids, and they appear in BeyondInsight as separate PLATFORMS with separate access
+# control:
+#
+#   "Certificate"     an end-entity certificate — all nine backends,  isca defaults FALSE
+#   "Subordinate CA"  a subordinate authority   — the four that can sign one, isca TRUE
+#
+# The split is the point rather than packaging tidiness: a subordinate CA is a delegation
+# of issuing authority, not one more credential, so the team that may request a leaf is
+# not automatically the team that may request an issuer — and that separation is
+# expressible in Password Safe's own access model instead of by convention.
+#
+# Everything below therefore takes a ``package``. It decides three things an address
+# cannot say for itself: which backends are offered, what ``isca=`` defaults to, and what
+# ``bundle=`` defaults to. It defaults to the leaf package, which keeps every caller that
+# predates the split byte-identical.
+CERT_PACKAGE_LEAF = "certificate"
+CERT_PACKAGE_SUBCA = "subca"
+CERT_PACKAGES = (CERT_PACKAGE_LEAF, CERT_PACKAGE_SUBCA)
+_CERT_SUBCA_PACKAGE_NAMES = frozenset({
+    CERT_PACKAGE_SUBCA, "subordinateca", "subordinate ca", "subordinate", "subordinate-ca"})
+
+
+def cert_normalise_package(package: str) -> str:
+    """One of ``CERT_PACKAGES``. Anything that is not the subordinate package is the leaf
+    one — a typo must not silently switch an address onto the platform that issues
+    certificate AUTHORITIES, so the safe value is the one that falls through."""
+    return (CERT_PACKAGE_SUBCA
+            if (package or "").strip().lower() in _CERT_SUBCA_PACKAGE_NAMES
+            else CERT_PACKAGE_LEAF)
+
+
 # Backend names, normalised by lowercasing and dropping punctuation — the plugin does the
 # same, so 'AWS-PCA' and 'awspca' are one thing.
 _CERT_BACKENDS = {
     "adcs": "adcs", "ad": "adcs", "microsoftca": "adcs",
+    "est": "est", "rfc7030": "est",
+    "ejbca": "ejbca", "keyfactorejbca": "ejbca",
+    "vault": "vaultpki", "vaultpki": "vaultpki", "hashicorpvault": "vaultpki",
+    "stepca": "stepca", "step": "stepca", "smallstep": "stepca",
+    "digicert": "digicert", "digicertone": "digicert",
+    "sectigo": "sectigo", "sectigocm": "sectigo",
     "awspca": "awspca", "aws": "awspca", "awsprivateca": "awspca", "acmpca": "awspca",
     "gcpcas": "gcpcas", "gcp": "gcpcas", "cas": "gcpcas", "googlecas": "gcpcas",
     "selfsigned": "selfsigned", "self": "selfsigned",
@@ -321,12 +366,32 @@ _CERT_BACKENDS = {
 }
 # Options each backend cannot do without. The plugin fails at construction on a missing
 # one; naming it here means the operator sees it while the address is still editable.
+#
+# ``url=`` is shared by the five backends that speak HTTP to a named service, and it is
+# that service's ORIGIN — the plugin appends the API path itself, exactly as it does with
+# ``biurl=``, so a full API path here yields a doubled one.
 _CERT_REQUIRED = {
     "adcs": ("ca", "template"),
+    "est": ("url",),
+    "ejbca": ("url", "ca"),
+    "vaultpki": ("url",),
+    "stepca": ("url", "fingerprint"),
+    "digicert": ("url",),
+    "sectigo": ("url",),
     "awspca": ("arn",),
     "gcpcas": ("project", "location", "pool"),
     "selfsigned": (),
     "selfsignedtest": (),
+}
+# Requirements a flat entry above cannot express: a choice of several, where any one
+# satisfies it. EJBCA needs a certificate profile and spells it three ways depending on
+# what is being issued, so a flat requirement would refuse a legal address.
+_CERT_REQUIRED_EITHER = {
+    "ejbca": ((("profile", "template", "subcaprofile"),
+               "a certificate profile — profile= (or its alias template=), or "
+               "subcaprofile= when a subordinate CA is being issued"),),
+    "digicert": ((("profile", "template"), "a certificate profile — profile="),),
+    "sectigo": ((("profile", "template"), "a certificate profile — profile="),),
 }
 # Option aliases → canonical key, exactly as the plugin's alias table reads.
 _CERT_ALIASES = {
@@ -341,36 +406,100 @@ _CERT_COMMON_KEYS = frozenset({
     "bundle", "pbe", "warn", "warndays", "warnminutes",
     "store", "biurl", "folder", "secret", "owner",
     "publisher", "tenant", "appid", "spid", "retain",
+    # Revocation. The plugin does it on two triggers and neither on its own initiative,
+    # and both read the superseded serial out of the stored bundle — the only place it
+    # keeps one.
+    "revokeondisable", "revokeonrenewal",
 })
 # Options the plugin reads only on one backend. Accepting 'region=' on a gcpcas address
 # would silently do nothing, which is the same class of bug the whole validator exists for.
 _CERT_BACKEND_KEYS = {
     "ca": "adcs", "template": "adcs", "impersonate": "adcs", "validate": "adcs",
+    "label": "est",
+    "subcaprofile": "ejbca", "eeprofile": "ejbca", "issuerdn": "ejbca",
+    "mount": "vaultpki", "role": "vaultpki", "auth": "vaultpki",
+    "approlemount": "vaultpki",
+    "fingerprint": "stepca",
     "arn": "awspca", "region": "awspca", "sigalg": "awspca",
     "templatearn": "awspca", "wait": "awspca",
     "project": "gcpcas", "location": "gcpcas", "pool": "gcpcas",
     "issuer": "gcpcas", "certtemplate": "gcpcas",
 }
-# ── subordinate-CA issuance ('isca=true') ─────────────────────────────────────
+# Options SEVERAL backends read, which _CERT_BACKEND_KEYS cannot express — it maps each
+# key to exactly ONE owning backend and refuses it everywhere else. The plugin shares an
+# option name wherever the meaning is the same, deliberately, so the grammar stays small:
+# url= means one thing to five backends and profile= to three.
 #
-# With isca=true the plugin issues a subordinate CERTIFICATE AUTHORITY instead of an
-# end-entity certificate: the managed credential becomes the issuer, some other system
-# (PRA Vault, in the design note) holds it and mints its own short-lived leaves beneath
-# it, and Password Safe rotates the subordinate on a schedule. See
+# ``ca=`` and ``template=`` appear here as well as above. On ADCS they are required and
+# mean a CA configuration string and a certificate template; on EJBCA ca= is the issuing
+# CA's name and template= is the plugin's own alias for profile=. Same words, same shape,
+# so both spellings have to be accepted on both — and a key named in BOTH tables takes
+# this one, which is the wider set.
+_CERT_SHARED_BACKEND_KEYS = {
+    "url": frozenset({"est", "ejbca", "vaultpki", "stepca", "digicert", "sectigo"}),
+    "insecure": frozenset({"est", "ejbca", "vaultpki", "stepca"}),
+    "profile": frozenset({"ejbca", "digicert", "sectigo"}),
+    "template": frozenset({"adcs", "ejbca", "digicert", "sectigo"}),
+    "ca": frozenset({"adcs", "ejbca"}),
+}
+# ── subordinate-CA issuance ───────────────────────────────────────────────────
+#
+# On the Subordinate CA package the managed credential is the ISSUER: some other system
+# (PRA Vault, the case this was built for) holds it and mints its own short-lived leaves
+# beneath it, and Password Safe rotates the subordinate on a schedule. See
 # docs/design/pra-session-ca.md.
 #
+# ``isca=`` still exists on the address because the shared core still reads it, but it is
+# the PACKAGE that decides the default: true on Subordinate CA, false on Certificate. So
+# a subordinate profile normally says nothing at all here, which is 10 characters of the
+# 255-character budget back.
+#
 # These deliberately do NOT live in _CERT_BACKEND_KEYS. That table maps each key to
-# exactly ONE owning backend and refuses it on every other, which cannot express "either
-# cloud backend" — it would refuse 'isca=' on whichever of awspca/gcpcas was not named.
+# exactly ONE owning backend and refuses it on every other, which cannot express "any
+# backend that can sign a subordinate".
 _CERT_SUBCA_KEYS = frozenset({
     "isca", "pathlen", "permitdns", "permitemail", "permitip", "excludedns"})
 # Name-constraint subtrees, separately: these are the options that bound what the
 # subordinate may assert, and the ones the plugin only warns about when absent.
 _CERT_SUBCA_CONSTRAINTS = ("permitdns", "permitemail", "permitip", "excludedns")
-# The plugin refuses isca=true on the remaining backends, and both refusals are policy
-# positions rather than gaps — so the reason travels with the error instead of the
-# operator discovering it at the first rotation. ('selfsignedtest' never reaches this:
-# the backend itself is refused further up.)
+# The four backends that can actually sign a subordinate, and HOW each does it:
+#
+#   awspca    the issuance template is switched to SubordinateCACertificate_PathLen{0-3},
+#             chosen from pathlen=. ACM PCA ignores the CSR's basic constraints and builds
+#             from the template, so this is the ONLY thing that decides whether a CA
+#             comes back — hence the templatearn= contradiction check further down.
+#   gcpcas    the CSR's own extensions are honoured, subject to the pool's issuance
+#             policy. The parent needs --max-chain-length=1 or higher.
+#   ejbca     a CA-type certificate profile, named with subcaprofile=. An end-entity
+#             profile cannot produce basicConstraints CA:TRUE, which is why it is a
+#             separate option from profile=.
+#   vaultpki  a dedicated endpoint, <mount>/root/sign-intermediate — not a flag on the
+#             ordinary signing path, so the two operations cannot be confused.
+#
+# There are TWO gates, and this is the outer one: the PACKAGE's own list, which declines a
+# backend by name before any policy is consulted. Underneath it sits the plugin's own
+# ``CaCapabilities.SubordinateCaIssuance`` flag, which FAILS CLOSED — a backend that does
+# not declare it is refused by name even if some future package offered it.
+#
+# Failing closed is the deliberate choice there. An earlier version of the plugin switched
+# on the backend name and allowed anything it did not recognise, which meant every backend
+# added afterwards was permitted to attempt CA issuance until somebody remembered to write
+# a refusal for it — and since most certificate authorities cannot sign a subordinate at
+# all, the unrecognised case is far more likely to be one that should be refused.
+#
+# One consequence worth knowing when scoping the functional account's grant. On three of
+# these four, signing a subordinate is a DISTINCT operation that can be granted on its own.
+# GCP is the exception: issuing a subordinate uses the same
+# ``privateca.certificates.create`` as issuing a leaf, so the separation has to be made
+# with a dedicated CA pool whose policy permits CA certificates and the grant scoped to
+# that pool. There, the boundary is the RESOURCE rather than the verb — which is why this
+# dashboard builds a sub-CA-capable root as its own CA row rather than widening an
+# existing one.
+_CERT_SUBCA_CAPABLE = frozenset({"awspca", "gcpcas", "ejbca", "vaultpki"})
+# Why each of the others cannot, in its own words. Two of these are POLICY positions
+# rather than gaps and a customer asks about both, so the reason travels with the error
+# instead of being discovered at the first rotation. These are reached from the LEAF
+# package (where those backends are offered at all) as well as from the subordinate one.
 _CERT_SUBCA_REFUSED = {
     "adcs": ("a subordinate-CA template that issues unattended means turning OFF CA "
              "certificate manager approval, which many organisations forbid outright — "
@@ -381,6 +510,17 @@ _CERT_SUBCA_REFUSED = {
                    "— nothing above it constrains what it may assert, and every relying "
                    "party would have to be visited to trust it and visited again to "
                    "stop. Sign the subordinate from a real CA instead"),
+    "selfsignedtest": ("the harness CA is a new trust root too, and it writes its own "
+                       "private key unencrypted to disk beside the plugin"),
+    "est": ("RFC 7030 has no mechanism for requesting a CA certificate at all — "
+            "simpleenroll issues end-entity certificates and nothing else. EST remains "
+            "the route for LEAF issuance against the same CA across a firewall"),
+    "stepca": ("step-ca's sign endpoint issues end-entity certificates, and this backend "
+               "speaks no other"),
+    "digicert": ("a managed or public CA will not sign you a subordinate off its own "
+                 "hierarchy outside a dedicated, heavily audited programme"),
+    "sectigo": ("a managed or public CA will not sign you a subordinate off its own "
+                "hierarchy outside a dedicated, heavily audited programme"),
 }
 # ACM PCA builds the certificate from one of its own templates rather than from the CSR's
 # extensions, and the subordinate templates stop at PathLen3.
@@ -399,6 +539,24 @@ _CERT_HASHES = frozenset({"sha256", "sha384", "sha512"})
 _CERT_BUNDLES = frozenset({"pkcs12", "pembundle"})
 _CERT_PBE = frozenset({"aes256", "legacy"})
 _CERT_STORES = frozenset({"secretssafe", "filesystem"})
+# Vault's two auth methods. AppRole is the cleanest credential fit in the whole family —
+# a role_id and a secret_id are already a name and a secret, needing no encoding.
+_CERT_VAULT_AUTH = frozenset({"token", "approle"})
+# Options the plugin reads as a boolean. A value it cannot read as one falls back to a
+# default nobody chose, and for several of these that silently changes whether a
+# superseded credential is withdrawn or whether TLS is validated at all.
+#
+# ``isca`` is deliberately NOT here: it gets its own check further down, because the
+# consequence of getting it wrong is specific enough to be worth naming.
+_CERT_BOOL_KEYS = ("impersonate", "validate", "insecure",
+                   "revokeondisable", "revokeonrenewal")
+_CERT_BOOLS = frozenset({"true", "false"})
+# What ``bundle=`` defaults to per package, for the checks that depend on the EFFECTIVE
+# value rather than the typed one. The Subordinate CA package ships PemBundle because
+# that is what a consumer of a CA key needs: PRA Vault takes a PEM key, a passphrase and
+# a PEM certificate as three separate fields, and its key box says "Only PEM encoding is
+# valid".
+_CERT_DEFAULT_BUNDLE = {CERT_PACKAGE_LEAF: "pkcs12", CERT_PACKAGE_SUBCA: "pembundle"}
 _CERT_PUBLISHERS = {"none": None, "entraapp": "appid", "app": "appid",
                     "entrasp": "spid", "sp": "spid"}
 # '12h', '30d', '2w', '1y', '90m'; a bare number means DAYS.
@@ -434,18 +592,37 @@ def parse_certificate_address(dns_name: str) -> dict:
     return {"backend": head.strip(), "options": options}
 
 
-def _validate_certificate_dns_name(dns_name: str) -> None:
+def _cert_backends_for(package: str) -> list:
+    """The canonical backend names a package offers, in a stable order for a message.
+
+    The Subordinate CA package offers only the four that can actually sign a subordinate,
+    rather than accepting a configuration and failing later at the CA."""
+    names = sorted(set(_CERT_BACKENDS.values()) - {"selfsignedtest"})
+    if cert_normalise_package(package) == CERT_PACKAGE_SUBCA:
+        return [n for n in names if n in _CERT_SUBCA_CAPABLE]
+    return names
+
+
+def _validate_certificate_dns_name(dns_name: str,
+                                   package: str = CERT_PACKAGE_LEAF) -> None:
     """Raise PSResourceError unless ``dns_name`` is a certificate profile the plugin parses.
+
+    ``package`` is which of the two .psplugin packages this address is destined for —
+    ``CERT_PACKAGE_LEAF`` for the "Certificate" platform, ``CERT_PACKAGE_SUBCA`` for
+    "Subordinate CA". It decides which backends are legal and what ``isca=`` and
+    ``bundle=`` default to, none of which the address itself says.
 
     Grammar and value checks only; the shared 255-character cap runs separately in the
     caller via ``_check_address_length``."""
+    package = cert_normalise_package(package)
+    subca_package = package == CERT_PACKAGE_SUBCA
     addr = (dns_name or "").strip()
     if not addr:
         raise PSResourceError(
             "Certificate onboarding requires a Network Address carrying the certificate "
             "profile — a backend name plus options, e.g. "
-            "'gcpcas?project=<p>&location=us-central1&pool=<pool>&lifetime=24h'. The "
-            "package deliberately ships no default backend, so an empty address fails "
+            "'gcpcas?project=<p>&location=us-central1&pool=<pool>&lifetime=24h'. Both "
+            "packages deliberately ship no default backend, so an empty address fails "
             "with 'No certificate authority backend is configured' at the first action.")
 
     parsed = parse_certificate_address(addr)
@@ -453,26 +630,66 @@ def _validate_certificate_dns_name(dns_name: str) -> None:
     backend = _CERT_BACKENDS.get(_cert_normalise_backend(raw_backend))
     if backend is None:
         raise PSResourceError(
-            f"certificate backend {raw_backend!r} is not recognised — use one of: adcs, "
-            f"awspca, gcpcas, selfsigned (or the aliases ad/microsoft-ca, "
-            f"aws/aws-private-ca/acm-pca, gcp/cas/google-cas, self)")
+            f"certificate backend {raw_backend!r} is not recognised — use one of: "
+            f"{', '.join(_cert_backends_for(package))}. Aliases are accepted too: "
+            f"ad/microsoft-ca, rfc7030, keyfactor-ejbca, vault/hashicorp-vault, "
+            f"step/smallstep, aws/acm-pca, gcp/cas, self")
     if backend == "selfsignedtest":
         raise PSResourceError(
             "the 'selfsignedtest' backend generates and persists its own CA private key "
             "UNENCRYPTED beside the plugin and is for harness use only — never register a "
             "managed system against it. Use 'selfsigned' for the Entra publisher case, "
             "which needs no certificate authority either.")
+    # The package's own backend list, refused by name rather than accepted and failed at
+    # the CA. This is the gate the plugin states in its own error, and it fails closed.
+    if subca_package and backend not in _CERT_SUBCA_CAPABLE:
+        why = _CERT_SUBCA_REFUSED.get(
+            backend, "it does not declare the capability to sign one, and the gate fails "
+                     "closed")
+        raise PSResourceError(
+            f"the Subordinate CA platform does not support the {backend!r} backend — "
+            f"{why}. It offers {', '.join(_cert_backends_for(package))}. For an "
+            f"end-entity certificate from {backend!r}, use the Certificate platform")
 
     options = parsed["options"]
     for key in sorted(options):
         if key in _CERT_COMMON_KEYS:
             continue
         if key in _CERT_SUBCA_KEYS:
-            why = _CERT_SUBCA_REFUSED.get(backend)
-            if why:
+            # On the leaf package these ask for something that package does not issue —
+            # but WHICH refusal an operator gets depends on the backend, and the
+            # difference is the point.
+            #
+            # For a backend that cannot sign a subordinate at all, this is where the
+            # per-backend POLICY reasoning lives, because this is the only platform those
+            # backends are offered on: "why not ADCS?" is answered here or nowhere. The
+            # Subordinate CA platform never reaches it, having declined the backend by
+            # name before any policy is consulted.
+            #
+            # For a backend that CAN sign one, the answer is the other package: the
+            # option is legal here and does nothing useful, and putting an issuer under
+            # the access control meant for a leaf is exactly what the split prevents.
+            if not subca_package:
+                why = _CERT_SUBCA_REFUSED.get(backend)
+                if why:
+                    raise PSResourceError(
+                        f"{key!r} asks for subordinate-CA issuance, which the plugin "
+                        f"refuses on a {backend!r} address — {why}")
                 raise PSResourceError(
-                    f"{key!r} asks for subordinate-CA issuance, which the plugin refuses "
-                    f"on a {backend!r} address — {why}")
+                    f"{key!r} describes a subordinate certificate authority, which is "
+                    f"managed by the separate 'Subordinate CA' platform from its own "
+                    f".psplugin — a delegation of issuing authority is not one more "
+                    f"credential, and the split is what lets the team that may request a "
+                    f"leaf not automatically be the team that may request an issuer. "
+                    f"Onboard this identity against that package instead.")
+            continue
+        shared = _CERT_SHARED_BACKEND_KEYS.get(key)
+        if shared is not None:
+            if backend not in shared:
+                raise PSResourceError(
+                    f"the {key!r} option applies to a "
+                    f"{', '.join(sorted(shared))} address, but this is a {backend!r} "
+                    f"address — the plugin would ignore it")
             continue
         owner = _CERT_BACKEND_KEYS.get(key)
         if owner is None:
@@ -492,8 +709,13 @@ def _validate_certificate_dns_name(dns_name: str) -> None:
             f"a {backend!r} certificate address requires "
             f"{', '.join(k + '=' for k in missing)} — without it the backend fails at "
             f"construction rather than mid-rotation")
+    for alternatives, what in _CERT_REQUIRED_EITHER.get(backend, ()):
+        if not any((options.get(k) or "").strip() for k in alternatives):
+            raise PSResourceError(
+                f"a {backend!r} certificate address requires {what} — without it the "
+                f"backend fails at construction rather than mid-rotation")
 
-    _validate_certificate_options(backend, options)
+    _validate_certificate_options(backend, options, package)
 
 
 def _cert_lifetime_days(value: str) -> float | None:
@@ -513,10 +735,22 @@ def _cert_lifetime_days(value: str) -> float | None:
         return None
 
 
-def _validate_certificate_options(backend: str, options: dict) -> None:
+def _validate_certificate_options(backend: str, options: dict,
+                                  package: str = CERT_PACKAGE_LEAF) -> None:
     """Value-level checks for a parsed certificate profile."""
+    package = cert_normalise_package(package)
+
     def _val(key: str) -> str:
         return (options.get(key) or "").strip()
+
+    for name in _CERT_BOOL_KEYS:
+        value = _val(name).lower()
+        if value and value not in _CERT_BOOLS:
+            raise PSResourceError(
+                f"{name} {value!r} is not valid — use true or false (a bare {name!r} "
+                f"with no '=' reads as true). The plugin falls back to its default on a "
+                f"value it cannot read as a boolean, which is a silent change rather "
+                f"than an error")
 
     lifetime = _val("lifetime")
     if lifetime and not _CERT_LIFETIME.match(lifetime):
@@ -552,7 +786,8 @@ def _validate_certificate_options(backend: str, options: dict) -> None:
         if value and not value.isdigit():
             raise PSResourceError(f"{name} {value!r} is not a whole number")
 
-    _validate_certificate_subca(backend, options)
+    _validate_certificate_service(backend, options)
+    _validate_certificate_subca(backend, options, package)
 
     publisher = _val("publisher").lower()
     if publisher:
@@ -593,11 +828,95 @@ def _validate_certificate_options(backend: str, options: dict) -> None:
                     "appsettings.json, which cannot be edited on a Password Safe Cloud "
                     "tenant — on Cloud the first credential change will fail.", name, why)
 
-def _validate_certificate_subca(backend: str, options: dict) -> None:
-    """Value-level checks for the ``isca=`` subordinate-CA options.
+def _validate_certificate_service(backend: str, options: dict) -> None:
+    """Value-level checks for the six backends that speak HTTP to a named service.
 
-    Reached only on ``awspca`` and ``gcpcas``; the caller refuses the other backends with
-    the plugin's own reasoning before any of this runs."""
+    These share ``url=`` and ``insecure=`` and differ only in authentication, so the
+    checks they need are about the URL's SHAPE — which is where the two real traps are.
+    """
+    def _val(key: str) -> str:
+        return (options.get(key) or "").strip()
+
+    url = _val("url")
+    if url:
+        parts = urlsplit(url if "://" in url else f"//{url}")
+        if not parts.netloc:
+            raise PSResourceError(
+                f"url {url!r} has no host — it is the service's base URL, e.g. "
+                f"https://ca.corp.example.com")
+        # https everywhere except Vault, where a development server may legitimately be
+        # plain http. Refused rather than warned: the CSR is not secret, but the
+        # credential in the Authorization header is, and on five of these six backends
+        # that credential is the whole enrollment identity.
+        #
+        # A MISSING scheme is refused too, and separately, because it is the commoner
+        # mistake and produces a worse message otherwise: a bare host leaves the scheme
+        # empty, so a check that only compares against "https" passes it, and the plugin
+        # is then left to guess a scheme nobody chose.
+        scheme = (parts.scheme or "").lower()
+        if not scheme:
+            raise PSResourceError(
+                f"url {url!r} has no scheme — give the full origin, "
+                f"https://{parts.netloc}. A bare host leaves the plugin to pick a scheme "
+                f"nobody chose, for a request that carries the enrollment credential")
+        if scheme != "https" and not (backend == "vaultpki" and scheme == "http"):
+            raise PSResourceError(
+                f"url {url!r} is not https — the request carries the functional "
+                f"account's enrollment credential in a header, so plain http would put "
+                f"it on the wire. Only the Vault backend accepts http, and only because "
+                f"a development server may be plain")
+        # The same trap as ``biurl=``, and it fails the same way: the plugin appends the
+        # API path itself, so a full path here yields a doubled one and a 404 at the
+        # first credential change rather than at registration.
+        if parts.path.strip("/"):
+            raise PSResourceError(
+                f"url {url!r} carries a path — this is the service's ORIGIN, and the "
+                f"plugin appends its own API path ({'/.well-known/est/simpleenroll' if backend == 'est' else 'the backend API path'}). "
+                f"A path here yields a doubled one and a 404 at the first credential "
+                f"change. Use {parts.scheme or 'https'}://{parts.netloc}")
+
+    auth = _val("auth").lower()
+    if auth and auth not in _CERT_VAULT_AUTH:
+        raise PSResourceError(
+            f"auth {auth!r} is not valid — use token (the functional account password is "
+            f"a Vault token) or approle (the account NAME is a role_id and its password "
+            f"a secret_id)")
+
+    # Two spellings of one thing. The plugin aliases template= to profile=, so setting
+    # both is not a preference to resolve — one of the two values is ignored, and which
+    # one is an implementation detail nobody should have to know.
+    if backend != "adcs":
+        profile, template = _val("profile"), _val("template")
+        if profile and template and profile != template:
+            raise PSResourceError(
+                f"profile={profile!r} and template={template!r} are two spellings of the "
+                f"same option on a {backend!r} address and they disagree — the plugin "
+                f"aliases template= to profile=, so one of these two values is silently "
+                f"ignored. Set one")
+
+    # insecure= exists for one real moment and is a footgun to reach for any other time:
+    # a private CA's own management endpoint is often presented on a certificate chaining
+    # to that very CA, which the broker does not trust until the chain is installed.
+    # Installing the chain is the actual fix.
+    if _val("insecure").lower() == "true":
+        logger.warning(
+            "PS: certificate address sets insecure=true on a %s backend, so the "
+            "service's TLS certificate is NOT validated. That is the first-enrollment "
+            "chicken-and-egg — a private CA's endpoint presented on a certificate "
+            "chaining to itself — and the real fix is installing the chain in the "
+            "broker's trust store and turning this back off.", backend)
+
+
+def _validate_certificate_subca(backend: str, options: dict,
+                                package: str = CERT_PACKAGE_LEAF) -> None:
+    """Value-level checks for the subordinate-CA options.
+
+    ``package`` decides what ``isca=`` defaults to, which is the whole reason it is
+    threaded this far: on the Subordinate CA platform an address that says nothing at all
+    still issues a certificate AUTHORITY, so every check below has to key off the
+    effective value rather than the typed one."""
+    package = cert_normalise_package(package)
+
     def _val(key: str) -> str:
         return (options.get(key) or "").strip()
 
@@ -609,21 +928,58 @@ def _validate_certificate_subca(backend: str, options: dict) -> None:
             f"value the plugin cannot read as a boolean issues an END-ENTITY certificate "
             f"where a certificate authority was asked for, and that surfaces at the "
             f"relying party as an untrusted issuer, a long way from the cause")
-    issuing_ca = isca == "true"
+    # The package is the default, and the address only overrides it. isca=false on the
+    # Subordinate CA package is legal — it makes that platform behave as the Certificate
+    # platform does — but it points at using the other package, so it is said out loud.
+    issuing_ca = (isca == "true") if isca else package == CERT_PACKAGE_SUBCA
+    if package == CERT_PACKAGE_SUBCA and isca == "false":
+        logger.warning(
+            "PS: a Subordinate CA managed system carries isca=false, so it issues an "
+            "END-ENTITY certificate from the platform whose access control is meant to "
+            "gate the issuance of authorities. Legal, and the plugin honours it — but "
+            "the Certificate platform is the package for a leaf.")
 
     constraints = [k for k in _CERT_SUBCA_CONSTRAINTS if _val(k)]
 
-    # pathlen= and the constraint options do nothing at all without isca=true — the same
-    # class of silent no-op as the publisher options, and refused for the same
-    # reason. Note pathlen='0' is meaningful, so this tests presence and not truthiness.
+    # pathlen= and the constraint options do nothing at all unless a subordinate is
+    # actually being issued — the same class of silent no-op as the publisher options,
+    # and refused for the same reason. Note pathlen='0' is meaningful, so this tests
+    # presence and not truthiness.
     if not issuing_ca:
         stray = constraints + (["pathlen"] if _val("pathlen") else [])
         if stray:
             raise PSResourceError(
-                f"{', '.join(k + '=' for k in sorted(stray))} only does anything with "
-                f"isca=true — without it the plugin issues an end-entity certificate and "
-                f"never asserts the basic-constraints or name-constraints extensions "
-                f"these describe")
+                f"{', '.join(k + '=' for k in sorted(stray))} only does anything when a "
+                f"subordinate CA is being issued — with isca=false the plugin issues an "
+                f"end-entity certificate and never asserts the basic-constraints or "
+                f"name-constraints extensions these describe")
+
+    # Two backend-specific prerequisites for signing a subordinate, each of which the
+    # plugin names rather than letting the CA refuse it further along.
+    if issuing_ca:
+        # An END-ENTITY profile cannot produce basicConstraints CA:TRUE, so EJBCA needs a
+        # CA-type one. Deliberately a separate option from profile=, because reusing one
+        # field would fail confusingly at the CA rather than here.
+        if backend == "ejbca" and not _val("subcaprofile"):
+            raise PSResourceError(
+                "issuing a subordinate CA from EJBCA needs subcaprofile= — a CA-type "
+                "certificate profile. An end-entity profile cannot produce "
+                "basicConstraints CA:TRUE, which is why this is its own option rather "
+                "than profile= wearing a second hat")
+        # Vault signs a subordinate through pki/root/sign-intermediate, which is not
+        # role-scoped at all — so a role= here is read by nothing.
+        if backend == "vaultpki" and _val("role"):
+            raise PSResourceError(
+                "role= does nothing when Vault signs a subordinate — a leaf goes through "
+                "pki/sign/<role> and carries the role's issuance policy, but a "
+                "subordinate goes through pki/root/sign-intermediate, which is not "
+                "role-scoped. Drop role=, and put the boundary in permitdns= or on the "
+                "mount itself")
+    elif backend == "vaultpki" and not _val("role"):
+        # The other direction: a leaf from Vault has no issuance policy without one.
+        raise PSResourceError(
+            "a leaf from the Vault backend requires role= — the PKI role is what carries "
+            "Vault's own issuance policy, and pki/sign/<role> has no other source for it")
 
     pathlen = _val("pathlen")
     if pathlen:
@@ -675,14 +1031,27 @@ def _validate_certificate_subca(backend: str, options: dict) -> None:
     # silently dropped, and a silently dropped option is what this validator is for.
     if _val("eku"):
         raise PSResourceError(
-            "eku= cannot be combined with isca=true — the plugin asserts NO extended key "
-            "usage on a subordinate CA, deliberately, because an EKU on a CA certificate "
-            "constrains everything issued beneath it and implementations disagree on how. "
-            "So this value would be dropped without effect; drop it here instead")
+            "eku= cannot be combined with subordinate-CA issuance — the plugin asserts NO "
+            "extended key usage on a subordinate CA, deliberately, because an EKU on a CA "
+            "certificate constrains everything issued beneath it and implementations "
+            "disagree on how. So this value would be dropped without effect; drop it here "
+            "instead")
+
+    # retain=, publisher= and the SAN options exist in the shared grammar for the leaf
+    # platform and do nothing useful on an issuer: a subordinate has no relying party to
+    # publish a thumbprint to. Refused for the same silent-no-op reason as the rest.
+    stray_leaf = [k for k in ("publisher", "tenant", "appid", "spid", "retain")
+                  if _val(k)]
+    if stray_leaf:
+        raise PSResourceError(
+            f"{', '.join(k + '=' for k in stray_leaf)} does nothing on a subordinate CA — "
+            f"a publisher exists for a relying party that PINS a certificate by "
+            f"thumbprint, and an issuer has none. These options are in the shared grammar "
+            f"for the Certificate platform")
 
     if not constraints:
         logger.warning(
-            "PS: certificate address sets isca=true with no name constraints "
+            "PS: certificate address issues a SUBORDINATE CA with no name constraints "
             "(permitdns=/permitemail=/permitip=). The plugin allows this and warns: a "
             "vaulted CA key is not a credential to one system, it is the authority to "
             "mint an identity for ANYTHING the CA may assert. Prefer the parent CA pool's "
@@ -710,28 +1079,35 @@ def _validate_certificate_subca(backend: str, options: dict) -> None:
     # exists for — takes PEM only, in three separate fields, and its key box says so:
     # "Only PEM encoding is valid". A PKCS#12 has to be taken apart with openssl before
     # any of it can be pasted in. Warned rather than refused because a subordinate could
-    # be destined for something else entirely and this cannot know the consumer; note the
-    # default is Pkcs12, so the common case is an address that simply says nothing.
-    if (_val("bundle").lower() or "pkcs12") == "pkcs12":
+    # be destined for something else entirely and this cannot know the consumer.
+    #
+    # The EFFECTIVE value is what matters, and it differs per package: the Subordinate CA
+    # package defaults to PemBundle, so a silent address there is already right and this
+    # only fires when somebody typed pkcs12 on purpose. On the leaf package with
+    # isca=true the default is still Pkcs12, and a silent address there is the case worth
+    # cautioning about.
+    bundle = _val("bundle").lower() or _CERT_DEFAULT_BUNDLE[package]
+    if bundle == "pkcs12":
         logger.warning(
             "PS: certificate address issues a SUBORDINATE CA as %s. If PRA Vault is the "
             "consumer, set bundle=PemBundle — its X.509 Parent Certificate Authority "
             "account takes a PEM key, a passphrase and a PEM certificate as three "
             "separate fields, and a PKCS#12 has to be unpacked with openssl first. "
             "Ignore this if the subordinate is going somewhere else.",
-            _val("bundle") or "the default Pkcs12")
+            _val("bundle") or f"the {package} package's default Pkcs12")
 
-    # ACM PCA's template decides what comes back, so isca= and templatearn= naming
-    # different things is not a preference to resolve — one of them is a lie. Without
-    # this, asking for a CA returns a perfectly valid end-entity certificate.
+    # ACM PCA's template decides what comes back, so asking for a CA and naming a
+    # template that is not one is not a preference to resolve — one of them is a lie.
+    # Without this, asking for a CA returns a perfectly valid end-entity certificate.
     template = _val("templatearn").lower()
     if template and _CERT_AWS_SUBCA_TEMPLATE not in template:
         raise PSResourceError(
-            f"templatearn= and isca=true disagree — {_val('templatearn')!r} is not a "
-            f"SubordinateCACertificate template, and ACM PCA builds the certificate from "
-            f"the template rather than from the CSR. The request would succeed and return "
-            f"an END-ENTITY certificate, which fails later at the relying party as an "
-            f"untrusted issuer. Drop templatearn= and let pathlen= select the template")
+            f"templatearn= contradicts subordinate-CA issuance — {_val('templatearn')!r} "
+            f"is not a SubordinateCACertificate template, and ACM PCA builds the "
+            f"certificate from the template rather than from the CSR. The request would "
+            f"succeed and return an END-ENTITY certificate, which fails later at the "
+            f"relying party as an untrusted issuer. Drop templatearn= and let pathlen= "
+            f"select the template")
 
 
 # ── AWS SSM DB plugin address grammar ─────────────────────────────────────────
@@ -1504,6 +1880,7 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
                                    dns_name: str = "", account_suffix: str = "",
                                    initial_password: str = "",
                                    use_own_credentials: bool = False,
+                                   cert_package: str = CERT_PACKAGE_LEAF,
                                    tenant: Optional[dict] = None) -> dict:
     """Onboard a VM as a Password Safe managed system + managed account.
     Returns ``{managed_system_id, managed_account_id, tf_state_json,
@@ -1795,7 +2172,12 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
         # which Password Safe generates from the account's password policy and hands to
         # the plugin on the first Change Password. Seeding one here would hand the account
         # a passphrase that opens nothing.
-        _validate_certificate_dns_name(dns_name)
+        # ``cert_package`` has to arrive from the caller: an address destined for the
+        # Subordinate CA platform normally carries NO isca= at all, because that package
+        # defaults it to true — so validating it as a leaf profile would refuse the
+        # name-constraint options as a subordinate profile in the wrong place. The
+        # platform_id argument cannot stand in for it, being an opaque tenant-side id.
+        _validate_certificate_dns_name(dns_name, cert_package)
         _check_address_length(dns_name, "certificate")
         _validate_ip_field(ip_address, "Certificate")
         if use_own_credentials:

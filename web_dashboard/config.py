@@ -1945,9 +1945,26 @@ class Settings(BaseSettings):
     # submission paths has been proven against a live CA yet. Off means the dashboard
     # behaves exactly as before, and no CA pool can be created to bill for.
     cert_lab_enabled: bool = False                   # master gate: page, nav, router
+    # TWO platforms, because the plugin ships as two .psplugin packages over a shared
+    # core with different plugin ids: "Certificate" issues an end-entity certificate on
+    # any of its nine backends, "Subordinate CA" issues an issuing authority on the four
+    # that can sign one. They install side by side and neither overwrites the other.
+    #
+    # The split exists so their access control is separable — a subordinate CA is a
+    # delegation of issuing authority rather than one more credential, so the team that
+    # may request a leaf should not automatically be the team that may request an issuer.
+    # Two config keys rather than one with a suffix rule, for the same reason there are
+    # two: an operator who renamed one platform has not necessarily renamed the other.
     cert_ps_platform: str = "Certificate"            # plugin platform (name or id) — resolved live via /Platforms
+    cert_ps_subca_platform: str = "Subordinate CA"   # the second package's platform, same resolution
     cert_ps_workgroup: str = ""                      # blank → passwordsafe_workgroup
     cert_ps_functional_account: str = ""             # reference mode ONLY: the account to use, named by the operator
+    # The subordinate package's own reference-mode account. A functional account is
+    # PLATFORM-bound and a managed system inherits its platform, so the leaf account
+    # cannot carry a Subordinate CA managed system — it would onboard green and fail
+    # every credential action. Blank falls back to cert_ps_functional_account, which is
+    # right for an operator running only one platform and wrong for one running both.
+    cert_ps_subca_functional_account: str = ""
     # create  — mint one per CA from the build's terraform outputs (the default)
     # reference — use cert_ps_functional_account, which an operator maintains by hand.
     # Reference mode is not legacy: an ADCS or other bring-your-own CA has no
@@ -1975,6 +1992,16 @@ class Settings(BaseSettings):
     cert_default_eku: str = "ClientAuth"             # named explicitly: under eku=Auto a DNS SAN drags serverAuth in
     cert_default_warn: str = ""                      # renewal threshold as a % of the certificate's own lifetime (plugin default 25)
     cert_default_subject: str = ""                   # blank → the plugin's own default, CN={AccountName}
+    # A subordinate CA's lifetime is a different quantity from a leaf's, which is why it
+    # gets its own key rather than sharing cert_default_lifetime.
+    #
+    # Rotation does NOT revoke: a relying party walks the chain to the root and neither
+    # knows nor cares which subordinate was current when a leaf was minted. So this — not
+    # the rotation interval — is the exposure window if the signing key leaks. Issue the
+    # subordinate just longer than the interval Password Safe rotates it on, sizing the
+    # overlap to the longest expected session. Blank lets the plugin default it, and the
+    # plugin itself cautions above 45 days.
+    cert_subca_default_lifetime: str = ""            # e.g. 8d against a 7-day rotation
     # GCP CAS lab defaults, read by the Certificate Lab page when it composes a gcpcas
     # address against a pool this dashboard provisioned.
     cert_gcp_cas_location: str = "us-central1"       # CAS is regional; the pool, its CAs and any template all share this
