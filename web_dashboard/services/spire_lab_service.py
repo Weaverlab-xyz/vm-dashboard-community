@@ -946,6 +946,7 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str) -> None:
     surprise than leaving a server nothing can reach.
     """
     from ..api.websocket import broadcast_progress
+    from . import storage_service      # the unlink stage's asset backend, same as run()
     row = get_lab(db, lab_id)
     if not row:
         logger.warning("spire-lab: row %s vanished before teardown", lab_id)
