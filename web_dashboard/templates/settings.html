@@ -5883,6 +5883,25 @@
               </p>
             </div>
             <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Authentication</label>
+              <select x-model="panelCfg.wlc_auth_mode"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="pat">Personal Access Token (stored)</option>
+                <option value="entra">Azure workload identity (nothing stored)</option>
+              </select>
+              <p class="text-[11px] text-gray-400 mt-1">
+                <strong>Workload identity</strong> is available when the dashboard runs as an
+                Azure container with a managed identity assigned. The container's own identity
+                token is presented to Pathfinder, which trusts it because you registered a
+                <strong>Workload Identity</strong> there — so this install holds
+                <strong>no BeyondTrust credential at all</strong>. Registering the trust is a
+                one-time action in the Pathfinder GUI under
+                <strong>Administration → Workload Identities</strong>; there is no API for it.
+                See <a href="/docs/cloud-hosting" target="_blank"
+                       class="text-blue-600 hover:text-blue-800 underline">Cloud hosting</a>.
+              </p>
+            </div>
+            <div class="mt-3" x-show="(panelCfg.wlc_auth_mode || 'pat') !== 'entra'" x-cloak>
               <label class="block text-sm font-medium text-gray-700 mb-1">Personal Access Token</label>
               <input type="password" x-model="panelCfg.wlc_pat" autocomplete="new-password"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
@@ -5893,9 +5912,51 @@
                 Created under <strong>Manage Profile → Personal Access Tokens</strong>. Stored
                 encrypted; the box is always empty — leave it blank to keep the stored token,
                 type to replace it, or clear it to remove it. A PAT is scoped to a single
-                site. <strong>This is the one long-lived credential this feature still needs</strong>
+                site. <strong>This is the one long-lived credential this mode still needs</strong>
                 — it replaces the per-cloud static keys rather than eliminating secrets entirely.
+                The workload-identity mode above removes it.
               </p>
+            </div>
+            <div class="mt-3 space-y-3" x-show="panelCfg.wlc_auth_mode === 'entra'" x-cloak>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Service name</label>
+                <input type="text" x-model="panelCfg.wlc_service_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="e.g. vm-dashboard">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  The <strong>Service Name</strong> from the Workload Identity registration,
+                  sent as the <code>X-BT-Service-Name</code> header. It tells Pathfinder which
+                  registration to evaluate this container's token against.
+                </p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Token resource (App ID URI)</label>
+                <input type="text" x-model="panelCfg.wlc_entra_resource"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="api://vm-dashboard-wlc">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  What the managed identity requests a token <em>for</em>; it becomes the
+                  token's <code>aud</code>. Use an app registration in your own tenant with
+                  <code>accessTokenAcceptedVersion: 2</code> — that is what makes the issuer
+                  <code>…/v2.0</code>, which is the issuer the Azure Entra ID registration type
+                  expects.
+                </p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">
+                  User-assigned identity client ID <span class="text-gray-400 font-normal">(optional)</span>
+                </label>
+                <input type="text" x-model="panelCfg.wlc_entra_client_id"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="(blank = system-assigned identity)">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  Leave blank to use the container's system-assigned identity. A
+                  <strong>user-assigned</strong> identity is usually the better choice here: the
+                  app and the worker are separate container apps, and sharing one identity means
+                  <strong>one</strong> registration in Pathfinder instead of two — and the worker
+                  is where credentials are actually minted.
+                </p>
+              </div>
             </div>
             <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
@@ -5928,8 +5989,9 @@
             <p x-show="wlcTest.ok === false" x-cloak
                class="text-xs text-red-600 mt-2" x-text="wlcTest.error"></p>
             <p class="text-[11px] text-gray-400 mt-1">
-              Authenticates with <code>GET /session</code> — it proves the token, the site ID and
-              the API version together without issuing a credential, so it is <strong>free</strong>
+              Authenticates with <code>GET /session</code> — it proves the site ID, the API
+              version and whatever this panel authenticates with (the stored token, or this
+              container's identity) together without issuing a credential, so it is <strong>free</strong>
               and safe to repeat. Tests the <strong>saved</strong> values, so save first. Unlike
               Active credential source below, this asks BeyondTrust rather than replaying the last
               stored result.

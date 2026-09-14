@@ -27,6 +27,7 @@ cares about:
 | Dynamic AWS credentials for the dashboard's own cloud calls | **Implemented** — not yet exercised against a live dynamic secret |
 | Splitting AWS into an everyday and a provisioning lease | **Implemented** — opt-in, not yet exercised live |
 | Dynamic Azure credentials | **Implemented** — not yet exercised against a live dynamic secret |
+| Authenticating to WC with an **Azure workload identity** instead of a stored PAT | **Implemented** — client path unit-tested; the Azure + Pathfinder wiring not yet run live |
 | In-cluster workload identity (a pod federating its ServiceAccount token) | Planned |
 
 The static-secret backend was deliberately first: it exercises the site, token
@@ -138,8 +139,11 @@ dynamic, GCP static — is the normal case, not a gap.
 
 ### Be clear about what this buys
 
-The dashboard still needs one long-lived credential — the WC **personal access
-token** — to call the API. So the honest claim is not "no static secrets":
+The dashboard needs one long-lived credential — the WC **personal access
+token** — to call the API, *unless* it runs as an Azure container and
+authenticates with its own managed identity instead (see
+[How the dashboard authenticates](#how-the-dashboard-authenticates)). On the PAT
+path the honest claim is not "no static secrets":
 
 > Three standing cloud credentials carrying `ec2:*` / `Contributor` /
 > `Compute Admin` collapse into **one platform PAT**, and the cloud credentials
@@ -161,7 +165,10 @@ presenting a stored one.
    holds after signing in to Pathfinder.
 3. **A personal access token** — Pathfinder → **Manage Profile → Personal
    Access Tokens → Create Token**. Copy it immediately; it is not retrievable
-   later.
+   later. *(Not needed if the dashboard runs as an Azure container and will
+   authenticate with a workload identity — see
+   [How the dashboard authenticates](#how-the-dashboard-authenticates). A PAT is
+   still the quickest way to prove the site works before switching.)*
 
    > **Switch to the target site *before* creating the token.** A PAT is scoped
    > to whichever site was selected when you minted it, and there is currently no
@@ -216,6 +223,43 @@ so an existing secret can be migrated to WC from the Secrets page.
 > the dashboard reaches WC in the first place, so storing it there would make
 > the backend unreadable without itself. The migration UI refuses this
 > explicitly.
+
+---
+
+## How the dashboard authenticates
+
+Two modes, set on the settings panel. The second one exists because the first
+leaves a credential behind.
+
+| Mode | What it holds | Where it works |
+|---|---|---|
+| **Personal Access Token** (default) | the PAT, encrypted in `app_config` | anywhere |
+| **Azure workload identity** | **nothing** | the dashboard running as an Azure container with a managed identity |
+
+In the second mode the container asks the Azure platform for a short-lived token
+for its own identity, and Pathfinder accepts it because a **Workload Identity**
+registered there names that identity's issuer and service-principal object id.
+Every request then carries that token plus an `X-BT-Service-Name` header naming
+the registration to evaluate it against. Nothing is stored, and there is nothing
+to rotate.
+
+**The registration is a manual, one-time action in Pathfinder's GUI**
+(Administration → Workload Identities) and has no API in this dashboard by
+design: something that could register its own trust would be holding a
+credential that creates credentials. Pathfinder offers three issuer categories —
+**GitHub Actions** (a CI workflow, pinned to `owner/repo` and optionally to
+immutable org/repo IDs), **Azure Entra ID**, and **Custom IDP** (any OIDC issuer,
+scoped by explicit AND-matched claim conditions). The dashboard wires the Azure
+one, because the thing being authenticated is an Azure-hosted container; the
+other two describe workloads that are not this process.
+
+Full walkthrough, including the v1-versus-v2 issuer trap that makes a perfectly
+valid token silently fail to match:
+[Cloud hosting → No PAT](../cloud-hosting.md#no-pat-authenticate-to-pathfinder-with-an-entra-workload-identity).
+
+**Assign the identity to the worker too.** `dash-worker` is where credentials are
+minted, so an identity on the web app alone yields a panel that tests green and
+jobs that keep failing.
 
 ---
 
@@ -444,7 +488,7 @@ Practical consequences:
 | | |
 |---|---|
 | API base | `https://api.beyondtrust.io/site/<site-id>/secrets` |
-| Auth | `Authorization: Bearer <PAT>` |
+| Auth | `Authorization: Bearer <PAT>`, or a managed-identity token plus `X-BT-Service-Name: <registration>` |
 | Required header | `bt-secrets-api-version: 2026-04-28` |
 | Terraform provider | `beyondtrust/beyondtrust` (registry), Terraform ≥ 1.11 |
 | Provider env vars | `BEYONDTRUST_ACCESS_TOKEN`, `BEYONDTRUST_SITE_ID` |

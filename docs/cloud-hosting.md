@@ -361,6 +361,146 @@ az containerapp create \
 Full detail, including why the worker is its own Container App rather than
 another sidecar: [job-worker.md](job-worker.md#container-apps).
 
+### No PAT: authenticate to Pathfinder with an Entra workload identity
+
+> **Applies to:** an install using [Workload Credentials](integrations/workload-credentials.md).
+> Skip this if you do not. **Status:** the client path ships and is unit-tested;
+> the Azure and Pathfinder steps below have not yet been run end to end on this
+> install, so treat the commands as a starting point rather than a transcript.
+
+Workload Credentials replaced three standing cloud keys with **one** standing
+platform credential: a Personal Access Token, stored encrypted in `app_config`.
+That token is the last secret this feature holds, and it is the one that has
+actually caused an outage here — a dead PAT produces
+`401 Personal access token not found` on every mint, from a dashboard that looks
+entirely healthy.
+
+On Azure that token can go away. Container Apps can hand the container a
+**managed identity**; Pathfinder can be told, once, to trust that identity. The
+container then presents a short-lived Entra token it fetched from the platform a
+moment earlier, and there is **no BeyondTrust credential anywhere in the
+deployment** — nothing in `app_config`, nothing in the Container App's secrets,
+nothing to rotate.
+
+**Registration is a GUI action and there is no API for it.** Pathfinder →
+**Administration → Workload Identities → Register Workload Identity**. That is
+deliberate on both sides: a trust that can be created by the thing being trusted
+is not a trust. It takes a few minutes, once.
+
+Pathfinder registers three kinds of issuer. Only the second applies to this
+container:
+
+| Identity Provider Type | What it is for |
+|---|---|
+| **GitHub Actions** | a workflow pulling secrets in CI — pinned to `owner/repo` and, optionally, immutable org/repo **IDs** so a renamed or recreated repo stops matching |
+| **Azure Entra ID** | anything holding an Entra identity, including this Container App |
+| **Custom IDP** | any other OIDC issuer, scoped by explicit claim conditions — the escape hatch, and the one to reach for below if the issuer version fights you |
+
+#### 1. One user-assigned identity, on both container apps
+
+Use a **user-assigned** identity rather than a system-assigned one. The app and
+the worker are two separate Container Apps, so system-assigned means two
+principals, two object ids, and two registrations in Pathfinder to keep in step.
+And **the worker is where credentials are actually minted** — an identity on
+`dash` alone gives you a panel that tests green and jobs that still fail.
+
+```bash
+az identity create -g RG-DASH -n id-dash-wlc
+ID=$(az identity show -g RG-DASH -n id-dash-wlc --query id -o tsv)
+az containerapp identity assign -n dash        -g RG-DASH --user-assigned "$ID"
+az containerapp identity assign -n dash-worker -g RG-DASH --user-assigned "$ID"
+```
+
+Then read back the two values Pathfinder and the settings panel each need:
+
+```bash
+az identity show -g RG-DASH -n id-dash-wlc \
+  --query '{principalId:principalId, clientId:clientId, tenantId:tenantId}' -o json
+```
+
+`principalId` is the **service principal object ID** — the value Pathfinder asks
+for, and the one that ends up as the `sub` claim it checks. `clientId` is what
+the dashboard sends when asking the platform for a token; without it the request
+resolves to the *system-assigned* identity, which here is not assigned at all.
+
+#### 2. An audience for the token, and the issuer trap behind it
+
+A managed identity does not mint a token in the abstract — it mints one **for a
+resource**, and that resource becomes the token's `aud`. Register an application
+in your own tenant purely to be that audience:
+
+```bash
+APP_ID=$(az ad app create --display-name vm-dashboard-wlc \
+           --identifier-uris api://vm-dashboard-wlc --query appId -o tsv)
+az ad app update --id "$APP_ID" --set api.requestedAccessTokenVersion=2
+az ad sp create --id "$APP_ID"      # so the tenant can resolve api://…
+```
+
+**That second command is the whole trap, so do not skip it.** Entra issues *two*
+token versions with *two different issuers*:
+
+| Token version | `iss` |
+|---|---|
+| v1 (the default) | `https://sts.windows.net/<tenant-id>/` |
+| v2 (`requestedAccessTokenVersion: 2`) | `https://login.microsoftonline.com/<tenant-id>/v2.0` |
+
+The **Azure Entra ID** registration type expects the v2 form — it is what the
+field's own placeholder shows. Leave the resource app on the default and the
+identity happily produces a perfectly valid token that Pathfinder will never
+match, with nothing in either UI to say why. In the portal's manifest the same
+property reads `accessTokenAcceptedVersion`; via Graph and the CLI it is
+`requestedAccessTokenVersion`. They are the same knob.
+
+If you cannot change the resource app — someone else owns it — register as
+**Custom IDP** instead, with the issuer set to `https://sts.windows.net/<tenant-id>/`
+and one claim condition, `sub` = the identity's `principalId`. That path is
+exactly why Custom IDP exists.
+
+#### 3. Register the trust in Pathfinder
+
+**Administration → Workload Identities → Register Workload Identity**:
+
+| Field | Value |
+|---|---|
+| Identity Provider Type | **Azure Entra ID** |
+| Service Name | `vm-dashboard` — any name; the dashboard sends it back as `X-BT-Service-Name` |
+| Issuer URL | `https://login.microsoftonline.com/<tenant-id>/v2.0` |
+| Service Principal OID | the identity's `principalId` from step 1 |
+| Site | **the site whose Workload Credentials you use** |
+
+That last row carries the same trap a PAT does: a registration made against the
+wrong site fails every call with `401 Access denied for this site`, which reads
+like the site is missing the application rather than like a scoping mistake.
+
+#### 4. Point the dashboard at it
+
+**Settings → Integrations → Workload Credentials**:
+
+- **Authentication** → *Azure workload identity (nothing stored)*
+- **Service name** → the Service Name from step 3
+- **Token resource** → `api://vm-dashboard-wlc`
+- **User-assigned identity client ID** → `clientId` from step 1
+
+**Save, then press Test connection** — it tests the *saved* values. The test is
+an unmetered `GET /session`, so it is free and safe to repeat, and it is the only
+thing that separates the two failures cleanly:
+
+| What you see | What it means |
+|---|---|
+| `no managed identity endpoint reachable` | no identity is assigned to **this** container app |
+| `could not get a managed identity token (HTTP 400/404)` | the identity exists but the tenant will not issue for that resource — check the App ID URI and that the service principal in step 2 was created |
+| `Workload Credentials error (HTTP 401)` | the token was fine and Pathfinder declined it — wrong site, wrong Service Name, a `sub` that is not this identity's `principalId`, or the v1/v2 issuer mismatch above |
+
+Once it passes, clear `wlc_pat`: switching modes does not delete it, and a stored
+token nobody uses is still a credential somebody has to answer for. The Workload
+Lab's Cloud tab mints through the same client, so it stops depending on a stored
+token at the same moment.
+
+**What this does not remove.** `DATABASE_URL` and `JWT_SECRET_KEY` are still
+platform secrets on both container apps, and they still have to match between
+`dash` and `dash-worker`. This removes the BeyondTrust credential, not every
+credential.
+
 ---
 
 ## GCP Cloud Run
