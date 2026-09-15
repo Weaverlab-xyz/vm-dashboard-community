@@ -791,6 +791,26 @@ def list_wlc() -> list:
     return out
 
 
+def update_wlc(ref: str, value: str) -> str:
+    """Write a new version of the secret **at** ``ref``, folder included.
+
+    ``write_wlc`` takes a bare key and prepends the folder new secrets are configured
+    to go into. An edit already knows the full path — it came out of ``list_wlc`` —
+    so sending it back through the writer would prepend that folder a second time and
+    create ``dashboard/dashboard/<key>``: the real secret untouched, the ``wlc://``
+    reference in ``app_config`` still resolving to the old value, and an edit that
+    reported success. Same reasoning as ``_wlc_split``'s — a reference records where
+    the secret actually is.
+    """
+    from . import workload_credentials_service as wlc
+    folder, name = _wlc_split(ref)
+    if not name:
+        raise ValueError(f"Not a Workload Credentials secret reference: {ref!r}")
+    wlc.write_static(name, value, folder=folder)
+    logger.info("WC: updated secret %s", ref)
+    return ref
+
+
 def delete_wlc(ref: str) -> None:
     from . import workload_credentials_service as wlc
     folder, name = _wlc_split(ref)
@@ -1430,6 +1450,33 @@ def ref_for(backend: str, key: str) -> str:
     if not fn:
         raise ValueError(f"Cannot derive a ref for backend: {backend}")
     return fn(key)
+
+
+# Writers that address a secret by its EXISTING reference instead of deriving one
+# from a key. Only these two are correct for an edit today: `database` never mangled
+# the key, and `update_wlc` exists because the wlc backend is newly editable from the
+# Secrets page. The cloud stores and Password Safe still route an edit through their
+# key-deriving writer, which re-applies the prefix — see update_sync_validated.
+_UPDATE_FN = {
+    "wlc":      update_wlc,
+    "database": write_database,
+}
+
+
+def update_sync_validated(backend: str, ref: str, value: str) -> str:
+    """JSON-validated write to a secret that already exists, addressed by ``ref``.
+
+    Separate from :func:`write_sync_validated` because a create is given a *key* and
+    an update is given a *reference*, and for most backends those are not the same
+    string: the writers prepend a prefix or a folder, swap characters, or both (see
+    the note above ``_REF_FN``). Backends with no absolute-ref writer keep exactly
+    today's behaviour rather than getting a new, untested path.
+    """
+    validate_json_value(value)
+    fn = _UPDATE_FN.get(backend)
+    if fn:
+        return fn(ref, value)
+    return write_sync_validated(backend, ref, value)
 
 
 def write_sync_validated(backend: str, key: str, value: str) -> str:

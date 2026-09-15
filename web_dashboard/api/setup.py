@@ -2186,6 +2186,40 @@ def _write_feature(feature: str, payload_dict: dict, touched: set | None = None)
             pass
 
 
+def _guard_wlc_auth_mode(filtered: dict, touched: set | None) -> None:
+    """Refuse to switch Workload Credentials back to stored-PAT auth when the PAT
+    has been migrated into Workload Credentials itself.
+
+    That combination is unreadable by construction — the token needed to fetch the
+    token — and it is reachable by an entirely reasonable sequence: migrate every
+    database secret into the `wlc` backend while on workload identity (where nothing
+    reads the PAT), then flip the auth dropdown back. The write would succeed, the
+    panel would look right, and every call to the platform would start reporting a
+    missing PAT for one the Secrets page shows as configured.
+
+    Saving a real PAT in the same request is allowed: that write replaces the
+    reference, so the state this guards against never exists.
+    """
+    from ..services import workload_credentials_service as wlc
+    if "wlc_auth_mode" not in filtered:
+        return
+    mode = str(filtered.get("wlc_auth_mode") or "").strip().lower()
+    if mode == wlc.AUTH_MODE_ENTRA:
+        return
+    typed_pat = str(filtered.get("wlc_pat") or "").strip()
+    if typed_pat and (touched is None or "wlc_pat" in touched):
+        return   # this same save overwrites the reference with a usable token
+    if not wlc.pat_is_self_referential():
+        return
+    raise HTTPException(
+        status_code=400,
+        detail="wlc_pat is currently stored in Workload Credentials itself "
+               "(wlc://…), so stored-token auth cannot read it. Stay on "
+               "workload-identity (entra) auth, or paste a Personal Access Token "
+               "into this panel in the same save.",
+    )
+
+
 @router.get("/feature/{feature_name}")
 def get_feature_config(feature_name: str, request: Request):
     """Return current config for a single feature (secrets redacted). Admin JWT required."""
@@ -2232,6 +2266,8 @@ def patch_feature_config(feature_name: str, payload: dict, request: Request):
                    f"{feature_flags.profile_noun()}, so it cannot be "
                    f"enabled here. Run a separate instance for it.",
         )
+    if feature_name == "workload_credentials":
+        _guard_wlc_auth_mode(filtered, touched)
     _write_feature(feature_name, filtered, touched=touched)
     logger.info("Feature '%s' configuration updated.", feature_name)
     return {"ok": True}

@@ -95,7 +95,7 @@ by calling the vault API, caches the result for 5 minutes, and discards it.
 | **Azure Key Vault** | `azure_kv://` | Service principal already configured in the dashboard |
 | **GCP Secret Manager** | `gcp_sm://` | Service account already configured in the dashboard |
 | **BeyondTrust Secrets Safe** | `bt_safe://` | ps-cli credentials already configured in the dashboard |
-| **BeyondTrust Workload Credentials** | `wlc://` | Site ID + personal access token (preview — see below) |
+| **BeyondTrust Workload Credentials** | `wlc://` | Site ID, plus either a personal access token or the container's own Azure workload identity (preview — see below) |
 
 Each backend reuses the cloud provider credentials you have already entered —
 no additional IAM setup is needed beyond granting the existing SP / SA / IAM
@@ -113,6 +113,16 @@ user access to the vault.
    - Verifies the reference resolves correctly before committing.
 5. The plaintext value is no longer stored in the database. Future reads go
    to the vault.
+
+**Bootstrap credentials are held back.** Each backend authenticates with one of
+the dashboard's own secrets — the AWS secret key for Secrets Manager, the Azure
+client secret for Key Vault, the service-account JSON for GCP SM, the ps-cli
+client secret for Secrets Safe — and a migration that moved one into the backend
+it unlocks would leave the dashboard unable to read its own credentials on the
+next restart. Those appear in the results as skipped bootstrap credentials and
+stay in the encrypted database. Workload Credentials is the exception: on
+workload-identity auth it authenticates with no stored secret at all, so it holds
+nothing back.
 
 ### Why the JWT root key cannot be migrated
 
@@ -307,9 +317,15 @@ Credentials additionally works as a Tier 2 backend for ordinary static secrets
 (`wlc://`), which is the cheapest way to verify the connection before anything
 dynamic is switched on.
 
-One caveat stated plainly: the dashboard still holds a Workload Credentials
-personal access token, so this collapses three standing cloud credentials into
-one platform token rather than eliminating secrets outright.
+One caveat, and the one way out of it. On the default auth mode the dashboard
+still holds a Workload Credentials personal access token, so this collapses three
+standing cloud credentials into one platform token rather than eliminating
+secrets outright. On the **Azure workload-identity** auth mode it holds nothing:
+the container mints a short-lived Entra token from its own managed identity, and
+`wlc_pat` is read by no code path. That is the one posture in which migrating
+*every* database secret — the PAT included — into `wlc://` leaves the database
+with references only. The migration refuses to move the PAT on the token mode,
+and reports it as a skipped bootstrap credential.
 
 See [integrations/workload-credentials.md](integrations/workload-credentials.md).
 

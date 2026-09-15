@@ -24,6 +24,7 @@ cares about:
 | Capability | Status |
 |---|---|
 | Static secrets as a `wlc://` secrets backend (list / read / create / update / delete, staleness metadata) | **Implemented, verified live** |
+| Migrating the database's own secrets into it in one step | **Implemented** — see [Emptying the database](#emptying-the-database-wc-as-the-secrets-backend); not yet run live |
 | Dynamic AWS credentials for the dashboard's own cloud calls | **Implemented** — not yet exercised against a live dynamic secret |
 | Splitting AWS into an everyday and a provisioning lease | **Implemented** — opt-in, not yet exercised live |
 | Dynamic Azure credentials | **Implemented** — not yet exercised against a live dynamic secret |
@@ -153,6 +154,10 @@ The in-cluster path is the one that can reach genuinely zero standing
 credentials, because a pod federates its own ServiceAccount token rather than
 presenting a stored one.
 
+On the Azure workload-identity path there is no PAT either, and that is what
+makes it possible to move **every** remaining database secret into WC itself —
+see [Emptying the database](#emptying-the-database-wc-as-the-secrets-backend).
+
 ---
 
 ## Prerequisites
@@ -260,6 +265,47 @@ valid token silently fail to match:
 **Assign the identity to the worker too.** `dash-worker` is where credentials are
 minted, so an identity on the web app alone yields a panel that tests green and
 jobs that keep failing.
+
+---
+
+## Emptying the database: WC as the secrets backend
+
+Workload Credentials is also a Tier 2 backend for ordinary static secrets
+(`wlc://`), and on the workload-identity auth mode that combination is the one
+configuration where the application database can end up holding **no secret
+values at all** — only references.
+
+Select **BeyondTrust Workload Credentials** under Target Backend on
+Settings → Secrets Backend (`/secrets`) and run a **Dry Run** first. Each secret
+is written to `<folder>/<key>` under the folder configured on this page, and its
+database row is replaced with `wlc://<folder>/<key>`.
+
+Which auth mode you are on decides whether that is *every* secret:
+
+| Auth mode | What the database keeps afterwards |
+|---|---|
+| **Personal Access Token** | one row: `wlc_pat` itself. The migration refuses to move it, because the token that authenticates to WC cannot be stored inside WC |
+| **Azure workload identity** | nothing. Nothing reads `wlc_pat` on this mode, so it migrates like any other secret |
+
+The dry run reports the PAT as a skipped **bootstrap credential** on the first
+mode. That is the only secret held back, and switching auth modes is the way to
+move it — not a limit of the backend.
+
+Two things to know before you do it:
+
+- **Switching back to PAT auth afterwards is refused.** Once `wlc_pat` holds a
+  `wlc://` reference, stored-token auth would need the token in order to fetch
+  the token. The settings panel rejects the change with that reason, and a
+  request that somehow reaches the client is refused rather than reporting the
+  PAT as missing — which is what the resolution loop would otherwise look like.
+  Paste a real PAT into the panel in the same save if you genuinely want to go
+  back.
+- **The JWT root key is not part of this** and never can be — it derives the key
+  that encrypts the very rows a vault credential lives in. See
+  [why the JWT root key cannot be migrated](../secrets-management.md#why-the-jwt-root-key-cannot-be-migrated).
+
+Secrets already living in another external vault are left untouched; the
+migration only moves database-stored values.
 
 ---
 

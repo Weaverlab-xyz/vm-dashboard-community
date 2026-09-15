@@ -89,6 +89,36 @@ def _cfg(key: str, fallback: str = "") -> str:
         return fallback
 
 
+def _raw_cfg(key: str) -> str:
+    """The **stored** value for ``key``, with external references left unresolved.
+
+    ``_cfg`` goes through ``config_service.get``, which transparently resolves a
+    ``wlc://`` reference by calling this module — fine for every key except the one
+    this module authenticates with. Only the DB is consulted (no ``settings``
+    fallback): a reference can only get there by being migrated, and an environment
+    variable is never one.
+    """
+    try:
+        from . import config_service
+        return config_service.get_raw(key) or ""
+    except Exception:
+        return ""
+
+
+def pat_is_self_referential() -> bool:
+    """True when ``wlc_pat`` holds a ``wlc://`` reference — the token that unlocks
+    Workload Credentials, stored inside Workload Credentials.
+
+    Reachable, and only this way: migrate the PAT into the ``wlc`` backend while on
+    workload-identity auth (where nothing reads it), then switch back to ``pat``.
+    Resolving it would then call in here, which would resolve it again; the recursion
+    bottoms out in ``config_service``'s catch-all and yields ``""``, so the install
+    reports a *missing* PAT for one that is plainly set. Detected instead, and
+    refused with the actual reason.
+    """
+    return _raw_cfg("wlc_pat").startswith("wlc://")
+
+
 def _enabled() -> bool:
     try:
         from . import config_service
@@ -124,7 +154,10 @@ def _missing() -> list:
             out.append("wlc_service_name")
         if not _cfg("wlc_entra_resource"):
             out.append("wlc_entra_resource")
-    elif not _cfg("wlc_pat"):
+    elif not (_raw_cfg("wlc_pat") or _cfg("wlc_pat")):
+        # Raw first, and not only to avoid the resolve: a self-referential PAT IS
+        # set, and reporting it as missing would send the operator to paste in a
+        # token that is already there. `_auth_headers` names the real problem.
         out.append("wlc_pat")
     return out
 
@@ -363,6 +396,12 @@ def _auth_headers() -> dict:
             "Authorization": f"Bearer {_entra_token()}",
             "X-BT-Service-Name": _cfg("wlc_service_name"),
         }
+    if pat_is_self_referential():
+        raise WorkloadCredentialsError(
+            "wlc_pat is stored in Workload Credentials itself (wlc://…), which "
+            "cannot be read without it. Either set the auth mode back to "
+            "workload identity (entra), where the PAT is not used at all, or "
+            "paste the token back into Settings -> Workload Credentials.")
     return {"Authorization": f"Bearer {_cfg('wlc_pat')}"}
 
 
