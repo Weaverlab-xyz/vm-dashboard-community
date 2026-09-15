@@ -137,7 +137,7 @@ A successful response begins with `{'Status': 'Success', 'Value': 'OpaqueRef:...
 ## Multiple connections
 
 Connection details used to live in Settings as a single set of fields, so there could
-only ever be one XCP-ng pool. They now live in the **Connections** page (`/connections`),
+only ever be one XCP-ng pool. They now live on the **Connections** tab of the Remote Agents page (`/connections`),
 which holds as many as you like — a second XCP-ng pool at another site, or the same one
 under a read-only and a privileged service account.
 

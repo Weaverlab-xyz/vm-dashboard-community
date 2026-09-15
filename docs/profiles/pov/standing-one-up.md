@@ -188,7 +188,7 @@ tenant that passed is not the tenant you now have, and stale-green is worse than
 
 On first boot the dashboard copies whatever singletons the install already has into rows,
 once. After that **the rows are the truth and editing the Settings keys does nothing** —
-the same one-way promise the Connections page makes for hypervisors, and for the same
+the same one-way promise the Connections tab makes for hypervisors, and for the same
 reason: a second copy that keeps re-reading the singletons is how an operator edits a
 field and watches it have no effect, or worse, have an effect a week later.
 

@@ -1365,15 +1365,29 @@ def _hypervisor_page_host(kind: str) -> dict:
 
 @app.get("/connections", response_class=HTMLResponse, include_in_schema=False)
 async def connections_page(request: Request):
-    """Hypervisor connections. Reachable whenever ANY hypervisor integration is on —
-    it is the one place their credentials now live."""
+    """Hypervisor connections — the Connections TAB of the Remote Agents page.
+
+    It stopped being a page of its own: a connection is nearly always a connection through
+    an agent, so the two are filled in together. This route stayed, rendering the same
+    template opened on that tab, and it is not a leftover alias — it keeps a DIFFERENT gate
+    from /agents. Reachable whenever ANY hypervisor integration is on (it is the one place
+    their credentials live, for all five kinds at once) and 404 otherwise, which is the
+    guard the persona use cases read — see services/personas and tests/test_personas.py.
+    An install with a directly dialled vCenter and no agent at all has no Agents tab and
+    still arrives here.
+
+    Not a redirect, for two reasons: the query string matters (the discovery hand-off on a
+    job page sends ?add=1&kind=…&host=… straight into the add form), and the any-of guard
+    has to stay on an HTML page route for the persona test to be able to read it.
+    """
     # Read, not rendered: the template gets its flags from _profile_context. This local
     # exists only for the gate below, which is why it is not passed to TemplateResponse.
     flags = _feature_flags()
     if not any(flags.get(f"{k}_enabled") for k in
                ("proxmox", "vsphere", "hyperv", "nutanix", "xcpng", "vmware")):
         raise HTTPException(status_code=404, detail="No hypervisor integration is enabled")
-    return templates.TemplateResponse("connections/index.html", {"request": request})
+    return templates.TemplateResponse(
+        "agents/index.html", {"request": request, "initial_tab": "connections"})
 
 
 @app.get("/proxmox", response_class=HTMLResponse, include_in_schema=False,
@@ -1624,9 +1638,25 @@ async def k8s_page(request: Request):
 
 @app.get("/agents", response_class=HTMLResponse, include_in_schema=False)
 async def agents_page(request: Request):
-    """Remote on-prem agents. Nav-gated on remote_agents_enabled (+ admin); the
-    /api/agent router is feature-gated and its operator half is admin-only."""
-    return templates.TemplateResponse("agents/index.html", {"request": request})
+    """Remote on-prem agents, and the hypervisor connections they reach, as one page.
+
+    Two tabs, each gated inside the template on the flags its own half needs:
+
+      * **Agents** -- the containers that poll out of a private network for work
+        (remote_agents_enabled, /api/agent);
+      * **Connections** -- where each hypervisor lives and how to authenticate to it
+        (any of the six hypervisor flags, /api/connections).
+
+    DELIBERATELY UNGATED, matching /k8s and the other feature pages: with remote agents off
+    the Agents panel is the only thing that tells an operator where the switch lives, and a
+    404 cannot say that. Nav-gated on remote_agents_enabled (+ admin) instead; the
+    /api/agent router is feature-gated and every route on it needs the `agents` scope.
+
+    /connections renders this same template opened on the Connections tab, and keeps its
+    own any-of-six gate — see that route for why it is still here.
+    """
+    return templates.TemplateResponse(
+        "agents/index.html", {"request": request, "initial_tab": "agents"})
 
 
 @app.get("/pov", response_class=HTMLResponse, include_in_schema=False,

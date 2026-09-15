@@ -663,12 +663,14 @@ async function ociPlacementChecks() {
   delete global.window;
 }
 
-// --- agents/index.html: the install-command shell toggle ---
+// --- agents/_agents.html: the install-command shell toggle ---
+// The Agents panel is a TAB partial now (the hub is agents/index.html, which also carries
+// the Connections tab), and its Alpine factory lives in the partial beside its markup.
 // The agent image is Linux only, but it runs fine on a Windows host under Docker Desktop,
 // so the enrolment modal emits the same container for two shells and a toggle picks one.
 // The invariant worth pinning is that Copy copies what the operator is looking at: two
 // <pre> blocks behind x-show with their own copy() calls is how that silently comes apart.
-const AG = 'agents/index.html';
+const AG = 'agents/_agents.html';
 const mkEnrol = (shell, over) => {
   const o = {};
   for (const m of ['isPowershell', 'runCmd', 'codeFileCmd'])

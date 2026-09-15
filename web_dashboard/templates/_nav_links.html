@@ -59,8 +59,16 @@
 <a data-nav="xcpng" href="/xcpng" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/xcpng' %}{{ nav_active }}{% endif %}">XCP-ng</a>
 {% endif %}
+{# Hypervisor connections are a TAB of Remote Agents now, not a page — a connection is
+   nearly always a connection through an agent. So this is the SAME destination as the
+   Agents link in the admin section below, and it renders only for the viewers that link
+   is not there for: with remote agents off it is absent entirely, and when they are on it
+   is admin-only while this list is governed by the `connections` scope. Deleting this row
+   instead would leave a directly-dialled vCenter, or a non-admin with connections
+   permission, with no nav route to the page at all. /connections opens it on that tab. #}
 {% if proxmox_enabled or vsphere_enabled or hyperv_enabled or nutanix_enabled or xcpng_enabled or vmware_enabled %}
-<a data-nav="connections" href="/connections" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+<a {% if remote_agents_enabled %}x-show="!$store.auth.isAdmin"{% endif %}
+   data-nav="connections" href="/connections" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/connections' %}{{ nav_active }}{% endif %}">Connections</a>
 {% endif %}
 
@@ -144,10 +152,13 @@
    {% if request.url.path.startswith('/jobs') %}{{ nav_active }}{% endif %}">Jobs</a>
 
 {# ── Admin ────────────────────────────────────────────────────────── #}
+{# Agents AND their hypervisor connections — one page, two tabs. /connections lights this
+   link too, because it is the same page on its other tab and leaving an admin who arrived
+   from a Settings panel with no lit link reads as "you are nowhere". #}
 {% if remote_agents_enabled %}
 <a x-show="$store.auth.isAdmin" data-nav="agents" href="/agents"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-   {% if request.url.path.startswith('/agents') %}{{ nav_active }}{% endif %}">Agents</a>
+   {% if request.url.path.startswith('/agents') or request.url.path == '/connections' %}{{ nav_active }}{% endif %}">Agents</a>
 {% endif %}
 <a x-show="$store.auth.isAdmin" data-nav="audit" href="/audit"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}

@@ -1,12 +1,27 @@
-{% extends "base.html" %}
-{% block title %}Connections{% endblock %}
+{# The Connections tab of the Remote Agents page (agents/index.html), backed by
+   /api/connections.
 
-{% block content %}
-<div class="max-w-6xl mx-auto py-8 px-4" x-data="connectionsPage()" x-init="init()">
+   Where each on-premises hypervisor lives and how to authenticate to it, for all five
+   kinds at once. IT IS NOT GATED ON ANY ONE HYPERVISOR: this list holds rows for all of
+   them, so gating it on one would hide the others' connections whenever that one is off.
+   The page's two entry points enforce that between them -- /connections 404s unless ANY
+   of the six flags is on, which is the gate the persona cards read; see main.py.
 
-  <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3 sm:mb-1">
-    <h1 class="text-2xl font-bold text-gray-800">Hypervisor Connections</h1>
-    <button @click="openAdd()"
+   IT SHARES A PAGE WITH AGENTS BECAUSE OF THE via_agent ROW. A connection reached through
+   an agent holds no host and no username -- the agent's own connections.yaml has those,
+   and the row only names which of its entries to use -- so filling this form means reading
+   the agent's file, and the Agent dropdown here is a list of the rows next door. A
+   dashboard-dialled connection needs no agent at all and is still perfectly valid; it is
+   simply the minority case now.
+
+   Self-contained, and that is required of it rather than tidy: the markup and the Alpine
+   factory it names live in this one file, which is what tests/test_template_scripts.py and
+   tests/test_templates_parse.py check of any template carrying an x-data. #}
+
+<div x-data="connectionsPage()" x-init="init()">
+
+  <div class="flex justify-end mb-3 sm:mb-1">
+    <button x-show="!noAccess" @click="openAdd()"
             class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
       Add connection
     </button>
@@ -26,7 +41,15 @@
 
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
     <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
-    <div x-show="!loading && connections.length === 0" x-cloak
+    <!-- No `connections` permission. In place rather than a red toast for the same reason
+         the Agents panel next door does it: this component mounts on a page somebody may
+         have opened for the other tab, and a failure notice about a list they never asked
+         for reads as the whole page being broken. -->
+    <div x-show="!loading && noAccess" x-cloak class="p-10 text-center">
+      <h2 class="text-base font-semibold text-gray-700 mb-2">You cannot see the connection list</h2>
+      <p class="text-sm text-gray-500 max-w-xl mx-auto" x-text="noAccess"></p>
+    </div>
+    <div x-show="!loading && !noAccess && connections.length === 0" x-cloak
          class="p-10 text-center text-sm text-gray-400">
       No connections yet. Click <strong>Add connection</strong>, or run a discovery scan
       from an agent and add what it finds.
@@ -306,9 +329,7 @@
     </div>
   </div>
 </div>
-{% endblock %}
 
-{% block scripts %}
 <script>
 const CONN_KIND_LABELS = {
   proxmox: 'Proxmox VE', vsphere: 'VMware vSphere', nutanix: 'Nutanix AHV',
@@ -320,6 +341,7 @@ function connectionsPage() {
   return {
     connections: [], agents: [], kinds: [],
     loading: true, busy: '',
+    noAccess: '',   // the 403 text when this user holds no `connections` permission
     toast: '', toastType: 'success',
     showForm: false, saving: false, formError: '', editingId: '',
     form: {},
@@ -336,7 +358,7 @@ function connectionsPage() {
     // cannot leave the dropdown on a value the API would refuse.
     openFromQuery() {
       const q = new URLSearchParams(window.location.search);
-      if (q.get('add') !== '1') return;
+      if (q.get('add') !== '1' || this.noAccess) return;
       this.openAdd();
       const kind = (q.get('kind') || '').toLowerCase();
       if (this.kinds.includes(kind)) this.form.kind = kind;
@@ -360,11 +382,22 @@ function connectionsPage() {
         this.connections = data.connections || [];
         this.agents = data.agents || [];
         this.kinds = data.kinds || [];
+        this.noAccess = '';
       } catch (e) {
-        this.flash(e.message || 'Failed to load connections.', 'error');
+        // A 403 from require_explicit_permission('connections', …) is a state with a
+        // specific explanation, not an error to flash — see isDenied.
+        if (this.isDenied(e)) this.noAccess = e.message;
+        else this.flash(e.message || 'Failed to load connections.', 'error');
       } finally {
         this.loading = false;
       }
+    },
+
+    // Matched on the message because that is all the API helper keeps: it throws an Error
+    // carrying the detail string and no status. The string is built in one place,
+    // api/auth.require_explicit_permission.
+    isDenied(e) {
+      return /^Requires '[\w.:]+' permission/.test((e && e.message) || '');
     },
 
     _blank() {
@@ -497,4 +530,3 @@ function connectionsPage() {
   };
 }
 </script>
-{% endblock %}
