@@ -167,10 +167,20 @@ def missing_settings() -> list:
 # token against.
 #
 # Pathfinder registers three issuer categories — GitHub Actions, Azure Entra ID
-# and a Custom IDP with explicit claim conditions. Only the Azure one is wired
-# here, because the thing being authenticated is an Azure-hosted container. The
-# other two describe workloads that are not this process (a CI job, a third-party
-# IdP) and would need a token source this code has no business owning.
+# and a Custom IDP with explicit claim conditions. **That choice is independent of
+# this code and must not be read off the mode name.** What is wired here is a
+# TOKEN SOURCE: Azure's own identity endpoint, which is what ``entra`` names. Which
+# category evaluates the resulting token is chosen in Pathfinder, and the install
+# this was proven on (2026-09-15) uses a **Custom IDP** naming the v1 issuer and a
+# ``sub`` condition — no app registration, and the v1/v2 issuer trap never arises.
+# A reader debugging a 401 who assumes the registration must say "Azure Entra ID"
+# will look in the wrong place.
+#
+# The other two categories describe workloads that are not this process (a CI job,
+# a third-party IdP) and would need a token source this code has no business
+# owning. That is still true of this client. It is NOT a statement about what
+# Pathfinder accepts: a Custom IDP registration will trust any OIDC issuer whose
+# claims you can state, which is what makes a SPIFFE JWT-SVID a candidate.
 
 AUTH_MODE_PAT = "pat"
 AUTH_MODE_ENTRA = "entra"

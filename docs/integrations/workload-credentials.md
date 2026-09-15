@@ -249,12 +249,24 @@ design: something that could register its own trust would be holding a
 credential that creates credentials. Pathfinder offers three issuer categories —
 **GitHub Actions** (a CI workflow, pinned to `owner/repo` and optionally to
 immutable org/repo IDs), **Azure Entra ID**, and **Custom IDP** (any OIDC issuer,
-scoped by explicit AND-matched claim conditions). The dashboard wires the Azure
-one, because the thing being authenticated is an Azure-hosted container; the
-other two describe workloads that are not this process.
+scoped by explicit AND-matched claim conditions).
 
-Full walkthrough, including the v1-versus-v2 issuer trap that makes a perfectly
-valid token silently fail to match:
+**Keep the token source and the registration category apart — they are chosen
+independently, and confusing them is the easiest mistake here.** This client has
+exactly one token source: Azure's own identity endpoint, which is why the mode is
+named `entra`. The *category* that evaluates the resulting token is a separate
+choice, and the install this was proven on (2026-09-15) registered it as a
+**Custom IDP** naming the v1 issuer and a `sub` condition — which works, needs no
+app registration, and sidesteps the issuer trap entirely.
+
+That matters beyond convenience. A Custom IDP registration matches an issuer and
+claims you state, so **any OIDC issuer can be trusted** — including a SPIFFE
+JWT-SVID from the [SPIRE lab](spiffe.md). The dashboard's own client still has no
+business owning a token source that is not this process; what changed is that the
+platform side is not the constraint.
+
+Full walkthrough, including both registration routes and the v1-versus-v2 issuer
+trap that makes a perfectly valid token silently fail to match:
 [Cloud hosting → No PAT](../cloud-hosting.md#no-pat-authenticate-to-pathfinder-with-an-entra-workload-identity).
 
 **Assign the identity to the worker too.** `dash-worker` is where credentials are

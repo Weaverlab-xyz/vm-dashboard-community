@@ -364,9 +364,11 @@ another sidecar: [job-worker.md](job-worker.md#container-apps).
 ### No PAT: authenticate to Pathfinder with an Entra workload identity
 
 > **Applies to:** an install using [Workload Credentials](integrations/workload-credentials.md).
-> Skip this if you do not. **Status:** the client path ships and is unit-tested;
-> the Azure and Pathfinder steps below have not yet been run end to end on this
-> install, so treat the commands as a starting point rather than a transcript.
+> Skip this if you do not. **Status:** **run end to end on this install,
+> 2026-09-15.** No PAT, nothing stored. The route that worked registers the trust
+> as a **Custom IDP** and skips the audience app in step 2 entirely — see the fork
+> there. The client code needed no change: what differs is which registration
+> Pathfinder evaluates the token against, not how the token is obtained.
 
 Workload Credentials replaced three standing cloud keys with **one** standing
 platform credential: a Personal Access Token, stored encrypted in `app_config`.
@@ -387,14 +389,15 @@ nothing to rotate.
 deliberate on both sides: a trust that can be created by the thing being trusted
 is not a trust. It takes a few minutes, once.
 
-Pathfinder registers three kinds of issuer. Only the second applies to this
-container:
+Pathfinder registers three kinds of issuer. **Either of the last two works for
+this container, and the third is the one proven here** — step 2 is where you
+choose:
 
 | Identity Provider Type | What it is for |
 |---|---|
 | **GitHub Actions** | a workflow pulling secrets in CI — pinned to `owner/repo` and, optionally, immutable org/repo **IDs** so a renamed or recreated repo stops matching |
-| **Azure Entra ID** | anything holding an Entra identity, including this Container App |
-| **Custom IDP** | any other OIDC issuer, scoped by explicit claim conditions — the escape hatch, and the one to reach for below if the issuer version fights you |
+| **Azure Entra ID** | anything holding an Entra identity, including this Container App. Needs the audience app in step 2, Route A |
+| **Custom IDP** | any OIDC issuer at all, scoped by explicit claim conditions. Needs nothing created, and is what this install runs — step 2, Route B |
 
 #### 1. One user-assigned identity, on both container apps
 
@@ -423,11 +426,47 @@ for, and the one that ends up as the `sub` claim it checks. `clientId` is what
 the dashboard sends when asking the platform for a token; without it the request
 resolves to the *system-assigned* identity, which here is not assigned at all.
 
-#### 2. An audience for the token, and the issuer trap behind it
+#### 2. Decide how Pathfinder will recognise the token — two routes
 
-A managed identity does not mint a token in the abstract — it mints one **for a
-resource**, and that resource becomes the token's `aud`. Register an application
-in your own tenant purely to be that audience:
+A managed identity does not mint a token in the abstract. It mints one **for a
+resource**, and that resource becomes the token's `aud`. The token also carries
+an `iss` and a `sub` it chose, not ones you picked. Pathfinder has to match all
+of that, and there are two ways to get the two sides to agree:
+
+| | Route A — **Azure Entra ID** | Route B — **Custom IDP** |
+|---|---|---|
+| The idea | reshape the token to fit the registration | describe the token you already get |
+| Needs in Entra | a dedicated app registration, switched to v2 | **nothing** |
+| Registration type in step 3 | Azure Entra ID | Custom IDP |
+| Status here | documented, not run | **run end to end, 2026-09-15** |
+
+**Route B is the shorter path and the one proven on this install.** Route A is
+kept below because the trap it documents is the single most confusing failure in
+this whole setup, and because it is what Pathfinder's Azure type is built for.
+
+##### Route B — Custom IDP (proven)
+
+Skip the app registration entirely. Point the dashboard's **Token resource** at a
+resource your tenant will already issue a token for, then tell Pathfinder, in
+step 3, the issuer and the `sub` that the resulting token actually carries:
+
+| Field | Value |
+|---|---|
+| Issuer URL | `https://sts.windows.net/<tenant-id>/` — the **v1** issuer a default Entra token carries |
+| Claim condition | `sub` = the identity's `principalId` from step 1 |
+
+That is the whole of it. Nothing is created, nothing is switched to v2, and the
+v1/v2 trap below cannot bite because you are describing the token rather than
+demanding a particular shape of one.
+
+Worth being explicit about the bit that reads as a downside and is not: Custom
+IDP matches on **claim conditions you write**, so a loose condition is a loose
+trust. One `sub` equal to a specific service-principal object id is as tight as
+the Azure type's own check — it is the same claim, checked the same way.
+
+##### Route A — Azure Entra ID, with a dedicated audience app
+
+Register an application in your own tenant purely to be that audience:
 
 ```bash
 APP_ID=$(az ad app create --display-name vm-dashboard-wlc \
@@ -451,26 +490,35 @@ match, with nothing in either UI to say why. In the portal's manifest the same
 property reads `accessTokenAcceptedVersion`; via Graph and the CLI it is
 `requestedAccessTokenVersion`. They are the same knob.
 
-If you cannot change the resource app — someone else owns it — register as
-**Custom IDP** instead, with the issuer set to `https://sts.windows.net/<tenant-id>/`
-and one claim condition, `sub` = the identity's `principalId`. That path is
-exactly why Custom IDP exists.
+This route is also the one to take if you want the registration to say *Azure
+Entra ID* for its own sake — an auditor reading the Pathfinder console sees the
+issuer category named rather than a custom rule to read.
 
 #### 3. Register the trust in Pathfinder
 
-**Administration → Workload Identities → Register Workload Identity**:
+**Administration → Workload Identities → Register Workload Identity**. Two rows
+are the same whichever route you took in step 2:
 
 | Field | Value |
 |---|---|
-| Identity Provider Type | **Azure Entra ID** |
 | Service Name | `vm-dashboard` — any name; the dashboard sends it back as `X-BT-Service-Name` |
-| Issuer URL | `https://login.microsoftonline.com/<tenant-id>/v2.0` |
-| Service Principal OID | the identity's `principalId` from step 1 |
 | Site | **the site whose Workload Credentials you use** |
 
 That last row carries the same trap a PAT does: a registration made against the
 wrong site fails every call with `401 Access denied for this site`, which reads
 like the site is missing the application rather than like a scoping mistake.
+
+The rest depends on the route:
+
+| Field | Route B — **Custom IDP** (proven) | Route A — **Azure Entra ID** |
+|---|---|---|
+| Identity Provider Type | Custom IDP | Azure Entra ID |
+| Issuer URL | `https://sts.windows.net/<tenant-id>/` (v1) | `https://login.microsoftonline.com/<tenant-id>/v2.0` (v2) |
+| Who may present it | claim condition `sub` = the identity's `principalId` | Service Principal OID = the identity's `principalId` |
+
+Both end up checking the same claim against the same value. The difference is
+only whether Pathfinder derives the check from an issuer category it knows, or
+you state it.
 
 #### 4. Point the dashboard at it
 
@@ -478,8 +526,14 @@ like the site is missing the application rather than like a scoping mistake.
 
 - **Authentication** → *Azure workload identity (nothing stored)*
 - **Service name** → the Service Name from step 3
-- **Token resource** → `api://vm-dashboard-wlc`
-- **User-assigned identity client ID** → `clientId` from step 1
+- **Token resource** → on Route A, `api://vm-dashboard-wlc`. On Route B, the
+  resource you asked for a token for — whatever it is, it becomes the token's
+  `aud`, and the registration in step 3 was written to match the token that
+  resource actually produces. The client refuses to start an identity request
+  without this: it is not optional in either route.
+- **User-assigned identity client ID** → `clientId` from step 1. **Omit it only
+  for a system-assigned identity** — sending it blank is not the same as omitting
+  it, and asks for an identity with no client id.
 
 **Save, then press Test connection** — it tests the *saved* values. The test is
 an unmetered `GET /session`, so it is free and safe to repeat, and it is the only
@@ -488,13 +542,58 @@ thing that separates the two failures cleanly:
 | What you see | What it means |
 |---|---|
 | `no managed identity endpoint reachable` | no identity is assigned to **this** container app |
-| `could not get a managed identity token (HTTP 400/404)` | the identity exists but the tenant will not issue for that resource — check the App ID URI and that the service principal in step 2 was created |
-| `Workload Credentials error (HTTP 401)` | the token was fine and Pathfinder declined it — wrong site, wrong Service Name, a `sub` that is not this identity's `principalId`, or the v1/v2 issuer mismatch above |
+| `could not get a managed identity token (HTTP 400/404)` | the identity exists but the tenant will not issue for that resource — check the Token resource. On Route A, also check that the service principal was created |
+| `Workload Credentials error (HTTP 401)` | the token was fine and Pathfinder declined it — wrong site, wrong Service Name, or a `sub` that is not this identity's `principalId`. On Route A, suspect the v1/v2 issuer mismatch first; on Route B, the issuer or claim condition you wrote |
 
 Once it passes, clear `wlc_pat`: switching modes does not delete it, and a stored
 token nobody uses is still a credential somebody has to answer for. The Workload
 Lab's Cloud tab mints through the same client, so it stops depending on a stored
 token at the same moment.
+
+#### What Route B proves beyond this container
+
+Route A only ever worked for a workload holding an Entra identity. Route B matches
+on an issuer and a claim you state, so **the issuer can be anything that signs an
+OIDC token** — this container's Entra identity today, a CI workflow, a
+SPIFFE JWT-SVID from the [SPIRE lab](integrations/spiffe.md). The token source in
+this dashboard's own client is still Azure's identity endpoint and did not change;
+what got wider is the set of workloads Pathfinder will accept, which is the half
+that was blocking everything else.
+
+Two consequences worth naming while they are fresh:
+
+**Workload Credentials becomes the only backend with nothing underneath it.** The
+dashboard already resolves secrets through [backends](secrets-management.md), and
+`wlc://` is one of five — so any of the seventeen secrets in `secret_hygiene`'s
+registry can be a reference rather than a stored value. But every backend needs a
+credential to reach *it*, and that credential cannot live inside itself;
+`api/secrets.py` encodes this as `_BOOTSTRAP_BLOCKLIST`, which refuses to migrate
+each backend's own auth secret into it:
+
+| Backend | Cannot hold |
+|---|---|
+| AWS Secrets Manager | `aws_secret_access_key` |
+| Azure Key Vault | `azure_client_secret` |
+| GCP Secret Manager | `gcp_service_account_json` |
+| BeyondTrust Secrets Safe | `pscli_client_secret` |
+| Workload Credentials | `wlc_pat` |
+
+Four of those five are irreducible: pick that backend and one stored secret
+survives, by construction. **The fifth stops applying in this mode** — there is no
+PAT to migrate, because nothing reads one. The blocklist entry stays, because
+switching back to PAT mode would need it, but it now guards a value that does not
+exist. That leaves Workload Credentials as the only one of the five that can hold
+every other backend's credential without needing one of its own.
+
+**`JWT_SECRET_KEY` cannot follow it, and the reason is structural rather than a
+matter of effort.** `config_service` encrypts *every* `app_config` row with a
+Fernet key derived from it — not only the ones marked secret — so it has to exist
+before any config can be read, including the `wlc_*` settings that say how to
+reach Workload Credentials. It is the root of the chain, not a peer of the things
+hanging off it. Every `wlc_*` setting does have an environment-variable fallback,
+so a deployment *could* bootstrap from env and fetch the JWT key from WC at
+startup — at the cost of a hard boot-time dependency on WC and sessions that
+invalidate if the fetched value ever differs. Left alone deliberately.
 
 **What this does not remove.** `DATABASE_URL` and `JWT_SECRET_KEY` are still
 platform secrets on both container apps, and they still have to match between
