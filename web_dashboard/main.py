@@ -24,6 +24,7 @@ from .logging_context import (
     reset_client_ip, reset_correlation_id, set_client_ip, set_correlation_id,
 )
 from .database import SessionLocal, User, create_admin_user, init_db
+from .services import branding
 from .services import cache_service
 from .services import config_service, feature_flags
 from .services import personas
@@ -853,7 +854,10 @@ def _profile_context(request: Request) -> dict:
     persona = personas.get(persona_key)
     return {
         "install_profile": profile,
-        "theme": ui_theme.theme_for(profile, settings.app_env),
+        # branding.overrides() is the operator's Appearance settings, already
+        # validated; it is empty on an instance that never set any, which is what
+        # keeps this call identical to what it was before branding existed.
+        "theme": ui_theme.theme_for(profile, settings.app_env, **branding.overrides()),
         "persona": persona_key,
         "persona_label": persona.label if persona else "",
         "persona_source": persona_source,

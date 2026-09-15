@@ -302,21 +302,28 @@ def _shell(title: str, body: str) -> str:
     without signing in. That is deliberate, and already true of ``GET /api/features`` which
     serves ``install_profile`` to anyone -- but it is a decision, not an accident, and it
     would need revisiting if that endpoint were ever locked down.
+
+    ``brand`` and ``product`` are escaped because ``_SHELL`` is a ``.format()`` template,
+    not a Jinja one: nothing here autoescapes. That was safe while the brand was a constant
+    in ``ui_theme``; it stopped being safe the moment an admin could set it in Settings,
+    since this page is the one place an operator-supplied string renders to an anonymous
+    visitor. ``services.branding`` strips control characters and caps the length, but that
+    is defence in depth -- this escape is the control.
     """
     from ..config import settings
-    from ..services import ui_theme
+    from ..services import branding, ui_theme
     try:
         from ..services import feature_flags
         profile = feature_flags.install_profile()
     except Exception:
         profile = settings.install_profile
-    theme = ui_theme.theme_for(profile, settings.app_env)
+    theme = ui_theme.theme_for(profile, settings.app_env, **branding.overrides())
     rail = theme["hex"]["rail"]
     return _SHELL.format(
         title=title,
         body=body,
-        brand=theme["brand"],
-        product=theme["product"],
+        brand=_html.escape(theme["brand"]),
+        product=_html.escape(theme["product"]),
         favicon=theme["favicon"],
         mark_warp=theme["mark_warp_path"],
         mark_weft=theme["mark_weft_path"],

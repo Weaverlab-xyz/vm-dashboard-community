@@ -9,7 +9,7 @@ GET  /api/setup/config     — current config with secrets redacted (admin JWT i
 import logging
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ValidationInfo, field_validator
 
 from ..services import notify_policy
 
@@ -2545,3 +2545,117 @@ def patch_preview_flag(key: str, payload: dict, request: Request):
     config_service.set(key, "1" if enabled else "0")
     logger.info("Preview flag '%s' set to %s.", key, enabled)
     return {"ok": True, "key": key, "enabled": enabled}
+
+
+# ── Appearance (branding) ─────────────────────────────────────────────────────
+#
+# Deliberately NOT a _FEATURE_MODELS panel. That machinery is for integrations, and
+# tests/test_settings_integrations pins integrations[] <-> _FEATURE_MODELS parity, so
+# registering here would force an "Appearance" card into the grid beside AWS and VMware
+# and give it an `enabled` toggle that means nothing. The preview-flags endpoints above are
+# the precedent for a standalone settings card with its own pair of routes.
+#
+# The five keys are plain app_config rows, so there is no migration: app_config is
+# key-value. services/branding.py is the reader and re-validates everything this model
+# checks, because these rows are also reachable from scripts/config_migrate and from psql.
+
+_BRANDING_KEYS = (
+    "brand_name",
+    "brand_full",
+    "brand_accent",
+    "brand_env_label",
+    "brand_env_color",
+)
+
+
+class BrandingConfig(BaseModel):
+    """Operator branding. Every field optional; empty string means "use the default"."""
+
+    brand_name: str = ""
+    brand_full: str = ""
+    brand_accent: str = ""
+    brand_env_label: str = ""
+    brand_env_color: str = ""
+
+    @field_validator("brand_name", "brand_full", "brand_env_label")
+    @classmethod
+    def _text(cls, v: str, info: ValidationInfo) -> str:
+        from ..services import branding
+        # One cleaner shared with the read path in services/branding. Duplicating the rules
+        # here would let the two drift, and the drift would only ever surface as a stored
+        # value the renderer silently refuses to use -- a setting that saves and then does
+        # nothing, which is the worst shape this bug could take.
+        #
+        # Truncating rather than rejecting: these are display strings, and an operator who
+        # pastes a 60-character company name wants the 32 that fit, not a 422.
+        limits = {
+            "brand_name": branding._MAX_BRAND,
+            "brand_full": branding._MAX_BRAND_FULL,
+            "brand_env_label": branding._MAX_ENV_LABEL,
+        }
+        return branding._clean_text(v or "", limits[info.field_name])
+
+    @field_validator("brand_accent")
+    @classmethod
+    def _accent(cls, v: str) -> str:
+        from ..services import ui_theme
+        key = (v or "").strip().lower()
+        if key and key not in ui_theme._ACCENTS:
+            raise ValueError(f"Unknown accent '{v}'")
+        return key
+
+    @field_validator("brand_env_color")
+    @classmethod
+    def _color(cls, v: str) -> str:
+        from ..services import branding
+        candidate = (v or "").strip()
+        if not candidate:
+            return ""
+        cleaned = branding._clean_color(candidate)
+        if not cleaned:
+            raise ValueError("Colour must be a #rrggbb hex value")
+        return cleaned
+
+
+@router.get("/branding")
+def get_branding(request: Request):
+    """Current branding, plus the accent palette the picker renders. Admin JWT required.
+
+    ``accents`` comes from ui_theme rather than from a copy in the template: the swatch a
+    person clicks and the colour they get are then the same value by construction.
+
+    ``defaults`` lets the panel show what "unset" will fall back to without the template
+    hardcoding the shipped brand -- the one place it would otherwise reappear after the
+    rest of the app was cleaned of it.
+    """
+    _require_admin(request)
+    from ..services import config_service, ui_theme
+    return {
+        "config": {k: config_service.get_raw(k) for k in _BRANDING_KEYS},
+        "accents": ui_theme.accent_choices(),
+        "defaults": {"brand_name": ui_theme.BRAND, "brand_full": ui_theme.BRAND_FULL},
+    }
+
+
+@router.patch("/branding")
+def patch_branding(payload: BrandingConfig, request: Request):
+    """Persist branding. Admin JWT required.
+
+    Writes all five keys every time, including the empty ones: clearing a field has to
+    erase the stored row, and a PATCH that only wrote non-empty values would make "Reset to
+    defaults" a no-op that looks like it worked.
+
+    Takes effect within ``config_service``'s 5s cache TTL. Under multiple gunicorn workers
+    the other worker keeps serving the old branding until its own cache expires, because
+    ``invalidate()`` is process-local -- the settings panel says so rather than the code
+    pretending otherwise.
+    """
+    _require_admin(request)
+    from ..services import config_service
+    values = {k: getattr(payload, k) for k in _BRANDING_KEYS}
+    config_service.set_many(values)
+    logger.info(
+        "Branding updated: name=%r accent=%r env_label=%r",
+        values["brand_name"], values["brand_accent"], values["brand_env_label"],
+    )
+    return {"ok": True, "config": values}

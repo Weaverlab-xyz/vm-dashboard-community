@@ -139,8 +139,17 @@ def test_the_theme_is_not_persona_aware():
     src = _read(_THEME)
     assert "persona" not in src.lower(), \
         "ui_theme.py mentions personas — chrome colour must carry the profile ALONE"
-    assert "def theme_for(profile: str, app_env: str)" in src, \
-        "theme_for's signature changed; a persona must not have become an input to it"
+    # The positional parameters, pinned. theme_for has since grown keyword-only branding
+    # arguments (services/branding, the operator's own name and accent), so freezing the
+    # whole signature as one literal string no longer states the rule this test is about.
+    # What must stay true is that nothing joins profile and app_env as a positional input:
+    # the line above already forbids the word persona anywhere in the file, and this keeps
+    # a third positional from being slipped in under some other name.
+    params = re.search(r"def theme_for\(\s*(.*?)\)\s*->", src, re.S)
+    assert params, "theme_for is gone or its signature no longer parses"
+    positional = params.group(1).split("*,")[0]
+    assert re.findall(r"(\w+)\s*:", positional) == ["profile", "app_env"], \
+        f"theme_for gained a positional input: {positional.strip()!r}"
 
 
 # ── ordering fields are hints, never filters ─────────────────────────────────
