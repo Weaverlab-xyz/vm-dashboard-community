@@ -1594,8 +1594,13 @@ def update_bt_secrets_safe(ref: str, value: str) -> str:
             f"Typically the linked user can write to folder {target_folder!r} but "
             f"not overwrite an existing secret in it."
         )
-    logger.info("BT Safe: updated+verified secret %s (folder=%s/%s)",
-                ref, target_folder, folder_id)
+    # The folder NAME is deliberately not logged. It reaches here from
+    # `config_service.get` via `_bt_cfg`, which CodeQL treats as a secret source
+    # (py/clear-text-logging-sensitive-data), and it adds nothing: `ref` already
+    # carries the folder segment whenever the ref has one, and `folder_id` is the
+    # value actually passed to `-fid`, so it is the better diagnostic of the two.
+    logger.info("BT Safe: updated+verified secret %s (folder id=%s)",
+                ref, folder_id)
     return ref
 
 
