@@ -286,7 +286,7 @@ Where the Ansible process actually runs. Picked in
 | **AWS ECS Fargate** | A Fargate task launched per run in your VPC. | EC2 targets in private subnets without a path back to the dashboard host. |
 | **Azure ACI** | An Azure Container Instance per run, in your VNet. | Azure VMs in private subnets. |
 | **GCP Cloud Run Jobs** | A Cloud Run Job per run, in your project. | GCE instances. |
-| **Remote agent** | A one-shot container on the *agent's* host, inside your network. Not selectable here — it is chosen automatically when the target is only reachable that way. | On-prem hypervisor guests and on-prem databases, especially from a cloud-hosted dashboard. See [remote agents](remote-agents/config-runs.md#agent-executed-config-management). |
+| **Remote agent** | A one-shot container on the *agent's* host, inside your network. Not selectable here — it is chosen automatically when the target is only reachable that way. **Which** agent defaults to the one that discovered the VM, and can be routed per address range on Remote Agents → Config Routes. | On-prem hypervisor guests and on-prem databases, especially from a cloud-hosted dashboard. See [remote agents](remote-agents/config-runs.md#agent-executed-config-management) and [which agent executes a run](remote-agents/config-runs.md#which-agent-executes-a-run). |
 
 The cloud runners exist because connecting from a dashboard sitting on
 a corporate LAN to a deeply-private cloud subnet is often impossible

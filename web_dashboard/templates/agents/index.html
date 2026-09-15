@@ -1,11 +1,18 @@
 {% extends "base.html" %}
 
-{# Remote Agents. Two tabs over the two halves of the same job:
+{# Remote Agents. Three tabs over the halves of the same job:
 
-     * Agents      -- the containers that poll OUT of a private network for work
-                      (remote_agents_enabled, /api/agent);
-     * Connections -- the hypervisors they reach, and the credentials for them
-                      (any of six hypervisor flags, /api/connections).
+     * Agents        -- the containers that poll OUT of a private network for work
+                        (remote_agents_enabled, /api/agent);
+     * Connections   -- the hypervisors they reach, and the credentials for them
+                        (any of six hypervisor flags, /api/connections);
+     * Config Routes -- which agent EXECUTES a Config-Management run against an address
+                        range, as opposed to which one brokers the hypervisor the target
+                        was discovered through (remote_agents_enabled + ansible_enabled,
+                        /api/connections/config-mgmt-routes). Those two are the same agent
+                        by default and cannot be where the brokering agent has no route to
+                        the guests -- vmrest binds 127.0.0.1, so that agent lives on the
+                        Windows host, whose Docker Desktop WSL2 VM reaches no vmnet.
 
    CONNECTIONS WAS ITS OWN PAGE AND IS NOT ANY MORE, because a connection is almost always
    a connection THROUGH an agent: the via_agent form holds no host and no username at all,
@@ -47,6 +54,14 @@
    Same any-of the /connections route enforces. #}
 {% if proxmox_enabled or vsphere_enabled or hyperv_enabled or nutanix_enabled or xcpng_enabled or vmware_enabled %}
   {% set _ = tabs.append({'slug': 'connections', 'label': 'Connections'}) %}
+{% endif %}
+{# BOTH flags, and neither is redundant: a route names an agent (so remote agents must be
+   on) to execute a Config-Management run (so Ansible must be on, which is also the gate on
+   the /api/config-mgmt router the routed runs are queued through). Requiring
+   remote_agents_enabled is also what keeps `connections_only` below exhaustive — this tab
+   can never be the only one, because the Agents tab is on whenever this one is. #}
+{% if remote_agents_enabled and ansible_enabled %}
+  {% set _ = tabs.append({'slug': 'config-routes', 'label': 'Config Routes'}) %}
 {% endif %}
 {# Neither on. /agents is deliberately reachable in that state -- the Agents panel is the
    only thing that tells an operator where the switch lives -- so fall back to it rather
@@ -122,6 +137,12 @@
   {% if 'connections' in tab_slugs %}
   <div x-show="activeTab === 'connections'" x-cloak role="tabpanel">
     {% include "agents/_connections.html" %}
+  </div>
+  {% endif %}
+
+  {% if 'config-routes' in tab_slugs %}
+  <div x-show="activeTab === 'config-routes'" x-cloak role="tabpanel">
+    {% include "agents/_config_routes.html" %}
   </div>
   {% endif %}
 

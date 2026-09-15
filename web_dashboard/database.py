@@ -649,6 +649,63 @@ class HypervisorVMCache(Base):
     synced_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
+class ConfigMgmtRoute(Base):
+    """Which agent EXECUTES a Config-Management run against an address range.
+
+    Splits "who can reach the hypervisor's management API" from "who can reach its
+    guests". Before this they were forced to be the same agent — ``api/config_mgmt.py``
+    required the run's agent to be the one brokering the connection the VM was synced
+    from — and that is wrong for the topology agent-bound connections exist to serve.
+    VMware Workstation's ``vmrest`` binds 127.0.0.1 and has no bind-address option, so
+    the brokering agent must run ON the Windows host under Docker Desktop, whose WSL2 VM
+    can reach no VMware vmnet at all. The agent that can read the inventory is therefore
+    structurally unable to reach the VMs in it.
+
+    Deliberately NOT a new ``hypervisor_connections`` kind. Eleven of that table's
+    columns (host, port, username, secret_enc, secret_ref, verify_ssl, options,
+    is_default, last_sync_at …) are meaningless here, and a new member of
+    ``VALID_KINDS`` would need a ``hypervisor_view_service`` projector for something
+    with no VMs to project, a ``DEFAULT_PORTS`` entry for something with no port, and a
+    ``_probe`` for something that cannot be dialled.
+
+    **Reachability is a property of the NETWORK, not of the hypervisor** — which is why
+    the key is a CIDR and not a connection id. One ``vmrest`` connection routinely
+    reports guests on several vmnets at once, so a per-connection executor cannot
+    express "this segment is reachable from there, that one is not".
+
+    What it may NOT do is change WHICH address a run targets. That stays pinned to one
+    the discovering agent itself reported, above the routing decision in
+    ``_resolve_agent_target`` — see that function.
+    """
+    __tablename__ = "config_mgmt_routes"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # CASCADE is declared for the ORM's benefit; `agent_service.delete_agent` deletes
+    # these rows explicitly, for the reason its own docstring gives — SQLite does not
+    # enforce foreign keys unless PRAGMA foreign_keys=ON is set per connection, and
+    # nothing here sets it. A dangling route would resolve runs to an id that no longer
+    # exists.
+    agent_id = Column(String(36), ForeignKey("remote_agents.id", ondelete="CASCADE"),
+                      nullable=False, index=True)
+    # The NORMALISED network, e.g. "192.168.235.0/24" — never the operator's raw input.
+    # String(64) rather than 43 (39 + "/128", the true IPv6 maximum) for headroom: the
+    # StringDataRightTruncation that silently ate a whole sync page in
+    # HypervisorVMCache.scope is not worth re-running for four characters.
+    cidr = Column(String(64), nullable=False)
+    label = Column(String(64))      # "vmnet1 host-only" — display only
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by = Column(String(100))
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    # Unique on the normalised cidr, and this IS the tiebreak. Two agents claiming one
+    # range is the single ambiguity longest-prefix matching cannot resolve, so it is
+    # refused at write time with a message naming the existing row rather than settled
+    # by an invisible created_at comparison. Overlapping ranges of DIFFERENT prefix
+    # length are legal and the longest wins, exactly like a routing table.
+    __table_args__ = (UniqueConstraint("cidr", name="uq_config_mgmt_route_cidr"),)
+
+
 class Job(Base):
     """Job model for tracking long-running operations"""
     __tablename__ = "jobs"
@@ -3403,6 +3460,10 @@ def init_db():
             # Nor does `ephemeral_state` (FIDO2 challenges + OAuth/OIDC CSRF state),
             # for the same reason. Nothing backfills that one either — every row it
             # will ever hold expires within five minutes of being written.
+            # Nor does `config_mgmt_routes`, and empty is the load-bearing default
+            # there: no rows means every Config-Management run still goes to the agent
+            # whose connection discovered the VM, which is the behaviour that predates
+            # the table. A backfill would have to invent a routing decision nobody made.
             #
             # Password-Safe-managed k8s ServiceAccount token rotation. Two Password Safe
             # managed-account ids (the token account, and the "PRA Vault Token" mirror the
