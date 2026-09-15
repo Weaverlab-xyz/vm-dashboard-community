@@ -261,11 +261,21 @@ slice 3 was deliberate that blank means *unknown*, never a guess, "because a con
 wrong answer sends a Windows VM down the Password-Safe-over-SSH path". That column is what
 makes the RB host selectable at all.
 
-Selection should follow the broker VM's rule exactly: **an operator-chosen name, matched
-exactly and case-insensitively, defaulting to something like `rb`.** Not "the first
-Windows VM" — a POV template with a domain controller and a member server has two, and
-picking one by position installs a Resource Broker on whichever the platform happened to
-list first.
+Selection is **an operator-chosen name, matched exactly and case-insensitively,
+defaulting to something like `rb`.** Not "the first Windows VM" — a POV template with a
+domain controller and a member server has two, and picking one by position installs a
+Resource Broker on whichever the platform happened to list first.
+
+> **This no longer matches the broker VM's rule, and that is deliberate.** The broker is
+> now auto-detected as *the only Linux VM* when no name is typed
+> (`pov_broker.resolve_broker_candidate`). The RB host keeps the name-only rule because
+> the premise that unlocked inference does not hold for it: a POV template almost always
+> has several Windows guests — a domain controller and a member server at least — so
+> there is no "the only one" to find. Uniqueness is what makes inference safe, not the
+> OS check; where uniqueness is absent, a name is the only honest answer. The Entitle
+> agent host keeps the name-only rule for the mirror-image reason: it competes with the
+> broker for the *same* Linux guests, which is why `claimed_vm_names` excludes it from
+> the broker's inference rather than letting the two guess at each other.
 
 The run is then `run_kind="vm"`, `transport="winrm"`, `target_host` = that VM's
 `private_ip`, `target_port` 5985 or 5986. `agent_ansible_meta.transport_for_guest_os`

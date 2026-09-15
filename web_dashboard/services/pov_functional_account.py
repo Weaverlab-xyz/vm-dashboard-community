@@ -138,7 +138,7 @@ def guests_of(db: Session, env: PovEnvironment, family: str) -> list:
     fam = (family or "").strip().lower()
     return [vm for vm in db.query(PovEnvironmentVM)
                             .filter(PovEnvironmentVM.environment_id == env.id).all()
-            if (vm.os_family or "").strip().lower() == fam and (vm.platform_vm_id or "")]
+            if vm.guest_os == fam and (vm.platform_vm_id or "")]
 
 
 async def pov_wide_credential(db: Session, env: PovEnvironment, family: str) -> tuple:

@@ -2706,6 +2706,34 @@ class PovEnvironmentVM(Base):
     # existing estate needs nothing typed into it.
     login_username = Column(String(104), nullable=True)
 
+    # What an operator says this guest runs, when the lab platform's own read said
+    # nothing. "linux" | "windows" | NULL.
+    #
+    # A SEPARATE column rather than a correction of `os_family`, because
+    # `pov_env_service.refresh_vms` rewrites that one from the platform on every refresh
+    # — a correction written there would survive exactly until the next read. Same reason
+    # `login_username` above and the PAM artifact columns are their own columns.
+    #
+    # NULL is the normal state and means "believe the platform", so this backfills to
+    # today's behaviour and an existing estate needs nothing typed into it. Blank still
+    # means UNKNOWN everywhere downstream: this does not soften the "never guess an OS"
+    # rule, it gives an operator the only way to END the blank that rule leaves behind.
+    os_family_override = Column(String(16), nullable=True)
+
+    @property
+    def guest_os(self) -> str:
+        """"linux" | "windows" | "" — the operator's answer first, else the platform's.
+
+        The one place the POV feature answers "what does this guest run". Every selector
+        and every wire-up path reads this rather than `os_family`, so an override reaches
+        all of them at once; `os_family` stays the platform's own untouched answer, which
+        is what the VMs tab shows beside the control.
+
+        Normalised here so ~20 call sites stop repeating `(x or "").strip().lower()`.
+        """
+        return ((self.os_family_override or "").strip().lower()
+                or (self.os_family or "").strip().lower())
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -3521,6 +3549,10 @@ def init_db():
             # NULL backfills to "choose by guest OS", so no existing POV changes
             # behaviour when this lands. See PovEnvironmentVM.login_username.
             "ALTER TABLE pov_environment_vms ADD COLUMN login_username VARCHAR(104)",
+            # What an operator says a guest runs when the platform reported nothing.
+            # NULL backfills to "believe the platform", so no existing POV changes
+            # behaviour when this lands. See PovEnvironmentVM.os_family_override.
+            "ALTER TABLE pov_environment_vms ADD COLUMN os_family_override VARCHAR(16)",
             # The functional account a CA's identities onboard against, and — only when
             # the dashboard minted it — its id. Both backfill to NULL, which is right
             # for every CA built before this: their account was made by hand, so

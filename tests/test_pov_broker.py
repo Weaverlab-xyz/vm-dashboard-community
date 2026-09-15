@@ -357,19 +357,198 @@ def test_the_enrolment_wait_cannot_outlive_the_code():
 
 # ── selection ────────────────────────────────────────────────────────────────
 
-def test_the_broker_vm_is_matched_exactly_not_fuzzily():
+def test_a_typed_broker_vm_name_is_matched_exactly_not_fuzzily():
     """'contains broker' also matches a customer VM called password-broker, and the cost
-    of the wrong answer is an agent installed on a machine nobody expected."""
+    of the wrong answer is an agent installed on a machine nobody expected.
+
+    Exactness now lives on the TYPED rung, which is the only place it means anything: a
+    name the operator wrote down is an instruction. Note the VM is Linux here and the
+    name IS typed -- without both, this passes for an unrelated reason (the blank-OS
+    refusal below) and stops testing fuzziness at all.
+    """
     env_id = _new_env()
     _add_vms(env_id, [{"platform_vm_id": "v1", "name": "password-broker",
-                       "private_ip": "10.0.0.9"}])
+                       "os_family": "linux", "private_ip": "10.0.0.9"}])
     db = d.SessionLocal()
     env = pov_env_service.get(db, env_id)
+    pov_broker.configure(db, env, vm_name="broker")
     try:
         pov_broker.select_broker_vm(db, env)
         raise AssertionError("a fuzzy match was accepted")
     except pov_broker.BrokerError as exc:
         assert "password-broker" in str(exc), "the refusal must name what it did find"
+        assert "named 'broker'" in str(exc), "the refusal must name what it looked for"
+    finally:
+        db.close()
+
+
+def test_the_only_linux_vm_is_the_broker_whatever_it_is_called():
+    """The feature. A template whose Docker host is called BtPocLin01 matches no broker
+    name anybody would guess, and its OS is a fact about it where its name is a
+    convention somebody else's template never agreed to."""
+    env_id = _new_env()
+    _add_vms(env_id, [{"platform_vm_id": "v1", "name": "BtPocLin01",
+                       "os_family": "linux", "private_ip": "10.0.0.9"},
+                      {"platform_vm_id": "v2", "name": "BtPocWin01",
+                       "os_family": "windows", "private_ip": "10.0.0.10"}])
+    db = d.SessionLocal()
+    env = pov_env_service.get(db, env_id)
+    try:
+        assert pov_broker.select_broker_vm(db, env).platform_vm_id == "v1"
+    finally:
+        db.close()
+
+
+def test_a_blank_os_is_never_read_as_linux():
+    """Slice 3's invariant, and the reason the OS override exists. A guest the platform
+    would not classify must refuse and SAY SO, not be adopted because it is the only
+    candidate left -- the bootstrap is a shell script and a Windows guest fails partway
+    through it."""
+    env_id = _new_env()
+    _add_vms(env_id, [{"platform_vm_id": "v1", "name": "BtPocLin01",
+                       "private_ip": "10.0.0.9"}])
+    db = d.SessionLocal()
+    env = pov_env_service.get(db, env_id)
+    try:
+        pov_broker.select_broker_vm(db, env)
+        raise AssertionError("a blank os_family was read as Linux")
+    except pov_broker.BrokerError as exc:
+        assert "BtPocLin01" in str(exc), "the refusal must name the unclassified guest"
+        assert "VMs tab" in str(exc), "the refusal must carry the remedy that works"
+    finally:
+        db.close()
+
+
+def test_an_operator_set_os_makes_the_only_linux_vm_resolvable():
+    """The two halves together, and the motivating case end to end: the platform said
+    nothing, an operator said linux, and the broker resolves."""
+    env_id = _new_env()
+    _add_vms(env_id, [{"platform_vm_id": "v1", "name": "BtPocLin01",
+                       "private_ip": "10.0.0.9"}])
+    db = d.SessionLocal()
+    env = pov_env_service.get(db, env_id)
+    try:
+        pov_env_service.set_vm_os(db, env, "v1", "linux")
+        assert pov_broker.select_broker_vm(db, env).platform_vm_id == "v1"
+    finally:
+        db.close()
+
+
+def test_two_linux_vms_are_refused_by_naming_both():
+    """Uniqueness, never position. "The first Linux VM" is not a decision a position in a
+    list can make, so ambiguity refuses -- and names the candidates, because the operator
+    has to pick one and the old message named a VM that did not exist."""
+    env_id = _new_env()
+    _add_vms(env_id, [{"platform_vm_id": "v1", "name": "app01",
+                       "os_family": "linux", "private_ip": "10.0.0.9"},
+                      {"platform_vm_id": "v2", "name": "db01",
+                       "os_family": "linux", "private_ip": "10.0.0.10"}])
+    db = d.SessionLocal()
+    env = pov_env_service.get(db, env_id)
+    try:
+        pov_broker.select_broker_vm(db, env)
+        raise AssertionError("an ambiguous POV was resolved anyway")
+    except pov_broker.BrokerError as exc:
+        assert "app01" in str(exc) and "db01" in str(exc), "both candidates must be named"
+    finally:
+        db.close()
+
+
+def test_the_conventional_name_breaks_a_tie_between_two_linux_vms():
+    env_id = _new_env()
+    _add_vms(env_id, [{"platform_vm_id": "v1", "name": "app01",
+                       "os_family": "linux", "private_ip": "10.0.0.9"},
+                      {"platform_vm_id": "v2", "name": "broker",
+                       "os_family": "linux", "private_ip": "10.0.0.10"}])
+    db = d.SessionLocal()
+    env = pov_env_service.get(db, env_id)
+    try:
+        assert pov_broker.select_broker_vm(db, env).platform_vm_id == "v2"
+    finally:
+        db.close()
+
+
+def test_the_entitle_host_is_not_conscripted_as_the_broker():
+    """k3s brings its own containerd and its own iptables rules, so putting it on the one
+    host whose job is keeping the agent channel up means the install can sever the
+    connection it arrives over. A coincidence of naming must not decide that."""
+    env_id = _new_env()
+    _add_vms(env_id, [{"platform_vm_id": "v1", "name": "entitle",
+                       "os_family": "linux", "private_ip": "10.0.0.9"},
+                      {"platform_vm_id": "v2", "name": "dc01",
+                       "os_family": "windows", "private_ip": "10.0.0.10"}])
+    db = d.SessionLocal()
+    env = pov_env_service.get(db, env_id)
+    try:
+        pov_broker.select_broker_vm(db, env)
+        raise AssertionError("the Entitle host was conscripted as the broker")
+    except pov_broker.BrokerError as exc:
+        assert "entitle" in str(exc), "the refusal must name the claim"
+    finally:
+        db.close()
+
+
+def test_an_enrolled_broker_is_never_moved_by_inference():
+    """The sticky rung. The agent's identity lives on the guest it enrolled from, so
+    re-resolving onto a different VM leaves a container polling from a machine nothing
+    points at -- and adding a Linux VM to a running POV must not do that."""
+    env_id = _new_env()
+    _add_vms(env_id, [{"platform_vm_id": "v1", "name": "lin01",
+                       "os_family": "linux", "private_ip": "10.0.0.9"},
+                      {"platform_vm_id": "v2", "name": "dc01",
+                       "os_family": "windows", "private_ip": "10.0.0.10"}])
+    db = d.SessionLocal()
+    env = pov_env_service.get(db, env_id)
+    env.broker_vm_id = "v2"
+    db.commit()
+    try:
+        assert pov_broker.select_broker_vm(db, env).platform_vm_id == "v2"
+    finally:
+        db.close()
+
+
+def test_a_typed_name_moves_a_broker_that_already_enrolled():
+    """The sticky rung must sit BELOW the typed one. Sticky exists to stop INFERENCE
+    moving an enrolled broker, not to outrank an operator -- and naming a VM is precisely
+    the remedy the ambiguity refusals tell people to use, so a stale broker_vm_id
+    swallowing it would make that advice false."""
+    env_id = _new_env()
+    _add_vms(env_id, [{"platform_vm_id": "v1", "name": "lin01",
+                       "os_family": "linux", "private_ip": "10.0.0.9"},
+                      {"platform_vm_id": "v2", "name": "lin02",
+                       "os_family": "linux", "private_ip": "10.0.0.10"}])
+    db = d.SessionLocal()
+    env = pov_env_service.get(db, env_id)
+    env.broker_vm_id = "v1"
+    db.commit()
+    try:
+        # Inference alone keeps it where it is...
+        assert pov_broker.select_broker_vm(db, env).platform_vm_id == "v1"
+        # ...and naming the other one moves it.
+        pov_broker.configure(db, env, vm_name="lin02")
+        assert pov_broker.select_broker_vm(db, env).platform_vm_id == "v2"
+    finally:
+        db.close()
+
+
+def test_the_cloud_read_back_never_infers():
+    """`infer=False` is the cloud path's contract. There the dashboard has just BUILT the
+    broker, so a POV whose workload guests are Linux must not bind broker_vm_id to one of
+    them -- which would be silent, because the bootstrap did reach the real broker."""
+    env_id = _new_env()
+    _add_vms(env_id, [{"platform_vm_id": "v1", "name": "workload01",
+                       "os_family": "linux", "private_ip": "10.0.0.9"}])
+    db = d.SessionLocal()
+    env = pov_env_service.get(db, env_id)
+    try:
+        pov_broker.select_broker_vm(db, env, infer=False)
+        raise AssertionError("the cloud read-back inferred a workload guest")
+    except pov_broker.BrokerError as exc:
+        assert "workload01" in str(exc)
+    # ...but the id the driver reported is taken, name or no name.
+    try:
+        assert pov_broker.select_broker_vm(
+            db, env, infer=False, platform_vm_id="v1").platform_vm_id == "v1"
     finally:
         db.close()
 
@@ -382,6 +561,43 @@ def test_a_per_pov_broker_vm_name_overrides_the_default():
     db.commit()
     assert pov_broker.broker_vm_name(env) == "jump01"
     db.close()
+
+
+def test_a_typed_broker_vm_name_is_distinguishable_from_none_typed():
+    """The property the whole design rests on. "Typed nothing" means infer and "typed
+    'broker'" means match exactly, so a reader that substitutes the convention cannot
+    tell the two instructions apart -- and would switch inference off for every POV."""
+    env_id = _new_env()
+    db = d.SessionLocal()
+    env = pov_env_service.get(db, env_id)
+    try:
+        assert pov_broker.stored_broker_vm_name(env) == "", "nothing was typed"
+        assert pov_broker.broker_vm_name(env) == "broker", "but a name is still offered"
+        pov_broker.configure(db, env, vm_name="broker")
+        assert pov_broker.stored_broker_vm_name(env) == "broker", "now it was typed"
+    finally:
+        db.close()
+
+
+def test_naming_the_broker_vm_does_not_forget_the_resource_broker_host():
+    """The write MERGES. `metadata_dict` also carries rb_vm_name, rb_zone, the Entitle
+    host and broker_error, so an assignment drops whichever was set first."""
+    env_id = _new_env()
+    db = d.SessionLocal()
+    env = pov_env_service.get(db, env_id)
+    try:
+        meta = env.metadata_dict
+        meta["rb_vm_name"] = "rb01"
+        env.metadata_dict = meta
+        db.commit()
+        pov_broker.configure(db, env, vm_name="jump01")
+        assert env.metadata_dict.get("rb_vm_name") == "rb01", "the RB host survived"
+        assert env.metadata_dict.get("broker_vm_name") == "jump01"
+        pov_broker.configure(db, env, vm_name="")
+        assert "broker_vm_name" not in env.metadata_dict, "blank clears to auto-detect"
+        assert env.metadata_dict.get("rb_vm_name") == "rb01", "and still survived"
+    finally:
+        db.close()
 
 
 # ── ensure_broker ────────────────────────────────────────────────────────────

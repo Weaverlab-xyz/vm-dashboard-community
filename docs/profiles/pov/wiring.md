@@ -238,6 +238,13 @@ fallback deliberately excludes the broker: k3s brings its own containerd and its
 iptables rules, and the broker is the one guest whose job is to keep alive the channel
 this install runs over. Nothing stops you naming it on purpose.
 
+The exclusion is by **enrolled VM id as well as by name**, because the broker no longer
+has to be named anything in particular — it is auto-detected as the only Linux VM when
+nothing is typed, so on a template whose Docker host is called `BtPocLin01` a name
+comparison would miss it entirely. It works the other way round too: a guest already
+named as the Entitle host is excluded from the *broker's* auto-detection, so the two
+never quietly select each other.
+
 **Teardown destroys the token**, and it has to. Entitle refuses to mint a name it already
 holds and cannot read an existing value back, so a survivor would wedge the next POV that
 derives the same name. A destroy that fails is reported on the job log with the name to
@@ -329,6 +336,13 @@ existing functional account on the tenant.
 **A VM shows as skipped with "did not report an OS".** The lab platform reported a blank
 `os_family`, and guessing would build the wrong kind of jump item. Power it on and refresh
 the POV so the platform re-reads it.
+
+If it still reports nothing — and it often will, because the OS is inferred from whatever
+text the platform hands back rather than read from a field — **set it yourself in the OS
+column on the POV's VMs tab**. That is stored separately from the platform's own answer,
+so it survives every later refresh, and it unblocks this VM everywhere at once: the jump
+items, the Password Safe half, guest steps, functional accounts, and the broker's own
+auto-detection. Refreshing forever is not the remedy for a platform that will never say.
 
 **Every VM's Password Safe half failed with `is not support. Use https`.** Fixed — the
 dashboard no longer produces it. The message came from the `passwordsafe` Terraform

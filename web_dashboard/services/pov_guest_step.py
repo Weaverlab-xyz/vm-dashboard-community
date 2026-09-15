@@ -146,7 +146,7 @@ def opted_in_vms(db: Session, env: PovEnvironment) -> list:
 
 def _targets(db: Session, env: PovEnvironment, family: str) -> list[str]:
     return sorted({(r.private_ip or "").strip() for r in opted_in_vms(db, env)
-                   if (r.os_family or "").strip().lower() == family
+                   if r.guest_os == family
                    and (r.private_ip or "").strip()})
 
 
@@ -196,11 +196,16 @@ def granted_addresses(env: PovEnvironment) -> list[str]:
 def select_vm(db: Session, env: PovEnvironment, vm_name: str) -> PovEnvironmentVM:
     """The guest a step will run on, or a refusal naming what it found.
 
-    Exact name match, case-insensitively — the rule ``pov_broker.select_broker_vm`` and
-    ``pov_resource_broker.select_rb_vm`` both follow. Deliberately not "the first Windows
+    Exact name match, case-insensitively — the rule
+    ``pov_resource_broker.select_rb_vm`` follows too. Deliberately not "the first Windows
     guest": a POV template with a domain controller and two member servers has three, and
     running an unattended installer on whichever came back first is not a mistake anyone
     can undo.
+
+    Note ``pov_broker`` no longer works this way: it auto-detects the only Linux VM when
+    no name is typed. That is safe there because UNIQUENESS decides, not position — and
+    it is unavailable here, where the step is named by the operator per run and there is
+    no "the only one" to find.
     """
     wanted = str(vm_name or "").strip()
     if not wanted:
@@ -222,7 +227,7 @@ def select_vm(db: Session, env: PovEnvironment, vm_name: str) -> PovEnvironmentV
             f"a run at a guest outside it fails as a connection timeout rather than as a "
             f"permission error.")
 
-    family = (match.os_family or "").strip().lower()
+    family = match.guest_os
     if family not in (_WINDOWS, _LINUX):
         raise GuestStepError(
             f"{match.name} has no known operating system, so this dashboard cannot choose "
@@ -285,7 +290,7 @@ def preflight(db: Session, env: PovEnvironment, *, vm_name: str, asset: str,
             f"Put the arguments inside the script, or upload an installer.")
 
     vm = select_vm(db, env, vm_name)
-    family = (vm.os_family or "").strip().lower()
+    family = vm.guest_os
     if family == _WINDOWS and atype in ("script", "rpm", "deb"):
         raise GuestStepError(
             f"{staged!r} is a Linux asset and {vm.name} is a Windows guest. Upload a .ps1 "
@@ -310,7 +315,7 @@ def queue(db: Session, env: PovEnvironment, *, vm_name: str, asset: str,
           arguments: str = "", created_by: str = "") -> Job:
     """Queue one guest step on this POV's broker agent."""
     agent, vm = preflight(db, env, vm_name=vm_name, asset=asset, arguments=arguments)
-    family = (vm.os_family or "").strip().lower()
+    family = vm.guest_os
     windows = family == _WINDOWS
 
     extra_vars = {}

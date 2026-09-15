@@ -166,10 +166,21 @@
               <template x-for="vm in (env.vms || [])" :key="vm.id">
                 <tr>
                   <td class="px-4 py-2 text-gray-900" x-text="vm.name || vm.id"></td>
-                  <!-- Blank rather than a guess: the wire-up skips a VM with no OS
+                  <!-- The platform will not guess: the wire-up skips a VM with no OS
                        reported, because an SSH jump to a Windows box fails in front of
-                       whoever clicked it. -->
-                  <td class="px-4 py-2 text-gray-600" x-text="vm.os_family || '—'"></td>
+                       whoever clicked it. It still will not guess -- but an operator can
+                       now answer, which is the only remedy that refusal ever had. A
+                       select, not a text box: the writer takes exactly two values. -->
+                  <td class="px-4 py-2">
+                    <select x-model="vm.os_family_override" @change="saveVmOs(vm)"
+                            :title="osTitle(vm)"
+                            class="w-28 text-xs border rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-purple-400"
+                            :class="vm.os_family_override ? 'border-purple-300 bg-purple-50 text-gray-900' : 'border-gray-300 text-gray-600'">
+                      <option value="" x-text="vm.os_family_reported || '— not reported'"></option>
+                      <option value="linux">linux</option>
+                      <option value="windows">windows</option>
+                    </select>
+                  </td>
                   <td class="px-4 py-2 text-gray-600" x-text="vm.runstate || '—'"></td>
                   <td class="px-4 py-2 text-gray-600" x-text="vm.private_ip || '—'"></td>
                   <!-- A USERNAME, never a credential. The password is still read live off
@@ -1242,6 +1253,39 @@
           this.notice = data.note || '';
         } catch (e) {
           this.error = 'Could not reach the dashboard to save that login.';
+        }
+      },
+
+      // Why the empty option shows the platform's own answer rather than a dash: the
+      // control has to say what it is overriding, or clearing it looks like erasing the
+      // OS rather than handing the question back.
+      osTitle(vm) {
+        if (vm.os_family_override) {
+          return 'Set by an operator. The platform reported '
+                 + (vm.os_family_reported || 'nothing') + '.';
+        }
+        if (vm.os_family_reported) return 'Reported by the lab platform.';
+        return 'The lab platform did not report an OS for this guest, so the wire-up '
+             + 'skips it and the broker will not resolve it. Set it here.';
+      },
+
+      // What this guest runs, when the platform would not say. Posted on change for the
+      // same reason the login box is: it is configuration the next run reads, and an
+      // operator who set it and walked away should not find it gone.
+      async saveVmOs(vm) {
+        this.error = ''; this.notice = '';
+        try {
+          const res = await this.apiFetch(
+            `/api/pov/managed/${this.envId}/vms/${encodeURIComponent(vm.id)}/os`,
+            { method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ os_family: vm.os_family_override || '' }) });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { this.error = data.detail || `Could not save (${res.status}).`; return; }
+          this.env = data.environment || this.env;
+          this.notice = data.note || '';
+        } catch (e) {
+          this.error = 'Could not reach the dashboard to save that OS.';
         }
       },
 

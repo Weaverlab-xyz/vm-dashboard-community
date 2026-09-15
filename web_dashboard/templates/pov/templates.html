@@ -134,10 +134,12 @@
 
       <label class="block">
         <span class="text-sm font-medium text-gray-700">Broker VM name</span>
-        <input type="text" x-model="form.broker_vm_name" placeholder="broker"
+        <input type="text" x-model="form.broker_vm_name"
+               placeholder="auto — the only Linux VM"
                class="mt-1 block w-full rounded-md border-gray-300 text-sm">
         <span class="text-xs text-gray-500">
-          Matched exactly, case-insensitively. Blank means <code>broker</code>.
+          Blank auto-detects the one Linux VM in the template, which is what a POV built
+          from it will do too. A name is matched exactly, case-insensitively.
         </span>
       </label>
 
@@ -485,7 +487,8 @@
       </label>
       <label class="block">
         <span class="text-sm font-medium text-gray-700">Broker VM name</span>
-        <input type="text" x-model="bp.broker_vm_name" placeholder="broker"
+        <input type="text" x-model="bp.broker_vm_name"
+               placeholder="auto — the only Linux VM"
                class="mt-1 block w-full rounded-md border-gray-300 text-sm">
       </label>
       <label class="block">
@@ -605,7 +608,7 @@
               <td class="px-4 py-2 text-gray-600"
                   x-text="b.template_name || b.template_id"></td>
               <td class="px-4 py-2 text-gray-600"
-                  x-text="b.broker_vm_name || 'broker'"></td>
+                  x-text="b.broker_vm_name || 'auto'"></td>
               <td class="px-4 py-2 text-gray-600 text-xs">
                 <template x-for="kind in tenantKinds" :key="kind.kind">
                   <div x-show="b[tenantField(kind.kind)]"

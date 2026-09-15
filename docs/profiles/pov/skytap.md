@@ -178,12 +178,33 @@ agent dials out — because a POV lives on a lab platform's private network and 
 dashboard has no route into it. The Gateway install, the Resource Broker install and the
 per-VM wire-up all wait on this one thing, so it is worth setting up properly once.
 
-Which VM? The one whose name matches the POV's **Broker VM name** — `broker` unless you
-set something else when you create the POV. The match is exact and case-insensitive, and
-deliberately not fuzzy: "contains broker" also matches a customer VM called
-`password-broker`, and the cost of that mistake is an agent installed on a machine nobody
-expected. If no VM matches, the POV still comes up and the Broker column reads `none` with
-the names it *did* find.
+Which VM? **Leave Broker VM name blank and the POV works it out: the one Linux VM in the
+template.** A broker is a Docker host by construction, so on the usual shape — one Linux
+guest beside some Windows ones — its OS identifies it and its name does not have to. That
+matters because templates come from wherever the SE got them, and a guest called
+`BtPocLin01` was never going to match a name this dashboard guessed.
+
+The full order it resolves in, and why each step exists:
+
+| | |
+|---|---|
+| 1. **The name you typed**, if you typed one | Matched exactly and case-insensitively, and **refused** if nothing matches rather than falling through to a guess. A name you wrote down is an instruction: "contains broker" also matches a customer VM called `password-broker`, and the cost of that mistake is an agent installed on a machine nobody expected |
+| 2. **The VM already brokered** | An enrolled broker is not *guessed* away from. The agent's identity lives on that guest, so re-resolving onto a different VM leaves a container polling from a machine nothing points at. Below the typed name, deliberately — otherwise **name VM** would be silently ignored on the POVs that most need it |
+| 3. **The only Linux VM** | Uniqueness, never position. "The first Linux VM" is not a decision a position in a list can make, but "the only one" is a fact about the template. VMs already named as the [Entitle agent host](wiring.md) or the [Resource Broker host](gateway-and-broker.md#the-resource-broker) are excluded — those are deliberately different machines |
+| 4. **A VM called `broker`**, if several Linux guests remain | The old convention, kept as a tie-break |
+| 5. Otherwise it **refuses, naming the candidates** | So you can pick one. The Broker column reads `none` with the reason beside it |
+
+**A blank OS is not Linux.** Skytap does not report a guest OS as a field — the dashboard
+infers it from whatever text the platform hands back, and it answers "unknown" rather than
+guess wrong, because a confident wrong answer sends a Windows VM down an SSH path. A guest
+whose OS reads `—` on the POV's **VMs tab** is therefore skipped by step 3, by the wire-up,
+and by every other POV feature. **Set it yourself in the OS column on that tab**; it is
+stored separately from the platform's own answer, so it survives every later refresh. That
+one control is the remedy for most "this VM is being ignored" questions, not just for the
+broker.
+
+You can also correct the name after the fact: **name VM** beside the Broker column sets it
+on a POV that already exists, which is what answers a step-5 refusal.
 
 A POV that also runs a Resource Broker needs a **second** special VM — a Windows Server
 2019 or 2022 x64 guest with WinRM enabled, on the same automatic network. See
@@ -332,7 +353,7 @@ badge, because "no broker VM" and "the broker is on a manual network" have diffe
 
 | Check | `fail` means |
 |---|---|
-| Broker VM | No VM matches the broker name, so a POV from this template has nowhere to run its agent. The report names the VMs it *did* find |
+| Broker VM | No broker VM could be resolved, so a POV from this template has nowhere to run its agent: either the name you typed matches nothing, or nothing distinguishes the template's Linux guests. The report names the VMs it *did* find. Note a template read has no POV, so the per-VM OS override cannot apply here — a template whose only Linux guest reports no OS fails this check while the POV built from it resolves fine once you set the OS on its VMs tab |
 | Broker network | The broker is on a manual network. The metadata service answers **only** on automatic networks, so the guest would receive no bootstrap at all — which looks exactly like a missing runner |
 | Resource Broker host | Never fails. No Windows guest is a **warning**: a PRA-and-Entitle POV does not need one |
 | Workload VMs | Never fails. A broker-only template is a **warning** — a POV built from it has nothing to demonstrate |
@@ -544,7 +565,9 @@ rather than failing somewhere inside a job.
 | **Test connection** says the host could not be reached | DNS, a firewall or an outbound proxy | Not a credential problem. Check outbound HTTPS to the API URL from wherever the dashboard runs |
 | VM counts show `—` | The collection read did not include the VM array | Expected. Open the environment for the measured count — a dash means "not measured", never zero |
 | "publishing the share link failed … `Expiration date tz is invalid`" | Skytap did not accept the expiry's timezone. A publish set's expiry is **two** fields — `expiration_date` and `expiration_date_tz` — and the date alone is a 400 naming the tz | Fixed: the dashboard now sends both, the date in UTC and the zone as `UTC`. If it recurs, the message names the zone it sent — change `SHARE_EXPIRY_TZ` in `services/skytap_service.py` to one the account accepts |
-| The Broker column reads **none** and the row names other VMs | No VM matches the POV's Broker VM name | Rename the template's broker VM, or create the POV with the name your template actually uses. The match is exact |
+| The Broker column reads **none** and the row names other VMs | The broker could not be resolved. Three different causes, and the message says which | If it says **no VM reports a Linux OS**: set the OS in the VMs tab's OS column for the guest that runs Docker. If it says **several VMs could be the broker**: press **name VM** beside the Broker column and name one. If it says **no VM is named X**: you typed a name this template does not use — clear it to auto-detect, or correct it |
+| The broker resolved to the **wrong** guest | The template has one Linux VM and it is not the Docker host | Press **name VM** and name the right one. A typed name always wins over auto-detect |
+| The Broker column reads **none** on a POV that used to work | A second Linux VM was added, so auto-detect became ambiguous | This refuses rather than silently moving the broker. Name the original with **name VM**. An *already enrolled* broker is never moved by this |
 | The Broker column reads **enrolling** and never changes | Nothing executed the payload, or it executed and died | The broker VM has no metadata runner ([template contract](#the-template-contract)), **has no `docker`**, is on a manual network, or cannot reach the agent endpoint. Fix it and press **Broker** to re-issue |
 | "no agent enrolled within 14 minutes" | Same causes as above | The bootstrap is still on the VM — `user_data` is only cleared on a successful enrolment, so being able to read it proves the agent never enrolled. On the guest: `journalctl -u dashboard-bootstrap-runner -n1 -o cat` names the line that failed, and `docker logs dashboard-agent`, if it ever started, names the rest. A `docker: command not found` there is the base template, not this POV |
 | "this dashboard does not know its own public URL" | No pinned audience and no `public_base_url` | An agent inside a customer network needs an address. Set it in Settings → Integrations → Remote Agents |

@@ -690,6 +690,57 @@ def test_a_login_override_survives_a_vm_refresh():
     db.close()
 
 
+def test_an_os_override_survives_a_vm_refresh():
+    """The property the SEPARATE column exists for. `refresh_vms` rewrites `os_family`
+    from the platform every time, so an operator's correction written there would survive
+    exactly until the next sync -- and the refusals it answers would all come back."""
+    db = d.SessionLocal()
+    env, _a, vm = _ready(db)
+    pov_env_service.set_vm_os(db, env, vm.platform_vm_id, "linux")
+    db.refresh(vm)
+    assert vm.guest_os == "linux", "the override decides"
+
+    from web_dashboard.services import lab_platforms
+
+    class _Fake:
+        async def get_environment(self, env_id):
+            # The platform still says nothing, which is the whole point.
+            return {"runstate": "running",
+                    "vms": [{"id": vm.platform_vm_id, "name": vm.name,
+                             "os_family": "", "runstate": "running",
+                             "private_ip": "10.9.0.10"}]}
+    original = lab_platforms.adapter
+    lab_platforms.adapter = lambda platform: _Fake()
+    try:
+        asyncio.run(pov_env_service.refresh_vms(db, env))
+    finally:
+        lab_platforms.adapter = original
+    db.refresh(vm)
+    assert vm.os_family == "", "the platform's own answer is still the platform's"
+    assert vm.os_family_override == "linux", "and the operator's answer survived"
+    assert vm.guest_os == "linux"
+
+    # Clearing it hands the answer back to the platform, which is the normal state.
+    pov_env_service.set_vm_os(db, env, vm.platform_vm_id, "")
+    db.refresh(vm)
+    assert vm.os_family_override is None
+    assert vm.guest_os == ""
+    db.close()
+
+
+def test_an_os_that_cannot_be_reached_is_refused_at_the_form():
+    """Only two families, refused when typed. A third value would reintroduce the blank
+    this control exists to end, one refusal later."""
+    db = d.SessionLocal()
+    env, _a, vm = _ready(db)
+    try:
+        pov_env_service.set_vm_os(db, env, vm.platform_vm_id, "solaris")
+        raise AssertionError("an unreachable OS was stored")
+    except pov_env_service.VmOsError as exc:
+        assert "linux" in str(exc) and "windows" in str(exc)
+    db.close()
+
+
 def test_an_unusable_platform_credential_names_the_vm():
     db = d.SessionLocal()
     env, _a, vm = _ready(db)

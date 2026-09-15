@@ -245,6 +245,10 @@ async def refresh_vms(db: Session, env: PovEnvironment) -> int:
     **never on an empty read**. A transient error that returned zero VMs would otherwise
     delete every row, taking the PAM artifact columns with it, and the sync would record
     success. That is a bug this codebase has already paid for once.
+
+    Because it upserts rather than rebuilds, the columns the platform does not report —
+    ``login_username``, ``os_family_override`` and the PAM artifacts — survive a refresh.
+    A prune still takes them with the row, which is why the empty-read guard matters.
     """
     mod = _adapter(env)
     detail = await mod.get_environment(env.platform_environment_id)
@@ -272,6 +276,9 @@ async def refresh_vms(db: Session, env: PovEnvironment) -> int:
             row = PovEnvironmentVM(environment_id=env.id, platform_vm_id=vm_id)
             db.add(row)
         row.name = raw.get("name") or ""
+        # The platform's own answer, overwritten on every refresh — which is exactly why
+        # an operator's correction lives in `os_family_override` and not here. Read
+        # `row.guest_os`, never this column, anywhere a decision depends on the OS.
         row.os_family = raw.get("os_family") or ""
         row.runstate = raw.get("runstate") or ""
         row.private_ip = raw.get("private_ip") or ""
@@ -331,6 +338,55 @@ def set_vm_login(db: Session, env: PovEnvironment, vm_id: str, username: str) ->
     db.commit()
     logger.info("POV %s: VM %s pinned to the stored login %s", env.id, vm_id, wanted)
     return f"{row.name or vm_id} will use the stored login {wanted}."
+
+
+class VmOsError(Exception):
+    """The per-VM OS override could not be set. Operator-facing."""
+
+
+# The two families this dashboard knows how to reach a guest on. Not a wider set: a
+# third value would reintroduce the blank this control exists to end, one refusal later.
+_OS_FAMILIES = ("linux", "windows")
+
+
+def set_vm_os(db: Session, env: PovEnvironment, vm_id: str, family: str) -> str:
+    """Say what this guest runs when the lab platform would not. Returns a job-log line.
+
+    The platform's own answer stays in ``os_family``, untouched. This is a second column
+    rather than a correction, because ``refresh_vms`` rewrites that one from the platform
+    every time — see ``PovEnvironmentVM.os_family_override``.
+
+    Blank clears the override and is the normal state: it hands the answer back to the
+    platform. This does not soften the "never guess an OS" rule that every POV selector
+    follows — ``skytap_service._os_family`` still returns "" rather than guess, and a
+    blank family is still refused everywhere. It gives an operator the only remedy those
+    refusals ever had, which on a template the platform will not classify is otherwise
+    "recreate the POV with a different name".
+    """
+    row = db.query(PovEnvironmentVM).filter(
+        PovEnvironmentVM.environment_id == env.id,
+        PovEnvironmentVM.platform_vm_id == str(vm_id or "").strip()).first()
+    if row is None:
+        raise VmOsError(
+            "this POV has no such VM. Re-read its VMs from the platform and try again.")
+
+    wanted = (family or "").strip().lower()
+    if not wanted:
+        row.os_family_override = None
+        db.commit()
+        return (f"Cleared the OS override on {row.name or vm_id}; it reports "
+                f"{row.os_family or 'nothing'} again.")
+
+    if wanted not in _OS_FAMILIES:
+        raise VmOsError(
+            f"{family!r} is not an OS this dashboard can reach a guest on. Use "
+            f"'linux' or 'windows', or clear it to believe the platform.")
+
+    row.os_family_override = wanted
+    db.commit()
+    logger.info("POV %s: VM %s pinned to os_family %s (platform said %r)",
+                env.id, vm_id, wanted, row.os_family or "")
+    return f"{row.name or vm_id} is recorded as {wanted}."
 
 
 # ── power ────────────────────────────────────────────────────────────────────

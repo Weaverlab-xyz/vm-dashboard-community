@@ -287,6 +287,25 @@ def test_the_broker_vm_is_excluded_from_the_guessed_target_list():
     db.close()
 
 
+def test_the_guessed_target_list_excludes_an_INFERRED_broker():
+    """The exclusion above compares NAMES, and the broker no longer has to have one.
+    `pov_broker.select_broker_vm` infers it as the only Linux VM, so on a template whose
+    Docker host is called BtPocLin01 a name comparison misses it entirely -- and this
+    list would then grant SSH to, and `select_host_vm` could later install k3s onto, the
+    one guest whose job is keeping the agent channel up."""
+    db = d.SessionLocal()
+    env, _a, _v, _t = _ready(db)
+    broker = _vm(db, env, name="BtPocLin01", os_family="linux", ip="10.9.0.51")
+    # What `ensure_broker` persists once the agent enrols. No name matches the broker.
+    env.broker_vm_id = broker.platform_vm_id
+    db.commit()
+    ea.configure(db, env, vm_name="nothing-matches-this")
+    targets = ea.linux_targets(db, env)
+    assert broker.private_ip not in targets, "an inferred broker must be excluded too"
+    assert "10.9.0.30" in targets, "and the real workload guest must survive"
+    db.close()
+
+
 # ── the token ────────────────────────────────────────────────────────────────
 
 def test_the_token_is_minted_in_the_povs_tenant_not_the_installs():
