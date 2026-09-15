@@ -125,7 +125,7 @@ demonstrated it is a Workload Credentials token in that workload's environment: 
 moves the problem to something short-lived, audited and metered, it does not make it vanish.
 For the **dashboard's own** calls it can now bottom out in nothing at all, because Pathfinder
 will trust a registered **Workload Identity** — see
-[Cloud hosting → No PAT](../cloud-hosting.md#no-pat-authenticate-to-pathfinder-with-an-entra-workload-identity).
+[Cloud hosting → No PAT](../cloud-hosting.md#no-pat-authenticate-to-pathfinder-with-a-workload-identity).
 That is worth saying out loud in a demonstration: the same move is available to the consumer,
 and what closes the gap is a registration in Pathfinder rather than a better secret store.
 

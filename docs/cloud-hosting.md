@@ -361,12 +361,13 @@ az containerapp create \
 Full detail, including why the worker is its own Container App rather than
 another sidecar: [job-worker.md](job-worker.md#container-apps).
 
-### No PAT: authenticate to Pathfinder with an Entra workload identity
+### No PAT: authenticate to Pathfinder with a workload identity
 
 > **Applies to:** an install using [Workload Credentials](integrations/workload-credentials.md).
-> Skip this if you do not. **Status:** the client path ships and is unit-tested;
-> the Azure and Pathfinder steps below have not yet been run end to end on this
-> install, so treat the commands as a starting point rather than a transcript.
+> Skip this if you do not. **Status:** run end to end on the Azure Container
+> Apps install on 2026-09-15, so the walkthrough below is a transcript rather
+> than a sketch. One leg is still unproven: the *worker* minting under a real
+> job, which is a different process from the one Test connection exercises.
 
 Workload Credentials replaced three standing cloud keys with **one** standing
 platform credential: a Personal Access Token, stored encrypted in `app_config`.
@@ -387,14 +388,31 @@ nothing to rotate.
 deliberate on both sides: a trust that can be created by the thing being trusted
 is not a trust. It takes a few minutes, once.
 
-Pathfinder registers three kinds of issuer. Only the second applies to this
-container:
+Pathfinder registers three kinds of issuer, and the third is the general case:
 
 | Identity Provider Type | What it is for |
 |---|---|
 | **GitHub Actions** | a workflow pulling secrets in CI — pinned to `owner/repo` and, optionally, immutable org/repo **IDs** so a renamed or recreated repo stops matching |
-| **Azure Entra ID** | anything holding an Entra identity, including this Container App |
-| **Custom IDP** | any other OIDC issuer, scoped by explicit claim conditions — the escape hatch, and the one to reach for below if the issuer version fights you |
+| **Azure Entra ID** | an Entra identity whose tokens carry the **v2** issuer — convenient when it fits, and step 2 covers when it does not |
+| **Custom IDP** | **any** OIDC issuer, scoped by explicit claim conditions: Okta, Ping, Keycloak, an EKS or GKE cluster's own issuer — or Entra itself |
+
+**Custom IDP is the general mechanism rather than a fallback.** It takes an
+issuer URL and a set of claim conditions, so anything that mints a signed OIDC
+token carrying a stable claim to pin can be trusted. The walkthrough below uses
+it against Entra because that is the host being documented; the same form with
+`https://<your-org>.okta.com/oauth2/default` or a GKE cluster's issuer URL works
+identically.
+
+**One honest limit, and it is on this side rather than Pathfinder's.** The trust
+is IdP-agnostic. The dashboard's *token source* is not. Today it can obtain a
+bearer token exactly two ways: a stored PAT, or Azure's managed-identity endpoint
+(`IDENTITY_ENDPOINT`, with IMDS as a fallback). There is no code path that reads
+a token from Okta, Ping, a GKE metadata server, or an EKS projected service
+account file — so **hosting on AWS or GCP, the dashboard itself still needs a
+PAT**, even though your *other* callers on the same Pathfinder site (CI jobs,
+your own services, scripts) can authenticate through Custom IDP with nothing
+stored. A PAT-free dashboard on a non-Azure host is a feature request, not a
+setting you have overlooked.
 
 #### 1. One user-assigned identity, on both container apps
 
@@ -423,11 +441,43 @@ for, and the one that ends up as the `sub` claim it checks. `clientId` is what
 the dashboard sends when asking the platform for a token; without it the request
 resolves to the *system-assigned* identity, which here is not assigned at all.
 
-#### 2. An audience for the token, and the issuer trap behind it
+#### 2. An audience for the token — usually without registering anything
 
 A managed identity does not mint a token in the abstract — it mints one **for a
-resource**, and that resource becomes the token's `aud`. Register an application
-in your own tenant purely to be that audience:
+resource**, and that resource becomes the token's `aud`. You need a value to put
+there. You do not necessarily need to create one.
+
+**Start here, because it needs no directory permissions at all:** borrow a
+first-party resource that already exists in every tenant, and read the two values
+step 3 wants straight off a real token.
+
+```bash
+az account get-access-token --resource https://management.azure.com/ --query accessToken -o tsv \
+  | python3 -c "import base64,json,sys;p=sys.stdin.read().strip().split('.')[1];p+='='*(-len(p)%4);d=json.loads(base64.urlsafe_b64decode(p));print('iss:',d['iss']);print('aud:',d['aud'])"
+```
+
+```
+iss: https://sts.windows.net/<tenant-id>/
+aud: https://management.azure.com/
+```
+
+Use **Azure Resource Manager** rather than Microsoft Graph as the borrowed
+audience. Graph tokens can carry a nonce in the JWT header that makes the
+signature unverifiable by anything except Graph — and Pathfinder has to verify
+it — whereas ARM tokens are ordinary JWTs and ARM's service principal exists in
+every tenant. What makes borrowing safe is not the audience but the identity:
+the one from step 1 holds **no role assignments anywhere**, so a token minted
+for it authorises nothing.
+
+The trade-off is the issuer, and it settles step 3 for you. A first-party
+resource issues a **v1** token — `iss = https://sts.windows.net/<tenant-id>/` —
+so the registration has to be **Custom IDP**. The *Azure Entra ID* type derives
+the issuer as `https://login.microsoftonline.com/<tenant-id>/v2.0` and will
+never match a v1 token, with nothing in either UI to say why.
+
+**If you would rather own the audience** — this needs directory permissions —
+register an application purely to be that resource, and you can then use the
+*Azure Entra ID* type:
 
 ```bash
 APP_ID=$(az ad app create --display-name vm-dashboard-wlc \
@@ -436,25 +486,19 @@ az ad app update --id "$APP_ID" --set api.requestedAccessTokenVersion=2
 az ad sp create --id "$APP_ID"      # so the tenant can resolve api://…
 ```
 
-**That second command is the whole trap, so do not skip it.** Entra issues *two*
-token versions with *two different issuers*:
+`requestedAccessTokenVersion: 2` is the entire reason to bother: it is what moves
+the issuer to the v2 form. In the portal's manifest the same property reads
+`accessTokenAcceptedVersion` — one knob, two names. Leave it at the default and
+the identity produces a perfectly valid token the *Azure Entra ID* type refuses.
+If the tenant rejects `api://vm-dashboard-wlc`, `api://<the new appId>` always
+resolves.
 
-| Token version | `iss` |
-|---|---|
-| v1 (the default) | `https://sts.windows.net/<tenant-id>/` |
-| v2 (`requestedAccessTokenVersion: 2`) | `https://login.microsoftonline.com/<tenant-id>/v2.0` |
-
-The **Azure Entra ID** registration type expects the v2 form — it is what the
-field's own placeholder shows. Leave the resource app on the default and the
-identity happily produces a perfectly valid token that Pathfinder will never
-match, with nothing in either UI to say why. In the portal's manifest the same
-property reads `accessTokenAcceptedVersion`; via Graph and the CLI it is
-`requestedAccessTokenVersion`. They are the same knob.
-
-If you cannot change the resource app — someone else owns it — register as
-**Custom IDP** instead, with the issuer set to `https://sts.windows.net/<tenant-id>/`
-and one claim condition, `sub` = the identity's `principalId`. That path is
-exactly why Custom IDP exists.
+Many tenants do not permit this. If `az ad app create` returns *"Directory
+permission is needed for the current user to register the application …
+Insufficient privileges to complete the operation"*, nothing is misconfigured —
+app registration is restricted to directory roles, and the borrowed-audience
+route above is the way through. The minimum role that unblocks it is
+**Application Developer**, if you want this path specifically.
 
 #### 3. Register the trust in Pathfinder
 
@@ -462,23 +506,63 @@ exactly why Custom IDP exists.
 
 | Field | Value |
 |---|---|
-| Identity Provider Type | **Azure Entra ID** |
-| Service Name | `vm-dashboard` — any name; the dashboard sends it back as `X-BT-Service-Name` |
-| Issuer URL | `https://login.microsoftonline.com/<tenant-id>/v2.0` |
-| Service Principal OID | the identity's `principalId` from step 1 |
+| Identity Provider Type | **Custom IDP** — or **Azure Entra ID** only if you own the audience app and set it to v2 |
+| Service Name | any name; the dashboard sends it back as `X-BT-Service-Name` |
+| Issuer URL | the `iss` from step 2, verbatim, trailing slash included |
+| Claim Conditions | `sub` = the identity's `principalId` **GUID** from step 1 |
+| | `aud` = the `aud` from step 2 |
 | Site | **the site whose Workload Credentials you use** |
+| Product Scopes | **Secrets** |
 
-That last row carries the same trap a PAT does: a registration made against the
-wrong site fails every call with `401 Access denied for this site`, which reads
-like the site is missing the application rather than like a scoping mistake.
+Four of those rows carry a trap.
 
-#### 4. Point the dashboard at it
+**`sub` takes the GUID, not the word.** `principalId` is the name of the Azure
+property you read the value *from*. Typing the literal string gets you
+`Claim not present in token`, because the form then goes looking for a claim
+named `principalId`. And it is `principalId`, not `clientId`: both are GUIDs on
+the same identity, and the mix-up is silent in both directions — `clientId` here
+yields a valid token that Pathfinder declines, while `principalId` in the panel
+field of step 4 fails at the Azure token fetch instead.
+
+**Add the `aud` condition yourself.** The Custom IDP form has no audience field —
+the *Token Resource (App ID URI)* input belongs to the *Azure Entra ID* type — so
+without an explicit condition, **any** token that identity obtains for **any**
+resource satisfies this trust. It costs one row.
+
+**Product Scopes is a grant separate from Site.** The site says whose data; the
+scopes say which product APIs. Missing or wrong, it is another flat 401.
+
+**The wrong site fails every call** with `401 Access denied for this site`, which
+reads like the site lacking the application rather than like a scoping mistake.
+
+Before saving, use the **Validate a token** tab. It is free, and it is the only
+place in this feature that names *which* claim failed. Paste the token from the
+step 2 command; the correct result is a single failure:
+
+```
+✗ sub — present, but the values do not match
+```
+
+That is the all-clear. It means the issuer string, the signature check against
+the provider's JWKS, the `aud` condition and every claim path passed, and the
+only mismatch is the one a laptop cannot fix — that token's subject is *you*, not
+the workload. Anything else failing is a real finding, and far easier to read
+here than at runtime, where all of it collapses into one `HTTP 401`.
+
+> **A live token is a credential.** The token from step 2 is a working Azure
+> Resource Manager bearer token for **your own** user, valid about an hour, and
+> pasting it here sends it to the platform. It is the quickest pre-flight, and
+> the field exists to accept tokens — but if your account carries real Azure
+> privileges, consider going straight to Test connection in step 4 instead. That
+> uses the workload's own inert identity and proves strictly more.
+
+
 
 **Settings → Integrations → Workload Credentials**:
 
 - **Authentication** → *Azure workload identity (nothing stored)*
 - **Service name** → the Service Name from step 3
-- **Token resource** → `api://vm-dashboard-wlc`
+- **Token resource** → the `aud` from step 2 — `https://management.azure.com/`, or your own `api://…` if you registered one
 - **User-assigned identity client ID** → `clientId` from step 1
 
 **Save, then press Test connection** — it tests the *saved* values. The test is
@@ -488,8 +572,9 @@ thing that separates the two failures cleanly:
 | What you see | What it means |
 |---|---|
 | `no managed identity endpoint reachable` | no identity is assigned to **this** container app |
-| `could not get a managed identity token (HTTP 400/404)` | the identity exists but the tenant will not issue for that resource — check the App ID URI and that the service principal in step 2 was created |
-| `Workload Credentials error (HTTP 401)` | the token was fine and Pathfinder declined it — wrong site, wrong Service Name, a `sub` that is not this identity's `principalId`, or the v1/v2 issuer mismatch above |
+| a hang, then a connection error naming `169.254.169.254` | the same cause wearing a disguise: Azure injects `IDENTITY_ENDPOINT` only into replicas that have an identity, and the IMDS fallback is unreachable from a Container App, so the call times out instead of saying so. Assign the identity, then restart the revision |
+| `could not get a managed identity token (HTTP 400/404)` | the identity exists but the tenant will not issue for that resource — check the token resource, that `az ad sp create` was run if it is your own `api://…` app, and that the client ID field holds `clientId` and not `principalId` |
+| `Workload Credentials error (HTTP 401)` | the token was fine and Pathfinder declined it — wrong site, missing Product Scopes, a Service Name that does not match (including a trailing space, which is **not** trimmed), a `sub` that is not this identity's `principalId`, an `aud` condition that does not match the token resource, or the v1/v2 issuer mismatch from step 2. The **Validate a token** tab in step 3 separates these; this message does not |
 
 Once it passes, clear `wlc_pat`: switching modes does not delete it, and a stored
 token nobody uses is still a credential somebody has to answer for. The Workload

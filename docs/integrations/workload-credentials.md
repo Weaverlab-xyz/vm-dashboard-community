@@ -255,7 +255,7 @@ other two describe workloads that are not this process.
 
 Full walkthrough, including the v1-versus-v2 issuer trap that makes a perfectly
 valid token silently fail to match:
-[Cloud hosting → No PAT](../cloud-hosting.md#no-pat-authenticate-to-pathfinder-with-an-entra-workload-identity).
+[Cloud hosting → No PAT](../cloud-hosting.md#no-pat-authenticate-to-pathfinder-with-a-workload-identity).
 
 **Assign the identity to the worker too.** `dash-worker` is where credentials are
 minted, so an identity on the web app alone yields a panel that tests green and
