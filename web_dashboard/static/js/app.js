@@ -665,6 +665,149 @@ function permissionScopeAllowsLevel(levelsByScope, scope, level) {
     return Array.isArray(allowed) && allowed.includes(level);
 }
 
+// Shared Alpine state for the permission grid, spread into the Users and Groups page
+// components. Both edit the same catalog into the same shape -- `form.permissions` (a map
+// of scope -> array of levels) plus `form.permissionsUnrestricted` -- and before this they
+// held two copies of the toggle logic that had already drifted in their method names. Each
+// page still supplies the catalog itself (`permissionScopes`, `permissionLevels`,
+// `permissionScopeLevels`, `permissionScopeGroups`) from its own injected page context, so
+// nothing here hard-codes a scope.
+//
+// Used by templates/partials/permission_matrix.html -- the macro calls these names.
+function permissionGridState() {
+    return {
+        // Display-only. Filtering must never touch the saved map: an admin who types
+        // "pov", ticks a box and saves would otherwise wipe the 30 sections they could
+        // not see.
+        permFilter: '',
+        permGroupCollapsed: {},
+
+        allowsLevel(scope, level) {
+            return permissionScopeAllowsLevel(this.permissionScopeLevels, scope, level);
+        },
+
+        hasPerm(scope, level) {
+            if (!this.form.permissions) return false;
+            return (this.form.permissions[scope] || []).includes(level);
+        },
+
+        togglePerm(scope, level, checked) {
+            if (!this.form.permissions) this.form.permissions = {};
+            if (!this.form.permissions[scope]) this.form.permissions[scope] = [];
+            if (checked) {
+                if (!this.form.permissions[scope].includes(level))
+                    this.form.permissions[scope].push(level);
+            } else {
+                this.form.permissions[scope] = this.form.permissions[scope].filter(l => l !== level);
+            }
+        },
+
+        toggleUnrestricted() {
+            // Ticking clears the grid, because the grid is about to stop being read.
+            // Unticking deliberately restores nothing: least privilege is the honest
+            // starting point, and the previous selection was never saved anywhere.
+            if (this.form.permissionsUnrestricted) this.form.permissions = {};
+        },
+
+        // ── Filtering and grouping ─────────────────────────────────────────────────
+        permScopeMatches(scope) {
+            const q = (this.permFilter || '').trim().toLowerCase();
+            if (!q) return true;
+            return permissionScopeLabel(scope).toLowerCase().includes(q)
+                || String(scope).toLowerCase().includes(q);
+        },
+
+        // [{label, scopes}] after the filter, groups with nothing visible dropped. The
+        // catalog is [[label, [scope...]], ...] from auth.grouped_permission_scopes(), so
+        // every scope appears exactly once and an ungrouped one still renders.
+        permVisibleGroups() {
+            const out = [];
+            for (const entry of (this.permissionScopeGroups || [])) {
+                const scopes = (entry[1] || []).filter(s => this.permScopeMatches(s));
+                if (scopes.length) out.push({ label: entry[0], scopes });
+            }
+            return out;
+        },
+
+        // A filter hides rows, so a collapsed group would hide the very match the admin
+        // just searched for. While filtering, everything is expanded.
+        permGroupOpen(label) {
+            if ((this.permFilter || '').trim()) return true;
+            return !this.permGroupCollapsed[label];
+        },
+
+        permToggleGroup(label) {
+            this.permGroupCollapsed[label] = !this.permGroupCollapsed[label];
+        },
+
+        // ── Bulk toggles ───────────────────────────────────────────────────────────
+        // Always intersected with what the scope actually offers, so a bulk grant can
+        // never produce a level the API 422s on.
+        permSetScope(scope, granted) {
+            if (!this.form.permissions) this.form.permissions = {};
+            this.form.permissions[scope] = granted
+                ? [...((this.permissionScopeLevels || {})[scope] || [])]
+                : [];
+        },
+
+        permScopeCount(scope) {
+            return ((this.form.permissions || {})[scope] || []).length;
+        },
+
+        permSetGroup(label, granted) {
+            const hit = this.permVisibleGroups().find(g => g.label === label);
+            for (const scope of (hit ? hit.scopes : [])) this.permSetScope(scope, granted);
+        },
+
+        // Column headers act on the VISIBLE rows only. Acting on all 31 from behind a
+        // filter would be a silent grant the admin cannot see and did not ask for.
+        permToggleColumn(level) {
+            const scopes = this.permVisibleGroups()
+                .flatMap(g => g.scopes)
+                .filter(s => this.allowsLevel(s, level));
+            const everyone = scopes.length > 0 && scopes.every(s => this.hasPerm(s, level));
+            for (const scope of scopes) this.togglePerm(scope, level, !everyone);
+        },
+
+        // ── Summary ────────────────────────────────────────────────────────────────
+        permGrantedCount() {
+            return (this.permissionScopes || []).filter(s => this.permScopeCount(s) > 0).length;
+        },
+
+        permTotalCount() {
+            return (this.permissionScopes || []).length;
+        },
+
+        // ── Serialisation ──────────────────────────────────────────────────────────
+        // The map sent to the API. Two very different empty states, and the difference is
+        // the whole point:
+        //
+        //   unrestricted ticked  -> {}  -> the API stores NULL -> every scope allowed,
+        //                                  now and for every scope added in future.
+        //   unticked             -> EVERY scope as a key, with its granted levels, which
+        //                           may be []. Non-empty, so `has_permission` treats it as
+        //                           a strict per-scope allowlist and denies what is absent.
+        //
+        // Materialising every key is what makes "restricted, nothing granted" expressible
+        // at all. The obvious payload for it -- {} -- is falsy, and both api/users.py and
+        // api/groups.py turn a falsy map into NULL, i.e. UNRESTRICTED. That is how a newly
+        // created user ended up holding every permission in the dashboard. Do not
+        // "optimise" this back down to only the ticked scopes.
+        buildPermissionsPayload() {
+            if (this.form.permissionsUnrestricted) return {};
+            const out = {};
+            // Iterates the CATALOG, not the edited map, so a stored-but-retired scope
+            // key is dropped here rather than round-tripped forever. It had to be: the
+            // grid never rendered such a key, and validate_permissions_payload 422s on
+            // it, so an admin who opened that user could not save them at all.
+            for (const scope of (this.permissionScopes || [])) {
+                out[scope] = [...((this.form.permissions || {})[scope] || [])];
+            }
+            return out;
+        },
+    };
+}
+
 function formatDuration(seconds) {
     if (seconds == null) return '–';
     if (seconds < 60) return `${seconds}s`;

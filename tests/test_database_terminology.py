@@ -100,9 +100,16 @@ def test_the_permission_grid_maps_the_scope_to_a_label():
     assert "function permissionScopeLabel(" in app_js
     assert "cloud_database: 'Databases'" in app_js
     assert "replace(/_/g, ' ')" in app_js, "the unmapped-scope fallback is gone"
+    # The grid itself now lives in one partial that both pages import, so the label call
+    # is asserted there. Checking the pages for the literal would have started passing for
+    # the wrong reason the moment the markup moved.
+    grid = _read(_tpl("partials", "permission_matrix.html"))
+    assert "permissionScopeLabel(scope)" in grid, (
+        "the shared permission grid renders the raw scope key")
     for rel in (("users", "list.html"), ("groups", "index.html")):
         src = _read(_tpl(*rel))
-        assert "permissionScopeLabel(scope)" in src, f"{rel} renders the raw scope key"
+        assert "permission_matrix" in src, (
+            f"{rel} no longer uses the shared grid — check it did not grow its own copy")
 
 
 def test_the_doc_was_renamed_and_retitled():

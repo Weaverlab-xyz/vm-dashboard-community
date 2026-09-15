@@ -31,7 +31,8 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 
 from web_dashboard.api.auth import (  # noqa: E402
-    PERMISSION_LEVELS, PERMISSION_SCOPE_LEVELS, PERMISSION_SCOPES, levels_for_scope)
+    PERMISSION_LEVELS, PERMISSION_SCOPE_GROUPS, PERMISSION_SCOPE_LEVELS, PERMISSION_SCOPES,
+    grouped_permission_scopes, levels_for_scope)
 
 
 def _read(*parts):
@@ -426,16 +427,28 @@ def test_every_scope_has_a_display_label_or_reads_correctly_unmapped():
 
 
 def test_both_grids_render_only_the_levels_a_scope_offers():
-    """A checkbox for a level the scope does not offer saves a payload the server 422s."""
+    """A checkbox for a level the scope does not offer saves a payload the server 422s.
+
+    The markup is now one partial both pages import, so the guard is asserted once, there.
+    Each page is still checked for the level map it has to hand that partial, and for the
+    import itself -- a page that quietly grew a second copy of the grid is the regression
+    this pair of assertions is for.
+    """
+    grid = _read("web_dashboard", "templates", "partials", "permission_matrix.html")
+    assert "allowsLevel(scope, level)" in grid, (
+        "the shared grid renders a checkbox without asking whether the level is offered")
+
+    js = _read("web_dashboard", "static", "js", "app.js")
+    assert "permissionScopeAllowsLevel" in js, (
+        "permissionGridState no longer delegates to the shared level-map helper")
+
     for rel in (("templates", "users", "list.html"), ("templates", "groups", "index.html")):
         src = _read("web_dashboard", *rel)
         where = "/".join(rel)
         assert "permission_scope_levels | tojson" in src, (
             f"{where} does not receive the per-scope level map from the page context")
-        assert "allowsLevel(scope, level)" in src, (
-            f"{where} renders a checkbox without asking whether the level is offered")
-        assert "permissionScopeAllowsLevel" in src, (
-            f"{where} does not delegate to the shared helper in app.js")
+        assert "permission_matrix" in src, (
+            f"{where} does not use the shared grid")
 
 
 def test_the_page_context_ships_the_level_map_to_both_pages():
@@ -503,6 +516,38 @@ def test_no_scope_offers_a_level_no_route_enforces():
     assert not dead, (
         "these levels are offered by a scope but enforced nowhere, so ticking them grants "
         f"nothing: {dead}")
+
+
+def test_every_scope_belongs_to_exactly_one_display_group():
+    """The grid renders by group, so an ungrouped scope is a permission nobody can grant.
+
+    ``grouped_permission_scopes`` fails visibly rather than silently — an unlisted scope
+    lands under "Ungrouped" instead of vanishing — but "visible" is not "correct", and the
+    person adding a scope is not the person who notices a stray heading three months later.
+    This is the test that tells them, at the moment they add it.
+    """
+    flat = [s for scopes in PERMISSION_SCOPE_GROUPS.values() for s in scopes]
+
+    dupes = sorted({s for s in flat if flat.count(s) > 1})
+    assert not dupes, f"these scopes are in more than one display group: {dupes}"
+
+    unknown = sorted(s for s in flat if s not in PERMISSION_SCOPE_LEVELS)
+    assert not unknown, (
+        "PERMISSION_SCOPE_GROUPS names scopes that are not in the catalog — a group entry "
+        f"that renders no row: {unknown}")
+
+    ungrouped = sorted(s for s in PERMISSION_SCOPES if s not in flat)
+    assert not ungrouped, (
+        "these scopes are in no display group, so the grid shows them under 'Ungrouped' — "
+        f"give each one a group in api/auth.PERMISSION_SCOPE_GROUPS: {ungrouped}")
+
+
+def test_the_grouped_view_covers_the_catalog_exactly_once():
+    """What the template actually iterates, rather than the raw map above."""
+    rendered = [s for _label, scopes in grouped_permission_scopes() for s in scopes]
+    assert sorted(rendered) == sorted(PERMISSION_SCOPES), (
+        "the grouped view and the flat catalog disagree; every scope must render exactly "
+        "one row")
 
 
 if __name__ == "__main__":
