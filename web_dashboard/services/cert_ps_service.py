@@ -593,13 +593,24 @@ async def ensure_functional_account(row, outputs: dict,
             "can be composed — the pool exists, but its identity does not")
 
     cred = resolve_bi_credential()
+    # ``cred`` carries a client secret and an API key, so **nothing read out of it may
+    # reach a log line, the account name, or the returned dict.** Taint analysis is
+    # per-dict rather than per-key and it is right to be: the two halves of this credential
+    # differ only by which key they are under. Everything below that is safe to log is
+    # therefore either a branch LITERAL or re-read from config, never carried out of here.
     if cred["auth"] == BI_AUTH_OAUTH:
         # Four values in four fields. Nothing is packed, so nothing is split — which is
         # why a CA secret, or a CA account NAME, may contain a colon on this path and
         # could not be expressed at all on the other one.
         name_suffix, packed_secret = "", secret
+        auth = BI_AUTH_OAUTH
+        auth_label = ("oauth (cert_ps_bi_client_id)" if _cfg("cert_ps_bi_client_id")
+                      else "oauth (pscli_client_id)")
     else:
-        run_as, api_key = cred["run_as"], cred["api_key"]
+        # Re-read rather than taken off ``cred``: identical by construction — it is where
+        # the resolver got it — and it keeps the account name, which IS logged, clear of
+        # the dict that holds the secrets.
+        run_as, api_key = bi_run_as_user(), cred["api_key"]
         # Splitting on the LAST colon is what lets a CA credential contain one. It buys
         # the BeyondInsight halves nothing, and a colon in either of them silently moves
         # the split point and mis-parses BOTH fields.
@@ -611,6 +622,8 @@ async def ensure_functional_account(row, outputs: dict,
                     f"not. The OAuth path (cert_ps_bi_client_id) packs nothing and has "
                     f"neither constraint")
         name_suffix, packed_secret = f":{run_as}", f"{secret}:{api_key}"
+        auth = BI_AUTH_APIKEY
+        auth_label = "apikey (cert_ps_bi_api_key)"
 
     platform = platform_name(package)
     platform_id = await ps_api_service.get_platform_id(platform)
@@ -633,11 +646,13 @@ async def ensure_functional_account(row, outputs: dict,
     # The AUTH is logged, the credential is not. Which of the two paths an account was
     # minted on is the first thing worth knowing when the plugin later reports that it
     # has no BeyondInsight credential, and the account name no longer says so on its own.
+    # ``auth_label`` is a branch literal naming the config key it came from — not a read
+    # of ``cred``, which holds the secrets alongside it.
     logger.info("PS: minted %s functional account %r (id %s) on platform %r for CA %s, "
-                "BeyondInsight auth=%s from %s", package_label(package), account_name,
-                fa_id, platform, row.id, cred["auth"], cred["source"])
+                "BeyondInsight auth=%s", package_label(package), account_name,
+                fa_id, platform, row.id, auth_label)
     return {"mode": "create", "package": package, "account_name": account_name,
-            "id": str(fa_id), "auth": cred["auth"]}
+            "id": str(fa_id), "auth": auth}
 
 
 async def resolve_functional_account(name: str = "",

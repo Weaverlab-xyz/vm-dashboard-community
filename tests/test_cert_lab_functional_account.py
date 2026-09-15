@@ -736,6 +736,20 @@ def test_the_auth_select_keeps_its_x_init_default():
     assert "x-init" in panel[at:at + 300]
 
 
+def test_nothing_read_out_of_the_credential_dict_reaches_the_minting_log_line():
+    """CodeQL taints per-DICT, not per-key — and it is right to: the two halves of this
+    credential differ only by which key they are under. So the account name takes its
+    run-as user from config rather than off `cred`, and the auth is a branch literal."""
+    src = _src("web_dashboard/services/cert_ps_service.py")
+    block = src.split("async def ensure_functional_account(")[1].split("\nasync def ")[0]
+    call = block.split("logger.info(")[1].split("\n    return")[0]
+    assert "cred[" not in call, "a read of the credential dict reaches a log line"
+    assert "auth_label" in call
+    name = [ln for ln in block.splitlines() if ln.strip().startswith("account_name = ")]
+    assert name and "cred[" not in name[0], \
+        "the account name is logged, so it must not be built out of the credential dict"
+
+
 def test_the_rest_call_sends_both_api_fields_or_neither():
     """A consumer treats half the pair as absent and falls back, so one alone produces an
     account that looks configured and authenticates as nothing."""
