@@ -1977,9 +1977,17 @@ class Settings(BaseSettings):
     # dashboard-built enrollment identity to mint from, so there is nothing to create.
     cert_ps_functional_account_mode: str = "create"
     # The BeyondInsight half of the functional account's two credentials, used in CREATE
-    # mode only. The dashboard's own REST client signs in with OAuth2 client credentials
-    # (pscli_client_id/secret) and never sends a PS-Auth key, so the plugin's API
-    # registration key is genuinely not otherwise held anywhere in this config.
+    # mode only. There are two shapes of it and the plugin prefers OAuth: the account's
+    # API key and secret fields carry a client id and client secret, and nothing is packed
+    # into the name or password. `auto` resolves it — a dedicated client id wins, then an
+    # explicitly set API key (so an install that works keeps working), then the
+    # dashboard's own pscli_* pair, which is the same tenant by construction.
+    cert_ps_bi_auth: str = "auto"                    # auto|oauth|apikey — which credential a minted account carries
+    cert_ps_bi_client_id: str = ""                   # BI OAuth registration for the PLUGIN; blank → pscli_client_id
+    cert_ps_bi_client_secret: str = ""               # SECRET: its client secret; both or neither
+    # The packed fallback. Kept because whether the Password Safe console offers an API key
+    # credential type on a plugin-supplied platform is unverified — where it does not, this
+    # is the only way the plugin can reach Secrets Safe on a Cloud tenant at all.
     cert_ps_bi_api_key: str = ""                     # SECRET: BI API registration key — the password's second half
     cert_ps_bi_run_as_user: str = ""                 # blank → pscli_api_account_name, which is the same run-as user
     # Where the plugin writes the bundle. `biurl` is the BeyondInsight base URL the plugin

@@ -5388,11 +5388,15 @@
                 <option value="reference">Reference an existing account</option>
               </select>
               <p class="text-[11px] text-gray-400 mt-1">
-                <strong>One account, two credentials</strong>, both fields split on the
+                <strong>One account, two credentials</strong> — the certificate authority's,
+                and the BeyondInsight identity that writes the bundle to Secrets Safe. On
+                the OAuth path the name and password are the CA credential
+                <em>whole</em> and the BeyondInsight client id and secret ride the account's
+                own API key and secret fields. On the packed one both are split on the
                 <strong>last</strong> colon: username
                 <code>&lt;ca-account&gt;:&lt;bi-run-as-user&gt;</code>, password
-                <code>&lt;ca-secret&gt;:&lt;bi-api-key&gt;</code>. Splitting from the right lets a
-                CA password contain colons.
+                <code>&lt;ca-secret&gt;:&lt;bi-api-key&gt;</code> — splitting from the right is
+                what lets a CA password contain colons there.
               </p>
               <p class="text-[11px] text-gray-400 mt-1"
                  x-show="(panelCfg.cert_ps_functional_account_mode || 'create') !== 'reference'">
@@ -5431,7 +5435,62 @@
                 platforms and wrong if you run both.
               </p>
             </div>
+            <!-- x-init for the same reason the mode select has one: an unset string key
+                 reads back "" from /api/setup/feature, not the model default. -->
             <div class="mt-3" x-show="(panelCfg.cert_ps_functional_account_mode || 'create') !== 'reference'">
+              <label class="block text-sm font-medium text-gray-700 mb-1">BeyondInsight credential</label>
+              <select x-model="panelCfg.cert_ps_bi_auth"
+                      x-init="panelCfg.cert_ps_bi_auth = panelCfg.cert_ps_bi_auth || 'auto'"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="auto">Automatic — prefer OAuth</option>
+                <option value="oauth">OAuth client credentials</option>
+                <option value="apikey">Packed API registration key</option>
+              </select>
+              <p class="text-[11px] text-gray-400 mt-1">
+                The plugin reads both and prefers OAuth. What it cannot tell you from here
+                is whether <em>your</em> Password Safe console offers an <strong>API key</strong>
+                credential type on a plugin-supplied platform — open the functional account
+                form on the Certificate platform and look. If it does not, pin
+                <strong>Packed API registration key</strong>; the plugin works either way.
+                <span x-show="(panelCfg.cert_ps_bi_auth || 'auto') === 'auto'">
+                  Automatic keeps an install that already has an API key set on that path,
+                  so nothing changes underneath a CA that works.
+                </span>
+              </p>
+            </div>
+            <div class="mt-3" x-show="(panelCfg.cert_ps_functional_account_mode || 'create') !== 'reference'
+                                      && (panelCfg.cert_ps_bi_auth || 'auto') !== 'apikey'">
+              <label class="block text-sm font-medium text-gray-700 mb-1">
+                BeyondInsight OAuth client id
+                <span class="font-normal text-gray-400">(optional)</span>
+              </label>
+              <input type="text" x-model="panelCfg.cert_ps_bi_client_id"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="(blank uses the dashboard's own pscli_client_id)">
+              <p class="text-[11px] text-gray-400 mt-1">
+                An API registration permitting the <strong>client credentials</strong> grant,
+                with write access to the Secrets Safe folder below. The account carries it in
+                its API key and secret fields, so nothing is packed and the plugin presents a
+                short-lived bearer token instead of a static key. Blank falls back to the
+                dashboard's own registration — same tenant, but that one administers the whole
+                of it, and this one is handed to a plugin on a Resource Broker.
+              </p>
+            </div>
+            <div class="mt-3" x-show="(panelCfg.cert_ps_functional_account_mode || 'create') !== 'reference'
+                                      && (panelCfg.cert_ps_bi_auth || 'auto') !== 'apikey'">
+              <label class="block text-sm font-medium text-gray-700 mb-1">BeyondInsight OAuth client secret</label>
+              <input type="password" x-model="panelCfg.cert_ps_bi_client_secret" autocomplete="new-password"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     :placeholder="(panelCfg._secrets_set || []).includes('cert_ps_bi_client_secret')
+                                   ? '•••••••• stored — leave blank to keep'
+                                   : '(blank uses pscli_client_secret)'">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Both or neither — half a pair is refused rather than quietly falling back to
+                a different registration than the one named above.
+              </p>
+            </div>
+            <div class="mt-3" x-show="(panelCfg.cert_ps_functional_account_mode || 'create') !== 'reference'
+                                      && (panelCfg.cert_ps_bi_auth || 'auto') !== 'oauth'">
               <label class="block text-sm font-medium text-gray-700 mb-1">BeyondInsight API key</label>
               <input type="password" x-model="panelCfg.cert_ps_bi_api_key" autocomplete="new-password"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
@@ -5439,12 +5498,13 @@
                                    ? '•••••••• stored — leave blank to keep'
                                    : 'Paste the API registration key'">
               <p class="text-[11px] text-gray-400 mt-1">
-                The password's second half. The dashboard's own API sign-in uses OAuth2
-                client credentials and never a PS-Auth key, so this is not held anywhere
-                else — it is the one credential here it cannot derive.
+                The packed path's second half of the password, with the run-as user below as
+                the second half of the username. Needed only where the console will not take
+                an API key credential type on a plugin platform.
               </p>
             </div>
-            <div class="mt-3" x-show="(panelCfg.cert_ps_functional_account_mode || 'create') !== 'reference'">
+            <div class="mt-3" x-show="(panelCfg.cert_ps_functional_account_mode || 'create') !== 'reference'
+                                      && (panelCfg.cert_ps_bi_auth || 'auto') !== 'oauth'">
               <label class="block text-sm font-medium text-gray-700 mb-1">BeyondInsight run-as user</label>
               <input type="text" x-model="panelCfg.cert_ps_bi_run_as_user"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"

@@ -1,9 +1,16 @@
 """Certificate Lab: the dashboard mints the functional account from the CA build.
 
-The Certificate plugin needs one functional account carrying TWO credentials, split on
-the LAST colon: username ``<ca-account>:<bi-run-as-user>``, password
-``<ca-secret>:<bi-api-key>``. That account used to be an operator's manual step, which
-was the wrong shape for a reason that is easy to lose:
+The Certificate plugin needs one functional account carrying TWO credentials — the
+certificate authority's, and the BeyondInsight identity that writes the bundle to Secrets
+Safe — and there are two shapes of the second. The plugin reads both and **prefers OAuth**:
+
+    oauth   name and password are the CA credential WHOLE, and the BeyondInsight OAuth
+            client id and secret ride the account's own API key and secret fields
+    apikey  name ``<ca-account>:<bi-run-as-user>``, password ``<ca-secret>:<bi-api-key>``,
+            each split on the LAST colon
+
+That account used to be an operator's manual step, which was the wrong shape for a reason
+that is easy to lose:
 
 - **the CA half exists for one moment only.** It comes back in the apply's outputs — a
   GCP service account key, an AWS secret access key — both of which their APIs return
@@ -15,9 +22,11 @@ was the wrong shape for a reason that is easy to lose:
 - **the most common mistake is pasting the whole JSON key file** instead of the
   ``private_key`` field out of it.
 
-So these pin: the composition per cloud, that the PEM is the field and survives at full
-length, that a referenced account is never recorded as owned (teardown deletes only what
-it minted), and that the composed password never reaches a log line.
+So these pin: the composition per cloud on both shapes, which of the two the resolver
+picks (and that an install already working on the packed one is never moved off it by an
+upgrade), that the PEM is the field and survives at full length, that a referenced account
+is never recorded as owned (teardown deletes only what it minted), and that neither
+composed credential ever reaches a log line.
 
 Runs under pytest, or standalone:  python tests/test_cert_lab_functional_account.py
 """
@@ -79,8 +88,10 @@ class _CertLab:
 
 
 async def _fake_create_fa_on_platform(*, platform_id, account_name, display_name,
-                                      password, description="", tenant=None):
-    CALLS.append(("create", platform_id, account_name, display_name, password))
+                                      password, description="", api_key="",
+                                      api_secret="", tenant=None):
+    CALLS.append(("create", platform_id, account_name, display_name, password,
+                  api_key, api_secret))
     return 4242
 
 
@@ -169,7 +180,7 @@ def _last_create():
 def test_gcp_composes_both_halves_onto_one_account():
     _reset()
     out = _run(svc.ensure_functional_account(_CertLab(), _GCP_OUTPUTS))
-    _, platform_id, account_name, display_name, password = _last_create()
+    _, platform_id, account_name, display_name, password, _, _ = _last_create()
     assert platform_id == 1008
     assert account_name == ("certauth-1a2b3c4d@bt-se-lab.iam.gserviceaccount.com"
                             ":certauth-svc")
@@ -182,7 +193,7 @@ def test_gcp_composes_both_halves_onto_one_account():
 def test_aws_composes_from_its_own_differently_named_outputs():
     _reset()
     _run(svc.ensure_functional_account(_CertLab(cloud="aws"), _AWS_OUTPUTS))
-    _, _, account_name, _, password = _last_create()
+    _, _, account_name, _, password, _, _ = _last_create()
     assert account_name == "AKIAIOSFODNN7EXAMPLE:certauth-svc"
     assert password == "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY:9f2c1b7e4a"
 
@@ -395,6 +406,185 @@ def test_the_returned_dict_carries_the_name_but_never_the_credential():
     assert "9f2c1b7e4a" not in repr(out)
 
 
+# ── the OAuth path, and which of the two the resolver picks ───────────────────
+#
+# The plugin reads BOTH and prefers OAuth: `ECredentialType` is a flags enum and
+# `CredentialParameter` carries ApiKey/ApiSecret as fields of their own, so one account
+# can be `Password, ApiKey` at once. What the dashboard cannot see from here is whether a
+# given Password Safe console offers an API key credential type on a PLUGIN-supplied
+# platform, so the packed form stays and `cert_ps_bi_auth` pins either.
+
+_OAUTH = {"cert_ps_bi_client_id": "8f14e45f-ea", "cert_ps_bi_client_secret": "s3cr3t-cs"}
+
+
+def test_oauth_puts_four_values_in_four_fields_and_packs_nothing():
+    _reset(cert_ps_bi_api_key="", **_OAUTH)
+    out = _run(svc.ensure_functional_account(_CertLab(), _GCP_OUTPUTS))
+    _, _, account_name, _, password, api_key, api_secret = _last_create()
+    assert account_name == "certauth-1a2b3c4d@bt-se-lab.iam.gserviceaccount.com", \
+        "the OAuth path appends no run-as user — the name is the CA account, whole"
+    assert password == _PEM, "the password is the CA secret, whole and unsuffixed"
+    assert (api_key, api_secret) == ("8f14e45f-ea", "s3cr3t-cs")
+    assert out["auth"] == "oauth"
+
+
+def test_the_oauth_path_lets_a_ca_secret_contain_a_colon():
+    """Not expressible at all on the packed path, where the LAST colon is the delimiter:
+    a CA secret ending in something colon-shaped would be silently truncated and the tail
+    read as an API key."""
+    _reset(cert_ps_bi_api_key="", **_OAUTH)
+    outputs = dict(_AWS_OUTPUTS, enroll_secret_access_key="S0me:P@ssword")
+    _run(svc.ensure_functional_account(_CertLab(cloud="aws"), outputs))
+    assert _last_create()[4] == "S0me:P@ssword"
+
+
+def test_the_packed_path_sends_neither_api_field():
+    """Half a pair is not a pair — the plugin falls back to the packed format on one, so
+    an ApiKey with no secret would produce an account that authenticates as nothing."""
+    _reset()
+    _run(svc.ensure_functional_account(_CertLab(), _GCP_OUTPUTS))
+    assert _last_create()[5:] == ("", "")
+
+
+def test_auto_keeps_an_install_that_already_has_an_api_key_on_the_packed_path():
+    """The regression that must not happen on an upgrade. A functional account that
+    authenticates as nothing onboards GREEN and fails hours later at a rotation, so an
+    install working on the packed path stays there until somebody says otherwise."""
+    _reset(pscli_client_id="dash-client", pscli_client_secret="dash-secret")
+    assert svc.resolve_bi_credential()["auth"] == "apikey"
+    _run(svc.ensure_functional_account(_CertLab(), _GCP_OUTPUTS))
+    assert _last_create()[2].endswith(":certauth-svc")
+    assert _last_create()[5] == ""
+
+
+def test_auto_reaches_oauth_from_the_dashboards_own_registration():
+    """Same tenant by construction, so an install that has configured Password Safe at
+    all needs nothing new to reach the preferred path."""
+    _reset(cert_ps_bi_api_key="", pscli_client_id="dash-client",
+           pscli_client_secret="dash-secret")
+    cred = svc.resolve_bi_credential()
+    assert cred["auth"] == "oauth"
+    assert cred["source"] == "pscli_client_id"
+    assert (cred["client_id"], cred["client_secret"]) == ("dash-client", "dash-secret")
+
+
+def test_a_dedicated_registration_outranks_a_configured_api_key():
+    """Nobody sets cert_ps_bi_client_id by accident, and the dedicated one is the point:
+    the dashboard's own client administers the whole tenant, where this is handed to a
+    plugin running on a Resource Broker."""
+    _reset(pscli_client_id="dash-client", pscli_client_secret="dash-secret", **_OAUTH)
+    cred = svc.resolve_bi_credential()
+    assert cred["auth"] == "oauth"
+    assert cred["source"] == "cert_ps_bi_client_id"
+    assert cred["client_id"] == "8f14e45f-ea"
+
+
+def test_half_a_dedicated_pair_is_refused_rather_than_silently_substituted():
+    """Falling through to pscli_* would authenticate as a DIFFERENT registration than the
+    one named in config, and the only symptom would be a permission error on a folder the
+    operator believes they granted."""
+    for key in ("cert_ps_bi_client_id", "cert_ps_bi_client_secret"):
+        _reset(pscli_client_id="dash-client", pscli_client_secret="dash-secret",
+               **{key: _OAUTH[key]})
+        try:
+            svc.resolve_bi_credential()
+        except svc.CertPSError as exc:
+            assert "cert_ps_bi_client_id" in str(exc) and "cert_ps_bi_client_secret" in str(exc)
+        else:
+            raise AssertionError(f"{key} alone must be refused")
+
+
+def test_pinning_apikey_ignores_an_oauth_registration_entirely():
+    """For a console that will not offer an API key credential type on a plugin platform.
+    A stray half-set client id must not stand in the way of the path that was pinned."""
+    _reset(cert_ps_bi_auth="apikey", cert_ps_bi_client_id="8f14e45f-ea")
+    cred = svc.resolve_bi_credential()
+    assert cred["auth"] == "apikey"
+
+    _reset(cert_ps_bi_auth="apikey", cert_ps_bi_api_key="", **_OAUTH)
+    try:
+        svc.resolve_bi_credential()
+    except svc.CertPSError as exc:
+        assert "cert_ps_bi_api_key" in str(exc)
+    else:
+        raise AssertionError("apikey pinned with no API key must raise")
+
+
+def test_pinning_oauth_refuses_when_no_registration_resolves():
+    _reset(cert_ps_bi_auth="oauth")
+    try:
+        svc.resolve_bi_credential()
+    except svc.CertPSError as exc:
+        assert "cert_ps_bi_client_id" in str(exc)
+    else:
+        raise AssertionError("oauth pinned with no registration must raise")
+
+
+def test_an_unrecognised_auth_mode_is_auto_rather_than_a_refusal():
+    _reset(cert_ps_bi_auth="  OAuth  ")
+    assert svc.bi_auth_mode() == "oauth"
+    for val in ("", "oauth2", "apikeys"):
+        _reset(cert_ps_bi_auth=val)
+        assert svc.bi_auth_mode() == "auto", val
+
+
+def test_no_beyondinsight_credential_at_all_names_both_ways_to_supply_one():
+    _reset(cert_ps_bi_api_key="")
+    try:
+        _run(svc.ensure_functional_account(_CertLab(), _GCP_OUTPUTS))
+    except svc.CertPSError as exc:
+        assert "cert_ps_bi_client_id" in str(exc) and "cert_ps_bi_api_key" in str(exc)
+    else:
+        raise AssertionError("no BeyondInsight credential must raise")
+    assert not [c for c in CALLS if c[0] == "create"]
+
+
+def test_the_oauth_client_secret_never_reaches_a_log_line():
+    """The mint logs which path it took — that is the first thing worth knowing when the
+    plugin later reports no BeyondInsight credential — but the SOURCE is a config key
+    name, never the value."""
+    _reset(cert_ps_bi_api_key="", **_OAUTH)
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    old_level = root.level
+    root.setLevel(logging.DEBUG)
+    try:
+        _run(svc.ensure_functional_account(_CertLab(), _GCP_OUTPUTS))
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(old_level)
+    logged = buf.getvalue()
+    assert "s3cr3t-cs" not in logged, "the OAuth client secret was logged"
+    assert "BEGIN PRIVATE KEY" not in logged
+    assert "auth=oauth" in logged, "which path an account was minted on has to be visible"
+
+
+def test_a_colon_free_name_stops_being_warned_about_once_oauth_is_configured():
+    """A colon-free name is the NORMAL shape on the OAuth path — the BeyondInsight half
+    rides the account's API fields, which GET FunctionalAccounts does not return, so the
+    name says nothing about it and the old warning would be false."""
+    def _warnings_for(**conf):
+        _reset(**conf)
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        root = logging.getLogger()
+        root.addHandler(handler)
+        old_level = root.level
+        root.setLevel(logging.DEBUG)
+        try:
+            _run(svc.resolve_functional_account("svc-adcs-enroll"))
+        finally:
+            root.removeHandler(handler)
+            root.setLevel(old_level)
+        return buf.getvalue()
+
+    assert "appsettings.json" in _warnings_for(), \
+        "with no OAuth registration a missing second half is still a real problem"
+    assert "appsettings.json" not in _warnings_for(cert_ps_bi_api_key="", **_OAUTH)
+
+
 # ── the wiring, read off the source ───────────────────────────────────────────
 #
 # Text assertions rather than execution, matching tests/test_cert_lab_wiring.py: these
@@ -524,13 +714,50 @@ def test_every_new_config_key_is_declared_bound_and_classified():
     panel = _src("web_dashboard/templates/settings.html")
     model = setup.split("class CertLabFeatureConfig(")[1].split("\nclass ")[0]
     for key in ("cert_ps_bi_api_key", "cert_ps_bi_run_as_user",
-                "cert_ps_functional_account_mode"):
+                "cert_ps_functional_account_mode", "cert_ps_bi_auth",
+                "cert_ps_bi_client_id", "cert_ps_bi_client_secret"):
         assert re.search(rf"^    {key}: ", conf, re.M), f"{key} missing from Settings"
         assert f"{key}: " in model, f"{key} missing from CertLabFeatureConfig"
         assert f"panelCfg.{key}" in panel, f"{key} is unbound, so a save discards it"
     secrets = setup.split("_SECRET_FEATURE_KEYS = frozenset({")[1].split("})")[0]
-    assert '"cert_ps_bi_api_key"' in secrets, \
-        "an unclassified secret round-trips in clear through the feature API"
+    for key in ("cert_ps_bi_api_key", "cert_ps_bi_client_secret"):
+        assert f'"{key}"' in secrets, \
+            "an unclassified secret round-trips in clear through the feature API"
+    assert '("cert_ps_bi_client_secret",' in _src("web_dashboard/services/secret_hygiene.py"), \
+        "a secret missing from SECRET_REGISTRY is invisible to the hygiene scanner"
+
+
+def test_the_auth_select_keeps_its_x_init_default():
+    """Same trap as the mode select: an unset string key reads back "" from
+    /api/setup/feature, not the model default, so a select without x-init renders blank
+    and saves "" over it — which here would read as `auto` anyway, but only by accident."""
+    panel = _src("web_dashboard/templates/settings.html")
+    at = panel.index('x-model="panelCfg.cert_ps_bi_auth"')
+    assert "x-init" in panel[at:at + 300]
+
+
+def test_the_rest_call_sends_both_api_fields_or_neither():
+    """A consumer treats half the pair as absent and falls back, so one alone produces an
+    account that looks configured and authenticates as nothing."""
+    src = _src("web_dashboard/services/ps_api_service.py")
+    block = src.split("async def create_functional_account_on_platform(")[1] \
+               .split("\nasync def ")[0]
+    assert "if api_key and api_secret:" in block
+    assert '"ApiKey"' in block and '"ApiSecret"' in block
+
+
+def test_a_rewire_that_switches_path_reports_the_account_it_left_behind():
+    """The two shapes differ in the account NAME, so Password Safe sees a new object
+    rather than a duplicate and the id teardown deletes by moves to it. Unsaid, the first
+    account stays behind holding a live enrollment credential."""
+    src = _src("web_dashboard/services/cert_lab_service.py")
+    block = src.split("async def rewire_functional_account(")[1].split("\ndef ")[0]
+    assert "had_id" in block and 'str(fa.get("id")' in block
+    assert "delete_functional_account" not in block, \
+        "a managed system may still reference it; deleting it under one breaks it"
+    assert "r.replaced" in _src(
+        "web_dashboard/templates/workload_lab/_certificates.html"), \
+        "an orphaned account the operator is never told about is the whole failure mode"
 
 
 def test_create_is_the_default_in_both_places_that_declare_it():
