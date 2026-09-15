@@ -1,0 +1,132 @@
+{#
+  The permission grid, shared by Users and Groups.
+
+  Both pages edit the same catalog into the same shape, and before this they held two
+  copies of it that had already drifted. The Alpine side lives in
+  static/js/app.js::permissionGridState() -- spread it into the page component, and give
+  the component `permissionScopes`, `permissionLevels`, `permissionScopeLevels` and
+  `permissionScopeGroups` from the page route's injected context (never hard-coded, or the
+  grid drifts from what require_permission enforces). The edited map is `form.permissions`
+  and the escape hatch is `form.permissionsUnrestricted`.
+
+  Usage:
+    {% from "partials/permission_matrix.html" import permission_matrix %}
+    {{ permission_matrix("Permissions", "User has unrestricted access to all sections.") }}
+#}
+{% macro permission_matrix(label, unrestricted_note) %}
+<div>
+  <div class="flex items-center justify-between mb-2 gap-3">
+    <label class="block text-sm font-medium text-gray-700">{{ label }}</label>
+    <label class="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer shrink-0">
+      <input type="checkbox" x-model="form.permissionsUnrestricted"
+             @change="toggleUnrestricted()"
+             class="rounded border-gray-300 text-blue-600">
+      Full access (unrestricted)
+    </label>
+  </div>
+
+  <div x-show="!form.permissionsUnrestricted">
+    <!-- Filter. Display only: it hides rows, it never drops a scope from the saved map. -->
+    <div class="flex items-center gap-2 mb-2">
+      <input type="text" x-model="permFilter" placeholder="Filter sections…"
+             class="flex-1 border border-gray-300 rounded-lg px-3 py-1.5 text-xs
+                    focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <button type="button" x-show="permFilter" @click="permFilter = ''"
+              class="shrink-0 text-xs text-gray-500 hover:text-gray-700">Clear</button>
+    </div>
+
+    <!--
+      The scroller. This wrapper is deliberately NOT overflow-hidden: the grid is taller
+      than any panel that holds it, and a clipped checkbox still reports a perfect bounding
+      rect, so it looks fine and is a dead control. The thead is sticky inside it, because
+      a Read/Write/Delete/Use column is unreadable once its header has scrolled away.
+    -->
+    <div class="border border-gray-200 rounded-lg text-xs max-h-[45vh] overflow-y-auto
+                overflow-x-auto overscroll-contain">
+      <table class="w-full">
+        <thead class="bg-gray-50 text-gray-500 sticky top-0 z-10">
+          <tr>
+            <th class="px-3 py-2 text-left font-medium bg-gray-50">Section</th>
+            <template x-for="level in permissionLevels" :key="level">
+              <th class="px-3 py-2 text-center font-medium bg-gray-50">
+                <!-- Acts on the rows currently VISIBLE under the filter. Granting all 31
+                     sections from behind a filter would be a change the admin cannot see. -->
+                <button type="button" @click="permToggleColumn(level)"
+                        class="capitalize hover:text-blue-600 hover:underline"
+                        :title="'Toggle ' + level + ' on every section matching the filter'"
+                        x-text="level"></button>
+              </th>
+            </template>
+            <th class="px-3 py-2 text-right font-medium bg-gray-50">All</th>
+          </tr>
+        </thead>
+
+        <template x-for="group in permVisibleGroups()" :key="group.label">
+          <tbody class="divide-y divide-gray-100">
+            <tr class="bg-gray-50/60">
+              <td :colspan="permissionLevels.length + 2" class="px-2 py-1.5">
+                <div class="flex items-center justify-between gap-2">
+                  <button type="button" @click="permToggleGroup(group.label)"
+                          class="flex items-center gap-1.5 font-semibold text-gray-600
+                                 hover:text-gray-900">
+                    <span class="text-gray-400 w-3 inline-block"
+                          x-text="permGroupOpen(group.label) ? '▾' : '▸'"></span>
+                    <span x-text="group.label"></span>
+                    <span class="font-normal text-gray-400"
+                          x-text="'(' + group.scopes.length + ')'"></span>
+                  </button>
+                  <span class="shrink-0 text-gray-400">
+                    <button type="button" @click="permSetGroup(group.label, true)"
+                            class="hover:text-blue-600 hover:underline">All</button>
+                    <span class="px-1">/</span>
+                    <button type="button" @click="permSetGroup(group.label, false)"
+                            class="hover:text-blue-600 hover:underline">None</button>
+                  </span>
+                </div>
+              </td>
+            </tr>
+
+            <template x-for="scope in group.scopes" :key="scope">
+              <tr class="hover:bg-gray-50" x-show="permGroupOpen(group.label)">
+                <td class="px-3 py-2 font-medium text-gray-700 capitalize"
+                    x-text="permissionScopeLabel(scope)"></td>
+                <template x-for="level in permissionLevels" :key="level">
+                  <td class="px-3 py-2 text-center">
+                    <!-- No checkbox where the scope does not offer the level. A disabled
+                         box would invite "why can't I tick this?", and the answer is that
+                         nothing enforces it. -->
+                    <input x-show="allowsLevel(scope, level)" type="checkbox"
+                           :checked="hasPerm(scope, level)"
+                           @change="togglePerm(scope, level, $event.target.checked)"
+                           class="rounded border-gray-300 text-blue-600">
+                    <span x-show="!allowsLevel(scope, level)"
+                          class="text-gray-300 select-none">&middot;</span>
+                  </td>
+                </template>
+                <td class="px-3 py-2 text-right whitespace-nowrap text-gray-400">
+                  <button type="button" @click="permSetScope(scope, true)"
+                          class="hover:text-blue-600 hover:underline">All</button>
+                  <span class="px-1">/</span>
+                  <button type="button" @click="permSetScope(scope, false)"
+                          class="hover:text-blue-600 hover:underline">None</button>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </template>
+      </table>
+
+      <p x-show="!permVisibleGroups().length" class="px-3 py-4 text-center text-gray-400">
+        No sections match “<span x-text="permFilter"></span>”.
+      </p>
+    </div>
+
+    <p class="text-xs text-gray-500 mt-1">
+      <span x-text="permGrantedCount()"></span> of <span x-text="permTotalCount()"></span>
+      sections granted.
+    </p>
+  </div>
+
+  <p x-show="form.permissionsUnrestricted" class="text-xs text-gray-400 mt-1">{{ unrestricted_note }}</p>
+</div>
+{% endmacro %}

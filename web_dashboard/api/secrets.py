@@ -74,9 +74,34 @@ _BOOTSTRAP_BLOCKLIST: dict[str, frozenset[str]] = {
     "gcp_sm":          frozenset({"gcp_service_account_json"}),
     "bt_secrets_safe": frozenset({"pscli_client_secret"}),
     # The PAT is how the dashboard reaches WC at all; migrating it into WC
-    # would make the backend unreadable without itself.
+    # would make the backend unreadable without itself. Conditional — see
+    # _bootstrap_blocked, which drops it on workload-identity auth.
     "wlc":             frozenset({"wlc_pat"}),
 }
+
+
+def _bootstrap_blocked(target_backend: str) -> frozenset[str]:
+    """The entries of ``_BOOTSTRAP_BLOCKLIST`` that actually apply right now.
+
+    Static for every backend but one. Workload Credentials has two auth modes and
+    only the first one stores anything: on ``pat`` the dashboard authenticates with
+    a stored token, so that token is a genuine bootstrap credential; on ``entra`` it
+    mints a short-lived Entra token from the container's own managed identity and
+    ``wlc_pat`` is read by **nothing**. Keeping the block there would leave the one
+    secret an operator on workload identity is most entitled to get out of the
+    database permanently pinned in it — and would report the reason as "migrating it
+    would brick the dashboard", which on that install is simply untrue.
+
+    Asked per migration rather than resolved once at import: the auth mode is
+    operator-editable config, and a module-level answer would be whatever was true
+    when the worker booted.
+    """
+    blocked = _BOOTSTRAP_BLOCKLIST.get(target_backend, frozenset())
+    if target_backend == "wlc" and "wlc_pat" in blocked:
+        from ..services import workload_credentials_service as wlc
+        if wlc.auth_mode() == wlc.AUTH_MODE_ENTRA:
+            return blocked - {"wlc_pat"}
+    return blocked
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -380,8 +405,21 @@ async def migrate_secrets(payload: MigratePayload, request: Request):
     from ..services import config_service as cs
     from ..services import secrets_backend_service as sbs
 
+    if payload.target_backend == "wlc" and not cs.get_bool(
+            "workload_credentials_enabled", False):
+        # The backend id is valid but the feature is off, so every write below would
+        # fail with "Workload Credentials is not configured" — once per secret, which
+        # reads as a broken vault rather than an unset flag. /backends omits wlc while
+        # the flag is off, so the UI cannot offer it; a direct API call still can.
+        raise HTTPException(
+            status_code=400,
+            detail="Workload Credentials is a preview feature and is currently off. "
+                   "Enable it under Settings -> Preview features (and configure the "
+                   "site) before migrating secrets into it.",
+        )
+
     target_prefix = _BACKEND_PREFIXES[payload.target_backend]
-    blocked = _BOOTSTRAP_BLOCKLIST.get(payload.target_backend, frozenset())
+    blocked = _bootstrap_blocked(payload.target_backend)
 
     migrated: list[dict] = []
     skipped:  list[dict] = []
@@ -389,14 +427,16 @@ async def migrate_secrets(payload: MigratePayload, request: Request):
 
     for key, description in _SECRET_REGISTRY:
         if key in blocked:
-            skipped.append({
-                "key": key,
-                "reason": (
-                    f"bootstrap credential — {payload.target_backend} reads this "
-                    f"to authenticate; migrating it would brick the dashboard"
-                ),
-                "bootstrap": True,
-            })
+            reason = (f"bootstrap credential — {payload.target_backend} reads this "
+                      f"to authenticate; migrating it would brick the dashboard")
+            if payload.target_backend == "wlc":
+                # There is a way out of this one, and it is the whole point of the
+                # second auth mode — say so here rather than leaving the operator
+                # with a permanent-looking refusal.
+                reason += (". Switch Workload Credentials to workload-identity "
+                           "(entra) auth and re-run: on that mode nothing reads "
+                           "the PAT, so it migrates like any other secret")
+            skipped.append({"key": key, "reason": reason, "bootstrap": True})
             continue
 
         # Raw stored value (external refs left unresolved so we can detect
@@ -530,12 +570,12 @@ async def update_secret_item(backend: str, ref: str, payload: SecretUpdateReques
     """Update the value of an existing secret. New value must parse as JSON.
     The path's `backend` and the body's `backend` must agree.
 
-    `update_sync_validated`, not `write_sync_validated`: `ref` is a reference the
-    listing handed out, and the writers take a *key* and derive the backend's name
-    from it. Deriving twice writes to a name nothing was ever stored under —
-    editing `dashboard/aws_secret_access_key` would land at
-    `dashboard/dashboard/aws_secret_access_key`, leave the original serving its old
-    value, and still return 200.
+    Goes through `update_sync_validated`, which addresses the secret by the
+    reference the browse list handed out. The create path's writer would re-derive
+    a name from it and write somewhere else — editing
+    `dashboard/aws_secret_access_key` lands at
+    `dashboard/dashboard/aws_secret_access_key` — leaving the original serving its
+    old value while the save returns 200.
     """
     if payload.backend != backend:
         raise HTTPException(status_code=400, detail="backend in URL and body must match")

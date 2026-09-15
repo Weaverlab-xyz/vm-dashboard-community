@@ -791,6 +791,26 @@ def list_wlc() -> list:
     return out
 
 
+def update_wlc(ref: str, value: str) -> str:
+    """Write a new version of the secret **at** ``ref``, folder included.
+
+    ``write_wlc`` takes a bare key and prepends the folder new secrets are configured
+    to go into. An edit already knows the full path — it came out of ``list_wlc`` —
+    so sending it back through the writer would prepend that folder a second time and
+    create ``dashboard/dashboard/<key>``: the real secret untouched, the ``wlc://``
+    reference in ``app_config`` still resolving to the old value, and an edit that
+    reported success. Same reasoning as ``_wlc_split``'s — a reference records where
+    the secret actually is.
+    """
+    from . import workload_credentials_service as wlc
+    folder, name = _wlc_split(ref)
+    if not name:
+        raise ValueError(f"Not a Workload Credentials secret reference: {ref!r}")
+    wlc.write_static(name, value, folder=folder)
+    logger.info("WC: updated secret %s", ref)
+    return ref
+
+
 def delete_wlc(ref: str) -> None:
     from . import workload_credentials_service as wlc
     folder, name = _wlc_split(ref)
@@ -1458,9 +1478,11 @@ def write_sync_validated(backend: str, key: str, value: str) -> str:
 # page reports the save as successful. An operator who "rotated" a migrated
 # credential from Browse & Edit changed nothing.
 #
-# So each backend gets an updater that addresses the secret AT the ref it was
+# So EVERY backend gets an updater that addresses the secret AT the ref it was
 # handed and derives nothing from it. Each returns the ref it wrote, which is
-# always the ref it was given.
+# always the ref it was given. `update_wlc` is the exception to the placement,
+# not the rule: it lives up with `list_wlc`/`delete_wlc`, which do the same
+# `_wlc_split` on the same refs.
 
 def update_aws_sm(ref: str, value: str) -> str:
     """Put a new value on the AWS SM secret NAMED ``ref``.
@@ -1574,24 +1596,6 @@ def update_bt_secrets_safe(ref: str, value: str) -> str:
         )
     logger.info("BT Safe: updated+verified secret %s (folder=%s/%s)",
                 ref, target_folder, folder_id)
-    return ref
-
-
-def update_wlc(ref: str, value: str) -> str:
-    """Write a new value to the Workload Credentials secret at ``ref``.
-
-    The folder is split back out of the ref rather than read from config — the
-    same split ``read_wlc`` and ``delete_wlc`` do, and for the same reason. It
-    matters more here than there: ``write_static`` is create-or-update, so a
-    re-derived folder would not fail, it would create a SECOND secret beside the
-    one being edited and leave the original serving its old value.
-    """
-    from . import workload_credentials_service as wlc
-    folder, name = _wlc_split(ref)
-    if not name:
-        raise ValueError("A Workload Credentials reference is required.")
-    wlc.write_static(name, value, folder=folder)
-    logger.info("WC: updated secret %s", ref)
     return ref
 
 

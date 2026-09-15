@@ -26,6 +26,15 @@ class UserCreateRequest(BaseModel):
     email: Optional[str] = None
     workgroups: List[str] = []
     is_admin: bool = False
+    # Same three-state meaning as the PATCH below, and the reason it is here at all:
+    # omitting it stored NULL, and NULL means UNRESTRICTED in `has_permission`. Every user
+    # the admin UI created therefore held every non-admin permission in the dashboard until
+    # somebody re-opened them in Edit. The UI now always sends this; None is kept as "no
+    # permissions given" for API callers that predate the field, so they are unchanged.
+    permissions: Optional[dict] = None
+    # Which POVs the new user may reach. Same column, same meaning as on update -- [] or
+    # omitted is every POV their `pov` scope allows.
+    pov_env_ids: Optional[List[str]] = None
 
 
 class UserUpdateRequest(BaseModel):
@@ -129,6 +138,16 @@ async def create_user(
         is_admin=body.is_admin,
     )
     user.workgroups_list = body.workgroups
+    if body.permissions is not None:
+        # Validated, never stored raw -- the same treatment the PATCH path gives it, for
+        # the same reason: an unknown scope persisted here is invisible to the grid and
+        # permanent. An empty map still means unrestricted; the UI expresses "restricted,
+        # nothing granted" as every scope present with an empty level list, which is a
+        # non-empty map and so a strict allowlist.
+        validate_permissions_payload(body.permissions)
+        user.permissions_dict = body.permissions if body.permissions else None
+    if body.pov_env_ids is not None:
+        user.pov_env_ids_list = body.pov_env_ids
     db.add(user)
     db.commit()
     db.refresh(user)

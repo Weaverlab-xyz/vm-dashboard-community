@@ -276,9 +276,12 @@ def test_an_invisible_folder_names_the_folder_rather_than_failing_at_ps_cli():
 
 # -- Workload Credentials and the database backend -----------------------------
 
-def test_editing_a_wlc_secret_writes_at_its_own_path():
-    """write_static is create-or-update, so a re-derived folder does not fail --
-    it creates a SECOND secret beside the one being edited."""
+def test_editing_a_wlc_secret_goes_through_its_own_updater():
+    """The wlc updater itself is covered in test_workload_credentials.py, which
+    owns that backend; what is pinned here is that the dispatch reaches it.
+
+    write_static is create-or-update, so a re-derived folder does not fail -- it
+    creates a SECOND secret beside the one being edited."""
     _reset(secrets_wlc_folder="dashboard")
     ref = "dashboard/sub/wlc-probe"
     assert sbs.update_sync("wlc", ref, '{"v": 2}') == ref
@@ -337,9 +340,7 @@ def test_the_patch_route_uses_the_update_path_not_the_write_path():
                encoding="utf-8").read()
     body = src.split("async def update_secret_item(")[1].split("\n@router")[0]
     assert "sbs.update_sync_validated" in body
-    # The call, not the mention: the docstring names write_sync_validated to say
-    # which one it is NOT.
-    assert "sbs.write_sync_validated" not in body
+    assert "write_sync_validated" not in body
 
 
 def test_the_create_route_still_uses_the_write_path():
