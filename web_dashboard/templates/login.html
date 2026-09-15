@@ -11,6 +11,24 @@
 </head>
 <body class="{{ theme.login_bg }} min-h-screen flex items-center justify-center">
 
+  {# Environment banner. The front door is where naming the instance matters most: it is the
+     screen an operator lands on with several tabs open and no page content to tell them
+     apart yet, and the one screen a customer sees before they have any context at all.
+
+     Fixed to the top rather than placed in the flow, because this body centres a single
+     card and an ordinary sibling would sit BESIDE it. Nothing on this page is layered, so
+     there is no stacking context to fight -- unlike base.html, where the same strip goes in
+     the rail slot under the bar.
+
+     Colours inline and computed in services.ui_theme; see the longer note in base.html for
+     why that is safe and what must stay true for it to remain so. #}
+  {% if theme.env_banner %}
+    <div class="fixed top-0 inset-x-0 py-1 px-4 text-center text-xs font-semibold tracking-wide"
+         style="background-color: {{ theme.env_banner.bg }}; color: {{ theme.env_banner.fg }}">
+      {{ theme.env_banner.label }}
+    </div>
+  {% endif %}
+
   <div class="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-sm"
        x-data="loginForm()">
 

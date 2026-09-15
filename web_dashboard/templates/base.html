@@ -279,9 +279,30 @@
          x-cloak></div>
   </div>
 
-  {# Profile accent rail. Empty on a demo instance; on POV it is the one bit of chrome
-     that stays visible in a cropped screenshot of the page body. #}
-  {% if theme.rail %}<div class="{{ theme.rail }}"></div>{% endif %}
+  {# Environment banner, else the profile accent rail. One slot, never both: two coloured
+     strips stacked under the bar read as a rendering fault rather than as two facts.
+
+     The banner is what an operator sets in Settings to tell two instances apart — the rail
+     is already described as the one bit of chrome that survives a cropped screenshot of the
+     page body, so a labelled version of it is the strongest place to put the answer to
+     "which one am I on". theme.env_banner is None unless a label is set, so an instance
+     that never opened the Appearance panel renders exactly the rail it always did.
+
+     The colours are inline because this is the one free-form colour in the app and a class
+     cannot express an arbitrary hex. services.branding is what makes that safe: the value
+     is matched against ^#[0-9a-fA-F]{6}$ before it is stored OR read, and the foreground is
+     computed from the background's luminance rather than assumed, so a pale choice does not
+     render white-on-white. Do not interpolate a config value here without that check.
+
+     It scrolls with the page rather than sticking under the bar, which is the same trade
+     the rail already makes. Making it sticky is not a small change: see the note on the nav
+     wrapper above for what a second stacking context did to the modals last time. #}
+  {% if theme.env_banner %}
+    <div class="py-1 px-4 text-center text-xs font-semibold tracking-wide"
+         style="background-color: {{ theme.env_banner.bg }}; color: {{ theme.env_banner.fg }}">
+      {{ theme.env_banner.label }}
+    </div>
+  {% elif theme.rail %}<div class="{{ theme.rail }}"></div>{% endif %}
 
   <!-- Page content -->
   <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">

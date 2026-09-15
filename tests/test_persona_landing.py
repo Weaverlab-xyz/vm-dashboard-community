@@ -269,7 +269,15 @@ def test_the_theme_stays_persona_blind():
     src = _read(_THEME)
     assert "persona" not in src.lower(), \
         "ui_theme.py mentions personas — chrome colour must carry the profile ALONE"
-    assert "def theme_for(profile: str, app_env: str)" in src
+    # Positional parameters only. theme_for now takes keyword-only branding arguments (the
+    # operator's own name and accent, read by services/branding), so the literal-signature
+    # pin this used to be would fail for a reason that has nothing to do with personas.
+    # See the same check in tests/test_personas.py.
+    params = re.search(r"def theme_for\(\s*(.*?)\)\s*->", src, re.S)
+    assert params, "theme_for is gone or its signature no longer parses"
+    positional = params.group(1).split("*,")[0]
+    assert re.findall(r"(\w+)\s*:", positional) == ["profile", "app_env"], \
+        f"theme_for gained a positional input: {positional.strip()!r}"
 
 
 def test_the_lens_is_not_in_the_measured_nav_row():
