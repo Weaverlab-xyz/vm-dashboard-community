@@ -10,8 +10,10 @@ int validation on save and silently 422s the entire Settings "Configure" panel
 (the error renders off-screen at the top of the panel, so Save looks dead). This
 pins the int round-trip so it can't regress.
 
-Pure-Python: ``config_service`` is stubbed (no DB). Skips if fastapi/pydantic (the
-app deps ``api.setup`` needs) aren't installed. Runs under pytest, or standalone:
+Pure-Python: ``config_service`` is stubbed (no DB). Skips ONLY if fastapi/pydantic (the
+app deps ``api.setup`` needs) aren't installed — any other import failure is a real
+regression and fails loudly, because everything below is a drift check and a drift check
+that can vanish quietly is worth nothing. Runs under pytest, or standalone:
     python tests/test_setup_feature_roundtrip.py
 """
 import ast
@@ -34,9 +36,17 @@ CONF = {}
 
 def _install_config_stub():
     """Stub web_dashboard.services.config_service so _read_feature reads CONF
-    instead of a real backend/DB (mirrors test_k8s_tf_vars.py)."""
+    instead of a real backend/DB (mirrors test_k8s_tf_vars.py).
+
+    ``__path__`` points at the REAL package directory, not ``[]``: api.setup imports
+    sibling services too (``notify_policy``), and an empty ``__path__`` makes every one
+    of those unresolvable — which skipped this whole file for several releases. With the
+    real path, genuine submodules still import while ``config_service`` stays
+    overridden, because the stub package object is already in sys.modules and the
+    override is set on it before anything imports it."""
     services = types.ModuleType("web_dashboard.services")
-    services.__path__ = []  # mark as a package so the submodule import resolves
+    # A package, so `from ..services import <submodule>` resolves against the real tree.
+    services.__path__ = [os.path.join(_ROOT, "web_dashboard", "services")]
     sys.modules["web_dashboard.services"] = services
     cfg = types.ModuleType("web_dashboard.services.config_service")
     cfg.get = lambda key, default="", workgroup=None: CONF.get(key, default)
@@ -48,23 +58,32 @@ def _install_config_stub():
 
 
 _install_config_stub()
+
+# The ONLY legitimate reason to skip is a bare interpreter with no app deps, so probe
+# for those by name and let every other ImportError propagate as a failure. A blanket
+# `except Exception: skip` here is what let this file skip silently once api.setup grew
+# a sibling-service import the stub couldn't satisfy — a suite whose entire job is
+# catching quiet drift must not be able to disappear quietly itself.
 try:
-    from web_dashboard.api.setup import (_read_feature, _write_feature,
-                                         _CONFIG_ONLY_FEATURES,
-                                         _FEATURE_MODELS, _SECRET_FEATURE_KEYS,
-                                         AnsibleFeatureConfig,
-                                         CostExplorerFeatureConfig,
-                                         K8sManagementFeatureConfig,
-                                         PortainerFeatureConfig,
-                                         ResourceExpiryFeatureConfig,
-                                         WorkloadCredentialsFeatureConfig)
-except Exception as exc:  # pragma: no cover — skip if fastapi/pydantic/app deps missing
+    import fastapi  # noqa: F401
+    import pydantic  # noqa: F401
+except ModuleNotFoundError as exc:  # pragma: no cover — no fastapi/pydantic installed
     try:
         import pytest
-        pytest.skip(f"api.setup import unavailable: {exc}", allow_module_level=True)
+        pytest.skip(f"app deps unavailable: {exc}", allow_module_level=True)
     except ModuleNotFoundError:
         print(f"SKIP: {exc}")
         sys.exit(0)
+
+from web_dashboard.api.setup import (_read_feature, _write_feature,
+                                     _CONFIG_ONLY_FEATURES,
+                                     _FEATURE_MODELS, _SECRET_FEATURE_KEYS,
+                                     AnsibleFeatureConfig,
+                                     CostExplorerFeatureConfig,
+                                     K8sManagementFeatureConfig,
+                                     PortainerFeatureConfig,
+                                     ResourceExpiryFeatureConfig,
+                                     WorkloadCredentialsFeatureConfig)
 
 
 def test_unset_int_fields_round_trip():
