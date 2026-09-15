@@ -1,0 +1,349 @@
+{#
+  The POV use-case checklist's stylesheet. ONE definition, included by the three surfaces
+  that render the checklist:
+
+    use_cases.html      the POV lead on /use-cases           nobody writes
+    pov/detail.html     the POV's own Use cases tab           the SE writes
+    pov/access.html     the customer's "What to try"          the customer writes
+
+  A PARTIAL rather than a rule in base.html's <style>, because pov/access.html does not
+  extend base.html -- it is standalone on purpose, so that "what may this person see?" is
+  not a CSS question with an x-show for an answer (see its own header) -- and a rule in the
+  shell could not reach it.
+
+  A partial rather than three copies, because the point of this format is that the SE's
+  checklist and the customer's are the SAME checklist, and three copies of a palette is
+  three chances for the customer-facing one to drift invisibly. Two of the three files are
+  never open at the same time.
+
+  Loaded per page through base.html's {% block head %} rather than unconditionally: 34 of
+  the 36 pages that extend the shell have no checklist on them, and base.html's own <style>
+  is deliberately reserved for rules that rescue EVERY page (the table clip, the unbreakable
+  token). A feature's stylesheet in there erodes that distinction.
+
+  EVERY selector is prefixed `chk-`. The reference this format came from uses bare `.item`,
+  `.section`, `.name`, `.note`, `.progress` and `.count`; inside a Tailwind app those are one
+  utility collision away from a layout nobody can explain, and base.html already owns
+  `.progress-bar-fill` one hyphen from `.progress`.
+
+  No element carrying a `chk-` class also carries a Tailwind utility. The Play CDN injects
+  its sheet at runtime, so which of two single-class rules wins is a question about script
+  timing rather than about this file, and the way to never ask it is to not overlap.
+  `chk-scope` is the one exemption -- it declares custom properties and no layout, and on
+  pov/access.html it rides the page's own wrapper. tests/test_checklist_format.py pins all
+  of this.
+
+  The custom properties are scoped to `.chk-scope` rather than `:root` on purpose. This is a
+  BRAND accent, and the app already spends its colour budget on the TENANCY signal
+  (services/ui_theme: the chrome is the one thing that survives a cropped screenshot of a
+  screen-share). A constant cannot be mistaken for a signal that varies by profile -- but
+  only while it stays constant. If this orange ever becomes profile- or persona-derived, the
+  objection recorded at use_cases.html's group header applies again in full.
+#}
+<style>
+  .chk-scope {
+    --bt-orange: #FF5500;
+    --bt-orange-dark: #E04A00;
+    --bt-navy: #131A2E;
+    --bt-gray: #5B6373;
+    --bt-border: #E3E6EB;
+  }
+
+  /* ── page header ─────────────────────────────────────────────────────────── */
+  .chk-page-header h1 {
+    font-size: 21px;
+    font-weight: 700;
+    color: var(--bt-navy);
+    line-height: 1.2;
+  }
+  /* For a checklist that is a SECTION of a page rather than the whole of it -- the
+     accessor's "What to try", which sits below that page's own <h1>. Smaller, so the
+     heading level and the type size agree. Not `.chk-section h2`: that rule is the grey
+     bar at the top of a group, and this is a page heading that happens to be an h2. */
+  .chk-page-header h2 {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--bt-navy);
+    line-height: 1.2;
+  }
+  .chk-accent {
+    width: 44px;
+    height: 3px;
+    background: var(--bt-orange);
+    border-radius: 2px;
+    margin: 6px 0;
+  }
+  .chk-page-header p {
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--bt-gray);
+    max-width: 680px;
+  }
+  .chk-progress {
+    margin-top: 6px;
+    font-size: 12.5px;
+    color: var(--bt-gray);
+  }
+  .chk-progress b { color: var(--bt-orange-dark); font-weight: 600; }
+
+  /* The one row on these pages that puts two things side by side. `flex-wrap`, not a
+     breakpoint: at 393px the progress line plus the POV selector plus the link is wider
+     than the column, and this codebase has been bitten repeatedly by a row that would not
+     wrap taking the whole document sideways with it.
+
+     `justify-content` as a DECLARATION rather than the `justify-between` class, so this
+     row genuinely wraps instead of merely carrying the class that a mobile test looks
+     for. */
+  .chk-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px 16px;
+    margin-top: 10px;
+  }
+
+  /* ── sections ────────────────────────────────────────────────────────────── */
+  .chk-section {
+    background: #fff;
+    border: 1px solid var(--bt-border);
+    border-radius: 8px;
+    margin-top: 10px;
+    /* A declaration, not the Tailwind `overflow-hidden` CLASS: base.html rewrites that
+       class to `overflow-x: auto` when the div's direct child is a table, and a section
+       that silently started scrolling sideways would be a very confusing afternoon. */
+    overflow: hidden;
+  }
+  .chk-section h2 {
+    font-size: 11.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--bt-navy);
+    background: #FAFBFC;
+    border-bottom: 1px solid var(--bt-border);
+    padding: 7px 16px;
+    line-height: 1.4;
+  }
+  .chk-count {
+    float: right;
+    color: var(--bt-gray);
+    font-weight: 500;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .chk-focus {
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 9px;
+    background: #FFF3EC;
+    color: var(--bt-orange-dark);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  /* The reference's "only if asked / if time" group, doing the POV job: the cards this
+     evaluation has no tenant for. Dashed and warm rather than grey, because grey is what
+     the old wall of masked cards looked like and this is a scoping FACT, not a failure. */
+  .chk-section.chk-deferred { border-style: dashed; }
+  .chk-section.chk-deferred h2 {
+    color: var(--bt-orange-dark);
+    background: #FFF3EC;
+    border-bottom-color: #F5D8C7;
+  }
+  .chk-blurb {
+    padding: 6px 16px;
+    border-bottom: 1px solid var(--bt-border);
+    font-size: 12px;
+    line-height: 1.35;
+    color: var(--bt-gray);
+  }
+
+  /* ── rows ────────────────────────────────────────────────────────────────── */
+  .chk-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 6px 16px;
+    border-bottom: 1px solid var(--bt-border);
+  }
+  .chk-item:last-child { border-bottom: none; }
+  .chk-item:hover { background: #FAFBFC; }
+  /* Only where a click on the row actually toggles something. The reference puts
+     `cursor: pointer` on every row because its rows hold nothing but a checkbox and prose;
+     ours hold a title anchor, a Guide link and (on the customer's page) a text box, so the
+     pointer is opt-in and the handler guards itself. */
+  .chk-item.chk-clickable { cursor: pointer; user-select: none; }
+
+  .chk-box {
+    margin-top: 2px;
+    width: 15px;
+    height: 15px;
+    accent-color: var(--bt-orange);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  /* The read-only slot on /use-cases. Same 15px footprint as a checkbox so the names line
+     up down the page, and deliberately NOT a box outline: an outlined square that does not
+     respond to a click is a control, and that page performs no writes. */
+  .chk-mark {
+    width: 15px;
+    margin-top: 1px;
+    flex-shrink: 0;
+    font-size: 13px;
+    line-height: 1.3;
+    text-align: center;
+    color: var(--bt-orange-dark);
+  }
+
+  /* THE DENSITY. The name and the note share one line and the note wraps inside itself;
+     the tail is pushed right on whatever line it lands on. */
+  .chk-txt {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 8px;
+    row-gap: 2px;
+  }
+  .chk-name {
+    flex: 0 1 auto;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: #1C2233;
+    text-decoration: none;
+    /* The same argument base.html makes for `main code`: only `anywhere` counts toward
+       min-content, and min-content is what sets the page's minimum width. A product name
+       nobody hyphenated must not be able to widen the document. */
+    overflow-wrap: anywhere;
+  }
+  a.chk-name { color: #1C2233; }
+  a.chk-name:hover { color: var(--bt-orange-dark); text-decoration: underline; }
+  .chk-note {
+    /* Grows into the space left over on the name's line, wraps INSIDE itself, and only
+       drops to its own line below ~10rem. That is what keeps one card to one line on a
+       desktop. */
+    flex: 1 1 10rem;
+    min-width: 0;
+    font-size: 12px;
+    line-height: 1.35;
+    color: var(--bt-gray);
+    overflow-wrap: anywhere;
+  }
+  .chk-note::before { content: "\2014\00a0"; color: #B4BAC7; }
+
+  /* Everything actionable or numeric, right-aligned, and it WRAPS rather than clips. No
+     `truncate` and no `text-overflow` anywhere in this file: the last time a row like this
+     was truncated at 393px the clip ate a 94px anchor whose rect was perfectly correct and
+     which nothing on screen said existed. */
+  .chk-tail {
+    flex: 0 0 auto;
+    margin-left: auto;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 8px;
+    font-size: 11.5px;
+    color: var(--bt-gray);
+  }
+  /* A full-width line inside the same row: the needs-wiring remedy, the attribution, the
+     customer's note, the note box. The second line of a row, not a second row. */
+  .chk-sub {
+    flex: 0 0 100%;
+    min-width: 0;
+    font-size: 11.5px;
+    line-height: 1.35;
+    color: var(--bt-gray);
+  }
+
+  .chk-item.chk-done .chk-name { text-decoration: line-through; color: #9AA3B5; }
+  .chk-item.chk-done .chk-note { color: #B4BAC7; }
+  .chk-item.chk-skipped .chk-name { color: #9AA3B5; }
+
+  .chk-state { white-space: nowrap; }
+  .chk-state.chk-state-done { color: var(--bt-orange-dark); font-weight: 600; }
+  .chk-state.chk-state-wiring { color: #8A5A18; }
+  .chk-guide { color: var(--bt-gray); text-decoration: none; white-space: nowrap; }
+  .chk-guide:hover { color: var(--bt-orange-dark); text-decoration: underline; }
+  .chk-link { color: var(--bt-orange-dark); text-decoration: underline; }
+  .chk-link:hover { text-decoration: none; }
+
+  /* ── controls ────────────────────────────────────────────────────────────── */
+  .chk-btn {
+    font-family: inherit;
+    font-size: 11px;
+    line-height: 1.4;
+    padding: 2px 8px;
+    border: 1px solid var(--bt-border);
+    border-radius: 5px;
+    background: #fff;
+    color: var(--bt-gray);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .chk-btn:hover { border-color: var(--bt-orange); color: var(--bt-orange-dark); }
+  .chk-btn:disabled { opacity: 0.5; cursor: default; }
+  .chk-btn.chk-btn-on {
+    background: #F2F3F5;
+    border-color: #C6CCD9;
+    color: #3A4256;
+    font-weight: 600;
+  }
+
+  /* The customer's note: always visible, and one line tall until there is something in it.
+     `field-sizing: content` grows it with the text in Chromium (what this app is measured
+     in); the `rows="2"` attribute on the element is the fallback everywhere else. */
+  .chk-noteinput {
+    width: 100%;
+    margin-top: 2px;
+    font-family: inherit;
+    font-size: 11.5px;
+    line-height: 1.4;
+    color: #3A4256;
+    padding: 3px 7px;
+    border: 1px solid var(--bt-border);
+    border-radius: 6px;
+    background: #fff;
+    resize: vertical;
+    field-sizing: content;
+    min-height: 1.9em;
+    max-height: 8em;
+  }
+  .chk-noteinput:focus { outline: none; border-color: var(--bt-orange); }
+  .chk-noteinput::placeholder { color: #A8AFBD; }
+
+  /* The customer's own words, read back on the operator's page. */
+  .chk-quote {
+    margin-top: 3px;
+    padding: 4px 9px;
+    border-left: 3px solid var(--bt-border);
+    border-radius: 0 4px 4px 0;
+    background: #FAFBFC;
+    font-style: italic;
+    color: #3A4256;
+  }
+  .chk-quote.chk-quote-customer {
+    border-left-color: var(--bt-orange);
+    background: #FFF8F4;
+    color: #7A3A12;
+  }
+  .chk-by { color: #9AA3B5; }
+
+  .chk-callout {
+    margin-top: 10px;
+    background: #FFF3EC;
+    border-left: 3px solid var(--bt-orange);
+    border-radius: 6px;
+    padding: 7px 12px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: #7A3A12;
+  }
+  .chk-empty {
+    padding: 10px 16px;
+    font-size: 12px;
+    color: var(--bt-gray);
+  }
+</style>

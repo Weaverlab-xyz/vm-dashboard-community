@@ -372,13 +372,53 @@ So on a POV instance that page now **leads with a POV**: pick one from the selec
 checklist. Measured on the same instance, that is 26 masked cards leading the page before and
 25 runnable ones after.
 
-The instance-wide catalog keeps its place underneath and is **collapsed, never filtered**.
-Every group and every card is still rendered, the toggle says what is behind it, and the page
-says why it is all still there. The distance between *collapsed* and *removed* is the whole
-argument this page rests on — a persona or a profile may reorder and emphasise, never
-subtract — so both halves are pinned: the groups assignment may not `.filter(`, and the
-collapse may not use `x-if`, which would take them out of the DOM. That is filtering with
-extra steps. An estate instance opens on exactly what it opened on before.
+Collapsed turned out not to be enough. The first build of this slice left the instance-wide
+catalog underneath the lead, collapsed behind one click. Every group and every card was still
+rendered — still in the DOM, still in find-in-page, and still one stray click from being the
+wall the lead exists to replace, on the page whose whole job is to stop being that wall. So
+**on a POV instance the instance-wide catalog is not rendered at all**: `x-if`, not `x-show`,
+because *hidden* is a claim about CSS and this is a claim about the DOM.
+
+Which axis does that is the part worth reading twice, because it looks like the rule this page
+rests on. A **persona** may reorder and emphasise and never subtract — unchanged, and still
+pinned: the groups assignment may not `.filter(`. This is the **profile** choosing which of two
+catalogs the page is *about*. The instance-wide one answers "can this instance run it?", which
+a POV page has no use for; the per-POV one answers "can I run this on this POV?". An estate
+instance renders the first, complete and unfiltered, exactly as it did before; a POV instance
+renders the second, and nothing else.
+
+### One format, three surfaces
+
+The checklist is rendered in one dense, BeyondTrust-branded format everywhere it appears:
+sections with an uppercase role header and a right-floated count, and one row per card with
+the title and its summary on a single line, separated by an em-dash. It replaced a
+three-column grid of tall cards, which was correct and which nobody scanned mid-call — a POV
+carries 32 role cards plus up to 14 runbook ones.
+
+| Surface | Who writes | The tick |
+|---|---|---|
+| `/use-cases`, the POV lead | nobody | a static ✓ / – mark and the word for it |
+| `/pov/<id>#use-cases` | the SE | a checkbox, and the whole row is a click target |
+| the accessor's page | the customer | a checkbox, plus an always-visible note box |
+
+The read-only surface gets a **mark, not a checkbox**. It performs no writes (pinned), and a
+checkbox there would be a control that looks live and records nothing — worse than no control,
+because a tick somebody believed is a card they will not demo again. For the same reason the
+mark is blank rather than an empty box outline: an outlined square that does nothing when
+clicked is a control.
+
+`out_of_scope` cards get the reference format's dashed "only if asked" section, on the SE's
+page only, headed *not part of this POV*. They stay **tickable** there — "we showed them
+anyway" is a thing that happens in a POV, and one row definition serves both sections so the
+deferred one cannot quietly drift read-only. The two surfaces answering "what next?" drop them
+instead: a card whose answer is "not on this evaluation" is not an answer to that question.
+
+The stylesheet is [`templates/_checklist_styles.html`](../../../../web_dashboard/templates/_checklist_styles.html)
+— one definition, reached through a new `{% block head %}` in `base.html` by the two surfaces
+that extend the shell, and by a direct `{% include %}` from the accessor page, which does not
+extend it and must not start. Three copies of a palette would be three chances for the
+customer-facing surface to drift, and two of the three files are never open at the same time.
+Every selector is prefixed `chk-`, and no element carrying one also carries a Tailwind utility.
 
 No backend. The lead reads `/api/pov/managed` and the same `/api/pov/managed/{id}/use-cases`
 the POV's own page reads, so the two cannot disagree about what a POV can run, and every way

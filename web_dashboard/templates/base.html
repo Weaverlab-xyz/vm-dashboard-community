@@ -61,6 +61,14 @@
     main code, main pre { overflow-wrap: anywhere; }
     main pre { max-width: 100%; overflow-x: auto; }
   </style>
+  {# Per-page <head> additions. Added for the POV checklist's stylesheet, which three
+     surfaces share and only two of them reach through this shell -- pov/access.html is
+     standalone on purpose and includes the same partial itself.
+
+     The rules above are app-wide and belong to every page: the table clip rescues ~50
+     tables, the code/pre rule rescues 363 elements. A feature's stylesheet does not, and
+     34 of the 36 pages that extend this file have no checklist on them. #}
+  {% block head %}{% endblock %}
 </head>
 <body class="{{ theme.body_bg }} min-h-screen font-sans text-gray-800">
 

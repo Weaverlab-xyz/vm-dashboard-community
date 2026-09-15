@@ -812,6 +812,40 @@ def test_the_accessor_page_renders_the_note_as_text_not_html():
         "the operator's page does not show the customer's note"
 
 
+def test_the_customer_ticks_with_a_checkbox_and_the_note_is_always_there():
+    """Three properties of the customer's row.
+
+    The tick is a real control bound to the state the API served -- this page writes, so
+    unlike the read-only lead on /use-cases it gets a checkbox rather than a static mark.
+
+    The note box is visible without a click, because a comment behind a control is a
+    comment nobody leaves, and it is the reason this page is worth more than a row of ticks.
+
+    And the row itself is NOT click-to-tick, unlike the operator's page: the customer clicks
+    into that text box on every card, and an accidental tick corrupts exactly the evidence
+    this page exists to collect. Checked inside class attributes rather than anywhere in the
+    file, so the comment that explains the absence does not satisfy the test.
+    """
+    src = _markup(_ACCESS_PAGE)
+    box = re.search(r'<input[^>]*class="chk-box"[^>]*>', src, re.S)
+    assert box, "the customer cannot tick a card"
+    assert "c.progress.state === 'done'" in box.group(0), \
+        "the box is not bound to the state the API served"
+    assert "@change=" in box.group(0), \
+        "the box is bound to click, which fires with the old checked value"
+    tex = re.search(r'<textarea[^>]*x-model="c\.progress\.note"[^>]*>', src, re.S)
+    assert tex, "the customer has nowhere to write a note"
+    assert "x-show" not in tex.group(0), "the note box itself is behind an x-show"
+    # And neither is the element holding it. Scoped to that one wrapper rather than to the
+    # preceding few hundred characters, which would also catch the Guide link's own x-show.
+    head = src[:tex.start()]
+    wrapper = head[head.rfind("<div"):]
+    assert "x-show" not in wrapper, \
+        "the note box is behind an x-show; a comment behind a control is one nobody leaves"
+    assert not re.search(r'class="[^"]*chk-clickable', src), \
+        "the customer's rows are click-to-tick, next to a text box they click into"
+
+
 def test_the_accessor_page_still_offers_no_link_into_the_dashboard():
     """Every card target on the operator's page is a screen an accessor is refused on."""
     src = _markup(_ACCESS_PAGE)

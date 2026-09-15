@@ -6,10 +6,12 @@ One page per role. Each covers what that person owns, the four-layer story in th
 language (provisioning → PRA → Password Safe → Entitle), the use cases to run, which
 integrations each needs, and how to talk to that buyer.
 
-The in-app **Use cases** page is the same catalog, with each card reporting whether *this*
-instance can actually run it. These pages are the narrative behind those cards; the
-registry that produces them is `services/personas.py`, and `tests/test_persona_docs.py` is
-what stops the two drifting.
+On an estate instance the in-app **Use cases** page is the same catalog, with each card
+reporting whether *this* instance can actually run it. A POV instance shows that POV's own
+checklist there instead — see [What the customer sees](../../pov/customer-access.md).
+
+These pages are the narrative behind those cards; the registry that produces them is
+`services/personas.py`, and `tests/test_persona_docs.py` is what stops the two drifting.
 
 | Role | Owns |
 |---|---|

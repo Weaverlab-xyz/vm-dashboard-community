@@ -17,9 +17,15 @@ selector and you get its checklist, asking a different question — **can I run 
 POV?** — whose answer comes from the three tenant columns on the row, which is exactly where
 a Password-Safe-only evaluation differs from an all-three one.
 
-The instance-wide catalog is still there, underneath, collapsed behind one click. Collapsed
-and not removed: nothing on this page is ever hidden from you, and an estate instance opens
+The instance-wide catalog is **not on that page at all** on a POV instance. It answers a
+question about the *instance* — "can this instance run it?" — which a POV page has no use for,
+and the twenty-six grey cards it produced here were the wall the lead exists to replace;
+leaving them collapsed underneath left them one find-in-page away. An estate instance opens
 exactly as it always did.
+
+That page **reads**. Each row shows a ✓ or a – and the word for it, not a control: ticking a
+card off lives on the POV's own page, which is where every other action on that POV lives too,
+and a checkbox on a page that records nothing would be worse than no checkbox.
 
 Every role and every card is always on the page. The product mix decides what each card
 **says**, never whether you can see it:
@@ -29,6 +35,10 @@ Every role and every card is always on the page. The product mix decides what ea
 | Live | This POV has the products, and the wire-up has run for them | A link to the tab that runs it |
 | Needs wiring | The tenant is set and the artifact is not | What to run, and a link to the Wired tab |
 | Not part of this POV | No tenant for that product on this row | Nothing — the fix is a decision about the evaluation, not a button |
+
+The "not part of this POV" cards are grouped into their own dashed section at the foot of each
+role on your page, headed *not part of this POV*. They are still tickable there — if you showed
+one anyway, that counts — and the customer never sees them at all.
 
 That last row is the one worth reading twice. It is **not** the same state as an estate-only
 feature being masked on this instance: nobody can turn it on from Settings, because there
@@ -41,7 +51,11 @@ half you came for.
 
 ### Ticking them off
 
-Each card has **Mark done** and **Skip**, and the count rides on the row in the POV list.
+Each card has a **checkbox** and a **Skip** control, and on your page clicking anywhere on the
+row that is not a link or a button ticks it too. The count rides on the row in the POV list.
+The customer's version of the same row has a checkbox, a **Not for us** control, and a note box
+that is always visible rather than behind a control — a comment behind a click is a comment
+nobody leaves.
 
 `Skip` is a real answer rather than a way to hide a card: "we showed them and it did not
 land" and "we never got to it" are different things to walk into a renewal conversation
