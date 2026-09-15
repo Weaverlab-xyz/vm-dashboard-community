@@ -23,6 +23,7 @@ from ..database import (CertLab, CloudDatabase, CloudFunction,
                         HypervisorConnection, HypervisorVMCache, Job, K8sCluster,
                         PovEnvironment, SpireLab, VirtualDesktop, WorkloadCloudCredential,
                         WorkloadK8sToken)
+from . import config_mgmt_route_service as cmr
 from . import expiry_policy, hypervisor_view_service
 
 logger = logging.getLogger(__name__)
@@ -444,7 +445,11 @@ def _hv_match_keys(conn, row) -> set:
     return keys
 
 
-def _hv_item(conn, row, workgroup: Optional[str], ips: list) -> dict:
+def _hv_item(conn, row, workgroup: Optional[str], ips: list,
+             routes: "cmr.RouteTable" = cmr.EMPTY) -> dict:
+    # `routes` defaults to the empty table so this stays callable as a pure mapper with
+    # no session — which is how the projection tests exercise it, and how an empty table
+    # proves the pre-route behaviour is unchanged rather than merely re-asserted.
     kind = (conn.kind or "").lower()
     if kind in _SCOPE_IS_A_REGION:
         region = (row.scope or "") or (conn.site or "")
@@ -485,7 +490,22 @@ def _hv_item(conn, row, workgroup: Optional[str], ips: list) -> dict:
         # getattr, like _db_item's: these projections are exercised against plain
         # stand-ins as well as ORM rows, and a row from a build before the column
         # existed is the same shape.
-        "agent_id": getattr(conn, "agent_id", None),
+        #
+        # `agent_id` is WHO EXECUTES a Config-Management run, which is normally the agent
+        # brokering the connection but may be one a Config-Management route delegates this
+        # VM's address to. The two differ exactly when the brokering agent cannot reach
+        # the guest subnet — the vmrest case, where that agent must live on the Windows
+        # host and Docker Desktop's WSL2 VM reaches no vmnet. Resolved HERE so
+        # /agent-targets, `_target_spec` and the bulk fan-out cannot disagree about it.
+        "agent_id": routes.executor_for(ips[0] if ips else "",
+                                        fallback=getattr(conn, "agent_id", None) or "")
+                    or None,
+        # WHO DISCOVERED it. Provenance, and the field a diagnostic must name: the
+        # `sync_guest_details` remedy for a VM with no address belongs in the BROKER's
+        # connections.yaml, never the executor's. Kept separate rather than overwritten
+        # because those two are only equal by accident on that path — no address means no
+        # route match means fallback — and an accident is not an invariant.
+        "broker_agent_id": getattr(conn, "agent_id", None),
         "connection_id": conn.id,
         # The guest's OS as the hypervisor reported it, used only to choose SSH or WinRM.
         # Absent on a connection that does not sync guest details, and the run form's
@@ -497,8 +517,11 @@ def _hv_item(conn, row, workgroup: Optional[str], ips: list) -> dict:
 def _hypervisor_items(db: Session, claimed: set) -> list:
     """Synced hypervisor VMs, minus any a deploy Job already accounts for.
 
-    One row query plus one bulk override lookup per kind present — at most six, whatever
-    the size of the estate.
+    One row query, one Config-Management route table, and one bulk override lookup per
+    kind present — at most seven, whatever the size of the estate. The route table is
+    loaded ONCE here and threaded down into `_hv_item` for the same reason the override
+    lookup is bulk: resolving it per VM would be a query per row, and
+    `tests/test_inventory_route_queries.py` pins that it is not.
 
     Only ACTIVE connections: a sync only ever touches those, and ``_prune`` only removes
     rows a pass touched, so deactivating a connection freezes its cache rather than
@@ -513,6 +536,8 @@ def _hypervisor_items(db: Session, claimed: set) -> list:
             .all())
     if not rows:
         return []
+
+    routes = cmr.load_table(db)
 
     by_kind: dict = {}
     for row, conn in rows:
@@ -538,7 +563,7 @@ def _hypervisor_items(db: Session, claimed: set) -> list:
             except (TypeError, ValueError):
                 ips = []
             key = _hv_override_key(kind, row.vm_id, row.scope)
-            items.append(_hv_item(conn, row, overrides.get(key), ips))
+            items.append(_hv_item(conn, row, overrides.get(key), ips, routes))
     return items
 
 

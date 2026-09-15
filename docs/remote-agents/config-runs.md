@@ -47,6 +47,12 @@ the policy check happens here and the connection happens seconds later in anothe
 
 ### Four grants, all required
 
+Every one of them belongs to the agent that **executes** the run. By default that is the
+agent whose hypervisor connection discovered the target, so "the agent" is unambiguous —
+but a [Config-Management route](#which-agent-executes-a-run) can send runs for an address
+range to a different agent, and then it is *that* agent's `policy.yaml` and *that* agent's
+grant on the Agents tab that decide whether the run happens.
+
 | Grant | Who owns it | Where |
 |---|---|---|
 | this agent may run `agent_ansible` | the dashboard operator | Agents page |
@@ -69,6 +75,46 @@ docker pull chrweav/ansible-cloud:latest     # database targets — the localhos
 
 The agent will not pull either for you, deliberately — a pull is a network fetch of
 executable content.
+
+### Which agent executes a run
+
+By default, the agent whose hypervisor connection discovered the VM. That is usually
+right, and while it is right there is nothing to configure.
+
+It stops being right when the agent that can read a hypervisor's API has no network path
+to the guests that hypervisor reports. The clearest case is VMware Workstation: `vmrest`
+binds `127.0.0.1` and has no bind-address option, so the agent must run **on the Windows
+host** under Docker Desktop — and Docker Desktop's Linux VM cannot reach a VMware vmnet at
+all. The agent sees every guest and can reach none of them.
+
+A **Config-Management route** separates the two. On **Remote Agents → Config Routes**, name
+an address range and the agent that executes runs against it:
+
+| Range | Executes on |
+|---|---|
+| `192.168.235.0/24` | `lab-runner` (a VM on that segment) |
+
+Runs for an address in that range go to `lab-runner`. Everything else still goes to the
+discovering agent. Matching is longest-prefix-first, so a `/32` overrides a `/24`, and one
+range may name only one agent — a duplicate is refused rather than resolved by guesswork.
+
+**What moves is who runs it, never what it runs against.** The target address is still
+whichever address the *discovering* agent reported for that VM
+([it needs an address](#before-a-vm-appears-as-a-target-it-needs-an-address) is unchanged),
+and the route is applied to that address after it is fixed. A route cannot aim a playbook
+somewhere the sync never reported.
+
+**The routed agent needs its own grants** — all four above, in its own `policy.yaml`,
+including an `ansible.targets` entry covering the range. Two agents means two policy files,
+and the second one is the step people miss: the symptom is
+`policy.yaml does not allow Config Management against …` from an agent that has never
+appeared in a job before. The route form renders the exact block to paste.
+
+Where you see the result: the target picker names the executing agent, the line under it
+explains which route decided, and the job description records it as `… via <agent>`.
+
+To undo it, clear **Active** on the route — runs go straight back to the discovering agent,
+with no re-sync. Delete it if you do not want the record of the decision kept.
 
 ### Before a VM appears as a target: it needs an address
 

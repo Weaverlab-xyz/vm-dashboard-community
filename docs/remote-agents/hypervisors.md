@@ -21,6 +21,11 @@ host or a username. The job says *"run `inventory_sync` on `dc1-vcenter`"* and t
 resolves the endpoint from its own
 [`connections.yaml`](../../examples/remote-agent/connections.example.yaml).
 
+This binding decides which agent **discovers and powers** the estate. Which agent
+**configures** the guests it finds is a separate question, because the two are not always
+the same host — see
+[which agent executes a run](config-runs.md#which-agent-executes-a-run).
+
 That asymmetry is the difference between this and a proxy, and it is not about secrecy — it
 is about aiming. A dashboard that could set `host` could redirect the agent's authenticated
 session at an endpoint of its choosing and harvest the credential on first use; one that

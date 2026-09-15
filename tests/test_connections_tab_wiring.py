@@ -157,7 +157,8 @@ def test_each_panel_defines_the_factory_it_names():
     script tag inside an `x-if` template is cloned rather than executed, so lazy-mounting a
     panel that way would silently leave a dead x-data."""
     for name, factory in (("_agents.html", "agentsPage"),
-                          ("_connections.html", "connectionsPage")):
+                          ("_connections.html", "connectionsPage"),
+                          ("_config_routes.html", "configRoutesPage")):
         src = _read(*_TPL, "agents", name)
         assert f'x-data="{factory}()"' in src, f"{name} does not mount {factory}()"
         assert re.search(r"\nfunction %s\(" % factory, src), \
@@ -169,10 +170,103 @@ def test_both_panels_explain_a_403_instead_of_flashing_it():
     (`agents` and `connections` are separate, and both are require_explicit_permission)
     gets a 403 from the other tab. A red toast about a list the reader never asked for
     reads as the whole page being broken."""
-    for name in ("_agents.html", "_connections.html"):
+    for name in ("_agents.html", "_connections.html", "_config_routes.html"):
         src = _read(*_TPL, "agents", name)
         assert "isDenied(e)" in src, f"{name} does not recognise a permission denial"
         assert "noAccess" in src, f"{name} has no in-place notice for a denial"
+
+
+# ── the Config Routes tab ────────────────────────────────────────────────────
+
+def test_the_hub_declares_the_config_routes_tab():
+    hub = _read(*_TPL, "agents", "index.html")
+    assert "activeTab === 'config-routes'" in hub, "the hub has no Config Routes panel"
+    assert '{% include "agents/_config_routes.html" %}' in hub, \
+        "the hub does not include the Config Routes partial"
+
+
+def test_the_config_routes_tab_needs_both_agents_and_ansible():
+    """Neither flag is redundant. A route names an AGENT (so remote agents must be on) to
+    execute a Config-Management run (so Ansible must be on — it is also the gate on the
+    /api/config-mgmt router those runs are queued through). A panel rendering against a
+    router that 404s is the nav-link-to-404 bug by another door."""
+    hub = _read(*_TPL, "agents", "index.html")
+    assert "{% if remote_agents_enabled and ansible_enabled %}" in hub, \
+        "the Config Routes tab is not gated on both remote_agents_enabled and ansible_enabled"
+
+
+def test_the_config_routes_tab_can_never_be_the_only_tab():
+    """Keeps the `connections_only` heading branch exhaustive. Because the Config Routes
+    gate includes remote_agents_enabled, the Agents tab is on whenever this one is — so
+    there is no third "only tab" state needing a heading of its own."""
+    hub = _read(*_TPL, "agents", "index.html")
+    gate = "{% if remote_agents_enabled and ansible_enabled %}"
+    assert gate in hub
+    body = hub.split(gate, 1)[1].split("{% endif %}", 1)[0]
+    assert "'config-routes'" in body, "the gate above no longer guards the tab append"
+    assert "connections_only = tab_slugs == ['connections']" in hub, \
+        ("the single-tab heading rule changed shape; re-check whether Config Routes can "
+         "now be the only tab")
+
+
+def test_the_config_routes_panel_toggles_with_x_show():
+    """A script tag inside an `x-if` template is CLONED rather than executed, so lazy
+    mounting would leave a dead x-data: the panel would render and every button would do
+    nothing, with no error anywhere."""
+    hub = _read(*_TPL, "agents", "index.html")
+    panel = re.search(r"<div ([^>]*activeTab === 'config-routes'[^>]*)>", hub)
+    assert panel, "the Config Routes panel wrapper changed shape"
+    assert "x-show=" in panel.group(1), "the Config Routes panel mounts lazily with x-if"
+
+
+def test_a_route_form_never_offers_a_host_a_port_or_a_secret():
+    """THE INVARIANT, ASSERTED IN THE MARKUP. A route designates who runs a playbook,
+    never what it runs against: the address stays pinned to one the discovering agent
+    reported. A host or credential field here would be the substitution this feature was
+    careful not to introduce."""
+    src = _read(*_TPL, "agents", "_config_routes.html")
+    for forbidden in ("form.host", "form.port", "form.secret", "form.username",
+                      "form.transport", "form.connection_id"):
+        assert forbidden not in src, \
+            f"the route form binds {forbidden} — it must name an agent and a range only"
+
+
+def test_the_route_form_tells_the_operator_about_the_second_policy_file():
+    """The top new failure mode: two agents means two policy.yaml files, and the routed
+    agent's `ansible.targets` is the one people forget. The form renders the block to
+    paste, because the alternative is finding out from a failed job's Live Output."""
+    src = _read(*_TPL, "agents", "_config_routes.html")
+    assert "policySnippet()" in src, "the form no longer offers the policy.yaml block"
+    assert "ansible.targets" in src or "targets:" in src, \
+        "the form does not mention the routed agent's own ansible.targets"
+
+
+def test_the_route_panel_reads_the_endpoint_that_serves_routes():
+    src = _read(*_TPL, "agents", "_config_routes.html")
+    assert "/api/connections/config-mgmt-routes" in src, \
+        "the panel does not call the route endpoint"
+    router = _read("web_dashboard", "api", "connections.py")
+    assert '@router.get("/config-mgmt-routes")' in router, \
+        "the route list endpoint is gone or renamed"
+    # Static paths must be declared before `/{connection_id}`, or a future FastAPI
+    # matching change could let the parameterised route shadow them.
+    assert router.index('"/config-mgmt-routes"') < router.index('"/{connection_id}"'), \
+        "the route endpoints are declared after the parameterised connection routes"
+
+
+def test_the_route_endpoints_reuse_the_connections_scope():
+    """Deliberate, and argued in the router: a route decides which host runs a playbook as
+    root, so the audience is identical to a hypervisor credential, and `connections:write`
+    already lets its holder bind a connection to any agent. A new scope would cost the
+    whole permission-catalog dance for no change in who should hold it — so if
+    tests/test_permission_catalog.py starts failing, a new scope crept in here."""
+    router = _read("web_dashboard", "api", "connections.py")
+    block = router.split("Config-Management execution routes", 1)[1]
+    assert 'require_explicit_permission("connections", "read")' in block
+    assert 'require_explicit_permission("connections", "write")' in block
+    assert 'require_explicit_permission("connections", "delete")' in block
+    assert "PERMISSION_SCOPE" not in block, \
+        "the route endpoints reference a permission catalog entry of their own"
 
 
 # ── the nav ──────────────────────────────────────────────────────────────────

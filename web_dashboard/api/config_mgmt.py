@@ -29,6 +29,7 @@ from pydantic import BaseModel, model_validator
 from sqlalchemy.orm import Session
 
 from ..database import Job, User, get_db
+from ..services import config_mgmt_route_service as cmr
 from .auth import get_current_user, require_permission
 from ..services import job_service
 from ..services import storage_service
@@ -230,16 +231,28 @@ async def get_agent_targets(
     almost always a VM with no address yet — because "why is my VM not in this list" is the
     question this feature will actually generate.
 
+    ``agent_id`` is the agent that will EXECUTE the run, which for a VM may be one a
+    Config-Management route delegates its address to rather than the agent that discovered
+    it. ``executor_note`` is the whole operator-facing sentence, composed HERE so the
+    picker, the run panel and the job description cannot word it three different ways —
+    "why did it pick that agent" is the question this feature will actually generate.
+
     Response shape::
 
         {"vms": [{id, name, agent_id, agent_name, connection_id, target_id, ip,
-                  transport, cloud, reason}, …],
+                  transport, cloud, reason, discovered_by_agent_id,
+                  discovered_by_agent_name, executor_source, executor_via,
+                  executor_note}, …],
          "databases": [{id, name, agent_id, agent_name, target_id, host, engine, reason}, …]}
     """
     from ..database import RemoteAgent
     from ..services import inventory_service
 
-    agent_names = {a.id: a.name for a in db.query(RemoteAgent).all()}
+    agents = {a.id: a for a in db.query(RemoteAgent).all()}
+    agent_names = {aid: a.name for aid, a in agents.items()}
+    # One table for every row on the page, not one lookup per row — the same reason
+    # inventory_service loads it once.
+    routes = cmr.load_table(db)
     accessible = inventory_service.accessible_workgroups(current_user)
     out: dict = {"vms": [], "databases": []}
     for item in inventory_service.collect(db):
@@ -258,13 +271,72 @@ async def get_agent_targets(
                         "target_id": item["id"].split(":", 1)[1]})
             out["databases"].append(row)
         else:
+            broker = item.get("broker_agent_id") or ""
+            route = routes.match_for(item.get("ip") or "")
             row.update({"cloud": item.get("cloud") or "",
                         "connection_id": item.get("connection_id") or "",
                         "target_id": item["id"].split(":")[-1],
                         "ip": item.get("ip") or "",
-                        "transport": spec.get("transport") if isinstance(spec, dict) else ""})
+                        "transport": spec.get("transport") if isinstance(spec, dict) else "",
+                        "discovered_by_agent_id": broker,
+                        "discovered_by_agent_name": agent_names.get(broker, ""),
+                        "executor_source": "route" if route is not None else "connection",
+                        "executor_via": (route.label or route.cidr) if route else ""})
+            row["executor_note"] = _executor_note(row, route)
+            # A route pointing at a revoked agent, or one whose Config-Management grant
+            # was taken away, resolves every run in its range to a refusal. Said here,
+            # where the row renders disabled with the reason, rather than left to surface
+            # as a failed job twenty seconds later.
+            if not row["reason"]:
+                row["reason"] = _executor_unusable(agents.get(row["agent_id"]), route)
             out["vms"].append(row)
     return out
+
+
+def _executor_note(row: dict, route) -> str:
+    """The one sentence that answers "why that agent", in the order a reader needs it:
+    who runs it, who found it, and which row decided.
+
+    Server-side on purpose. The picker option, the run panel and the job description all
+    render this same string, so there is one wording to change and one wording to test.
+    """
+    runner = row.get("agent_name") or "an unknown agent"
+    if route is None:
+        return (f"Executed by {runner} — the agent whose hypervisor connection discovered "
+                f"this VM. Route a different one under Remote Agents → Config Routes.")
+    finder = row.get("discovered_by_agent_name") or "another agent"
+    via = route.label or route.cidr
+    return (f"Executed by {runner}. This VM was discovered by {finder}; the "
+            f"Config-Management route {via} ({route.cidr}) sends runs for its address to "
+            f"{runner}.")
+
+
+def _executor_unusable(executor, route) -> str:
+    """Why the resolved agent cannot actually take the run, or "" if it can.
+
+    Only the two states a route can put the dashboard into that the ordinary enqueue
+    gates would report against the WRONG agent: without this, a revoked delegate surfaces
+    as "That remote agent is not registered", naming an agent the operator never chose.
+    """
+    from ..services import agent_service
+
+    if executor is None:
+        if route is None:
+            return ""
+        return (f"the Config-Management route {route.cidr} names an agent that no longer "
+                f"exists. Remove the route, or re-add it against a registered agent.")
+    if not executor.is_active:
+        return (f"agent '{executor.name}' is revoked"
+                + (f", and the Config-Management route {route.cidr} sends this VM's runs "
+                   f"to it. Re-enrol that agent, or remove the route so runs go back to "
+                   f"the agent that discovered this VM." if route is not None else "."))
+    if "agent_ansible" not in agent_service.allowed_job_types(executor):
+        return (f"agent '{executor.name}' is not granted the Config-Management job type. "
+                f"Grant `agent_ansible` to it on the Agents tab — it is the agent that "
+                f"would execute this run"
+                + (f", named by the Config-Management route {route.cidr}."
+                   if route is not None else "."))
+    return ""
 
 
 # ── Localhost targets (Kubernetes clusters + databases) ─────────────────────────
@@ -443,6 +515,32 @@ def _validate_cloud_secret_stores(runner: str, secret_vars: dict | None,
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+def _wrong_executor(db, conn, host: str, agent, expected: str) -> str:
+    """Why this agent may not run against this address, and what to do instead.
+
+    Two shapes, because the remedy differs. With a Config-Management route in play the
+    caller is almost always a stale browser tab holding the pre-route target list, so the
+    fix is "select the target again" — the picker is what computes the executor. With no
+    route, this is the original "you named an agent that has nothing to do with this
+    connection" refusal, and the fix may well be to ADD a route.
+
+    Both name the agent that *would* run it. The old message named only the agent that
+    could not, which is the half that does not help.
+    """
+    from ..database import RemoteAgent
+
+    runner = db.query(RemoteAgent).filter(RemoteAgent.id == expected).first()
+    runner_name = runner.name if runner else (expected or "no agent")
+    route = cmr.match_for(db, host)
+    if route is not None:
+        return (f"This VM's address {host} is routed to agent '{runner_name}' by the "
+                f"Config-Management route {route.cidr}, so agent '{agent.name}' cannot run "
+                f"against it. Select the target again — the picker names the agent that "
+                f"will execute — or remove that route.")
+    return (f"This connection is brokered by agent '{runner_name}' and no "
+            f"Config-Management route covers {host}, so agent '{agent.name}' cannot run "
+            f"against it. Select the target again, or add a route for that address under "
+            f"Remote Agents → Config Management.")
 
 
 def _resolve_agent_target(payload: "RunRequest", db) -> dict:
@@ -509,19 +607,18 @@ def _resolve_agent_target(payload: "RunRequest", db) -> dict:
         return {"run_kind": "database", "transport": "local",
                 "target_host": row.private_host, "target_port": row.port or 0,
                 "target_id": row.id, "connection_id": "",
-                "target_label": f"{row.engine}/{row.id[:8]}"}
+                "target_label": f"{row.engine}/{row.id[:8]}",
+                "executor_name": agent.name}
 
-    # A VM: the connection must be bound to this agent, and the address must be one the
-    # agent itself reported for that VM. That second check is what stops an arbitrary
-    # address being substituted for a legitimately-synced one.
+    # A VM: the address must be one the agent itself reported for that VM, and the run's
+    # agent must be the one that EXECUTES for that address. The first check is what stops
+    # an arbitrary address being substituted for a legitimately-synced one; the second
+    # used to be `conn.agent_id == agent.id` and now goes through the route table — see
+    # below for why it had to move down past the address.
     conn = (db.query(HypervisorConnection)
             .filter(HypervisorConnection.id == payload.connection_id).first())
     if not conn or not conn.is_active:
         raise HTTPException(status_code=404, detail="No such hypervisor connection.")
-    if (conn.agent_id or "") != agent.id:
-        raise HTTPException(
-            status_code=400,
-            detail=f"That connection is not brokered by agent '{agent.name}'.")
     vm = (db.query(HypervisorVMCache)
           .filter(HypervisorVMCache.connection_id == conn.id,
                   HypervisorVMCache.vm_id == payload.target_id).first())
@@ -543,13 +640,32 @@ def _resolve_agent_target(payload: "RunRequest", db) -> dict:
                     "connections.yaml."))
     # The body's address must be one the AGENT reported. Equal, not merely plausible.
     host = payload.target if payload.target in ips else ips[0]
+
+    # ONLY NOW is it decided who executes, and it is decided FROM `host` above — the
+    # address already pinned to the agent's own report. That ordering is the whole
+    # security argument for this feature: the route table is an input to the AGENT
+    # decision and can never become an input to the ADDRESS decision. Do not hoist this
+    # above the line above. `tests/test_config_mgmt_route_single_rule.py` asserts the
+    # source order and `tests/test_config_mgmt_agent_resolution.py` asserts the behaviour.
+    #
+    # Equality against ONE resolved answer, not "the broker OR a delegate": under an OR a
+    # caller could still name the brokering agent for a delegated address and get a job
+    # that leases, runs and times out — which is the bug this feature exists to fix,
+    # surviving as an accepted input. With no routes `executor_for` returns the fallback,
+    # so this is byte-equivalent to the `conn.agent_id` check it replaces.
+    expected = cmr.executor_for(db, host, fallback=conn.agent_id or "")
+    if agent.id != expected:
+        raise HTTPException(status_code=400,
+                            detail=_wrong_executor(db, conn, host, agent, expected))
+
     transport = (payload.transport
                  if payload.transport in ("ssh", "winrm")
                  else agent_ansible_meta.transport_for_guest_os(vm.guest_os))
     return {"run_kind": "vm", "transport": transport, "target_host": host,
             "target_port": payload.port or 0, "target_id": vm.vm_id,
             "connection_id": conn.id,
-            "target_label": vm.name or vm.vm_id}
+            "target_label": vm.name or vm.vm_id,
+            "executor_name": agent.name}
 
 
 async def _run_agent_ansible(payload: "RunRequest", db, current_user):
@@ -593,13 +709,21 @@ async def _run_agent_ansible(payload: "RunRequest", db, current_user):
         raise HTTPException(status_code=_refusal.status, detail=_refusal.detail)
 
     overrides = _resolve_agent_target(payload, db)
+    # Popped, not left in: `run_meta` silently drops any key outside RUN_META_KEYS, so
+    # leaving it there would work by accident and stop working the day that changes.
+    executor_name = overrides.pop("executor_name", "")
     asset_backend = payload.asset_backend or storage_service.active_backend()
     # NOT gated on local-filesystem storage, unlike the in-cloud runners: the DASHBOARD reads
     # the asset and puts the bytes in the sealed bundle, so a local/UNC backend works here
     # even though a Fargate task could never reach it.
     meta = agent_ansible_meta.run_meta(
         payload,
-        description=f"Ansible (agent): {payload.asset} → {overrides['target_label']}",
+        # The executor is named here because the job row is the ONLY place it survives
+        # the run: nothing in the metadata or the sealed envelope records which agent was
+        # chosen, and "which agent actually ran this" is the first question about a failed
+        # Config-Management job.
+        description=(f"Ansible (agent): {payload.asset} → {overrides['target_label']}"
+                     + (f" via {executor_name}" if executor_name else "")),
         asset_backend=asset_backend, **overrides)
     problem = agent_ansible_meta.check(meta)
     if problem:

@@ -1,0 +1,307 @@
+{# The Config Routes tab of the Remote Agents page (agents/index.html), backed by
+   /api/connections/config-mgmt-routes.
+
+   WHICH AGENT EXECUTES a Config-Management run against an address range — as opposed to
+   which agent brokers the hypervisor the target was discovered through. Those are the same
+   agent by default, and this tab exists because they cannot always be: VMware Workstation's
+   vmrest binds 127.0.0.1 with no bind-address option, so the brokering agent must run ON
+   the Windows host under Docker Desktop, whose WSL2 VM can reach no VMware vmnet. The agent
+   that can read the inventory is then structurally unable to reach the VMs in it.
+
+   A RANGE, NOT A CONNECTION, and that is the whole design: reachability is a property of
+   the network. One vmrest connection routinely reports guests on several vmnets at once, so
+   a per-connection executor could not express "that segment is reachable from there, this
+   one is not". Matching is longest-prefix-first like a routing table, and one range may
+   name only one agent — the service refuses a duplicate rather than guessing.
+
+   IT DESIGNATES WHO RUNS, NEVER WHAT IS RUN AGAINST. There is no host, port, credential or
+   transport on this form and there must never be one: the address stays pinned to one the
+   discovering agent itself reported. See services/config_mgmt_route_service.
+
+   Self-contained, and that is required of it rather than tidy: the markup and the Alpine
+   factory it names live in this one file, which is what tests/test_template_scripts.py and
+   tests/test_templates_parse.py check of any template carrying an x-data. #}
+
+<div x-data="configRoutesPage()" x-init="init()">
+
+  <div class="flex justify-end mb-3 sm:mb-1">
+    <button x-show="!noAccess" @click="openAdd()"
+            class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
+      Add route
+    </button>
+  </div>
+  <p class="text-sm text-gray-500 mb-6">
+    Which agent <strong>executes</strong> a Config-Management run against an address range.
+    Without a route, a run goes to the agent whose hypervisor connection discovered the VM —
+    which is right until that agent has no network path to the guests it can see. The most
+    specific range wins, so a <code>/32</code> overrides a <code>/24</code>.
+    <a href="/docs/remote-agents/config-runs" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>.
+  </p>
+
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
+    <!-- No `connections` permission. In place rather than a red toast, for the same reason
+         the other two panels do it: this component mounts on a page somebody may have
+         opened for a different tab, and a failure notice about a list they never asked for
+         reads as the whole page being broken. -->
+    <div x-show="!loading && noAccess" x-cloak class="p-10 text-center">
+      <h2 class="text-base font-semibold text-gray-700 mb-2">You cannot see the route list</h2>
+      <p class="text-sm text-gray-500 max-w-xl mx-auto" x-text="noAccess"></p>
+    </div>
+    <div x-show="!loading && !noAccess && routes.length === 0" x-cloak
+         class="p-10 text-center text-sm text-gray-400">
+      No routes. Every Config-Management run goes to the agent that discovered its target,
+      which is the right default — add a route only when that agent cannot reach the target's
+      network.
+    </div>
+    <table x-show="!loading && routes.length > 0" x-cloak class="min-w-full text-sm">
+      <thead>
+        <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
+          <th class="px-4 py-3">Range</th>
+          <th class="px-4 py-3">Executes on</th>
+          <th class="px-4 py-3">Covers</th>
+          <th class="px-4 py-3">Status</th>
+          <th class="px-4 py-3 text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="r in routes" :key="r.id">
+          <tr class="border-b border-gray-100" :class="r.is_active ? '' : 'opacity-50'">
+            <td class="px-4 py-3">
+              <div class="font-mono text-gray-800" x-text="r.cidr"></div>
+              <div x-show="r.label" class="text-xs text-gray-500" x-text="r.label"></div>
+            </td>
+            <td class="px-4 py-3">
+              <span class="inline-block bg-purple-50 text-purple-700 text-xs px-2 py-0.5 rounded"
+                    x-text="agentName(r.agent_id)"></span>
+              <div x-show="!isGranted(r.agent_id)" class="text-xs text-red-600 mt-1">
+                not granted Config Management
+              </div>
+            </td>
+            <!-- The "did my range bind to anything" answer, and why this needs no Test
+                 button: there is nothing to dial, so coverage is the only real feedback. -->
+            <td class="px-4 py-3 text-gray-600" x-text="coverage(r)"></td>
+            <td class="px-4 py-3">
+              <span x-show="r.is_active" class="text-green-700 text-xs">Active</span>
+              <span x-show="!r.is_active" class="text-gray-500 text-xs">Inactive</span>
+            </td>
+            <td class="px-4 py-3 text-right whitespace-nowrap">
+              <button @click="openEdit(r)" class="text-blue-600 hover:underline text-xs mr-3">Edit</button>
+              <button @click="removeRoute(r)" :disabled="busy === r.id"
+                      class="text-red-600 hover:underline text-xs disabled:opacity-40">Delete</button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Add / edit. One form for both; `editingId` distinguishes them. -->
+  <div x-show="showForm" x-cloak class="fixed inset-0 bg-black/40 flex items-start justify-center p-4 z-40 overflow-y-auto">
+    <div class="bg-white rounded-xl shadow-lg w-full max-w-lg my-8">
+      <div class="px-6 py-4 border-b border-gray-200">
+        <h2 class="text-lg font-semibold text-gray-800"
+            x-text="editingId ? 'Edit route' : 'Add route'"></h2>
+      </div>
+      <div class="px-6 py-4 space-y-4">
+
+        <p class="text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+          This designates <strong>who runs the playbook</strong>, never
+          <strong>what it runs against</strong>. The address still comes from the synced VM
+          row, reported by the agent that discovered it. The agent you name needs its own
+          <code>agent_ansible</code> grant on the Agents tab, and its own
+          <code>ansible.targets</code> entry covering this range in its
+          <code>policy.yaml</code> — two agents means two policy files, and the second one
+          is the step people miss.
+        </p>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Network range</label>
+          <input x-model="form.cidr" type="text" placeholder="192.168.235.0/24"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+          <p class="text-xs text-gray-400 mt-1">
+            A CIDR range, or a single host. The most specific matching range wins.
+          </p>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Executing agent</label>
+          <select x-model="form.agent_id"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">Select an agent…</option>
+            <template x-for="a in agents" :key="a.id">
+              <option :value="a.id" x-text="agentOptionLabel(a)"></option>
+            </template>
+          </select>
+          <p x-show="form.agent_id && !isGranted(form.agent_id)"
+             class="text-xs text-red-600 mt-1">
+            That agent is not granted the Config-Management job type yet. Grant
+            <code>agent_ansible</code> to it on the Agents tab, or every run in this range
+            will be refused.
+          </p>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Label <span class="text-gray-400">(optional)</span></label>
+          <input x-model="form.label" type="text" placeholder="vmnet1 host-only"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+        </div>
+
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="form.is_active" class="rounded border-gray-300">
+          Active
+          <span class="text-xs text-gray-400">
+            — clear this to send runs back to the discovering agent without losing the row
+          </span>
+        </label>
+
+        <!-- The YAML the named agent needs, rendered so it can be pasted rather than
+             reconstructed from the docs. Shown once a range is typed, because before that
+             there is nothing to paste. -->
+        <div x-show="form.cidr">
+          <label class="block text-xs font-medium text-gray-600 mb-1">
+            Add this to that agent's policy.yaml
+          </label>
+          <pre class="bg-gray-900 text-gray-100 text-xs rounded-lg px-3 py-2 overflow-x-auto"
+               x-text="policySnippet()"></pre>
+        </div>
+
+        <p x-show="formError" x-cloak class="text-sm text-red-600" x-text="formError"></p>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-200 flex justify-end gap-2">
+        <button @click="showForm = false" class="text-sm text-gray-600 px-3 py-1.5">Cancel</button>
+        <button @click="submitForm()" :disabled="saving || !formValid()"
+                class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-1.5 rounded-lg disabled:opacity-40">
+          <span x-text="saving ? 'Saving…' : (editingId ? 'Save' : 'Add route')"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// The Config Routes tab. Its own component: it shares no state with the Connections or
+// Agents panels, and the container in agents/index.html owns only which tab is showing.
+function configRoutesPage() {
+  return {
+    routes: [], agents: [], grantedIds: [],
+    loading: true, busy: '',
+    noAccess: '',   // the 403 text when this user holds no `connections` permission
+    toast: '', toastType: 'success',
+    showForm: false, saving: false, formError: '', editingId: '',
+    form: {},
+
+    async init() {
+      requireAuth();
+      await this.refresh();
+    },
+
+    async refresh() {
+      try {
+        const data = await API.get('/api/connections/config-mgmt-routes');
+        this.routes = data.routes || [];
+        this.agents = data.agents || [];
+        this.grantedIds = data.ansible_agent_ids || [];
+        this.noAccess = '';
+      } catch (e) {
+        // A 403 from require_explicit_permission('connections', …) is a state with a
+        // specific explanation, not an error to flash — see isDenied.
+        if (this.isDenied(e)) this.noAccess = e.message;
+        else this.flash(e.message || 'Failed to load routes.', 'error');
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    // Matched on the message because that is all the API helper keeps: it throws an Error
+    // carrying the detail string and no status. The string is built in one place,
+    // api/auth.require_explicit_permission.
+    isDenied(e) {
+      return /^Requires '[\w.:]+' permission/.test((e && e.message) || '');
+    },
+
+    // METHODS, not getters. tests/template_helpers_check.js anchors its extractor on a
+    // bare `name(` and cannot see past a `get ` prefix, so a getter is invisible to the
+    // harness that exercises these in CI.
+    agentName(id) {
+      const a = this.agents.find(x => x.id === id);
+      return a ? a.name : (id || '').slice(0, 8);
+    },
+    agentOptionLabel(a) { return a.name + (a.site ? ' (' + a.site + ')' : ''); },
+    isGranted(id) { return this.grantedIds.includes(id); },
+    coverage(r) {
+      const n = r.matches || 0;
+      return n === 1 ? '1 VM' : n + ' VMs';
+    },
+    policySnippet() {
+      return ['ansible:', '  enabled: true', '  vm_image: chrweav/ansible-winrm:latest',
+              '  targets:', '    - cidr: ' + (this.form.cidr || ''),
+              '      ports: [22, 5985, 5986]'].join('\n');
+    },
+    flash(m, t) { this.toast = m; this.toastType = t || 'success'; setTimeout(() => this.toast = '', 4500); },
+
+    _blank() { return {cidr: '', agent_id: '', label: '', is_active: true}; },
+
+    openAdd() {
+      this.editingId = '';
+      this.form = this._blank();
+      this.formError = '';
+      this.showForm = true;
+    },
+
+    openEdit(r) {
+      this.editingId = r.id;
+      this.form = {cidr: r.cidr, agent_id: r.agent_id, label: r.label || '',
+                   is_active: !!r.is_active};
+      this.formError = '';
+      this.showForm = true;
+    },
+
+    formValid() { return !!(this.form.cidr && this.form.agent_id); },
+
+    async submitForm() {
+      this.saving = true;
+      this.formError = '';
+      try {
+        const body = {cidr: this.form.cidr, agent_id: this.form.agent_id,
+                      label: this.form.label || ''};
+        if (this.editingId) {
+          body.is_active = !!this.form.is_active;
+          await API.patch('/api/connections/config-mgmt-routes/' + this.editingId, body);
+        } else {
+          await API.post('/api/connections/config-mgmt-routes', body);
+        }
+        this.showForm = false;
+        await this.refresh();
+        this.flash(this.editingId ? 'Route updated.' : 'Route added.');
+      } catch (e) {
+        // In the form, not a toast: every refusal from the service names a fix the
+        // operator applies to a field they are looking at.
+        this.formError = e.message || 'Could not save the route.';
+      } finally {
+        this.saving = false;
+      }
+    },
+
+    async removeRoute(r) {
+      if (!confirm('Delete the route for ' + r.cidr + '? Runs for that range go back to '
+                   + 'the agent that discovered each target.')) return;
+      this.busy = r.id;
+      try {
+        await API.del('/api/connections/config-mgmt-routes/' + r.id);
+        await this.refresh();
+        this.flash('Route deleted.');
+      } catch (e) {
+        this.flash(e.message || 'Could not delete the route.', 'error');
+      } finally {
+        this.busy = '';
+      }
+    },
+  };
+}
+</script>

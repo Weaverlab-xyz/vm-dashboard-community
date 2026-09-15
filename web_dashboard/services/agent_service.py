@@ -209,12 +209,20 @@ def delete_agent(db: Session, agent: RemoteAgent) -> int:
     otherwise the jobs would keep pointing at an id that no longer exists, and the next
     lease query joining on it would quietly return nothing on SQLite while working on
     PostgreSQL — the worst kind of difference between dev and prod.
+
+    `config_mgmt_routes` is deleted explicitly for exactly the same reason, and it fails
+    worse: a surviving route would keep resolving every Config-Management run in its
+    range to an agent id that no longer exists, so those runs would be refused rather
+    than falling back to the agent that discovered the VM.
     """
+    from . import config_mgmt_route_service as cmr
+
     orphaned = (
         db.query(Job)
         .filter(Job.agent_id == agent.id)
         .update({Job.agent_id: None}, synchronize_session=False)
     )
+    cmr.delete_for_agent(db, agent.id)
     db.delete(agent)
     db.commit()
     return orphaned
