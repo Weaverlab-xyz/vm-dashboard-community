@@ -1784,14 +1784,17 @@ class CertLabFeatureConfig(BaseModel):
     objects the "Certificate" plugin needs and the certificate-profile defaults.
     See _CONFIG_ONLY_FEATURES.
 
-    Exactly ONE of these is a secret: `cert_ps_bi_api_key`. Both of the plugin's
-    credentials — the CA enrollment identity and the BeyondInsight API user — ride ONE
-    Password Safe functional account, which is the protected field built for exactly
-    that, and in `reference` mode this panel only NAMES that account. In `create` mode
-    the dashboard composes it, and it holds the CA half for the moment it takes to POST
-    it (straight out of the build's terraform outputs, never stored) — but the
-    BeyondInsight half has no other home, because the dashboard's REST client signs in
-    with OAuth2 client credentials and never sends a PS-Auth key. Hence the one secret.
+    TWO of these are secrets: `cert_ps_bi_api_key` and `cert_ps_bi_client_secret`. Both of
+    the plugin's credentials — the CA enrollment identity and the BeyondInsight one that
+    writes to Secrets Safe — ride ONE Password Safe functional account, which is the
+    protected field built for exactly that, and in `reference` mode this panel only NAMES
+    that account. In `create` mode the dashboard composes it, and it holds the CA half for
+    the moment it takes to POST it (straight out of the build's terraform outputs, never
+    stored) — but the BeyondInsight half has to be held here, in one of the two shapes the
+    plugin accepts. It prefers OAuth client credentials, which ride the account's own API
+    key and secret fields; `cert_ps_bi_client_secret` is that registration's secret, and
+    blank falls back to the dashboard's own `pscli_client_secret`, same tenant by
+    construction. `cert_ps_bi_api_key` is the older packed form's registration key.
 
     Nothing secret belongs on the managed system's address or the account name either,
     since neither is protected and both are visible anywhere Password Safe shows the
@@ -1810,6 +1813,13 @@ class CertLabFeatureConfig(BaseModel):
     cert_ps_functional_account: str = ""
     cert_ps_subca_functional_account: str = ""
     cert_ps_functional_account_mode: str = "create"   # "create" | "reference"
+    # Which BeyondInsight credential a MINTED account carries. "auto" prefers OAuth but
+    # lets an explicitly set cert_ps_bi_api_key keep an install on the path it already
+    # works on; "apikey" pins that for a console that will not take an API key credential
+    # type on a plugin platform, and "oauth" pins the other way.
+    cert_ps_bi_auth: str = "auto"                     # "auto" | "oauth" | "apikey"
+    cert_ps_bi_client_id: str = ""                    # blank → pscli_client_id
+    cert_ps_bi_client_secret: str = ""                # SECRET — see _SECRET_FEATURE_KEYS
     cert_ps_bi_api_key: str = ""                      # SECRET — see _SECRET_FEATURE_KEYS
     cert_ps_bi_run_as_user: str = ""                  # blank → pscli_api_account_name
     # Blank derives the ORIGIN of pscli_api_url, which is the same tenant by construction.
@@ -2040,6 +2050,7 @@ _SECRET_FEATURE_KEYS = frozenset({
     "oidc_client_secret",
     "wlc_pat",
     "cert_ps_bi_api_key",
+    "cert_ps_bi_client_secret",
 })
 
 

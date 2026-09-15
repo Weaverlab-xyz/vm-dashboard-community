@@ -39,13 +39,30 @@ whole profile from the Network Address is what lets one installed plugin serve a
 template, a GCP CA pool and a self-signed Entra credential at the same time — and it is the
 only shape that works on a Cloud tenant, which is what this dashboard targets.
 
-The two credentials ride ONE functional account, both fields split on the **last** colon:
+The two credentials ride ONE functional account, and there are two ways the BeyondInsight
+half arrives. The plugin reads whichever it is given and **prefers the first**:
 
-    Username   <ca-account>:<bi-run-as-user>       CORP\svc-adcs-enroll:certauth-svc
-    Password   <ca-secret>:<bi-api-key>            S0me:P@ssword:9f2c1b7e4a...
+    OAuth (preferred), nothing packed — four values in four fields:
+      Username   <ca-account>            CORP\svc-adcs-enroll
+      Password   <ca-secret>             S0me:P@ssword
+      API key    <bi-oauth-client-id>
+      API secret <bi-oauth-client-secret>
 
-Splitting from the right is deliberate: a BeyondInsight username and an API registration
-key contain no colon, but a certificate authority password may contain anything at all.
+    Packed (fallback), both fields split on the LAST colon:
+      Username   <ca-account>:<bi-run-as-user>   CORP\svc-adcs-enroll:certauth-svc
+      Password   <ca-secret>:<bi-api-key>        S0me:P@ssword:9f2c1b7e4a...
+
+``ECredentialType`` is a flags enum and ``CredentialParameter`` carries ``ApiKey`` and
+``ApiSecret`` as fields of their own, so one account can be ``Password, ApiKey`` at once.
+That path removes three things: no run-as user has to exist, nothing is packed — so a CA
+secret *or a CA account name* may contain a colon, which was not expressible before — and
+the plugin presents a short-lived bearer token instead of a long-lived static key.
+
+On the packed path, splitting from the right is deliberate: a BeyondInsight username and an
+API registration key contain no colon, but a certificate authority password may contain
+anything at all. It is kept because whether the Password Safe console offers an API key
+credential type for a **plugin-supplied** platform is unverified; ``cert_ps_bi_auth`` pins
+either path for an operator who has found out.
 
 ``ensure_functional_account`` composes that account during the CA build, because the CA
 half is returned exactly once — by the apply — and exists nowhere else afterwards.
@@ -357,8 +374,131 @@ def bi_run_as_user() -> str:
 
     Falls back to ``pscli_api_account_name`` — the run-as user this install already
     configured for the Password Safe terraform provider. It is the same tenant and
-    almost always the same identity, so asking for it twice invites them to drift."""
+    almost always the same identity, so asking for it twice invites them to drift.
+
+    Used by the PACKED path only. The OAuth one has no run-as user at all, which is one
+    of the three things it removes."""
     return _cfg("cert_ps_bi_run_as_user") or _cfg("pscli_api_account_name")
+
+
+BI_AUTH_OAUTH = "oauth"
+BI_AUTH_APIKEY = "apikey"
+
+
+def bi_client_credentials() -> tuple:
+    """``(client_id, client_secret, source_key)`` for the BeyondInsight OAuth registration
+    the plugin authenticates to Secrets Safe with, or ``("", "", "")``.
+
+    A dedicated ``cert_ps_bi_client_id``/``_secret`` wins, and falls back to the
+    ``pscli_*`` pair the dashboard signs itself in with — same tenant by construction, so
+    an install that has configured Password Safe at all already has a working pair and
+    needs nothing new to reach the OAuth path. Prefer the dedicated one in anything that
+    matters: this registration is handed to a plugin running on a Resource Broker and only
+    needs write on one Secrets Safe folder, where the dashboard's own is the client it
+    administers the whole tenant with.
+
+    **Half a dedicated pair raises rather than falling through.** Falling through would
+    silently authenticate as a DIFFERENT registration than the one named in config, and
+    the only visible symptom would be a permission error on a folder the operator believes
+    they granted."""
+    cid, secret = _cfg("cert_ps_bi_client_id").strip(), _cfg("cert_ps_bi_client_secret")
+    if cid and secret:
+        return cid, secret, "cert_ps_bi_client_id"
+    if cid or secret:
+        raise CertPSError(
+            "only half of the Certificate Lab's BeyondInsight OAuth registration is set "
+            "— cert_ps_bi_client_id and cert_ps_bi_client_secret are a pair. Set both, or "
+            "clear both to fall back to the dashboard's own pscli_client_id/secret")
+    cid, secret = _cfg("pscli_client_id").strip(), _cfg("pscli_client_secret")
+    return (cid, secret, "pscli_client_id") if cid and secret else ("", "", "")
+
+
+def bi_auth_mode() -> str:
+    """``oauth`` | ``apikey`` | ``auto`` — which BeyondInsight credential a MINTED
+    functional account carries. Normalised; anything unrecognised is ``auto``.
+
+    The plugin reads both and prefers OAuth, so this exists for the one thing the
+    dashboard cannot see from here: whether the Password Safe console will accept an API
+    key credential type on a plugin-supplied platform at all. Where it will not, the
+    account has to carry the packed registration key instead, and that is what ``apikey``
+    pins. ``oauth`` pins the other way, for an operator who has verified it."""
+    val = _cfg("cert_ps_bi_auth", "auto").strip().lower()
+    return val if val in (BI_AUTH_OAUTH, BI_AUTH_APIKEY) else "auto"
+
+
+def resolve_bi_credential() -> dict:
+    """Which BeyondInsight identity the minted functional account will carry.
+
+    Returns ``{"auth": "oauth"|"apikey", "client_id", "client_secret", "api_key",
+    "run_as", "source"}`` — the unused half of which is always "".
+
+    The ``auto`` ladder is ordered so that **an install that works keeps working**. An
+    explicitly configured ``cert_ps_bi_api_key`` outranks the *inherited* ``pscli_*``
+    pair, because it was set by hand for the packed path and the console's support for an
+    API-key functional account on a plugin platform is unverified — flipping a working
+    install to an unproven path on an upgrade is exactly the silent regression this
+    feature cannot afford, since a failed credential action surfaces hours later at a
+    rotation. A dedicated ``cert_ps_bi_client_id`` outranks it in turn: nobody sets that
+    by accident.
+
+        1. cert_ps_bi_client_id + secret          → oauth   (chosen for this feature)
+        2. cert_ps_bi_api_key + a run-as user     → apikey  (the configured packed path)
+        3. pscli_client_id + secret               → oauth   (inherited, needs no setup)
+    """
+    mode = bi_auth_mode()
+    api_key, run_as = _cfg("cert_ps_bi_api_key"), bi_run_as_user()
+
+    def _packed():
+        return {"auth": BI_AUTH_APIKEY, "client_id": "", "client_secret": "",
+                "api_key": api_key, "run_as": run_as, "source": "cert_ps_bi_api_key"}
+
+    if mode == BI_AUTH_APIKEY:
+        # Resolved before the OAuth pair is even looked at: an operator who pinned the
+        # packed path has said the API-key credential type is not available to them, and
+        # a stray half-set client id must not stand in the way of the path they pinned.
+        if not api_key:
+            raise CertPSError(
+                "cert_ps_bi_auth is 'apikey', but no BeyondInsight API key is configured "
+                "— set cert_ps_bi_api_key, or switch cert_ps_bi_auth to 'oauth'")
+        if not run_as:
+            raise CertPSError(_NO_RUN_AS)
+        return _packed()
+
+    cid, secret, source = bi_client_credentials()
+
+    def _oauth():
+        return {"auth": BI_AUTH_OAUTH, "client_id": cid, "client_secret": secret,
+                "api_key": "", "run_as": "", "source": source}
+
+    if mode == BI_AUTH_OAUTH:
+        if not cid:
+            raise CertPSError(
+                "cert_ps_bi_auth is 'oauth', but no BeyondInsight OAuth registration is "
+                "configured — set cert_ps_bi_client_id and cert_ps_bi_client_secret, or "
+                "configure the dashboard's own pscli_client_id/secret, which this falls "
+                "back to")
+        return _oauth()
+
+    if source == "cert_ps_bi_client_id":
+        return _oauth()
+    if api_key:
+        if not run_as:
+            raise CertPSError(_NO_RUN_AS)
+        return _packed()
+    if cid:
+        return _oauth()
+    raise CertPSError(
+        "no BeyondInsight credential is configured for the plugin to write the PKCS#12 "
+        "bundle into Secrets Safe. Either set cert_ps_bi_client_id and "
+        "cert_ps_bi_client_secret — an API registration permitting the client-credentials "
+        "grant, which the functional account carries in its API key and secret fields — "
+        "or set cert_ps_bi_api_key for the older packed form")
+
+
+_NO_RUN_AS = ("no BeyondInsight run-as user is configured — set cert_ps_bi_run_as_user "
+              "or pscli_api_account_name. It is the second half of the functional "
+              "account's username on the packed path; the OAuth one needs no run-as user "
+              "at all")
 
 
 def _ca_credential(cloud: str, outputs: dict) -> tuple:
@@ -395,9 +535,23 @@ async def ensure_functional_account(row, outputs: dict,
                                     package: str = CERT_PACKAGE_LEAF) -> dict:
     """Mint the functional account carrying BOTH of the plugin's credentials.
 
-    Returns ``{"mode", "package", "account_name", "id"}``; ``id`` is None in reference
-    mode, where nothing is created and the operator's own ``cert_ps_functional_account``
-    still applies.
+    Returns ``{"mode", "package", "account_name", "id"}`` — plus ``auth`` when one was
+    minted. ``id`` is None in reference mode, where nothing is created and the operator's
+    own ``cert_ps_functional_account`` still applies.
+
+    **Two shapes, because there are two ways the BeyondInsight half can arrive** and the
+    plugin reads whichever it is given, preferring the first (``resolve_bi_credential``
+    picks):
+
+        oauth   name = the CA account, password = the CA secret, both WHOLE, and the
+                OAuth client id/secret in the account's API key and secret fields
+        apikey  name = <ca-account>:<run-as>, password = <ca-secret>:<api-key>, each
+                split by the plugin on its LAST colon
+
+    The account NAME therefore differs between them, which matters on a re-wire: an
+    account minted on one path is not the same object as one minted on the other, so
+    switching path on a CA that already has one leaves the first behind (see
+    ``cert_lab_service.rewire_functional_account``, which says so).
 
     **One per package, because a functional account is platform-bound.** A managed system
     inherits its functional account's platform, so an account on "Certificate" cannot
@@ -438,31 +592,42 @@ async def ensure_functional_account(row, outputs: dict,
             "the CA build returned no enrollment credential, so no functional account "
             "can be composed — the pool exists, but its identity does not")
 
-    run_as = bi_run_as_user()
-    api_key = _cfg("cert_ps_bi_api_key")
-    if not api_key:
-        raise CertPSError(
-            "no BeyondInsight API key is configured — set cert_ps_bi_api_key. It is the "
-            "second half of the functional account's password, and the plugin needs it "
-            "to write the PKCS#12 bundle into Secrets Safe")
-    if not run_as:
-        raise CertPSError(
-            "no BeyondInsight run-as user is configured — set cert_ps_bi_run_as_user "
-            "or pscli_api_account_name. It is the second half of the functional "
-            "account's username")
-    # Splitting on the LAST colon is what lets a CA credential contain one. It buys the
-    # BeyondInsight halves nothing, and a colon in either of them silently moves the
-    # split point and mis-parses BOTH fields.
-    for label, value in (("run-as user", run_as), ("API key", api_key)):
-        if ":" in value:
-            raise CertPSError(
-                f"the BeyondInsight {label} contains ':', which is the delimiter both "
-                f"fields are split on — the CA half may contain colons, this half may "
-                f"not")
+    cred = resolve_bi_credential()
+    # ``cred`` carries a client secret and an API key, so **nothing read out of it may
+    # reach a log line, the account name, or the returned dict.** Taint analysis is
+    # per-dict rather than per-key and it is right to be: the two halves of this credential
+    # differ only by which key they are under. Everything below that is safe to log is
+    # therefore either a branch LITERAL or re-read from config, never carried out of here.
+    if cred["auth"] == BI_AUTH_OAUTH:
+        # Four values in four fields. Nothing is packed, so nothing is split — which is
+        # why a CA secret, or a CA account NAME, may contain a colon on this path and
+        # could not be expressed at all on the other one.
+        name_suffix, packed_secret = "", secret
+        auth = BI_AUTH_OAUTH
+        auth_label = ("oauth (cert_ps_bi_client_id)" if _cfg("cert_ps_bi_client_id")
+                      else "oauth (pscli_client_id)")
+    else:
+        # Re-read rather than taken off ``cred``: identical by construction — it is where
+        # the resolver got it — and it keeps the account name, which IS logged, clear of
+        # the dict that holds the secrets.
+        run_as, api_key = bi_run_as_user(), cred["api_key"]
+        # Splitting on the LAST colon is what lets a CA credential contain one. It buys
+        # the BeyondInsight halves nothing, and a colon in either of them silently moves
+        # the split point and mis-parses BOTH fields.
+        for label, value in (("run-as user", run_as), ("API key", api_key)):
+            if ":" in value:
+                raise CertPSError(
+                    f"the BeyondInsight {label} contains ':', which is the delimiter both "
+                    f"fields are split on — the CA half may contain colons, this half may "
+                    f"not. The OAuth path (cert_ps_bi_client_id) packs nothing and has "
+                    f"neither constraint")
+        name_suffix, packed_secret = f":{run_as}", f"{secret}:{api_key}"
+        auth = BI_AUTH_APIKEY
+        auth_label = "apikey (cert_ps_bi_api_key)"
 
     platform = platform_name(package)
     platform_id = await ps_api_service.get_platform_id(platform)
-    account_name = f"{principal}:{run_as}"
+    account_name = f"{principal}{name_suffix}"
     # Uniqueness tenant-side is (platform, domain, account name, display name). The
     # account name is already unique per CA — the enrollment identity is minted per row
     # for exactly that reason — and the PLATFORM differs between the two packages, so the
@@ -474,13 +639,20 @@ async def ensure_functional_account(row, outputs: dict,
         platform_id=int(platform_id),
         account_name=account_name,
         display_name=f"{row.name}-certauth{suffix}-{str(row.id)[:8]}",
-        password=f"{secret}:{api_key}",
+        password=packed_secret,
+        api_key=cred["client_id"], api_secret=cred["client_secret"],
         description=(f"{package_label(package)} Lab enrollment identity for CA "
                      f"{row.name} (lab_id={row.id}, {row.cloud})"))
-    logger.info("PS: minted %s functional account %r (id %s) on platform %r for CA %s",
-                package_label(package), account_name, fa_id, platform, row.id)
+    # The AUTH is logged, the credential is not. Which of the two paths an account was
+    # minted on is the first thing worth knowing when the plugin later reports that it
+    # has no BeyondInsight credential, and the account name no longer says so on its own.
+    # ``auth_label`` is a branch literal naming the config key it came from — not a read
+    # of ``cred``, which holds the secrets alongside it.
+    logger.info("PS: minted %s functional account %r (id %s) on platform %r for CA %s, "
+                "BeyondInsight auth=%s", package_label(package), account_name,
+                fa_id, platform, row.id, auth_label)
     return {"mode": "create", "package": package, "account_name": account_name,
-            "id": str(fa_id)}
+            "id": str(fa_id), "auth": auth}
 
 
 async def resolve_functional_account(name: str = "",
@@ -503,13 +675,15 @@ async def resolve_functional_account(name: str = "",
             raise CertPSError(
                 f"this CA has no {label} functional account yet — the build could not "
                 f"create one, or it has never issued on this package. Use 'Wire up "
-                f"Password Safe' on the CA to retry it, which needs cert_ps_bi_api_key "
-                f"set.")
+                f"Password Safe' on the CA to retry it, which needs a BeyondInsight "
+                f"credential set (cert_ps_bi_client_id and secret, or cert_ps_bi_api_key).")
         raise CertPSError(
             f"no Password Safe functional account is configured for the {label} platform "
             f"— set {_PLATFORM_CONFIG[package][2]}. It carries two credentials on one "
-            f"account: name '<ca-account>:<bi-run-as-user>', password "
-            f"'<ca-secret>:<bi-api-key>', both split on the LAST colon.")
+            f"account: either the CA account and secret whole, with the BeyondInsight "
+            f"OAuth client id and secret in the account's API key and secret fields; or "
+            f"name '<ca-account>:<bi-run-as-user>' and password '<ca-secret>:<bi-api-key>', "
+            f"both split on the LAST colon.")
     fa = await ps_api_service.get_functional_account(name)
     pname = fa.get("platform_name") or ""
     if pname and not ps_vm_hook._platform_name_ok(pname, *_PLATFORM_TOKENS[package]):
@@ -519,16 +693,34 @@ async def resolve_functional_account(name: str = "",
             f"platform, so this would onboard against the wrong package. The two are "
             f"separate plugins with separate access control, and a leaf and an issuer are "
             f"not interchangeable credentials")
-    if ":" not in name:
-        # Legal, but only for an on-premises administrator with filesystem access on the
-        # plugin host: without the second half the Secrets Safe connection has to come
-        # from appsettings.json, which a Cloud tenant cannot supply.
+    if ":" not in name and not _oauth_is_available():
+        # A colon-free name is the NORMAL shape on the OAuth path — the BeyondInsight half
+        # rides the account's API key and secret fields, which this API does not return,
+        # so the name says nothing about it and the warning would be false. It is only
+        # meaningful where OAuth is not on the table at all: there a missing second half
+        # leaves the Secrets Safe connection to appsettings.json, which is legal for an
+        # on-premises administrator with filesystem access on the plugin host and
+        # unreachable for a Cloud tenant.
         logger.warning(
-            "PS: certificate functional account %r carries no ':' — the BeyondInsight API "
-            "user is missing, so the plugin can only reach Secrets Safe through "
-            "appsettings.json. On a Password Safe Cloud tenant the first credential change "
-            "will fail with FailedCredentials.", name)
+            "PS: certificate functional account %r carries no ':' and no BeyondInsight "
+            "OAuth registration is configured — the API user is missing, so the plugin "
+            "can only reach Secrets Safe through appsettings.json. On a Password Safe "
+            "Cloud tenant the first credential change will fail with FailedCredentials.",
+            name)
     return fa
+
+
+def _oauth_is_available() -> bool:
+    """Whether an OAuth registration is configured at all — so a colon-free account name
+    can be read as the OAuth shape rather than as a missing half. A half-set pair raises
+    out of ``bi_client_credentials``; here that is simply 'no', because this is a warning
+    and the real refusal happens where the account is minted."""
+    if bi_auth_mode() == BI_AUTH_APIKEY:
+        return False
+    try:
+        return bool(bi_client_credentials()[0])
+    except CertPSError:
+        return False
 
 
 async def ensure_secrets_safe_folder(folder_path: str = "") -> dict:

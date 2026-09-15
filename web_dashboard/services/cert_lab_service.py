@@ -381,15 +381,35 @@ async def rewire_functional_account(db: Session, *, lab_id: str,
     if package == cert_ps_service.CERT_PACKAGE_SUBCA and not can_sign_subordinate(row):
         raise CertLabError(_subca_refusal(row))
     outputs = await _read_ca_outputs(row)
+    _, id_col = _FA_COLUMNS[package]
+    had_name, had_id = functional_account_for(row, package), getattr(row, id_col, None)
     fa = await cert_ps_service.ensure_functional_account(row, outputs, package)
     _set_functional_account(row, package, fa)
     row.error_message = None
     row.updated_at = datetime.utcnow()
     db.commit()
+
+    # **A re-wire onto the OTHER BeyondInsight path mints a SECOND account, and this row
+    # only tracks one.** The two shapes differ in the account NAME — the packed one
+    # suffixes the run-as user, the OAuth one does not — so Password Safe sees a different
+    # object rather than a duplicate, and the id teardown deletes by has just moved to the
+    # new one. Left unsaid, the first account stays behind holding a live enrollment
+    # credential for a CA nobody thinks it belongs to, which is the exact failure this
+    # feature exists to make impossible. It is NOT deleted here: a managed system may
+    # still reference it, and deleting the account under a working system breaks it.
+    replaced = ""
+    if had_id and str(had_id) != str(fa.get("id") or ""):
+        replaced = (f"a different functional account is now recorded for this CA — "
+                    f"{had_name!r} (id {had_id}) is no longer referenced and is not "
+                    f"deleted by teardown. Remove it in BeyondInsight once nothing is "
+                    f"registered against it.")
+        logger.warning("cert-lab: %s re-wired %s from account %r (id %s) to %r (id %s)",
+                       package, row.id, had_name, had_id,
+                       functional_account_for(row, package), fa.get("id"))
     return {"lab_id": row.id, "package": package,
             "platform": cert_ps_service.platform_name(package),
             "functional_account": functional_account_for(row, package),
-            "mode": fa.get("mode")}
+            "mode": fa.get("mode"), "auth": fa.get("auth", ""), "replaced": replaced}
 
 
 def _subca_refusal(row) -> str:

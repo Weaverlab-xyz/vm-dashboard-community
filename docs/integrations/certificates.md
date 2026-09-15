@@ -229,25 +229,54 @@ nothing here re-implements any of that.
    live by name through `GET /Platforms`, so a renamed platform just needs its new name in
    Settings (`cert_ps_platform`, `cert_ps_subca_platform`). See
    [Two packages, two platforms](#two-packages-two-platforms).
-3. **A BeyondInsight API registration**, set as `cert_ps_bi_api_key` in Settings →
-   Certificate Lab. The dashboard builds the functional account itself; this is the one
-   half it cannot derive, because its own API sign-in uses OAuth2 client credentials and
-   never a `PS-Auth` key. The run-as user comes from `pscli_api_account_name` unless
-   `cert_ps_bi_run_as_user` overrides it.
+3. **A BeyondInsight registration for the plugin to reach Secrets Safe with.** The
+   dashboard builds the functional account itself; this is the one half it cannot derive
+   from the CA build. One account carries **two** credentials, and there are two shapes of
+   the BeyondInsight one. **The plugin reads both and prefers OAuth.**
 
-   One account carries **two** credentials, both fields split on the **last** colon:
+   | | Username | Password | API key | API secret |
+   |---|---|---|---|---|
+   | **OAuth** (preferred) | `<ca-account>` | `<ca-secret>` | OAuth client id | OAuth client secret |
+   | **Packed** (fallback) | `<ca-account>:<bi-run-as-user>` | `<ca-secret>:<bi-api-key>` | — | — |
 
-   | Field | Form |
+   `ECredentialType` is a flags enum and `CredentialParameter` carries `ApiKey` and
+   `ApiSecret` as fields of their own, so one account can be `Password, ApiKey` at once.
+   The OAuth path removes three things: no run-as user has to exist, **nothing is packed**
+   — so a CA secret *or a CA account name* may contain a colon, which the packed form
+   could not express — and the plugin presents a short-lived bearer token instead of a
+   long-lived static key. On the packed path both fields are split on the **last** colon,
+   deliberately: a BeyondInsight username and an API registration key contain no colon,
+   but a certificate authority password may contain anything at all.
+
+   **Check which one your console supports before you configure it.** Open the functional
+   account form for a managed system on the `Certificate` platform and see whether Password
+   Safe offers an **API key** credential type. The SDK models it fully, but whether the
+   console exposes it for a *plugin-supplied* platform is host behaviour and is
+   unverified — two minutes here decides which row above you use, and the plugin works
+   either way.
+
+   In Settings → Certificate Lab:
+
+   | Setting | For |
    |---|---|
-   | Username | `<ca-account>:<bi-run-as-user>` |
-   | Password | `<ca-secret>:<bi-api-key>` |
+   | `cert_ps_bi_auth` | `auto` (default), `oauth`, or `apikey`. Pin it once you have checked |
+   | `cert_ps_bi_client_id` / `cert_ps_bi_client_secret` | The OAuth path. An API registration permitting the **client credentials** grant, with write access to the Secrets Safe folder. Blank falls back to the dashboard's own `pscli_client_id`/`pscli_client_secret` — same tenant by construction, but that registration administers the whole of it, and this one is handed to a plugin on a Resource Broker, so prefer a dedicated one |
+   | `cert_ps_bi_api_key` / `cert_ps_bi_run_as_user` | The packed path. The run-as user falls back to `pscli_api_account_name` |
 
-   Splitting from the right is deliberate: a BeyondInsight username and an API registration
-   key contain no colon, but a certificate authority password may contain anything at all.
+   `auto` resolves a dedicated client id first, then an explicitly set `cert_ps_bi_api_key`,
+   then the inherited `pscli_*` pair. The API key outranks the inherited pair on purpose:
+   an install already working on the packed path must not be moved onto an unproven one by
+   an upgrade, because a functional account that authenticates as nothing onboards **green**
+   and fails hours later at a rotation.
 
    **Building the CA creates this account** — see [Building a CA](#building-a-ca) below.
    The manual path is `cert_ps_functional_account_mode = reference`, which is the right
    setting for a CA this dashboard did not build.
+
+   > Switching path on a CA that **already has** an account mints a second one. The two
+   > shapes differ in the account name, so Password Safe sees a new object rather than a
+   > duplicate, and only the new one is tracked — **Wire up Password Safe** says so, and
+   > the old account has to be removed by hand once nothing is registered against it.
 4. **A Secrets Safe safe** for the bundles. The dashboard creates the *folder tree* beneath
    it; it never creates the safe, which carries its own ACL.
 
@@ -433,10 +462,13 @@ credential exists for exactly one moment**. Both clouds' APIs return it once —
 service account key, an AWS secret access key — so it is live in the apply's outputs and
 in no other place a person can reach. Recovering it by hand meant minting a *second* key.
 
-So the build composes the account and writes it to Password Safe: username
-`<enrollment-principal>:<run-as-user>`, password `<enrollment-secret>:<api-key>`. On GCP
-the secret is the `private_key` **field** out of the key JSON, PEM armour and all — never
-the whole file, which is the most common way to get this wrong by hand.
+So the build composes the account and writes it to Password Safe, in whichever of the two
+shapes above is configured: on the OAuth path username `<enrollment-principal>` and
+password `<enrollment-secret>` whole, with the client id and secret in the account's API
+key and secret fields; on the packed one username `<enrollment-principal>:<run-as-user>`
+and password `<enrollment-secret>:<api-key>`. On GCP the secret is the `private_key`
+**field** out of the key JSON, PEM armour and all — never the whole file, which is the most
+common way to get this wrong by hand.
 
 It is also the only path that fits. `ps-cli` caps a functional-account password at 1,000
 characters; a GCP `private_key` PEM is about 1,700. The REST API the dashboard uses

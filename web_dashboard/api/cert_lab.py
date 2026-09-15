@@ -183,15 +183,15 @@ def build_options(user: User = Depends(require_permission("cloud_function", "rea
                            "CA enrollment credential and the BeyondInsight API user, "
                            "split on the last colon")
     else:
-        if not config_service.get("cert_ps_bi_api_key"):
-            missing.append("cert_ps_bi_api_key — the dashboard composes the functional "
-                           "account from the CA build, but the BeyondInsight API key is "
-                           "the half it cannot derive, and the plugin needs it to write "
-                           "the bundle into Secrets Safe")
-        if not cert_ps_service.bi_run_as_user():
-            missing.append("cert_ps_bi_run_as_user (or pscli_api_account_name) — the "
-                           "BeyondInsight run-as user is the second half of the "
-                           "functional account's username")
+        # There are two shapes of the BeyondInsight half and the resolver picks one, so
+        # naming a single missing key here would name the wrong one: an install with an
+        # OAuth registration and no API key is completely configured. Ask the resolver,
+        # and report what it refuses — its message already names every key the credential
+        # could have come from.
+        try:
+            cert_ps_service.resolve_bi_credential()
+        except cert_ps_service.CertPSError as exc:
+            missing.append(str(exc))
     # A stamped timer is necessary and not sufficient: the reaper only DELETES when
     # `resource_expiry_enforce` is on and dry-run is off. `cert_lab_service.provision`
     # refuses an AWS build that would get no timer at all; this is the other half, and it

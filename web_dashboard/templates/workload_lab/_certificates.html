@@ -552,6 +552,11 @@ function certLabPage() {
         const r = await API.post(`/api/cert-lab/${encodeURIComponent(ca.id)}/functional-account`,
                                  { package: pkg || 'certificate' });
         this.notify(`Functional account ready on ${r.platform}: ${r.functional_account}`);
+        // A re-wire that switched BeyondInsight credential path mints a SECOND account
+        // — the two shapes have different names, so Password Safe sees a new object, not
+        // a duplicate — and only the new one is tracked. Say so as a warning of its own:
+        // folded into the line above it would read as detail on a success.
+        if (r.replaced) { this.notify(r.replaced, 'error'); }
         this.load();
       } catch (e) { this.notify(e.message, 'error'); }
       finally { this.busy = false; }

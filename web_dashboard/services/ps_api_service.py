@@ -1176,7 +1176,8 @@ async def _find_functional_account(client, *, platform_id: int, account_name: st
 
 async def create_functional_account_on_platform(
     *, platform_id: int, account_name: str, display_name: str,
-    password: str, description: str = "", tenant=None,
+    password: str, description: str = "", api_key: str = "", api_secret: str = "",
+    tenant=None,
 ) -> int:
     """Create a functional account on an explicit platform id and return its id.
 
@@ -1199,17 +1200,32 @@ async def create_functional_account_on_platform(
     mints one per POV in a customer's tenant. Defaulting to the install's singleton is
     right for the cloud-DB caller and wrong for that one, and the failure is silent: the
     account appears, in the demo tenant, and the POV's managed system then references an
-    id its own tenant does not have."""
+    id its own tenant does not have.
+
+    ``api_key``/``api_secret`` are a SECOND credential on the same account, sent only when
+    both are present. ``ECredentialType`` is a flags enum, so a platform declaring
+    ``Password, ApiKey`` carries all four fields at once — which is what lets the
+    Certificate plugin hold the certificate authority credential in the name and password
+    and a BeyondInsight OAuth client id/secret in the API fields, packing nothing.
+
+    **Both or neither, deliberately.** A consumer of this pair treats half of it as absent
+    and falls back to whatever it did before, so sending one alone produces an account that
+    looks configured and authenticates as nothing. Callers that cannot supply both should
+    supply neither and say so."""
     async with _client(tenant) as client:
         await _sign_in(client, tenant)
         try:
-            resp = await client.post("FunctionalAccounts", json={
+            payload = {
                 "PlatformID": int(platform_id),
                 "AccountName": account_name,
                 "DisplayName": display_name,
                 "Password": password,
                 "Description": description[:1000],
-            })
+            }
+            if api_key and api_secret:
+                payload["ApiKey"] = api_key
+                payload["ApiSecret"] = api_secret
+            resp = await client.post("FunctionalAccounts", json=payload)
             if resp.status_code not in (200, 201):
                 existing = await _find_functional_account(
                     client, platform_id=int(platform_id), account_name=account_name,
