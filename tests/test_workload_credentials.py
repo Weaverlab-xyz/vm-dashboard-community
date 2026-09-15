@@ -339,12 +339,15 @@ def test_conflict_detection_matches_the_shapes_that_mean_already_exists():
 # ── Wiring guards (the drift this repo keeps getting bitten by) ──────────────
 
 def test_the_backend_is_registered_in_every_dispatch_table():
-    # Six tables in secrets_backend_service; missing one shows up as a feature
+    # Seven tables in secrets_backend_service; missing one shows up as a feature
     # that half-works (readable but not listable, say) rather than as an error.
+    # _UPDATE_FN is the one that half-worked most quietly: an absent entry used to
+    # fall through to the key-deriving writer and report the save as successful.
     src = _read("web_dashboard", "services", "secrets_backend_service.py")
     for table, fn in (("_TEST_FN", "test_wlc"), ("_WRITE_FN", "write_wlc"),
                       ("_READ_FN", "read_wlc"), ("_DESCRIBE_FN", "describe_wlc"),
-                      ("_LIST_FN", "list_wlc"), ("_DELETE_FN", "delete_wlc")):
+                      ("_LIST_FN", "list_wlc"), ("_DELETE_FN", "delete_wlc"),
+                      ("_UPDATE_FN", "update_wlc")):
         block = src.split(table, 1)[1].split("}", 1)[0]
         assert '"wlc"' in block, f"{table} is missing the wlc entry"
         assert fn in block, f"{table} does not point at {fn}"

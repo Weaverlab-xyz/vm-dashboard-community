@@ -528,13 +528,21 @@ async def create_secret_item(payload: SecretCreateRequest, request: Request):
 @router.patch("/items/{backend}/{ref:path}", dependencies=[Depends(_require_admin_dep)])
 async def update_secret_item(backend: str, ref: str, payload: SecretUpdateRequest):
     """Update the value of an existing secret. New value must parse as JSON.
-    The path's `backend` and the body's `backend` must agree."""
+    The path's `backend` and the body's `backend` must agree.
+
+    `update_sync_validated`, not `write_sync_validated`: `ref` is a reference the
+    listing handed out, and the writers take a *key* and derive the backend's name
+    from it. Deriving twice writes to a name nothing was ever stored under —
+    editing `dashboard/aws_secret_access_key` would land at
+    `dashboard/dashboard/aws_secret_access_key`, leave the original serving its old
+    value, and still return 200.
+    """
     if payload.backend != backend:
         raise HTTPException(status_code=400, detail="backend in URL and body must match")
     from ..services import secrets_backend_service as sbs
     try:
         new_ref = await asyncio.to_thread(
-            sbs.write_sync_validated, backend, ref, payload.value,
+            sbs.update_sync_validated, backend, ref, payload.value,
         )
     except (ValueError, Exception) as e:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(e))
