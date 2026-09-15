@@ -54,10 +54,10 @@ Nothing runs unless all four agree, and they belong to different people:
 | this agent may run `agent_hypervisor` | the dashboard operator | Agents page |
 | this verb is allowed on this connection | **you** | `policy.yaml` → `connections:` |
 | this connection exists, and where its credential comes from | **you** | `connections.yaml` |
-| the credential itself, when `dashboard_secret` is set | the dashboard operator | Connections page |
+| the credential itself, when `dashboard_secret` is set | the dashboard operator | Connections tab |
 
 Withhold any one and nothing happens. The fourth is the only one the dashboard owns, and it
-owns it only because you said so in the third — a credential set on the Connections page for
+owns it only because you said so in the third — a credential set on the Connections tab for
 an agent-bound connection does nothing at all until your file opts that entry in. A refusal
 from the second or third arrives in
 Live Output naming the file and the line to add — the dashboard cannot fix it and does
@@ -77,7 +77,7 @@ row it did not just write — and it is also exactly what an agent hands back wh
 not read the host: on Hyper-V, an unloaded PowerShell module and a service account that
 cannot enumerate VMs both produce the same empty list. The agent therefore states which
 one it is, and an agent too old to say so never empties a cache. The rows stay, and the
-connection carries the reason on the Connections page (hover the red **Error**) instead
+connection carries the reason on the Connections tab (hover the red **Error**) instead
 of the page going quietly blank. The cost is the mirror image: a host you have genuinely
 emptied keeps showing its last VMs until you re-pull the agent — and, for Hyper-V or
 ESXi, the `chrweav/hypervisor-runner` image with it.

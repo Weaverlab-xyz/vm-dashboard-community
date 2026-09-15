@@ -142,7 +142,7 @@ has two ways to use Password Safe, and they differ in which host holds the OAuth
 
 | | Agent-side checkout | Dashboard-side checkout |
 |---|---|---|
-| Set in | `connections.yaml` → `ps_managed_account: <id>` | Connections page → `ps_account://<id>`, plus `dashboard_secret: true` in `connections.yaml` |
+| Set in | `connections.yaml` → `ps_managed_account: <id>` | Connections tab → `ps_account://<id>`, plus `dashboard_secret: true` in `connections.yaml` |
 | Password Safe client lives on | the agent host, in `passwordsafe.yaml` | the dashboard, which already has one |
 | Hypervisor password at rest | nowhere | nowhere |
 | Rotate on release | no | **yes**, by default |

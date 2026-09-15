@@ -549,6 +549,12 @@ _HYPERVISOR = Persona(
           "password — injected, brokered and recorded.",
     section_order=("hypervisors", "containers", "overview", "cloud", "managed"),
     tile_emphasis=("vsphere_vms", "proxmox_vms", "nutanix_vms", "gateways"),
+    # `connections` and `agents` are the same PAGE now — two tabs of /agents — and both
+    # are pinned on purpose rather than by oversight: the nav renders whichever of the two
+    # links this viewer gets (Agents is admin-only, Connections is the row that survives
+    # for everyone else and for an install with no agent at all), so pinning both is what
+    # puts a live link in the shortlist either way. Collapsing them to one would leave the
+    # other role's only route to the page unpinned. See _nav_links.html.
     nav_pins=("dashboard", "vsphere", "proxmox", "connections", "agents", "jobs"),
     quick_deploy=("proxmox_vm", "nutanix_vm"),
     docs=("profiles/demo/personas/hypervisor",),

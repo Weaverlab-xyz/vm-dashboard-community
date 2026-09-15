@@ -218,13 +218,14 @@ def test_no_page_header_row_keeps_its_columns_on_a_phone():
             if "flex-col" in toks or "flex-wrap" in toks:
                 continue
             offenders.append(f"{rel}: {m.group(1)}")
-    # 31, not the 33 this pinned before the Workload Lab consolidation. The Certificate and
-    # SPIRE labs had a header row each; they are tabs of one page now, and that page's title
-    # row carries no buttons to sit opposite -- each tab owns its own action, below the tab
-    # bar and inside its own component's scope -- so the justify-between pattern genuinely
-    # does not apply to it. This floor is the canary for the REGEX silently stopping to
-    # match; lower it only alongside a deliberate merge like that one.
-    assert checked >= 31, f"only {checked} page headers matched; the pattern stopped matching"
+    # 30, and each step down was a page MERGE rather than a page losing its header:
+    #   33 -> 31  the Certificate and SPIRE labs became tabs of the Workload Lab;
+    #   31 -> 30  Hypervisor Connections became a tab of Remote Agents.
+    # In every case the merged page's title row carries no buttons to sit opposite -- each
+    # tab owns its own action, below the tab bar and inside its own component's scope -- so
+    # the justify-between pattern genuinely does not apply to it. This floor is the canary
+    # for the REGEX silently stopping to match; lower it only alongside a merge like those.
+    assert checked >= 30, f"only {checked} page headers matched; the pattern stopped matching"
     assert not offenders, (
         "these page headers keep the title and the buttons side by side on a phone:\n  "
         + "\n  ".join(offenders[:12]))
@@ -246,11 +247,13 @@ def test_every_page_still_extends_the_shell_that_carries_the_rules():
     """The rules above live in base.html. A page that stopped extending it would quietly
     opt out of all of them."""
     pages = _pages()
-    # 37, not the 38 this pinned before the Workload Lab consolidation: the Certificate and
-    # SPIRE labs became two tabs of one page, so one template legitimately stopped existing.
-    # The floor is what catches a page quietly DROPPING `extends "base.html"` -- lower it
-    # only alongside a deliberate merge like that one.
-    assert len(pages) >= 37, f"only {len(pages)} page templates found; expected 37+"
+    # 36, and both steps down from the original 38 were page MERGES, each retiring one
+    # template legitimately: the Certificate and SPIRE labs became two tabs of the Workload
+    # Lab, and Hypervisor Connections became a tab of Remote Agents. A tab PARTIAL does not
+    # count here and must not -- it has no `extends` of its own, and it inherits the shell's
+    # rules through the hub that includes it. The floor is what catches a page quietly
+    # DROPPING `extends "base.html"`; lower it only alongside a merge like those.
+    assert len(pages) >= 36, f"only {len(pages)} page templates found; expected 36+"
 
 
 if __name__ == "__main__":

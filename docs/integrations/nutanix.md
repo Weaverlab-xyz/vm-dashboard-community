@@ -112,7 +112,7 @@ A successful response contains `"kind": "user"` in the result.
 ## Multiple connections
 
 Connection details used to live in Settings as a single set of fields, so there could
-only ever be one Prism Central. They now live in the **Connections** page (`/connections`),
+only ever be one Prism Central. They now live on the **Connections** tab of the Remote Agents page (`/connections`),
 which holds as many as you like — a second Prism Central at another site, or the same one
 under a read-only and a privileged service account.
 
