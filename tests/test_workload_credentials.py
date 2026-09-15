@@ -364,7 +364,9 @@ def test_the_pat_is_registered_in_all_four_secret_lists():
 
 
 def test_the_pat_cannot_be_migrated_into_workload_credentials_itself():
-    # Migrating the PAT into WC would make the backend unreadable without itself.
+    # Migrating the PAT into WC would make the backend unreadable without itself --
+    # while the PAT is what authenticates. On workload-identity auth nothing reads
+    # it and the block lifts; see _bootstrap_blocked and the test for it below.
     block = _assign_source(_read("web_dashboard", "api", "secrets.py"),
                            "_BOOTSTRAP_BLOCKLIST")
     assert '"wlc"' in block and "wlc_pat" in block
@@ -918,6 +920,214 @@ def test_the_lab_preflight_does_not_hard_code_the_pat():
     svc = _read("web_dashboard", "services", "workload_cloud_service.py")
     assert 'config_service.get("wlc_pat")' not in api
     assert "missing_settings()" in api and "missing_settings()" in svc
+
+
+# -- Migrating INTO Workload Credentials -------------------------------------
+#
+# Every piece of the `wlc` secrets backend shipped — the adapter, the reference
+# prefix, the migrate endpoint's target validation — behind a Migrate dropdown
+# that listed four backends as literal <option> tags. The one thing an operator
+# could not do with it was the thing it exists for.
+
+def _select_block(html, x_model):
+    """The <select> element bound to `x_model`, markup only."""
+    start = html.index('<select x-model="%s"' % x_model)
+    return html[start:html.index("</select>", start)]
+
+
+def test_workload_credentials_is_offered_as_a_migration_target():
+    html = _read("web_dashboard", "templates", "secrets", "index.html")
+    block = _select_block(html, "migrateTarget")
+    # Driven by /api/secrets/backends, which already omits `wlc` while the preview
+    # flag is off — so the gating stays in one place instead of being restated here.
+    assert "backends" in block, "the target list is not driven by the backend list"
+    assert "<option value=" not in block, \
+        "a literal option list is what hid the wlc backend in the first place"
+    assert "x.id !== 'database'" in block, \
+        "the database is what a migration moves secrets OUT of"
+
+
+def test_the_browse_picker_and_the_badges_know_the_wlc_backend():
+    """Otherwise a successful migration ends with every row showing an EMPTY
+    backend pill and a Browse section that cannot open the backend holding them."""
+    html = _read("web_dashboard", "templates", "secrets", "index.html")
+    browse = _select_block(html, "browse.backend")
+    assert "backends" in browse and "<option value=" not in browse
+    badges = html[html.index("s.backend === 'database'"):html.index("Browse &amp; Edit")]
+    assert "s.backend === 'wlc'" in badges, "a wlc-stored secret renders no label"
+
+
+def test_the_wlc_folder_is_editable_where_it_is_used():
+    """Bound AND declared: a key bound in the markup but missing from the page's
+    own cfg model is dropped by the PATCH, so the field would silently not save."""
+    html = _read("web_dashboard", "templates", "secrets", "index.html")
+    assert "cfg.secrets_wlc_folder" in html
+    model = html[html.index("cfg: {"):html.index("activeBackend:")]
+    assert "secrets_wlc_folder" in model
+    api = _read("web_dashboard", "api", "secrets.py")
+    assert "secrets_wlc_folder: str" in api          # on the PATCH model
+    assert api.count('"secrets_wlc_folder"') >= 2    # read AND written
+
+
+def test_the_pat_is_only_a_bootstrap_credential_while_it_is_the_auth_method():
+    """On workload identity nothing reads `wlc_pat`, so pinning it in the database
+    forever — and calling that "migrating it would brick the dashboard" — is simply
+    untrue, and it is the one secret such an install most wants to move."""
+    api = _read("web_dashboard", "api", "secrets.py")
+    fn = api[api.index("def _bootstrap_blocked("):api.index("# ── Pydantic models")]
+    assert "auth_mode()" in fn and "AUTH_MODE_ENTRA" in fn
+    assert '- {"wlc_pat"}' in fn
+    # And the migration loop has to ASK, not read the static map directly.
+    loop = api[api.index("async def migrate_secrets("):]
+    assert "_bootstrap_blocked(payload.target_backend)" in loop
+    assert "_BOOTSTRAP_BLOCKLIST.get" not in loop
+
+
+def test_the_bootstrap_skip_names_the_way_out():
+    """A skip line that reads as permanent is what made this look unsupported."""
+    api = _read("web_dashboard", "api", "secrets.py")
+    loop = api[api.index("async def migrate_secrets("):]
+    reason = loop[loop.index("if key in blocked:"):loop.index("raw = cs.get_raw(key)")]
+    assert "entra" in reason
+
+
+def test_a_wlc_target_is_refused_while_the_preview_flag_is_off():
+    """Otherwise every secret fails its own write with "not configured", which
+    reads as a broken vault rather than an unset flag."""
+    api = _read("web_dashboard", "api", "secrets.py")
+    loop = api[api.index("async def migrate_secrets("):]
+    guard = loop[:loop.index("target_prefix =")]
+    assert "workload_credentials_enabled" in guard and "status_code=400" in guard
+
+
+# -- The one way this can still deadlock, and why it cannot happen quietly ----
+
+@contextlib.contextmanager
+def _stored(**values):
+    """Run with `_raw_cfg` answering from `values` — the UNRESOLVED stored value."""
+    original = wlc._raw_cfg
+    wlc._raw_cfg = lambda key: values.get(key, "")
+    try:
+        yield
+    finally:
+        wlc._raw_cfg = original
+
+
+_MIGRATED_PAT = "wlc://dashboard/wlc_pat"
+
+
+def test_a_pat_stored_in_workload_credentials_is_detected():
+    with _stored(wlc_pat=_MIGRATED_PAT):
+        assert wlc.pat_is_self_referential() is True
+    with _stored(wlc_pat="PAT-123"):
+        assert wlc.pat_is_self_referential() is False
+    with _stored():
+        assert wlc.pat_is_self_referential() is False
+
+
+def test_pat_auth_refuses_a_pat_that_points_at_itself():
+    """Resolving it would call back in here and resolve it again. The recursion
+    bottoms out in config_service's catch-all as "", so the install reports a
+    MISSING token for one the Secrets page lists as configured."""
+    with _stored(wlc_pat=_MIGRATED_PAT), _config(wlc_site_id="SITE"):
+        try:
+            wlc._headers()
+        except wlc.WorkloadCredentialsError as exc:
+            assert "wlc://" in str(exc)
+            assert "entra" in str(exc)          # the mode that makes it readable
+        else:
+            raise AssertionError("built an Authorization header out of a reference")
+
+
+def test_a_migrated_pat_is_not_reported_as_missing():
+    # It IS set; "set wlc_pat" would send the operator to paste in a token that is
+    # already there.
+    with _stored(wlc_pat=_MIGRATED_PAT), _config(wlc_site_id="SITE"):
+        assert wlc.missing_settings() == []
+
+
+def test_entra_auth_does_not_care_where_the_pat_ended_up():
+    original = wlc._entra_token
+    wlc._entra_token = lambda: "IDENTITY-TOKEN"
+    try:
+        with _stored(wlc_pat=_MIGRATED_PAT), _config(wlc_auth_mode="entra",
+                                                     wlc_service_name="vm-dashboard"):
+            headers = wlc._headers()
+    finally:
+        wlc._entra_token = original
+    assert headers["Authorization"] == "Bearer IDENTITY-TOKEN"
+
+
+def test_the_panel_refuses_the_flip_back_to_a_migrated_pat():
+    """The save would succeed, the panel would look right, and every platform call
+    would start failing — so it is refused at the point of the decision."""
+    setup = _read("web_dashboard", "api", "setup.py")
+    guard = setup[setup.index("def _guard_wlc_auth_mode("):
+                  setup.index('@router.get("/feature/{feature_name}")')]
+    assert "pat_is_self_referential()" in guard
+    assert "AUTH_MODE_ENTRA" in guard          # an entra save is never blocked
+    assert "typed_pat" in guard                # a PAT in the same save is allowed
+    assert "status_code=400" in guard
+    patch = setup[setup.index("def patch_feature_config("):]
+    assert "_guard_wlc_auth_mode(filtered, touched)" in patch
+
+
+# -- Editing a migrated secret from the Secrets page --------------------------
+
+def _load_sbs():
+    """secrets_backend_service, imported as a package module with config_service
+    stubbed. It has to be a real import: `update_wlc` reaches its sibling through a
+    relative import, which a by-path load cannot satisfy."""
+    import types
+    if _ROOT not in sys.path:
+        sys.path.insert(0, _ROOT)
+    name = "web_dashboard.services.config_service"
+    if name not in sys.modules:
+        stub = types.ModuleType(name)
+        conf = {"secrets_wlc_folder": "dashboard"}
+        stub.get = lambda key, default="": conf.get(key, default)
+        stub.get_raw = lambda key, default="": conf.get(key, default)
+        stub.get_bool = lambda key, default=False: bool(conf.get(key, default))
+        stub.set = lambda key, value: conf.__setitem__(key, value)
+        stub.delete = lambda key: conf.pop(key, None)
+        sys.modules[name] = stub
+    from web_dashboard.services import secrets_backend_service as sbs
+    from web_dashboard.services import workload_credentials_service as sibling
+    return sbs, sibling
+
+
+def test_editing_a_wlc_secret_writes_at_its_own_path():
+    """The create writer prepends the configured folder. An edit is handed the
+    reference the browse list produced, which already contains it — so routing an
+    edit through that writer creates `dashboard/dashboard/<key>`: the real secret
+    untouched, the `wlc://` reference still resolving to the old value, and a save
+    that reported success."""
+    sbs, sibling = _load_sbs()
+    calls = []
+    original = sibling.write_static
+    sibling.write_static = lambda name, value, folder="": calls.append((name, folder))
+    try:
+        ref = sbs.update_wlc("dashboard/aws_secret_access_key", '{"v": 1}')
+        assert calls == [("aws_secret_access_key", "dashboard")]
+        assert ref == "dashboard/aws_secret_access_key"
+        # The dispatch, not just the function.
+        calls.clear()
+        sbs.update_sync_validated("wlc", "dashboard/epml_pat", '{"v": 2}')
+        assert calls == [("epml_pat", "dashboard")]
+        # What it replaced, kept explicit so the regression stays recognisable.
+        calls.clear()
+        assert sbs.write_wlc("dashboard/epml_pat", '{"v": 2}') \
+            == "dashboard/dashboard/epml_pat"
+    finally:
+        sibling.write_static = original
+
+
+def test_the_edit_endpoint_uses_the_reference_writer():
+    api = _read("web_dashboard", "api", "secrets.py")
+    patch = api[api.index("async def update_secret_item("):
+                api.index("async def delete_secret_item(")]
+    assert "sbs.update_sync_validated" in patch
+    assert "write_sync_validated" not in patch
 
 
 if __name__ == "__main__":
