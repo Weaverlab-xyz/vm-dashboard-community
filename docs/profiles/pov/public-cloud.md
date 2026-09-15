@@ -496,6 +496,17 @@ Two consequences worth knowing:
 The broker VM's image must have **cloud-init and Docker**. Build it with the Packer
 tooling and reference it from the template.
 
+**A cloud broker is never auto-detected, and must not be.** On Skytap the broker is found
+by its OS -- the only Linux VM in the template -- because the template was authored
+elsewhere and the dashboard is adopting one of its guests. A cloud inverts that: the
+template designates its broker by **role**, and the dashboard *builds* it. So after the
+create, the instance is identified by the **id the driver just returned**, with the role's
+name as a fallback and no inference at any point. Inferring here would pick "the only
+Linux VM" out of rows that by then include this POV's Linux *workload* guests, record one
+of those as the broker, and look completely successful -- the bootstrap did reach the real
+broker via cloud-init, and the agent does enrol. What breaks later is everything that
+excludes the broker from a target list, which would then exclude the wrong machine.
+
 **The spent enrolment code stays in user-data.** A cloud's user-data can only be rewritten
 while the instance is stopped, so unlike the Skytap path there is nothing to clear once
 the code has been redeemed. The exposure is small — the code is single-use, fifteen

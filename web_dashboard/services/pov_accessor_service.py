@@ -400,7 +400,7 @@ def wired_view(db: Session, env: PovEnvironment) -> list:
               .order_by(PovEnvironmentVM.name).all())
     return [{
         "name": vm.name or vm.platform_vm_id,
-        "os_family": vm.os_family or "",
+        "os_family": vm.guest_os,
         # Their own lab's private network, which the share link already puts them on. Not a
         # credential and not an id in anybody's appliance.
         "private_ip": vm.private_ip or "",

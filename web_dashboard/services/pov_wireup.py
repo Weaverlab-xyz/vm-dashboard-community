@@ -507,7 +507,7 @@ def wireable(vm: PovEnvironmentVM) -> str:
     if not (vm.private_ip or "").strip():
         return ("no private address — the platform reports one once the VM is running, "
                 "so power the environment on and refresh")
-    family = (vm.os_family or "").strip().lower()
+    family = vm.guest_os
     if family not in ("linux", "windows"):
         # Blank means the platform did not say. Slice 3 refused to guess for exactly this
         # reason: an SSH jump to a Windows box fails at session launch, in front of
@@ -565,7 +565,7 @@ async def wire_vm(db: Session, env: PovEnvironment, vm: PovEnvironmentVM, *,
         return f"{vm.name}: skipped — {problem}."
 
     label = f"{env.name}-{vm.name}"
-    windows = (vm.os_family or "").strip().lower() == "windows"
+    windows = vm.guest_os == "windows"
 
     try:
         if windows:
@@ -637,7 +637,7 @@ async def onboard_vm(db: Session, env: PovEnvironment, vm: PovEnvironmentVM, *,
     if vm.ps_managed_system_id:
         return f"{vm.name}: already in Password Safe (system {vm.ps_managed_system_id})."
 
-    family = (vm.os_family or "").strip().lower()
+    family = vm.guest_os
     account = (ps.get("accounts") or {}).get(family)
     if account is None:
         # The mint attempt's own reason when there was one: it is specific and actionable
@@ -744,7 +744,7 @@ async def register_vm_entitle(db: Session, env: PovEnvironment, vm: PovEnvironme
     if vm.entitle_integration_id:
         return f"{vm.name}: already in Entitle ({vm.entitle_integration_id})."
 
-    if (vm.os_family or "").strip().lower() != "linux":
+    if vm.guest_os != "linux":
         return (f"{vm.name}: skipped Entitle — the SSH ephemeral-accounts app mints "
                 f"accounts over SSH, which this guest does not answer.")
 
@@ -1093,7 +1093,7 @@ async def unwire_jump_items(db: Session, env: PovEnvironment, rows: list, *,
     """
     removed = problems = 0
     for vm in rows:
-        windows = (vm.os_family or "").strip().lower() == "windows"
+        windows = vm.guest_os == "windows"
         try:
             if windows:
                 await terraform_pra_service.remove_rdp_jump(vm.pra_jump_tf_state,

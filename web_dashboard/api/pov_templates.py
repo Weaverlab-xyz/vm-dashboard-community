@@ -39,7 +39,7 @@ from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovTemplateBuild, User, get_db
 from ..services import (job_service, lab_platforms, pov_blueprint_service,
-                        pov_broker, pov_cloud_env, pov_cloud_template_service,
+                        pov_cloud_env, pov_cloud_template_service,
                         pov_template_builder)
 from .auth import get_current_user, require_admin, require_explicit_permission, require_permission
 
@@ -174,8 +174,12 @@ async def start_build(payload: BuildRequest, db: Session = Depends(get_db),
         base_template_id=str(payload.base_template_id),
         base_template_name=base_name,
         project_id=effective_project or None,
-        broker_vm_name=(payload.broker_vm_name.strip()
-                        or pov_broker.DEFAULT_BROKER_VM_NAME),
+        # Blank stays blank. Coercing it here was the quiet way this whole feature
+        # could be defeated: a build that records "broker" carries a TYPED name
+        # forever, so the resolver takes its exact-match rung and auto-detect never
+        # fires on the builder at all -- while the POV made from the template does
+        # infer, which is the two-expressions drift this shares a resolver to avoid.
+        broker_vm_name=payload.broker_vm_name.strip(),
         keep_build_environment=bool(payload.keep_build_environment),
         status=pov_template_builder.STATUS_BUILDING,
         workgroup=payload.workgroup or None,
@@ -241,7 +245,9 @@ async def verify_contract(target_id: str = Query(...),
     except Exception as exc:  # noqa: BLE001
         raise _platform_error(exc, f"reading {name} {kind} {target_id}") from exc
 
-    wanted = broker_vm_name.strip() or pov_broker.DEFAULT_BROKER_VM_NAME
+    # Blank means auto-detect, and is reported back as blank so the page does not show
+    # a name the operator never asked for.
+    wanted = broker_vm_name.strip()
     report = pov_template_builder.check_contract(target.get("vms") or [], wanted)
     return {
         "platform": name,

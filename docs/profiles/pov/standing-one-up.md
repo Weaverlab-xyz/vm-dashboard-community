@@ -79,6 +79,7 @@ same POV.
 | A blueprint carries | It does not carry |
 |---|---|
 | The template, project and broker VM name | The POV's **name** — that is per-POV by definition |
+| … and a blank broker VM name stays blank, which means auto-detect | |
 | The idle timeout and an expiry override | The **workgroup**, which decides RBAC and the expiry exempt list. Not something a saved recipe should set silently |
 | The three tenant references | Any **secret** — see below |
 | The Gateway name, and the Resource Broker's VM, zone and installer asset | |
@@ -88,7 +89,11 @@ same POV.
 A blueprint supplies values for the fields a request left blank and nothing else. Everything
 after that is the same provision job that runs without one — a blueprint that forked the
 flow would be a second place for the rules about orphaned environments to drift. If you
-typed a broker VM name before picking a recipe, the recipe does not overwrite it.
+typed a broker VM name before picking a recipe, the recipe does not overwrite it — and a
+blank one is left blank rather than filled with a default, because blank now *means*
+auto-detect ([which VM runs the agent](skytap.md#the-broker-vm)). A recipe that helpfully
+wrote `broker` into that field would switch auto-detection off for every POV made from
+it.
 
 The tenant ids on a blueprint are validated **when you save it**, against the same check the
 create form uses. A stored selection that only failed at provision time would move a form

@@ -487,8 +487,16 @@ def check_contract(vms: list[dict], broker_vm_name: str) -> list[dict]:
 
     What is checked, and what each failure actually costs:
 
-    * **A broker VM by name.** Without it the POV comes up, bills, and the Broker column
-      reads ``none`` forever. Exact match — see ``pov_broker.name_matches_broker``.
+    * **A resolvable broker VM.** Without one the POV comes up, bills, and the Broker
+      column reads ``none`` forever. Resolved by ``pov_broker.resolve_broker_candidate``,
+      the same ladder the POV itself uses, so a template that verifies is a template the
+      POV can broker. A blank ``broker_vm_name`` means auto-detect (the only Linux VM),
+      not the conventional name.
+
+      One caveat this cannot close: the operator's per-VM OS override lives on a POV's
+      rows, and a template read has no POV, so a template whose only Linux guest reports
+      no OS fails here while the POV built from it resolves fine once the OS is set on
+      its VMs tab. One rule, two different worlds.
     * **The broker is on an automatic network.** The metadata service answers *only* on
       VMs attached to one. On a manual network the guest gets no metadata at all, which
       looks exactly like a missing runner and sends the operator to rewrite a runner that
@@ -504,19 +512,23 @@ def check_contract(vms: list[dict], broker_vm_name: str) -> list[dict]:
     rather than guessing.
     """
     out: list[dict] = []
-    wanted = (broker_vm_name or pov_broker.DEFAULT_BROKER_VM_NAME).strip()
-    names = [str(v.get("name") or "") for v in vms]
+    # Blank stays blank: it means auto-detect, and coercing it to the conventional name
+    # here would make every Verify demand a name the template never agreed to.
+    wanted = (broker_vm_name or "").strip()
 
-    broker = next((v for v in vms
-                   if pov_broker.name_matches_broker(v.get("name"), wanted)), None)
-    if broker is None:
-        found = ", ".join(sorted(n for n in names if n)) or "none"
-        out.append(_result(
-            "broker VM", CHECK_FAIL,
-            f"no VM is named {wanted!r}, so a POV from this template has nowhere to run "
-            f"its agent. Found: {found}. Rename the VM in the template, or build with the "
-            f"name this template actually uses."))
-    else:
+    broker = None
+    try:
+        broker = pov_broker.resolve_broker_candidate(
+            vms, typed_name=wanted,
+            # No env: this is a template, so only the conventional role names are known.
+            claimed_names=pov_broker.claimed_vm_names(),
+            remedy=("Rename the VM in the template, or build with the name this "
+                    "template actually uses."))
+    except pov_broker.BrokerError as exc:
+        # The resolver already names what it found and what to do about it, so this
+        # passes the sentence straight through rather than composing a second one.
+        out.append(_result("broker VM", CHECK_FAIL, str(exc)))
+    if broker is not None:
         out.append(_result("broker VM", CHECK_PASS,
                            f"{broker.get('name')} will run the agent."))
 
@@ -558,7 +570,11 @@ def check_contract(vms: list[dict], broker_vm_name: str) -> list[dict]:
             "no Windows guest, so a POV from this template cannot install a Password Safe "
             "Resource Broker. Fine for a PRA-and-Entitle POV."))
 
-    workload = [n for n in names if not pov_broker.name_matches_broker(n, wanted)]
+    # By identity, not by name. The broker may have been INFERRED rather than named, so a
+    # name comparison would count it as a workload VM and report a bare broker template
+    # as having something to demonstrate. Identity also settles the case of two VMs that
+    # share a name, which a name comparison silently got wrong before.
+    workload = [v for v in vms if v is not broker]
     if workload:
         out.append(_result("workload VMs", CHECK_PASS,
                            f"{len(workload)} VM(s) besides the broker."))
@@ -865,7 +881,8 @@ async def run_template_build(job_id: str, meta: dict) -> None:
                                         "Checking the template contract…")
             live = await mod.get_environment(build.build_environment_id)
             vms = live.get("vms") or []
-            wanted = (build.broker_vm_name or pov_broker.DEFAULT_BROKER_VM_NAME)
+            # Blank stays blank -- auto-detect. See check_contract.
+            wanted = (build.broker_vm_name or "")
             report = check_contract(vms, wanted)
             build.contract_list = report
             db.commit()
@@ -882,8 +899,17 @@ async def run_template_build(job_id: str, meta: dict) -> None:
                       "environment.")
                 return
 
-            broker = next((v for v in vms
-                           if pov_broker.name_matches_broker(v.get("name"), wanted)), None)
+            # The SAME resolver the contract check and the POV itself use. Two
+            # expressions of this rule would let the builder PREPARE one VM while a POV
+            # from the baked template ENROLS another -- and neither half would look
+            # wrong on its own. Suppressed rather than fatal: contract_ok above has
+            # already decided whether a refusal blocks the bake, and the
+            # `broker is None` path below degrades to prepare_method = "skipped".
+            broker = None
+            with contextlib.suppress(pov_broker.BrokerError):
+                broker = pov_broker.resolve_broker_candidate(
+                    vms, typed_name=wanted,
+                    claimed_names=pov_broker.claimed_vm_names())
             if broker is not None:
                 build.broker_vm_id = str(broker.get("id") or "")
                 db.commit()
@@ -1007,7 +1033,8 @@ def serialize(build: PovTemplateBuild) -> dict:
         "project_id": build.project_id or "",
         "build_environment_id": build.build_environment_id or "",
         "build_environment_was": build.build_environment_was or "",
-        "broker_vm_name": build.broker_vm_name or pov_broker.DEFAULT_BROKER_VM_NAME,
+        # What was typed, so "" means auto-detect and the page can say so.
+        "broker_vm_name": build.broker_vm_name or "",
         "broker_vm_id": build.broker_vm_id or "",
         "result_template_id": build.result_template_id or "",
         "result_template_name": build.result_template_name or "",

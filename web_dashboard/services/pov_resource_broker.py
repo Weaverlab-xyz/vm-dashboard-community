@@ -215,10 +215,16 @@ def set_application_host(db: Session, env: PovEnvironment, value: int | None) ->
 def select_rb_vm(db: Session, env: PovEnvironment) -> PovEnvironmentVM:
     """The Windows VM that will host the Resource Broker, or a refusal naming what it found.
 
-    Exact name match, case-insensitively — the same rule ``pov_broker.select_broker_vm``
-    follows, and deliberately not "the first Windows VM": a POV template with a domain
-    controller and a member server has two, and installing a Resource Broker on whichever
-    the platform happened to list first is not a decision a position in a list can make.
+    Exact name match, case-insensitively, and deliberately not "the first Windows VM": a
+    POV template with a domain controller and a member server has two, and installing a
+    Resource Broker on whichever the platform happened to list first is not a decision a
+    position in a list can make.
+
+    ``pov_broker`` used to follow this same rule and no longer does — it auto-detects
+    the only Linux VM when no name is typed. The difference is not that one is fussier:
+    inference is safe there because UNIQUENESS answers, and a template almost always has
+    several Windows guests, so there is no unique one to find here. Where uniqueness is
+    absent a name is the only honest answer.
     """
     wanted = rb_vm_name(env).strip().lower()
     rows = (db.query(PovEnvironmentVM)
@@ -240,8 +246,8 @@ def select_rb_vm(db: Session, env: PovEnvironment) -> PovEnvironmentVM:
     # blank means UNKNOWN rather than a guess. Refusing both cases is right: a Linux VM
     # reached over WinRM fails as a connection timeout, which reads as a firewall problem
     # and sends an SE somewhere else entirely.
-    if (match.os_family or "").strip().lower() != "windows":
-        reported = match.os_family or "nothing"
+    if match.guest_os != "windows":
+        reported = match.guest_os or "nothing"
         raise ResourceBrokerError(
             f"{match.name!r} reports its OS as {reported}, and a Resource Broker is a "
             f"Windows program (Server 2019 or 2022 x64). Point this POV at a Windows VM — "
@@ -271,7 +277,7 @@ def windows_targets(db: Session, env: PovEnvironment) -> list[str]:
         rows = (db.query(PovEnvironmentVM)
                   .filter(PovEnvironmentVM.environment_id == env.id).all())
         return sorted({(r.private_ip or "").strip() for r in rows
-                       if (r.os_family or "").strip().lower() == "windows"
+                       if r.guest_os == "windows"
                        and (r.private_ip or "").strip()})
 
 
@@ -431,7 +437,7 @@ async def platform_login(db: Session, env_id: str, vm_id: str) -> tuple:
     try:
         return pov_credentials.pick(
             entries, vm_label=label,
-            os_family=(row.os_family or "") if row is not None else "",
+            os_family=row.guest_os if row is not None else "",
             prefer=(row.login_username or "") if row is not None else "")
     except pov_credentials.CredentialParseError as exc:
         raise ResourceBrokerError(str(exc)) from None

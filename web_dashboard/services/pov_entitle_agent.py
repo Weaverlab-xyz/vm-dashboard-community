@@ -297,11 +297,15 @@ def token_for_job(db: Session, job: Job) -> str:
 def select_host_vm(db: Session, env: PovEnvironment) -> PovEnvironmentVM:
     """The Linux VM that will host the agent, or a refusal naming what it found.
 
-    Exact name match, case-insensitively — the same rule ``pov_resource_broker`` and
-    ``pov_broker`` follow, and deliberately not "the first Linux VM": a POV template with
-    a web tier and a database has several, and installing a Kubernetes distribution on
-    whichever the platform happened to list first is not a decision a position in a list
-    can make.
+    Exact name match, case-insensitively — the same rule ``pov_resource_broker``
+    follows, and deliberately not "the first Linux VM": a POV template with a web tier and
+    a database has several, and installing a Kubernetes distribution on whichever the
+    platform happened to list first is not a decision a position in a list can make.
+
+    ``pov_broker`` auto-detects *the only* Linux VM, which is not the same claim: position
+    is what this refuses, and uniqueness is what that relies on. The two compete for the
+    same guests, so the broker's inference excludes whatever is named here
+    (``pov_broker.claimed_vm_names``) rather than the two guessing at each other.
     """
     wanted = host_vm_name(env).strip().lower()
     rows = (db.query(PovEnvironmentVM)
@@ -319,13 +323,13 @@ def select_host_vm(db: Session, env: PovEnvironment) -> PovEnvironmentVM:
             f"install the Entitle agent. Found: {found}. Rename the template's VM, or set "
             f"a different Entitle agent host on this POV.")
 
-    family = (match.os_family or "").strip().lower()
+    family = match.guest_os
     if family != "linux":
         # Blank means the platform did not say, and the POV feature has refused to guess
         # since slice 3. Here the cost of a wrong guess is concrete: the k3s installer is
         # a shell script, so a Windows guest fails somewhere inside a play that has
         # already logged in, which reads as a broken playbook.
-        reported = match.os_family or "nothing"
+        reported = match.guest_os or "nothing"
         raise EntitleAgentError(
             f"{match.name!r} reports its OS as {reported}, and the Entitle agent runs on "
             f"Linux. Point this POV at a Linux VM — the k3s installer is a shell script "
@@ -351,6 +355,16 @@ def linux_targets(db: Session, env: PovEnvironment) -> list[str]:
     except EntitleAgentError:
         from . import pov_broker
         broker = pov_broker.broker_vm_name(env).strip().lower()
+        # ...and by ID as well as by name, because the broker is no longer necessarily
+        # NAMED anything in particular. `pov_broker.select_broker_vm` infers it as the
+        # only Linux VM when nothing was typed, so on a template whose Docker host is
+        # called `BtPocLin01` a name comparison misses it entirely -- and this fallback
+        # would then grant SSH to, and `select_host_vm` could later install k3s onto, the
+        # one guest whose job is keeping the agent channel up. Read the persisted column
+        # rather than re-resolving: it is already committed by the time any policy is
+        # rendered, and calling the resolver here would be a second chance to disagree
+        # with it.
+        broker_id = (env.broker_vm_id or "").strip()
         rows = (db.query(PovEnvironmentVM)
                   .filter(PovEnvironmentVM.environment_id == env.id).all())
         # The broker VM is excluded from the FALLBACK, not from the named host. Nothing
@@ -358,9 +372,11 @@ def linux_targets(db: Session, env: PovEnvironment) -> list[str]:
         # include the one guest whose job is to keep the agent channel up — see
         # DEFAULT_HOST_VM_NAME.
         return sorted({(r.private_ip or "").strip() for r in rows
-                       if (r.os_family or "").strip().lower() == "linux"
+                       if r.guest_os == "linux"
                        and (r.private_ip or "").strip()
-                       and (r.name or "").strip().lower() != broker})
+                       and (r.name or "").strip().lower() != broker
+                       and (not broker_id
+                            or (r.platform_vm_id or "").strip() != broker_id)})
 
 
 # ── the tenant ───────────────────────────────────────────────────────────────

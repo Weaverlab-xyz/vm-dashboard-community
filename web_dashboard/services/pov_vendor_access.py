@@ -362,7 +362,7 @@ def _session_perms(db: Session, env: PovEnvironment) -> dict[str, bool]:
     an unknown guest grants nothing rather than guessing.
     """
     families = {
-        (v.os_family or "").strip().lower()
+        v.guest_os
         for v in db.query(PovEnvironmentVM).filter(
             PovEnvironmentVM.environment_id == env.id,
             PovEnvironmentVM.pra_jump_id.isnot(None)).all()}

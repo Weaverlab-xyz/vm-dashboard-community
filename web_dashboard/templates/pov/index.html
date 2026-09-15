@@ -169,13 +169,19 @@
       </div>
       <div x-show="current.bootstrap_injection">
         <label class="block text-sm font-medium text-gray-700 mb-1">Broker VM name</label>
-        <input type="text" x-model="form.broker_vm_name" placeholder="broker"
+        <!-- No `value`, deliberately. Pre-filling this would make every POV carry a
+             TYPED name, which takes the resolver's exact-match rung and switches
+             auto-detect off permanently. -->
+        <input type="text" x-model="form.broker_vm_name"
+               placeholder="auto — the only Linux VM in the template"
                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
         <p class="text-xs text-gray-400 mt-1">
           The VM in the template that runs the agent. It needs Docker and the
           <a href="/docs/profiles/pov/skytap#the-template-contract" target="_blank"
              class="underline">metadata runner</a> — nothing executes the payload for you.
-          Blank uses <span class="font-mono">broker</span>.
+          <strong>Leave this blank</strong> and the POV finds it: the one Linux VM that is
+          not the Entitle or Resource Broker host. Name one only when the template has
+          several Linux guests, or when auto-detect refuses — it says which.
         </p>
       </div>
       <template x-for="k in tenantKinds" :key="'pick-' + k.kind">
@@ -295,11 +301,32 @@
                                'bg-amber-100 text-amber-800': ['offline','enrolling'].includes(e.broker_status),
                                'bg-red-100 text-red-700': e.broker_status === 'revoked',
                                'bg-gray-100 text-gray-500': e.broker_status === 'none'}"
-                      :title="e.broker_agent_name || ('expected VM: ' + (e.broker_vm_name || 'broker'))"
+                      :title="brokerTitle(e)"
                       x-text="e.broker_status || 'none'"></span>
                 <!-- The reason lives here rather than in error_message: a POV whose broker
                      did not come up is running, billing and reapable. -->
                 <p x-show="e.broker_error" class="text-xs text-amber-700 mt-0.5" x-text="e.broker_error"></p>
+                <!-- The remedy for the refusals auto-detect can produce ("several VMs
+                     could be the broker"). Those are facts about a provisioned
+                     environment, so the create form could not have asked. -->
+                <div x-show="editingBroker !== e.id">
+                  <p class="text-xs mt-0.5"
+                     :class="e.broker_vm_name ? 'text-gray-500' : 'text-gray-300'"
+                     x-text="e.broker_vm_name || 'auto-detect'"></p>
+                  <button x-show="current.bootstrap_injection" @click="startEditBroker(e)"
+                          :disabled="!actionable(e)"
+                          class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">name VM</button>
+                </div>
+                <div x-show="editingBroker === e.id" class="space-y-1 mt-0.5">
+                  <input type="text" x-model="brokerEdit.vm_name"
+                         placeholder="auto — the only Linux VM"
+                         class="w-full border border-gray-300 rounded px-1 py-0.5 text-xs font-mono">
+                  <div class="flex gap-1">
+                    <button @click="saveBroker(e, true)" class="text-xs px-2 py-0.5 rounded bg-blue-600 text-white">Save &amp; broker</button>
+                    <button @click="saveBroker(e, false)" class="text-xs px-2 py-0.5 rounded border border-gray-300">Save only</button>
+                    <button @click="editingBroker = ''" class="text-xs px-2 py-0.5 text-gray-500">Cancel</button>
+                  </div>
+                </div>
               </td>
               <td class="px-4 py-2">
                 <div x-show="editingGateway !== e.id" class="space-y-0.5">
@@ -913,6 +940,8 @@ function povPage() {
     tenantEdit: {},
     editingGateway: '',
     gatewayEdit: { name: '', deploy_key: '', has_key: false },
+    editingBroker: '',
+    brokerEdit: { vm_name: '' },
     editingRb: '',
     rbEdit: { vm_name: '', asset: '', zone: '', installer_key: '', has_key: false },
     // Only the Windows installers. The asset list carries every uploaded playbook and
@@ -1413,6 +1442,36 @@ function povPage() {
       try {
         await this.post(`/api/pov/managed/${env.id}/tenants`, body);
         this.editingTenants = '';
+        await this.load();
+      } catch (e) { this.error = e.message; }
+    },
+
+    // Why this is not `e.broker_vm_name || 'broker'`: a blank field now MEANS
+    // auto-detect, so naming a default here would tell the operator the POV is looking
+    // for a VM called `broker` when it is not looking for a name at all.
+    brokerTitle(env) {
+      if (env.broker_agent_name) return env.broker_agent_name;
+      if (env.broker_vm_name) return 'expected VM: ' + env.broker_vm_name;
+      if (env.broker_vm_id) return 'auto-detected VM: ' + env.broker_vm_id;
+      return 'auto-detect: the only Linux VM in the template';
+    },
+
+    startEditBroker(env) {
+      this.brokerEdit = { vm_name: env.broker_vm_name || '' };
+      this.editingBroker = env.id;
+    },
+
+    async saveBroker(env, install) {
+      this.error = ''; this.notice = '';
+      try {
+        const data = await this.post(`/api/pov/managed/${env.id}/broker`, {
+          vm_name: this.brokerEdit.vm_name,
+          install: !!install,
+        });
+        this.editingBroker = '';
+        this.notice = install
+          ? `${env.name}: installing the broker agent — watch job ${data.job_id}.`
+          : `${env.name}: broker VM name saved.`;
         await this.load();
       } catch (e) { this.error = e.message; }
     },

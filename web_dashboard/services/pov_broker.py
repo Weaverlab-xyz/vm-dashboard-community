@@ -62,10 +62,23 @@ class BrokerError(Exception):
     """
 
 
-# The VM in the template that carries the agent. A convention, not a discovery: the
-# dashboard cannot tell which of eight VMs is the one with Docker on it, and guessing
-# wrong installs an agent on the customer's domain controller.
+# The CONVENTIONAL name for the VM that carries the agent. No longer a default that has
+# to match: a POV that named nothing is resolved by `resolve_broker_candidate` below, and
+# this name serves two narrower jobs — breaking a tie between several Linux guests, and
+# being the name the cloud read-back looks for, where the template designates its broker
+# by ROLE and names it this.
+#
+# It stopped being a hard requirement because the dashboard now has a signal it did not
+# have when this was written: `PovEnvironmentVM.guest_os`, an operator-correctable OS. On
+# a template with one Linux guest that is a better answer than any name, because the
+# thing being looked for is "the Docker host", and Linux is a fact about it while its
+# name is a convention somebody else's template never agreed to.
 DEFAULT_BROKER_VM_NAME = "broker"
+
+# Where the operator-typed name lives. Not a secret — a VM name inside the environment —
+# so it goes on the row's metadata, the same split `pov_resource_broker` and
+# `pov_entitle_agent` make for theirs.
+_META_VM_NAME = "broker_vm_name"
 
 # Both markers must be present before the guest runs anything. A metadata read that
 # returns a truncated body would otherwise execute half a script — with the `docker rm -f`
@@ -166,8 +179,52 @@ def broker_vm_name(env: PovEnvironment) -> str:
     a single account can hold two whose broker VMs are named differently. Stored on the
     row's metadata at provision time so it survives into every later re-run — a default
     read fresh each time would silently change meaning when the default changed.
+
+    Substitutes the conventional name, so this answers "what name would we look for" and
+    NOT "what did the operator ask for". Anything choosing a VM wants
+    :func:`stored_broker_vm_name`; the difference is load-bearing — see there.
     """
-    return (env.metadata_dict.get("broker_vm_name") or "").strip() or DEFAULT_BROKER_VM_NAME
+    return (env.metadata_dict.get(_META_VM_NAME) or "").strip() or DEFAULT_BROKER_VM_NAME
+
+
+def stored_broker_vm_name(env: PovEnvironment) -> str:
+    """What was actually TYPED, or "" — as opposed to :func:`broker_vm_name`, which
+    substitutes the conventional name.
+
+    The distinction is the hinge of the whole selection rule. "The operator typed nothing"
+    and "the operator typed 'broker'" are different instructions — the first means *infer
+    which guest this is*, the second means *match this name exactly and refuse if it is
+    missing* — and the defaulted reader above cannot tell them apart. While `broker` was a
+    hard requirement that did not matter; now that a blank field means auto-detect, a
+    reader that invents a value would switch inference off for every POV.
+    """
+    return str(env.metadata_dict.get(_META_VM_NAME) or "").strip()
+
+
+def set_broker_vm_name(env: PovEnvironment, vm_name: str | None) -> None:
+    """MERGE the typed name onto the row's metadata. ``None`` leaves it alone, ``""``
+    clears it back to auto-detect. No commit: the create path writes this onto a row it
+    has not added yet, so the caller owns the transaction.
+
+    A merge, not an assignment. `metadata_dict` also carries `rb_vm_name`, `rb_zone`,
+    `rb_asset`, the Entitle host name, the guest-step opt-in list and `broker_error`, so
+    replacing the dict drops whichever of those was set first.
+    """
+    meta = env.metadata_dict
+    if vm_name is None:
+        return
+    value = str(vm_name).strip()
+    if value:
+        meta[_META_VM_NAME] = value
+    else:
+        meta.pop(_META_VM_NAME, None)
+    env.metadata_dict = meta
+
+
+def configure(db: Session, env: PovEnvironment, *, vm_name: str | None = None) -> None:
+    """:func:`set_broker_vm_name` plus the commit. The post-create writer."""
+    set_broker_vm_name(env, vm_name)
+    db.commit()
 
 
 def agent_name(env: PovEnvironment) -> str:
@@ -201,35 +258,211 @@ def name_matches_broker(name: str, wanted: str) -> bool:
     One predicate rather than the same expression written out wherever a broker is picked.
     The rule it encodes is the load-bearing part: "contains broker" also matches a customer
     VM called ``password-broker``, and the cost of that wrong answer is an agent installed
-    on a machine nobody expected. Both callers — ``select_broker_vm`` below, over database
-    rows, and the template builder, over a live platform read — have to agree on it, and
-    two copies of a rule are two chances to relax one of them.
+    on a machine nobody expected. It is now one rung of
+    :func:`resolve_broker_candidate` rather than the whole rule, and exactness is what
+    that rung is for: a name the operator TYPED is an instruction, so matching it loosely
+    is how a typo becomes a successful install on the wrong guest.
     """
     return (name or "").strip().lower() == (wanted or "").strip().lower()
 
 
-def select_broker_vm(db: Session, env: PovEnvironment) -> PovEnvironmentVM:
-    """The VM that will run the agent, or a refusal naming what was actually found.
+# The remedy the POV page can offer. A parameter on the resolver rather than baked into
+# its messages, because the template builder's remedy is a different sentence: it holds a
+# template nobody has made a POV from yet, so "set the name on this POV" names nothing.
+_POV_REMEDY = ("Set the broker VM name on this POV to name one on purpose, then press "
+               "Broker.")
 
-    Exact name match, case-insensitively — see ``name_matches_broker``.
+
+def claimed_vm_names(env: PovEnvironment | None = None) -> tuple[str, ...]:
+    """The VM names another POV role has already taken, lowercased.
+
+    Inference must not hand the agent a guest whose job is something else. On a POV with
+    one Linux VM, "the only Linux VM" and "the Entitle agent host" can be the same
+    machine, and that is a refusal rather than a coincidence: k3s brings its own
+    containerd and its own iptables rules onto the one host whose job is keeping the
+    agent channel up.
+
+    The DEFAULTED readers, deliberately. A template guest literally named "entitle" is
+    the Entitle host by convention whether or not anybody configured it, and inference
+    that conscripted it would be overruled by the first person to press that button.
+
+    ``env=None`` gives the two conventional names alone, which is all the template
+    builder can know -- it holds a template, not a POV.
+
+    Imported in the function body: both modules reach this one, so a top-level import
+    would close a real cycle. Same reason ``ensure_broker`` imports them locally.
     """
-    wanted = broker_vm_name(env).strip().lower()
-    rows = (db.query(PovEnvironmentVM)
-              .filter(PovEnvironmentVM.environment_id == env.id).all())
-    if not rows:
+    from . import pov_entitle_agent, pov_resource_broker
+    if env is None:
+        names = (pov_entitle_agent.DEFAULT_HOST_VM_NAME,
+                 pov_resource_broker.DEFAULT_RB_VM_NAME)
+    else:
+        names = (pov_entitle_agent.host_vm_name(env),
+                 pov_resource_broker.rb_vm_name(env))
+    return tuple(sorted({(n or "").strip().lower() for n in names if (n or "").strip()}))
+
+
+def _label(cand: dict) -> str:
+    """How a candidate is named in a refusal: its name, or its platform id if unnamed."""
+    return str(cand.get("name") or cand.get("id") or "").strip() or "unnamed"
+
+
+def resolve_broker_candidate(candidates: list[dict], *, typed_name: str = "",
+                             claimed_names: tuple[str, ...] = (), sticky_id: str = "",
+                             pinned_id: str = "", remedy: str = _POV_REMEDY) -> dict:
+    """Which of these VMs is the broker. Returns the candidate given; raises
+    ``BrokerError`` naming what it found.
+
+    ``candidates`` is the minimal shape both callers already hold --
+    ``{"id", "name", "os_family"}``, extra keys ignored and the SAME dict handed back, so
+    the template builder can pass its live adapter dicts straight in and keep using the
+    NIC list on the one that comes out.
+
+    ONE expression of the rule, over both DB rows and a live platform read, because a
+    builder that PREPARES one VM while the adopt path ENROLS another is the failure mode
+    two copies of it produce, and neither half would look wrong on its own.
+
+    The ladder, in order. Each rung exists because the one above it cannot answer:
+
+    a. **Pinned** -- ``pinned_id`` wins outright: the platform has just told us which
+       instance it built, which is better than any inference about it and better than any
+       name, because the dashboard chose that name itself moments earlier.
+    b. **Typed** -- a name the operator actually typed is matched exactly, and refused if
+       nothing matches. Never widened to inference: a typed name matching nothing is a
+       typo or a renamed template, and inferring past it installs an agent somewhere the
+       operator did not ask for.
+    c. **Sticky** -- ``sticky_id`` still among the candidates. An enrolled broker is not
+       moved: the agent's identity lives on that guest, so re-resolving onto a different
+       VM leaves a container polling from a machine nothing points at.
+
+       Below the typed rung, deliberately. This exists to stop INFERENCE moving an
+       enrolled broker, not to outrank an operator -- above it, naming a VM on a POV that
+       had already brokered would be silently ignored, which is exactly the remedy the
+       refusals at (f) tell people to use.
+    d. **Infer** -- the Linux candidates, minus ``claimed_names``. Exactly one survivor
+       is an answer. Uniqueness, never position: "the first Linux VM" is not a decision a
+       position in a list can make, but "the only one" is a fact about the template. A
+       blank family is NOT Linux -- it means the platform did not say, which is what
+       ``PovEnvironmentVM.os_family_override`` exists to end.
+    e. **Convention** -- several survivors, one of them named ``DEFAULT_BROKER_VM_NAME``.
+    f. **Refuse**, naming the candidates and the remedy.
+    """
+    if not candidates:
         raise BrokerError(
             "this environment has no VM rows yet, so there is nothing to install the "
             "broker on. Refresh the POV and try again once the platform reports its VMs.")
 
-    for row in rows:
-        if name_matches_broker(row.name, wanted):
-            return row
+    found = ", ".join(sorted(_label(c) for c in candidates)) or "none"
 
-    found = ", ".join(sorted((r.name or r.platform_vm_id) for r in rows)) or "none"
+    # (a) the instance the platform just handed back.
+    pinned = str(pinned_id or "").strip()
+    if pinned:
+        for cand in candidates:
+            if str(cand.get("id") or "").strip() == pinned:
+                return cand
+
+    # (b) a name the operator typed is exact, or a refusal. Text kept as it was, so the
+    # remedy an operator already knows still reads the same way.
+    wanted = str(typed_name or "").strip()
+    if wanted:
+        for cand in candidates:
+            if name_matches_broker(cand.get("name"), wanted):
+                return cand
+        raise BrokerError(
+            f"no VM in this environment is named {wanted.lower()!r}, so there is nowhere "
+            f"to install the broker agent. Found: {found}. Rename the template's broker "
+            f"VM, or set a different broker VM name on this POV.")
+
+    # (c) an enrolled broker is not moved BY INFERENCE -- but a typed name above already
+    # had its say, so this never overrules an operator.
+    sticky = str(sticky_id or "").strip()
+    if sticky:
+        for cand in candidates:
+            if str(cand.get("id") or "").strip() == sticky:
+                return cand
+
+    # (d) the only Linux guest that is not already somebody else's host.
+    claimed = {(n or "").strip().lower() for n in claimed_names}
+    linux = [c for c in candidates
+             if str(c.get("os_family") or "").strip().lower() == "linux"]
+    free = [c for c in linux if _label(c).lower() not in claimed]
+    if len(free) == 1:
+        return free[0]
+
+    if not linux:
+        blank = [c for c in candidates if not str(c.get("os_family") or "").strip()]
+        if blank:
+            # The message a BtPocLin01-shaped POV meets, and the reason this rung names
+            # the blank guests: the operator is looking at a VMs tab whose OS column
+            # reads "-" and has no reason to connect that to a broker that will not
+            # install.
+            unknown = ", ".join(sorted(_label(c) for c in blank))
+            raise BrokerError(
+                f"no VM in this environment reports a Linux OS, and {len(blank)} report "
+                f"none at all ({unknown}). A blank OS means unknown, never Linux. Set "
+                f"the OS on the POV's VMs tab for the guest that runs Docker, or set the "
+                f"broker VM name. Found: {found}.")
+        raise BrokerError(
+            f"no VM in this environment runs Linux, and the broker agent is a Docker "
+            f"host. Found: {found}. {remedy}")
+
+    if not free:
+        # Every Linux guest is already claimed. Naming the claim matters: "the only Linux
+        # VM is the Entitle host" is a sentence an operator can act on, where "could not
+        # resolve the broker" sends them looking at the template instead.
+        taken = ", ".join(sorted(_label(c) for c in linux))
+        raise BrokerError(
+            f"the only Linux VM in this environment ({taken}) is already this POV's "
+            f"Entitle agent or Resource Broker host, and those are deliberately "
+            f"different machines from the broker. Add a Linux VM to the template, or "
+            f"{remedy[0].lower()}{remedy[1:]}")
+
+    # (e) several Linux guests, one conventionally named.
+    for cand in free:
+        if name_matches_broker(cand.get("name"), DEFAULT_BROKER_VM_NAME):
+            return cand
+
+    # (f) genuinely ambiguous, so name them rather than naming a VM that does not exist.
+    names = ", ".join(sorted(_label(c) for c in free))
     raise BrokerError(
-        f"no VM in this environment is named {wanted!r}, so there is nowhere to install "
-        f"the broker agent. Found: {found}. Rename the template's broker VM, or set a "
-        f"different broker VM name on this POV.")
+        f"{len(free)} VMs in this environment could be the broker ({names}) and nothing "
+        f"distinguishes them. {remedy}")
+
+
+def select_broker_vm(db: Session, env: PovEnvironment, *, infer: bool = True,
+                     platform_vm_id: str = "") -> PovEnvironmentVM:
+    """The VM that will run the agent, or a refusal naming what was actually found.
+
+    The rule is :func:`resolve_broker_candidate`; this adapts the POV's own rows to it
+    and maps the answer back. ``guest_os`` rather than ``os_family`` is what makes an
+    operator's OS override reach the broker.
+
+    ``infer=False`` restricts this to an exact name match with no inference at all. That
+    is the cloud read-back's contract: there the dashboard has just CREATED the broker,
+    and a cloud POV whose workload guests are Linux would otherwise bind
+    ``broker_vm_id`` to a workload guest -- silently, and then persist it.
+
+    ``platform_vm_id`` short-circuits to the VM the platform said it just built, which is
+    strictly better than any name match and is what the cloud path passes.
+    """
+    rows = (db.query(PovEnvironmentVM)
+              .filter(PovEnvironmentVM.environment_id == env.id).all())
+    by_id = {r.platform_vm_id: r for r in rows}
+    cands = [{"id": r.platform_vm_id, "name": r.name or "", "os_family": r.guest_os}
+             for r in rows]
+    chosen = resolve_broker_candidate(
+        cands,
+        # With inference off the conventional name is a requirement again, so the
+        # defaulted reader is the right one there and only there.
+        typed_name=(stored_broker_vm_name(env) if infer else broker_vm_name(env)),
+        claimed_names=(claimed_vm_names(env) if infer else ()),
+        # The id the caller was GIVEN outranks everything; the id this POV happens to
+        # have brokered before only outranks a guess. Two different claims, so two
+        # different rungs -- collapsing them would let a stale broker_vm_id swallow the
+        # `name VM` remedy.
+        pinned_id=str(platform_vm_id or "").strip(),
+        sticky_id=((env.broker_vm_id or "") if infer else ""))
+    return by_id[chosen["id"]]
 
 
 def _broker_targets(db: Session, env: PovEnvironment) -> list[str]:
@@ -610,6 +843,9 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
     # `cloud_init` it does NOT exist yet — and must not, because the policy about to be
     # rendered names the TARGETS' addresses, which only exist once the targets are up.
     # See pov_cloud_env.vm_specs for the ordering this imposes.
+    # Inference lives here and only here: on `metadata` the broker VM already EXISTS and
+    # has to be picked out of the template. See the `cloud_init` branch below for why the
+    # read-back after a create must not share this behaviour.
     vm = select_broker_vm(db, env) if mechanism == "metadata" else None
     targets = _broker_targets(db, env)
     if not targets:
@@ -676,15 +912,25 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
         # clean by construction rather than by remembering to delete it.
         _progress(50, f"Building the broker VM {broker_vm_name(env)}…")
         try:
-            await mod.create_broker_vm(env.platform_environment_id, env.template_id,
-                                       payload)
+            created = await mod.create_broker_vm(env.platform_environment_id,
+                                                 env.template_id, payload)
         except Exception as exc:  # noqa: BLE001
             raise BrokerError(
                 f"could not build the broker VM for {env.name}: {exc}") from exc
         # Read it back so the row below names a VM that exists, and so the POV page shows
         # it alongside the targets.
         await pov_env_service.refresh_vms(db, env)
-        vm = select_broker_vm(db, env)
+        # NO inference here, deliberately, and this is the load-bearing half of that
+        # distinction. The dashboard just BUILT this VM: the template designates its
+        # broker by ROLE (pov_cloud_env.vm_specs) and the driver hands back the instance
+        # it created, so there is a better answer than any guess. Inferring instead would
+        # pick "the only Linux VM" out of rows that now include this POV's Linux WORKLOAD
+        # guests, bind broker_vm_id to one of them, and persist it two lines below --
+        # silently, because the bootstrap did reach the real broker via cloud-init and the
+        # agent enrols perfectly. Everything that later excludes the broker would then
+        # exclude the wrong machine.
+        vm = select_broker_vm(db, env, infer=False,
+                              platform_vm_id=str((created or {}).get("id") or ""))
 
     # Persist BEFORE the wait. A crash here must leave the next run re-issuing this row's
     # code rather than minting a second agent for the same POV.

@@ -102,6 +102,21 @@ left no agent at all. If a pull did fail you get the old refusal, which is now a
 This needs **outbound HTTPS from the broker VM to Docker Hub**, alongside the
 `download.docker.com` reachability the runtime install already needs.
 
+### Telling the dashboard what a guest runs
+
+The broker VM is found by its **OS**, not its name — the only Linux VM in the template,
+unless you name one ([the order it resolves in](skytap.md#the-broker-vm)). That rests on
+the OS column being populated, and Skytap does not report a guest OS as a field: the
+dashboard infers it from whatever text comes back and answers "unknown" rather than guess
+wrong.
+
+So a guest whose **OS** column reads `—` on the POV's VMs tab is invisible to the broker's
+auto-detection, and to the wire-up, guest steps, functional accounts and the Password Safe
+half besides. Set it in that column. It is stored separately from the platform's own
+answer — the platform's stays visible as the blank option — so a later refresh cannot
+overwrite it, and clearing it hands the question back. Only `linux` and `windows`: a third
+value would just be a new way of saying unknown.
+
 ### How big the broker VM has to be
 
 One vCPU is enough. It did not used to be: the Config-Management runner asked for a flat

@@ -134,7 +134,12 @@ class ProvisionRequest(BaseModel):
     suspend_on_idle_seconds: int = 0
     # Which VM in the template runs the agent. Per-POV rather than a global setting:
     # templates come from wherever the SE got them, and one account can hold two that name
-    # it differently. Blank means pov_broker.DEFAULT_BROKER_VM_NAME.
+    # it differently.
+    #
+    # Blank means AUTO-DETECT -- the only Linux VM in the template, see
+    # pov_broker.resolve_broker_candidate -- and is stored as blank rather than coerced to
+    # the conventional name, because a stored default is indistinguishable from a typed
+    # one and would switch auto-detection off for every POV.
     broker_vm_name: str = ""
     # Which BeyondTrust tenants this POV is wired into. Blank means "not chosen yet",
     # which is allowed: the wire-up slices are what consume these, and refusing to create
@@ -202,7 +207,10 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
         "expires_at": env.expires_at.isoformat() if env.expires_at else "",
         "expiry_enabled": expiry_policy.enabled(),
         "error_message": env.error_message or "",
-        "broker_vm_name": pov_broker.broker_vm_name(env),
+        # What was TYPED, so "" on the wire means auto-detect. The defaulted reader
+        # would report "broker" for a POV nobody named, and the page would then render a
+        # value the operator never chose as though they had.
+        "broker_vm_name": pov_broker.stored_broker_vm_name(env),
         "pra_tenant_id": env.pra_tenant_id or "",
         "ps_tenant_id": env.ps_tenant_id or "",
         "entitle_tenant_id": env.entitle_tenant_id or "",
@@ -244,7 +252,13 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
         out["vms"] = [{
             "id": v.platform_vm_id,
             "name": v.name or "",
-            "os_family": v.os_family or "",
+            # EFFECTIVE, so every existing reader — the opt-in checkbox, the accessor
+            # page, the wire-up panel — sees an operator's override without knowing it
+            # exists. The platform's own answer and the override travel beside it so the
+            # VMs tab can render the control and say what it is overriding.
+            "os_family": v.guest_os,
+            "os_family_reported": v.os_family or "",
+            "os_family_override": v.os_family_override or "",
             "runstate": v.runstate or "",
             "private_ip": v.private_ip or "",
             "published_services": v.published_services_list,
@@ -621,8 +635,16 @@ async def provision(payload: ProvisionRequest,
     )
     # On the row rather than in the job metadata: every later broker re-run reads it, and
     # a job's metadata is the record of one run, not of the environment.
-    if payload.broker_vm_name.strip():
-        env.metadata_dict = {"broker_vm_name": payload.broker_vm_name.strip()}
+    #
+    # Through the service, which MERGES. Assigning the dict here was safe only because
+    # this is the first thing ever written to it; the same line run second would drop
+    # `rb_vm_name`, `rb_zone`, `rb_asset`, the Entitle host and `broker_error`, and there
+    # is now a post-create writer for this same key.
+    #
+    # Blank is stored as blank, and that is the point: an empty field means AUTO-DETECT
+    # (the only Linux VM), so a coerced default here would switch inference off for every
+    # POV this dashboard creates.
+    pov_broker.set_broker_vm_name(env, payload.broker_vm_name)
     # The auto-delete timer, stamped at creation like every other kind. NULL when the
     # feature is off, which is what makes enabling it later act on nothing that already
     # exists. A POV gets its own much longer default than a cloud VM — see
@@ -752,8 +774,29 @@ async def set_tenants(env_id: str, payload: TenantSelection,
     return {"environment": _serialize(env, broker=pov_broker.describe(db, env))}
 
 
+class BrokerRequest(BaseModel):
+    """Name the VM that carries the agent, and press Broker.
+
+    ``vm_name`` is ``None`` to leave it alone and ``""`` to clear it back to auto-detect
+    (the only Linux VM in the template -- see ``pov_broker.resolve_broker_candidate``).
+
+    Editable after create, unlike before, because the refusal it answers cannot appear
+    until the first Broker run: "three VMs could be the broker" and "no VM reports a
+    Linux OS" are facts about a provisioned environment, not about the create form. While
+    the name was a hard requirement there was nothing to say here, so the only remedy for
+    a mistyped or unguessable name was recreating the POV.
+
+    ``install`` follows ``GatewayRequest``: naming and installing are almost always the
+    same intent, and a separate save step is a state an operator can leave a POV in that
+    looks configured and is not.
+    """
+    vm_name: str | None = None
+    install: bool = True
+
+
 @router.post("/managed/{env_id}/broker", status_code=202, dependencies=_POV_WRITE)
-async def broker(env_id: str, db: Session = Depends(get_db),
+async def broker(env_id: str, payload: BrokerRequest | None = None,
+                 db: Session = Depends(get_db),
                  current_user: User = Depends(get_current_user)):
     """Install, or re-enrol, the agent inside this POV.
 
@@ -773,6 +816,13 @@ async def broker(env_id: str, db: Session = Depends(get_db),
     ok, why = pov_env_service.may_act_on(env)
     if not ok:
         raise HTTPException(status_code=409, detail=why)
+    # Before the gates below, so a name an operator typed is saved even when the run that
+    # follows is refused. The refusal they are answering came FROM a run, so losing the
+    # answer to another one is the loop this control exists to break.
+    if payload is not None and payload.vm_name is not None:
+        pov_broker.configure(db, env, vm_name=payload.vm_name)
+    if payload is not None and not payload.install:
+        return {"environment": _serialize(env, broker=pov_broker.describe(db, env))}
     if not env.platform_environment_id:
         raise HTTPException(
             status_code=409,
@@ -1166,6 +1216,44 @@ async def set_vm_login(env_id: str, vm_id: str, payload: VmLoginRequest,
     try:
         note = pov_env_service.set_vm_login(db, env, vm_id, payload.login_username)
     except pov_env_service.VmLoginError as exc:
+        # 400, not 409: this is about the value in the request, not a step still owed.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    vms = (db.query(PovEnvironmentVM)
+             .filter(PovEnvironmentVM.environment_id == env.id).all())
+    return {"note": note,
+            "environment": _serialize(env, vms=vms,
+                                      broker=pov_broker.describe(db, env))}
+
+
+class VmOsRequest(BaseModel):
+    """Say what a POV guest runs, when the lab platform would not.
+
+    Not a guess this dashboard makes. ``skytap_service._os_family`` is a token match over
+    whatever text the platform hands back and returns "" rather than answer wrongly, and
+    every POV selector refuses a blank family instead of reading it as Linux. Both rules
+    stay. This is the operator ending the blank, which is the only remedy those refusals
+    ever had — and on a template whose guests the platform will not classify (a name like
+    ``BtPocLin01`` matches no token), the alternative remedy was recreating the POV.
+
+    Blank clears the override and hands the answer back to the platform.
+    """
+    os_family: str = ""
+
+
+@router.post("/managed/{env_id}/vms/{vm_id}/os", dependencies=_POV_WRITE)
+async def set_vm_os(env_id: str, vm_id: str, payload: VmOsRequest,
+                    db: Session = Depends(get_db),
+                    current_user: User = Depends(get_current_user)):
+    """Record what one POV guest runs, or clear the record."""
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+    try:
+        note = pov_env_service.set_vm_os(db, env, vm_id, payload.os_family)
+    except pov_env_service.VmOsError as exc:
         # 400, not 409: this is about the value in the request, not a step still owed.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     vms = (db.query(PovEnvironmentVM)
