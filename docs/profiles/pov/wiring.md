@@ -180,6 +180,13 @@ on the wire and no agent image to rebuild — but the broker's `policy.yaml` has
 the grant, so a POV brokered before this shipped needs **Broker** pressed once to rewrite
 it. The refusal says so.
 
+That grant is a **closed list of addresses**, not a job type, so pointing the POV at a
+*different* host needs **Broker** pressed again too. The install checks the host against
+the policy the last Broker run actually wrote and refuses with that remedy — worth knowing
+because the agent's own refusal, if it gets that far, tells you to add a line to
+`policy.yaml` and restart the agent. On a POV do not: that file is written by the
+dashboard's bootstrap and the next Broker run replaces whatever you put there.
+
 What it does, on a **Linux** guest named on the POV (default `entitle`):
 
 1. mints an agent token **in this POV's own Entitle tenant**, not the instance's;
@@ -209,6 +216,22 @@ Kubernetes 1.29+. Give the host **2 vCPU and 4 GB** and it is comfortable.
 Two things it needs from the network, both of which fail in a way the job output names:
 egress to `get.k3s.io` and `get.helm.sh` for the install, and to `ghcr.io` for the agent
 image. An `ImagePullBackOff` is the second one.
+
+**The guest needs a Python, and the install now puts one there.** Ansible runs its modules
+*on the target*, so a template with no `python3` used to fail at **Gathering Facts** —
+before task one — with `The module interpreter '/usr/bin/python3' was not found`, which
+reads as a broken playbook rather than as a missing package. The play's first real task is
+a `raw` one (the only kind that needs no interpreter): it looks for a python the runner's
+ansible-core can actually drive, installs one from the guest's own package manager if
+there is none, and pins the path it found. So there is a third egress requirement — the
+guest's distro repo — on a template that ships without python.
+
+It checks a *version*, not a package name, and that is not pedantry: AlmaLinux and RHEL 8
+call 3.6 `python3` and this ansible-core will not drive it, so `dnf install python3` can
+succeed and leave the run failing exactly as before. The task installs `python3.12`,
+`python3.11` or `python39` there instead. If the guest has no package manager, or its
+repos are unreachable, the task fails by name and the remedy is to bake `python3` into
+the template.
 
 **Not the broker VM.** The named host defaults to a VM called `entitle` and the guessed
 fallback deliberately excludes the broker: k3s brings its own containerd and its own

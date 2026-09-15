@@ -136,6 +136,77 @@ CHART_DEFAULTS = {
 # egress is, and a timeout here reads as a broken install rather than a slow download.
 ROLLOUT_TIMEOUT = "600s"
 
+# The sentinel the bootstrap below prints its answer on. Wrapped rather than read off the
+# last line: `raw` hands back whatever the guest's shell wrote, which on a real login
+# includes an MOTD, a sudo lecture and a CRLF — and the same class of mistake as reading a
+# cloud runner's log capture as its return value.
+PYTHON_SENTINEL = "ENTITLE_PYTHON="
+
+# Ansible needs an interpreter ON THE GUEST, and a POV template is not obliged to have
+# one. The runner tracks upstream `willhallonline/ansible:latest`, whose ansible-core
+# tries `python3.14` down to `python3.9` and then bare `/usr/bin/python3`; a guest with
+# none of them fails at **Gathering Facts**, before task one, with
+# "The module interpreter '/usr/bin/python3' was not found" — which reads as a broken
+# playbook rather than as a missing package. Hit live on a Skytap POV guest 2026-09-15.
+#
+# 3.9 is a floor rather than a preference, and it is why this bootstrap checks a VERSION
+# instead of just installing `python3`: AlmaLinux/RHEL 8 — the family POV templates come
+# from — call 3.6 `python3`, and this ansible-core will not drive it. So the guest's own
+# default package can be the wrong answer even when it installs cleanly.
+#
+# Written as one `raw` task because `raw` is the only module that needs no interpreter. It
+# is idempotent, installs nothing when the guest already has one, and prints the absolute
+# path it settled on so the play can pin `ansible_python_interpreter` to exactly that
+# rather than re-running discovery that has already failed once.
+#
+# Package names per manager, most modern first: RHEL 9 spells them `python3.12` /
+# `python3.11`, RHEL 8 `python39`, Debian/Ubuntu/Alpine/SUSE just `python3` (with
+# `python311` as SLES 15's modern one). No single quotes anywhere in the script: it is
+# re-quoted once by become's sudo wrapper, and a shell-quoting accident here would surface
+# as a syntax error from a line nobody wrote.
+PYTHON_BOOTSTRAP = """\
+set -u
+PY=""
+find_python() {
+  for CAND in python3.13 python3.12 python3.11 python3.10 python3.9; do
+    BIN=$(command -v "$CAND" 2>/dev/null) || continue
+    PY="$BIN"
+    return 0
+  done
+  BIN=$(command -v python3 2>/dev/null) || return 1
+  "$BIN" -c "import sys; sys.exit(0 if sys.version_info[:2] >= (3, 9) else 1)" || return 1
+  PY="$BIN"
+  return 0
+}
+if find_python; then echo "%(sentinel)s$PY"; exit 0; fi
+if command -v dnf >/dev/null 2>&1; then
+  for PKG in python3.12 python3.11 python39 python3; do
+    dnf install -y "$PKG" >/dev/null 2>&1 && find_python && break
+  done
+elif command -v yum >/dev/null 2>&1; then
+  for PKG in python39 python3; do
+    yum install -y "$PKG" >/dev/null 2>&1 && find_python && break
+  done
+elif command -v apt-get >/dev/null 2>&1; then
+  DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null 2>&1 || true
+  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 >/dev/null 2>&1 || true
+  find_python || true
+elif command -v zypper >/dev/null 2>&1; then
+  for PKG in python311 python3; do
+    zypper --non-interactive install "$PKG" >/dev/null 2>&1 && find_python && break
+  done
+elif command -v apk >/dev/null 2>&1; then
+  apk add --no-cache python3 >/dev/null 2>&1 || true
+  find_python || true
+else
+  echo "no package manager (dnf, yum, apt-get, zypper, apk) on this guest" >&2
+  exit 1
+fi
+if [ -n "$PY" ]; then echo "%(sentinel)s$PY"; exit 0; fi
+echo "no python3 >= 3.9 on this guest, and none could be installed from its repos" >&2
+exit 1
+""" % {"sentinel": PYTHON_SENTINEL}
+
 
 # ── stored values ────────────────────────────────────────────────────────────
 
@@ -380,12 +451,20 @@ def playbook_yaml() -> str:
     ``kubernetes.core`` modules, because the agent's sibling Ansible image is not
     guaranteed to carry that collection and a missing-collection error reads as a broken
     playbook.
+
+    **Facts are gathered by a task, not by the play.** Implicit gathering is the FIRST
+    thing that runs and it needs an interpreter on the guest, so on a template without one
+    this play died before task one — see :data:`PYTHON_BOOTSTRAP` for what that looked
+    like. The order below is the only one that works: a ``raw`` task (no interpreter), then
+    the interpreter it found, then ``setup``, then everything that needs a module. The
+    ``unarchive`` task reads ``ansible_architecture``, so the facts are not optional either.
     """
     d = CHART_DEFAULTS
     play = [{
         "name": "Install the Entitle agent on single-node k3s",
         "hosts": "all",
-        "gather_facts": True,
+        # Off, and replaced by an explicit `setup` below. NOT because facts are unwanted.
+        "gather_facts": False,
         # Not at play level: the first task decides what to sudo WITH, and a play-level
         # become would make that decision need sudo already.
         "become": False,
@@ -401,6 +480,45 @@ def playbook_yaml() -> str:
                     "ansible_become_password": "{{ ansible_ssh_pass }}"},
                 "when": "ansible_ssh_pass is defined and ansible_ssh_pass | length > 0",
                 "no_log": True,
+            },
+            {
+                # First because nothing after it can run without one. `raw` is the only
+                # module that needs no interpreter, and `set_fact` above it is resolved on
+                # the controller — so these two are the only tasks that could come first.
+                "name": "Make sure this guest has a Python that Ansible can drive",
+                "become": True,
+                "ansible.builtin.raw": PYTHON_BOOTSTRAP,
+                "register": "entitle_python",
+                # Reports what it found rather than changing something, in the common case
+                # where the guest already had one.
+                "changed_when": False,
+                # Naming `failed_when` REPLACES the default rc check, so the rc arm is not
+                # redundant. The second arm is the one that matters: a guest whose shell
+                # prints a banner and exits 0 without ever reaching the echo would
+                # otherwise pass here and fail on the next task with an interpreter error
+                # again — one symptom, two causes.
+                "failed_when": ("entitle_python.rc != 0 or "
+                                f"'{PYTHON_SENTINEL}' not in entitle_python.stdout"),
+            },
+            {
+                # Pinned to the path the guest just reported, rather than left to
+                # discovery: discovery has already been tried and has already failed, and
+                # on a guest where the interpreter is `python3.12` it would fail again.
+                "name": "Point Ansible at the interpreter this guest reported",
+                # `split` rather than `regex_search`: a backreference has to survive being
+                # written as a Python string, dumped as YAML and then unescaped by Jinja,
+                # and each of those three layers spells a backslash differently. The
+                # second `split()` is what drops the CRLF a login shell leaves on the line.
+                "ansible.builtin.set_fact": {
+                    "ansible_python_interpreter":
+                        "{{ (entitle_python.stdout.split('" + PYTHON_SENTINEL + "')"
+                        " | last).split() | first }}"},
+            },
+            {
+                # What `gather_facts: true` would have done, moved to where an interpreter
+                # exists. `ansible_architecture` is read by the helm download below.
+                "name": "Gather facts, now that there is an interpreter to gather them",
+                "ansible.builtin.setup": {},
             },
             {
                 "name": "Install and configure",
@@ -591,6 +709,29 @@ def preflight(db: Session, env: PovEnvironment) -> tuple:
 
     tenant = entitle_tenant(db, env)
     vm = select_host_vm(db, env)
+
+    # The grant this install needs is an ADDRESS, and `reported_job_types` above cannot
+    # see it: an agent reports which job types its policy allows, never which hosts. So
+    # this reads what the last broker run actually WROTE into policy.yaml — the record
+    # `pov_broker` keeps for exactly this, and which covers this module's host because the
+    # render writes it for every grant at once.
+    #
+    # Without it the refusal comes from the agent instead, and it is the wrong refusal:
+    # the agent's message tells an operator to add a line to policy.yaml and restart, and
+    # on a POV that file is the dashboard's — written by the bootstrap at enrolment, and
+    # overwritten by the next Broker run. An SE who follows it edits a file that is about
+    # to be replaced. Hit live 2026-09-15.
+    #
+    # Imported in the body: `pov_guest_step` reaches `pov_gateway`, which this module also
+    # reaches, and the convention in `pov_broker` for the same triangle is a local import.
+    from . import pov_guest_step
+    granted = pov_guest_step.granted_addresses(env)
+    if granted and (vm.private_ip or "").strip() not in granted:
+        raise EntitleAgentError(
+            f"{vm.name} is this POV's Entitle agent host, but its address is not in the "
+            f"policy the broker agent was last given, so the agent will refuse the run. "
+            f"Press Broker on this POV to rewrite the policy, then try again — do not "
+            f"edit policy.yaml on the broker VM, the next Broker run replaces it.")
     return agent, vm, tenant
 
 
