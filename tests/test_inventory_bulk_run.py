@@ -23,6 +23,7 @@ The planner is pure — it takes already-filtered items — so all of this runs 
 DB and no app. Runs under pytest, or standalone:
     python tests/test_inventory_bulk_run.py
 """
+import ast
 import os
 import sys
 import types
@@ -34,6 +35,19 @@ if _ROOT not in sys.path:
 CONF = {}
 
 
+def _db_model_names():
+    """Every top-level class in web_dashboard/database.py, read via ast.
+
+    Derived, not listed. The hand-maintained version of this list carried a comment
+    telling the next person to keep it in sync -- and was then missed twice anyway
+    (PovEnvironment, then WorkloadCloudCredential), each time skipping this whole file
+    silently. A floor assertion keeps the walk honest."""
+    with open(os.path.join(_ROOT, "web_dashboard", "database.py"), encoding="utf-8") as fh:
+        names = [n.name for n in ast.parse(fh.read()).body if isinstance(n, ast.ClassDef)]
+    assert len(names) > 30, f"only found {len(names)} models -- did database.py move?"
+    return names
+
+
 def _install_stubs():
     sa = types.ModuleType("sqlalchemy")
     sa_orm = types.ModuleType("sqlalchemy.orm")
@@ -43,8 +57,7 @@ def _install_stubs():
     sys.modules.setdefault("sqlalchemy.orm", sa_orm)
 
     db = types.ModuleType("web_dashboard.database")
-    for name in ("CloudDatabase", "Job", "K8sCluster", "VirtualDesktop",
-                 "HypervisorConnection", "HypervisorVMCache"):
+    for name in _db_model_names():
         setattr(db, name, type(name, (), {}))
     sys.modules.setdefault("web_dashboard.database", db)
 
@@ -63,15 +76,12 @@ def _install_stubs():
 
 
 _install_stubs()
-try:
-    from web_dashboard.services import inventory_service as inv
-except Exception as exc:  # pragma: no cover
-    try:
-        import pytest
-        pytest.skip(f"inventory_service import unavailable: {exc}", allow_module_level=True)
-    except ModuleNotFoundError:
-        print(f"SKIP: {exc}")
-        sys.exit(0)
+
+# Imported UNGUARDED on purpose: every dependency is stubbed above, so there is no
+# optional third-party package to tolerate and an ImportError here is a real regression.
+# The `except Exception: skip` that used to wrap this line is what let a stale stub turn
+# the file into a permanent green no-op. See tests/test_import_guard_narrowness.py.
+from web_dashboard.services import inventory_service as inv  # noqa: E402
 
 
 # ── fixtures: inventory rows in the shape collect() emits ─────────────────────

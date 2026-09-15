@@ -7,6 +7,7 @@ live session); the mappers take row-like objects so they test without a DB.
 Heavy deps (web_dashboard.database → bcrypt) are stubbed in sys.modules. Runs
 under pytest, or standalone:  python tests/test_inventory_service.py
 """
+import ast
 import os
 import sys
 import types
@@ -17,15 +18,26 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 
+def _db_model_names():
+    """Every top-level class in web_dashboard/database.py, read via ast.
+
+    Derived, not listed. The hand-maintained version of this list carried a comment
+    telling the next person to keep it in sync -- and was then missed twice anyway
+    (PovEnvironment, then WorkloadCloudCredential), each time skipping this whole file
+    silently. A floor assertion keeps the walk honest."""
+    with open(os.path.join(_ROOT, "web_dashboard", "database.py"), encoding="utf-8") as fh:
+        names = [n.name for n in ast.parse(fh.read()).body if isinstance(n, ast.ClassDef)]
+    assert len(names) > 30, f"only found {len(names)} models -- did database.py move?"
+    return names
+
+
 def _install_stubs():
     db = types.ModuleType("web_dashboard.database")
-    # Every name inventory_service imports from web_dashboard.database. A missing one
-    # does not fail this file -- it makes the import below raise and the whole thing
-    # SKIP, silently, which is how PovEnvironment went unnoticed here for as long as it
-    # did. If you add a model to that import, add it here.
-    for name in ("Job", "CertLab", "CloudDatabase", "CloudFunction", "K8sCluster",
-                 "VirtualDesktop", "HypervisorConnection", "HypervisorVMCache",
-                 "PovEnvironment", "SpireLab"):
+    # EVERY model, derived. The old hand-kept list named the ten that inventory_service
+    # imported at the time, plus a comment asking the next person to extend it. That
+    # comment was missed twice -- PovEnvironment, then WorkloadCloudCredential -- and
+    # each miss skipped this file silently rather than failing it.
+    for name in _db_model_names():
         setattr(db, name, type(name, (), {}))
     sys.modules["web_dashboard.database"] = db
 
@@ -42,15 +54,12 @@ def _install_stubs():
 
 
 _install_stubs()
-try:
-    from web_dashboard.services import inventory_service as svc
-except Exception as exc:  # pragma: no cover
-    try:
-        import pytest
-        pytest.skip(f"inventory_service import unavailable: {exc}", allow_module_level=True)
-    except ModuleNotFoundError:
-        print(f"SKIP: {exc}")
-        sys.exit(0)
+
+# Imported UNGUARDED on purpose: every dependency is stubbed above, so there is no
+# optional third-party package to tolerate and an ImportError here is a real regression.
+# The `except Exception: skip` that used to wrap this line is what let a stale stub turn
+# the file into a permanent green no-op. See tests/test_import_guard_narrowness.py.
+from web_dashboard.services import inventory_service as svc  # noqa: E402
 
 _TS = datetime(2026, 6, 28, 12, 0, 0)
 
