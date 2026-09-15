@@ -44,12 +44,13 @@ import logging
 import math
 import re
 import secrets
+import string
 from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovEnvironmentVM, PovVendorUser
-from . import config_service, job_service, pov_gateway, pov_share, pra_vendor_api
+from . import config_service, job_service, pov_gateway, pra_vendor_api
 from .pra_tenant_api import PRATenantError
 
 logger = logging.getLogger(__name__)
@@ -139,6 +140,48 @@ def is_vendor_username(username: str) -> bool:
 def _ours(name: str) -> bool:
     """Whether a Vendor Group or Group Policy is one this module created."""
     return str(name or "").startswith(OBJECT_PREFIX)
+
+
+# ── passwords ────────────────────────────────────────────────────────────────
+
+# The four classes PRA's default password policy demands, minus the characters nobody can
+# read down a phone line (Il1O0) — which is how a vendor credential actually gets
+# delivered, since PRA has no invite call to send it for us. The symbols are the ones with
+# unambiguous spoken names, and none of them is a quote, a backslash or a shell
+# metacharacter: this string is handed over by hand and typed into a login form.
+_PW_LOWER = [c for c in string.ascii_lowercase if c not in "l"]
+_PW_UPPER = [c for c in string.ascii_uppercase if c not in "IO"]
+_PW_DIGITS = [c for c in string.digits if c not in "10"]
+_PW_SYMBOLS = list("!@#$%*+=?")
+_PW_POOL = _PW_LOWER + _PW_UPPER + _PW_DIGITS + _PW_SYMBOLS
+_PW_LENGTH = 20
+
+
+def _generate_password() -> str:
+    """A password PRA will accept, by construction rather than by luck.
+
+    **Not ``pov_share.generate_password``, and the difference is not a preference.** That
+    one draws from letters and digits only, and PRA's default policy requires at least one
+    upper, one lower, one number *and* one special character — so every single vendor login
+    minted through it was refused with a 422, 100% of the time, not occasionally. The
+    appliance's own wording is the giveaway and the only reason it was legible at all:
+    the ``errors`` bag names ``password``.
+
+    Same construction as ``pov_cloud_azure._generate_admin_password``: one character of
+    each required class placed first, the rest filled from the pool, then the whole thing
+    shuffled with ``SystemRandom`` so the guaranteed four are never in front. Twenty
+    characters against PRA's floor of eight, because a site policy may raise that floor
+    and this is a live way into a customer's network.
+
+    A site whose policy is stricter still (a longer minimum, a banned symbol) is left to
+    fail on the wire — ``pra_vendor_api._fields`` renders the appliance's own explanation,
+    which beats this module guessing at a policy it cannot read.
+    """
+    chars = [secrets.choice(_PW_LOWER), secrets.choice(_PW_UPPER),
+             secrets.choice(_PW_DIGITS), secrets.choice(_PW_SYMBOLS)]
+    chars += [secrets.choice(_PW_POOL) for _ in range(_PW_LENGTH - len(chars))]
+    secrets.SystemRandom().shuffle(chars)
+    return "".join(chars)
 
 
 # ── expiry ───────────────────────────────────────────────────────────────────
@@ -580,7 +623,7 @@ async def mint_user(db: Session, env: PovEnvironment, *, email: str = "",
 
     tenant = pov_gateway.pra_tenant(db, env)
     username = _username_for(env)
-    password = pov_share.generate_password()
+    password = _generate_password()
 
     try:
         user_id = await pra_vendor_api.create_vendor_user(
