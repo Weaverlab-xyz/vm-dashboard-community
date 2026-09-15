@@ -12,12 +12,16 @@ Three properties, each of which would be invisible if it broke:
     points at Settings. `masked` is not: api/setup.patch_feature_config refuses that enable
     with a 409 naming the profile, so a Settings link would send the operator to a switch
     that cannot move -- and a target would be a live link to a page this profile 404s.
-  * **On a POV instance it LEADS with a POV, and still subtracts nothing.** The catalog
-    asks feature_flags, which is an instance-wide answer, so on a POV instance most of it
-    was greyed out -- correct, and useless in front of a customer. The POV lead goes on
-    top; the catalog is COLLAPSED underneath, never filtered, and a demo instance renders
-    exactly what it did before. The distance between "collapsed" and "removed" is the whole
-    argument, so both halves are pinned.
+  * **On a POV instance it IS a POV checklist.** The catalog asks feature_flags, which is
+    an instance-wide answer, so on a POV instance most of it was greyed out -- correct, and
+    useless in front of a customer. Slice 4 put the POV lead on top and left the catalog
+    collapsed underneath; collapsed was still one click and one find-in-page from the same
+    wall, on the page whose whole job is to stop being it. So it is not rendered there at
+    all. WHICH AXIS does that is the point: a PERSONA may never subtract (pinned below,
+    unchanged), and this is the PROFILE choosing which of two catalogs the page is about. A
+    demo instance renders exactly what it did before.
+  * **/use-cases performs no writes, and offers no control that looks like one.** The state
+    is a static mark and the word for it; the two surfaces that write get a real checkbox.
 
 Runs under pytest, or standalone:
     python tests/test_use_cases_page.py
@@ -217,40 +221,41 @@ def test_a_masked_card_never_carries_a_target_on_either_profile():
 
 # ── the POV lead ─────────────────────────────────────────────────────────────
 
-def test_a_demo_instance_renders_what_it_always_did():
-    """The lead is additive. Everything new is behind `isPov`, and the catalog opens by
-    default anywhere that is not a POV instance."""
+def test_a_demo_instance_renders_the_catalog_it_always_did():
+    """The removal above is a POV-instance change and nothing else. A demo instance still
+    opens on the complete catalog: every group, reordered by the active persona, never
+    filtered, with all three card states rendered."""
     src = _read(_PAGE)
-    for gated in ('x-show="loaded && isPov"',):
-        assert gated in src, f"the POV lead is not gated on the profile ({gated})"
-    body = src.split("this.showCatalog = ", 1)[1].split(";", 1)[0]
-    assert "!this.isPov" in body, \
-        "the catalog does not open by default on a demo instance"
-
-
-def test_the_catalog_is_collapsed_not_filtered():
-    """The distinction this whole page rests on. Collapsing changes what leads; filtering
-    would make the persona/profile layer able to remove something, which is the one thing
-    services/personas exists to forbid."""
-    src = _read(_PAGE)
+    assert 'x-show="loaded && isPov"' in src, \
+        "the POV lead is not gated on the profile"
     assign = src.split("this.groups =", 1)[1].split(";", 1)[0]
-    assert ".filter(" not in assign, "the catalog groups are filtered"
-    # Every group still renders — behind x-show, which keeps it in the DOM.
-    block = src.split('<template x-for="g in groups"', 1)[1][:200]
-    assert 'x-show="showCatalog"' in block, "the catalog is not collapsible"
-    assert "x-if" not in block, \
-        "the catalog uses x-if, which REMOVES the groups from the DOM rather than hiding " \
-        "them — that is filtering with extra steps"
+    assert ".sort(" in assign and ".filter(" not in assign
+    for state in ("'ready'", "'needs_flag'", "'masked'"):
+        assert state in src, (
+            f"the catalog markup lost its {state} branch. A demo instance renders all "
+            "three, and dropping one would hide a card's own explanation of itself.")
 
 
-def test_the_collapse_says_what_is_behind_it():
-    """A closed section with no explanation reads as something missing."""
+def test_the_demo_catalog_is_absent_on_a_pov_instance():
+    """Collapsed was not enough. Slice 4 left the instance-wide catalog underneath the POV
+    lead behind one click -- so twenty-six cards reading "Not available on a POV instance"
+    were still in the DOM, still in find-in-page, and still one stray click from being the
+    wall the lead exists to replace. On a POV instance it is not rendered: `x-if`, not
+    `x-show`, because "hidden" is a claim about CSS and this is a claim about the DOM.
+
+    Note WHICH AXIS does this, because it is not the one this file forbids. A PERSONA may
+    reorder and never subtract -- test_the_grouping_reorders_and_never_filters is unchanged
+    and still pins that. This is the PROFILE choosing which of two catalogs the page is
+    ABOUT, and on a demo instance the answer is still all of it (see the next test).
+    """
     src = _read(_PAGE)
-    assert "showCatalog = !showCatalog" in src, "there is no way to open the catalog"
-    assert "Everything this dashboard can demo" in src, \
-        "the collapsed section is unlabelled"
-    assert "nothing is hidden from you" in src, \
-        "the page does not say why the whole catalog is still there"
+    assert "showCatalog" not in src, (
+        "the collapse toggle is back. The catalog is either rendered or it is not; the "
+        "third state is what left the wall one click away.")
+    before = src.split('<template x-for="g in groups"', 1)[0]
+    assert 'x-if="loaded && !isPov"' in before[-900:], (
+        "the instance-wide catalog is not gated on the profile with x-if. x-show would "
+        "leave every masked card in the DOM on a POV instance, which is the defect.")
 
 
 def test_the_pov_lead_reuses_the_per_pov_endpoint():
@@ -284,6 +289,18 @@ def test_the_lead_never_offers_an_action():
         assert verb not in src, f"the use-cases page performs a write ({verb})"
 
 
+def test_the_read_only_page_offers_no_checkbox():
+    """This page writes nothing (above), so a real checkbox on it would be a control that
+    looks live and records nothing -- worse than no control, because a tick somebody
+    believed is a card they will not demo again. The state is a static glyph, with the WORD
+    for it in the same row, so the meaning is in text rather than in a shape."""
+    src = _read(_PAGE)
+    assert 'type="checkbox"' not in src, \
+        "/use-cases renders a checkbox; it performs no writes, so the control would be dead"
+    assert "chk-mark" in src, "the read-only state mark is gone"
+    assert "stateWord(" in src, "the state is a glyph with no word for it"
+
+
 def test_a_destroyed_pov_is_not_offered():
     src = _read(_PAGE)
     loader = src.split("async loadPovs()", 1)[1].split("\n      },", 1)[0]
@@ -303,11 +320,18 @@ def test_the_remembered_pov_survives_a_browser_that_refuses_storage():
                 f"an unguarded localStorage call: {line.strip()[:70]}"
 
 
+_LEAD_START = "<!-- \u2500\u2500 The POV lead"
+_LEAD_END = "<!-- \u2500\u2500 The instance-wide catalog"
+
+
 def test_the_lead_still_hard_codes_no_persona_key():
     """The same rule the catalog below it keeps."""
     from web_dashboard.services import personas as P
     src = _read(_PAGE)
-    lead = src.split("For one POV", 1)[1].split("Everything this dashboard can demo", 1)[0]
+    assert _LEAD_START in src and _LEAD_END in src, (
+        "the section comments this test slices on are gone. They are load-bearing: they "
+        "are what tells the next reader which half of this page is which.")
+    lead = src.split(_LEAD_START, 1)[1].split(_LEAD_END, 1)[0]
     for key in P.VALID_PERSONAS:
         assert f"'{key}'" not in lead and f'"{key}"' not in lead, \
             f"the POV lead names the persona key {key!r}"

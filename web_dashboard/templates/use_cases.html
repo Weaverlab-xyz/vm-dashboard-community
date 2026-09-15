@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Use cases{% endblock %}
+{% block head %}{% include "_checklist_styles.html" %}{% endblock %}
 
 {#
   The guided-demo catalog. Groups every card by the role it belongs to, with the active
@@ -9,17 +10,29 @@
   choosing no focus must not subtract anything, and this page is where an SE who has not
   picked a role goes to find out what there is. A persona reorders it; it never filters it.
 
-  ON A POV INSTANCE IT LEADS WITH A POV. The catalog below asks feature_flags whether a
-  demo can run here, which is an instance-wide answer — and on a POV instance the answer
-  for most of it is "this profile masks that", so this page was 26 grey cards saying so.
-  Correct, and useless in front of a customer. So the POV a person picks goes first, with
-  its cards resolved against the products THAT evaluation is wired into (see
-  services/pov_use_cases), and the instance-wide catalog keeps its place underneath.
+  ON A POV INSTANCE IT IS A POV CHECKLIST, AND NOTHING ELSE. The catalog below asks
+  feature_flags whether a demo can run here, which is an instance-wide answer — and on a
+  POV instance the answer for most of it is "this profile masks that", so this page was 26
+  grey cards saying so. Correct, and useless in front of a customer. Slice 4 put a POV's
+  own checklist on top and left the catalog underneath, collapsed. Collapsed turned out to
+  be one click and one find-in-page from the same wall, on the page whose whole job is to
+  stop being it. So on a POV instance the catalog is not rendered at all: `x-if`, not
+  `x-show`, because "hidden" is a claim about CSS and this is a claim about the DOM.
 
-  Underneath, not instead of. Every group is still rendered and every card is still in the
-  DOM on both profiles — the section is COLLAPSED on a POV instance, not filtered, and it
-  opens with one click. Reordering and emphasis are what this layer may do; subtracting is
-  not, and the difference has to survive somebody skim-reading this file.
+  NOTE WHICH AXIS DOES THAT, because the rule it looks like it breaks is the rule this file
+  exists to keep. A PERSONA may reorder and emphasise and never subtract — that is
+  unchanged, and `this.groups` still sorts and never filters. This is the PROFILE choosing
+  which of two catalogs the page is ABOUT: the instance-wide one answers "can this instance
+  run it?", which a POV page has no use for, and the per-POV one answers "can I run this on
+  this POV?". On a demo instance the answer is still the whole thing, every group,
+  unfiltered, exactly as it renders today.
+
+  THIS PAGE READS. Every state is a static mark and a word for it, never a real checkbox
+  input: a checkbox here would be a control that looks live and writes nothing, which is
+  worse than no control — a tick somebody believed is a card they will not demo again.
+  Ticking one off lives on the POV's own page, which is also where every other action on
+  that POV lives. (Hence no checkbox markup anywhere in this file, not even quoted in a
+  comment — tests/test_use_cases_page greps the whole file for it.)
 
   Nothing here hard-codes a persona key — the groups, their order and their copy all arrive
   from /api/persona/catalog, which reads services/personas.py. A key spelled in this file
@@ -27,11 +40,12 @@
 #}
 
 {% block content %}
-<div x-data="useCases()" x-init="init()">
+<div x-data="useCases()" x-init="init()" class="chk-scope">
 
-  <div class="mb-6">
-    <h1 class="text-2xl font-bold text-gray-900">Use cases</h1>
-    <p class="text-sm text-gray-500 mt-1">
+  <div class="chk-page-header">
+    <h1>Use cases</h1>
+    <div class="chk-accent"></div>
+    <p>
       Guided demos, grouped by the role they are for. Each one links to the screen that
       runs it.
     </p>
@@ -49,183 +63,164 @@
        because povs stays empty (the /api/pov router 404s there). ───────────────── -->
   <div x-show="loaded && isPov" class="mb-10">
 
-    <div class="flex items-baseline justify-between gap-4 mb-3">
-      <div>
-        <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">
-          For one POV
-        </h2>
-        <p class="text-xs text-gray-400 mt-0.5">
-          What this evaluation can demonstrate, and what has been covered so far.
-        </p>
-      </div>
-      <select x-show="povs.length" x-model="povId" @change="loadPov()"
-              class="border border-gray-300 rounded-lg px-3 py-2 text-sm shrink-0">
-        <template x-for="p in povs" :key="p.id">
-          <option :value="p.id" x-text="p.name"></option>
-        </template>
-      </select>
+    <div class="chk-toolbar">
+      <p class="chk-progress" x-show="povs.length && povSummary">
+        <b x-text="povSummary ? povSummary.done : 0"></b> of
+        <b x-text="povSummary ? povSummary.total : 0"></b> covered<span
+          x-show="povSummary && povSummary.skipped"> · <span
+          x-text="povSummary ? povSummary.skipped : 0"></span> skipped</span>
+      </p>
+      <span class="chk-tail">
+        <select x-show="povs.length" x-model="povId" @change="loadPov()" class="chk-btn">
+          <template x-for="p in povs" :key="p.id">
+            <option :value="p.id" x-text="p.name"></option>
+          </template>
+        </select>
+        <!-- The one place to DO anything about it. Ticking a card off lives on the POV's
+             own page, which is also where every action on that POV lives; this page reads. -->
+        <a x-show="povs.length" :href="'/pov/' + povId + '#use-cases'"
+           class="chk-link">Open this POV →</a>
+      </span>
     </div>
 
-    <div x-show="!povs.length" class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-      <p class="text-sm text-gray-500">
+    <div x-show="!povs.length" class="chk-section">
+      <p class="chk-empty">
         No POV environments yet. Create one on the
-        <a href="/pov" class="text-blue-700 hover:underline">POV page</a> and its checklist
-        appears here.
+        <a href="/pov" class="chk-link">POV page</a> and its checklist appears here.
       </p>
     </div>
 
-    <template x-if="povs.length && povSummary">
-      <div class="mb-4 flex items-baseline justify-between gap-4">
-        <p class="text-xs text-gray-400">
-          <span x-text="povSummary.done"></span> of
-          <span x-text="povSummary.total"></span> covered<span
-            x-show="povSummary.skipped"> · <span x-text="povSummary.skipped"></span> skipped</span>
-        </p>
-        <!-- The one place to DO anything about it. Ticking a card off lives on the POV's
-             own page, which is also where every action on that POV lives; this page reads. -->
-        <a :href="'/pov/' + povId + '#use-cases'"
-           class="text-xs text-blue-600 hover:underline shrink-0">Open this POV →</a>
-      </div>
-    </template>
-
     <template x-for="g in povGroups" :key="'pov-' + g.persona">
-      <div class="mb-8" x-show="inScope(g).length">
-        <div class="flex items-baseline justify-between mb-3">
-          <div>
-            <h3 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">
-              <span x-text="g.label"></span>
-              <span x-show="g.persona === active"
-                    class="ml-2 text-xs font-medium bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">
-                your focus
-              </span>
-            </h3>
-            <p class="text-xs text-gray-400 mt-0.5" x-text="g.blurb"></p>
-          </div>
-          <span class="text-xs text-gray-400 shrink-0 ml-4"
-                x-text="inScope(g).length + ' in scope'"></span>
-        </div>
+      <div class="chk-section" x-show="inScope(g).length">
+        <h2>
+          <span x-text="g.label"></span>
+          <!-- Constant, not persona-derived. Chrome colour is the tenancy signal
+               (services/ui_theme) and a colour that VARIES inside the content area is the
+               same confusion one layer in; this one is the same on every profile and under
+               every persona, so it carries no signal to confuse. -->
+          <span x-show="g.persona === active" class="chk-focus">your focus</span>
+          <span class="chk-count" x-text="inScope(g).length + ' in scope'"></span>
+        </h2>
 
-        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          <template x-for="c in inScope(g)" :key="c.id">
-            <div class="bg-white rounded-xl shadow-sm border p-5 flex flex-col"
-                 :class="c.progress && c.progress.state === 'done' ? 'border-green-200'
-                         : (c.state === 'ready' ? 'border-gray-200' : 'border-gray-100')">
-              <div class="flex items-start justify-between gap-2">
-                <a x-show="c.state === 'ready'" :href="c.target"
-                   class="text-sm font-semibold text-blue-700 hover:underline" x-text="c.title"></a>
-                <span x-show="c.state !== 'ready'"
-                      class="text-sm font-semibold text-gray-400" x-text="c.title"></span>
-                <span class="text-xs text-gray-400 shrink-0" x-text="c.minutes + ' min'"></span>
-              </div>
-              <p class="text-sm mt-2 flex-1"
-                 :class="c.state === 'ready' ? 'text-gray-600' : 'text-gray-400'"
-                 x-text="c.summary"></p>
-              <div class="mt-3 pt-3 border-t border-gray-50 flex items-center justify-between gap-2">
-                <span class="text-xs"
-                      :class="c.progress && c.progress.state === 'done' ? 'text-green-700' : 'text-gray-400'"
-                      x-text="c.progress && c.progress.state === 'done' ? '✓ covered'
-                              : (c.progress && c.progress.state === 'skipped' ? 'skipped'
-                              : (c.state === 'needs_wiring' ? 'needs wiring' : 'not yet'))"></span>
-                <a x-show="c.docs" :href="c.docs" target="_blank" rel="noopener noreferrer"
-                   class="text-xs text-gray-400 hover:text-blue-600 shrink-0">Guide →</a>
-              </div>
-            </div>
-          </template>
-        </div>
-      </div>
-    </template>
-  </div>
-
-  <!-- ── The instance-wide catalog. Present on both profiles and never filtered; on a
-       POV instance it starts collapsed because most of it is masked there and the POV
-       above is what somebody came for. Collapsed is not hidden: every group and every
-       card is rendered, and the toggle says how many. ───────────────────────────── -->
-  <div x-show="loaded && isPov" class="mb-4 border-t border-gray-200 pt-6">
-    <button @click="showCatalog = !showCatalog"
-            class="text-sm font-semibold text-gray-700 uppercase tracking-wide hover:text-gray-900">
-      <span x-text="showCatalog ? '▾' : '▸'"></span>
-      Everything this dashboard can demo
-    </button>
-    <p class="text-xs text-gray-400 mt-1">
-      The whole catalog, across every role. Most of it runs on a demo estate rather than a
-      customer POV, so on this instance most of it cannot run — it is here in full so that
-      nothing is hidden from you, not because you can run it.
-    </p>
-  </div>
-
-  <template x-for="g in groups" :key="g.persona">
-    <div class="mb-8" x-show="showCatalog">
-      <div class="flex items-baseline justify-between mb-3">
-        <div>
-          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">
-            <span x-text="g.label"></span>
-            <!-- Grey, not coloured: chrome colour is the tenancy signal (ui_theme.py) and
-                 a persona accent anywhere — including inside the content area — is the
-                 same confusion one layer in. -->
-            <span x-show="g.persona === active"
-                  class="ml-2 text-xs font-medium bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">
-              your focus
-            </span>
-          </h2>
-          <p class="text-xs text-gray-400 mt-0.5" x-text="g.blurb"></p>
-        </div>
-        <span class="text-xs text-gray-400 shrink-0 ml-4"
-              x-text="g.use_cases.length + (g.use_cases.length === 1 ? ' use case' : ' use cases')"></span>
-      </div>
-
-      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-        <template x-for="c in g.use_cases" :key="c.id">
-          <!-- Three states, three renders. `masked` carries NO href: a link the client
-               merely styles as inert is one stray middle-click from proving the page 404s
-               on this instance's profile. -->
-          <div class="bg-white rounded-xl shadow-sm border p-5 flex flex-col"
-               :class="c.state === 'ready' ? 'border-gray-200' : 'border-gray-100'">
-            <div class="flex items-start justify-between gap-2">
+        <template x-for="c in inScope(g)" :key="c.id">
+          <div class="chk-item"
+               :class="c.progress && c.progress.state === 'done' ? 'chk-done'
+                       : (c.progress && c.progress.state === 'skipped' ? 'chk-skipped' : '')">
+            <!-- The state, as a mark rather than a control. `aria-hidden` because the word
+                 for it is two elements along in real text: a screen reader that read
+                 "check mark" and then "covered" would be reading one fact twice, and the
+                 glyph is the decoration of the two. -->
+            <span class="chk-mark" aria-hidden="true" x-text="tickGlyph(c)"></span>
+            <div class="chk-txt">
               <!-- Two elements rather than one with a conditional href: an <a> with no
-                   href is still focusable and still looks like a link to a screen reader,
-                   and the whole point of `masked` is that there is nowhere to go. -->
+                   href is still focusable and still announces as a link, and the point of
+                   an unready card is that there is nowhere to go. -->
               <a x-show="c.state === 'ready'" :href="c.target"
-                 class="text-sm font-semibold text-blue-700 hover:underline"
-                 x-text="c.title"></a>
-              <span x-show="c.state !== 'ready'"
-                    class="text-sm font-semibold text-gray-400" x-text="c.title"></span>
-              <span class="text-xs text-gray-400 shrink-0"
-                    x-text="c.minutes + ' min'"></span>
-            </div>
-
-            <p class="text-sm mt-2 flex-1"
-               :class="c.state === 'ready' ? 'text-gray-600' : 'text-gray-400'"
-               x-text="c.summary"></p>
-
-            <div class="mt-3 pt-3 border-t border-gray-50 flex items-center justify-between gap-2">
-              <div class="min-w-0">
-                <!-- needs_flag is ACTIONABLE, so it says what to turn on and links to
-                     Settings. masked is not: api/setup.patch_feature_config would refuse
-                     the enable with a 409 naming the profile, so a Settings link there
-                     would send the operator to a switch that cannot move. -->
-                <!-- `sm:truncate`, not `truncate`: this line ends in the link that makes
-                     the row actionable, and at 393px the clip ate it — a 94px anchor whose
-                     rect is perfectly correct and which nothing on screen says exists. It
-                     wraps on a phone and keeps the one-line row on a desktop. The masked
-                     line below truncates unconditionally because it holds no control. -->
-                <p x-show="c.state === 'needs_flag'" class="text-xs text-amber-700 sm:truncate"
-                   :title="'Needs: ' + c.needs.join(', ')">
-                  Needs <span x-text="c.needs.join(', ')"></span> —
-                  <a :href="c.settings_link" class="underline hover:no-underline">enable in Settings</a>
-                </p>
-                <p x-show="c.state === 'masked'" class="text-xs text-gray-400 truncate"
-                   :title="c.needs.join(', ')">
-                  Not available on
-                  <span x-text="profile === 'pov' ? 'a POV instance' : 'this instance'"></span>
-                  <span x-show="c.needs.length" x-text="' — needs ' + c.needs.join(', ')"></span>
-                </p>
-              </div>
-              <a x-show="c.docs" :href="c.docs" target="_blank" rel="noopener noreferrer"
-                 class="text-xs text-gray-400 hover:text-blue-600 shrink-0">Guide →</a>
+                 class="chk-name" x-text="c.title"></a>
+              <span x-show="c.state !== 'ready'" class="chk-name" x-text="c.title"></span>
+              <span class="chk-note" x-text="c.summary"></span>
+              <span class="chk-tail">
+                <span x-text="c.minutes + ' min'"></span>
+                <span class="chk-state"
+                      :class="c.progress && c.progress.state === 'done' ? 'chk-state-done'
+                              : (c.state === 'needs_wiring' ? 'chk-state-wiring' : '')"
+                      x-text="stateWord(c)"></span>
+                <a x-show="c.docs" :href="c.docs" target="_blank" rel="noopener noreferrer"
+                   class="chk-guide">Guide →</a>
+              </span>
             </div>
           </div>
         </template>
       </div>
+    </template>
+  </div>
+
+  <!-- ── The instance-wide catalog. DEMO INSTANCES ONLY, and not in the DOM anywhere
+       else. It asks feature_flags whether a demo can run here — an instance-wide answer,
+       and on a POV instance the answer for most of it is "this profile masks that". The 26
+       grey cards that produced were the wall the POV lead above exists to replace, and
+       leaving them collapsed underneath left them one find-in-page away.
+
+       `x-if` and not `x-show`: "hidden" is a claim about CSS and this is a claim about the
+       DOM. On a demo instance nothing below changes — every group, in the order
+       /api/persona/catalog served them, never filtered. ─────────────────────────── -->
+  <template x-if="loaded && !isPov">
+    <div>
+      <template x-for="g in groups" :key="g.persona">
+        <div class="mb-8">
+          <div class="flex items-baseline justify-between mb-3">
+            <div>
+              <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">
+                <span x-text="g.label"></span>
+                <!-- Grey, not coloured: chrome colour is the tenancy signal (ui_theme.py) and
+                     a persona accent anywhere — including inside the content area — is the
+                     same confusion one layer in. -->
+                <span x-show="g.persona === active"
+                      class="ml-2 text-xs font-medium bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">
+                  your focus
+                </span>
+              </h2>
+              <p class="text-xs text-gray-400 mt-0.5" x-text="g.blurb"></p>
+            </div>
+            <span class="text-xs text-gray-400 shrink-0 ml-4"
+                  x-text="g.use_cases.length + (g.use_cases.length === 1 ? ' use case' : ' use cases')"></span>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            <template x-for="c in g.use_cases" :key="c.id">
+              <!-- Three states, three renders. `masked` carries NO href: a link the client
+                   merely styles as inert is one stray middle-click from proving the page 404s
+                   on this instance's profile. -->
+              <div class="bg-white rounded-xl shadow-sm border p-5 flex flex-col"
+                   :class="c.state === 'ready' ? 'border-gray-200' : 'border-gray-100'">
+                <div class="flex items-start justify-between gap-2">
+                  <!-- Two elements rather than one with a conditional href: an <a> with no
+                       href is still focusable and still looks like a link to a screen reader,
+                       and the whole point of `masked` is that there is nowhere to go. -->
+                  <a x-show="c.state === 'ready'" :href="c.target"
+                     class="text-sm font-semibold text-blue-700 hover:underline"
+                     x-text="c.title"></a>
+                  <span x-show="c.state !== 'ready'"
+                        class="text-sm font-semibold text-gray-400" x-text="c.title"></span>
+                  <span class="text-xs text-gray-400 shrink-0"
+                        x-text="c.minutes + ' min'"></span>
+                </div>
+
+                <p class="text-sm mt-2 flex-1"
+                   :class="c.state === 'ready' ? 'text-gray-600' : 'text-gray-400'"
+                   x-text="c.summary"></p>
+
+                <div class="mt-3 pt-3 border-t border-gray-50 flex items-center justify-between gap-2">
+                  <div class="min-w-0">
+                    <!-- needs_flag is ACTIONABLE, so it says what to turn on and links to
+                         Settings. masked is not: api/setup.patch_feature_config would refuse
+                         the enable with a 409 naming the profile, so a Settings link there
+                         would send the operator to a switch that cannot move. -->
+                    <!-- `sm:truncate`, not `truncate`: this line ends in the link that makes
+                         the row actionable, and at 393px the clip ate it — a 94px anchor whose
+                         rect is perfectly correct and which nothing on screen says exists. It
+                         wraps on a phone and keeps the one-line row on a desktop. The masked
+                         line below truncates unconditionally because it holds no control. -->
+                    <p x-show="c.state === 'needs_flag'" class="text-xs text-amber-700 sm:truncate"
+                       :title="'Needs: ' + c.needs.join(', ')">
+                      Needs <span x-text="c.needs.join(', ')"></span> —
+                      <a :href="c.settings_link" class="underline hover:no-underline">enable in Settings</a>
+                    </p>
+                    <p x-show="c.state === 'masked'" class="text-xs text-gray-400 truncate"
+                       :title="c.needs.join(', ')">
+                      Not available on
+                      <span x-text="profile === 'pov' ? 'a POV instance' : 'this instance'"></span>
+                      <span x-show="c.needs.length" x-text="' — needs ' + c.needs.join(', ')"></span>
+                    </p>
+                  </div>
+                  <a x-show="c.docs" :href="c.docs" target="_blank" rel="noopener noreferrer"
+                     class="text-xs text-gray-400 hover:text-blue-600 shrink-0">Guide →</a>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
     </div>
   </template>
 
@@ -245,7 +240,6 @@
       povId: '',
       povGroups: [],
       povSummary: null,
-      showCatalog: true,
 
       get isPov() {
         return this.profile === 'pov';
@@ -264,13 +258,12 @@
           ]);
           this.active = act.persona || '';
           this.profile = act.install_profile || '';
-          // Collapsed only where most of the catalog is masked. A demo instance opens on
-          // exactly what it opened on before this change.
-          this.showCatalog = !this.isPov;
           const all = (cat.personas || []);
           // The active persona's group first; everything else keeps its declared order.
           // Not a filter — every group is always present, which is what makes the neutral
-          // view the complete catalog rather than an empty one.
+          // view the complete catalog rather than an empty one. The PROFILE decides whether
+          // this list is the one the page renders (see the markup above); a persona only
+          // ever decides what leads it.
           this.groups = all.slice().sort((a, b) =>
             (a.persona === this.active ? 0 : 1) - (b.persona === this.active ? 0 : 1));
         } catch (e) {
@@ -326,10 +319,33 @@
         }
       },
 
-      // Out-of-scope cards are dropped from the POV lead rather than greyed. This page
-      // already carries a full explanation of everything it cannot run — the section below
-      // it — and repeating it here would rebuild the wall of grey this lead exists to
-      // replace. The card is still on the POV's own page, stated rather than dropped.
+      // Two expressions rather than a nine-line ternary in an attribute, and neither is
+      // called `mark…` anything: tests/test_use_cases_page's
+      // test_the_lead_never_offers_an_action bans that verb — followed by an open paren —
+      // anywhere in this file, because a writer on this page is the bug it is watching
+      // for. (Which is also why this comment spells the ban out rather than quoting it.)
+      // Naming these two for what they render keeps that guard honest.
+      tickGlyph(c) {
+        const s = (c.progress || {}).state;
+        if (s === 'done') return '✓';
+        if (s === 'skipped') return '–';
+        // Deliberately blank rather than an empty box outline: an outlined square that
+        // does nothing when clicked is a control, and this page performs no writes.
+        return '';
+      },
+
+      stateWord(c) {
+        const s = (c.progress || {}).state;
+        if (s === 'done') return '✓ covered';
+        if (s === 'skipped') return 'skipped';
+        return c.state === 'needs_wiring' ? 'needs wiring' : 'not yet';
+      },
+
+      // Out-of-scope cards are dropped from this lead rather than stated. This page is the
+      // short answer to "what can I show them next?", and a card whose answer is "not on
+      // this evaluation" is not an answer to that question. The card is not lost: the POV's
+      // own page states it, in its own dashed section, and that is where somebody who wants
+      // to argue with the scoping decision is already going.
       inScope(g) {
         return (g.use_cases || []).filter(c => c.state !== 'out_of_scope');
       },

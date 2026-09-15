@@ -433,6 +433,42 @@ def test_the_needs_wiring_card_does_link_to_the_wire_up():
         "the needs_wiring branch hides its own fix"
 
 
+def test_the_operator_ticks_a_card_with_a_real_checkbox():
+    """The two surfaces that WRITE get a control; the read-only lead on /use-cases gets a
+    static mark instead (tests/test_use_cases_page pins that half). The box is bound to the
+    state the API SERVED rather than to a local flag, so a reload shows what was stored
+    rather than what was clicked."""
+    src = _read(_DETAIL)
+    box = re.search(r'<input[^>]*class="chk-box"[^>]*>', src, re.S)
+    assert box, "the checklist has no checkbox"
+    tag = box.group(0)
+    assert "c.progress.state === 'done'" in tag, \
+        "the box is not bound to the state the API served"
+    assert "@change=" in tag and "@click=" not in tag, (
+        "the box is bound to click rather than change. `click` fires with the OLD checked "
+        "value, so every tick would write the opposite of what was asked for.")
+
+
+def test_an_out_of_scope_card_is_set_apart_and_still_tickable():
+    """out_of_scope earns its own dashed section -- it is a scoping decision worth reading,
+    not a failure, and grey is what the wall of masked cards looked like. A card an SE
+    demoed anyway is still a card they demoed, so the row stays tickable there.
+
+    One row definition serves both sections, which is what stops the deferred one drifting
+    read-only on a later edit. Counted on `class="chk-box"` rather than on the checkbox
+    input: this page has three other, unrelated checkboxes (the VM opt-in, the power-on
+    toggle, the VM picker), and only the checklist's carries that class.
+    """
+    src = _read(_DETAIL)
+    assert "chk-deferred" in src, "out-of-scope cards have no section of their own"
+    assert src.count('class="chk-box"') == 1, (
+        "the checklist row is defined more than once. Both sections must render the same "
+        "row, or one of them quietly stops being tickable.")
+    body = src.split("sections(g) {", 1)[1].split("\n      },", 1)[0]
+    assert "c.state === 'out_of_scope'" in body and "c.state !== 'out_of_scope'" in body, \
+        "sections() does not split the group into in-scope and out-of-scope"
+
+
 def test_the_page_never_filters_the_groups():
     """Every role is always present -- the same promise /use-cases keeps one layer up."""
     src = _read(_DETAIL)

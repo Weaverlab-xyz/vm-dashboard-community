@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}POV{% endblock %}
+{% block head %}{% include "_checklist_styles.html" %}{% endblock %}
 
 {#
   One POV, in depth.
@@ -447,110 +448,116 @@
       </div>
 
       <!-- ── Use cases ────────────────────────────────────────────────── -->
-      <div x-show="tab === 'use-cases'" class="space-y-8">
+      <!-- The checklist, in the dense one-row-per-card format shared with the customer's
+           page and with the read-only lead on /use-cases. `chk-scope` goes here rather
+           than on the page root, because the root also carries the Tailwind-styled tab
+           strip and nothing outside this panel is a checklist. -->
+      <div x-show="tab === 'use-cases'" class="chk-scope">
 
-        <div class="flex items-baseline justify-between">
-          <p class="text-sm text-gray-500">
+        <div class="chk-page-header">
+          <p>
             Grouped by the role they are for. Every role is always here; what this POV is
             wired into decides what each card says.
           </p>
-          <p class="text-xs text-gray-400 shrink-0 ml-4">
-            <span x-text="summary.done"></span> run,
-            <span x-text="summary.skipped"></span> skipped,
-            <span x-text="summary.total"></span> in scope
+          <p class="chk-progress">
+            <b x-text="summary.done"></b> run ·
+            <b x-text="summary.skipped"></b> skipped ·
+            <b x-text="summary.total"></b> in scope
           </p>
         </div>
 
+        <!-- One section per group, plus a second DASHED one for the cards this POV has no
+             tenant for. Both are driven by `sections(g)` and both use the row below, so
+             there is exactly one definition of a row and the two cannot drift.
+
+             An out-of-scope card stays TICKABLE. "We showed them anyway" is a thing that
+             happens in a POV, and a section that made those cards read-only would be
+             pretending it does not. -->
         <template x-for="g in groups" :key="g.persona">
+          <!-- The wrapper is load-bearing, not decoration: x-for clones its template's
+               first ELEMENT child, so a <template x-for> nested directly inside another
+               relies on a cloned <template> bringing its own content along. Every other
+               nested loop in this app goes template > div > template. -->
           <div>
-            <div class="flex items-baseline justify-between mb-3">
-              <div>
-                <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide" x-text="g.label"></h2>
-                <p class="text-xs text-gray-400 mt-0.5" x-text="g.blurb"></p>
-              </div>
-              <span class="text-xs text-gray-400 shrink-0 ml-4"
-                    x-text="inScope(g) + ' of ' + g.use_cases.length + ' in scope'"></span>
-            </div>
+          <template x-for="s in sections(g)" :key="s.key">
+            <div class="chk-section" :class="s.deferred ? 'chk-deferred' : ''">
+              <h2>
+                <span x-text="g.label"></span>
+                <span x-show="s.deferred"> · not part of this POV</span>
+                <span class="chk-count"
+                      x-text="s.deferred ? s.cards.length + ' out of scope'
+                              : s.cards.length + ' of ' + g.use_cases.length + ' in scope'"></span>
+              </h2>
+              <p class="chk-blurb" x-show="!s.deferred && g.blurb" x-text="g.blurb"></p>
 
-            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              <template x-for="c in g.use_cases" :key="c.id">
-                <div class="bg-white rounded-xl shadow-sm border p-5 flex flex-col"
-                     :class="c.progress.state === 'done' ? 'border-green-200'
-                             : (c.state === 'ready' ? 'border-gray-200' : 'border-gray-100')">
-
-                  <div class="flex items-start justify-between gap-2">
+              <template x-for="c in s.cards" :key="c.id">
+                <div class="chk-item chk-clickable"
+                     @click="rowClick(c, $event)"
+                     :class="c.progress.state === 'done' ? 'chk-done'
+                             : (c.progress.state === 'skipped' ? 'chk-skipped' : '')">
+                  <!-- Bound to `change`, not `click`: change fires after the browser has
+                       already flipped the box, so `el.checked` is the value the operator
+                       asked for rather than the one they are leaving. `toggleDone` then
+                       re-derives the box from what the server accepted, so a failed write
+                       snaps the tick back instead of leaving a tick nothing recorded. -->
+                  <input type="checkbox" class="chk-box"
+                         :checked="c.progress.state === 'done'"
+                         :disabled="busy === c.id"
+                         @change="toggleDone(c, $event.target)"
+                         :aria-label="'Mark ' + c.title + ' done'">
+                  <div class="chk-txt">
                     <!-- Two elements rather than one conditional href: an <a> with no href
                          is still focusable and still announces as a link, and the point of
                          out_of_scope is that there is nowhere to go. -->
                     <a x-show="c.state === 'ready'" :href="c.target"
-                       class="text-sm font-semibold text-blue-700 hover:underline" x-text="c.title"></a>
-                    <span x-show="c.state !== 'ready'"
-                          class="text-sm font-semibold text-gray-400" x-text="c.title"></span>
-                    <span class="text-xs text-gray-400 shrink-0" x-text="c.minutes + ' min'"></span>
-                  </div>
+                       class="chk-name" x-text="c.title"></a>
+                    <span x-show="c.state !== 'ready'" class="chk-name" x-text="c.title"></span>
+                    <span class="chk-note" x-text="c.summary"></span>
+                    <span class="chk-tail">
+                      <span x-text="c.minutes + ' min'"></span>
+                      <button type="button" class="chk-btn"
+                              :class="c.progress.state === 'skipped' ? 'chk-btn-on' : ''"
+                              :disabled="busy === c.id"
+                              @click="mark(c, c.progress.state === 'skipped' ? '' : 'skipped')"
+                              x-text="c.progress.state === 'skipped' ? '✓ Skipped' : 'Skip'"></button>
+                      <a x-show="c.docs" :href="c.docs" target="_blank" rel="noopener noreferrer"
+                         class="chk-guide">Guide →</a>
+                    </span>
 
-                  <p class="text-sm mt-2 flex-1"
-                     :class="c.state === 'ready' ? 'text-gray-600' : 'text-gray-400'"
-                     x-text="c.summary"></p>
-
-                  <div class="mt-3 pt-3 border-t border-gray-50 space-y-2">
                     <!-- needs_wiring is ACTIONABLE, so it says what to run and links to the
                          tab with the button. out_of_scope is not: the fix is a tenant on the
                          POV row, which is a decision about the evaluation rather than a
                          click, so it gets no link at all. -->
-                    <p x-show="c.state === 'needs_wiring'" class="text-xs text-amber-700"
+                    <p class="chk-sub" x-show="c.state === 'needs_wiring'"
                        :title="c.needs.join(', ')">
                       Needs <span x-text="c.needs.join(', ')"></span> —
-                      <a :href="c.action_link" class="underline hover:no-underline">see what is wired</a>
+                      <a :href="c.action_link" class="chk-link">see what is wired</a>
                     </p>
-                    <p x-show="c.state === 'out_of_scope'" class="text-xs text-gray-400"
+                    <p class="chk-sub" x-show="c.state === 'out_of_scope'"
                        :title="c.needs.join(', ')">
                       Not part of this POV — no
                       <span x-text="c.needs.join(' or ')"></span> tenant
                     </p>
 
-                    <div class="flex items-center justify-between gap-2">
-                      <div class="flex items-center gap-2">
-                        <button @click="mark(c, c.progress.state === 'done' ? '' : 'done')"
-                                :disabled="busy === c.id"
-                                class="text-xs px-2 py-1 rounded border disabled:opacity-50"
-                                :class="c.progress.state === 'done'
-                                        ? 'border-green-300 bg-green-50 text-green-800'
-                                        : 'border-gray-300 text-gray-600 hover:bg-gray-50'"
-                                x-text="c.progress.state === 'done' ? '✓ Done' : 'Mark done'"></button>
-                        <button @click="mark(c, c.progress.state === 'skipped' ? '' : 'skipped')"
-                                :disabled="busy === c.id"
-                                class="text-xs px-2 py-1 rounded border disabled:opacity-50"
-                                :class="c.progress.state === 'skipped'
-                                        ? 'border-gray-400 bg-gray-100 text-gray-700'
-                                        : 'border-gray-200 text-gray-400 hover:bg-gray-50'"
-                                x-text="'Skip'"></button>
-                      </div>
-                      <a x-show="c.docs" :href="c.docs" target="_blank" rel="noopener noreferrer"
-                         class="text-xs text-gray-400 hover:text-blue-600 shrink-0">Guide →</a>
-                    </div>
-
-                    <p x-show="c.progress.state" class="text-xs text-gray-400">
+                    <p class="chk-sub chk-by" x-show="c.progress.state">
                       <span x-text="c.progress.state === 'done' ? 'Run by' : 'Skipped by'"></span>
                       <span x-text="c.progress.by || 'someone'"></span>
-                      <span x-show="c.progress.by_kind === 'accessor'" class="text-gray-400">(the customer)</span>
+                      <span x-show="c.progress.by_kind === 'accessor'">(the customer)</span>
                     </p>
 
                     <!-- The customer's own words, and the reason this feature is worth more
                          than a row of ticks. Rendered with x-text, never x-html: it is text
                          somebody outside the account typed. -->
-                    <div x-show="c.progress.note"
-                         class="text-xs rounded-lg px-2 py-1.5"
-                         :class="c.progress.by_kind === 'accessor'
-                                 ? 'bg-violet-50 text-violet-900' : 'bg-gray-50 text-gray-600'">
-                      <p class="italic" x-text="c.progress.note"></p>
-                      <p x-show="c.progress.by_kind === 'accessor'"
-                         class="mt-0.5 not-italic text-violet-700/70">— the customer</p>
+                    <div class="chk-sub" x-show="c.progress.note">
+                      <p class="chk-quote"
+                         :class="c.progress.by_kind === 'accessor' ? 'chk-quote-customer' : ''"
+                         x-text="c.progress.note"></p>
                     </div>
                   </div>
                 </div>
               </template>
             </div>
+          </template>
           </div>
         </template>
       </div>
@@ -1578,8 +1585,44 @@
         ];
       },
 
-      inScope(g) {
-        return g.use_cases.filter(c => c.state !== 'out_of_scope').length;
+      // Two sections per group at most: what this POV can run, and what it has no tenant
+      // for. Both are rendered from the ONE row definition in the markup, because the
+      // out-of-scope cards must stay tickable and a second copy of the row is how one of
+      // them quietly stops being.
+      //
+      // `.filter(` is fine here and not in loadUseCases(): a product mix may STATE a card,
+      // never remove it, and both lists are always rendered.
+      sections(g) {
+        const cards = g.use_cases || [];
+        const out = [{
+          key: g.persona + ':scope',
+          deferred: false,
+          cards: cards.filter(c => c.state !== 'out_of_scope'),
+        }];
+        const deferred = cards.filter(c => c.state === 'out_of_scope');
+        if (deferred.length) {
+          out.push({ key: g.persona + ':deferred', deferred: true, cards: deferred });
+        }
+        return out;
+      },
+
+      // The box is the source of truth for what the operator ASKED for; the server is the
+      // source of truth for what happened. `change` gives us the former, `mark` gets the
+      // latter, and the last line reconciles them — so a write that fails visibly reverts
+      // rather than leaving a tick nothing recorded.
+      async toggleDone(card, el) {
+        await this.mark(card, el.checked ? 'done' : '');
+        el.checked = card.progress.state === 'done';
+      },
+
+      // The reference format makes the whole row a click target, and on a dense list that
+      // is the difference between a checklist and a form. Its rows hold nothing but prose,
+      // though, and ours hold a title anchor, a Skip button and a Guide link — so this
+      // refuses to hijack a click that already had a destination. Kept in JS rather than
+      // inlined into @click so the guard is reviewable.
+      rowClick(card, event) {
+        if (event.target.closest('a, button, input, textarea, select, label')) return;
+        this.mark(card, card.progress.state === 'done' ? '' : 'done');
       },
 
       // An empty `state` un-ticks. One handler for both buttons so the toggle can never

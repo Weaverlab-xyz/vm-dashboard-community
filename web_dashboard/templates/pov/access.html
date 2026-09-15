@@ -11,6 +11,7 @@
      requireAuth — and requireAuth would redirect an accessor to this page, from this
      page. This page needs a token and one fetch, which is less than the store costs to
      reason about here. #}
+  {% include "_checklist_styles.html" %}
 </head>
 {#
   The accessor's page. A prospect's view of the one POV they were given a login for.
@@ -35,7 +36,7 @@
   server will not keep.
 #}
 <body class="bg-gray-50 min-h-screen">
-  <div x-data="accessorPage()" x-init="init()" class="max-w-5xl mx-auto px-4 py-10">
+  <div x-data="accessorPage()" x-init="init()" class="chk-scope max-w-5xl mx-auto px-4 py-10">
 
     <div x-show="loading" class="py-16 text-center text-gray-400 text-sm">Loading…</div>
 
@@ -187,64 +188,76 @@
           </div>
         </div>
 
-        <div>
-          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">What to try</h2>
-          <p class="text-sm text-gray-500 mt-1">
-            Grouped by the role each one is written for. The greyed-out ones are not part of
-            this evaluation.
+        <div class="chk-page-header">
+          <!-- h2, not h1: this page's <h1> is the environment name at the top, and the
+               two headings beside this one ("Your environment", "What is set up") are h2s. -->
+          <h2>What to try</h2>
+          <div class="chk-accent"></div>
+          <p>
+            Grouped by the role each one is written for. Tick the ones you have seen, and
+            tell us how they went — your notes go straight back to your contact.
           </p>
         </div>
 
         <template x-for="g in groups" :key="g.persona">
-          <div x-show="inScope(g).length">
-            <h3 class="text-sm font-semibold text-gray-700 mb-3" x-text="g.label"></h3>
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <template x-for="c in inScope(g)" :key="c.id">
-                <div class="bg-white rounded-xl shadow-sm border p-5"
-                     :class="c.progress.state === 'done' ? 'border-green-200' : 'border-gray-200'">
-                  <div class="flex items-start justify-between gap-2">
-                    <!-- No link, on any card. Every target on the SE's page is a dashboard
-                         screen an accessor is refused on, so an anchor here would be a
-                         promise the server will not keep. -->
-                    <p class="text-sm font-semibold text-gray-900" x-text="c.title"></p>
-                    <span class="text-xs text-gray-400 shrink-0" x-text="c.minutes + ' min'"></span>
-                  </div>
-                  <p class="text-sm text-gray-600 mt-2" x-text="c.summary"></p>
-                  <div class="mt-3 pt-3 border-t border-gray-50 space-y-2">
-                    <div class="flex items-center justify-between gap-2">
-                      <div class="flex items-center gap-2">
-                        <button @click="mark(c, c.progress.state === 'done' ? '' : 'done')"
-                                :disabled="busy === c.id"
-                                class="text-xs px-2 py-1 rounded border disabled:opacity-50"
-                                :class="c.progress.state === 'done'
-                                        ? 'border-green-300 bg-green-50 text-green-800'
-                                        : 'border-gray-300 text-gray-600 hover:bg-gray-50'"
-                                x-text="c.progress.state === 'done' ? '✓ Covered' : 'Mark covered'"></button>
-                        <button @click="mark(c, c.progress.state === 'skipped' ? '' : 'skipped')"
-                                :disabled="busy === c.id"
-                                class="text-xs px-2 py-1 rounded border disabled:opacity-50"
-                                :class="c.progress.state === 'skipped'
-                                        ? 'border-gray-400 bg-gray-100 text-gray-700'
-                                        : 'border-gray-200 text-gray-400 hover:bg-gray-50'">Not for us</button>
-                      </div>
-                      <a x-show="c.docs" :href="c.docs" target="_blank" rel="noopener noreferrer"
-                         class="text-xs text-gray-400 hover:text-blue-600">Guide →</a>
-                    </div>
+          <div class="chk-section" x-show="inScope(g).length">
+            <h2>
+              <span x-text="g.label"></span>
+              <span class="chk-count" x-text="inScope(g).length"></span>
+            </h2>
 
-                    <!-- Saved on blur rather than behind a Save button: a comment somebody
-                         typed and navigated away from is the one this feature most wants
-                         to keep. -->
-                    <textarea x-model="c.progress.note" @blur="saveNote(c)" rows="2"
-                              placeholder="How did this go? Your notes come back to your contact."
-                              class="w-full border border-gray-200 rounded-lg px-2 py-1 text-xs text-gray-700 focus:border-gray-400 focus:outline-none"></textarea>
+            <template x-for="c in inScope(g)" :key="c.id">
+              <!-- Deliberately NOT chk-clickable, unlike the operator's page. The customer
+                   clicks into the note box on every card, and an accidental row-tick
+                   corrupts exactly the evidence this page exists to collect. -->
+              <div class="chk-item"
+                   :class="c.progress.state === 'done' ? 'chk-done'
+                           : (c.progress.state === 'skipped' ? 'chk-skipped' : '')">
+                <!-- `change`, not `click`: click fires with the OLD checked value, so every
+                     tick would write the opposite of what was asked for. -->
+                <input type="checkbox" class="chk-box"
+                       :checked="c.progress.state === 'done'"
+                       :disabled="busy === c.id"
+                       @change="toggleCovered(c, $event.target)"
+                       :aria-label="'Mark ' + c.title + ' covered'">
+                <div class="chk-txt">
+                  <!-- No link, on any card. Every target on the SE's page is a dashboard
+                       screen an accessor is refused on, so an anchor here would be a
+                       promise the server will not keep. -->
+                  <span class="chk-name" x-text="c.title"></span>
+                  <span class="chk-note" x-text="c.summary"></span>
+                  <span class="chk-tail">
+                    <span x-text="c.minutes + ' min'"></span>
+                    <button type="button" class="chk-btn"
+                            :class="c.progress.state === 'skipped' ? 'chk-btn-on' : ''"
+                            :disabled="busy === c.id"
+                            @click="mark(c, c.progress.state === 'skipped' ? '' : 'skipped')"
+                            x-text="c.progress.state === 'skipped' ? '✓ Not for us' : 'Not for us'"></button>
+                    <a x-show="c.docs" :href="c.docs" target="_blank" rel="noopener noreferrer"
+                       class="chk-guide">Guide →</a>
+                  </span>
 
-                    <p x-show="c.progress.by_kind === 'se'" class="text-xs text-gray-400">
-                      Marked by your contact.
-                    </p>
+                  <!-- Always visible, and ONE line tall until there is something in it.
+                       Hiding it behind a control would cost the comment this whole feature
+                       is worth more than a row of ticks for; a two-row box on every card
+                       would cost the density.
+
+                       Saved on blur rather than behind a Save button: a comment somebody
+                       typed and navigated away from is the one this feature most wants
+                       to keep. -->
+                  <div class="chk-sub">
+                    <textarea class="chk-noteinput" rows="2"
+                              x-model="c.progress.note" @blur="saveNote(c)"
+                              :aria-label="'Your notes on ' + c.title"
+                              placeholder="How did this go?"></textarea>
                   </div>
+
+                  <p class="chk-sub chk-by" x-show="c.progress.by_kind === 'se'">
+                    Marked by your contact.
+                  </p>
                 </div>
-              </template>
-            </div>
+              </div>
+            </template>
           </div>
         </template>
 
@@ -334,6 +347,14 @@
             this.saveError = e.message;
           }
           this.waking = false;
+        },
+
+        // See the note on the operator's page: `change` is what the customer asked for,
+        // the server is what happened, and the last line reconciles the two — so a failed
+        // write cannot leave a tick their contact will read as evidence.
+        async toggleCovered(card, el) {
+          await this.mark(card, el.checked ? 'done' : '');
+          el.checked = card.progress.state === 'done';
         },
 
         // An empty `state` un-ticks. One handler for both buttons, so a card can never end
