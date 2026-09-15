@@ -17,6 +17,7 @@ without a live DB.
 
 Runs under pytest, or standalone:  python tests/test_expiry_reaper.py
 """
+import ast
 import os
 import sys
 import types
@@ -60,6 +61,19 @@ class _Model(type):
         return _Col()
 
 
+def _db_model_names():
+    """Every top-level class in web_dashboard/database.py, read via ast.
+
+    Deliberately NOT a hardcoded list. The previous one named nine models while the real
+    module has ~49, so the day an import in this chain reached one that wasn't listed
+    (CertLab, via inventory_service) the whole file skipped and tested nothing. Deriving
+    the names means a new model can never silently disable these tests."""
+    with open(os.path.join(_ROOT, "web_dashboard", "database.py"), encoding="utf-8") as fh:
+        names = [n.name for n in ast.parse(fh.read()).body if isinstance(n, ast.ClassDef)]
+    assert len(names) > 30, f"only found {len(names)} models -- did database.py move?"
+    return names
+
+
 def _install_stubs():
     sa = types.ModuleType("sqlalchemy")
     sa.__path__ = []
@@ -77,12 +91,13 @@ def _install_stubs():
     sys.modules.setdefault("sqlalchemy.exc", sa_exc)
 
     db = types.ModuleType("web_dashboard.database")
-    # NotificationDelivery/Endpoint are here because the reaper reaches
-    # notification_service to queue its expiring/reaped messages. Without them that
-    # import raises, the emit is swallowed by _notify's guard, and the notification
-    # path in these tests silently does nothing.
-    for name in ("CloudDatabase", "Job", "K8sCluster", "VirtualDesktop", "User",
-                 "AuditLog", "JobLog", "NotificationDelivery", "NotificationEndpoint"):
+    # Every model, not a curated subset. NotificationDelivery/Endpoint used to be listed
+    # by hand with a note that the reaper reaches notification_service to queue its
+    # expiring/reaped messages — without them that import raises, the emit is swallowed
+    # by _notify's guard, and the notification path here silently does nothing. Exactly
+    # that reasoning applies to every other model the import chain may grow, so derive
+    # the list instead of maintaining it.
+    for name in _db_model_names():
         setattr(db, name, _Model(name, (), {}))
     db.get_db = lambda: None
     db._is_sqlite = True
@@ -102,15 +117,12 @@ def _install_stubs():
 
 
 _install_stubs()
-try:
-    from web_dashboard.services import expiry_policy as pol, expiry_reaper as reaper
-except Exception as exc:  # pragma: no cover
-    try:
-        import pytest
-        pytest.skip(f"expiry_reaper import unavailable: {exc}", allow_module_level=True)
-    except ModuleNotFoundError:
-        print(f"SKIP: {exc}")
-        sys.exit(0)
+
+# Imported UNGUARDED on purpose — see the note in tests/test_expiry_api.py. Everything
+# this file needs is stubbed above, so an ImportError here is a real regression rather
+# than a missing optional dependency.
+from web_dashboard.services import (expiry_policy as pol,  # noqa: E402
+                                    expiry_reaper as reaper)
 
 
 NOW = datetime(2026, 7, 29, 12, 0, 0)

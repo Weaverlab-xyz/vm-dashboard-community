@@ -33,6 +33,19 @@ if _ROOT not in sys.path:
 CONF = {"resource_expiry_enabled": "1", "resource_expiry_max_total_hours": "720"}
 
 
+def _db_model_names():
+    """Every top-level class in web_dashboard/database.py, read via ast.
+
+    Deliberately NOT a hardcoded list. The previous one named nine models while the real
+    module has ~49, so the day an import in this chain reached one that wasn't listed
+    (CertLab, via inventory_service) the whole file skipped and tested nothing. Deriving
+    the names means a new model can never silently disable these tests."""
+    with open(os.path.join(_ROOT, "web_dashboard", "database.py"), encoding="utf-8") as fh:
+        names = [n.name for n in ast.parse(fh.read()).body if isinstance(n, ast.ClassDef)]
+    assert len(names) > 30, f"only found {len(names)} models -- did database.py move?"
+    return names
+
+
 def _install_stubs():
     # Marked as a package: expiry_reaper pulls in job_service, which imports
     # sqlalchemy.exc — a plain module stub makes that a confusing "not a package" error.
@@ -52,8 +65,7 @@ def _install_stubs():
     sys.modules.setdefault("sqlalchemy.exc", sa_exc)
 
     db = types.ModuleType("web_dashboard.database")
-    for name in ("CloudDatabase", "Job", "K8sCluster", "VirtualDesktop", "User",
-                 "AuditLog", "JobLog", "HypervisorConnection", "HypervisorVMCache"):
+    for name in _db_model_names():
         setattr(db, name, type(name, (), {}))
     db.get_db = lambda: None
     db._is_sqlite = True
@@ -73,15 +85,12 @@ def _install_stubs():
 
 
 _install_stubs()
-try:
-    from web_dashboard.services import expiry_reaper, inventory_service
-except Exception as exc:  # pragma: no cover
-    try:
-        import pytest
-        pytest.skip(f"expiry_reaper import unavailable: {exc}", allow_module_level=True)
-    except ModuleNotFoundError:
-        print(f"SKIP: {exc}")
-        sys.exit(0)
+
+# Imported UNGUARDED on purpose. Every dependency these tests need is stubbed above, so
+# there is no optional third-party package to tolerate — an ImportError here is a real
+# regression, and the `except Exception: skip` that used to sit around this line is what
+# let the file exit 0 having tested nothing.
+from web_dashboard.services import expiry_reaper, inventory_service  # noqa: E402
 
 
 _API = os.path.join(_ROOT, "web_dashboard", "api", "expiry.py")
