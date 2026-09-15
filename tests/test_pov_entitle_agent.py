@@ -162,9 +162,63 @@ def test_the_values_file_is_removed_even_when_the_install_fails():
     """The token is the one secret that lands on the guest. An `always` block, not a task
     after the install, because a failed helm run must not leave it there."""
     import yaml
-    block = yaml.safe_load(ea.playbook_yaml())[0]["tasks"][1]
+    # Found by shape, not by index: the interpreter bootstrap added tasks in front of this
+    # one, and an index here would have turned that into a failure in the wrong test.
+    block = next(t for t in yaml.safe_load(ea.playbook_yaml())[0]["tasks"] if "block" in t)
     assert any("absent" in json.dumps(t) for t in block["always"])
     assert block["rescue"], "a failure must print why the pods did not start"
+
+
+def test_the_play_does_not_gather_facts_before_there_is_an_interpreter():
+    """The live failure this pins: implicit fact gathering is the FIRST thing that runs and
+    it needs python on the guest, so a template without one died before task one with
+    "The module interpreter '/usr/bin/python3' was not found" — which reads as a broken
+    playbook. Only `set_fact` (controller-side) and `raw` may come before the bootstrap."""
+    import yaml
+    play = yaml.safe_load(ea.playbook_yaml())[0]
+    assert play["gather_facts"] is False
+    modules = [k for t in play["tasks"] for k in t
+               if k.startswith("ansible.") or k == "block"]
+    boot = modules.index("ansible.builtin.raw")
+    assert set(modules[:boot]) <= {"ansible.builtin.set_fact"}, modules[:boot]
+    # And the facts still have to arrive: the helm download reads ansible_architecture.
+    setup = modules.index("ansible.builtin.setup")
+    assert boot < setup < modules.index("block")
+    assert "ansible_architecture" in ea.playbook_yaml()
+
+
+def test_the_interpreter_is_read_off_a_sentinel_and_pinned():
+    """A login shell writes an MOTD, a sudo lecture and a CRLF around the one line that is
+    the answer, so the path is parsed out of a marker rather than taken as the output —
+    and then pinned, because discovery has already been tried and has already failed."""
+    import yaml
+    tasks = yaml.safe_load(ea.playbook_yaml())[0]["tasks"]
+    raw = next(t for t in tasks if "ansible.builtin.raw" in t)
+    assert ea.PYTHON_SENTINEL in raw["ansible.builtin.raw"]
+    # rc alone is not enough: naming failed_when replaces the default rc check, and a
+    # shell that prints a banner and exits 0 without reaching the echo must still fail.
+    assert "rc != 0" in raw["failed_when"]
+    assert ea.PYTHON_SENTINEL in raw["failed_when"]
+    assert raw["become"] is True, "installing a package needs root"
+    pin = next(t for t in tasks if "ansible.builtin.set_fact" in t
+               and "ansible_python_interpreter" in t["ansible.builtin.set_fact"])
+    expr = pin["ansible.builtin.set_fact"]["ansible_python_interpreter"]
+    assert ea.PYTHON_SENTINEL in expr and ".split()" in expr
+
+
+def test_the_bootstrap_is_posix_sh_and_checks_a_version_not_a_package_name():
+    """`python3` is 3.6 on AlmaLinux/RHEL 8 — the family POV templates come from — and the
+    runner's ansible-core will not drive it. So installing the guest's default package is
+    not the same as satisfying it, and a name-only check would pass here while the run
+    failed live. Also: no single quotes, because become re-quotes the whole script."""
+    script = ea.PYTHON_BOOTSTRAP
+    assert "'" not in script
+    assert "version_info" in script and "(3, 9)" in script
+    for manager in ("dnf", "yum", "apt-get", "zypper", "apk"):
+        assert f"command -v {manager}" in script
+    # RHEL 8 spells a modern python `python39`; RHEL 9 `python3.11` / `python3.12`.
+    for pkg in ("python39", "python3.11", "python3.12"):
+        assert pkg in script
 
 
 def test_binaries_are_absolute_because_sudo_rewrites_the_path():
@@ -396,6 +450,40 @@ def test_a_broker_that_may_not_run_config_management_is_refused_with_the_remedy(
         assert "policy.yaml" in str(exc) and "Broker" in str(exc)
     finally:
         db.close()
+
+
+def test_a_host_outside_the_policy_the_broker_holds_says_press_broker():
+    """The live failure this pins: the agent refused the run with "add it under
+    ansible.targets and restart the agent", which on a POV is advice to edit a file the
+    dashboard owns and the next Broker run replaces. `reported_job_types` cannot catch it —
+    an agent reports which job TYPES its policy allows, never which hosts."""
+    from web_dashboard.services import pov_guest_step
+    db = d.SessionLocal()
+    env, _a, _vm_row, _t = _ready(db)
+    pov_guest_step.record_grant(db, env, ["10.9.0.99"])   # what the last render wrote
+    try:
+        ea.preflight(db, env)
+        raise AssertionError("a host outside the written policy was accepted")
+    except ea.EntitleAgentError as exc:
+        assert "Press Broker" in str(exc)
+        assert "do not" in str(exc) and "policy.yaml" in str(exc)
+    finally:
+        db.close()
+
+
+def test_a_host_inside_the_policy_the_broker_holds_is_accepted():
+    """The other half, because a check that refuses everything would pass the test above.
+    A POV brokered before the record existed has an EMPTY record, which must not refuse —
+    that is why the check is `granted and ...` rather than `not in granted`."""
+    from web_dashboard.services import pov_guest_step
+    db = d.SessionLocal()
+    env, agent, vm, _t = _ready(db)
+    pov_guest_step.record_grant(db, env, [vm.private_ip])
+    _a, picked, _tenant = ea.preflight(db, env)
+    assert picked.private_ip == vm.private_ip
+    pov_guest_step.record_grant(db, env, [])              # brokered by an older build
+    assert ea.preflight(db, env)[1].private_ip == vm.private_ip
+    db.close()
 
 
 # ── the policy grant ─────────────────────────────────────────────────────────
