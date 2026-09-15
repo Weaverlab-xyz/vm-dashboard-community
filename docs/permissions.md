@@ -28,11 +28,31 @@ The consequence is that the grid has two very different empty states:
 
 - **"Full access (unrestricted)" ticked** — the map is NULL. Every scope is allowed, now
   and for every scope added in future.
-- **Unticked with nothing checked** — the map exists but is empty. Every scope is denied.
+- **Unticked with nothing checked** — the map lists every section with nothing granted
+  against any of them. Every scope is denied.
 
 So the way to restrict somebody is to untick "Full access" and then grant what they need.
 Leaving it ticked and unchecking boxes underneath does nothing, because the boxes are not
 being read.
+
+The second state used to be unreachable, and that is worth knowing if you are reading an
+older map. The obvious payload for "restricted, nothing granted" is an empty object, an
+empty object is stored as NULL, and NULL is the *first* state — so asking for nothing got
+you everything. The grid now writes out every section explicitly, each with its own list of
+granted levels, so the map is never empty unless you asked for full access. A section
+absent from a map is still a denial, which is what makes an older, shorter map keep
+behaving exactly as it did.
+
+## New users start restricted
+
+Creating a user from **Users → + New User** gives them a permission map with nothing
+granted. The grid is on the create panel for that reason: grant what they need before you
+save, or they will be able to sign in and see nothing. The panel says so when you are about
+to create one that way.
+
+Before this, the create form had no grid at all and saved no map, which left the account in
+the NULL state above — every section, every level, for anyone the admin added. Tick
+"Full access (unrestricted)" if that is genuinely what you want.
 
 ## Levels
 

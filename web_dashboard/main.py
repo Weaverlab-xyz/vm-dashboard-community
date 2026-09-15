@@ -1738,6 +1738,11 @@ async def users_page(request: Request):
             # the two above: a hard-coded copy in the template would keep offering
             # "delete" on a read-only scope, and the server would 422 the save.
             "permission_scope_levels": auth.PERMISSION_SCOPE_LEVELS,
+            # How the grid groups those scopes into collapsible sections. Derived, and it
+            # covers every scope: one absent from the group map falls into "Ungrouped"
+            # rather than rendering nowhere, because a scope with no row is a permission
+            # nobody can grant.
+            "permission_scope_groups": auth.grouped_permission_scopes(),
         },
     )
 
@@ -1764,6 +1769,11 @@ async def groups_page(request: Request):
             # the two above: a hard-coded copy in the template would keep offering
             # "delete" on a read-only scope, and the server would 422 the save.
             "permission_scope_levels": auth.PERMISSION_SCOPE_LEVELS,
+            # How the grid groups those scopes into collapsible sections. Derived, and it
+            # covers every scope: one absent from the group map falls into "Ungrouped"
+            # rather than rendering nowhere, because a scope with no row is a permission
+            # nobody can grant.
+            "permission_scope_groups": auth.grouped_permission_scopes(),
         },
     )
 

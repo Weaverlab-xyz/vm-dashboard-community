@@ -279,6 +279,46 @@ PERMISSION_SCOPE_LEVELS = {
 PERMISSION_SCOPES = list(PERMISSION_SCOPE_LEVELS)
 
 
+# How the grid LAYS OUT those scopes. Presentation only: `PERMISSION_SCOPES` above stays
+# the single flat catalog every other consumer iterates, and its order is unchanged.
+#
+# A scope missing from here would render in no group at all -- an ungrantable permission,
+# invisible in exactly the way `has_permission`'s "adding a scope is a silent revocation"
+# note describes. So the grid renders anything unlisted under a trailing "Ungrouped"
+# heading rather than dropping it, and tests/test_permission_catalog.py asserts the
+# partition is exact. Adding a scope means adding it to a group here too.
+PERMISSION_SCOPE_GROUPS = {
+    "Core": ["vms", "jobs", "workgroups", "inventory", "audit"],
+    "Clouds": ["aws", "azure", "gcp", "oci", "costs"],
+    "Hypervisors": ["proxmox", "vsphere", "hyperv", "nutanix", "xcpng", "connections"],
+    "Platform": ["images", "containers", "k8s", "cloud_function", "cloud_database",
+                 "storage", "secrets", "config_mgmt"],
+    "POV": ["pov", "pov_templates"],
+    "Operations": ["gateways", "agents", "notifications", "epml", "ot"],
+}
+
+
+def grouped_permission_scopes() -> list:
+    """``[(group_label, [scope, ...]), ...]`` covering EVERY scope, in grid order.
+
+    Scopes absent from ``PERMISSION_SCOPE_GROUPS`` land in a final "Ungrouped" entry
+    instead of vanishing, which is the whole point -- a new scope that nobody grouped is
+    still grantable, and looks obviously unfinished while it waits for its group.
+    """
+    out = []
+    placed = set()
+    for label, scopes in PERMISSION_SCOPE_GROUPS.items():
+        known = [s for s in scopes if s in PERMISSION_SCOPE_LEVELS]
+        if not known:
+            continue
+        out.append((label, known))
+        placed.update(known)
+    orphans = [s for s in PERMISSION_SCOPES if s not in placed]
+    if orphans:
+        out.append(("Ungrouped", orphans))
+    return out
+
+
 def levels_for_scope(scope: str) -> list:
     """The levels ``scope`` offers, or [] if it is not a scope at all."""
     return list(PERMISSION_SCOPE_LEVELS.get(scope, ()))

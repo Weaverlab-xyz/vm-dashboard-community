@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/permission_matrix.html" import permission_matrix %}
 {% block title %}Users{% endblock %}
 
 {% block content %}
@@ -89,16 +90,33 @@
     </table>
   </div>
 
-  <!-- ── Create / Edit User Modal ─────────────────────────────────────────── -->
-  <div x-show="showUserModal" x-cloak
-       class="fixed inset-0 bg-black/50 flex items-center justify-center z-40 p-4"
+  <!-- ── Create / Edit User flyout ─────────────────────────────────────── -->
+  <!--
+    A right-side panel rather than a centred dialog, and the reason is the permission
+    grid: 31 sections is taller than any viewport, and a centred box with no height cap
+    put the title off the top and the Save button off the bottom with nothing to scroll.
+    Granular permissions were literally ungrantable from this page.
+
+    Same shape as the Settings feature slide-over -- header / scrolling body / pinned
+    footer -- and the <form> wraps all three, so the Save button in the footer still
+    submits it. z-50 to clear the sticky nav's z-30, matching that slide-over.
+  -->
+  <div x-show="showUserModal" x-cloak class="fixed inset-0 z-50 flex"
        @keydown.escape.window="showUserModal = false">
-    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg" @click.stop>
-      <div class="flex items-center justify-between px-6 py-4 border-b">
+    <div class="absolute inset-0 bg-black/40 transition-opacity" @click="showUserModal = false"></div>
+    <div class="absolute right-0 top-0 h-full w-full max-w-3xl bg-white shadow-2xl flex flex-col"
+         x-show="showUserModal"
+         x-transition:enter="transition ease-out duration-200 transform"
+         x-transition:enter-start="translate-x-full" x-transition:enter-end="translate-x-0"
+         x-transition:leave="transition ease-in duration-150 transform"
+         x-transition:leave-start="translate-x-0" x-transition:leave-end="translate-x-full">
+      <form @submit.prevent="saveUser()" class="flex flex-col h-full min-h-0">
+      <div class="flex items-center justify-between px-6 py-4 border-b flex-shrink-0">
         <h2 class="font-semibold text-gray-900" x-text="editingUser ? 'Edit User' : 'New User'"></h2>
-        <button @click="showUserModal = false" class="text-gray-400 hover:text-gray-600">✕</button>
+        <button type="button" @click="showUserModal = false"
+                class="text-gray-400 hover:text-gray-600">✕</button>
       </div>
-      <form @submit.prevent="saveUser()" class="px-6 py-4 space-y-4">
+      <div class="flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-4 space-y-4">
         <!-- Username (create only) -->
         <div x-show="!editingUser">
           <label class="block text-sm font-medium text-gray-700 mb-1">Username <span class="text-red-500">*</span></label>
@@ -173,51 +191,27 @@
             <span>Active</span>
           </label>
         </div>
+        <p x-show="form.is_admin" class="text-xs text-amber-600 -mt-2">
+          Admin bypasses the permission grid entirely — every section, every level, plus
+          the admin-only pages. The grid below is not consulted for this user.
+        </p>
 
-        <!-- Permission Matrix -->
-        <div x-show="editingUser && !form.is_admin">
-          <div class="flex items-center justify-between mb-2">
-            <label class="block text-sm font-medium text-gray-700">Permissions</label>
-            <label class="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer">
-              <input type="checkbox" x-model="form.permissionsUnrestricted"
-                     @change="toggleUnrestricted()"
-                     class="rounded border-gray-300 text-blue-600">
-              Full access (unrestricted)
-            </label>
-          </div>
-          <div x-show="!form.permissionsUnrestricted" class="border border-gray-200 rounded-lg overflow-hidden text-xs">
-            <table class="w-full">
-              <thead class="bg-gray-50 text-gray-500">
-                <tr>
-                  <th class="px-3 py-2 text-left font-medium">Section</th>
-                  <template x-for="level in permissionLevels" :key="level">
-                    <th class="px-3 py-2 text-center font-medium capitalize" x-text="level"></th>
-                  </template>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-gray-100">
-                <template x-for="scope in permissionScopes" :key="scope">
-                  <tr class="hover:bg-gray-50">
-                    <td class="px-3 py-2 font-medium text-gray-700 capitalize" x-text="permissionScopeLabel(scope)"></td>
-                    <template x-for="level in permissionLevels" :key="level">
-                      <td class="px-3 py-2 text-center">
-                        <!-- No checkbox where the scope does not offer the level. A
-                             disabled box would invite "why can't I tick this?", and the
-                             answer is that nothing enforces it. -->
-                        <input x-show="allowsLevel(scope, level)" type="checkbox"
-                               :checked="hasPerm(scope, level)"
-                               @change="togglePerm(scope, level, $event.target.checked)"
-                               class="rounded border-gray-300 text-blue-600">
-                        <span x-show="!allowsLevel(scope, level)"
-                              class="text-gray-300 select-none">&middot;</span>
-                      </td>
-                    </template>
-                  </tr>
-                </template>
-              </tbody>
-            </table>
-          </div>
-          <p x-show="form.permissionsUnrestricted" class="text-xs text-gray-400 mt-1">User has unrestricted access to all sections (same as NULL permissions).</p>
+        <!--
+          Permissions. Shown on CREATE too, not just edit: the create path used to send no
+          map at all, which left the column NULL, and NULL means UNRESTRICTED in
+          has_permission -- so every user made here held every non-admin permission in the
+          dashboard until somebody re-opened them. The grid is the whole point of the form.
+        -->
+        <div x-show="!form.is_admin">
+          {{ permission_matrix(
+               "Permissions",
+               "User has unrestricted access to all sections (stored as NULL permissions).") }}
+
+          <p x-show="!form.permissionsUnrestricted && permGrantedCount() === 0"
+             class="text-xs text-amber-600 mt-1">
+            This user will be able to sign in and see nothing. Grant at least one section,
+            or tick “Full access (unrestricted)”.
+          </p>
 
           <!-- Per-POV narrowing. Shown once the POV row holds any level, because until
                then there is nothing to narrow — and ALWAYS once this user is narrowed,
@@ -270,15 +264,17 @@
             </p>
           </div>
         </div>
-        <!-- Actions -->
-        <div class="flex justify-end gap-3 pt-2">
-          <button type="button" @click="showUserModal = false"
-                  class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
-          <button type="submit"
-                  class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
-            <span x-text="editingUser ? 'Save Changes' : 'Create User'"></span>
-          </button>
-        </div>
+      </div>
+      <!-- Actions. Pinned: with the grid scrolling above it, a Save button that scrolled
+           away with the content is the defect this panel exists to fix. -->
+      <div class="flex justify-end gap-3 px-6 py-4 border-t flex-shrink-0 bg-gray-50">
+        <button type="button" @click="showUserModal = false"
+                class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+        <button type="submit"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+          <span x-text="editingUser ? 'Save Changes' : 'Create User'"></span>
+        </button>
+      </div>
       </form>
     </div>
   </div>
@@ -287,7 +283,7 @@
   <div x-show="showTokensModal" x-cloak
        class="fixed inset-0 bg-black/50 flex items-center justify-center z-40 p-4"
        @keydown.escape.window="showTokensModal = false">
-    <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl" @click.stop>
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto" @click.stop>
       <div class="flex items-center justify-between px-6 py-4 border-b">
         <h2 class="font-semibold text-gray-900">
           API Tokens — <span x-text="tokenUser?.username"></span>
@@ -387,15 +383,23 @@ const PERMISSION_LEVELS = {{ permission_levels | tojson }};
 // Which levels each scope offers. Same source, same reason: a scope that enforces nothing
 // at a level must not show a checkbox there, or the save 422s.
 const PERMISSION_SCOPE_LEVELS = {{ permission_scope_levels | tojson }};
+// How the grid LAYS those scopes out: [[group label, [scope, ...]], ...] covering every
+// scope exactly once. Presentation only -- an unlisted scope lands in "Ungrouped" rather
+// than disappearing, because a scope that renders nowhere is an ungrantable permission.
+const PERMISSION_SCOPE_GROUPS = {{ permission_scope_groups | tojson }};
 
 function usersPage() {
   return {
     users: [],
     currentUserId: null,
     availableWorkgroups: {{ workgroups | tojson }},
+    // Filtering, grouping, bulk toggles, hasPerm/togglePerm and buildPermissionsPayload
+    // all live in app.js so this page and /groups cannot drift apart again.
+    ...permissionGridState(),
     permissionScopes: PERMISSION_SCOPES,
     permissionLevels: PERMISSION_LEVELS,
     permissionScopeLevels: PERMISSION_SCOPE_LEVELS,
+    permissionScopeGroups: PERMISSION_SCOPE_GROUPS,
     // POV environments, for the per-POV picker. Loaded lazily and allowed to stay empty:
     // the POV router is feature-gated, so on a demo install it 404s and the picker falls
     // back to free-text ids rather than claiming there are no POVs.
@@ -426,6 +430,13 @@ function usersPage() {
         return;
       }
       this.currentUserId = me.id;
+      // The flyout is full-height and scrolls internally; without this the page behind it
+      // scrolls too, which on a phone reads as the panel jumping. Same approach as the nav
+      // drawer in app.js -- overflow on <body> rather than position:fixed, so the list
+      // does not lose its scroll position while an admin edits one row.
+      this.$watch('showUserModal', open => {
+        document.body.classList.toggle('overflow-hidden', open);
+      });
       await this.loadUsers();
     },
 
@@ -436,8 +447,19 @@ function usersPage() {
 
     openCreate() {
       this.editingUser = null;
-      this.form = { username: '', full_name: '', email: '', password: '', workgroups: [], is_admin: false };
+      // Restricted with nothing granted, NOT unrestricted. The old create form sent no
+      // permissions at all, which stored NULL, which has_permission reads as full access
+      // -- so every account made here started out able to do everything. The admin grants
+      // what the person needs in this same panel.
+      this.form = {
+        username: '', full_name: '', email: '', password: '', workgroups: [],
+        is_admin: false, is_active: true,
+        permissions: {}, permissionsUnrestricted: false,
+        povEnvIds: [], povEnvToAdd: '', persona: '',
+      };
+      this.permFilter = '';
       this.showUserModal = true;
+      this.loadPovEnvironments();
     },
 
     openEdit(u) {
@@ -461,6 +483,7 @@ function usersPage() {
         // persona_source says which, and the table shows it.
         persona: u.persona || '',
       };
+      this.permFilter = '';
       this.showUserModal = true;
       this.loadPovEnvironments();
     },
@@ -531,32 +554,6 @@ function usersPage() {
       }
     },
 
-    allowsLevel(scope, level) {
-      return permissionScopeAllowsLevel(this.permissionScopeLevels, scope, level);
-    },
-
-    hasPerm(scope, level) {
-      if (!this.form.permissions) return false;
-      return (this.form.permissions[scope] || []).includes(level);
-    },
-
-    togglePerm(scope, level, checked) {
-      if (!this.form.permissions) this.form.permissions = {};
-      if (!this.form.permissions[scope]) this.form.permissions[scope] = [];
-      if (checked) {
-        if (!this.form.permissions[scope].includes(level))
-          this.form.permissions[scope].push(level);
-      } else {
-        this.form.permissions[scope] = this.form.permissions[scope].filter(l => l !== level);
-      }
-    },
-
-    toggleUnrestricted() {
-      if (this.form.permissionsUnrestricted) {
-        this.form.permissions = {};
-      }
-    },
-
     async saveUser() {
       try {
         if (this.editingUser) {
@@ -571,10 +568,11 @@ function usersPage() {
             persona: this.form.persona || '',
           };
           if (this.form.password) body.password = this.form.password;
-          // Send permissions: null = no change to perms (only for create);
-          // for edit: send null if unrestricted, or the dict if restricted
+          // Admin bypasses the map entirely, so sending one would store a restriction
+          // nothing reads and that reappears the day the flag comes off. See
+          // buildPermissionsPayload for what the two empty states mean.
           if (!this.form.is_admin) {
-            body.permissions = this.form.permissionsUnrestricted ? {} : (this.form.permissions || {});
+            body.permissions = this.buildPermissionsPayload();
           }
           // Always sent on edit, so removing the last entry actually clears the
           // narrowing. [] means "every POV", matching the column's NULL.
@@ -589,6 +587,12 @@ function usersPage() {
             email: this.form.email || null,
             workgroups: this.form.workgroups,
             is_admin: this.form.is_admin,
+            // Sent on create too. Omitting it is what left the column NULL, and NULL is
+            // unrestricted -- the bug this form existed to avoid and instead caused.
+            permissions: this.form.is_admin ? null : this.buildPermissionsPayload(),
+            // Reachable on create now that the grid is: ticking POV read shows the
+            // picker. Focus is not -- it stays edit-only, as its comment above says.
+            pov_env_ids: this.form.povEnvIds || [],
           });
           toast('User created', 'success');
         }

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/permission_matrix.html" import permission_matrix %}
 
 {% block title %}Entra Group Mappings{% endblock %}
 
@@ -161,47 +162,12 @@
         </p>
       </div>
 
-      <!-- Default Permissions for auto-provisioned users -->
-      <div>
-        <div class="flex items-center justify-between mb-2">
-          <label class="block text-sm font-medium text-gray-700">Default Permissions for new users</label>
-          <label class="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer">
-            <input type="checkbox" x-model="form.permissionsUnrestricted"
-                   class="rounded border-gray-300 text-blue-600">
-            Full access (unrestricted)
-          </label>
-        </div>
-        <div x-show="!form.permissionsUnrestricted" class="border border-gray-200 rounded-lg overflow-hidden text-xs">
-          <table class="w-full">
-            <thead class="bg-gray-50 text-gray-500">
-              <tr>
-                <th class="px-3 py-2 text-left font-medium">Section</th>
-                <template x-for="level in permissionLevels" :key="level">
-                  <th class="px-3 py-2 text-center font-medium capitalize" x-text="level"></th>
-                </template>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-gray-100">
-              <template x-for="scope in permissionScopes" :key="scope">
-                <tr class="hover:bg-gray-50">
-                  <td class="px-3 py-2 font-medium text-gray-700 capitalize" x-text="permissionScopeLabel(scope)"></td>
-                  <template x-for="level in permissionLevels" :key="level">
-                    <td class="px-3 py-2 text-center">
-                      <input x-show="allowsLevel(scope, level)" type="checkbox"
-                             :checked="formHasPerm(scope, level)"
-                             @change="formTogglePerm(scope, level, $event.target.checked)"
-                             class="rounded border-gray-300 text-blue-600">
-                      <span x-show="!allowsLevel(scope, level)"
-                            class="text-gray-300 select-none">&middot;</span>
-                    </td>
-                  </template>
-                </tr>
-              </template>
-            </tbody>
-          </table>
-        </div>
-        <p x-show="form.permissionsUnrestricted" class="text-xs text-gray-400 mt-1">Auto-provisioned users will have unrestricted access (same as admins without the admin flag).</p>
-      </div>
+      <!-- Default Permissions for auto-provisioned users. Same grid as /users, from
+           the same partial: two copies of it had already drifted apart in their method
+           names, and every future improvement would have had to be made twice. -->
+      {{ permission_matrix(
+           "Default Permissions for new users",
+           "Auto-provisioned users will have unrestricted access (same as admins without the admin flag).") }}
 
       <div class="flex items-center gap-3 pt-1">
         <button type="submit" :disabled="saving"
@@ -243,6 +209,8 @@ const PERMISSION_SCOPES_G = {{ permission_scopes | tojson }};
 const PERMISSION_LEVELS_G = {{ permission_levels | tojson }};
 // Which levels each scope offers, so this grid cannot offer one the server will 422.
 const PERMISSION_SCOPE_LEVELS_G = {{ permission_scope_levels | tojson }};
+// How the grid lays them out. See the same const on the Users page.
+const PERMISSION_SCOPE_GROUPS_G = {{ permission_scope_groups | tojson }};
 
 function groupsPage() {
   return {
@@ -251,9 +219,13 @@ function groupsPage() {
     // Injected from services/personas so the dropdown cannot offer a focus the resolver
     // does not know, and so no persona key is spelled in this file.
     personaOptions: {{ persona_options | tojson }},
+    // Shared with /users -- see app.js::permissionGridState. This page used to carry
+    // its own copy of the toggle logic under different method names.
+    ...permissionGridState(),
     permissionScopes: PERMISSION_SCOPES_G,
     permissionLevels: PERMISSION_LEVELS_G,
     permissionScopeLevels: PERMISSION_SCOPE_LEVELS_G,
+    permissionScopeGroups: PERMISSION_SCOPE_GROUPS_G,
     loading: true,
     showAdd: false,
     saving: false,
@@ -282,24 +254,6 @@ function groupsPage() {
       }
     },
 
-    allowsLevel(scope, level) {
-      return permissionScopeAllowsLevel(this.permissionScopeLevels, scope, level);
-    },
-
-    formHasPerm(scope, level) {
-      return (this.form.permissions[scope] || []).includes(level);
-    },
-
-    formTogglePerm(scope, level, checked) {
-      if (!this.form.permissions[scope]) this.form.permissions[scope] = [];
-      if (checked) {
-        if (!this.form.permissions[scope].includes(level))
-          this.form.permissions[scope].push(level);
-      } else {
-        this.form.permissions[scope] = this.form.permissions[scope].filter(l => l !== level);
-      }
-    },
-
     async addMapping() {
       this.saving = true;
       try {
@@ -307,7 +261,11 @@ function groupsPage() {
           display_name: this.form.display_name,
           entra_group_id: this.form.entra_group_id,
           workgroup: this.form.workgroup,
-          default_permissions: this.form.permissionsUnrestricted ? null : this.form.permissions,
+          // null = unrestricted. Otherwise EVERY scope with its granted levels: a map
+          // holding only the ticked scopes would be {} when nothing is ticked, and
+          // api/groups.py turns a falsy map into NULL, i.e. unrestricted -- the exact
+          // inversion of what the admin asked for. See buildPermissionsPayload.
+          default_permissions: this.form.permissionsUnrestricted ? null : this.buildPermissionsPayload(),
           persona: this.form.persona || null,
           // Only meaningful alongside a persona, so it is not sent without one -- a
           // priority on a mapping that expresses no focus is a value nothing reads.
@@ -343,6 +301,7 @@ function groupsPage() {
     },
 
     resetForm() {
+      this.permFilter = '';
       this.form = { display_name: '', entra_group_id: '', workgroup: '', persona: '', persona_priority: null,
                     permissions: {}, permissionsUnrestricted: true };
     },
