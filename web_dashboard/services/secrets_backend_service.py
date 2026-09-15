@@ -1452,37 +1452,197 @@ def ref_for(backend: str, key: str) -> str:
     return fn(key)
 
 
-# Writers that address a secret by its EXISTING reference instead of deriving one
-# from a key. Only these two are correct for an edit today: `database` never mangled
-# the key, and `update_wlc` exists because the wlc backend is newly editable from the
-# Secrets page. The cloud stores and Password Safe still route an edit through their
-# key-deriving writer, which re-applies the prefix — see update_sync_validated.
+def write_sync_validated(backend: str, key: str, value: str) -> str:
+    """Write wrapper that enforces JSON value validation. Use this from the
+    Secrets page's CREATE path; the existing `write_sync` is kept for callers that
+    write internal infrastructure values (Terraform output, deploy artefacts)
+    where JSON shape isn't enforced.
+
+    `key`, not a ref — every writer derives the backend's own name from it. The
+    EDIT path holds a ref that has already been derived once and must go through
+    :func:`update_sync_validated` instead."""
+    validate_json_value(value)
+    return write_sync(backend, key, value)
+
+
+# ── Absolute-ref updates (editing a secret that already exists) ──────────────
+#
+# An edit is not a write. `write_sync(backend, key, ...)` takes a KEY, and every
+# writer derives the backend's own name from it — an AWS prefix and a slash, a
+# Key Vault name with underscores swapped for dashes, a GCP prefix plus that same
+# swap, a Secrets Safe folder. The Secrets page's edit path holds a REF, which has
+# already been through that derivation once, so handing it back to the writer
+# derives twice: editing `dashboard/aws_secret_access_key` creates
+# `dashboard/dashboard/aws_secret_access_key`, the original is untouched, the
+# `aws_sm://` reference in app_config keeps resolving to the OLD value — and the
+# page reports the save as successful. An operator who "rotated" a migrated
+# credential from Browse & Edit changed nothing.
+#
+# So EVERY backend gets an updater that addresses the secret AT the ref it was
+# handed and derives nothing from it. Each returns the ref it wrote, which is
+# always the ref it was given. `update_wlc` is the exception to the placement,
+# not the rule: it lives up with `list_wlc`/`delete_wlc`, which do the same
+# `_wlc_split` on the same refs.
+
+def update_aws_sm(ref: str, value: str) -> str:
+    """Put a new value on the AWS SM secret NAMED ``ref``.
+
+    ``put_secret_value`` alone, not ``write_aws_sm``'s create-then-put: the secret
+    already exists (its ref came out of a listing), and ``SecretId`` is the ref
+    verbatim. ``list_aws_sm`` hands back ``s["Name"]``, which already carries the
+    configured prefix, so ``_aws_secret_name`` must not run on it again.
+    """
+    region, _ = _aws_cfg()
+    import boto3
+    client = boto3.client("secretsmanager", region_name=region)
+    client.put_secret_value(SecretId=ref, SecretString=value)
+    logger.info("AWS SM: updated secret %s", ref)
+    return ref
+
+
+def update_azure_kv(ref: str, value: str) -> str:
+    """Set a new version of the Key Vault secret NAMED ``ref``.
+
+    No ``_kv_name`` on the way in. Key Vault names are already dash-only, so
+    re-mangling a live ref happens to be a no-op today — but the guarantee this
+    path needs is that the write lands where the caller pointed, not that one
+    particular transform is currently harmless.
+    """
+    client, _ = _azure_kv_client()
+    client.set_secret(ref, value)
+    logger.info("Azure KV: updated secret %s", ref)
+    return ref
+
+
+def update_gcp_sm(ref: str, value: str) -> str:
+    """Add a version to the GCP SM secret whose secret id is ``ref``.
+
+    No ``create_secret`` and no ``_gcp_secret_id``: the secret exists, and the ref
+    ``list_gcp_sm`` returns is the id with the prefix and the underscore→dash swap
+    already applied. A ref that does NOT exist raises ``NotFound`` from
+    ``add_secret_version``, which is the right answer for an edit — the previous
+    behaviour was to quietly create a second, double-prefixed secret instead.
+    """
+    project = _gcp_project_or_raise()
+    client = _gcp_client()
+    client.add_secret_version(request={
+        "parent": f"projects/{project}/secrets/{ref}",
+        "payload": {"data": value.encode()},
+    })
+    logger.info("GCP SM: updated secret %s", ref)
+    return ref
+
+
+def _bt_split_ref(ref: str) -> tuple[str, str]:
+    """Split a Secrets Safe ref into ``(folder, title)``.
+
+    A ref is ``<Folder>/<Title>`` — the shape both ``_bt_secret_title`` and
+    ``list_bt_secrets_safe`` produce — so the last segment is the title and
+    everything before it is the folder. A bare title carries no folder of its own.
+
+    The folder comes from the REF, never from live config, for the reason
+    :func:`_wlc_split` gives: the ref records where the secret actually IS, and
+    re-deriving it would relocate every stored reference the day an operator edits
+    the configured folder.
+    """
+    ref = (ref or "").strip().strip("/")
+    if "/" not in ref:
+        return "", ref
+    folder, _, title = ref.rpartition("/")
+    return folder, title
+
+
+def update_bt_secrets_safe(ref: str, value: str) -> str:
+    """Write a new value to the Secrets Safe secret AT ``ref``.
+
+    ``ref`` is the folder-qualified title that ps-cli's ``-t`` addresses (the same
+    string ``read_bt_secrets_safe`` and ``delete_bt_secrets_safe`` pass through),
+    and it goes to ps-cli verbatim. Re-prefixing it with the configured folder —
+    what ``_bt_secret_title`` does to a KEY — would target
+    ``<Folder>/<Folder>/<Title>``, and would also drag a secret the operator
+    browsed to in some other folder into the configured one.
+
+    ps-cli exposes no update verb, so the write reuses ``create-secret`` at the
+    existing title. That is precisely the call this module has already seen exit 0
+    without persisting, so the value is read back and compared: an edit that did
+    not take raises instead of reporting a successful save.
+    """
+    folder, title = _bt_split_ref(ref)
+    if not title:
+        raise ValueError("A BeyondTrust Secrets Safe reference is required.")
+    # A bare ref means the listing was unscoped; the configured folder is then the
+    # only folder id there is to resolve against.
+    target_folder = folder or _bt_cfg()[1]
+    if not target_folder:
+        raise ValueError(
+            f"Cannot tell which folder {ref!r} lives in: the reference carries no "
+            f"folder and no default folder is configured (secrets_bt_folder)."
+        )
+    folder_id = _resolve_bt_folder_id(target_folder)
+    if not folder_id:
+        raise ValueError(
+            f"BeyondTrust folder {target_folder!r} is not visible to ps-cli, so "
+            f"secret {ref!r} cannot be updated. `folders list` returned no folder "
+            f"by that name."
+        )
+    _ps_run(["secrets", "create-secret", "-t", ref, "--text", value,
+             "-o", _bt_owner_id(), "-ot", "User", "-fid", folder_id], timeout=30)
+    if read_bt_secrets_safe(ref) != value:
+        raise ValueError(
+            f"BeyondTrust secret {ref!r} still reads back its previous value after "
+            f"the update — ps-cli exited 0 but did not persist the new one. "
+            f"Typically the linked user can write to folder {target_folder!r} but "
+            f"not overwrite an existing secret in it."
+        )
+    # The folder NAME is deliberately not logged. It reaches here from
+    # `config_service.get` via `_bt_cfg`, which CodeQL treats as a secret source
+    # (py/clear-text-logging-sensitive-data), and it adds nothing: `ref` already
+    # carries the folder segment whenever the ref has one, and `folder_id` is the
+    # value actually passed to `-fid`, so it is the better diagnostic of the two.
+    logger.info("BT Safe: updated+verified secret %s (folder id=%s)",
+                ref, folder_id)
+    return ref
+
+
+def update_database(ref: str, value: str) -> str:
+    """Set the ``app_config`` row named ``ref``.
+
+    The database backend's ref IS its key — nothing is derived on write — so this
+    is ``write_database`` under another name. It gets its own entry anyway so that
+    every backend is in the table and an unlisted one is a loud error rather than
+    a fall-through to the key-deriving writer.
+    """
+    return write_database(ref, value)
+
+
 _UPDATE_FN = {
-    "wlc":      update_wlc,
-    "database": write_database,
+    "aws_sm":          update_aws_sm,
+    "azure_kv":        update_azure_kv,
+    "gcp_sm":          update_gcp_sm,
+    "bt_secrets_safe": update_bt_secrets_safe,
+    "wlc":             update_wlc,
+    "database":        update_database,
 }
 
 
-def update_sync_validated(backend: str, ref: str, value: str) -> str:
-    """JSON-validated write to a secret that already exists, addressed by ``ref``.
+def update_sync(backend: str, ref: str, value: str) -> str:
+    """Write ``value`` to the secret that already lives at ``ref``.
 
-    Separate from :func:`write_sync_validated` because a create is given a *key* and
-    an update is given a *reference*, and for most backends those are not the same
-    string: the writers prepend a prefix or a folder, swap characters, or both (see
-    the note above ``_REF_FN``). Backends with no absolute-ref writer keep exactly
-    today's behaviour rather than getting a new, untested path.
+    A backend missing from ``_UPDATE_FN`` raises here rather than falling through
+    to ``write_sync``. The fall-through is the bug this table exists to close:
+    ``write_sync`` reads its second argument as a KEY and derives a second, wrong
+    name out of a ref that was already derived once.
     """
-    validate_json_value(value)
     fn = _UPDATE_FN.get(backend)
-    if fn:
-        return fn(ref, value)
-    return write_sync_validated(backend, ref, value)
+    if not fn:
+        raise ValueError(f"Cannot update backend: {backend}")
+    return fn(ref, value)
 
 
-def write_sync_validated(backend: str, key: str, value: str) -> str:
-    """Write wrapper that enforces JSON value validation. Use this from the
-    Secrets page CRUD path; the existing `write_sync` is kept for callers that
-    write internal infrastructure values (Terraform output, deploy artefacts)
-    where JSON shape isn't enforced."""
+def update_sync_validated(backend: str, ref: str, value: str) -> str:
+    """Update wrapper that enforces JSON value validation, mirroring
+    :func:`write_sync_validated`. This is the Secrets page's EDIT path;
+    ``write_sync_validated`` is its CREATE path, and the two are not
+    interchangeable — one takes a key, this one takes a ref."""
     validate_json_value(value)
-    return write_sync(backend, key, value)
+    return update_sync(backend, ref, value)

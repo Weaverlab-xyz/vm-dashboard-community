@@ -572,8 +572,10 @@ async def update_secret_item(backend: str, ref: str, payload: SecretUpdateReques
 
     Goes through `update_sync_validated`, which addresses the secret by the
     reference the browse list handed out. The create path's writer would re-derive
-    a name from it and write somewhere else (`dashboard/dashboard/<key>` on the
-    folder-based backends) while reporting success.
+    a name from it and write somewhere else — editing
+    `dashboard/aws_secret_access_key` lands at
+    `dashboard/dashboard/aws_secret_access_key` — leaving the original serving its
+    old value while the save returns 200.
     """
     if payload.backend != backend:
         raise HTTPException(status_code=400, detail="backend in URL and body must match")
