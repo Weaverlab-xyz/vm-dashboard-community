@@ -191,6 +191,29 @@ pieces, and a destroy cleans exactly what exists. A cell deployed **before** the
 PRA-checkout feature shows *wiring incomplete* once (its Password Safe onboarding
 exists but the checkout pair doesn't) — Re-wire retrofits exactly the missing pieces.
 
+### Clearing a cell whose VM never deployed
+
+A failure *before* the VM exists is a different case, because the cell's inventory
+record is the VM-deploy child row and Destroy only acts on a **completed** deploy.
+Such a card has neither Re-wire (there is nothing to wire — wiring runs only after
+the VM is up) nor Destroy, and there is no Terraform state to fall back on: the cell
+VM is an SDK deploy, and only the wiring uses Terraform. Use **Clear**
+(`DELETE /api/ot/cell/{vm_job_id}`), which retires the record:
+
+- The VM is **probed first**. One that still exists is refused — clearing the record
+  is exactly how a VM nobody is tracking keeps billing — so destroy it from the
+  cloud's VMs tab and then clear. If the probe cannot answer (no credentials, no read
+  access to its resource group), the page asks you to confirm and re-sends with
+  `force=true`; check the cloud console first.
+- The shared Gateway reference this deploy took is released, so a host kept alive
+  only by the failed cell is reclaimed.
+- The row keeps its **failed** status and its error message — Clear only hides the
+  card. The job page stays as the record of what went wrong.
+
+On a stuck Azure create the job's error now quotes what ARM reported (provisioning
+state, instance-view statuses, whether the guest agent ever checked in) — an absent
+guest agent after the deploy deadline points at the *image*, not the VM size.
+
 ## PRA checkout of the cell's admin credential
 
 Password Safe onboarding alone puts `adminuser` on the **GCP VM SSH Rotation**
@@ -300,6 +323,10 @@ Notes that save demo time:
   then the Shell Jump, Password Safe and Entitle deregistrations, then the instance —
   and release the shared gateway reference last. There is no separate OT teardown
   path to forget, on any cloud.
+- **Clear** (`DELETE /api/ot/cell/{vm_job_id}`) is the exit for a cell whose VM
+  deploy *failed*, which Destroy cannot see — see
+  [Clearing a cell whose VM never deployed](#clearing-a-cell-whose-vm-never-deployed).
+  It destroys nothing; it refuses if the VM is still there.
 - **Expiry**: the child is a normal deploy row for its cloud, so the cell participates
   in the auto-delete timer with no extra configuration (see
   [auto-delete-timer](../../auto-delete-timer.md)).

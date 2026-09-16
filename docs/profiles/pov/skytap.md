@@ -36,7 +36,7 @@ instance the integration is masked off and Settings refuses to enable it.
 | Credential | An **API security token** from the Skytap account page — **not** your account password |
 | Network | Outbound HTTPS from the dashboard to `cloud.skytap.com` |
 | Network, for template builds only | Outbound **TCP to an arbitrary high port** at a Skytap NAT address. Only the automatic runner install needs this — see [building a template](#building-a-template). An egress rule that allows 443 to the API host and nothing else will block it, and the builder says so rather than reporting a generic connection failure |
-| Network **from the guest**, for template builds only | Outbound HTTPS from the **broker VM** to `download.docker.com`, unless the base template already carries a container runtime. This is the guest's route out of the lab, not the dashboard's — the only prerequisite on this list that nothing on this side can test for you. A build that cannot reach it still bakes, with the reason in the **Runner** column |
+| Network **from the guest** | A route to a container runtime, unless the base template already carries one: either outbound HTTPS from the **broker VM** to `download.docker.com`, **or** the guest's own distro repository carrying `podman` + `podman-docker`, which is the fallback and is usually already reachable. This is the guest's route out, not the dashboard's — the only prerequisite on this list that nothing on this side can test for you. A build that cannot reach either still bakes, with the reason in the **Runner** column, and the POV's first **Broker** press tries again |
 
 ### Getting the token
 
@@ -308,12 +308,48 @@ and names nothing, exactly as if no runner existed. Base templates that carry ne
 common: a stock AlmaLinux 8 guest has no `docker`, no `podman`, and no socket.
 
 The build installs both. It publishes SSH on the broker VM, reads the login from Skytap's
-own [stored credentials](#capabilities), installs the runner and its systemd unit, then
-Docker CE from `download.docker.com` if — and only if — `docker` does not already resolve,
-and revokes the published service in a `finally`. If the VM carries more than one credential it tries
+own [stored credentials](#capabilities), installs the runner and its systemd unit, then a
+container runtime if — and only if — `docker` does not already resolve, and revokes the
+published service in a `finally`. If the VM carries more than one credential it tries
 each in turn — the first the guest accepts wins, and the **Runner** detail names it — so a
-box holding a stale login beside a good one builds rather than refusing. Three things are
-worth knowing before you rely on it:
+box holding a stale login beside a good one builds rather than refusing.
+
+**And since 2026-09-16 the injected bootstrap installs a runtime too**, using the same
+block, so a POV made from a template that baked without one repairs itself on the first
+**Broker** press instead of sitting at `enrolling`. That does not make the bake redundant:
+an install at bake time lands on every POV made from the template, before anyone is waiting
+fourteen minutes for it.
+
+**Docker CE first, the distro's Podman second.** Docker CE comes from
+`download.docker.com` and is what the agent's use of the Engine API is tested against, so
+it leads. But a lab guest routinely reaches its own distro mirror and no external CDN at
+all — a Skytap AlmaLinux 8 broker resolves `appstream` and `baseos` perfectly and cannot
+reach Docker's — so every step of that install is non-fatal, and `podman` +
+`podman-docker` from the guest's own repository is the fallback. Podman serves the same
+Engine API on the same socket path, so the agent cannot tell the difference. **Podman on a
+lab VM is a supported outcome here, not a degraded one.**
+
+> `podman-docker` is not optional garnish. Podman alone gives no `docker` command and no
+> `/var/run/docker.sock`, and the agent speaks the Engine API over that path directly —
+> it never runs the CLI. Nor does installing the package *start* anything: the install
+> **enables and starts** `podman.socket` itself, because a guest where the shim answers
+> and nothing is listening enrols, goes green, and then fails every Gateway and
+> Config-Management job.
+>
+> Both verbs matter, and they fail differently. `systemctl enable podman.socket` writes a
+> symlink and starts nothing, so an enabled-only guest has no API **until it is
+> rebooted**; starting without enabling is the mirror image, and is the trap `docker-ce`
+> sets on the RHEL family. Where socket activation produces no listening socket the
+> install falls back to `podman.service` — the API service running persistently, which is
+> what an operator reaches for by hand.
+
+The **boot gate asks Podman the same question**. It used to skip a podman-docker guest
+entirely, because `systemctl cat docker.service` is false there and there is no docker unit
+to enable — so a template could bake with a socket that answered only because the install
+had just started it, and every POV from it came up with a working `docker` command and
+nothing listening. Either `podman.socket` or `podman.service` being enabled satisfies it.
+
+Three more things are worth knowing before you rely on it:
 
 - **It reaches a NAT-ed high port, not the API host.** See the prerequisites table above.
   If your egress only allows HTTPS to `cloud.skytap.com`, clear **Install the metadata
@@ -569,7 +605,9 @@ rather than failing somewhere inside a job.
 | The broker resolved to the **wrong** guest | The template has one Linux VM and it is not the Docker host | Press **name VM** and name the right one. A typed name always wins over auto-detect |
 | The Broker column reads **none** on a POV that used to work | A second Linux VM was added, so auto-detect became ambiguous | This refuses rather than silently moving the broker. Name the original with **name VM**. An *already enrolled* broker is never moved by this |
 | The Broker column reads **enrolling** and never changes | Nothing executed the payload, or it executed and died | The broker VM has no metadata runner ([template contract](#the-template-contract)), **has no `docker`**, is on a manual network, or cannot reach the agent endpoint. Fix it and press **Broker** to re-issue |
-| "no agent enrolled within 14 minutes" | Same causes as above | The bootstrap is still on the VM — `user_data` is only cleared on a successful enrolment, so being able to read it proves the agent never enrolled. On the guest: `journalctl -u dashboard-bootstrap-runner -n1 -o cat` names the line that failed, and `docker logs dashboard-agent`, if it ever started, names the rest. A `docker: command not found` there is the base template, not this POV |
+| "no agent enrolled within 14 minutes" | Same causes as above | **Read the whole message first.** When this dashboard built the template, the failure names it: *"built that template (…) and recorded 'docker: MISSING' on its broker VM"* means the runtime is the cause and the bootstrap's own install could not fix it either. Otherwise: the bootstrap is still on the VM — `user_data` is only cleared on a successful enrolment, so being able to read it proves the agent never enrolled. On the guest, `journalctl -u dashboard-bootstrap-runner -n1 -o cat` names the line that failed and `docker logs dashboard-agent`, if it ever started, names the rest |
+| "nothing is listening at /var/run/docker.sock" | The runtime is installed and its API is not running | Almost always Podman with `podman.socket` not started — the `docker` command answers while nothing serves the Engine API, and the agent uses only the API. `systemctl enable --now podman.socket` on the broker VM, then press **Broker**. The install does this itself; seeing this means it did not take |
+| "/var/run/docker.sock … is a DIRECTORY" | A `docker run -v` created one on a host whose daemon was down | `rmdir /var/run/docker.sock` on the broker VM, make sure the daemon is up, and press **Broker** again |
 | "this dashboard does not know its own public URL" | No pinned audience and no `public_base_url` | An agent inside a customer network needs an address. Set it in Settings → Integrations → Remote Agents |
 | "the agent endpoint is `http://…`" | The audience is plaintext | The agent refuses to sign over plaintext, so the broker would never enrol. Terminate TLS and correct **Public base URL** |
 | A build fails with "does not satisfy the template contract" | The base template has no broker VM, or its broker is on a manual network | Read the contract report on the build row. Press **Discard** to reap the scratch environment, fix the base template, and build again |
@@ -577,7 +615,7 @@ rather than failing somewhere inside a job.
 | The **Runner** column reads `failed` with "refused all N stored credentials" | Every login stored against the broker VM was rejected by its sshd | The detail names the usernames it tried. Correct the credential on that VM in Skytap and build again — SSH answered, so this is the login and not the route |
 | The **Runner** column reads `failed` with "the install exited …" | A login worked but the script did not finish | It installs as root, so check that the credential you left is an administrator with `sudo`. The detail carries the state read back off the VM afterwards, so it says which half landed. The template still bakes; paste the script in by hand |
 | The **Runner** detail says `docker at boot: disabled` | The daemon is up but its unit is not enabled | The build refuses this rather than baking it: a template is booted for every POV, so a daemon that is only running *now* gives each one a broker with no runtime. `systemctl enable docker` on the broker VM and build again — `dnf install docker-ce` leaves it disabled on the RHEL family |
-| The **Runner** detail says `docker: MISSING` | The runner landed and the runtime did not | Almost always no route from the **guest** to `download.docker.com` (see [prerequisites](#prerequisites)), or a distro Docker's repo does not serve — the detail names it. Install a runtime on the broker VM by hand and re-bake; the runner on it is already correct |
+| The **Runner** detail says `docker: MISSING` | The runner landed and neither runtime did | No route from the **guest** to `download.docker.com` *and* no `podman` in its own repository (see [prerequisites](#prerequisites)) — the detail names what it tried. The template is still usable: the POV's first **Broker** press runs the same install again, and a POV whose broker still will not enrol now says this in the job's own error. Install a runtime by hand and re-bake to fix it for every POV; the runner on the VM is already correct |
 | The **Runner** column reads `skipped` | You cleared the checkbox, or no broker VM was resolved | Not a failure. Paste the install script from **POV → Templates** onto the broker VM |
 | A build row shows a **build env** that is still running | The build failed, or you asked to keep it | It is billing. Press **Discard** to reap it. A failed build keeps the id on purpose, so this always works |
 | Discard says the environment could not be deleted | Skytap refused the delete | The row stays visible with its id rather than being marked discarded — marking it would hide a running environment. Clear the cause and press Discard again |

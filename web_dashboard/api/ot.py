@@ -617,6 +617,108 @@ def rewire_cell(
             "message": "Re-wiring the cell's missing PRA pieces…"}
 
 
+@router.delete("/cell/{vm_job_id}")
+async def clear_cell(
+    vm_job_id: str,
+    force: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Clear a **failed** cell's record so the card stops occupying the tab.
+
+    A cell's inventory record is its VM-deploy child row, and the ONLY thing that
+    ever retired one was the cloud's Destroy button — which resolves the row by
+    resource name among ``completed`` deploys and marks it ``destroyed``. A cell
+    whose VM deploy FAILED therefore had no exit at all: the cards list it (it is
+    neither destroyed nor cancelled), both card buttons are gated on
+    ``completed``, the cloud's destroy route cannot see a failed row, and
+    ``DELETE /api/jobs/{id}`` refuses any status but queued/pending/running.
+    There is no Terraform state either — the cell VM is an SDK deploy, and the
+    wiring that does use Terraform never runs when the VM never arrives. So the
+    card was permanent.
+
+    This is the missing exit, and it is deliberately *not* a destroy:
+
+    * ``completed`` is refused and pointed at Destroy, which is the path that
+      tears down the VM and the PRA/Password Safe wiring. A failed child has no
+      wiring by construction — ``_wire_cell`` runs only after the child reaches
+      ``completed`` — so there is nothing here for it to skip.
+    * The VM is PROBED first. A failed deploy has normally already had its
+      half-created VM removed by the cloud's own cleanup, but "normally" is not
+      "provably": a live VM is refused (409) and named, because clearing the
+      record is exactly how a billable orphan becomes invisible. An
+      *unanswerable* probe needs ``?force=true``, so the operator asserts it
+      rather than the dashboard assuming it.
+    * The shared Gateway reference, if this deploy took one, is released — that
+      reference is a failed deploy's other leak, since the release lives in the
+      cloud's destroy runner and nothing else ever reached it.
+
+    The row keeps its ``failed`` status: it is evidence of what went wrong, and
+    the destroy runners' ``set_completed``-with-``destroyed`` would rewrite a
+    failed deploy into a successful one. ``destroyed`` alone retires it.
+    """
+    child = job_service.get_job(db, vm_job_id)
+    cloud = ot_service.cell_cloud_for_job_type(child.job_type) if child else ""
+    if child is None or not cloud or not child.metadata_dict.get("ot_cell"):
+        raise HTTPException(status_code=404, detail=f"{vm_job_id} is not an OT cell VM job")
+    _require_cloud(current_user, cloud, "delete")
+
+    accessible = _accessible_workgroups(current_user)
+    if accessible is not None and (child.workgroup or "").lower() not in accessible:
+        raise HTTPException(status_code=404, detail=f"{vm_job_id} is not an OT cell VM job")
+
+    meta = child.metadata_dict
+    if meta.get("destroyed"):
+        raise HTTPException(status_code=400, detail="This cell has already been cleared.")
+    if child.status == "completed":
+        raise HTTPException(
+            status_code=400,
+            detail="This cell deployed — use Destroy, which also removes the VM and "
+                   "its PRA jump items, Vault checkout account and Password Safe "
+                   "registration. Clear only retires the record of a failed deploy.")
+
+    name = meta.get("instance_name") or meta.get("vm_name") or vm_job_id
+    alive = await ot_service.cell_resource_alive(cloud, meta)
+    if alive is True:
+        raise HTTPException(
+            status_code=409,
+            detail=f"'{name}' still exists in {cloud} — clearing the record now would "
+                   f"leave a VM nobody is tracking and nobody stops paying for. "
+                   f"Destroy it from the {cloud.upper()} VMs tab first, then clear this.")
+    if alive is None and not force:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Could not confirm whether '{name}' still exists in {cloud} (no "
+                   f"credentials, no read access to its resource group, or the row is "
+                   f"too old to record where it was deployed). Check the cloud console, "
+                   f"then re-send with force=true to clear the record anyway.")
+
+    job_service.update_metadata(db, vm_job_id, {"destroyed": True})
+
+    # Release the shared Gateway host this deploy borrowed. `teardown_jumpoint_host_if_idle`
+    # counts live rows and takes no "exclude me" argument, so this must come AFTER the
+    # `destroyed` flag above or the row being retired counts itself — the same ordering,
+    # and the same reason, as every cloud's _run_destroy.
+    released = False
+    if ot_service._cell_has_gateway_ref(meta, cloud) or meta.get("jumpoint_mode"):
+        region = (meta.get("jumpoint_region") or meta.get("location")
+                  or meta.get("region")
+                  or (_region_from_zone(meta.get("zone", "")) if meta.get("zone") else ""))
+        try:
+            from ..services import jumpoint_host_service
+            await jumpoint_host_service.teardown_jumpoint_host_if_idle(db, cloud, region)
+            released = True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OT cell clear: Gateway host release failed (non-fatal): %s", exc)
+
+    job_service.log_audit(db, current_user.username, "ot_cell_clear",
+                          details={"vm_job_id": vm_job_id, "cloud": cloud,
+                                   "instance_name": name, "status": child.status,
+                                   "forced": bool(force and alive is None)})
+    return {"vm_job_id": vm_job_id, "cleared": True, "gateway_released": released,
+            "message": f"Cleared the record of failed cell '{name}'."}
+
+
 @router.get("/cells", response_model=OTCellListResponse)
 def list_cells(
     cloud: str = "gcp",

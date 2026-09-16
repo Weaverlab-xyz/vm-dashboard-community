@@ -42,7 +42,8 @@ from web_dashboard import database as d  # noqa: E402
 d.Base.metadata.create_all(bind=d.engine)
 
 from web_dashboard.services import (agent_service, job_service, lab_platforms,  # noqa: E402
-                                    pov_broker, pov_env_service)
+                                    pov_broker, pov_env_service,
+                                    pov_template_builder)
 
 _AGENT_URL = "https://agents.example.test"
 
@@ -111,7 +112,11 @@ def _new_env(**kw):
     db = d.SessionLocal()
     env = d.PovEnvironment(
         platform="skytap", name=kw.get("name", "poc-" + uuid.uuid4().hex[:6]),
-        template_id="42", platform_environment_id=kw.get("platform_environment_id", "sky-900"),
+        # Overridable, because the build rows that describe a template are keyed on this
+        # and the database is shared by every test in this file: two envs on one template
+        # id means one test's PovTemplateBuild is read by the next one's broker run.
+        template_id=kw.get("template_id", "42"),
+        platform_environment_id=kw.get("platform_environment_id", "sky-900"),
         status=kw.get("status", pov_env_service.STATUS_ACTIVE))
     db.add(env)
     db.commit()
@@ -233,6 +238,49 @@ def test_the_pull_runs_before_the_agent_is_replaced():
     assert script.index("docker pull") < script.index("docker rm -f dashboard-agent")
 
 
+def test_the_bootstrap_installs_a_runtime_before_anything_needs_one():
+    """The failure this whole payload used to end in. A base template with a perfect
+    metadata runner and no `docker` runs as far as the final `docker run`, `set -e` kills it
+    there, the runner re-reads `user_data` twenty seconds later and dies in the same place
+    forever — and the dashboard sees nothing, because the thing that would report it is the
+    agent that never started.
+
+    Ordering is the whole test: the install has to precede the pulls (which need a runtime)
+    and precede the `docker rm -f` (so a slow or failed install costs a re-broker nothing).
+    """
+    script = pov_broker.render_bootstrap(
+        env_name="poc-01", dashboard_url="https://d", enroll_code="a",
+        policy_yaml="v: 1\n", images=(pov_broker.GATEWAY_IMAGE,))
+    runtime_at = script.index("the container runtime")
+    assert runtime_at < script.index("docker pull"), \
+        "a pull needs a runtime, so the install cannot come after it"
+    assert runtime_at < script.index("docker rm -f dashboard-agent"), \
+        "an install that reaches a package repo must not cost a re-broker its agent"
+
+
+def test_the_bootstraps_runtime_install_is_the_builders_own():
+    """One expression of the install, reached rather than copied. What a template BAKE
+    installs and what a POV installs when the bake never happened have to be the same
+    runtime, or the feature is tested against one and shipped on the other — and the only
+    difference permitted is the enabled-at-boot gate, which is a statement about a template
+    and not about a guest that is already running."""
+    script = pov_broker.render_bootstrap(
+        env_name="poc-01", dashboard_url="https://d", enroll_code="a",
+        policy_yaml="v: 1\n")
+    assert pov_template_builder.render_docker_install(
+        require_enabled_at_boot=False) in script, \
+        "the bootstrap must carry the builder's own install block verbatim"
+    assert pov_template_builder.render_docker_install() not in script, \
+        "the boot gate is a template's rule; a live POV must not be refused over it"
+
+
+def test_the_bootstrap_mounts_the_socket_the_install_verified():
+    """Two constants for one path is how an install passes while the agent finds nothing:
+    the install gates on a socket and the `docker run` MOUNTS one, and if they ever name
+    different paths both halves look correct on their own."""
+    assert pov_template_builder.AGENT_SOCKET_PATH == pov_broker.GUEST_DOCKER_SOCKET
+
+
 def test_a_failed_pull_never_costs_the_pov_its_agent():
     """`set -eu` is in force, so an unguarded pull failure would abort the bootstrap and
     leave no agent at all. A POV with an enrolled agent and one missing image refuses one
@@ -309,7 +357,11 @@ def _run_group_resolution(script: str, stat_stub: str) -> str:
     rename fails here loudly instead of silently testing nothing.
     """
     start = script.index('DOCKER_GROUP=""')
-    end = script.index("docker run ")
+    # Searched FROM `start`, not from the top. The payload now carries a container-runtime
+    # install above this block whose comments quote `docker run` while explaining why it is
+    # there, so the first match in the whole script is prose several hundred lines early —
+    # and the slice it produced ran backwards and tested nothing.
+    end = script.index("docker run ", start)
     return subprocess.run(
         ["sh", "-s"],
         input="set -eu\n" + stat_stub + "\n" + script[start:end] + '\necho "[$DOCKER_GROUP]"\n',
@@ -622,6 +674,65 @@ def test_the_agent_id_is_persisted_before_the_wait():
     vm_id, agent_id, _, _ = _reload(env_id)
     assert vm_id == "vm-1", "the broker VM must be recorded before the wait"
     assert agent_id, "the agent id must be recorded before the wait"
+
+
+def test_the_timeout_names_a_template_that_baked_with_no_runtime():
+    """The gap that cost a live POV most of an afternoon. A broker that never enrols is
+    silent by construction — the guest cannot reach the dashboard until the agent it cannot
+    start has started — so this message can only list candidates, and it listed three, two
+    of which were fine.
+
+    But the dashboard BAKED that template and wrote down what it found: `docker: MISSING`,
+    sitting in `prepare_detail` the whole time. Reading it back turns the one cause nobody
+    can see into the one the job names first.
+    """
+    _set_url()
+    original = _install(FakeAdapter())
+    env_id = _new_env()
+    db = d.SessionLocal()
+    db.add(d.PovTemplateBuild(
+        platform="skytap", name="weaver", result_template_id="42",
+        status="ready", prepare_method="ssh",
+        prepare_detail=f"runner installed over SSH as root; active - "
+                       f"{pov_template_builder.DOCKER_MISSING_MARKER}"))
+    db.commit()
+    env = pov_env_service.get(db, env_id)
+    try:
+        asyncio.run(pov_broker.ensure_broker(db, env, sleep=_no_sleep))
+        raise AssertionError("the wait should have timed out")
+    except pov_broker.BrokerError as exc:
+        message = str(exc)
+        assert pov_template_builder.DOCKER_MISSING_MARKER in message, \
+            f"the timeout must name the recorded runtime gap: {message}"
+        assert "weaver" in message, "and the template it is a fact about"
+        # Still the whole message: the other candidates did not stop being candidates.
+        assert "metadata runner" in message, message
+    finally:
+        db.close()
+        _restore(original)
+
+
+def test_the_timeout_invents_nothing_for_a_template_this_dashboard_never_built():
+    """Silence is right here. A POV built from a template somebody else authored has no
+    build row to read, and a sentence about a runtime nobody probed would be worse than the
+    three honest candidates it was meant to improve on."""
+    _set_url()
+    original = _install(FakeAdapter())
+    # Its own template id: the test above leaves a build row on "42", and reading that one
+    # here would prove the opposite of what this asserts while still passing.
+    env_id = _new_env(template_id="no-build-99")
+    db = d.SessionLocal()
+    env = pov_env_service.get(db, env_id)
+    try:
+        asyncio.run(pov_broker.ensure_broker(db, env, sleep=_no_sleep))
+        raise AssertionError("the wait should have timed out")
+    except pov_broker.BrokerError as exc:
+        message = str(exc)
+        assert pov_template_builder.DOCKER_MISSING_MARKER not in message, message
+        assert "metadata runner" in message, "the ordinary message still stands"
+    finally:
+        db.close()
+        _restore(original)
 
 
 def test_a_re_run_re_issues_the_same_agent_rather_than_minting_a_second():

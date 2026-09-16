@@ -99,8 +99,30 @@ refuses one job and names it, which beats a bootstrap that died at a registry hi
 left no agent at all. If a pull did fail you get the old refusal, which is now accurate —
 `docker pull` it on the broker and run the job again.
 
-This needs **outbound HTTPS from the broker VM to Docker Hub**, alongside the
-`download.docker.com` reachability the runtime install already needs.
+This needs **outbound HTTPS from the broker VM to Docker Hub**, alongside the runtime
+install's own need for either `download.docker.com` or the guest's distro repository.
+
+### The bootstrap installs a container runtime
+
+Since 2026-09-16 the injected payload installs one when the guest has none, using the same
+block a [template bake](skytap.md#what-the-build-does-about-the-runner-and-docker) runs —
+Docker CE first, `podman` + `podman-docker` from the guest's own repository as the
+fallback. A POV built from a template that baked without a runtime therefore repairs itself
+on the first **Broker** press, instead of sitting at `enrolling` and saying nothing.
+
+It is idempotent and skips a guest that already resolves `docker`, so a healthy broker and
+every cloud POV pay nothing for it. It runs before the image pulls (which need a runtime)
+and before the `docker rm -f`, so a slow or failed install costs a re-broker nothing.
+
+**Podman is a supported runtime here.** It serves the same Engine API on the same socket,
+and the agent only ever speaks that API — it never runs the `docker` command. Which is why
+the install **enables and starts** `podman.socket` and then checks that something is
+actually listening: the shim answering while nothing serves the API is a broker that
+enrols, goes green, and fails every Gateway and Config-Management job.
+
+Enabling alone leaves the guest with no API until its next reboot; starting alone leaves it
+with none after that reboot. Where socket activation yields no listening socket the install
+falls back to `podman.service`, the API service running persistently.
 
 ### Telling the dashboard what a guest runs
 

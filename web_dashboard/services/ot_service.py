@@ -732,6 +732,55 @@ async def _run_rewire(db, job_id: str, child_id: str) -> None:
 # would trigger the paired-delete branch), azure `_AciRef.record` (mode "host"),
 # aws `_BatchResources.record` (informational id only: `_active_ec2_count` counts
 # every live row, so the reference needs no mode key).
+async def cell_resource_alive(cloud: str, cmeta: dict) -> Optional[bool]:
+    """Does this cell's VM still exist in its cloud? ``True`` / ``False`` /
+    ``None`` when the question could not be answered.
+
+    Read by the "clear a failed cell" path, which must never hide a billable
+    orphan. The job row cannot answer it on its own: a deploy that died *inside*
+    the create call never got a ``vm_id`` / ``instance_id`` written, whether or
+    not the VM it was creating survived — so an absent id means "we don't know",
+    not "nothing was created".
+
+    ``None`` (no creds, no Reader on the group, an API hiccup, a row too old to
+    carry its placement) is a third state on purpose, the same shape as
+    ``azure_service._sku_trusted_launch_capable``: the caller must treat it as
+    unknown and make the operator say so explicitly, never silently as "gone".
+    """
+    name = (cmeta.get("instance_name") or cmeta.get("vm_name") or "").strip()
+    if not name:
+        return None
+    try:
+        if cloud == "azure":
+            from . import azure_service
+            rg = (cmeta.get("resource_group") or "").strip()
+            return bool(await azure_service.get_vm(rg, name)) if rg else None
+        if cloud == "gcp":
+            from . import gcp_service
+            project = (cmeta.get("project_id") or "").strip()
+            zone = (cmeta.get("zone") or "").strip()
+            if not (project and zone):
+                return None
+            return bool(await gcp_service.describe_instances(project, zone, [name]))
+        if cloud == "aws":
+            from . import aws_service
+            region = (cmeta.get("region") or "").strip()
+            if not region:
+                return None
+            # By NAME tag, not instance id — the id is exactly what a deploy that
+            # failed inside RunInstances does not have. Terminated instances are
+            # excluded: a terminated row is not a billable orphan.
+            found = await aws_service.find_instances_by_tag(
+                region, name_tag=name,
+                states=["pending", "running", "stopping", "stopped"])
+            return bool(found)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OT cell liveness probe failed (cloud=%s name=%s): %s",
+                       cloud, name, exc)
+        return None
+    return None
+
+
 def _cell_has_gateway_ref(cmeta: dict, cloud: str) -> bool:
     if cmeta.get("jumpoint_host_id"):
         return True
