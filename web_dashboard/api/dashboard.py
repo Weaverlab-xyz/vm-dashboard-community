@@ -199,29 +199,34 @@ def _db_tiles(db: Session, user: User) -> dict:
     _safe("registered_images", _registry)
 
     def _databases():
-        from ..services import cloud_database_service
-        rows = cloud_database_service.list_databases(db)
-        # Creator-scoped, not workgroup-scoped: these rows carry no workgroup.
-        if not user.is_effective_admin:
-            rows = [r for r in rows if r.get("created_by") == user.username]
+        from ..services import cloud_database_service, inventory_service
+        # Two-tier, via the same helper /api/databases uses, so the tile count and the
+        # page can never disagree: a tagged row counts for its workgroup, an untagged
+        # one only for its creator.
+        accessible = inventory_service.accessible_workgroups(user)
+        rows = [r for r in cloud_database_service.list_databases(db)
+                if inventory_service.row_visible_to(r, accessible, user.username)]
         return _tile(len(rows))
     _safe("cloud_databases", _databases)
 
     def _clusters():
-        from ..services import k8s_service
-        rows = k8s_service.list_clusters(db)
-        if not user.is_effective_admin:
-            rows = [r for r in rows if r.get("created_by") == user.username]
+        from ..services import inventory_service, k8s_service
+        accessible = inventory_service.accessible_workgroups(user)
+        rows = [r for r in k8s_service.list_clusters(db)
+                if inventory_service.row_visible_to(r, accessible, user.username)]
         return _tile(len(rows))
     _safe("k8s_clusters", _clusters)
 
     def _functions():
-        from ..services import cloud_function_service
-        rows = cloud_function_service.list_functions(db)
-        # Creator-scoped like the two above, and for the same reason: a cloud_functions
-        # row carries no workgroup.
-        if not user.is_effective_admin:
-            rows = [r for r in rows if r.get("created_by") == user.username]
+        from ..services import cloud_function_service, inventory_service
+        # Same helper as the two above, and still creator-scoped in practice: a
+        # cloud_functions row carries no workgroup column, so row_visible_to always
+        # takes its creator branch. Sharing the helper rather than keeping a fourth copy
+        # of the comparison is the point -- if functions ever gain the column, this reads
+        # it without another edit.
+        accessible = inventory_service.accessible_workgroups(user)
+        rows = [r for r in cloud_function_service.list_functions(db)
+                if inventory_service.row_visible_to(r, accessible, user.username)]
         # Secondary counts the ones actually callable. A function still `deploying`, or one
         # whose apply failed, has no endpoint — the page's own status column says so, and a
         # tile reading "3" while every one of them is dead would be the worse lie.

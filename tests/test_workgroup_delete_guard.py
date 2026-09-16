@@ -28,8 +28,9 @@ os.environ.setdefault(
 os.environ.setdefault("JWT_SECRET_KEY", "x" * 32)
 
 try:
-    from web_dashboard.database import (Base, Job, SessionLocal, User,
-                                        VMWorkgroupOverride, Workgroup, engine)
+    from web_dashboard.database import (Base, CloudDatabase, Job, K8sCluster,
+                                        SessionLocal, User, VMWorkgroupOverride,
+                                        Workgroup, engine)
     from web_dashboard.services import workgroup_service as svc
     from web_dashboard.services import workgroup_override_service as wos
 except Exception as exc:  # noqa: BLE001
@@ -41,6 +42,8 @@ Base.metadata.create_all(bind=engine)
 
 def _reset(db):
     db.query(VMWorkgroupOverride).delete()
+    db.query(CloudDatabase).delete()
+    db.query(K8sCluster).delete()
     db.query(Job).delete()
     db.query(User).delete()
     db.query(Workgroup).delete()
@@ -130,6 +133,88 @@ def test_an_override_on_a_different_workgroup_does_not_block():
         assert db.query(Workgroup).filter(Workgroup.name == doomed).first() is None
         assert wos.get(db, "workstation", "AB12") == keeper, (
             "the surviving tag must be untouched")
+    finally:
+        db.close()
+
+
+# ── Cloud databases and K8s clusters ──────────────────────────────────────────
+#
+# These two carry `workgroup` as a bare VARCHAR with no ForeignKey, so unlike the
+# override rows above nothing is destroyed by an unguarded delete. The failure is
+# quieter and arguably worse: the name stops resolving, every tagged row falls back to
+# "untagged = creator-only", and a team loses a database or a cluster it could use
+# yesterday with nothing in the log to connect it to.
+
+
+def test_a_workgroup_with_a_tagged_database_is_refused():
+    db = SessionLocal()
+    try:
+        _reset(db)
+        doomed = _workgroup(db, "doomed")
+        db.add(CloudDatabase(id="db-1", engine="postgres", cloud="aws",
+                             status="available", workgroup=doomed))
+        db.commit()
+        try:
+            svc.delete(db, doomed)
+        except svc.WorkgroupError as e:
+            assert "/databases" in str(e), f"the message must say where to go: {e}"
+        else:
+            raise AssertionError("delete must be refused while a database is tagged")
+        assert db.query(Workgroup).filter(Workgroup.name == doomed).first() is not None
+    finally:
+        db.close()
+
+
+def test_a_workgroup_with_a_tagged_cluster_is_refused():
+    db = SessionLocal()
+    try:
+        _reset(db)
+        doomed = _workgroup(db, "doomed")
+        db.add(K8sCluster(id="k-1", cloud="gcp", name="prod", status="registered",
+                          workgroup=doomed))
+        db.commit()
+        try:
+            svc.delete(db, doomed)
+        except svc.WorkgroupError as e:
+            assert "/k8s" in str(e), f"the message must say where to go: {e}"
+        else:
+            raise AssertionError("delete must be refused while a cluster is tagged")
+    finally:
+        db.close()
+
+
+def test_an_untagged_database_or_cluster_does_not_block():
+    """The control that proves the guard reads the COLUMN and not the table. Every row
+    that predates `cloud_databases.workgroup` is NULL, and NULL is not a reference --
+    if it were, no workgroup could ever be deleted on an install with any inventory."""
+    db = SessionLocal()
+    try:
+        _reset(db)
+        doomed = _workgroup(db, "doomed")
+        db.add(CloudDatabase(id="db-2", engine="mysql", cloud="gcp",
+                             status="available", workgroup=None))
+        db.add(K8sCluster(id="k-2", cloud="aws", name="other", status="registered",
+                          workgroup=None))
+        db.commit()
+        svc.delete(db, doomed)
+        assert db.query(Workgroup).filter(Workgroup.name == doomed).first() is None
+    finally:
+        db.close()
+
+
+def test_a_resource_in_a_different_workgroup_does_not_block():
+    db = SessionLocal()
+    try:
+        _reset(db)
+        doomed = _workgroup(db, "doomed")
+        keeper = _workgroup(db, "keeper")
+        db.add(CloudDatabase(id="db-3", engine="postgres", cloud="aws",
+                             status="available", workgroup=keeper))
+        db.commit()
+        svc.delete(db, doomed)
+        assert db.query(Workgroup).filter(Workgroup.name == doomed).first() is None
+        assert db.query(CloudDatabase).filter(
+            CloudDatabase.id == "db-3").first().workgroup == keeper
     finally:
         db.close()
 

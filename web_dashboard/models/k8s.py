@@ -21,6 +21,10 @@ class ClusterRegisterRequest(BaseModel):
     cloud: str = "local"                   # aws | azure | gcp | local
     kubeconfig: str                        # full kubeconfig YAML (stored as a reference, never in the row)
     mgmt_kind: Optional[str] = None        # portainer | rancher | argocd | headlamp (optional; set when known)
+    # Optional. Blank leaves the resource creator-scoped, which is what every row
+    # created before this field exists is. Never required, so an API client that
+    # predates it keeps working.
+    workgroup: Optional[str] = None
 
 
 class ClusterProvisionRequest(BaseModel):
@@ -42,6 +46,10 @@ class ClusterProvisionRequest(BaseModel):
     zone: Optional[str] = None                # GCP only — zonal cluster zone (else <region>-a)
     enable_ebs_csi: Optional[bool] = None     # AWS only — install the EBS CSI driver addon (dynamic PVCs); off by default, opt in for stateful workloads (e.g. Rancher)
     register_token_in_passwordsafe: Optional[bool] = None  # onboard the PRA SA token as a Password Safe managed account after provisioning (None → k8s_ps_token_register_on_provision)
+    # Optional. Blank leaves the resource creator-scoped, which is what every row
+    # created before this field exists is. Never required, so an API client that
+    # predates it keeps working.
+    workgroup: Optional[str] = None
 
 
 class K8sProvisionOptions(BaseModel):
@@ -165,5 +173,8 @@ class ClusterInfo(BaseModel):
     ps_token_account_id: Optional[str] = None
     ps_pra_vault_account_id: Optional[str] = None
     pra_vault_account_id: Optional[str] = None
+    # "" when untagged, which the visibility rule reads as creator-scoped. Mirrors
+    # k8s_service._serialize; keep the two in step.
+    workgroup: str = ""
     created_by: Optional[str] = None
     created_at: str

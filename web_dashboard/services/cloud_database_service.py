@@ -580,6 +580,29 @@ def regional_network_ids(*, engine: str, cloud: str, region: str,
     return out
 
 
+def _canonical_workgroup(workgroup):
+    """Canonical storage form for a workgroup name, or None when blank.
+
+    Shape only -- it does NOT check the workgroup exists, and deliberately does not
+    import workgroup_service to do so. Two reasons:
+
+    1. **Layering.** Validating a workgroup means authorizing it (may this user tag a
+       resource into it?), and that needs a ``User``, which this layer never has. That
+       check lives at the API edge, in ``api.cloud_databases._resolve_workgroup``, which is
+       where the caller's identity actually is.
+    2. **Import surface.** ``workgroup_service`` reaches into ``..database`` for
+       ``User``/``VMWorkgroupOverride``/``Workgroup``. Several test modules stub
+       ``web_dashboard.database`` with only the symbols this module names, so touching
+       it from here -- at import time OR inside a function -- breaks them with
+       ``cannot import name 'User'``.
+
+    Lowercasing is not cosmetic: ``inventory_service.row_visible_to`` and
+    ``expiry_policy.exempt_workgroups`` both compare lowercase, so a stored "Team-A"
+    would be invisible to every member of "team-a", including whoever typed it.
+    """
+    return (workgroup or "").strip().lower() or None
+
+
 def provision(
     db: Session, *, engine: str, cloud: str, region: str, name: str,
     created_by: str, master_username: str = "dbadmin",
@@ -587,7 +610,8 @@ def provision(
     jump_group: Optional[str] = None, jumpoint_name: Optional[str] = None,
     pra_credential_ref: Optional[str] = None,
     register_in_entitle: bool = False,
-    register_in_passwordsafe: Optional[bool] = None, **opts,
+    register_in_passwordsafe: Optional[bool] = None,
+    workgroup: Optional[str] = None, **opts,
 ) -> dict:
     """Record a new managed database: validate, mint the admin credential, write
     the ``CloudDatabase`` row + a provisioning ``Job``, and return the Terraform
@@ -605,6 +629,8 @@ def provision(
             f"{engine} on {cloud} is not available yet"
         )
 
+    wg = _canonical_workgroup(workgroup)
+
     from . import expiry_policy
     row = CloudDatabase(
         engine=engine,
@@ -618,11 +644,15 @@ def provision(
         jump_group=(jump_group or "").strip() or None,
         jumpoint_name=(jumpoint_name or "").strip() or None,
         pra_credential_ref=(pra_credential_ref or "").strip() or None,
+        workgroup=wg,
         # Auto-delete timer from the global default; None (no timer) unless the feature
         # is on AND a default is configured. Only this PROVISION path stamps one —
         # register_database deliberately does not, since deleting a registered row only
         # deregisters it. See expiry_policy.default_expiry_for_kind.
-        expires_at=expiry_policy.default_expiry_for_kind("database", source="provisioned"),
+        # The workgroup is passed so an exempt one is never stamped, rather than stamped
+        # and then skipped by the sweeper.
+        expires_at=expiry_policy.default_expiry_for_kind(
+            "database", source="provisioned", workgroup=wg),
     )
     db.add(row)
     db.commit()
@@ -681,7 +711,7 @@ def provision(
     db.commit()
     job = job_service.create_job(
         db, job_type="clouddb_provision", created_by=created_by,
-        metadata=job_meta,
+        metadata=job_meta, workgroup=wg,
     )
 
     logger.info("clouddb provisioned record db_id=%s engine=%s cloud=%s job_id=%s",
@@ -4199,6 +4229,9 @@ def start_decommission(db: Session, db_id: str, created_by: str = "") -> dict:
     job = job_service.create_job(
         db, job_type="clouddb_decommission", created_by=created_by or row.created_by or "system",
         metadata={"db_id": db_id, "engine": row.engine, "cloud": row.cloud},
+        # Inherit the database's workgroup, so the teardown is listed on /jobs under the
+        # same workgroup as the database it tears down.
+        workgroup=row.workgroup,
     )
     return {"ok": True, "db_id": db_id, "job_id": job.id}
 
@@ -4543,7 +4576,8 @@ _MANAGED_REF_PREFIX = "psmanaged:"
 def register_database(db: Session, *, engine: str, cloud: str, host: str,
                       port: int | None, db_name: str, managed_account: dict,
                       created_by: str, region: str = "", instance_id: str = "",
-                      agent_id: str = "") -> dict:
+                      agent_id: str = "",
+                      workgroup: Optional[str] = None) -> dict:
     """Record a database that already exists, so it can be a Config Management target.
 
     The sibling of :func:`k8s_service.register_cluster`: no Terraform, no provisioning
@@ -4593,6 +4627,8 @@ def register_database(db: Session, *, engine: str, cloud: str, host: str,
                                             RemoteAgent.is_active.is_(True)).first():
             raise CloudDatabaseError("that remote agent is not registered.")
 
+    wg = _canonical_workgroup(workgroup)
+
     row = CloudDatabase(
         agent_id=agent_id or None,
         engine=engine, cloud=cloud, source="registered",
@@ -4608,6 +4644,7 @@ def register_database(db: Session, *, engine: str, cloud: str, host: str,
             "uses_ssh_key": bool(managed_account.get("uses_ssh_key")),
         }, sort_keys=True),
         created_by=created_by,
+        workgroup=wg,
     )
     db.add(row)
     db.commit()
@@ -4783,6 +4820,11 @@ def _serialize(r: CloudDatabase) -> dict:
         "adapter_viable": cloud_db_adapter_service.adapter_ineligible_reason(r) is None,
         "adapter_fn_id": "",
         "adapter_status": "",
+        # getattr, matching the `agent_id` line below and for the same reason: several
+        # test modules hand this projection a lightweight stand-in rather than an ORM
+        # row, and a bare r.workgroup would AttributeError on every one of them. ""
+        # means untagged, which the visibility helpers read as creator-scoped.
+        "workgroup": getattr(r, "workgroup", None) or "",
         "created_by": r.created_by,
         "created_at": r.created_at.isoformat() if r.created_at else None,
         # Which remote agent brokers Config-Management runs against this database, or None

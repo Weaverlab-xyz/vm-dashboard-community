@@ -33,6 +33,15 @@ class WorkgroupError(ValueError):
     """Raised for service-layer validation failures (404/409/400 at the API edge)."""
 
 
+class WorkgroupAccessError(WorkgroupError):
+    """The workgroup exists, but this user is not a member of it.
+
+    A subclass so a caller that only cares "was the input bad?" still catches it, while
+    an API that wants to answer 403 rather than 400 can tell the two apart. Catch this
+    one FIRST where both are handled.
+    """
+
+
 def _normalize(name: str) -> str:
     return (name or "").strip().lower()
 
@@ -64,6 +73,61 @@ def get(db: Session, name: str) -> Optional[Workgroup]:
 
 def exists(db: Session, name: str) -> bool:
     return db.query(Workgroup.id).filter(Workgroup.name == _normalize(name)).first() is not None
+
+
+def canonical_or_none(db: Session, name: Optional[str]) -> Optional[str]:
+    """The canonical lowercase name for ``name``, or ``None`` when it is blank.
+
+    The one validator for "a workgroup a resource is being tagged into". Blank is a
+    legitimate answer, not an error: a cloud database or K8s cluster may be created
+    without a workgroup, in which case it stays creator-scoped. An unknown name is an
+    error, because silently dropping it would leave the operator looking at a row they
+    believe they shared.
+
+    Returns the stored form deliberately. The name is canonical lowercase in the
+    ``workgroups`` table, and everything downstream that compares a workgroup --
+    ``inventory_service.row_visible_to``, ``expiry_policy.exempt_workgroups`` -- compares
+    lowercase, so a row tagged "Hydra" would be invisible to the workgroup it names.
+    """
+    if not (name or "").strip():
+        return None
+    wg = get(db, name)
+    if not wg:
+        raise WorkgroupError(f"Unknown workgroup '{name}'.")
+    return wg.name
+
+
+def resolve_for_tagging(db: Session, name: Optional[str], *, user=None) -> Optional[str]:
+    """The canonical workgroup name to store on a resource, or ``None`` to leave it
+    untagged. The one authorization point for "tag this resource into that workgroup".
+
+    Wraps :func:`canonical_or_none` with a membership check, because tagging is not a
+    label -- it hands the resource to a set of people. Two failure modes, deliberately
+    distinguishable: an unknown name is a :class:`WorkgroupError` (bad input), one the
+    user is not in is a :class:`WorkgroupAccessError` (refused).
+
+    The membership check matters even though it looks like it only protects other
+    people's resources: the workgroup branch of ``visible_to`` OUTRANKS the creator
+    branch, so a user tagging their own database into a workgroup they are not in would
+    immediately lose sight of it, with no way back short of an admin retag. Refusing is
+    the kinder answer.
+
+    ``user=None`` skips the check, for a caller that has no user to speak of (a seeder,
+    a background reconcile). Passing the user is what an HTTP route must do.
+    """
+    canonical = canonical_or_none(db, name)
+    if canonical is None or user is None:
+        return canonical
+    # is_effective_admin, not is_admin: these two feature areas key on the effective
+    # flag everywhere else, and api/mcp_server.py is explicit that the two rules must
+    # not be collapsed in the wrong direction.
+    if getattr(user, "is_effective_admin", False):
+        return canonical
+    if canonical not in [w.lower() for w in user.workgroups_list]:
+        raise WorkgroupAccessError(
+            f"You are not a member of workgroup '{canonical}', so you cannot assign a "
+            f"resource to it.")
+    return canonical
 
 
 def members(db: Session, name: str) -> List[User]:
@@ -182,6 +246,28 @@ def delete(db: Session, name: str) -> None:
         raise WorkgroupError(
             f"Cannot delete workgroup '{canonical}': {vm_refs} VM(s) are tagged into it. "
             f"Clear or reassign them on their hypervisor page first.")
+
+    # Cloud databases and K8s clusters tagged into this workgroup. The argument for
+    # guarding is NOT the one above: these are bare VARCHAR columns with no ForeignKey,
+    # so nothing is destroyed or left dangling by the delete. It is operational instead
+    # -- the name simply stops resolving, every tagged row silently reverts to
+    # "untagged = creator-only", and the operator's first clue is a /databases or /k8s
+    # page that has quietly gone admin-only for a team that could use it yesterday.
+    #
+    # Imported here rather than added to the module-top `from ..database import` line,
+    # which is not about circularity -- that import already exists. It keeps this
+    # module's import-time surface small on purpose: several test modules stub
+    # web_dashboard.database with only the symbols their subject names, and every symbol
+    # added up there is one more that every such stub has to grow. Two callers already
+    # import workgroup_service lazily for exactly that reason.
+    from ..database import CloudDatabase, K8sCluster
+    for model, label, page in ((CloudDatabase, "database", "/databases"),
+                               (K8sCluster, "Kubernetes cluster", "/k8s")):
+        refs = db.query(model.id).filter(model.workgroup == canonical).count()
+        if refs:
+            raise WorkgroupError(
+                f"Cannot delete workgroup '{canonical}': {refs} {label}(s) are tagged "
+                f"into it. Reassign or delete them on {page} first.")
 
     db.delete(wg)
     db.commit()

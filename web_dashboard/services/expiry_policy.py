@@ -495,6 +495,7 @@ def default_expiry_for(job_type: str, *, workgroup=None,
 
 
 def default_expiry_for_kind(kind: str, *, source: str = "provisioned",
+                            workgroup=None,
                             now: Optional[datetime] = None) -> Optional[datetime]:
     """The expiry a newly provisioned database / cluster row should carry.
 
@@ -503,12 +504,21 @@ def default_expiry_for_kind(kind: str, *, source: str = "provisioned",
     eventually make the dashboard silently forget somebody's production database. That
     is worse than no timer, so registered rows are never stamped (and, independently,
     never reaped: see :func:`reap_target`).
+
+    ``workgroup`` checks the exemption list exactly as :func:`default_expiry_for` does
+    for a VM. It is honoured here and not only at reap time so an exempt resource is
+    never stamped in the first place: :func:`is_exempt` would make the sweeper skip it
+    anyway, but the row would still show a countdown the sweeper intends to ignore, and
+    an operator reading "deletes in 6h" next to "exempt" has no way to tell which wins.
+    Only reachable for a database or cluster now that those carry a workgroup at all.
     """
     if kind not in REAPABLE_KINDS or kind == "vm":
         return None
     if (source or "provisioned") != "provisioned":
         return None
     if not enabled():
+        return None
+    if workgroup and workgroup.strip().casefold() in exempt_workgroups():
         return None
     # A POV is an evaluation, not a scratch VM: weeks rather than a working day. Read
     # AFTER the master switch above, not before — a default that outran `enabled()` would

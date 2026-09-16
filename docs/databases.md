@@ -570,6 +570,37 @@ with no recorded catalog to scope grants to. Full detail in
 [Cloud Functions](integrations/cloud-functions.md).
 ---
 
+## Workgroups (who can see a database)
+
+A database with **no workgroup** is visible only to whoever created it, plus
+administrators. That is how every database provisioned or registered before this field
+existed still behaves, and it is why adding the field granted and revoked nothing.
+
+Assign one and the whole workgroup can see and manage it:
+
+- **At creation** — the **Workgroup** select on the provision form and on *Register
+  existing*. Optional; blank leaves the row creator-scoped. You may only pick a workgroup
+  you are a member of, because the workgroup rule outranks the creator rule: tagging your
+  own database into a workgroup you are not in would hide it from you.
+- **Afterwards** — the **Workgroup** button on the row, administrators only. This is the
+  only way an existing database gets one. Clearing it returns the database to its creator.
+
+Retagging is admin-only because it is a **transfer**, not a filter. Everyone in the chosen
+workgroup gains the row in `/api/databases`, every by-id action on it (connection details,
+decommission, Entitle and Password Safe registration), the ability to run
+[Config Management](config-management.md) against it, and the ability to change its
+[auto-delete timer](auto-delete-timer.md). The person who loses it is not in the dialog.
+
+> **Not the same as a Password Safe workgroup.** Password Safe has its own, unrelated
+> notion of a workgroup, which this page also mentions: `clouddb_ps_import_workgroup`
+> narrows the *import* candidate list (see [Importing from Password Safe](#importing-from-password-safe)).
+> That one names a container in Password Safe. This one names a set of dashboard users.
+> They are never the same value and neither is derived from the other.
+
+See [Permissions](permissions.md) for how workgroups sit alongside permission scopes.
+
+---
+
 ## Lifecycle (provision, register, decommission)
 
 - **Provision:** from the Databases page, pick engine + cloud + region and (when

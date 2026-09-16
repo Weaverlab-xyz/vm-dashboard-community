@@ -246,7 +246,10 @@
 function groupsPage() {
   return {
     mappings: [],
-    availableWorkgroups: {{ workgroups | tojson }},
+    // Fetched in init(), not injected -- see the matching comment in _users.html and
+    // the _rbac_context docstring. The injected form read `settings.workgroups`, a
+    // bootstrap seed that is {} at runtime, so this dropdown was always empty.
+    availableWorkgroups: [],
     // Injected from services/personas so the dropdown cannot offer a focus the resolver
     // does not know, and so no persona key is spelled in this file.
     personaOptions: {{ persona_options | tojson }},
@@ -287,6 +290,7 @@ function groupsPage() {
       // No auth gate here -- rbacPage() in the container owns the single one.
       // Roles for the picker. Fetched, not injected -- see the note in _users.html.
       try { this.availableRoles = await API.get('/api/roles') || []; } catch (e) {}
+      try { this.availableWorkgroups = await API.get('/api/groups/workgroups') || []; } catch (e) {}
       await this.loadMappings();
     },
 

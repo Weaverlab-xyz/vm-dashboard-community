@@ -12,13 +12,19 @@ registered cluster. See docs/kubernetes.md.
   GET    /api/k8s/clusters/{id}            — one cluster
   DELETE /api/k8s/clusters/{id}            — deregister (registered) / decommission+destroy (provisioned)
   POST   /api/k8s/clusters/{id}/management — launch a management plane (Phase 2)
+  PATCH  /api/k8s/clusters/{id}/workgroup  — retag into a workgroup, or clear it (admin)
+
+Every route naming a {cluster_id} additionally passes through :func:`_visible_or_404`,
+which refuses — with a 404 — a cluster the caller's workgroup does not cover. The
+permission scope says whether you may act on clusters; that guard says which ones.
 """
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Response
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..database import User, get_db
+from ..database import Job, K8sCluster, User, get_db
 from ..models.k8s import (
     BrokerAccessRequest,
     ClusterProvisionRequest,
@@ -32,13 +38,64 @@ from ..models.k8s import (
     PSTokenRegisterRequest,
     SecretDeliveryRequest,
 )
-from ..services import k8s_service, job_service, cache_service, pra_api_service
+from ..services import (k8s_service, job_service, cache_service, pra_api_service,
+                        inventory_service, workgroup_service)
 from ..services.aws_service import AWSError
 from ..services.k8s_service import K8sError
-from .auth import require_permission
+from .auth import require_admin, require_permission
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/k8s", tags=["kubernetes"])
+
+
+def _visible_or_404(db: Session, cluster_id: str, user: User) -> dict:
+    """This cluster's record, or 404 if the caller may not act on it.
+
+    Ownership, not the verb. ``require_permission("k8s", "delete")`` answers "may you
+    delete clusters at all", never "may you delete THIS one" -- so before this guard a
+    non-admin holding k8s:delete could decommission, re-tunnel, re-broker or Password-
+    Safe-register a cluster that /api/k8s/clusters refuses to even list for them. The
+    guard lived only in list_clusters.
+
+    404 and not 403, matching api/spire_lab._visible_or_404, api/cert_lab._visible and
+    api/auth.require_pov_env_access: the list endpoint HIDES a row this user cannot see,
+    so answering 403 here would confirm the existence of the very thing that RBAC just
+    denied, and make the id worth guessing.
+
+    Returns the serialized row because nearly every caller already wanted it -- this
+    replaces an identical ``k8s_service.get_cluster`` call, so no route pays for a
+    second query.
+
+    NOT a router-level dependency, unlike api/auth.require_pov_env_access, and the
+    reason is narrow: ``GET /api/k8s/__phase1__`` is deliberately unauthenticated, and a
+    router dependency resolving a user would start rejecting that probe. The AST sweep in
+    tests/test_k8s_db_action_ownership.py is what keeps a future by-id route from
+    forgetting the call.
+    """
+    try:
+        info = k8s_service.get_cluster(db, cluster_id)
+    except K8sError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    accessible = inventory_service.accessible_workgroups(user)
+    if not inventory_service.row_visible_to(info, accessible, user.username):
+        raise HTTPException(status_code=404,
+                            detail=f"cluster {cluster_id} not found")
+    return info
+
+
+def _resolve_workgroup(db: Session, user: User, workgroup):
+    """Canonical workgroup name to tag a new resource with, or None for untagged.
+
+    Thin HTTP adapter over workgroup_service.resolve_for_tagging, which owns the rule.
+    Blank is legal and means untagged -- that is what keeps every pre-existing caller
+    working and what every row predating the column already is.
+    """
+    try:
+        return workgroup_service.resolve_for_tagging(db, workgroup, user=user)
+    except workgroup_service.WorkgroupAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except workgroup_service.WorkgroupError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/__phase1__")
@@ -62,14 +119,15 @@ async def list_clusters(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "read")),
 ):
-    """Every managed cluster (newest first).
+    """Every managed cluster the caller may see (newest first).
 
-    Clusters carry no workgroup — only a creator — so mirror the ownerless branch
-    of inventory_service.visible_to: admins see all, everyone else sees only the
-    clusters they created."""
-    rows = k8s_service.list_clusters(db)
-    if not current_user.is_effective_admin:
-        rows = [r for r in rows if r.get("created_by") == current_user.username]
+    Two-tier, via inventory_service.row_visible_to: an admin sees all; a tagged cluster
+    is visible to its workgroup; an untagged one is visible only to its creator. That
+    last branch is what every cluster registered before `k8s_clusters.workgroup` existed
+    falls into, so adding the column widened nobody's view on its own."""
+    accessible = inventory_service.accessible_workgroups(current_user)
+    rows = [r for r in k8s_service.list_clusters(db)
+            if inventory_service.row_visible_to(r, accessible, current_user.username)]
     return {"clusters": rows}
 
 
@@ -85,6 +143,7 @@ async def register_cluster(
         return k8s_service.register_cluster(
             db, name=payload.name, cloud=payload.cloud, kubeconfig=payload.kubeconfig,
             created_by=current_user.username, mgmt_kind=payload.mgmt_kind,
+            workgroup=_resolve_workgroup(db, current_user, payload.workgroup),
         )
     except K8sError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -123,7 +182,8 @@ async def provision_cluster(
     try:
         result = k8s_service.create_cluster(
             db, cloud=payload.cloud, name=payload.name, region=payload.region,
-            created_by=current_user.username, **opts,
+            created_by=current_user.username,
+            workgroup=_resolve_workgroup(db, current_user, payload.workgroup), **opts,
         )
     except K8sError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -189,10 +249,7 @@ async def get_cluster(
     current_user: User = Depends(require_permission("k8s", "read")),
 ):
     """One cluster's record."""
-    try:
-        return k8s_service.get_cluster(db, cluster_id)
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    return _visible_or_404(db, cluster_id, current_user)
 
 
 @router.delete("/clusters/{cluster_id}")
@@ -207,10 +264,7 @@ async def delete_cluster(
     deregistered synchronously (best-effort PRA tunnel cleanup first so a deregister
     doesn't orphan a Jump Item, then drop the record + kubeconfig); it does not tear
     down the underlying cluster."""
-    try:
-        info = k8s_service.get_cluster(db, cluster_id)
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    info = _visible_or_404(db, cluster_id, current_user)
 
     if info.get("source") == "provisioned":
         # start_decommission flips the row to decommissioning + creates the pending
@@ -243,6 +297,7 @@ async def cluster_console(
 ):
     """A link to the cluster's management console (Phase 3a) — for Rancher, the
     imported cluster's dashboard URL; for Argo/Headlamp, the management URL."""
+    _visible_or_404(db, cluster_id, current_user)
     try:
         return k8s_service.console_url(db, cluster_id)
     except K8sError as e:
@@ -262,6 +317,9 @@ async def broker_access(
     Phase-3a ingress link. For a Rancher plane with Entitle enabled it also opens
     a time-boxed RBAC grant. Optional per-cluster overrides (jump group, jumpoint
     name, PRA credential) fall back to config."""
+    # Guarded before brokering, not after: open_console mints a PRA jump and can open a
+    # time-boxed RBAC grant, so an unowned call here is a live session, not a lookup.
+    _visible_or_404(db, cluster_id, current_user)
     try:
         return await k8s_service.open_console(
             db, cluster_id, current_user.username,
@@ -287,12 +345,10 @@ async def register_tunnel(
     via the cluster runner, minutes on a Cloud Run runner — too long for the request).
     Idempotent. Optional jump-group / jumpoint-name / PRA-credential / vault overrides
     fall back to config. Open the returned job for status/logs."""
-    try:
-        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    cluster = _visible_or_404(db, cluster_id, current_user)
     job = job_service.create_job(
         db, job_type="k8s_tunnel", created_by=current_user.username,
+        workgroup=cluster.get("workgroup") or None,
         metadata={
             "cluster_id": cluster_id, "action": "register",
             "jump_group": payload.jump_group, "jumpoint_name": payload.jumpoint_name,
@@ -314,12 +370,10 @@ async def remove_tunnel(
     """Destroy the cluster's PRA tunnel jump + clear its state (Phase 3b) — enqueues a
     ``k8s_tunnel`` (action=remove) job the worker runs (the vault path revokes the
     in-cluster SA via the runner). Open the returned job for status/logs."""
-    try:
-        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    cluster = _visible_or_404(db, cluster_id, current_user)
     job = job_service.create_job(
         db, job_type="k8s_tunnel", created_by=current_user.username,
+        workgroup=cluster.get("workgroup") or None,
         metadata={"cluster_id": cluster_id, "action": "remove"},
     )
     return {"ok": True, "status": "removing", "cluster_id": cluster_id,
@@ -340,12 +394,10 @@ async def register_api_tunnel(
     impersonate Entitle grants. Optional jump-group / jumpoint / PRA-credential
     overrides fall back to config (vault fields on the body are ignored — this
     tunnel injects no credential). Open the returned job for status/logs."""
-    try:
-        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    cluster = _visible_or_404(db, cluster_id, current_user)
     job = job_service.create_job(
         db, job_type="k8s_api_tunnel", created_by=current_user.username,
+        workgroup=cluster.get("workgroup") or None,
         metadata={
             "cluster_id": cluster_id, "action": "register",
             "jump_group": payload.jump_group, "jumpoint_name": payload.jumpoint_name,
@@ -364,12 +416,10 @@ async def remove_api_tunnel(
 ):
     """Destroy the cluster's API TCP tunnel jump + clear its state — enqueues a
     ``k8s_api_tunnel`` (action=remove) job. Open the returned job for status/logs."""
-    try:
-        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    cluster = _visible_or_404(db, cluster_id, current_user)
     job = job_service.create_job(
         db, job_type="k8s_api_tunnel", created_by=current_user.username,
+        workgroup=cluster.get("workgroup") or None,
         metadata={"cluster_id": cluster_id, "action": "remove"},
     )
     return {"ok": True, "status": "removing", "cluster_id": cluster_id,
@@ -388,9 +438,12 @@ async def api_tunnel_kubeconfig(
     free — carries no injected credential. Connect the tunnel on that local port,
     point ``KUBECONFIG`` at this file, and kubectl authenticates as your own cloud
     identity (and can ``--as`` impersonate Entitle grants)."""
+    # Guard BEFORE building anything: the document this returns is a working credential
+    # for the cluster, so the ownership check has to precede its construction rather
+    # than ride along with the name lookup that used to follow it.
+    info = _visible_or_404(db, cluster_id, current_user)
     try:
         content = k8s_service.build_api_tunnel_kubeconfig(db, cluster_id)
-        info = k8s_service.get_cluster(db, cluster_id)
     except K8sError as e:
         raise HTTPException(status_code=404, detail=str(e))
     filename = f"{info.get('name') or cluster_id}-api-tunnel.kubeconfig"
@@ -414,12 +467,10 @@ async def bind_entra_group(
     Entitle's Entra-ID integration can JIT-grant real-identity cluster access with no
     impersonation. ``group_id``/``role`` fall back to config (entra_rbac_group_id /
     entra_rbac_group_role, default cluster-admin). Open the returned job for status."""
-    try:
-        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    cluster = _visible_or_404(db, cluster_id, current_user)
     job = job_service.create_job(
         db, job_type="k8s_group_binding", created_by=current_user.username,
+        workgroup=cluster.get("workgroup") or None,
         metadata={"cluster_id": cluster_id, "action": "bind",
                   "group_id": payload.group_id, "role": payload.role},
     )
@@ -435,12 +486,10 @@ async def unbind_entra_group(
 ):
     """Remove the cluster's Entra-group ClusterRoleBinding — enqueues a
     ``k8s_group_binding`` (action=unbind) job. Open the returned job for status."""
-    try:
-        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    cluster = _visible_or_404(db, cluster_id, current_user)
     job = job_service.create_job(
         db, job_type="k8s_group_binding", created_by=current_user.username,
+        workgroup=cluster.get("workgroup") or None,
         metadata={"cluster_id": cluster_id, "action": "unbind"},
     )
     return {"ok": True, "status": "unbinding", "cluster_id": cluster_id,
@@ -465,12 +514,10 @@ async def apply_impersonator(
     as RBAC, so the group's principalSet is also bound to a project custom role holding
     only ``container.clusters.impersonate`` (needs ``roles/iam.roleAdmin`` on the
     dashboard SA; ~1-2 min to propagate). Open the returned job for status."""
-    try:
-        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    cluster = _visible_or_404(db, cluster_id, current_user)
     job = job_service.create_job(
         db, job_type="k8s_impersonator_binding", created_by=current_user.username,
+        workgroup=cluster.get("workgroup") or None,
         metadata={"cluster_id": cluster_id, "action": "apply",
                   "group_id": payload.group_id},
     )
@@ -489,12 +536,10 @@ async def remove_impersonator(
     project-level ``container.clusters.impersonate`` binding, but only when no other GKE
     cluster still has the same group bound (the grant is project-wide, so an unconditional
     revoke would break ``--as`` on those). Open the returned job for status."""
-    try:
-        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    cluster = _visible_or_404(db, cluster_id, current_user)
     job = job_service.create_job(
         db, job_type="k8s_impersonator_binding", created_by=current_user.username,
+        workgroup=cluster.get("workgroup") or None,
         metadata={"cluster_id": cluster_id, "action": "remove"},
     )
     return {"ok": True, "status": "removing", "cluster_id": cluster_id,
@@ -513,12 +558,10 @@ async def enable_entra_federation(
     cluster's OIDC IdP (async — the job polls to ACTIVE); AKS is native (no-op). The
     shared Entra app is set via entra_oidc_client_id on Settings. Open the returned job
     for status/logs."""
-    try:
-        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    cluster = _visible_or_404(db, cluster_id, current_user)
     job = job_service.create_job(
         db, job_type="k8s_entra_federation", created_by=current_user.username,
+        workgroup=cluster.get("workgroup") or None,
         metadata={"cluster_id": cluster_id, "action": "enable"},
     )
     return {"ok": True, "status": "enabling", "cluster_id": cluster_id,
@@ -534,12 +577,10 @@ async def disable_entra_federation(
     """Remove the cluster's Entra OIDC trust — enqueues a ``k8s_entra_federation``
     (action=disable) job (EKS disassociates the OIDC IdP; AKS no-op). Open the returned
     job for status/logs."""
-    try:
-        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    cluster = _visible_or_404(db, cluster_id, current_user)
     job = job_service.create_job(
         db, job_type="k8s_entra_federation", created_by=current_user.username,
+        workgroup=cluster.get("workgroup") or None,
         metadata={"cluster_id": cluster_id, "action": "disable"},
     )
     return {"ok": True, "status": "disabling", "cluster_id": cluster_id,
@@ -557,9 +598,12 @@ async def entra_kubeconfig(
     (int128 kubelogin) against the shared Entra app; AKS uses the native Azure
     kubelogin in interactive device-code mode. Both sign in with a device code.
     Connect the API tunnel first, then point ``KUBECONFIG`` at this file."""
+    # Guard BEFORE building anything: the document this returns is a working credential
+    # for the cluster, so the ownership check has to precede its construction rather
+    # than ride along with the name lookup that used to follow it.
+    info = _visible_or_404(db, cluster_id, current_user)
     try:
         content = k8s_service.build_entra_oidc_kubeconfig(db, cluster_id)
-        info = k8s_service.get_cluster(db, cluster_id)
     except K8sError as e:
         raise HTTPException(status_code=404, detail=str(e))
     filename = f"{info.get('name') or cluster_id}-entra.kubeconfig"
@@ -583,12 +627,10 @@ async def launch_management(
     job_id; poll the cluster status (deploying → managed / failed), or open the job
     to see the error if it fails. Valid kinds: see ``VALID_MGMT_KINDS`` — only
     ``rancher`` is wired today."""
-    try:
-        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    cluster = _visible_or_404(db, cluster_id, current_user)
     job = job_service.create_job(
         db, job_type="k8s_management", created_by=current_user.username,
+        workgroup=cluster.get("workgroup") or None,
         metadata={"cluster_id": cluster_id, "mgmt_kind": payload.mgmt_kind},
     )
     return {"ok": True, "status": "deploying", "cluster_id": cluster_id,
@@ -613,12 +655,10 @@ async def setup_secret_delivery(
             status_code=400,
             detail=f"unknown kind {payload.kind!r} (expected one of {', '.join(k8s_service.VALID_DELIVERY_KINDS)})",
         )
-    try:
-        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    cluster = _visible_or_404(db, cluster_id, current_user)
     job = job_service.create_job(
         db, job_type="k8s_secret_delivery", created_by=current_user.username,
+        workgroup=cluster.get("workgroup") or None,
         metadata={"cluster_id": cluster_id, "kind": payload.kind},
     )
     return {"ok": True, "status": "installing", "cluster_id": cluster_id,
@@ -659,14 +699,12 @@ async def register_ps_token(
             status_code=400,
             detail=f"unknown mode {payload.mode!r} (expected one of "
                    f"{', '.join(ps_k8s_token_service.VALID_PS_TOKEN_MODES)})")
-    try:
-        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    cluster = _visible_or_404(db, cluster_id, current_user)
     meta = {"cluster_id": cluster_id, "action": "register"}
     meta.update({k: v for k, v in payload.model_dump().items() if v is not None})
     job = job_service.create_job(
-        db, job_type="k8s_ps_token", created_by=current_user.username, metadata=meta)
+        db, job_type="k8s_ps_token", created_by=current_user.username,
+        workgroup=cluster.get("workgroup") or None, metadata=meta)
     return {"ok": True, "status": "registering", "cluster_id": cluster_id,
             "job_id": job.id}
 
@@ -679,12 +717,10 @@ async def remove_ps_token(
 ):
     """Off-board both Password Safe managed systems and drop the rotator RBAC.
     Async — enqueues a ``k8s_ps_token`` job with ``action=deregister``."""
-    try:
-        k8s_service.get_cluster(db, cluster_id)
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    cluster = _visible_or_404(db, cluster_id, current_user)
     job = job_service.create_job(
         db, job_type="k8s_ps_token", created_by=current_user.username,
+        workgroup=cluster.get("workgroup") or None,
         metadata={"cluster_id": cluster_id, "action": "deregister"})
     return {"ok": True, "status": "removing", "cluster_id": cluster_id,
             "job_id": job.id}
@@ -702,12 +738,10 @@ async def rotate_ps_token(
     same change, so there is no second step — but the job result says whether the pair
     is actually still synced, because an unlinked rotation succeeds while silently
     leaving PRA on the old value."""
-    try:
-        k8s_service.get_cluster(db, cluster_id)
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    cluster = _visible_or_404(db, cluster_id, current_user)
     job = job_service.create_job(
         db, job_type="k8s_ps_token", created_by=current_user.username,
+        workgroup=cluster.get("workgroup") or None,
         metadata={"cluster_id": cluster_id, "action": "rotate"})
     return {"ok": True, "status": "rotating", "cluster_id": cluster_id,
             "job_id": job.id}
@@ -726,10 +760,7 @@ async def ps_token_status(
     at registration — and "an admin unlinked it in the Password Safe console" is exactly
     what an operator opens this to find out."""
     from ..services import ps_k8s_token_service
-    try:
-        k8s_service.get_cluster(db, cluster_id)
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    _visible_or_404(db, cluster_id, current_user)
     try:
         return {"ok": True, **await ps_k8s_token_service.sync_status(db, cluster_id)}
     except Exception as exc:  # noqa: BLE001 — a status read must not 500 the modal
@@ -759,12 +790,10 @@ async def setup_entitle_agent(
             status_code=400,
             detail=f"unknown action {payload.action!r} (expected one of {', '.join(k8s_service.VALID_ENTITLE_AGENT_ACTIONS)})",
         )
-    try:
-        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    cluster = _visible_or_404(db, cluster_id, current_user)
     job = job_service.create_job(
         db, job_type="k8s_entitle_agent", created_by=current_user.username,
+        workgroup=cluster.get("workgroup") or None,
         metadata={"cluster_id": cluster_id, "action": payload.action},
     )
     return {"ok": True, "status": "installing" if payload.action == "install" else "removing",
@@ -788,12 +817,10 @@ async def register_cluster_in_entitle(
             status_code=400,
             detail=f"unknown action {payload.action!r} (expected one of {', '.join(k8s_service.VALID_ENTITLE_CLUSTER_ACTIONS)})",
         )
-    try:
-        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
-    except K8sError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    cluster = _visible_or_404(db, cluster_id, current_user)
     job = job_service.create_job(
         db, job_type="k8s_entitle_register", created_by=current_user.username,
+        workgroup=cluster.get("workgroup") or None,
         metadata={"cluster_id": cluster_id, "action": payload.action},
     )
     return {"ok": True, "status": "registering" if payload.action == "register" else "deregistering",
@@ -827,3 +854,59 @@ async def register_rancher_node_in_entitle(
     )
     return {"ok": True, "status": "registering" if payload.action == "register" else "deregistering",
             "action": payload.action, "job_id": job.id}
+
+
+# ── Reassign workgroup ───────────────────────────────────────────────────────
+
+
+class _WorkgroupReassignRequest(BaseModel):
+    """``""`` clears the workgroup, returning the cluster to creator-scoped."""
+    workgroup: str = ""
+
+
+@router.patch("/clusters/{cluster_id}/workgroup")
+async def reassign_cluster_workgroup(
+    cluster_id: str,
+    req: _WorkgroupReassignRequest,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Retag a cluster into a workgroup, or clear it. Admin only.
+
+    The counterpart of api/aws.reassign_instance_workgroup, and simpler than it: a VM
+    carries its workgroup as a cloud-side tag that has to be rewritten, whereas here the
+    column IS the record, so there is no cloud call and no 502 branch.
+
+    This is the only way an existing cluster gets a workgroup. Every cluster registered
+    before the column existed has NULL, and NULL means creator-scoped -- deliberately,
+    so that adding the column changed nobody's access and sharing stays an explicit act.
+
+    Blank clears it. Admin-only, not ``k8s:write``, because retagging is a transfer: it
+    hands the cluster (and its cluster-admin kubeconfig) to a different set of people,
+    and the person losing it is not in the conversation.
+
+    Deliberately does NOT touch ``expires_at``. Moving a cluster into a workgroup that
+    is exempt from auto-delete leaves any existing timer in place, and the sweeper then
+    skips it -- ``/inventory`` reports that state as ``expiry_exempt`` with a reason. A
+    visibility action silently rescheduling a deletion would be the worse surprise.
+    """
+    try:
+        canonical = workgroup_service.canonical_or_none(db, req.workgroup)
+    except workgroup_service.WorkgroupError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"cluster {cluster_id} not found")
+    row.workgroup = canonical
+
+    # Keep the provisioning Job in step, so the /jobs workgroup filter and the cluster
+    # page cannot disagree about who owns this. Only a provisioned cluster has one.
+    if row.deploy_job_id:
+        job = db.query(Job).filter(Job.id == row.deploy_job_id).first()
+        if job is not None:
+            job.workgroup = canonical
+    db.commit()
+
+    logger.info("k8s cluster %s reassigned to workgroup %r", cluster_id, canonical or "")
+    return {"cluster_id": cluster_id, "workgroup": canonical or ""}

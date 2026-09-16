@@ -233,18 +233,30 @@ Two more have no scope for narrower reasons:
 
 A scope says *what*, not *which*. Two mechanisms narrow the *which*:
 
-- **Workgroups** tag resources and users; cloud and container lists show you the rows whose
-  workgroup you are in. Untagged resources are visible to whoever deployed them. They live on
-  the **RBAC &rarr; Workgroups** tab, beside the permission tabs, because the two answer the two
-  halves of the same question.
+- **Workgroups** tag resources and users; the cloud, container, Databases and Kubernetes
+  lists show you the rows whose workgroup you are in. Untagged resources are visible to
+  whoever deployed them. They live on the **RBAC &rarr; Workgroups** tab, beside the
+  permission tabs, because the two answer the two halves of the same question.
 
   Unlike the other RBAC tabs, Workgroups is **not admin-only**: it has a real `workgroups`
   scope, so a user granted `workgroups:read` sees that tab and nothing else on the page.
   Deleting a workgroup still needs the Admin flag.
 - **POV access** narrows the POV pages to named environments, as described above.
 
-Several pages are additionally creator-scoped for non-admins — Databases, Functions,
-Certificates and SPIRE show you what you created. That is not configurable.
+"Untagged resources are visible to whoever deployed them" is the whole rule, and it is
+worth reading twice: a workgroup is a property of the **row**, not of the page. A cloud
+database or Kubernetes cluster carries one only once somebody assigns it — at creation, or
+later with the admin-only **Workgroup** button on [Databases](databases.md) /
+[Kubernetes](kubernetes.md). Until then the row is creator-scoped, which is why adding the
+field granted and revoked nothing on upgrade.
+
+Tagging a row widens what its workgroup can **do** to it, not only what they can see: the
+list, every by-id action, a Configuration Management run against it, and its auto-delete
+timer all answer to the same rule. Sharing a database with your team means the team can run
+plays against it and extend its timer.
+
+Functions, Certificates and SPIRE remain creator-scoped for non-admins — they show you what
+you created, and that is not configurable.
 
 ## If a user reports a 403
 
