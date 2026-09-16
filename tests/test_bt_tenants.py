@@ -632,7 +632,7 @@ def test_the_verify_endpoint_builds_no_message_from_a_caught_exception():
     reintroduces one."""
     src = (pathlib.Path(_ROOT) / "web_dashboard" / "api" / "bt_tenants.py").read_text(
         encoding="utf-8")
-    handler = src.split("async def verify_tenant", 1)[1].split("@router", 1)[0]
+    handler = src.split("def verify_tenant", 1)[1].split("@router", 1)[0]
     assert "str(exc)" not in handler, (
         "verify_tenant builds a response message from a caught exception again")
 

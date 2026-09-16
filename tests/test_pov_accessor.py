@@ -246,7 +246,7 @@ def test_the_self_route_takes_no_environment_id():
     """No path parameter means no ownership check for a later edit to forget."""
     tree = ast.parse(_read(os.path.join(_API, "pov_accessor.py")))
     node = next(n for n in ast.walk(tree)
-                if isinstance(n, ast.AsyncFunctionDef) and n.name == "accessor_self")
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "accessor_self")
     args = [a.arg for a in node.args.args]
     assert "env_id" not in args, f"/self takes an environment id from the caller: {args}"
     # Because it resolves the POV from the session instead.
@@ -653,7 +653,7 @@ def test_no_accessor_write_route_takes_an_environment_id():
     tree = ast.parse(_read(os.path.join(_API, "pov_accessor.py")))
     checked = 0
     for node in ast.walk(tree):
-        if not isinstance(node, ast.AsyncFunctionDef):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         decorators = ast.unparse(ast.Module(body=[], type_ignores=[])) if False else \
             " ".join(ast.unparse(d) for d in node.decorator_list)

@@ -115,7 +115,7 @@ def _resolve_role(db: Session, raw: Optional[str]):
 
 
 @router.get("", response_model=List[UserResponse])
-async def list_users(
+def list_users(
     _admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
@@ -153,7 +153,7 @@ async def list_users(
 # ── Create user ────────────────────────────────────────────────────────────────
 
 @router.post("", response_model=UserResponse, status_code=201)
-async def create_user(
+def create_user(
     body: UserCreateRequest,
     _admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
@@ -207,7 +207,7 @@ async def create_user(
 # ── Update user ────────────────────────────────────────────────────────────────
 
 @router.patch("/{user_id}", response_model=UserResponse)
-async def update_user(
+def update_user(
     user_id: str,
     body: UserUpdateRequest,
     admin: User = Depends(require_admin),
@@ -297,7 +297,7 @@ async def update_user(
 # ── Deactivate user ────────────────────────────────────────────────────────────
 
 @router.delete("/{user_id}", status_code=200)
-async def deactivate_user(
+def deactivate_user(
     user_id: str,
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
@@ -320,7 +320,7 @@ async def deactivate_user(
 # ── Permanently delete user ─────────────────────────────────────────────────────
 
 @router.delete("/{user_id}/permanent", status_code=200)
-async def delete_user_permanent(
+def delete_user_permanent(
     user_id: str,
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
@@ -343,7 +343,7 @@ async def delete_user_permanent(
 # ── List a user's PATs (admin view) ────────────────────────────────────────────
 
 @router.get("/{user_id}/tokens", response_model=List[UserTokenItem])
-async def list_user_tokens(
+def list_user_tokens(
     user_id: str,
     _admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
@@ -377,7 +377,7 @@ class AdminCreateTokenRequest(BaseModel):
 
 
 @router.post("/{user_id}/tokens", response_model=TokenCreateResponse, status_code=201)
-async def create_user_token(
+def create_user_token(
     user_id: str,
     body: AdminCreateTokenRequest,
     _admin: User = Depends(require_admin),
@@ -420,7 +420,7 @@ async def create_user_token(
 # ── Revoke any user's PAT (admin) ──────────────────────────────────────────────
 
 @router.delete("/{user_id}/tokens/{token_id}", status_code=200)
-async def revoke_user_token(
+def revoke_user_token(
     user_id: str,
     token_id: str,
     _admin: User = Depends(require_admin),
@@ -444,7 +444,7 @@ async def revoke_user_token(
 # ── FIDO2 summary per user (admin view) ────────────────────────────────────────
 
 @router.get("/{user_id}/fido2", response_model=List[dict])
-async def list_user_fido2(
+def list_user_fido2(
     user_id: str,
     _admin: User = Depends(require_admin),
     db: Session = Depends(get_db),

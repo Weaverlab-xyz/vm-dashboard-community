@@ -94,7 +94,7 @@ def test_the_login_path_never_writes_the_admin_set_column():
     """The failure this file exists for. `user.persona` is an admin's decision; the login
     path may only ever touch `user.session_persona`."""
     src = _read(_AUTH)
-    body = src.split("def _complete_oauth_login", 1)[1].split("\nasync def ", 1)[0]
+    body = src.split("def _complete_oauth_login", 1)[1].split("\n@router.", 1)[0]
     offenders = [ln.strip() for ln in body.split("\n")
                  if re.search(r"\buser\.persona\s*=", ln)]
     assert not offenders, (
@@ -110,7 +110,7 @@ def test_the_login_path_writes_the_group_column_unconditionally():
     in place forever — the same shape as the session_permissions overwrite it sits beside.
     """
     src = _read(_AUTH)
-    body = src.split("def _complete_oauth_login", 1)[1].split("\nasync def ", 1)[0]
+    body = src.split("def _complete_oauth_login", 1)[1].split("\n@router.", 1)[0]
     writes = [ln for ln in body.split("\n") if re.search(r"user\.session_persona\s*=", ln)]
     assert len(writes) == 2, (
         f"expected the existing-user and auto-provision branches to both write it, "
@@ -125,7 +125,7 @@ def test_the_group_persona_is_computed_where_the_group_ids_still_exist():
     """/api/auth/me has only the user row — it cannot re-derive which groups matched,
     because the login path maps ids to workgroups and then discards the ids."""
     src = _read(_AUTH)
-    body = src.split("def _complete_oauth_login", 1)[1].split("\nasync def ", 1)[0]
+    body = src.split("def _complete_oauth_login", 1)[1].split("\n@router.", 1)[0]
     assert "personas.persona_for_groups(" in body
     i_compute = body.index("persona_for_groups(")
     i_write = body.index("user.session_persona")
@@ -136,7 +136,7 @@ def test_the_env_fallback_path_confers_no_persona():
     """The .env group map is `{group_id: workgroup}` — it has no row to hang a persona on,
     so it must yield none rather than guessing."""
     src = _read(_AUTH)
-    body = src.split("def _complete_oauth_login", 1)[1].split("\nasync def ", 1)[0]
+    body = src.split("def _complete_oauth_login", 1)[1].split("\n@router.", 1)[0]
     legacy = body.split("no mappings configured", 1)[1].split("\n\n", 1)[0]
     assert 'matched_persona = ""' in legacy, \
         "the legacy .env path leaves matched_persona undefined or set to a real persona"
