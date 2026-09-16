@@ -595,6 +595,28 @@ def render_bootstrap(*, env_name: str, dashboard_url: str, enroll_code: str,
     is stated above and in the docs. What changes is only whether the process the dashboard
     put there on purpose can use the thing the dashboard mounted on purpose.
 
+    **And before any of that, there has to BE a Docker.** The script installs a container
+    runtime if the guest has none — ``pov_template_builder.render_docker_install``, the same
+    block a template bake runs, reached rather than copied. A base template with a perfect
+    metadata runner and no ``docker`` was the single most common way a POV failed, and it
+    failed in the worst possible shape: the payload runs as far as the final ``docker run``,
+    ``set -e`` kills it there, the runner re-reads ``user_data`` twenty seconds later and
+    dies in the same place forever, and the dashboard sees nothing at all because the thing
+    that would have told it is the agent that never started.
+
+    Two properties of putting it *here* rather than only in the bake:
+
+    * **It is idempotent and skips a guest that already has one**, so every POV whose broker
+      is healthy — every cloud POV, whose image carries Docker — pays nothing for it.
+    * **It reaches a package repository, so it is the one line here that can fail**, and it
+      fails as silently as the ``docker run`` it replaces. That is why it ships with
+      ``runtime_gap_for_template``: the install being attempted is only half an answer, and
+      the other half is the job saying which template baked without a runtime.
+
+    It does NOT make the bake redundant. A runtime installed by the bootstrap lands on one
+    POV; the same install at bake time lands on every POV made from the template, before
+    anybody is waiting fourteen minutes for it.
+
     **And naming an image is not the same as having it.** ``images`` are pulled here, before
     the agent that needs them starts. The agent will not pull one for itself and says so in
     three separate refusals -- a rule that is right where it was written: on a customer's
@@ -644,6 +666,19 @@ def render_bootstrap(*, env_name: str, dashboard_url: str, enroll_code: str,
         "  docker pull \"$IMAGE\" || echo \"WARNING: could not pull $IMAGE\"\n"
         "done\n\n")
 
+    # The container runtime, before anything that needs one. Imported in the function body:
+    # `pov_template_builder` imports THIS module at top level for the marker constants and
+    # the broker resolver, so a module-scope import here closes a real cycle -- the same
+    # reason `ensure_broker` imports its three siblings locally.
+    #
+    # The builder's renderer verbatim, not a second copy: what a bake installs and what a
+    # POV installs when the bake never happened have to be the same runtime, or the feature
+    # is tested against one and shipped on the other. Only the enabled-at-boot gate comes
+    # off -- see `render_docker_install` for why that gate is about a template and not
+    # about this guest.
+    from . import pov_template_builder
+    runtime = pov_template_builder.render_docker_install(require_enabled_at_boot=False)
+
     stamp = (now or datetime.utcnow()).strftime("%Y-%m-%d %H:%M:%SZ")
     # The name reaches a shell comment. `api/pov` already constrains it to a slug, but a
     # newline here would end the comment and put whatever followed on its own line, so it
@@ -665,6 +700,7 @@ chmod 0644 "$STATE/policy.yaml"
 # 022, not 077: the container runs as uid 10001 and cannot read a root-owned 0600 file.
 ( umask 022 && printf '%s' '{enroll_code}' > "$STATE/enroll-code" )
 
+{runtime}
 {pulls}# Replace any previous agent AND its state volume. The volume holds the identity written
 # at first enrolment; leaving it means the new code is never redeemed, the container signs
 # with a key the dashboard has already cleared, and every poll 401s.
@@ -953,19 +989,29 @@ async def ensure_broker(db: Session, env: PovEnvironment, *, job_id: str = "",
     if not ok:
         minutes = int(enroll_timeout_seconds() / 60)
         where = vm.name or vm.platform_vm_id
+        # What this dashboard already knows and has never said. A guest that cannot start
+        # the agent cannot report anything, so both messages below can only list
+        # candidates — and when the template was baked HERE, one of those candidates is a
+        # recorded fact rather than a guess. Led with, because it is the answer.
+        #
+        # Local import for the cycle, as in `render_bootstrap` above.
+        from . import pov_template_builder
+        gap = pov_template_builder.runtime_gap_for_template(
+            db, platform=env.platform, template_id=env.template_id or "")
+        lead = f"{gap} " if gap else ""
         if mechanism == "metadata":
             raise BrokerError(
                 f"the bootstrap was written to {where} but no agent enrolled within "
-                f"{minutes} minutes. Nothing executes user_data for you — check that VM "
-                f"has the metadata runner from the template contract, that it is on an "
+                f"{minutes} minutes. {lead}Nothing executes user_data for you — check that "
+                f"VM has the metadata runner from the template contract, that it is on an "
                 f"automatic network, and that it can reach {dashboard_url}. Press Broker "
                 f"again to re-issue the code.")
         raise BrokerError(
             f"the broker VM {where} was built with its bootstrap in user-data but no "
-            f"agent enrolled within {minutes} minutes. Cloud-init runs it on first boot, "
-            f"so check the VM's console output, that its image HAS cloud-init and Docker, "
-            f"and that it can reach {dashboard_url} outbound. Press Broker again to "
-            f"rebuild it with a fresh code.")
+            f"agent enrolled within {minutes} minutes. {lead}Cloud-init runs it on first "
+            f"boot, so check the VM's console output, that its image HAS cloud-init and "
+            f"Docker, and that it can reach {dashboard_url} outbound. Press Broker again "
+            f"to rebuild it with a fresh code.")
 
     # Redeemed, so the payload is now a spent secret sitting where anyone with read access
     # to the environment can see it. Clearing it also stops a reboot re-running a

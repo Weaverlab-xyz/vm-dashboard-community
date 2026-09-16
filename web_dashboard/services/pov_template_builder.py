@@ -122,18 +122,68 @@ _RUNNER_INTERVAL_S = 20
 # nothing. That is indistinguishable from having no runner at all, which is why installing
 # one without the other was only ever half a fix.
 #
-# **Docker CE from Docker's own repo, not the distro's `podman` + `podman-docker`.** The
-# shim satisfies `command -v docker` and would satisfy the check below, and the contract in
-# docs/profiles/pov/skytap.md still accepts it on a template somebody else authored. But
-# the agent does not drive a CLI: it speaks the Docker Engine API over the socket directly,
-# and the parts of it most likely to differ under Podman are the ones that have already
-# produced a bug here — binary log frames and a privileged sibling holding /dev/net/tun.
-# What this builder BAKES should be the runtime the feature is tested against.
+# **Docker CE from Docker's own repo FIRST, and the distro's `podman` + `podman-docker`
+# when that does not land.** Preference, not exclusion, and the ordering carries the whole
+# argument:
+#
+# Docker CE leads because the agent does not drive a CLI — it speaks the Docker Engine API
+# over the socket directly, and the parts of it most likely to differ under Podman are the
+# ones that have already produced a bug here (binary log frames, a privileged sibling
+# holding /dev/net/tun). What this feature is tested against is what it should install
+# where it can.
+#
+# Podman follows because "where it can" is not everywhere, and the gap is not exotic: this
+# repo is an internet CDN, and a lab guest routinely reaches its own distro mirror and
+# nothing else. A Skytap AlmaLinux 8 broker is exactly that guest. The alternative to
+# Podman there is not Docker CE, it is a POV that sits at `enrolling` and says nothing —
+# and Podman serves the same Engine API on the same socket path, so the agent cannot tell.
+# Podman on a lab VM is a decision this project has made deliberately (2026-09-16); it is
+# not a silent degradation.
+#
+# **What is NOT optional either way is the socket.** `command -v docker` and a running
+# Engine API are different facts under Podman, and only the second one is the agent's. See
+# the socket block in `render_docker_install`.
 #
 # A base image that already carries either is left alone: reinstalling over a working
 # runtime is how a build breaks a template that was fine.
 DOCKER_PACKAGES = "docker-ce docker-ce-cli containerd.io"
-DOCKER_REPO_BASE = "https://download.docker.com/linux"
+# The host on its own, because it is named in three places that must agree: the repo URL
+# below, the refusal an operator reads when neither runtime lands, and the sentence the
+# broker job adds to an enrolment timeout. It is also the one prerequisite on the whole
+# Skytap list that nothing on this side can test, so "which host do I have to let out" is
+# a question worth being able to answer from one constant.
+DOCKER_REPO_HOST = "download.docker.com"
+DOCKER_REPO_BASE = f"https://{DOCKER_REPO_HOST}/linux"
+
+# The fallback, from the guest's OWN repository. Reached when Docker CE does not land,
+# which on a lab guest is usually not a broken repo but an unreachable one: a Skytap
+# AlmaLinux 8 broker resolves `appstream` and `baseos` perfectly and cannot reach Docker's
+# CDN at all, and `dnf install podman-docker` there pulls 19 packages without leaving the
+# lab. That guest is the common case, not the exotic one.
+#
+# **`podman-docker` is not optional garnish, it is the half that makes this work.** Podman
+# alone gives no `docker` command and, more importantly, no AGENT_SOCKET_PATH: the agent
+# speaks the Engine API over that path directly and never runs a CLI. podman-docker ships
+# both the shim and the symlink. Neither, however, STARTS anything -- see the socket block
+# in `render_docker_install`, which is the part that turns this from a trap into a runtime.
+PODMAN_PACKAGES = "podman podman-docker"
+
+# Where the agent expects the Engine API, and where Podman actually puts it.
+#
+# The first is `pov_broker`'s constant rather than a second spelling of the same path: the
+# bootstrap MOUNTS that path into the agent container, so an install that verified a
+# different one would pass while the agent found nothing. One literal, two readers.
+AGENT_SOCKET_PATH = pov_broker.GUEST_DOCKER_SOCKET
+PODMAN_SOCKET_PATH = "/run/podman/podman.sock"
+
+# What the probe writes into `prepare_detail` when the guest has no runtime, and the
+# string anything reading that column back has to match on.
+#
+# A constant because it is now WRITTEN in one place and READ in another: a build records it
+# here, and `runtime_gap_for_template` below answers a broker job with it weeks later, on a
+# POV whose enrolment timed out. Two spellings of it would mean the read silently never
+# matches — which is the same silence this whole path exists to end.
+DOCKER_MISSING_MARKER = "docker: MISSING"
 
 # What the post-install probe asks the guest. One constant because it is read on both
 # paths — after a success, to name what landed, and after a failure, to name which half.
@@ -145,7 +195,7 @@ DOCKER_REPO_BASE = "https://download.docker.com/linux"
 # disabled for having no `docker.service` to enable.
 _STATE_PROBE = ("systemctl is-active dashboard-bootstrap-runner 2>/dev/null "
                 "|| echo 'runner: INACTIVE'; "
-                "docker --version 2>/dev/null || echo 'docker: MISSING'; "
+                f"docker --version 2>/dev/null || echo '{DOCKER_MISSING_MARKER}'; "
                 "if systemctl cat docker.service >/dev/null 2>&1; then "
                 "echo \"docker at boot: $(systemctl is-enabled docker 2>&1)\"; fi")
 
@@ -291,12 +341,16 @@ WantedBy=multi-user.target
 """
 
 
-def render_docker_install() -> str:
+def render_docker_install(*, require_enabled_at_boot: bool = True,
+                          socket_path: str = "") -> str:
     """The container runtime install, as a ``/bin/sh`` block the install script appends.
 
     Its own renderer rather than more lines inside ``render_install_script`` because it is
     the half that can actually fail — it reaches a package repository over the network from
     inside the guest — and a thing that can fail is a thing to be able to test on its own.
+    It is now also the half ``pov_broker.render_bootstrap`` emits into the payload itself,
+    which is the reason this is a renderer and not a section of a script: one expression of
+    the install, reached from a bake and from a POV that never had one.
 
     Three properties, and each is a way a build produces a template that looks fine:
 
@@ -310,15 +364,43 @@ def render_docker_install() -> str:
        and then booted, for every POV, so enabled-at-boot is the property that survives the
        bake and the only one worth gating on. Found the hard way on a guest that was
        running because somebody had just started it by hand.
-    3. **An unsupported distro says so, naming itself.** ``download.docker.com`` serves the
-       Debian and RHEL families; on anything else this exits non-zero with the distro's own
-       ``ID`` in the message, so the build's Runner detail names the thing to fix rather
-       than a package manager's error.
+    3. **Docker CE first, the distro's Podman second, and a refusal that names both.**
+       Every step of the Docker CE install is non-fatal, because failing it is the normal
+       case on a lab guest with no route to ``download.docker.com`` — and the answer there
+       is ``podman`` + ``podman-docker`` out of the guest's own repository, which serves the
+       same Engine API on the same socket. Only when neither lands does this exit non-zero,
+       naming the distro and both attempts, so the Runner detail says the thing to fix
+       rather than a package manager's last error.
+    4. **It verifies the SOCKET, not just the command.** This is the one that bites: under
+       Podman ``docker`` is a shim that answers happily while nothing is listening, because
+       installing ``podman-docker`` does not start ``podman.socket`` and the
+       ``/var/run/docker.sock`` symlink it ships is created by ``systemd-tmpfiles`` at the
+       next boot. A guest in that state passes every CLI check, enrols, comes up green, and
+       then fails every Gateway and Config-Management job on a socket nobody started. So
+       the socket is brought up here and then checked as its own gate.
+
+    ``require_enabled_at_boot=False`` drops property 2's *second* gate, and only the second.
+    That gate is a statement about a TEMPLATE — baked now, booted later, for every POV — and
+    it is the wrong question to fail a live POV on. The bootstrap runs on a guest that is
+    already up and needs a runtime in the next ten minutes; refusing it because
+    ``systemctl enable`` did not take would abort an install that was about to work and
+    leave the POV with no agent, which is strictly worse than a broker that comes back
+    after a power cycle. The verify above it still runs on both paths: "it works" is never
+    the part that gets skipped.
+
+    ``socket_path`` is where the caller's bootstrap will MOUNT the Engine API from, and
+    defaults to the one constant ``pov_broker`` mounts (:data:`AGENT_SOCKET_PATH`). It is
+    a parameter for one further reason worth stating plainly: property 4 is a gate with two
+    sides, and the machines this repo is developed on cannot create an ``AF_UNIX`` socket
+    at all, so a test that could only ever see the failing side would pin half a rule.
 
     Written without ``${...}`` parameter expansion on purpose: every variable it reads
     from ``/etc/os-release`` is initialised to empty first, because the script runs under
     ``set -u`` and a Debian guest has no ``VERSION_ID`` field to speak of.
     """
+    # Named here rather than interpolated as an expression, so the f-string below reads as
+    # the shell it is.
+    sock = str(socket_path or "").strip() or AGENT_SOCKET_PATH
     return f"""# --- the container runtime ----------------------------------------
 # The injected bootstrap ends in `docker run`, and that is the first line in it that can
 # fail. A broker with a runner and no runtime re-runs the payload every {_RUNNER_INTERVAL_S}s forever
@@ -340,20 +422,27 @@ else
         *" ubuntu "*) DOCKER_REPO_DIR=ubuntu ;;
         *) DOCKER_REPO_DIR=debian ;;
       esac
-      if [ -z "$VERSION_CODENAME" ]; then
-        echo "this guest's /etc/os-release names no VERSION_CODENAME, and Docker's apt repository is per-release. Install docker by hand, then re-run this script." >&2
-        exit 1
-      fi
       export DEBIAN_FRONTEND=noninteractive
-      apt-get -y -q update
-      apt-get -y -q install ca-certificates curl gnupg
-      install -m 0755 -d /etc/apt/keyrings
-      curl -fsSL "{DOCKER_REPO_BASE}/$DOCKER_REPO_DIR/gpg" -o /etc/apt/keyrings/docker.asc
-      chmod a+r /etc/apt/keyrings/docker.asc
-      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] {DOCKER_REPO_BASE}/$DOCKER_REPO_DIR $VERSION_CODENAME stable" \\
-        > /etc/apt/sources.list.d/docker.list
-      apt-get -y -q update
-      apt-get -y -q install {DOCKER_PACKAGES}
+      apt-get -y -q update || true
+      # Every step from here is non-fatal, and the podman fallback after this `case` is
+      # why: no VERSION_CODENAME, no route to Docker's CDN and no gpg key are three
+      # different ways to end up without Docker CE, and the answer to all three is the
+      # distro's own container tools rather than a guest nobody can use.
+      if [ -n "$VERSION_CODENAME" ]; then
+        apt-get -y -q install ca-certificates curl gnupg || true
+        install -m 0755 -d /etc/apt/keyrings
+        if curl -fsSL "{DOCKER_REPO_BASE}/$DOCKER_REPO_DIR/gpg" -o /etc/apt/keyrings/docker.asc; then
+          chmod a+r /etc/apt/keyrings/docker.asc
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] {DOCKER_REPO_BASE}/$DOCKER_REPO_DIR $VERSION_CODENAME stable" \\
+            > /etc/apt/sources.list.d/docker.list
+          apt-get -y -q update || true
+          apt-get -y -q install {DOCKER_PACKAGES} || true
+        else
+          echo "could not fetch Docker's apt key from {DOCKER_REPO_BASE}; trying the distro's own container tools." >&2
+        fi
+      else
+        echo "this guest's /etc/os-release names no VERSION_CODENAME and Docker's apt repository is per-release; trying the distro's own container tools." >&2
+      fi
       ;;
     *" rhel "*|*" centos "*|*" fedora "*)
       # ID before ID_LIKE: an AlmaLinux guest's ID_LIKE is "rhel centos fedora", so a
@@ -364,9 +453,8 @@ else
       esac
       DOCKER_MAJOR=$(echo "$VERSION_ID" | cut -d. -f1)
       if [ -z "$DOCKER_MAJOR" ]; then
-        echo "this guest's /etc/os-release names no VERSION_ID, and Docker's yum repository is per-major-release. Install docker by hand, then re-run this script." >&2
-        exit 1
-      fi
+        echo "this guest's /etc/os-release names no VERSION_ID and Docker's yum repository is per-major-release; trying the distro's own container tools." >&2
+      else
       cat > /etc/yum.repos.d/docker-ce.repo <<DASHBOARD_DOCKER_REPO_EOF
 [docker-ce-stable]
 name=Docker CE Stable
@@ -378,27 +466,78 @@ DASHBOARD_DOCKER_REPO_EOF
       # --allowerasing: on a RHEL-family guest carrying the distro's own container stack,
       # containerd.io replaces runc, and without this dnf reports a dependency conflict
       # rather than resolving it.
+      #
+      # Non-fatal, because the fallback below is a real answer. This repo reaches
+      # download.docker.com, which a lab guest very often cannot: an AlmaLinux 8 broker
+      # with perfectly good access to `appstream` and none to Docker's CDN is the exact
+      # shape that leaves a POV at `enrolling`.
       if command -v dnf >/dev/null 2>&1; then
-        dnf -y install {DOCKER_PACKAGES} --allowerasing
+        dnf -y install {DOCKER_PACKAGES} --allowerasing || true
       else
-        yum -y install {DOCKER_PACKAGES}
+        yum -y install {DOCKER_PACKAGES} || true
+      fi
       fi
       ;;
     *)
-      echo "cannot install a container runtime automatically on '$ID': download.docker.com serves the debian and rhel families. Install docker on the broker VM by hand and re-run this script; the runner above is already in place." >&2
-      exit 1
+      echo "no Docker CE repository for '$ID'; trying the distro's own container tools." >&2
       ;;
   esac
+
+  # {PODMAN_PACKAGES} from the DISTRO's repository, when Docker CE did not land. Podman
+  # serves the same Engine API, and `podman-docker` provides both the `docker` command and
+  # the /var/run/docker.sock symlink the agent's socket path depends on -- so this is a
+  # substitution the agent cannot tell apart, not a downgrade it has to cope with.
+  #
+  # It is the FALLBACK and not the default on purpose: Docker CE is what this feature is
+  # tested against, and the places Podman differs (binary log frames, a privileged sibling
+  # holding /dev/net/tun) are places that have already produced bugs here. But a lab guest
+  # that cannot reach Docker's CDN and can reach its own distro mirror is common, and a
+  # working broker on Podman beats a POV that sits at `enrolling` saying nothing.
+  if ! command -v docker >/dev/null 2>&1; then
+    if command -v dnf >/dev/null 2>&1; then
+      dnf -y install {PODMAN_PACKAGES} || true
+    elif command -v yum >/dev/null 2>&1; then
+      yum -y install {PODMAN_PACKAGES} || true
+    elif command -v apt-get >/dev/null 2>&1; then
+      apt-get -y -q install {PODMAN_PACKAGES} || true
+    fi
+  fi
+
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "could not install a container runtime on this guest ('$ID'): neither Docker CE from {DOCKER_REPO_HOST} nor {PODMAN_PACKAGES} from the distro's own repository. The injected bootstrap ends in 'docker run', so this broker will sit at 'enrolling' with nothing to say why. Install one by hand on this VM." >&2
+    exit 1
+  fi
 fi
 
 # Enable and start it whether this script installed it or found it. Neither is an error
-# worth stopping on here: a `podman-docker` guest has no `docker` unit at all and is
-# perfectly able to answer the checks below, which are what actually decide.
+# worth stopping on here: the checks below are what actually decide.
 if command -v systemctl >/dev/null 2>&1; then
   systemctl enable docker >/dev/null 2>&1 || true
   systemctl start docker >/dev/null 2>&1 || true
 else
   service docker start >/dev/null 2>&1 || true
+fi
+
+# **The socket, which is the part a CLI check cannot see.** The agent does not run `docker`:
+# it speaks the Engine API over {sock} directly. Under Podman the `docker`
+# command is a shim that works perfectly while NOTHING IS LISTENING -- `podman.socket` is
+# not enabled by installing podman-docker, and the symlink podman-docker drops is created
+# by systemd-tmpfiles at boot. So a guest can pass every CLI check here, enrol, come up
+# green, and then fail every Gateway and Config-Management job on a socket that was never
+# started. That failure reads as a permission or firewall problem and has cost days before.
+if command -v systemctl >/dev/null 2>&1 && [ ! -S {sock} ]; then
+  systemctl enable podman.socket >/dev/null 2>&1 || true
+  systemctl start podman.socket >/dev/null 2>&1 || true
+  # Now rather than at the next boot, and only ever as the symlink podman-docker itself
+  # ships -- this does not invent a path, it stops waiting for a reboot to create one.
+  systemd-tmpfiles --create >/dev/null 2>&1 || true
+  if [ ! -S {sock} ] && [ -S {PODMAN_SOCKET_PATH} ]; then
+    ln -sf {PODMAN_SOCKET_PATH} {sock} || true
+  fi
+  # `--restart unless-stopped` is in the bootstrap's `docker run`, and under Podman that
+  # flag only survives a reboot when this unit is enabled. Best-effort: the metadata runner
+  # brings the agent back anyway, just more slowly.
+  systemctl enable podman-restart.service >/dev/null 2>&1 || true
 fi
 
 # Working, not merely installed. A package that landed beside a daemon that will not start
@@ -408,7 +547,30 @@ if ! docker version >/dev/null 2>&1; then
   exit 1
 fi
 
-# AND enabled at boot, which is the check that matters for a TEMPLATE. `dnf install
+# AND the socket answers, which is the one the AGENT depends on. Checked separately from
+# the command above because they can disagree, and when they do it is always this one that
+# is wrong -- see the socket block above.
+#
+# Stated as the two ways it is WRONG rather than as one `-S` assertion, because the two
+# have different remedies and an operator reading either needs to be told which one they
+# have. A dangling podman-docker symlink and a leftover mount directory both fail a single
+# `-S` with one message that fits neither.
+if [ -d {sock} ]; then
+  echo "{sock} on this broker VM is a DIRECTORY, not a socket. A 'docker run -v {sock}:...' on a host whose daemon was not running creates one, and every later run then mounts an empty directory into the agent. Remove it with 'rmdir {sock}', make sure the daemon is up, and press Broker again." >&2
+  exit 1
+fi
+if [ ! -e {sock} ]; then
+  echo "'docker' works on this broker VM but nothing is listening at {sock}. The agent speaks the Engine API over that socket directly and never runs the command, so it would start, enrol, come up green, and then fail every Gateway and Config-Management job. Under Podman run 'systemctl enable --now podman.socket'; under Docker check that dockerd is running." >&2
+  exit 1
+fi
+
+""" + (_DOCKER_BOOT_GATE if require_enabled_at_boot else _DOCKER_BOOT_NOTE)
+
+
+# The second gate, and the only part of the install that is about a TEMPLATE rather than
+# about a working runtime. Split out so the broker's copy can omit exactly this and nothing
+# else — see `render_docker_install`'s `require_enabled_at_boot`.
+_DOCKER_BOOT_GATE = """# AND enabled at boot, which is the check that matters for a TEMPLATE. `dnf install
 # docker-ce` leaves the unit disabled on the RHEL family, so a guest can pass the check
 # above while being one power cycle from having no runtime at all - and a template is
 # baked and then booted, every time, for every POV. "Running now" is worth nothing here.
@@ -419,6 +581,18 @@ if command -v systemctl >/dev/null 2>&1 && systemctl cat docker.service >/dev/nu
   fi
 fi
 echo "docker: ready and enabled at boot"
+"""
+
+# The same place in the script when the caller is a live POV. It still says what it found,
+# because this text reaches a guest console an operator reads, but a disabled unit is a
+# note here rather than a refusal: this VM is already running, and the agent it is about to
+# start is worth more than the power cycle it may not survive.
+_DOCKER_BOOT_NOTE = """if command -v systemctl >/dev/null 2>&1 && systemctl cat docker.service >/dev/null 2>&1; then
+  if ! systemctl is-enabled docker >/dev/null 2>&1; then
+    echo "NOTE: docker is running but its unit is not enabled at boot; this broker will have no runtime after a power cycle. Run 'systemctl enable docker' on this VM."
+  fi
+fi
+echo "docker: ready"
 """
 
 
@@ -756,6 +930,53 @@ async def prepare_broker_vm(mod, env_id: str, vm: dict) -> str:
 
 def get(db: Session, build_id: str) -> PovTemplateBuild | None:
     return db.query(PovTemplateBuild).filter(PovTemplateBuild.id == build_id).first()
+
+
+def runtime_gap_for_template(db: Session, *, platform: str, template_id: str) -> str:
+    """One sentence when the template this POV came from baked with **no container
+    runtime**, or ``""`` when it did not, or when nothing here knows.
+
+    The point is whose knowledge this is. A broker that never enrols is silent by
+    construction — the guest has no way to talk to the dashboard until the agent it cannot
+    start has started — so the timeout message can only ever list *candidates*, and it lists
+    three, of which two are usually fine. But this dashboard **baked that template** and
+    wrote down what it found on the broker VM at the time: ``prepare_detail`` already says
+    ``docker: MISSING``. Reading it back turns the one failure nobody can see into the one
+    the job names first.
+
+    Deliberately a WARNING and never a refusal, which is the whole reason it is read here
+    and not in a preflight. The record is a fact about a bake that may be weeks old, and
+    installing a runtime by hand on the broker VM is exactly what an operator does about
+    it — so a preflight that refused would block the remedy for the problem it detected.
+    The bootstrap now carries its own install (``pov_broker.render_bootstrap``), which makes
+    this rarer still: by the time anybody reads this sentence, that install has also been
+    tried and also failed, and the pair of facts is the diagnosis.
+
+    ``""`` on anything unknown — no build row, a template somebody else authored, a build
+    whose probe never ran. Silence is right there: this exists to add a fact, and inventing
+    one about a template this dashboard never touched would be worse than the three
+    candidates it is trying to improve on.
+    """
+    template_id = str(template_id or "").strip()
+    if not template_id:
+        return ""
+    # The most recent build for this template. A template can be rebuilt under the same id
+    # on some platforms, and an older row's probe describes a guest that no longer exists.
+    build = (db.query(PovTemplateBuild)
+               .filter(PovTemplateBuild.platform == str(platform or "").strip(),
+                       PovTemplateBuild.result_template_id == template_id)
+               .order_by(PovTemplateBuild.created_at.desc())
+               .first())
+    if build is None or DOCKER_MISSING_MARKER not in (build.prepare_detail or ""):
+        return ""
+    return (f"This dashboard built that template ({build.name}) on "
+            f"{build.created_at:%Y-%m-%d} and recorded '{DOCKER_MISSING_MARKER}' on its "
+            f"broker VM, so it almost certainly has no container runtime: the payload runs "
+            f"as far as 'docker run' and dies there, every {_RUNNER_INTERVAL_S} seconds, "
+            f"saying nothing. The bootstrap tries to install one now, which needs the guest "
+            f"to reach either {DOCKER_REPO_HOST} or its own distro repository. Install a "
+            f"container runtime on the broker VM and re-bake the template to fix it for "
+            f"every POV.")
 
 
 def _adapter(build: PovTemplateBuild):
