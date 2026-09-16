@@ -37,6 +37,8 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SVC = os.path.join(_ROOT, "web_dashboard", "services", "ot_service.py")
 _API = os.path.join(_ROOT, "web_dashboard", "api", "ot.py")
 _AZURE_VM = os.path.join(_ROOT, "web_dashboard", "services", "azure_vm_service.py")
+_AWS_VM = os.path.join(_ROOT, "web_dashboard", "services", "aws_vm_service.py")
+_GCP_VM = os.path.join(_ROOT, "web_dashboard", "services", "gcp_vm_service.py")
 _PAGES = {cloud: os.path.join(_ROOT, "web_dashboard", "templates", cloud, "index.html")
           for cloud in ("gcp", "aws", "azure")}
 
@@ -214,6 +216,35 @@ def test_a_failed_azure_deploy_keeps_its_partial_result():
     for call in ('set_failed(db, job_id, str(e), result)',
                  "set_failed(db, job_id, f'Unexpected error: {e}', result)"):
         assert call in src, f"the deploy's failure path must persist `result`: {call}"
+
+
+def test_no_cloud_deploy_runner_fails_empty_handed():
+    """All four runners acquire regional resources BEFORE the instance, so every
+    failure path has to persist what the run took. The shapes differ — Azure and
+    GCP hand `set_failed` an explicit dict, AWS accumulates into `result` — so
+    this asserts the property (no `set_failed` in a deploy runner without a
+    fourth argument) rather than a spelling."""
+    for path in (_AZURE_VM, _AWS_VM, _GCP_VM):
+        src = _fn_src(path, "_run_deploy")
+        for node in ast.walk(ast.parse(src)):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "set_failed"):
+                assert len(node.args) >= 4, (
+                    f"{os.path.basename(path)} _run_deploy: "
+                    f"`{ast.unparse(node)}` drops the partial result")
+
+
+def test_gcp_can_still_see_its_gateway_when_the_launch_never_returned():
+    """GCP's leak is the sharpest of the three: in PAIRED mode the Gateway is a
+    dedicated `bt-jumpoint-<vm>` VM this deploy OWNS, and `_run_destroy` finds it
+    by the `jumpoint_name` KEY on the deploy row — not by a reference count. The
+    dict it is normally recorded into (`final_meta`) is built only after the
+    launch returns, so both it and `nat_name` have to be reachable from the
+    handler, which means bound before the `try`."""
+    src = _fn_src(_GCP_VM, "_run_deploy")
+    assert "nat_name = None" in src.split("try:")[0], \
+        "nat_name must be bound before the try, or the failure path cannot read it"
+    assert "jp.record(partial)" in src
 
 
 # ── the card ──────────────────────────────────────────────────────────────────
