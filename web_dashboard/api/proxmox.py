@@ -220,7 +220,7 @@ async def _run_import(job_id: str, connection_id: str, req: ImportImageRequest):
 
 
 @router.post("/import-image", dependencies=[Depends(require_permission("proxmox", "write"))])
-async def import_image(
+def import_image(
     payload: ImportImageRequest,
     background_tasks: BackgroundTasks,
     connection_id: str = "",
@@ -279,7 +279,7 @@ async def _run_deploy(job_id: str, connection_id: str, req: DeployRequest):
 
 
 @router.post("/deploy", dependencies=[Depends(require_permission("proxmox", "write"))])
-async def deploy(
+def deploy(
     payload: DeployRequest,
     background_tasks: BackgroundTasks,
     connection_id: str = "",
@@ -326,7 +326,7 @@ async def _run_delete(job_id: str, connection_id: str, node: str, vmid: int, vm_
 
 
 @router.delete("/vms/{node}/{vmid}", dependencies=[Depends(require_permission("proxmox", "delete"))])
-async def delete_vm(
+def delete_vm(
     node: str,
     vmid: int,
     vm_type: str = "qemu",

@@ -38,7 +38,7 @@ router = APIRouter(prefix="/api/mfa", tags=["mfa"])
 # ---------------------------------------------------------------------------
 
 @router.post("/register/begin", response_model=Fido2RegisterBeginResponse)
-async def register_begin(
+def register_begin(
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -79,7 +79,7 @@ async def register_begin(
 # ---------------------------------------------------------------------------
 
 @router.post("/register/complete", response_model=Fido2CredentialResponse)
-async def register_complete(
+def register_complete(
     body: Fido2RegisterCompleteRequest,
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -140,7 +140,7 @@ async def register_complete(
 # ---------------------------------------------------------------------------
 
 @router.get("/credentials", response_model=List[Fido2CredentialResponse])
-async def list_credentials(
+def list_credentials(
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -168,7 +168,7 @@ async def list_credentials(
 # ---------------------------------------------------------------------------
 
 @router.delete("/credentials/{credential_id}", status_code=204)
-async def delete_credential(
+def delete_credential(
     credential_id: str,
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),

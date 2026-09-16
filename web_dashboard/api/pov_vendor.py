@@ -95,7 +95,7 @@ def _refusal(exc: Exception) -> HTTPException:
 
 
 @router.get("/managed/{env_id}/vendor")
-async def vendor_state(env_id: str, db: Session = Depends(get_db),
+def vendor_state(env_id: str, db: Session = Depends(get_db),
                        current_user: User = Depends(get_current_user)):
     """This POV's vendor group and its live logins. No network calls, never a password."""
     env = _env_or_404(db, env_id)

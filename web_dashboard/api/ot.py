@@ -242,7 +242,7 @@ async def delete_tunnel(
 # only sees a parent and its child when both create_job calls sit in one function.
 
 @router.post("/cell", response_model=OTCellDeployResponse)
-async def deploy_cell(
+def deploy_cell(
     payload: OTCellDeployRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("gcp", "write")),
@@ -357,7 +357,7 @@ async def deploy_cell(
 
 
 @router.post("/cell/aws", response_model=OTCellDeployResponse)
-async def deploy_cell_aws(
+def deploy_cell_aws(
     payload: OTCellDeployRequestAWS,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("aws", "write")),
@@ -577,7 +577,7 @@ async def deploy_cell_azure(
 
 
 @router.post("/cell/{vm_job_id}/rewire")
-async def rewire_cell(
+def rewire_cell(
     vm_job_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("ot", "write")),
@@ -720,7 +720,7 @@ async def clear_cell(
 
 
 @router.get("/cells", response_model=OTCellListResponse)
-async def list_cells(
+def list_cells(
     cloud: str = "gcp",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),

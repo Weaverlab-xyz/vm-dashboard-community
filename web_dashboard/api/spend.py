@@ -89,7 +89,7 @@ def _cappable(job: Job) -> tuple:
 
 
 @router.get("/{job_id}")
-async def read_cap(
+def read_cap(
     job_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -108,7 +108,7 @@ async def read_cap(
 
 
 @router.put("/{job_id}")
-async def set_cap(
+def set_cap(
     job_id: str,
     payload: CapRequest,
     db: Session = Depends(get_db),
@@ -159,7 +159,7 @@ async def set_cap(
 
 
 @router.delete("/{job_id}")
-async def clear_cap(
+def clear_cap(
     job_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
