@@ -7,7 +7,10 @@
      * Groups -- identity-provider group mappings, which provision users on first login and
                  confer a workgroup, a role and a permission set (/api/groups);
      * Roles  -- the named, reusable permission maps the other two tabs assign
-                 (/api/roles).
+                 (/api/roles);
+     * Workgroups -- the OTHER axis: which objects a principal may act on, as opposed to
+                 which actions they may take (/api/workgroups). The only tab here that a
+                 non-admin can reach -- see rbacPage()'s per-tab gate.
 
    USERS AND GROUPS WERE TWO PAGES AND ARE NOT ANY MORE, because a person's effective
    access is the UNION of what both of them say. Answering "what can this user do?" meant
@@ -49,10 +52,17 @@
 {# The tab list, computed here rather than inside `content` so the <title> can see it too:
    a top-level `set` in a child template is visible to every block. #}
 {% set tabs = [
-     {'slug': 'users',  'label': 'Users'},
-     {'slug': 'groups', 'label': 'Groups'},
-     {'slug': 'roles',  'label': 'Roles'}] %}
+     {'slug': 'users',      'label': 'Users',      'admin': true},
+     {'slug': 'groups',     'label': 'Groups',     'admin': true},
+     {'slug': 'roles',      'label': 'Roles',      'admin': true},
+     {'slug': 'workgroups', 'label': 'Workgroups', 'admin': false}] %}
 {% set tab_slugs = tabs | map(attribute='slug') | list %}
+{# The tabs that answer only to the admin flag. Workgroups is deliberately NOT among them:
+   7 of the 8 /api/workgroups routes are gated on the grantable `workgroups` scope, and the
+   standalone page it replaced had no admin check at all, so a non-admin holding
+   `workgroups:read` could always use it. rbacPage() gates per TAB for that reason -- a
+   page-level admin check would have silently revoked access that already existed. #}
+{% set admin_slugs = tabs | selectattr('admin') | map(attribute='slug') | list %}
 
 {% block title %}RBAC{% endblock %}
 
@@ -72,20 +82,22 @@
         `or ''` on the second argument because |tojson on an Undefined raises: a route that
         forgot the key would take the whole page down rather than simply opening on the
         first tab. #}
-     x-data='rbacPage({{ tab_slugs | tojson }}, {{ (initial_tab or "") | tojson }})'
+     x-data='rbacPage({{ tab_slugs | tojson }}, {{ (initial_tab or "") | tojson }}, {{ admin_slugs | tojson }})'
      x-init="init()">
 
   <h1 class="text-2xl font-bold text-gray-900 mb-1">RBAC</h1>
   <p class="text-sm text-gray-500 mb-6">
-    Who can use this dashboard, and what they may do with it. A <strong>role</strong> is a
-    named set of permissions you assign to a person or to a group from your identity
-    provider; the per-user grid stays available on top of it for the one-off case.
+    Who can use this dashboard, what they may do, and which resources they may do it to.
+    A <strong>role</strong> is a named set of permissions you assign to a person or to a
+    group from your identity provider; a <strong>workgroup</strong> is the other axis, and
+    decides which VMs, databases and clusters they can see at all.
     <a href="/docs/permissions" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>.
   </p>
 
   <div class="border-b border-gray-200 mb-6 flex flex-wrap gap-1" role="tablist" aria-label="RBAC sections">
     {% for tab in tabs %}
     <button @click="select('{{ tab.slug }}')" role="tab" type="button"
+            {% if tab.admin %}x-show="$store.auth.isAdmin"{% endif %}
             :aria-selected="activeTab === '{{ tab.slug }}' ? 'true' : 'false'"
             :class="activeTab === '{{ tab.slug }}'
                       ? 'border-blue-600 text-blue-700'
@@ -112,6 +124,12 @@
   </div>
   {% endif %}
 
+  {% if 'workgroups' in tab_slugs %}
+  <div x-show="activeTab === 'workgroups'" x-cloak role="tabpanel">
+    {% include "rbac/_workgroups.html" %}
+  </div>
+  {% endif %}
+
 </div>
 {% endblock %}
 
@@ -120,25 +138,32 @@
 // The container. It owns which tab is showing and the page's ONE auth gate, and nothing
 // else -- each tab's state stays in that tab's own component, so they cannot reach each
 // other's data.
-function rbacPage(slugs, initial) {
+function rbacPage(slugs, initial, adminSlugs) {
   return {
     activeTab: '',
-    // The tabs this render actually has, kept so select() can refuse one it does not.
+    // The tabs this VIEWER has, narrowed from the rendered list by init() -- so select()
+    // refuses an admin-only tab for a non-admin as well as one this render lacks.
     slugs: slugs,
 
     init() {
-      // THE SINGLE ADMIN GATE, and the reason it is here rather than in the partials: each
-      // of the three used to be its own page with its own check, and all three components
-      // mount on this one page load. Left in place that is three redirects to / racing each
-      // other, by two different mechanisms -- the old Users page awaited /api/auth/me while
-      // the old Groups page read the store.
+      // THE GATE, and it is per-TAB rather than per-page. Each of these used to be its own
+      // page with its own check, and all four components mount on this one page load; left
+      // in place that is four redirects to / racing each other, by two different mechanisms.
       //
-      // The store is the right source: it costs no request, and the real control is
-      // require_admin on every route this page calls. A client-side check is a convenience
-      // either way -- it stops an ordinary user landing on a page of empty tables and red
-      // toasts, and nothing more.
+      // But a blanket admin check would be a REGRESSION. Users, Groups and Roles answer only
+      // to the admin flag, while 7 of the 8 /api/workgroups routes are gated on the
+      // grantable `workgroups` scope and the standalone Workgroups page had no admin check
+      // at all -- so a non-admin holding `workgroups:read` has always been able to use it.
+      // Redirecting them away from this page would quietly take that away.
+      //
+      // So: a non-admin keeps the tabs that are not admin-only, and is sent home only if
+      // there are none. Whether they actually hold `workgroups:read` is not knowable here --
+      // the panel's own fetch answers that, in place, which is the right shape anyway. As
+      // ever this is a CONVENIENCE: the real control is the dependency on each route.
       requireAuth();
-      if (!Alpine.store('auth').isAdmin) {
+      const isAdmin = Alpine.store('auth').isAdmin;
+      this.slugs = isAdmin ? slugs : slugs.filter(s => !adminSlugs.includes(s));
+      if (!this.slugs.length) {
         window.location.href = '/';
         return;
       }
@@ -146,10 +171,10 @@ function rbacPage(slugs, initial) {
       // Three ways in, in precedence order. The fragment is what a bookmark or a
       // cross-link carries; `initial` is what the ROUTE decided, which is how /groups opens
       // on its own tab without a fragment it never had; then the first tab that exists. A
-      // slug this render does not have falls through to that last case rather than showing a
-      // page with no panel.
+      // slug this render does not have -- including an admin-only one a non-admin asked for
+      // -- falls through to that last case rather than showing a page with no panel.
       const want = (window.location.hash || '').replace(/^#/, '') || initial || '';
-      this.select(slugs.includes(want) ? want : slugs[0], false);
+      this.select(this.slugs.includes(want) ? want : this.slugs[0], false);
     },
 
     select(slug, push = true) {

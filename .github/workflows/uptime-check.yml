@@ -1,0 +1,127 @@
+# External availability check for a hosted dashboard instance.
+#
+# Why this exists rather than an Azure Monitor alert: the SE-Prod subscription has
+# Microsoft.Insights UNREGISTERED and the account cannot register it
+# ("AuthorizationFailed ... Microsoft.Insights/register/action"), so no Azure metric
+# alert, action group or availability test can be created there at all. GitHub's
+# scheduler needs no Azure permissions.
+#
+# What it is tuned to catch, from the 2026-09-16 pov.weaverlab.app outage: the app did
+# not return errors, it **stopped answering**. Every path hung until the 240s Azure
+# ingress timeout, including /api/health, which does no I/O. So the signal is a
+# TIMEOUT, not a status code -- hence an explicit --max-time well below 240s. A check
+# without one would sit there for four minutes and then look like a slow network.
+#
+# Setup (both are repository-level, Settings -> Secrets and variables -> Actions):
+#   secret POV_BASE_URL        e.g. https://pov.weaverlab.app  (a secret, not a var:
+#                              this repo is public and there is no reason to publish
+#                              which hosts are being watched)
+#   secret UPTIME_WEBHOOK_URL  Slack incoming webhook, or a Teams workflow/connector
+#                              URL. Optional -- without it the job just fails, which
+#                              still shows up in GitHub notifications.
+# With POV_BASE_URL unset the job exits successfully and does nothing, so a fork or a
+# clone never spams anyone.
+
+name: Uptime check
+
+on:
+  schedule:
+    # Every 10 minutes. GitHub's cron is best-effort and runs only on the default
+    # branch, so this does nothing until it is merged to main.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+# Never let a slow run overlap the next tick.
+concurrency:
+  group: uptime-check
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe the instance
+        id: probe
+        env:
+          BASE_URL: ${{ secrets.POV_BASE_URL }}
+        run: |
+          set -uo pipefail
+
+          if [ -z "${BASE_URL:-}" ]; then
+            echo "POV_BASE_URL is not set; nothing to check."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
+          # /api/health proves the event loop is alive (it does no I/O, so it can only
+          # be slow if the loop itself is blocked). /login proves the authenticated
+          # stack renders -- templates and config reads. A gateway-level CIDR block
+          # answers a FAST 404 rather than hanging, which the status check catches.
+          PATHS="/api/health /login"
+
+          # Retry before crying wolf: a single miss can be a cold start or a deploy.
+          # Three attempts, 20s apart, and only a clean sweep of failures reports down.
+          FAILED=""
+          for attempt in 1 2 3; do
+            FAILED=""
+            for path in $PATHS; do
+              # curl -w already prints 000 when it never got a response, so do NOT add
+              # an `|| echo timeout` here: the two would concatenate into "000timeout".
+              # `|| true` only stops curl's non-zero exit from ending the step.
+              code=$(curl -s -o /dev/null -w "%{http_code}" \
+                          --max-time 20 "${BASE_URL}${path}") || true
+              [ -z "$code" ] && code="000"
+              if [ "$code" = "000" ]; then
+                printf 'attempt %s  %-14s -> no response (hang or refused)\n' "$attempt" "$path"
+                FAILED="${FAILED}${path} did not respond within 20s; "
+              elif [ "$code" != "200" ]; then
+                printf 'attempt %s  %-14s -> HTTP %s\n' "$attempt" "$path" "$code"
+                FAILED="${FAILED}${path} returned HTTP ${code}; "
+              else
+                printf 'attempt %s  %-14s -> HTTP 200\n' "$attempt" "$path"
+              fi
+            done
+            [ -z "$FAILED" ] && break
+            [ "$attempt" -lt 3 ] && sleep 20
+          done
+
+          if [ -n "$FAILED" ]; then
+            echo "detail=$FAILED" >> "$GITHUB_OUTPUT"
+            echo "::error::Instance is not healthy after 3 attempts: $FAILED"
+            exit 1
+          fi
+          echo "All probes returned 200."
+
+      - name: Notify the webhook
+        # Runs only on a real failure, and never when the check was skipped.
+        if: failure() && steps.probe.outputs.configured == 'true'
+        env:
+          WEBHOOK: ${{ secrets.UPTIME_WEBHOOK_URL }}
+          DETAIL: ${{ steps.probe.outputs.detail }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          if [ -z "${WEBHOOK:-}" ]; then
+            echo "No UPTIME_WEBHOOK_URL set; the failed job is the only signal."
+            exit 0
+          fi
+          # {"text": ...} is the one shape both Slack incoming webhooks and Teams
+          # connectors accept. A Teams *Workflows* endpoint may want an Adaptive Card
+          # instead; if this posts but nothing appears in the channel, that is why.
+          #
+          # The message deliberately does NOT include the URL that was probed: the
+          # webhook already identifies the instance to whoever receives it, and the
+          # run log is private to the repo's collaborators.
+          printf '{"text":%s}\n' \
+            "$(printf 'Dashboard uptime check FAILED: %s See %s' \
+                      "${DETAIL:-no detail}" "$RUN_URL" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')" \
+            > payload.json
+          curl -sS -X POST -H 'Content-Type: application/json' \
+               --max-time 20 --data @payload.json "$WEBHOOK" \
+            && echo "Webhook notified." \
+            || echo "Webhook POST failed; the failed job is still the signal."

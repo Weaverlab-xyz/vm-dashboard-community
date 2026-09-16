@@ -133,13 +133,20 @@ def test_the_catalog_and_its_list_form_agree():
 _NAV_EXEMPT = {
     # Gating the home page locks every user out of the dashboard.
     "dashboard": "aggregate landing page",
-    # A grantable scope on this IS privilege escalation: it administers identity. One page,
-    # three tabs (Users / identity-provider Groups / access Roles) -- and anyone who can edit
-    # a user, or a role a user holds, can make themselves an administrator. The prose twin of
-    # this entry is the "Scopes that are deliberately not grantable" section of
-    # docs/permissions.md; the two must keep saying the same thing.
-    "rbac": "identity administration (require_admin)",
-    "workgroups": "has the `workgroups` scope already",
+    # ONE nav link over FOUR tabs, and they do not share a gate -- which is why this sits
+    # here rather than in _NAV_SCOPE below.
+    #
+    # Users / Groups / Roles administer IDENTITY and answer only to the admin flag: a
+    # grantable scope on them would BE privilege escalation, since anyone who can edit a
+    # user, or a role a user holds, can make themselves an administrator. Workgroups is the
+    # object axis and DOES have a scope (`workgroups`, on 7 of its 8 routes) -- so keying
+    # this section on that scope would be the opposite error, implying the identity tabs are
+    # grantable when they must never be.
+    #
+    # The prose twin of this entry is the "Scopes that are deliberately not grantable"
+    # section of docs/permissions.md; the two must keep saying the same thing.
+    "rbac": "identity administration (require_admin); its Workgroups tab has the "
+            "`workgroups` scope",
     # Reads the POV API, so `pov:read` already governs what it can show.
     "use_cases": "renders /api/pov/managed, governed by pov:read",
     # Vault administration stays on the admin flag; `secrets` is the `use` level only.
@@ -490,7 +497,7 @@ def test_the_shared_rbac_context_is_the_one_source_of_the_level_map():
         "_rbac_context must not inject the workgroup list: it is operator configuration "
         "on an anonymously-readable page. The tabs fetch /api/groups/workgroups instead")
 
-    for path in ("/rbac", "/users", "/groups"):
+    for path in ("/rbac", "/users", "/groups", "/workgroups"):
         marker = '@app.get("%s", response_class=HTMLResponse' % path
         assert marker in src, "%s is not an HTML page route" % path
         body = src.split(marker, 1)[1].split("@app.get(", 1)[0]

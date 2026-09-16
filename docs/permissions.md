@@ -7,7 +7,7 @@ Two independent questions, and keeping them apart is the whole model:
 | Question | Answered by | Where |
 |---|---|---|
 | What may this user **do**? | a **role**, or a **scope** and a **level** | RBAC &rarr; Users / Groups / Roles |
-| Which **objects** may they do it to? | a workgroup tag, or a POV grant | Workgroups; the POV access picker |
+| Which **objects** may they do it to? | a workgroup tag, or a POV grant | RBAC &rarr; Workgroups; the POV access picker |
 
 A scope is a feature area — roughly one per section in the navigation. A level is
 `read`, `write`, `delete` or `use`. A grant is a scope plus a level: `pov:read`,
@@ -216,7 +216,8 @@ Some things answer only to the **Admin** flag, because a grantable version of th
 a way to become an administrator:
 
 - **RBAC (Users, Groups, Roles)** — anyone who can edit a user, or a role a user
-  holds, can make themselves admin.
+  holds, can make themselves admin. The fourth tab, **Workgroups**, is the exception: it
+  scopes *objects* rather than actions, so it has a grantable `workgroups` scope.
 - **Settings / first-run setup**, and the **secret vault registry**.
 - **Worker concurrency and preflight**, which are instance-wide plumbing.
 
@@ -234,14 +235,20 @@ A scope says *what*, not *which*. Two mechanisms narrow the *which*:
 
 - **Workgroups** tag resources and users; the cloud, container, Databases and Kubernetes
   lists show you the rows whose workgroup you are in. Untagged resources are visible to
-  whoever deployed them.
+  whoever deployed them. They live on the **RBAC &rarr; Workgroups** tab, beside the
+  permission tabs, because the two answer the two halves of the same question.
+
+  Unlike the other RBAC tabs, Workgroups is **not admin-only**: it has a real `workgroups`
+  scope, so a user granted `workgroups:read` sees that tab and nothing else on the page.
+  Deleting a workgroup still needs the Admin flag.
 - **POV access** narrows the POV pages to named environments, as described above.
 
-That second sentence is the whole rule, and it is worth reading twice: a workgroup is a
-property of the **row**, not of the page. A cloud database or Kubernetes cluster carries one
-only once somebody assigns it — at creation, or later with the admin-only **Workgroup**
-button on [Databases](databases.md) / [Kubernetes](kubernetes.md). Until then the row is
-creator-scoped, which is why adding the field granted and revoked nothing on upgrade.
+"Untagged resources are visible to whoever deployed them" is the whole rule, and it is
+worth reading twice: a workgroup is a property of the **row**, not of the page. A cloud
+database or Kubernetes cluster carries one only once somebody assigns it — at creation, or
+later with the admin-only **Workgroup** button on [Databases](databases.md) /
+[Kubernetes](kubernetes.md). Until then the row is creator-scoped, which is why adding the
+field granted and revoked nothing on upgrade.
 
 Tagging a row widens what its workgroup can **do** to it, not only what they can see: the
 list, every by-id action, a Configuration Management run against it, and its auto-delete

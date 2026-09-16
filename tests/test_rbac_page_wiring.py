@@ -27,7 +27,7 @@ sys.path.insert(0, _ROOT)
 
 _TPL = os.path.join(_ROOT, "web_dashboard", "templates")
 _RBAC = os.path.join(_TPL, "rbac")
-_PANELS = ("_users.html", "_groups.html", "_roles.html")
+_PANELS = ("_users.html", "_groups.html", "_roles.html", "_workgroups.html")
 
 
 def _read(*parts):
@@ -63,7 +63,8 @@ def test_the_standalone_users_and_groups_templates_are_deleted():
     without the shared admin gate. It would also keep every repointed assertion below green
     while checking nothing.
     """
-    for rel in (("users", "list.html"), ("groups", "index.html")):
+    for rel in (("users", "list.html"), ("groups", "index.html"),
+                ("workgroups", "index.html")):
         assert not os.path.exists(os.path.join(_TPL, *rel)), (
             "templates/%s is back — two entry surfaces for one page is what this "
             "consolidation removed" % "/".join(rel))
@@ -73,14 +74,16 @@ def test_no_route_renders_a_deleted_template():
     src = _main()
     # Quote-bounded on purpose: a bare substring test for "groups/index.html" also matches
     # "workgroups/index.html", which is a live page, and reports it as a deleted one.
-    for gone in ('"users/list.html"', '"groups/index.html"'):
+    for gone in ('"users/list.html"', '"groups/index.html"',
+                 '"workgroups/index.html"'):
         assert gone not in src, "main.py still renders %s" % gone
 
 
 # ── three routes, one template, no gate ───────────────────────────────────────
 
 def test_all_three_routes_render_the_page_on_the_right_tab():
-    for path, tab in (("/rbac", "users"), ("/users", "users"), ("/groups", "groups")):
+    for path, tab in (("/rbac", "users"), ("/users", "users"), ("/groups", "groups"),
+                      ("/workgroups", "workgroups")):
         body = _route_body(path)
         assert "rbac/index.html" in body, "%s does not render the RBAC page" % path
         assert '_rbac_context(request, "%s")' % tab in body, (
@@ -102,7 +105,7 @@ def test_every_initial_tab_is_a_tab_the_container_can_render():
 def test_the_legacy_paths_are_real_routes_and_not_redirects():
     """Runbooks and the single-sign-on settings panel print /users and /groups as things to
     open, and a 301 cannot carry a query string."""
-    for path in ("/users", "/groups"):
+    for path in ("/users", "/groups", "/workgroups"):
         body = _route_body(path)
         assert "RedirectResponse" not in body, "%s became a redirect" % path
         assert "status_code=30" not in body, "%s returns a 3xx" % path
@@ -112,7 +115,7 @@ def test_the_rbac_routes_are_deliberately_ungated():
     """Identity administration exists on every install, so there is no flag to hide it
     behind -- and no grantable scope either, because anyone who can edit a user or a role
     can make themselves an administrator."""
-    for path in ("/rbac", "/users", "/groups"):
+    for path in ("/rbac", "/users", "/groups", "/workgroups"):
         body = _route_body(path)
         assert "_feature_gate" not in body, "%s grew a feature gate" % path
         assert "_profile_page_gate" not in body, "%s grew a profile gate" % path
@@ -159,9 +162,9 @@ def test_the_role_list_is_not_rendered_into_the_page():
 
 # ── the container ─────────────────────────────────────────────────────────────
 
-def test_the_container_declares_all_three_tabs():
+def test_the_container_declares_every_tab():
     hub = _hub()
-    for slug in ("users", "groups", "roles"):
+    for slug in ("users", "groups", "roles", "workgroups"):
         assert "activeTab === '%s'" % slug in hub, "no panel for the %s tab" % slug
         assert 'rbac/_%s.html' % slug in hub, "the %s panel is not included" % slug
 
@@ -180,7 +183,7 @@ def test_every_panel_toggles_with_x_show_not_x_if():
     """A script tag inside an x-if template is CLONED rather than executed, so lazy-mounting
     a panel that way leaves a dead x-data and no error anywhere."""
     hub = _hub()
-    for slug in ("users", "groups", "roles"):
+    for slug in ("users", "groups", "roles", "workgroups"):
         m = re.search(r"<div ([^>]*activeTab === '%s'[^>]*)>" % slug, hub)
         assert m, "could not find the %s panel wrapper" % slug
         attrs = m.group(1)
@@ -198,6 +201,51 @@ def test_the_container_owns_the_only_admin_gate():
         "expected exactly one redirect-to-root across the RBAC page, found %d — see the "
         "gate in rbacPage()" % total)
     assert "window.location.href = '/'" in _hub(), "the one gate is not in the container"
+
+
+def test_the_gate_is_per_tab_so_a_non_admin_keeps_workgroups():
+    """A page-level admin check here would REVOKE access that already exists.
+
+    Users / Groups / Roles answer only to the admin flag. Workgroups does not: 7 of the 8
+    /api/workgroups routes are gated on the grantable `workgroups` scope, and the standalone
+    page it replaced had no admin redirect at all -- so a non-admin holding `workgroups:read`
+    has always been able to open it by typing the path. Folding that page into an
+    admin-gated one would have taken it away silently, which is the regression this pins.
+    """
+    hub = _hub()
+
+    # The tab list must mark which tabs are admin-only, and Workgroups must not be one.
+    assert "'admin': true" in hub and "'admin': false" in hub, (
+        "the tab list no longer records which tabs are admin-only")
+    wg = re.search(r"\{'slug': 'workgroups'.*?\}", hub)
+    assert wg and "'admin': false" in wg.group(0), (
+        "the Workgroups tab is marked admin-only, which locks out a non-admin who holds "
+        "workgroups:read")
+    for slug in ("users", "groups", "roles"):
+        m = re.search(r"\{'slug': '%s'.*?\}" % slug, hub)
+        assert m and "'admin': true" in m.group(0), (
+            "the %s tab is not marked admin-only, but it administers identity" % slug)
+
+    # The component must narrow the tab list rather than redirect outright.
+    init = hub.split("init() {", 1)[1].split("\n    },", 1)[0]
+    assert "adminSlugs" in init, "rbacPage does not receive the admin-only tab list"
+    assert "filter(" in init, (
+        "rbacPage still redirects a non-admin instead of narrowing their tabs")
+    assert "if (!this.slugs.length)" in init, (
+        "a viewer with no reachable tab is not sent home")
+
+    # And the admin-only tab buttons and panels must hide for a non-admin.
+    assert hub.count('x-show="$store.auth.isAdmin"') >= 1, (
+        "the admin-only tab buttons are always rendered")
+
+
+def test_the_workgroups_tab_has_no_permission_grid():
+    """Its axis is OBJECTS, not scopes. A permission matrix here would conflate the two
+    questions the page exists to keep apart."""
+    src = _panel("_workgroups.html")
+    code = re.sub(r"\{#.*?#\}", "", src, flags=re.S)
+    assert "permission_matrix" not in code, (
+        "the Workgroups tab grew a permission grid; workgroups scope OBJECTS, not actions")
 
 
 def test_the_container_owns_the_only_scripts_block():
@@ -328,21 +376,25 @@ def test_one_nav_link_lights_on_all_three_paths():
     m = re.search(r'data-nav="rbac".*?>RBAC</a>', nav, re.S)
     assert m, "could not read the RBAC nav anchor"
     anchor = m.group(0)
-    for path in ("/rbac", "/users", "/groups"):
+    for path in ("/rbac", "/users", "/groups", "/workgroups"):
         assert "'%s'" % path in anchor, (
             "the RBAC link does not light on %s, so an admin who followed a runbook there "
             "has no lit link and reads as 'you are nowhere'" % path)
 
 
 def test_the_old_nav_links_are_gone():
-    """One link, not two. The Agents precedent keeps a second row for non-admins because its
-    Connections tab is governed by the `connections` SCOPE; both rows here were admin-only
-    with no flag and no scope, so no viewer reaches one tab and not the other."""
+    """ONE link over four tabs.
+
+    Agents/Connections keeps a second nav row for non-admins because its Connections tab is
+    governed by the `connections` scope. This page needs none even though its Workgroups tab
+    is likewise scope-governed, and the reason is worth recording: the old Workgroups LINK
+    was itself `x-show="$store.auth.isAdmin"`, so a non-admin never had it -- they reached
+    that page by typing the path. That still works, and rbacPage()'s per-tab gate is what
+    keeps it working.
+    """
     nav = _read("web_dashboard", "templates", "_nav_links.html")
-    for gone in ('data-nav="users"', 'data-nav="groups"'):
+    for gone in ('data-nav="users"', 'data-nav="groups"', 'data-nav="workgroups"'):
         assert gone not in nav, "%s is still in the nav" % gone
-    assert 'data-nav="workgroups"' in nav, (
-        "the Workgroups link disappeared — it is a separate page from RBAC today")
 
 
 def test_the_security_persona_pins_the_merged_link():
