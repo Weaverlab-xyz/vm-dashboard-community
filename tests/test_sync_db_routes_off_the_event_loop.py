@@ -24,6 +24,17 @@ this sweep started. It is the majority pattern for the same work.
 **A route is exempt if it genuinely awaits something.** Those need the sync DB work moved
 off-loop instead (``run_in_threadpool`` or a service-level executor), which is a real
 change rather than dropping a keyword, so this sweep does not cover them.
+
+**Before converting a batch, grep the tests for the literal ``async def <name>(``.** A
+number of tests in this suite slice a function body out of the source with
+``src.split("async def foo(")[1]``, and dropping the keyword makes that raise
+``IndexError`` from a test that looks unrelated to the change. Known live example:
+``tests/test_pov_instance_grants.py`` does this to ``api/users.py::update_user``, and
+``tests/test_bt_tenants.py`` to ``verify_tenant`` -- both still in the backlog below, so
+whoever converts those files has to update the test in the same commit. Beware the
+false positive too: a test DOUBLE can define a method with the same name as a route
+(``tests/test_pov_add_vms.py`` has ``async def add_vms`` on a fake Skytap adapter), which
+is not a coupling at all. Read every hit before acting on it.
 """
 import ast
 import collections
@@ -59,14 +70,12 @@ NOT_YET_CONVERTED = {
     "web_dashboard/api/gateways.py": 3,
     "web_dashboard/api/gcp.py": 3,
     "web_dashboard/api/images.py": 6,
-    "web_dashboard/api/k8s.py": 25,
     "web_dashboard/api/mfa.py": 4,
     "web_dashboard/api/notifications.py": 6,
     "web_dashboard/api/nutanix.py": 4,
     "web_dashboard/api/oci.py": 1,
     "web_dashboard/api/ot.py": 4,
     "web_dashboard/api/packer.py": 3,
-    "web_dashboard/api/pov.py": 25,
     "web_dashboard/api/pov_accessor.py": 9,
     "web_dashboard/api/pov_templates.py": 11,
     "web_dashboard/api/pov_vendor.py": 1,

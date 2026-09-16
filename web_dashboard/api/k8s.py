@@ -58,7 +58,7 @@ def phase1_status() -> dict:
 
 
 @router.get("/clusters")
-async def list_clusters(
+def list_clusters(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "read")),
 ):
@@ -74,7 +74,7 @@ async def list_clusters(
 
 
 @router.post("/clusters", status_code=201)
-async def register_cluster(
+def register_cluster(
     payload: ClusterRegisterRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "write")),
@@ -91,7 +91,7 @@ async def register_cluster(
 
 
 @router.post("/clusters/provision", status_code=202)
-async def provision_cluster(
+def provision_cluster(
     payload: ClusterProvisionRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "write")),
@@ -183,7 +183,7 @@ async def pra_options(
 
 
 @router.get("/clusters/{cluster_id}")
-async def get_cluster(
+def get_cluster(
     cluster_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "read")),
@@ -236,7 +236,7 @@ async def delete_cluster(
 
 
 @router.get("/clusters/{cluster_id}/console")
-async def cluster_console(
+def cluster_console(
     cluster_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "read")),
@@ -276,7 +276,7 @@ async def broker_access(
 
 
 @router.post("/clusters/{cluster_id}/tunnel", status_code=202)
-async def register_tunnel(
+def register_tunnel(
     cluster_id: str,
     payload: BrokerAccessRequest = BrokerAccessRequest(),
     db: Session = Depends(get_db),
@@ -306,7 +306,7 @@ async def register_tunnel(
 
 
 @router.delete("/clusters/{cluster_id}/tunnel", status_code=202)
-async def remove_tunnel(
+def remove_tunnel(
     cluster_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "delete")),
@@ -327,7 +327,7 @@ async def remove_tunnel(
 
 
 @router.post("/clusters/{cluster_id}/api-tunnel", status_code=202)
-async def register_api_tunnel(
+def register_api_tunnel(
     cluster_id: str,
     payload: BrokerAccessRequest = BrokerAccessRequest(),
     db: Session = Depends(get_db),
@@ -357,7 +357,7 @@ async def register_api_tunnel(
 
 
 @router.delete("/clusters/{cluster_id}/api-tunnel", status_code=202)
-async def remove_api_tunnel(
+def remove_api_tunnel(
     cluster_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "delete")),
@@ -377,7 +377,7 @@ async def remove_api_tunnel(
 
 
 @router.get("/clusters/{cluster_id}/api-tunnel-kubeconfig")
-async def api_tunnel_kubeconfig(
+def api_tunnel_kubeconfig(
     cluster_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "read")),
@@ -402,7 +402,7 @@ async def api_tunnel_kubeconfig(
 
 
 @router.post("/clusters/{cluster_id}/entra-group", status_code=202)
-async def bind_entra_group(
+def bind_entra_group(
     cluster_id: str,
     payload: EntraGroupRequest = EntraGroupRequest(),
     db: Session = Depends(get_db),
@@ -428,7 +428,7 @@ async def bind_entra_group(
 
 
 @router.delete("/clusters/{cluster_id}/entra-group", status_code=202)
-async def unbind_entra_group(
+def unbind_entra_group(
     cluster_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "delete")),
@@ -448,7 +448,7 @@ async def unbind_entra_group(
 
 
 @router.post("/clusters/{cluster_id}/impersonator", status_code=202)
-async def apply_impersonator(
+def apply_impersonator(
     cluster_id: str,
     payload: ImpersonatorRequest = ImpersonatorRequest(),
     db: Session = Depends(get_db),
@@ -479,7 +479,7 @@ async def apply_impersonator(
 
 
 @router.delete("/clusters/{cluster_id}/impersonator", status_code=202)
-async def remove_impersonator(
+def remove_impersonator(
     cluster_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "delete")),
@@ -502,7 +502,7 @@ async def remove_impersonator(
 
 
 @router.post("/clusters/{cluster_id}/entra-federation", status_code=202)
-async def enable_entra_federation(
+def enable_entra_federation(
     cluster_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "write")),
@@ -526,7 +526,7 @@ async def enable_entra_federation(
 
 
 @router.delete("/clusters/{cluster_id}/entra-federation", status_code=202)
-async def disable_entra_federation(
+def disable_entra_federation(
     cluster_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "delete")),
@@ -547,7 +547,7 @@ async def disable_entra_federation(
 
 
 @router.get("/clusters/{cluster_id}/entra-kubeconfig")
-async def entra_kubeconfig(
+def entra_kubeconfig(
     cluster_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "read")),
@@ -571,7 +571,7 @@ async def entra_kubeconfig(
 
 
 @router.post("/clusters/{cluster_id}/management", status_code=202)
-async def launch_management(
+def launch_management(
     cluster_id: str,
     payload: ManagementRequest,
     db: Session = Depends(get_db),
@@ -596,7 +596,7 @@ async def launch_management(
 
 
 @router.post("/clusters/{cluster_id}/secret-delivery", status_code=202)
-async def setup_secret_delivery(
+def setup_secret_delivery(
     cluster_id: str,
     payload: SecretDeliveryRequest,
     db: Session = Depends(get_db),
@@ -626,7 +626,7 @@ async def setup_secret_delivery(
 
 
 @router.post("/clusters/{cluster_id}/ps-token", status_code=202)
-async def register_ps_token(
+def register_ps_token(
     cluster_id: str,
     payload: PSTokenRegisterRequest,
     db: Session = Depends(get_db),
@@ -672,7 +672,7 @@ async def register_ps_token(
 
 
 @router.delete("/clusters/{cluster_id}/ps-token", status_code=202)
-async def remove_ps_token(
+def remove_ps_token(
     cluster_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "delete")),
@@ -691,7 +691,7 @@ async def remove_ps_token(
 
 
 @router.post("/clusters/{cluster_id}/ps-token/rotate", status_code=202)
-async def rotate_ps_token(
+def rotate_ps_token(
     cluster_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "write")),
@@ -743,7 +743,7 @@ async def ps_token_status(
 
 
 @router.post("/clusters/{cluster_id}/entitle-agent", status_code=202)
-async def setup_entitle_agent(
+def setup_entitle_agent(
     cluster_id: str,
     payload: EntitleAgentRequest,
     db: Session = Depends(get_db),
@@ -772,7 +772,7 @@ async def setup_entitle_agent(
 
 
 @router.post("/clusters/{cluster_id}/entitle-register", status_code=202)
-async def register_cluster_in_entitle(
+def register_cluster_in_entitle(
     cluster_id: str,
     payload: EntitleClusterRegisterRequest,
     db: Session = Depends(get_db),
@@ -801,7 +801,7 @@ async def register_cluster_in_entitle(
 
 
 @router.post("/rancher/entitle-register", status_code=202)
-async def register_rancher_node_in_entitle(
+def register_rancher_node_in_entitle(
     payload: EntitleClusterRegisterRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "write")),
