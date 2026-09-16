@@ -42,7 +42,7 @@ def phase0_status() -> dict:
 
 
 @router.get("")
-async def list_desktops(
+def list_desktops(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
@@ -51,7 +51,7 @@ async def list_desktops(
 
 
 @router.get("/pools")
-async def list_pools(
+def list_pools(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
@@ -261,7 +261,7 @@ async def create_pool(
 
 
 @router.post("/pools/{name}/scale")
-async def scale_pool(
+def scale_pool(
     name: str,
     payload: PoolScaleRequest,
     db: Session = Depends(get_db),
@@ -292,7 +292,7 @@ async def scale_pool(
 
 
 @router.delete("/pools/{name}")
-async def delete_pool(
+def delete_pool(
     name: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
@@ -314,7 +314,7 @@ async def delete_pool(
 
 
 @router.get("/pools/{name}/seats")
-async def list_pool_seats(
+def list_pool_seats(
     name: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
@@ -325,7 +325,7 @@ async def list_pool_seats(
 
 
 @router.get("/seats/{seat_id}/session")
-async def open_seat_session(
+def open_seat_session(
     seat_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),

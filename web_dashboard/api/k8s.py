@@ -865,7 +865,7 @@ class _WorkgroupReassignRequest(BaseModel):
 
 
 @router.patch("/clusters/{cluster_id}/workgroup")
-async def reassign_cluster_workgroup(
+def reassign_cluster_workgroup(
     cluster_id: str,
     req: _WorkgroupReassignRequest,
     db: Session = Depends(get_db),

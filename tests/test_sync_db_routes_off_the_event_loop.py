@@ -33,8 +33,28 @@ number of tests in this suite slice a function body out of the source with
 ``tests/test_bt_tenants.py`` to ``verify_tenant`` -- both still in the backlog below, so
 whoever converts those files has to update the test in the same commit. Beware the
 false positive too: a test DOUBLE can define a method with the same name as a route
-(``tests/test_pov_add_vms.py`` has ``async def add_vms`` on a fake Skytap adapter), which
-is not a coupling at all. Read every hit before acting on it.
+(``tests/test_pov_add_vms.py`` has ``async def add_vms`` on a fake Skytap adapter, and
+``tests/test_portainer_import_service.py`` an ``async def deploy_stack``), which is not a
+coupling at all. Read every hit before acting on it.
+
+**The nastier variant: a def line used as a slice TERMINATOR.** 59 places in this suite
+slice a body out by splitting on a newline followed by ``def `` (or by ``async def ``).
+Those end at the *next* def of that kind, so converting a neighbouring function silently
+MOVES the boundary -- and the test then asserts over the wrong amount of source while
+still passing. A false pass, not an error, so nothing tells you.
+
+That is why ``api/auth.py`` (7 routes) is still in the backlog despite being clean on
+every other axis: ``tests/test_persona_identity.py`` slices
+``_complete_oauth_login`` and terminates on the next ``async def``, which IS
+``oauth_azure_login``. Converting that route would stretch the inspected block from ~190
+lines to the rest of the file. ``api/pov_accessor.py`` is held back for a related reason
+-- ``tests/test_pov_accessor.py`` has an ``AsyncFunctionDef``-only ``next(...)`` over
+``accessor_self`` (``StopIteration``) and a ``checked >= 4`` count over accessor write
+routes, which is a security invariant that would silently drop to 0.
+
+When checking this, do NOT pass an escaped pattern through a shell grep -- it mangles the
+backslash and reports 0 hits for a pattern that really has 59. Build the needle as
+``chr(92) + 'ndef '`` inside a Python FILE (not a heredoc) instead.
 """
 import ast
 import collections
@@ -61,15 +81,11 @@ NOT_YET_CONVERTED = {
     "web_dashboard/api/azure.py": 2,
     "web_dashboard/api/bt_tenants.py": 5,
     "web_dashboard/api/config_mgmt.py": 4,
-    "web_dashboard/api/containers.py": 9,
-    "web_dashboard/api/desktops.py": 6,
     "web_dashboard/api/epml.py": 1,
     "web_dashboard/api/expiry.py": 1,
     "web_dashboard/api/gateways.py": 3,
     "web_dashboard/api/gcp.py": 3,
-    "web_dashboard/api/images.py": 6,
     "web_dashboard/api/mfa.py": 4,
-    "web_dashboard/api/notifications.py": 6,
     "web_dashboard/api/nutanix.py": 4,
     "web_dashboard/api/oci.py": 1,
     "web_dashboard/api/ot.py": 4,

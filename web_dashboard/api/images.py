@@ -41,7 +41,7 @@ router = APIRouter(prefix="/api/images", tags=["images"])
 # ── List ─────────────────────────────────────────────────────────────────────
 
 @router.get("")
-async def list_images(
+def list_images(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("images", "read")),
 ):
@@ -51,7 +51,7 @@ async def list_images(
 # ── Register ─────────────────────────────────────────────────────────────────
 
 @router.post("", status_code=201)
-async def register_image(
+def register_image(
     payload: RegisterImageRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("images", "write")),
@@ -76,7 +76,7 @@ async def register_image(
 # ── Fetch one ────────────────────────────────────────────────────────────────
 
 @router.get("/{image_id}")
-async def get_image(
+def get_image(
     image_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("images", "read")),
@@ -90,7 +90,7 @@ async def get_image(
 # ── Delete ───────────────────────────────────────────────────────────────────
 
 @router.delete("/{image_id}")
-async def delete_image(
+def delete_image(
     image_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("images", "delete")),
@@ -103,7 +103,7 @@ async def delete_image(
 # ── Pre-flight ───────────────────────────────────────────────────────────────
 
 @router.post("/{image_id}/preflight")
-async def preflight_image(
+def preflight_image(
     image_id: str,
     payload: PromoteImageRequest,
     db: Session = Depends(get_db),
@@ -132,7 +132,7 @@ async def preflight_image(
 
 
 @router.post("/{image_id}/promote")
-async def promote_image(
+def promote_image(
     image_id: str,
     payload: PromoteImageRequest,
     manual: bool = False,
