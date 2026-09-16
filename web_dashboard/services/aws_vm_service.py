@@ -449,7 +449,8 @@ async def _run_deploy(
             if instance_result.get("instance_id"):
                 job_service.set_cloud_resource_id(db, job_id, instance_result["instance_id"])
         except CloudIdentityError as e:
-            job_service.set_failed(db, job_id, f"Cloud-identity elevation refused EC2 deploy: {e}")
+            job_service.set_failed(db, job_id,
+                                   f"Cloud-identity elevation refused EC2 deploy: {e}", result)
             return
         except AWSError as e:
             # EC2 failed. The shared Gateway host is ref-counted and may serve
@@ -517,10 +518,22 @@ async def _run_deploy(
         job_service.set_completed(db, job_id, result)
         await cache_service.invalidate(cache_service.key_global("aws_instances"))
 
+    # `result` is passed on the failure paths too, not just to set_completed. Step 1
+    # (`resources.record(result)`) runs BEFORE the instance exists and records what the
+    # run acquired or failed to acquire — the Gateway host id, the NAT instance, the SSM
+    # endpoint ids, and the `ecs_error` / `nat_error` / `ssm_endpoint_error` diagnostics.
+    # Dropping them left a failed row that could not say which regional resources it had
+    # touched, and threw away a step-1 remedy the moment a later step raised (the same
+    # loss k8s_ps_token_rotation's warnings taught).
+    #
+    # Note the reclaim story here is NOT Azure's: `_active_ec2_count` counts live
+    # ec2_deploy rows and ignores `jumpoint_host_id`, so the AWS host is reference-
+    # counted rather than key-driven and a failed row never pinned it. This is about
+    # the record and the diagnostics, not a leak.
     except AWSError as e:
-        job_service.set_failed(db, job_id, str(e))
+        job_service.set_failed(db, job_id, str(e), result)
     except Exception as e:
-        job_service.set_failed(db, job_id, f"Unexpected error: {e}")
+        job_service.set_failed(db, job_id, f"Unexpected error: {e}", result)
     finally:
         db.close()
 
