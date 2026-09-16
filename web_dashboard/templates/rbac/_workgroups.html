@@ -1,15 +1,30 @@
-{% extends "base.html" %}
+{# Workgroups -- the fourth tab of the RBAC page, and the only one that is not
+   admin-only.
 
-{% block title %}Workgroups{% endblock %}
+   The other three tabs answer "what may this principal DO?"; this one answers "to WHICH
+   objects?". `docs/permissions.md` has always opened by calling those two questions the whole
+   model, and then sent the reader to two different pages to answer them.
 
-{% block content %}
-<div class="max-w-5xl mx-auto py-8 px-4" x-data="workgroupsPage()" x-init="init()">
+   **This tab is reachable by a non-admin and the other three are not.** 7 of the 8
+   /api/workgroups routes are gated on the grantable `workgroups` scope rather than
+   require_admin (only DELETE needs the flag), and this page carried no admin redirect at
+   all -- so somebody holding `workgroups:read` has always been able to use it. That is why
+   rbacPage()'s gate is per-TAB rather than per-page: a blanket admin check here would have
+   quietly revoked access that already existed. See main.py's /workgroups route.
 
-  <h1 class="text-2xl font-bold text-gray-800 mb-1">Workgroups</h1>
-  <p class="text-sm text-gray-500 mb-8">
-    Workgroups scope RBAC and cloud-resource visibility. Each cloud VM is tagged
-    with the workgroup it belongs to. Users see only resources in their assigned
-    workgroups.
+   No permission_matrix import: this axis is objects, not scopes, and it must not grow one.
+   Script inline in this file, like the other partials -- an included partial cannot own a
+   Jinja block (named without spelling the tag, because a source sweep for one would
+   otherwise match this sentence). #}
+
+<div class="max-w-5xl" x-data="workgroupsPage()" x-init="init()">
+
+  <p class="text-sm text-gray-500 mb-6">
+    A workgroup is the <strong>other</strong> half of access control: the permission tabs
+    decide what someone may <em>do</em>, and a workgroup decides which VMs, databases and
+    clusters they may do it <em>to</em>. Each cloud resource is tagged with its workgroup,
+    and a user sees only the ones they are assigned to. Administrators see everything.
+    <a href="/docs/permissions" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>.
   </p>
 
   <!-- Toast -->
@@ -234,4 +249,3 @@ function workgroupsPage() {
   };
 }
 </script>
-{% endblock %}
