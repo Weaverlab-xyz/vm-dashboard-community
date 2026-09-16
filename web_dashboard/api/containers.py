@@ -277,7 +277,7 @@ async def remove_container(
 # ── Deploy container (async job) ──────────────────────────────────────────────
 
 @router.post("/deploy", response_model=DeployContainerResponse)
-async def deploy_container(
+def deploy_container(
     req: DeployContainerRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -369,7 +369,7 @@ async def list_stacks(
 
 
 @router.post("/stacks", response_model=DeployStackResponse)
-async def deploy_stack(
+def deploy_stack(
     req: DeployStackRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -439,7 +439,7 @@ async def _run_deploy_stack(
 # ── Generic Compose → cloud (ECS / ACI / GCE) ───────────────────────────────
 
 @router.post("/deploy-compose", response_model=DeployStackResponse)
-async def deploy_compose(
+def deploy_compose(
     req: DeployComposeRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -966,7 +966,7 @@ async def get_rancher_node(
 
 
 @router.get("/rancher/firewall")
-async def get_rancher_firewall(
+def get_rancher_firewall(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("containers", "read")),
 ):
@@ -1029,7 +1029,7 @@ def _node_regions_by_cloud() -> dict:
 
 
 @router.post("/rancher/deploy", response_model=DeployContainerResponse)
-async def deploy_rancher_node(
+def deploy_rancher_node(
     req: RancherDeployRequest = RancherDeployRequest(),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("containers", "write")),
@@ -1083,7 +1083,7 @@ async def deploy_rancher_node(
 
 
 @router.post("/rancher/{name}/stop", response_model=DeployContainerResponse)
-async def stop_rancher_node(
+def stop_rancher_node(
     name: str,
     zone: str = Query("", description="GCE zone / AZ (blank → the node's recorded zone)"),
     cloud: str = Query("", description="Cloud the node is in (blank → the recorded one)"),
@@ -1232,7 +1232,7 @@ async def get_portainer_node_deploy_options(
 
 
 @router.post("/portainer/node/deploy", response_model=DeployContainerResponse)
-async def deploy_portainer_node(
+def deploy_portainer_node(
     req: PortainerDeployRequest = PortainerDeployRequest(),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("containers", "write")),
@@ -1281,7 +1281,7 @@ async def deploy_portainer_node(
 
 
 @router.post("/portainer/node/{name}/stop", response_model=DeployContainerResponse)
-async def stop_portainer_node(
+def stop_portainer_node(
     name: str,
     zone: str = Query("", description="GCE zone / AZ (blank → the node's recorded zone)"),
     cloud: str = Query("", description="Cloud the node is in (blank → the recorded one)"),
@@ -1320,7 +1320,7 @@ _MAX_BUNDLE_BYTES = 5 * 1024 * 1024
 
 
 @router.post("/portainer/import", response_model=DeployContainerResponse)
-async def import_portainer_bundle(
+def import_portainer_bundle(
     req: PortainerImportRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("containers", "write")),

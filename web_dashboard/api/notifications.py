@@ -64,7 +64,7 @@ def _validate(url: str, fmt: str) -> None:
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.get("/endpoints")
-async def list_endpoints(db: Session = Depends(get_db),
+def list_endpoints(db: Session = Depends(get_db),
                          current_user: User = Depends(require_explicit_permission("notifications", "read"))):
     return {"endpoints": [notification_service.endpoint_public(e)
                           for e in notification_service.list_endpoints(db)],
@@ -73,7 +73,7 @@ async def list_endpoints(db: Session = Depends(get_db),
 
 
 @router.post("/endpoints")
-async def create_endpoint(payload: EndpointCreate,
+def create_endpoint(payload: EndpointCreate,
                           db: Session = Depends(get_db),
                           current_user: User = Depends(require_explicit_permission("notifications", "write"))):
     _validate(payload.url, payload.fmt)
@@ -92,7 +92,7 @@ async def create_endpoint(payload: EndpointCreate,
 
 
 @router.patch("/endpoints/{endpoint_id}")
-async def patch_endpoint(endpoint_id: str, payload: EndpointPatch,
+def patch_endpoint(endpoint_id: str, payload: EndpointPatch,
                          db: Session = Depends(get_db),
                          current_user: User = Depends(require_explicit_permission("notifications", "write"))):
     fields = payload.model_dump(exclude_unset=True)
@@ -109,7 +109,7 @@ async def patch_endpoint(endpoint_id: str, payload: EndpointPatch,
 
 
 @router.delete("/endpoints/{endpoint_id}")
-async def delete_endpoint(endpoint_id: str,
+def delete_endpoint(endpoint_id: str,
                           db: Session = Depends(get_db),
                           current_user: User = Depends(require_explicit_permission("notifications", "write"))):
     if not notification_service.delete_endpoint(db, endpoint_id):
@@ -142,7 +142,7 @@ async def test_endpoint(endpoint_id: str,
 # ── Delivery log ─────────────────────────────────────────────────────────────
 
 @router.get("/deliveries")
-async def list_deliveries(page: int = Query(1, ge=1),
+def list_deliveries(page: int = Query(1, ge=1),
                           page_size: int = Query(20, ge=1, le=200),
                           status: str = "", channel: str = "",
                           event_type: str = "", resource_id: str = "",
@@ -163,7 +163,7 @@ async def list_deliveries(page: int = Query(1, ge=1),
 
 
 @router.get("/summary")
-async def delivery_summary(hours: int = Query(24, ge=1, le=720),
+def delivery_summary(hours: int = Query(24, ge=1, le=720),
                            db: Session = Depends(get_db),
                            current_user: User = Depends(require_explicit_permission("notifications", "read"))):
     out = notification_service.summary(db, hours=hours)
