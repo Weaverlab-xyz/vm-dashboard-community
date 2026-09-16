@@ -190,7 +190,7 @@ Panel labels, with the underlying key, since the keys are what the API and envir
 | Keep sweep history | `resource_expiry_sweep_retention_days` | `7` | Days a *completed* sweep row survives on `/jobs`. `0` = keep forever. A failed pass never expires. |
 | Max per sweep | `resource_expiry_max_per_pass` | `10` | Bounds the damage rate. Targets go oldest-overdue-first, and the cap counts **deletions, not attempts** — otherwise a few unreapable rows at the front would starve everything behind them forever. |
 | Allow admins to remove a timer | `resource_expiry_allow_never` | off | Off means the most anyone can do is extend. |
-| Exempt workgroups | `resource_expiry_exempt_workgroups` | *blank* | CSV. **Only VMs carry a workgroup** — databases, clusters and desktop seats don't, so pin those individually instead. |
+| Exempt workgroups | `resource_expiry_exempt_workgroups` | *blank* | CSV. **VMs, cloud databases and Kubernetes clusters** carry a workgroup; cloud functions and desktop seats don't, so pin those individually instead. An *untagged* database or cluster has no workgroup to match here either. |
 
 Settings win over environment variables, which win over the built-in defaults, and every
 value is re-read each pass rather than captured at startup.
@@ -282,8 +282,18 @@ that from the deploy job's own record and **refuses rather than guess**, which i
 intended behaviour: a re-derived instance id is how you delete the wrong machine. Destroy it
 by hand.
 
-**Everything in one workgroup is exempt except the databases.** Only VMs carry a workgroup.
-Pin the databases and clusters individually instead.
+**Everything in one workgroup is exempt except one database or cluster.** Check whether that
+row is actually *tagged*. A cloud database or Kubernetes cluster carries a workgroup only
+once someone assigns one — every row created before the field existed is untagged, and an
+untagged row matches no exemption. Assign it with the **Workgroup** button on
+[Databases](databases.md) or [Kubernetes](kubernetes.md), or pin that one row instead.
+
+Note the asymmetry that remains: assigning an exempt workgroup stops a *new* resource being
+stamped at all, but it does **not** clear a timer already on an existing row. The sweeper
+still skips it — `/inventory` shows it as exempt with the reason — but the countdown stays
+visible. Retagging is a visibility action and deliberately does not reschedule a deletion.
+
+Cloud functions and desktop seats still carry no workgroup, so pin those individually.
 
 **A resource was deleted and nobody was told.** See *A resource was deleted and never warned*
 in [notifications.md](notifications.md) — the short version is that the warn-once latch is

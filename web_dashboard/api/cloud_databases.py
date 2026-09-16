@@ -12,13 +12,18 @@ Database infrastructure API — Phase 1 (gated by ``cloud_database_enabled``).
   POST   /api/databases/dbops/deploy    — deploy the Password Safe DB-Ops service (per region)
   POST   /api/databases/dbops/invokers  — re-apply roles/run.invoker from config, in place
   GET    /api/databases/dbops/status    — per-region DB-Ops services + resolved audience
+  PATCH  /api/databases/{id}/workgroup  — retag into a workgroup, or clear it (admin)
 
 Provisioning is cloud-only because it needs a Terraform module; registering needs
 only somewhere to reach, so it also covers on-premises (``cloud='local'``).
 
 Permission-gated via the ``cloud_database`` scope (read/write/delete), mirroring
-the AWS/Azure/GCP pages; list results are scoped to the caller's own rows for
-non-admins. The real Terraform apply and the PRA tunnel (Phase 2, via the
+the AWS/Azure/GCP pages. Which rows a non-admin may see and act on is a separate
+axis: a database tagged into a workgroup is visible to that workgroup, an untagged
+one only to its creator. Every route naming a {db_id} passes through
+:func:`_visible_or_404`, which refuses the rest with a 404 — the scope says whether
+you may act on databases, that guard says which ones. The real Terraform apply and
+the PRA tunnel (Phase 2, via the
 ``beyondtrust/sra`` provider) are later work; Phase 1 records and (with cloud
 creds) drives the apply as a background task.
 """
@@ -35,12 +40,13 @@ from ..database import CloudDatabase, User, get_db
 from ..services import (aws_service, azure_service, cache_service,
                         cloud_database_service, cloud_db_adapter_service,
                         cloud_function_service, clouddb_dbops_service,
-                        config_service, job_service, ps_api_service,
-                        ps_database_catalog, region_catalog)
+                        config_service, inventory_service, job_service,
+                        ps_api_service, ps_database_catalog, region_catalog,
+                        workgroup_service)
 from ..services.aws_service import AWSError
 from ..services.region_config import (REGION_CONFIG_CLOUDS, deployable_regions,
                                       resolve_region)
-from .auth import require_permission
+from .auth import require_admin, require_permission
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/databases", tags=["databases"])
@@ -49,6 +55,41 @@ router = APIRouter(prefix="/api/databases", tags=["databases"])
 def _require_enabled() -> None:
     if not config_service.get_bool("cloud_database_enabled", settings.cloud_database_enabled):
         raise HTTPException(status_code=403, detail="database infrastructure is disabled")
+
+
+def _visible_or_404(db: Session, db_id: str, user: User) -> dict:
+    """This database's record, or 404 if the caller may not act on it.
+
+    The twin of api/k8s._visible_or_404, and the same argument applies:
+    ``require_permission("cloud_database", "delete")`` says whether you may delete
+    databases, never whether you may delete THIS one, so until this guard existed a
+    non-admin with the scope could decommission, Entitle-register or Password-Safe-
+    onboard a database that GET /api/databases will not even list for them.
+
+    404 rather than 403, matching api/spire_lab._visible_or_404 and
+    api/auth.require_pov_env_access: the list endpoint hides the row, so a 403 would
+    confirm the existence of something RBAC just denied.
+    """
+    row = cloud_database_service.get_database(db, db_id)
+    accessible = inventory_service.accessible_workgroups(user)
+    if row is None or not inventory_service.row_visible_to(row, accessible, user.username):
+        raise HTTPException(status_code=404, detail=f"database {db_id} not found")
+    return row
+
+
+def _resolve_workgroup(db: Session, user: User, workgroup):
+    """Canonical workgroup name to tag a new resource with, or None for untagged.
+
+    Thin HTTP adapter over workgroup_service.resolve_for_tagging, which owns the rule.
+    Blank is legal and means untagged -- that is what keeps every pre-existing caller
+    working and what every row predating the column already is.
+    """
+    try:
+        return workgroup_service.resolve_for_tagging(db, workgroup, user=user)
+    except workgroup_service.WorkgroupAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except workgroup_service.WorkgroupError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 class DbOpsDeployRequest(BaseModel):
@@ -96,6 +137,10 @@ class ProvisionRequest(BaseModel):
     # every pre-existing caller sends — means "follow the configured default", which is
     # the clouddb_ps_onboarding_enabled setting, i.e. the behaviour before the checkbox.
     register_in_passwordsafe: Optional[bool] = None
+    # Optional. Blank leaves the database creator-scoped, which is what every row
+    # created before this field exists is. Never required, so an API client that
+    # predates it keeps working.
+    workgroup: Optional[str] = None
 
 
 class DatabaseOptions(BaseModel):
@@ -354,7 +399,8 @@ async def provision_database(
             jump_group=payload.jump_group, jumpoint_name=payload.jumpoint_name,
             pra_credential_ref=payload.pra_credential_ref,
             register_in_entitle=payload.register_in_entitle,
-            register_in_passwordsafe=payload.register_in_passwordsafe, **opts,
+            register_in_passwordsafe=payload.register_in_passwordsafe,
+            workgroup=_resolve_workgroup(db, current_user, payload.workgroup), **opts,
         )
     except cloud_database_service.CloudDatabaseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -375,12 +421,12 @@ async def list_databases(
     current_user: User = Depends(require_permission("cloud_database", "read")),
 ):
     _require_enabled()
-    # These rows carry no workgroup — only a creator — so mirror the ownerless
-    # branch of inventory_service.visible_to: admins see all, everyone else sees
-    # only the databases they provisioned.
-    rows = cloud_database_service.list_databases(db)
-    if not current_user.is_effective_admin:
-        rows = [r for r in rows if r.get("created_by") == current_user.username]
+    # Two-tier, via inventory_service.row_visible_to: an admin sees all; a tagged
+    # database is visible to its workgroup; an untagged one only to its creator. The
+    # last branch is where every row predating `cloud_databases.workgroup` sits.
+    accessible = inventory_service.accessible_workgroups(current_user)
+    rows = [r for r in cloud_database_service.list_databases(db)
+            if inventory_service.row_visible_to(r, accessible, current_user.username)]
     return {"databases": rows}
 
 
@@ -803,6 +849,8 @@ async def connection(
     current_user: User = Depends(require_permission("cloud_database", "read")),
 ):
     _require_enabled()
+    # Guarded before the descriptor is built: this is how a caller reaches the database.
+    _visible_or_404(db, db_id, current_user)
     try:
         return cloud_database_service.connection_info(db, db_id)
     except cloud_database_service.CloudDatabaseError as exc:
@@ -826,6 +874,10 @@ class RegisterDatabaseRequest(BaseModel):
     # valid with cloud='local' — an on-prem database is the one case the dashboard cannot
     # reach itself, and from a cloud-hosted dashboard it is the ONLY way to configure one.
     agent_id: str = ""
+    # Optional. Blank leaves the database creator-scoped, which is what every row
+    # created before this field exists is. Never required, so an API client that
+    # predates it keeps working.
+    workgroup: Optional[str] = None
 
 
 @router.post("/register", status_code=201)
@@ -843,6 +895,7 @@ async def register_database(
             db_name=req.db_name, managed_account=req.managed_account or {},
             created_by=current_user.username, region=req.region,
             instance_id=req.instance_id, agent_id=req.agent_id,
+            workgroup=_resolve_workgroup(db, current_user, req.workgroup),
         )
     except cloud_database_service.CloudDatabaseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -860,8 +913,8 @@ async def decommission_database(
     Terraform state for what it provisioned and nothing at all for what it was merely
     told about, so deleting someone else's database is never the right action here."""
     _require_enabled()
-    row = cloud_database_service.get_database(db, db_id)
-    if row is not None and row.get("source") == "registered":
+    row = _visible_or_404(db, db_id, current_user)
+    if row.get("source") == "registered":
         try:
             cloud_database_service.deregister_database(db, db_id)
             return {"id": db_id, "status": "deregistered"}
@@ -895,6 +948,7 @@ async def register_database_in_entitle(
     enqueues a ``clouddb_entitle_register`` job; open the job for status/error.
     Mirrors the k8s cluster ``entitle-register`` endpoint."""
     _require_enabled()
+    database = _visible_or_404(db, db_id, current_user)
     if payload.action not in cloud_database_service.VALID_ENTITLE_DB_ACTIONS:
         raise HTTPException(
             status_code=400,
@@ -924,6 +978,7 @@ async def register_database_in_entitle(
     job = job_service.create_job(
         db, job_type="clouddb_entitle_register", created_by=current_user.username,
         metadata={"db_id": db_id, "action": payload.action},
+        workgroup=database.get("workgroup") or None,
     )
     return {"ok": True,
             "status": "registering" if payload.action == "register" else "deregistering",
@@ -957,6 +1012,7 @@ async def register_database_in_password_safe(
     master admin — the old jump and Vault account are destroyed first. Without that the
     first rotation would overwrite the vaulted admin password with the managed user's."""
     _require_enabled()
+    database = _visible_or_404(db, db_id, current_user)
     if payload.action not in cloud_database_service.VALID_PS_DB_ACTIONS:
         raise HTTPException(
             status_code=400,
@@ -994,6 +1050,7 @@ async def register_database_in_password_safe(
     job = job_service.create_job(
         db, job_type="clouddb_ps_register", created_by=current_user.username,
         metadata={"db_id": db_id, "action": payload.action},
+        workgroup=database.get("workgroup") or None,
     )
     return {"ok": True,
             "status": "registering" if payload.action == "register" else "deregistering",
@@ -1027,6 +1084,7 @@ async def pair_database_with_adapter(
     """
     _require_enabled()
     _require_function_write(current_user)
+    _visible_or_404(db, db_id, current_user)
     # Two features, two flags. _require_enabled covers the Databases page; this endpoint
     # also deploys a Cloud Function, and the functions router is gated separately.
     if not config_service.get_bool("cloud_functions_enabled", settings.cloud_functions_enabled):
@@ -1218,3 +1276,50 @@ async def dbops_status(
         })
     return {"ok": True, "invokers": len(clouddb_dbops_service.invoker_members()),
             "regions": out}
+
+
+# ── Reassign workgroup ───────────────────────────────────────────────────────
+
+
+class _WorkgroupReassignRequest(BaseModel):
+    """``""`` clears the workgroup, returning the database to creator-scoped."""
+    workgroup: str = ""
+
+
+@router.patch("/{db_id}/workgroup")
+async def reassign_database_workgroup(
+    db_id: str,
+    req: _WorkgroupReassignRequest,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Retag a database into a workgroup, or clear it. Admin only.
+
+    The twin of api/k8s.reassign_cluster_workgroup; see that docstring for why this is
+    admin-only rather than ``cloud_database:write`` and why it leaves ``expires_at``
+    alone. In short: retagging is a transfer, and a visibility action must not silently
+    reschedule a deletion.
+
+    This is the only way a database that predates the column gets a workgroup -- those
+    rows are NULL, and NULL means creator-scoped.
+    """
+    _require_enabled()
+    try:
+        canonical = workgroup_service.canonical_or_none(db, req.workgroup)
+    except workgroup_service.WorkgroupError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"database {db_id} not found")
+    row.workgroup = canonical
+
+    # Keep the provisioning Job in step so /jobs and /databases agree. A `registered`
+    # database has no provisioning job, hence the None branch rather than a 404.
+    job = cloud_database_service._provision_job_for(db, db_id)
+    if job is not None:
+        job.workgroup = canonical
+    db.commit()
+
+    logger.info("cloud database %s reassigned to workgroup %r", db_id, canonical or "")
+    return {"db_id": db_id, "workgroup": canonical or ""}

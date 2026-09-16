@@ -403,7 +403,12 @@ function usersPage() {
   return {
     users: [],
     currentUserId: null,
-    availableWorkgroups: {{ workgroups | tojson }},
+    // Fetched in init(), not injected by the route. `settings.workgroups` is a
+    // bootstrap seed that is {} at runtime, so the injected version of this rendered
+    // EMPTY and there was no way to put a user in a workgroup at all; and a workgroup
+    // name is operator configuration, which this anonymously-readable template should
+    // not carry. Same reasoning as availableRoles beside it -- see _rbac_context.
+    availableWorkgroups: [],
     // Filtering, grouping, bulk toggles, hasPerm/togglePerm and buildPermissionsPayload
     // all live in app.js so this page and /groups cannot drift apart again.
     ...permissionGridState(),
@@ -467,6 +472,8 @@ function usersPage() {
       // Allowed to fail quietly and stay empty: the picker then offers "No role" alone,
       // which is exactly the pre-roles behaviour rather than a broken form.
       try { this.availableRoles = await API.get('/api/roles') || []; } catch (e) {}
+      // Same contract: fail quietly and stay empty rather than break the form.
+      try { this.availableWorkgroups = await API.get('/api/groups/workgroups') || []; } catch (e) {}
       this.currentUserId = me.id;
       // The flyout is full-height and scrolls internally; without this the page behind it
       // scrolls too, which on a phone reads as the panel jumping. Same approach as the nav

@@ -348,9 +348,38 @@ def test_cloud_tools_key_on_is_admin_not_effective_admin():
 def test_effective_admin_does_widen_creator_scoped_resources():
     """The other half of the same split: creator-scoped resources DO honour the JIT grant."""
     rows = [{"created_by": "alice", "id": 1}, {"created_by": "bob", "id": 2}]
-    assert mcp._creator_scoped(rows, JIT) == rows
-    assert mcp._creator_scoped(rows, ALICE) == [rows[0]]
-    assert mcp._creator_scoped(rows, ADMIN) == rows
+    assert mcp._resource_scoped(rows, JIT) == rows
+    assert mcp._resource_scoped(rows, ALICE) == [rows[0]]
+    assert mcp._resource_scoped(rows, ADMIN) == rows
+
+
+def test_resource_scoping_honours_a_workgroup_tag():
+    """Cloud databases and K8s clusters carry a workgroup now, so _resource_scoped is
+    two-tier: a tagged row reaches its whole workgroup, not only whoever created it.
+
+    Without this assertion the feature could ship as a no-op -- every other test here
+    only ever exercises the creator branch, which is what the rule already did."""
+    tagged = {"created_by": "alice", "workgroup": "team-a", "id": 1}
+    other = {"created_by": "alice", "workgroup": "team-b", "id": 2}
+    untagged = {"created_by": "alice", "id": 3}
+
+    rows = [tagged, other, untagged]
+    # BOB created none of these. He is in team-b, so exactly one is his to see.
+    assert mcp._resource_scoped(rows, BOB) == [other]
+    # ALICE is in team-a: her own untagged row, plus the team-a one. NOT the team-b one,
+    # even though she created it -- the workgroup branch outranks the creator branch,
+    # which is why tagging into a workgroup you are not in is refused at the API edge.
+    assert mcp._resource_scoped(rows, ALICE) == [tagged, untagged]
+    assert mcp._resource_scoped(rows, ADMIN) == rows
+
+
+def test_resource_scoping_is_unchanged_for_rows_with_no_workgroup_key():
+    """cloud_functions rows carry no workgroup column at all, so they must behave
+    exactly as the old _creator_scoped did -- .get returns None, creator branch."""
+    rows = [{"created_by": "alice", "id": 1}, {"created_by": "bob", "id": 2}]
+    for user, expected in ((ALICE, [rows[0]]), (BOB, [rows[1]]),
+                           (ADMIN, rows), (JIT, rows)):
+        assert mcp._resource_scoped(rows, user) == expected
 
 
 # ── Summary counts are scoped too ─────────────────────────────────────────────

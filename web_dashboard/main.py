@@ -1776,13 +1776,22 @@ def _rbac_context(request: Request, initial_tab: str) -> dict:
     with the token, like every other list on this page, and that endpoint is require_admin.
     It also avoids putting a database call on an HTML route that has no other reason to
     touch one.
+
+    **The workgroup list is not injected either, for exactly that reason.** It used to be,
+    as ``list(settings.workgroups.keys())`` -- and was doubly wrong: that dict is a
+    bootstrap seed read once by ``workgroup_service.seed_if_empty`` and is ``{}`` at
+    runtime, so both pickers rendered EMPTY. An operator could create a workgroup on
+    /workgroups and then had no way to put anybody in one. Reading the ``workgroups`` table
+    here would have fixed the emptiness and kept the other half of the problem: a
+    workgroup name is operator configuration, not a build constant, and this template is
+    anonymously readable. Both tabs now fetch ``/api/groups/workgroups`` in ``init()``,
+    like the role pickers beside them.
     """
     return {
         "request": request,
         # Which tab this route opens on. The container also honours a #fragment, which wins,
         # so a bookmarked /rbac#roles still lands where the reader left it.
         "initial_tab": initial_tab,
-        "workgroups": list(settings.workgroups.keys()),
         # Injected from the backend catalog so the assignment grid can't drift from
         # api/auth.py (it was hard-coded in the template once, and had already drifted).
         "permission_scopes": auth.PERMISSION_SCOPES,

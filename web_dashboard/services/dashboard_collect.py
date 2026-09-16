@@ -11,8 +11,9 @@ deployed resources, the image registry, gateways, databases, k8s clusters, works
 query: it was being one of ~22 separate HTTP requests, each holding its own pooled
 connection. Those get counted inline by the read endpoint, in the one session it already
 has. Collecting them here would add DB writes to buy nothing, and would force this module
-to re-encode their RBAC (databases and k8s clusters are creator-scoped, not
-workgroup-scoped) instead of leaving it where it lives.
+to re-encode their RBAC — databases and k8s clusters answer to
+``inventory_service.row_visible_to``, which is workgroup-scoped for a tagged row and
+creator-scoped for an untagged one — instead of leaving it where it lives.
 
 Cost is not here either: ``services/cost_cache`` is already exactly this, for spend.
 

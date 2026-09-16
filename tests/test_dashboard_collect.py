@@ -14,7 +14,8 @@ Also pinned:
     databases, k8s clusters, workstation, registry) are indexed reads the read endpoint
     does inline in the session it already has; collecting them would add writes to buy
     nothing and would force this module to re-encode their RBAC — databases and k8s
-    clusters are creator-scoped, not workgroup-scoped.
+    clusters answer to inventory_service.row_visible_to, which is workgroup-scoped for a
+    tagged row and creator-scoped for an untagged one.
   * every spec's `feature` is a real key in the map /api/features serves. A gate on a
     misspelled key is permanently false, so that tile silently never collects. This repo
     has that bug class on record (`get_bool` against a nonexistent config field).
@@ -73,9 +74,9 @@ NOT_COLLECTED = {
     "active_jobs":        "indexed COUNT on jobs; also the one number an operator watches move",
     "deployed_resources": "inventory_service.collect — dashboard DB only",
     "registered_images":  "registered_images table",
-    "cloud_databases":    "dashboard DB, creator-scoped",
-    "k8s_clusters":       "dashboard DB, creator-scoped",
-    "cloud_functions":    "dashboard DB, creator-scoped",
+    "cloud_databases":    "dashboard DB, workgroup- or creator-scoped per row",
+    "k8s_clusters":       "dashboard DB, workgroup- or creator-scoped per row",
+    "cloud_functions":    "dashboard DB, creator-scoped (no workgroup column)",
     "workstation_vms":    "HypervisorVMCache rows an agent synced",
     "gateways":           "gateway registry table (reconcile=false on the tile)",
     "ot_cells":           "Job rows (the cell's deploy child IS its inventory record)",

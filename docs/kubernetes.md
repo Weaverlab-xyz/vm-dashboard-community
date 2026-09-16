@@ -410,6 +410,33 @@ Config: `entra_rbac_group_id` / `_name` / `_role` (`cluster-admin`), `pra_k8s_na
 
 ---
 
+## Workgroups (who can see a cluster)
+
+A cluster with **no workgroup** is visible only to whoever registered or provisioned it,
+plus administrators — which is what every cluster predating this field still is.
+
+Assign one and the whole workgroup can see and manage it:
+
+- **At creation** — the **Workgroup** select on both the register and provision forms.
+  Optional; blank leaves the cluster creator-scoped. You may only pick a workgroup you
+  belong to, since the workgroup rule outranks the creator rule.
+- **Afterwards** — the **Workgroup** button on the row, administrators only, which is the
+  only way an existing cluster gets one. Clearing it returns the cluster to its creator.
+
+**Weigh this more carefully here than for a VM.** The kubeconfig behind a cluster row is
+**cluster-admin** — that is why only `kubeconfig_ref` is stored rather than the document
+itself. Tagging a cluster therefore hands its whole workgroup the console link, the
+API-tunnel and Entra kubeconfig downloads, brokered access, tunnel and binding changes,
+Password Safe token registration, decommission, and its
+[auto-delete timer](auto-delete-timer.md). It is a grant, not a label.
+
+Requesting a cluster you cannot see answers **404**, not 403 — the same rule the POV and
+lab pages use, so an id cannot be confirmed by probing for it.
+
+See [Permissions](permissions.md) for how workgroups sit alongside permission scopes.
+
+---
+
 ## Config Management
 
 Registered/provisioned clusters appear in the [Config Management](config-management.md) target

@@ -473,8 +473,22 @@ def test_the_shared_rbac_context_is_the_one_source_of_the_level_map():
 
     helper = src.split("def _rbac_context(", 1)[1].split("\n\n\n", 1)[0]
     for key in ("permission_scopes", "permission_levels", "permission_scope_levels",
-                "permission_scope_groups", "persona_options", "workgroups"):
+                "permission_scope_groups", "persona_options"):
         assert '"%s"' % key in helper, "_rbac_context does not inject %s" % key
+
+    # `workgroups` was on that list and is deliberately off it now. Everything above is a
+    # static property of the BUILD -- the catalog api/auth.py enforces, the personas the
+    # resolver knows -- and injecting it is what stops the grid drifting. A workgroup name
+    # is the operator's CONFIGURATION, and this template is an unauthenticated shell, so
+    # injecting it published the list to an anonymous GET. It was broken besides: the
+    # value came from `settings.workgroups`, a bootstrap seed that is {} at runtime, so
+    # both pickers rendered EMPTY and there was no way to put a user in a workgroup at
+    # all. Both tabs now fetch /api/groups/workgroups with a token, exactly as they
+    # already fetch the role list -- the same reasoning this helper's own docstring gives
+    # for not injecting roles. See tests/test_workgroup_picker_injection.py.
+    assert '"workgroups"' not in helper, (
+        "_rbac_context must not inject the workgroup list: it is operator configuration "
+        "on an anonymously-readable page. The tabs fetch /api/groups/workgroups instead")
 
     for path in ("/rbac", "/users", "/groups"):
         marker = '@app.get("%s", response_class=HTMLResponse' % path

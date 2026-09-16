@@ -122,6 +122,8 @@ def test_db_item_shape():
     # Drives the delete verb on /databases and the badge on /inventory.
     assert it["source"] == "provisioned"
     assert it["name"] == "postgres clouddb-ab" and it["state"] == "available"
+    # None here because the stub above declares no `workgroup` -- that is the getattr
+    # contract, asserted directly in test_db_and_k8s_items_carry_their_workgroup below.
     assert it["workgroup"] is None and it["detail_href"] == "/databases"
     assert it["id"] == "clouddb:d1234567"
     assert it["expires_at"] is None
@@ -150,6 +152,37 @@ def test_k8s_item_shape():
     assert it["name"] == "prod-gke" and it["state"] == "registered"
     assert it["job_id"] == "j9" and it["detail_href"] == "/k8s"
     assert it["source"] == "provisioned" and it["expires_at"] is None
+
+
+def test_db_and_k8s_items_carry_their_workgroup():
+    """Cloud databases and K8s clusters carry a workgroup now, and the projection has to
+    pass it through -- it is what flips `/inventory`'s Workgroup column and filter, the
+    auto-delete timer's RBAC, and the exempt-workgroup match, none of which needed a
+    change of their own.
+
+    The absent-attribute case is asserted too, and deliberately: `_db_item` reads the
+    field with getattr because these stubs and any row from a database whose migration
+    has not run yet have no such attribute. Absent and NULL both mean creator-scoped."""
+    assert svc._db_item(_db_row(workgroup="team-a"))["workgroup"] == "team-a"
+    assert svc._k8s_item(_k8s_row(workgroup="team-a"))["workgroup"] == "team-a"
+    # NULL and absent collapse to None, the value visible_to reads as "untagged".
+    assert svc._db_item(_db_row(workgroup=None))["workgroup"] is None
+    assert svc._k8s_item(_k8s_row(workgroup=""))["workgroup"] is None
+    assert svc._db_item(_db_row())["workgroup"] is None      # attribute absent entirely
+
+
+def test_a_tagged_database_reaches_its_whole_workgroup():
+    """The end-to-end point of the change, at the level the inventory page sees it: a
+    tagged row is visible to someone who did NOT create it. Every other visibility test
+    here exercises the creator branch, which is what the rule already did."""
+    item = svc._db_item(_db_row(created_by="alice", workgroup="team-a"))
+    assert svc.visible_to(item, ["team-a"], "bob") is True, (
+        "a tagged database must reach its workgroup, not only its creator")
+    assert svc.visible_to(item, ["team-b"], "bob") is False
+    # Untagged stays creator-only -- the property that made this safe to ship.
+    untagged = svc._db_item(_db_row(created_by="alice"))
+    assert svc.visible_to(untagged, ["team-a"], "bob") is False
+    assert svc.visible_to(untagged, ["team-a"], "alice") is True
 
 
 def test_db_and_k8s_items_carry_their_expiry():
@@ -234,7 +267,9 @@ def test_visible_workgroup_scoped():
 
 
 def test_visible_nonworkgroup_is_owner_only():
-    # DB/k8s/desktop items have no workgroup → only the creator sees them.
+    # An item with no workgroup is creator-only. Which items those are is a property of
+    # the ROW, not the kind: a cloud function or desktop seat never has one, while a
+    # database or cluster has one only once somebody tagged it.
     item = {"workgroup": None, "deployed_by": "alice"}
     assert svc.visible_to(item, ["hydra"], "alice") is True
     assert svc.visible_to(item, ["hydra"], "bob") is False

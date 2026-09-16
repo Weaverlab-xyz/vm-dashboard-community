@@ -141,7 +141,11 @@ def _db_item(row) -> dict:
         "name": f"{row.engine} {row.instance_id or row.private_host or row.id[:8]}".strip(),
         "region": row.region or "",
         "state": row.status,
-        "workgroup": None,
+        # getattr, not row.workgroup: this projection is also fed plain stand-ins in the
+        # tests, and a row read back from a database whose migration has not run yet has
+        # no such attribute either. Absent and NULL mean the same thing here -- creator-
+        # scoped -- so collapsing them to None is the honest reading, not a fallback.
+        "workgroup": getattr(row, "workgroup", None) or None,
         "deployed_by": row.created_by,
         "created_at": _iso(row.created_at),
         "expires_at": _iso(row.expires_at),
@@ -171,7 +175,8 @@ def _k8s_item(row) -> dict:
         "name": row.name,
         "region": row.region or "",
         "state": row.status,
-        "workgroup": None,
+        # Same getattr contract as _db_item's.
+        "workgroup": getattr(row, "workgroup", None) or None,
         "deployed_by": row.created_by,
         "created_at": _iso(row.created_at),
         "expires_at": _iso(row.expires_at),
@@ -689,9 +694,14 @@ def accessible_workgroups(user):
 
 def visible_to(item: dict, accessible, username: str) -> bool:
     """RBAC predicate. ``accessible=None`` → admin (sees everything). Otherwise a
-    workgroup-scoped item (a VM) is visible when its workgroup is in the user's
-    set; an item without a workgroup (database / k8s / desktop, or a synced hypervisor
-    VM) is visible only to the user who created it.
+    workgroup-scoped item is visible when its workgroup is in the user's set; an item
+    without a workgroup is visible only to the user who created it.
+
+    Which items carry a workgroup is a property of the row, not of the kind: VMs, cloud
+    databases and K8s clusters all can, while a desktop seat and a cloud function still
+    cannot. A database or cluster left untagged therefore takes the creator branch — that
+    is what every row predating ``cloud_databases.workgroup`` does, and it is why adding
+    that column granted and revoked nothing.
 
     A synced hypervisor VM has no creator, so that last clause makes it admin-only until
     an admin assigns a workgroup override — deliberately, and the same rule every
@@ -703,6 +713,41 @@ def visible_to(item: dict, accessible, username: str) -> bool:
     if wg:
         return wg in accessible
     return item.get("deployed_by") == username
+
+
+def row_visible_to(row: dict, accessible, username: str) -> bool:
+    """:func:`visible_to`'s rule for a SERVICE projection rather than an inventory item.
+
+    Same two-tier rule, with two differences from :func:`visible_to`.
+
+    **The creator key.** An inventory item spells it ``deployed_by`` (see
+    :func:`_vm_item`), while the per-page projections — ``k8s_service._serialize``,
+    ``cloud_database_service._serialize``, ``cloud_function_service.list_functions`` —
+    spell it ``created_by``. Rather than teach ``visible_to`` two key names, the rename
+    happens here, once.
+
+    **Normalisation.** The stored workgroup is casefolded before comparison, which
+    ``visible_to`` does not do. It can afford not to: a VM's workgroup reaches it from
+    ``Job.workgroup``, already canonical. These rows are read straight off a column that
+    any pre-existing tooling could have written, and a stored ``"Team-A"`` would
+    otherwise be invisible to every member of ``team-a`` — including whoever typed it.
+    ``workgroup_service.resolve_for_tagging`` stops new rows being written that way; this
+    covers the ones already there.
+
+    Shared by ``/api/databases``, ``/api/k8s/clusters``, the dashboard tiles and the MCP
+    list tools, which each carried their own copy of the creator comparison and so could
+    drift apart one at a time.
+
+    ``accessible`` must already be resolved by the caller (``None`` = admin). That is on
+    purpose: api/mcp_server.py documents a deliberate ``is_admin`` vs
+    ``is_effective_admin`` divergence between the cloud pages and the inventory pages, and
+    a helper that resolved admin-ness itself would quietly pick a side."""
+    if accessible is None:
+        return True
+    wg = row.get("workgroup")
+    if wg:
+        return wg.strip().lower() in accessible
+    return row.get("created_by") == username
 
 
 # ── Bulk Config-Management selection ──────────────────────────────────────────

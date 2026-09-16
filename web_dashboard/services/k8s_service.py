@@ -87,6 +87,29 @@ async def _to_thread(fn, /, *args, **kwargs):
         raise K8sError(str(exc)) from exc
 
 
+def _canonical_workgroup(workgroup):
+    """Canonical storage form for a workgroup name, or None when blank.
+
+    Shape only -- it does NOT check the workgroup exists, and deliberately does not
+    import workgroup_service to do so. Two reasons:
+
+    1. **Layering.** Validating a workgroup means authorizing it (may this user tag a
+       resource into it?), and that needs a ``User``, which this layer never has. That
+       check lives at the API edge, in ``api.k8s._resolve_workgroup``, which is
+       where the caller's identity actually is.
+    2. **Import surface.** ``workgroup_service`` reaches into ``..database`` for
+       ``User``/``VMWorkgroupOverride``/``Workgroup``. Several test modules stub
+       ``web_dashboard.database`` with only the symbols this module names, so touching
+       it from here -- at import time OR inside a function -- breaks them with
+       ``cannot import name 'User'``.
+
+    Lowercasing is not cosmetic: ``inventory_service.row_visible_to`` and
+    ``expiry_policy.exempt_workgroups`` both compare lowercase, so a stored "Team-A"
+    would be invisible to every member of "team-a", including whoever typed it.
+    """
+    return (workgroup or "").strip().lower() or None
+
+
 def _parse_api_server(kubeconfig: str) -> str:
     """The current-context cluster's API server URL from a kubeconfig (or "")."""
     try:
@@ -138,6 +161,11 @@ def _serialize(r: K8sCluster) -> dict:
         "ps_token_account_id":   r.ps_token_account_id or "",
         "ps_pra_vault_account_id": r.ps_pra_vault_account_id or "",
         "pra_vault_account_id":  r.pra_vault_account_id or "",
+        # "" rather than None for an untagged cluster: the row template renders it
+        # directly, and the visibility helpers treat any falsy value as "no workgroup".
+        # getattr for the same reason cloud_database_service._serialize uses it -- the
+        # test stand-ins for this row declare their attributes explicitly.
+        "workgroup":             getattr(r, "workgroup", None) or "",
         "created_by":            r.created_by,
         "created_at":            r.created_at.isoformat() if r.created_at else "",
     }
@@ -182,10 +210,15 @@ def count_rancher_imports(db: Session) -> int:
 # ── Writes ────────────────────────────────────────────────────────────────────
 
 def register_cluster(db: Session, *, name: str, cloud: str, kubeconfig: str,
-                     created_by: str, mgmt_kind: str = None) -> dict:
+                     created_by: str, mgmt_kind: str = None,
+                     workgroup: Optional[str] = None) -> dict:
     """Record an existing reachable cluster. Parses the API server from the
     kubeconfig, stores the kubeconfig as a secrets-backend reference, and
-    inserts a ``registered`` row. The kubeconfig is never written to the row."""
+    inserts a ``registered`` row. The kubeconfig is never written to the row.
+
+    ``workgroup`` is optional. Omitting it leaves the cluster creator-scoped, which is
+    what every cluster registered before the column existed is -- so an API caller that
+    predates this parameter keeps working unchanged."""
     name = (name or "").strip()
     if not name:
         raise K8sError("cluster name is required")
@@ -202,6 +235,11 @@ def register_cluster(db: Session, *, name: str, cloud: str, kubeconfig: str,
     if not api_server:
         raise K8sError("could not parse an API server from the kubeconfig")
 
+    # Resolved before the kubeconfig is stowed below: config_service.set is a side effect
+    # this function does not unwind, so an unknown workgroup has to fail first.
+    #
+    wg = _canonical_workgroup(workgroup)
+
     cluster_id = str(uuid.uuid4())
     ref = _KUBECONFIG_KEY.format(cluster_id=cluster_id)
     from . import config_service
@@ -210,7 +248,7 @@ def register_cluster(db: Session, *, name: str, cloud: str, kubeconfig: str,
     row = K8sCluster(
         id=cluster_id, cloud=cloud, name=name, status="registered",
         api_server=api_server, kubeconfig_ref=ref, mgmt_kind=mgmt_kind,
-        created_by=created_by,
+        created_by=created_by, workgroup=wg,
     )
     db.add(row)
     db.commit()
@@ -255,14 +293,18 @@ def _eks_name(name: str) -> str:
 
 
 def create_cluster(db: Session, *, cloud: str, name: str, region: str,
-                   created_by: str, **opts) -> dict:
+                   created_by: str, workgroup: Optional[str] = None, **opts) -> dict:
     """Provision a new cluster with Terraform (the ``terraform/k8s_cluster/<cloud>``
     module), then store its kubeconfig and flip to ``registered`` (§1.1a).
 
     Synchronous record-keeping only — validate, insert a ``provisioning`` row + a
     ``k8s_provision`` Job, and return the Terraform variables the apply will use.
     Does **not** run Terraform — the API schedules :func:`run_provision_apply` as a
-    background task. Mirrors ``cloud_database_service.provision``."""
+    background task. Mirrors ``cloud_database_service.provision``.
+
+    ``workgroup`` is declared explicitly rather than left to ``**opts`` on purpose: opts
+    is forwarded verbatim to :func:`_build_cluster_tf_variables`, and a workgroup is a
+    dashboard-side visibility tag, not a Terraform input."""
     name = (name or "").strip()
     if not name:
         raise K8sError("cluster name is required")
@@ -278,16 +320,22 @@ def create_cluster(db: Session, *, cloud: str, name: str, region: str,
     if db.query(K8sCluster).filter(K8sCluster.name == name).first():
         raise K8sError(f"a cluster named {name!r} is already registered")
 
+    wg = _canonical_workgroup(workgroup)
+
     cluster_id = str(uuid.uuid4())
     from . import expiry_policy
     row = K8sCluster(
         id=cluster_id, cloud=cloud, name=name, status="provisioning",
         source="provisioned", region=region, created_by=created_by,
+        workgroup=wg,
         # Auto-delete timer from the global default; None (no timer) unless the feature
         # is on AND a default is configured. Only this PROVISION path stamps one —
         # register_cluster deliberately does not, since deleting a registered cluster
         # only drops the dashboard's record. See expiry_policy.default_expiry_for_kind.
-        expires_at=expiry_policy.default_expiry_for_kind("k8s", source="provisioned"),
+        # The workgroup is passed because an exempt workgroup must not be stamped at all,
+        # not merely skipped later by the sweeper.
+        expires_at=expiry_policy.default_expiry_for_kind(
+            "k8s", source="provisioned", workgroup=wg),
     )
     db.add(row)
     db.commit()
@@ -312,6 +360,7 @@ def create_cluster(db: Session, *, cloud: str, name: str, region: str,
         meta["register_token_in_passwordsafe"] = bool(opts["register_token_in_passwordsafe"])
     job = job_service.create_job(
         db, job_type="k8s_provision", created_by=created_by, metadata=meta,
+        workgroup=wg,
     )
     row.deploy_job_id = job.id
     db.commit()
@@ -1037,9 +1086,11 @@ def _chain_ps_token_registration(db: Session, *, provision_job_id: str,
         logger.info("k8s provision: PS token registration requested for %s but the "
                     "feature is disabled — skipping", cluster_id)
         return
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     job = job_service.create_job(
         db, job_type="k8s_ps_token", created_by=created_by or "system",
-        metadata={"cluster_id": cluster_id, "action": "register"})
+        metadata={"cluster_id": cluster_id, "action": "register"},
+        workgroup=(row.workgroup if row else None))
     logger.info("k8s provision: chained PS token registration for %s (job %s)",
                 cluster_id, job.id)
 
@@ -1178,6 +1229,9 @@ def start_decommission(db: Session, cluster_id: str, created_by: str = "") -> di
     job = job_service.create_job(
         db, job_type="k8s_decommission", created_by=created_by or row.created_by or "system",
         metadata={"cluster_id": cluster_id, "cloud": row.cloud, "name": row.name},
+        # Inherit the cluster's workgroup so the teardown appears on /jobs under the same
+        # workgroup as the thing it is tearing down, the way cert_lab_service does it.
+        workgroup=row.workgroup,
     )
     return {"ok": True, "cluster_id": cluster_id, "job_id": job.id}
 
