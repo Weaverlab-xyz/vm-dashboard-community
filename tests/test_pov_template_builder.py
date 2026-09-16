@@ -314,7 +314,7 @@ def test_docker_ce_is_attempted_before_the_podman_fallback():
     not a preference. Reversing these would quietly change what every future template
     bakes."""
     block = b.render_docker_install()
-    assert block.index("download.docker.com") < block.index(b.PODMAN_PACKAGES), \
+    assert block.index(b.DOCKER_REPO_HOST) < block.index(b.PODMAN_PACKAGES), \
         "Docker CE must be tried first; podman is the fallback, not the default"
     guard_at = block.index("if ! command -v docker")
     install_at = block.index(f"dnf -y install {b.PODMAN_PACKAGES}")
@@ -349,7 +349,14 @@ dnf() { return 1; }
 yum() { return 1; }
 """)
     assert p.returncode != 0, "a guest with no runtime at all must fail loudly"
-    assert "download.docker.com" in p.stderr and b.PODMAN_PACKAGES in p.stderr, \
+    # The two ATTEMPTS by name, which is the property — an SE reading this needs to know
+    # both were tried, so that "no route to Docker's CDN" does not read as the whole story
+    # when the distro package was the other half. Deliberately not a containment check
+    # against the repo hostname: `x in y` with a host literal is what CodeQL reads as URL
+    # sanitization, and it is the wrong assertion anyway. Which host Docker CE comes from
+    # is pinned on the rendered block by
+    # `test_docker_ce_is_attempted_before_the_podman_fallback`.
+    assert "Docker CE" in p.stderr and b.PODMAN_PACKAGES in p.stderr, \
         f"the refusal must name BOTH attempts, or half the remedy is invisible: {p.stderr[:400]}"
     # And it names the distro. Asserted on the text: `$ID` is read from an /etc/os-release
     # this test has no way to write, so it is empty in the run above.

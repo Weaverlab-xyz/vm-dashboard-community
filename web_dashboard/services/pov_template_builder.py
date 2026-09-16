@@ -147,7 +147,13 @@ _RUNNER_INTERVAL_S = 20
 # A base image that already carries either is left alone: reinstalling over a working
 # runtime is how a build breaks a template that was fine.
 DOCKER_PACKAGES = "docker-ce docker-ce-cli containerd.io"
-DOCKER_REPO_BASE = "https://download.docker.com/linux"
+# The host on its own, because it is named in three places that must agree: the repo URL
+# below, the refusal an operator reads when neither runtime lands, and the sentence the
+# broker job adds to an enrolment timeout. It is also the one prerequisite on the whole
+# Skytap list that nothing on this side can test, so "which host do I have to let out" is
+# a question worth being able to answer from one constant.
+DOCKER_REPO_HOST = "download.docker.com"
+DOCKER_REPO_BASE = f"https://{DOCKER_REPO_HOST}/linux"
 
 # The fallback, from the guest's OWN repository. Reached when Docker CE does not land,
 # which on a lab guest is usually not a broken repo but an unreachable one: a Skytap
@@ -498,7 +504,7 @@ DASHBOARD_DOCKER_REPO_EOF
   fi
 
   if ! command -v docker >/dev/null 2>&1; then
-    echo "could not install a container runtime on this guest ('$ID'): neither Docker CE from download.docker.com nor {PODMAN_PACKAGES} from the distro's own repository. The injected bootstrap ends in 'docker run', so this broker will sit at 'enrolling' with nothing to say why. Install one by hand on this VM." >&2
+    echo "could not install a container runtime on this guest ('$ID'): neither Docker CE from {DOCKER_REPO_HOST} nor {PODMAN_PACKAGES} from the distro's own repository. The injected bootstrap ends in 'docker run', so this broker will sit at 'enrolling' with nothing to say why. Install one by hand on this VM." >&2
     exit 1
   fi
 fi
@@ -967,9 +973,10 @@ def runtime_gap_for_template(db: Session, *, platform: str, template_id: str) ->
             f"{build.created_at:%Y-%m-%d} and recorded '{DOCKER_MISSING_MARKER}' on its "
             f"broker VM, so it almost certainly has no container runtime: the payload runs "
             f"as far as 'docker run' and dies there, every {_RUNNER_INTERVAL_S} seconds, "
-            f"saying nothing. The bootstrap tries to install one now, which needs outbound "
-            f"HTTPS from the guest to {DOCKER_REPO_BASE.split('/linux')[0]}. Install "
-            f"docker on the broker VM and re-bake the template to fix it for every POV.")
+            f"saying nothing. The bootstrap tries to install one now, which needs the guest "
+            f"to reach either {DOCKER_REPO_HOST} or its own distro repository. Install a "
+            f"container runtime on the broker VM and re-bake the template to fix it for "
+            f"every POV.")
 
 
 def _adapter(build: PovTemplateBuild):
