@@ -113,7 +113,7 @@ async def upload_asset(
 # ── Inventory ─────────────────────────────────────────────────────────────────
 
 @router.get("/inventory")
-async def get_inventory(db: Session = Depends(get_db),
+def get_inventory(db: Session = Depends(get_db),
                         current_user: User = Depends(get_current_user)):
     """
     Return the dynamic Ansible inventory.
@@ -132,7 +132,7 @@ async def get_inventory(db: Session = Depends(get_db),
 # ── Cloud targets ─────────────────────────────────────────────────────────────
 
 @router.get("/cloud-targets")
-async def get_cloud_targets(
+def get_cloud_targets(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -210,7 +210,7 @@ async def get_cloud_targets(
 # ── Agent-reachable targets (on-prem VMs + databases behind a remote agent) ─────
 
 @router.get("/agent-targets")
-async def get_agent_targets(
+def get_agent_targets(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -342,7 +342,7 @@ def _executor_unusable(executor, route) -> str:
 # ── Localhost targets (Kubernetes clusters + databases) ─────────────────────────
 
 @router.get("/localhost-targets")
-async def get_localhost_targets(
+def get_localhost_targets(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):

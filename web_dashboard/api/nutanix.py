@@ -167,7 +167,7 @@ async def _run_import(job_id: str, connection_id: str, name: str, source_uri: st
 
 
 @router.post("/import-image", dependencies=[Depends(require_permission("nutanix", "write"))])
-async def import_image(
+def import_image(
     payload: ImportImageRequest,
     background_tasks: BackgroundTasks,
     connection_id: str = "",
@@ -225,7 +225,7 @@ async def _run_deploy(job_id: str, connection_id: str, req: DeployRequest):
 
 
 @router.post("/deploy", dependencies=[Depends(require_permission("nutanix", "write"))])
-async def deploy(
+def deploy(
     payload: DeployRequest,
     background_tasks: BackgroundTasks,
     connection_id: str = "",
@@ -272,7 +272,7 @@ async def _run_delete_image(job_id: str, connection_id: str, uuid: str, name: st
 
 
 @router.delete("/images/{uuid}", dependencies=[Depends(require_permission("nutanix", "delete"))])
-async def delete_image(
+def delete_image(
     uuid: str,
     name: str = "",
     connection_id: str = "",
@@ -309,7 +309,7 @@ async def _run_delete_vm(job_id: str, connection_id: str, uuid: str, name: str):
 
 
 @router.delete("/vms/{uuid}", dependencies=[Depends(require_permission("nutanix", "delete"))])
-async def delete_vm(
+def delete_vm(
     uuid: str,
     name: str = "",
     connection_id: str = "",

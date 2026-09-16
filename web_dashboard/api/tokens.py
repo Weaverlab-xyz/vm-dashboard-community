@@ -61,7 +61,7 @@ class TokenListItem(BaseModel):
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("", response_model=TokenCreateResponse, status_code=201)
-async def create_token(
+def create_token(
     body: CreateTokenRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -95,7 +95,7 @@ async def create_token(
 
 
 @router.get("", response_model=list[TokenListItem])
-async def list_tokens(
+def list_tokens(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -120,7 +120,7 @@ async def list_tokens(
 
 
 @router.delete("/{token_id}", status_code=200)
-async def revoke_token(
+def revoke_token(
     token_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),

@@ -29,7 +29,6 @@ Runs against a real throwaway SQLite database, because "does a second job row ex
 who owns it" is storage behaviour. Under pytest, or standalone:
     python tests/test_power_resync.py
 """
-import asyncio
 import os
 import sys
 import tempfile
@@ -147,7 +146,10 @@ def test_the_power_resync_scenario():
     # failure. `sync_now` says so by returning an empty reason, but the route replaces it
     # with prose, so the page could not tell this apart from an offline agent and showed
     # it in red — and this is now the common case, straight after a Start.
-    body = asyncio.run(vms_api.sync_inventory(db=db, current_user=None))
+    # Direct call, not asyncio.run: sync_inventory is a plain `def` so its synchronous
+    # SQLAlchemy runs off the event loop. See
+    # tests/test_sync_db_routes_off_the_event_loop.py.
+    body = vms_api.sync_inventory(db=db, current_user=None)
     assert body["queued"] == []
     assert [s["in_flight"] for s in body["skipped"]] == [True]
     assert body["skipped"][0]["connection"] == "bench"

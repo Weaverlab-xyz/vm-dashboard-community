@@ -963,7 +963,7 @@ async def deploy_instance(
 
 
 @router.delete("/instances/{instance_ocid:path}")
-async def destroy_instance(
+def destroy_instance(
     instance_ocid: str,
     current_user: User = Depends(require_permission("oci", "delete")),
     db: Session = Depends(get_db),

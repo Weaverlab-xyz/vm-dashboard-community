@@ -34,7 +34,7 @@ router = APIRouter(prefix="/api/packer", tags=["packer"])
 # ── AWS build ─────────────────────────────────────────────────────────────────
 
 @router.post("/aws/build", response_model=PackerBuildResponse)
-async def build_aws_image(
+def build_aws_image(
     req: AWSPackerBuildRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("aws", "write")),
@@ -76,7 +76,7 @@ async def build_aws_image(
 # ── Azure build ───────────────────────────────────────────────────────────────
 
 @router.post("/azure/build", response_model=PackerBuildResponse)
-async def build_azure_image(
+def build_azure_image(
     req: AzurePackerBuildRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("azure", "write")),
@@ -113,7 +113,7 @@ async def build_azure_image(
 # ── GCP build ─────────────────────────────────────────────────────────────────
 
 @router.post("/gcp/build", response_model=PackerBuildResponse)
-async def build_gcp_image(
+def build_gcp_image(
     req: GCPPackerBuildRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("gcp", "write")),

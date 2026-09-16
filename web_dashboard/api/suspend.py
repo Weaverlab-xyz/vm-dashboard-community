@@ -123,7 +123,7 @@ def _load(db: Session, job_id: str, user: User) -> Job:
 
 
 @router.get("/{job_id}")
-async def read_schedule(
+def read_schedule(
     job_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -200,7 +200,7 @@ async def set_schedule(
 
 
 @router.delete("/{job_id}")
-async def clear_schedule(
+def clear_schedule(
     job_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),

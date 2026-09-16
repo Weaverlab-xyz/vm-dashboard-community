@@ -519,7 +519,7 @@ async def list_community_amis(
 # ── Copy community AMI → private ─────────────────────────────────────────────
 
 @router.post("/amis/copy", response_model=CopyAMIResponse)
-async def copy_community_ami(
+def copy_community_ami(
     req: CopyAMIRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("aws", "write")),
@@ -961,7 +961,7 @@ async def reassign_instance_workgroup(
 # ── Terminate ─────────────────────────────────────────────────────────────────
 
 @router.delete("/instances/{instance_id}", response_model=DestroyResponse)
-async def destroy_instance(
+def destroy_instance(
     instance_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("aws", "delete")),
@@ -1191,7 +1191,7 @@ class ExportImageResponse(BaseModel):
 
 
 @router.post("/amis/{ami_id}/export", response_model=ExportImageResponse)
-async def export_ami(
+def export_ami(
     ami_id: str,
     req: ExportImageRequest,
     db: Session = Depends(get_db),
@@ -1224,7 +1224,7 @@ async def export_ami(
 # ── Create image from instance ────────────────────────────────────────────────
 
 @router.post("/instances/{instance_id}/create-image", response_model=CreateImageResponse)
-async def create_image_from_instance(
+def create_image_from_instance(
     instance_id: str,
     req: CreateImageRequest,
     db: Session = Depends(get_db),

@@ -157,7 +157,14 @@ def test_the_teardown_helper_refuses_the_managed_gateway():
 
 def test_the_delete_endpoint_refuses_the_managed_row():
     src = _read("web_dashboard", "api", "gateways.py")
-    body = src[src.index("async def destroy_gateway"):]
+    # Anchored on `def destroy_gateway`, not `async def destroy_gateway`: this substring
+    # matches either spelling, so the assertion below survives the route moving between
+    # the event loop and the threadpool. The routes here are deliberately plain `def` so
+    # their synchronous SQLAlchemy runs off the loop -- see
+    # tests/test_sync_db_routes_off_the_event_loop.py -- and `index` would raise
+    # ValueError on the old spelling, which reads as "substring not found" rather than
+    # as "this test is pinned to a keyword it never meant to assert".
+    body = src[src.index("def destroy_gateway"):]
     assert "row.managed" in body, "the delete endpoint does not check `managed`"
     assert "400" in body, "refusing a managed gateway should be a 400, not a silent no-op"
 

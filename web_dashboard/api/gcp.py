@@ -904,7 +904,7 @@ async def reassign_instance_workgroup(
 
 
 @router.post("/instances/{instance_name}/create-image", response_model=GCPDeployResponse)
-async def create_image_from_instance(
+def create_image_from_instance(
     instance_name: str,
     payload: GCPCreateImageRequest,
     current_user: User = Depends(require_permission("gcp", "write")),
@@ -940,7 +940,7 @@ async def create_image_from_instance(
 
 
 @router.delete("/instances/{instance_name}")
-async def destroy_instance(
+def destroy_instance(
     instance_name: str,
     zone: str = Query("", description="Zone the instance is in; defaults to configured zone"),
     current_user: User = Depends(require_permission("gcp", "delete")),
@@ -1150,7 +1150,7 @@ class ExportImageResponse(BaseModel):
 
 
 @router.post("/images/{image_name}/export", response_model=ExportImageResponse)
-async def export_custom_image(
+def export_custom_image(
     image_name: str,
     req: ExportImageRequest,
     db: Session = Depends(get_db),

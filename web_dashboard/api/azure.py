@@ -1460,7 +1460,7 @@ async def _destroy_without_deploy_job(
 # ── Create image from VM ──────────────────────────────────────────────────────
 
 @router.post("/vms/{vm_name}/create-image")
-async def create_image_from_vm(
+def create_image_from_vm(
     vm_name: str,
     req: AzureCreateImageRequest,
     db: Session = Depends(get_db),
@@ -1518,7 +1518,7 @@ class ExportImageResponse(BaseModel):
 
 
 @router.post("/images/{image_name}/export", response_model=ExportImageResponse)
-async def export_managed_image(
+def export_managed_image(
     image_name: str,
     req: ExportImageRequest,
     db: Session = Depends(get_db),
