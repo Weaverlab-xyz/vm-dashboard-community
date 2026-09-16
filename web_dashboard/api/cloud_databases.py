@@ -370,7 +370,7 @@ async def provision_database(
 
 
 @router.get("")
-async def list_databases(
+def list_databases(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("cloud_database", "read")),
 ):
@@ -797,7 +797,7 @@ async def ps_import(
 
 
 @router.get("/{db_id}/connection")
-async def connection(
+def connection(
     db_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("cloud_database", "read")),
@@ -829,7 +829,7 @@ class RegisterDatabaseRequest(BaseModel):
 
 
 @router.post("/register", status_code=201)
-async def register_database(
+def register_database(
     req: RegisterDatabaseRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("cloud_database", "write")),
@@ -849,7 +849,7 @@ async def register_database(
 
 
 @router.delete("/{db_id}")
-async def decommission_database(
+def decommission_database(
     db_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("cloud_database", "delete")),
@@ -882,7 +882,7 @@ class EntitleDatabaseRegisterRequest(BaseModel):
 
 
 @router.post("/{db_id}/entitle-register", status_code=202)
-async def register_database_in_entitle(
+def register_database_in_entitle(
     db_id: str,
     payload: EntitleDatabaseRegisterRequest,
     db: Session = Depends(get_db),
@@ -935,7 +935,7 @@ class PSDatabaseRegisterRequest(BaseModel):
 
 
 @router.post("/{db_id}/ps-register", status_code=202)
-async def register_database_in_password_safe(
+def register_database_in_password_safe(
     db_id: str,
     payload: PSDatabaseRegisterRequest,
     db: Session = Depends(get_db),
@@ -1001,7 +1001,7 @@ async def register_database_in_password_safe(
 
 
 @router.post("/{db_id}/adapter-pair", status_code=202)
-async def pair_database_with_adapter(
+def pair_database_with_adapter(
     db_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("cloud_database", "write")),
@@ -1097,7 +1097,7 @@ async def pair_database_with_adapter(
 
 
 @router.post("/dbops/deploy", status_code=202)
-async def deploy_dbops_service(
+def deploy_dbops_service(
     payload: DbOpsDeployRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("cloud_database", "write")),
@@ -1147,7 +1147,7 @@ async def deploy_dbops_service(
 
 
 @router.post("/dbops/invokers", status_code=202)
-async def sync_dbops_invokers(
+def sync_dbops_invokers(
     payload: DbOpsDeployRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("cloud_database", "write")),
@@ -1183,7 +1183,7 @@ async def sync_dbops_invokers(
 
 
 @router.get("/dbops/status")
-async def dbops_status(
+def dbops_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("cloud_database", "read")),
 ):

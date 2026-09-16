@@ -104,7 +104,7 @@ class BuildRequest(BaseModel):
 
 
 @router.get("/builds")
-async def list_builds(db: Session = Depends(get_db),
+def list_builds(db: Session = Depends(get_db),
                       current_user: User = Depends(get_current_user)):
     rows = (db.query(PovTemplateBuild)
               .order_by(PovTemplateBuild.created_at.desc()).all())
@@ -112,7 +112,7 @@ async def list_builds(db: Session = Depends(get_db),
 
 
 @router.get("/builds/{build_id}")
-async def get_build(build_id: str, db: Session = Depends(get_db),
+def get_build(build_id: str, db: Session = Depends(get_db),
                     current_user: User = Depends(get_current_user)):
     build = pov_template_builder.get(db, build_id)
     if build is None:
@@ -308,14 +308,14 @@ class BlueprintRequest(BaseModel):
 
 
 @router.get("/blueprints")
-async def list_blueprints(db: Session = Depends(get_db),
+def list_blueprints(db: Session = Depends(get_db),
                           current_user: User = Depends(get_current_user)):
     return {"blueprints": [pov_blueprint_service.serialize(b)
                            for b in pov_blueprint_service.list_all(db)]}
 
 
 @router.post("/blueprints", status_code=201)
-async def create_blueprint(payload: BlueprintRequest, db: Session = Depends(get_db),
+def create_blueprint(payload: BlueprintRequest, db: Session = Depends(get_db),
                            current_user: User = Depends(require_explicit_permission("pov_templates", "write"))):
     try:
         row = pov_blueprint_service.create(
@@ -344,7 +344,7 @@ async def create_blueprint(payload: BlueprintRequest, db: Session = Depends(get_
 
 
 @router.put("/blueprints/{blueprint_id}")
-async def update_blueprint(blueprint_id: str, payload: dict,
+def update_blueprint(blueprint_id: str, payload: dict,
                            db: Session = Depends(get_db),
                            current_user: User = Depends(require_explicit_permission("pov_templates", "write"))):
     """Partial update: only the keys present are touched.
@@ -364,7 +364,7 @@ async def update_blueprint(blueprint_id: str, payload: dict,
 
 
 @router.delete("/blueprints/{blueprint_id}")
-async def delete_blueprint(blueprint_id: str, db: Session = Depends(get_db),
+def delete_blueprint(blueprint_id: str, db: Session = Depends(get_db),
                            current_user: User = Depends(require_explicit_permission("pov_templates", "delete"))):
     row = pov_blueprint_service.get(db, blueprint_id)
     if row is None:
@@ -416,7 +416,7 @@ def _cloud_or_selected(cloud: str) -> str:
 
 
 @router.get("/cloud-templates")
-async def list_cloud_templates(cloud: str = Query(""), db: Session = Depends(get_db),
+def list_cloud_templates(cloud: str = Query(""), db: Session = Depends(get_db),
                                current_user: User = Depends(get_current_user)):
     """The cloud templates on this instance.
 
@@ -437,7 +437,7 @@ async def list_cloud_templates(cloud: str = Query(""), db: Session = Depends(get
 
 
 @router.get("/cloud-templates/{template_id}")
-async def get_cloud_template(template_id: str, db: Session = Depends(get_db),
+def get_cloud_template(template_id: str, db: Session = Depends(get_db),
                              current_user: User = Depends(get_current_user)):
     row = pov_cloud_template_service.get(db, template_id)
     if row is None:
@@ -446,7 +446,7 @@ async def get_cloud_template(template_id: str, db: Session = Depends(get_db),
 
 
 @router.post("/cloud-templates", status_code=201)
-async def create_cloud_template(payload: CloudTemplateRequest,
+def create_cloud_template(payload: CloudTemplateRequest,
                                 db: Session = Depends(get_db),
                                 current_user: User = Depends(require_explicit_permission("pov_templates", "write"))):
     """Save a cloud template.
@@ -475,7 +475,7 @@ async def create_cloud_template(payload: CloudTemplateRequest,
 
 
 @router.put("/cloud-templates/{template_id}")
-async def update_cloud_template(template_id: str, payload: dict,
+def update_cloud_template(template_id: str, payload: dict,
                                 db: Session = Depends(get_db),
                                 current_user: User = Depends(require_explicit_permission("pov_templates", "write"))):
     """Partial update: only the keys present are touched.
@@ -495,7 +495,7 @@ async def update_cloud_template(template_id: str, payload: dict,
 
 
 @router.delete("/cloud-templates/{template_id}")
-async def delete_cloud_template(template_id: str, db: Session = Depends(get_db),
+def delete_cloud_template(template_id: str, db: Session = Depends(get_db),
                                 current_user: User = Depends(require_explicit_permission("pov_templates", "delete"))):
     """Delete a template.
 

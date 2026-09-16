@@ -84,7 +84,7 @@ def _active_agents(db: Session) -> list:
 
 
 @router.get("")
-async def list_connections(kind: str = "",
+def list_connections(kind: str = "",
                            db: Session = Depends(get_db),
                            current_user: User = Depends(require_explicit_permission("connections", "read"))):
     """Every configured connection, optionally filtered to one kind.
@@ -131,7 +131,7 @@ class RouteUpdate(BaseModel):
 
 
 @router.get("/config-mgmt-routes")
-async def list_config_routes(db: Session = Depends(get_db),
+def list_config_routes(db: Session = Depends(get_db),
                              current_user: User = Depends(require_explicit_permission("connections", "read"))):
     """Every route, the agents that can be named by one, and how many VMs each covers.
 
@@ -154,7 +154,7 @@ async def list_config_routes(db: Session = Depends(get_db),
 
 
 @router.get("/config-mgmt-routes/resolve")
-async def resolve_config_route(address: str,
+def resolve_config_route(address: str,
                                db: Session = Depends(get_db),
                                current_user: User = Depends(require_explicit_permission("connections", "read"))):
     """Which agent would execute a run against ``address``.
@@ -174,7 +174,7 @@ async def resolve_config_route(address: str,
 
 
 @router.post("/config-mgmt-routes", status_code=201)
-async def create_config_route(req: RouteRequest,
+def create_config_route(req: RouteRequest,
                               db: Session = Depends(get_db),
                               current_user: User = Depends(require_explicit_permission("connections", "write"))):
     try:
@@ -189,7 +189,7 @@ async def create_config_route(req: RouteRequest,
 
 
 @router.patch("/config-mgmt-routes/{route_id}")
-async def update_config_route(route_id: str, req: RouteUpdate,
+def update_config_route(route_id: str, req: RouteUpdate,
                               db: Session = Depends(get_db),
                               current_user: User = Depends(require_explicit_permission("connections", "write"))):
     fields = req.model_dump(exclude_unset=True)
@@ -203,7 +203,7 @@ async def update_config_route(route_id: str, req: RouteUpdate,
 
 
 @router.delete("/config-mgmt-routes/{route_id}")
-async def delete_config_route(route_id: str,
+def delete_config_route(route_id: str,
                               db: Session = Depends(get_db),
                               current_user: User = Depends(require_explicit_permission("connections", "delete"))):
     try:
@@ -216,7 +216,7 @@ async def delete_config_route(route_id: str,
 
 
 @router.post("", status_code=201)
-async def create_connection(req: ConnectionRequest,
+def create_connection(req: ConnectionRequest,
                             db: Session = Depends(get_db),
                             current_user: User = Depends(require_explicit_permission("connections", "write"))):
     try:
@@ -234,7 +234,7 @@ async def create_connection(req: ConnectionRequest,
 
 
 @router.patch("/{connection_id}")
-async def update_connection(connection_id: str, req: ConnectionUpdate,
+def update_connection(connection_id: str, req: ConnectionUpdate,
                             db: Session = Depends(get_db),
                             current_user: User = Depends(require_explicit_permission("connections", "write"))):
     try:
@@ -248,7 +248,7 @@ async def update_connection(connection_id: str, req: ConnectionUpdate,
 
 
 @router.post("/{connection_id}/default")
-async def make_default(connection_id: str,
+def make_default(connection_id: str,
                        db: Session = Depends(get_db),
                        current_user: User = Depends(require_explicit_permission("connections", "write"))):
     try:
@@ -258,7 +258,7 @@ async def make_default(connection_id: str,
 
 
 @router.delete("/{connection_id}")
-async def delete_connection(connection_id: str,
+def delete_connection(connection_id: str,
                             db: Session = Depends(get_db),
                             current_user: User = Depends(require_explicit_permission("connections", "delete"))):
     try:
