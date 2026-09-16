@@ -214,11 +214,14 @@ def test_the_nsg_is_attached_to_the_nic_at_creation():
     src = _service_src("azure_service")
     body = src[src.index("def _run_vm_container_node_sync("):]
     body = body[:body.index("\nasync def ")]
-    assert 'nic_params["network_security_group"]' in body, (
+    # Syntax-agnostic on purpose: the payload is built from SDK models now, so match
+    # the attribute form as well as the old dict-key form.
+    m = re.search(r'nic_params(?:\.network_security_group|\["network_security_group"\])',
+                  body)
+    assert m, (
         "the node's NIC gets no NSG, so a Standard public IP denies every inbound "
         "packet no matter what the allow-list says")
-    assert body.index('nic_params["network_security_group"]') < body.index(
-        "network_interfaces.begin_create_or_update")
+    assert m.start() < body.index("network_interfaces.begin_create_or_update")
 
 
 def test_both_launchers_look_the_nsg_up_rather_than_re_ensuring_it():
@@ -273,8 +276,10 @@ def test_the_public_ip_is_standard_and_static():
     src = _service_src("azure_service")
     body = src[src.index("def _run_vm_container_node_sync("):]
     body = body[:body.index("\nasync def ")]
-    assert '"sku": {"name": "Standard"}' in body
-    assert '"public_ip_allocation_method": "Static"' in body
+    assert re.search(r'(?:PublicIPAddressSku\(name="Standard"\)|"sku": \{"name": "Standard"\})',
+                     body), "the node's public IP is not Standard SKU"
+    assert re.search(r'public_ip_allocation_method["\']?\s*[:=]\s*"Static"', body), (
+        "the node's public IP is not Static, so its address changes on a recreate")
 
 
 def test_the_os_disk_goes_with_the_vm_but_the_data_disk_does_not():
@@ -282,8 +287,9 @@ def test_the_os_disk_goes_with_the_vm_but_the_data_disk_does_not():
     src = _service_src("azure_service")
     body = src[src.index("def _run_vm_container_node_sync("):]
     body = body[:body.index("\nasync def ")]
-    assert '"delete_option": "Delete"' in body, "the OS disk would outlive the VM"
-    assert '"delete_option": "Detach"' in body, (
+    assert re.search(r'delete_option["\']?\s*[:=]\s*"Delete"', body), (
+        "the OS disk would outlive the VM")
+    assert re.search(r'delete_option["\']?\s*[:=]\s*"Detach"', body), (
         "the data disk is deleted with the VM, so durable state is not durable")
 
 
@@ -291,7 +297,7 @@ def test_the_data_disk_is_attached_at_create_not_after():
     src = _service_src("azure_service")
     body = src[src.index("def _run_vm_container_node_sync("):]
     body = body[:body.index("\nasync def ")]
-    assert 'storage_profile["data_disks"]' in body, (
+    assert re.search(r'storage_profile(?:\.data_disks|\["data_disks"\])', body), (
         "the data disk is not part of the create call, so cloud-init would have to poll "
         "for it — the AWS compromise, imported for no reason")
 

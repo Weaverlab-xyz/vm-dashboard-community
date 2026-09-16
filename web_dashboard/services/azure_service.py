@@ -2420,11 +2420,16 @@ def _create_image_from_vm_sync(cred, sub_id: str, rg: str, vm_name: str, image_n
         compute.virtual_machines.generalize(rg, vm_name)
 
     vm = compute.virtual_machines.get(rg, vm_name)
-    image_params = {
-        "location": vm.location,
-        "source_virtual_machine": {"id": vm.id},
-        "tags": {"managed-by": "vm-dashboard"},
-    }
+    # Models, not a raw dict: azure-mgmt-compute 38.x sends a snake_case dict to ARM
+    # verbatim (no snake->camel mapping, no `properties` nesting), which Azure rejects
+    # with "Could not find member 'source_virtual_machine' on object of type
+    # 'ResourceDefinition'".
+    from azure.mgmt.compute.models import Image, SubResource
+    image_params = Image(
+        location=vm.location,
+        source_virtual_machine=SubResource(id=vm.id),
+        tags={"managed-by": "vm-dashboard"},
+    )
 
     img = compute.images.begin_create_or_update(rg, image_name, image_params).result()
     return {"image_id": img.id, "name": img.name, "state": img.provisioning_state}
@@ -2785,14 +2790,16 @@ def _ensure_node_data_disk_sync(cred, sub_id: str, rg: str, location: str,
     existing = _find_node_data_disk_sync(cred, sub_id, rg, name)
     if existing:
         return {**existing, "created": False}
+    from azure.mgmt.compute.models import CreationData, Disk, DiskSku
     compute = _get_compute(cred, sub_id)
-    d = compute.disks.begin_create_or_update(rg, name, {
-        "location": location,
-        "sku": {"name": "StandardSSD_LRS"},
-        "disk_size_gb": int(size_gb),
-        "creation_data": {"create_option": "Empty"},
-        "tags": {"managed-by": _NODE_MANAGED_TAG},
-    }).result()
+    # Models, not a raw dict — see the note in _run_vm_container_node_sync.
+    d = compute.disks.begin_create_or_update(rg, name, Disk(
+        location=location,
+        sku=DiskSku(name="StandardSSD_LRS"),
+        disk_size_gb=int(size_gb),
+        creation_data=CreationData(create_option="Empty"),
+        tags={"managed-by": _NODE_MANAGED_TAG},
+    )).result()
     return {"disk_id": d.id, "name": name, "zone": location,
             "size_gb": int(size_gb), "state": "Unattached", "created": True}
 
@@ -2868,48 +2875,66 @@ def _run_vm_container_node_sync(
     # across a recreate, which is what lets Edge keys and a pinned server-url survive.
     pip = network.public_ip_addresses.begin_create_or_update(
         rg, pip_name,
-        {"location": location, "sku": {"name": "Standard"},
-         "public_ip_allocation_method": "Static", "tags": tags},
+        PublicIPAddress(location=location, sku=PublicIPAddressSku(name="Standard"),
+                        public_ip_allocation_method="Static", tags=tags),
     ).result()
-    ip_config = {"name": "ipconfig1", "subnet": {"id": subnet_id},
-                 "private_ip_allocation_method": "Dynamic",
-                 "public_ip_address": {"id": pip.id}}
-    nic_params = {"location": location, "ip_configurations": [ip_config], "tags": tags}
+    ip_config = NetworkInterfaceIPConfiguration(
+        name="ipconfig1", subnet={"id": subnet_id},
+        private_ip_allocation_method="Dynamic",
+        public_ip_address={"id": pip.id},
+    )
+    nic_params = NetworkInterface(location=location, ip_configurations=[ip_config],
+                                  tags=tags)
     if nsg_id:
         # Without this the Standard IP denies every inbound packet and the node reads
         # as a firewall problem no allow-list change can fix.
-        nic_params["network_security_group"] = {"id": nsg_id}
+        nic_params.network_security_group = {"id": nsg_id}
     nic = network.network_interfaces.begin_create_or_update(rg, f"{name}-nic",
                                                            nic_params).result()
 
-    storage_profile = {
-        "image_reference": {"publisher": "Canonical",
-                            "offer": "0001-com-ubuntu-server-jammy",
-                            "sku": "22_04-lts", "version": "latest"},
-        "os_disk": {"create_option": "FromImage", "delete_option": "Delete",
-                    **({"disk_size_gb": int(os_disk_gb)} if os_disk_gb else {})},
-    }
+    # Build the VM request out of SDK MODEL objects, never a raw snake_case dict.
+    # azure-mgmt-compute 38.x uses the typespec `azure.core` models, and under that
+    # SDK a raw dict is forwarded to ARM verbatim -- no snake_case -> camelCase
+    # mapping and no nesting under `properties` -- so Azure rejects the whole create
+    # with "(InvalidRequestContent) ... Could not find member 'hardware_profile' on
+    # object of type 'ResourceDefinition'". That killed every Azure managed-node
+    # deploy (Portainer and Rancher both land here) while the model-built deploy and
+    # ACI paths kept working, which is what made it look node-specific.
+    from azure.mgmt.compute.models import DataDisk, ManagedDiskParameters
+    storage_profile = StorageProfile(
+        image_reference=ImageReference(
+            publisher="Canonical", offer="0001-com-ubuntu-server-jammy",
+            sku="22_04-lts", version="latest",
+        ),
+        os_disk=OSDisk(
+            create_option=DiskCreateOptionTypes.FROM_IMAGE,
+            delete_option="Delete",
+            **({"disk_size_gb": int(os_disk_gb)} if os_disk_gb else {}),
+        ),
+    )
     if data_disk_id:
         # Attached AT CREATE, so cloud-init can mount it before starting the container.
         # delete_option=Detach is what "durable" means: the disk outlives the VM.
-        storage_profile["data_disks"] = [{
-            "lun": _NODE_DATA_LUN, "create_option": "Attach",
-            "delete_option": "Detach", "managed_disk": {"id": data_disk_id},
-        }]
+        storage_profile.data_disks = [DataDisk(
+            lun=_NODE_DATA_LUN, create_option="Attach", delete_option="Detach",
+            managed_disk=ManagedDiskParameters(id=data_disk_id),
+        )]
 
-    vm = compute.virtual_machines.begin_create_or_update(rg, name, {
-        "location": location, "tags": tags,
-        "hardware_profile": {"vm_size": vm_size},
-        "storage_profile": storage_profile,
-        "os_profile": {
-            "computer_name": name[:15],
-            "admin_username": admin_username,
-            "admin_password": admin_password,
-            "linux_configuration": {"disable_password_authentication": False},
-            "custom_data": cloud_init_b64,
-        },
-        "network_profile": {"network_interfaces": [{"id": nic.id, "primary": True}]},
-    }).result()
+    vm = compute.virtual_machines.begin_create_or_update(rg, name, VirtualMachine(
+        location=location, tags=tags,
+        hardware_profile=HardwareProfile(vm_size=vm_size),
+        storage_profile=storage_profile,
+        os_profile=OSProfile(
+            computer_name=name[:15],
+            admin_username=admin_username,
+            admin_password=admin_password,
+            linux_configuration=LinuxConfiguration(
+                disable_password_authentication=False),
+            custom_data=cloud_init_b64,
+        ),
+        network_profile=NetworkProfile(
+            network_interfaces=[NetworkInterfaceReference(id=nic.id, primary=True)]),
+    )).result()
     return {"name": name, "vm_id": vm.id, "reused": False, "zone": location,
             "status": "RUNNING", "machine_type": vm_size, "image": container_image,
             "internal_ip": (nic.ip_configurations[0].private_ip_address
