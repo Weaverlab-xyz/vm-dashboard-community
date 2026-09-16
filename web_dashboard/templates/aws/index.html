@@ -1722,6 +1722,17 @@
                           class="text-xs px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded-md transition">
                     Destroy
                   </button>
+                  <!-- A cell whose VM deploy failed has no Destroy: the cloud's destroy
+                       route only resolves completed deploys (and EC2's keys on an
+                       instance id a failed RunInstances never produced), so before this
+                       the card could never be retired. Clear checks the instance is
+                       really gone — by NAME tag, which a failed row does have — then
+                       retires the record. -->
+                  <button x-show="c.status !== 'completed'" x-cloak
+                          @click="clearOTCell(c)"
+                          class="text-xs px-2.5 py-1 bg-gray-600 hover:bg-gray-700 text-white rounded-md transition">
+                    Clear
+                  </button>
                 </div>
               </div>
             </template>
@@ -2374,6 +2385,25 @@
           toast('Destroy started — the cell disappears once the job completes.', 'success');
         } catch (e) {
           toast(e.message || 'Destroy failed', 'error');
+        }
+      },
+
+      // Retire a failed cell's record. The server refuses if the instance is still
+      // there, and asks for confirmation (force) when it cannot tell either way — so
+      // the retry offers that choice rather than swallowing the refusal.
+      async clearOTCell(c, force) {
+        if (!force && !confirm(`Clear the record of failed cell ${c.instance_name}? The instance is checked first — this only retires the card, it does not destroy anything.`)) return;
+        try {
+          const q = force ? '?force=true' : '';
+          await API.delete(`/api/ot/cell/${encodeURIComponent(c.vm_job_id)}${q}`);
+          toast('Cleared.', 'success');
+          this.loadOTCells();
+        } catch (e) {
+          const msg = e.message || 'Clear failed';
+          if (!force && /force=true/.test(msg) && confirm(msg + '\n\nClear the record anyway?')) {
+            return this.clearOTCell(c, true);
+          }
+          toast(msg, 'error');
         }
       },
 

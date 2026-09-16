@@ -1198,6 +1198,54 @@ def _best_effort_cleanup(compute, network, rg, vm_name, nic_name, pip_name=None)
             logger.warning("deploy cleanup: PIP %s delete failed: %s", pip_name, e)
 
 
+def _stuck_vm_diagnosis(compute, rg: str, vm_name: str) -> str:
+    """What ARM says about a VM still 'Creating' at the deploy deadline, as prose.
+
+    Read BEFORE ``_best_effort_cleanup``, which is the only chance: cleanup deletes
+    the VM, and with it every trace of why it never came up. Without this the
+    timeout could only guess, and it guessed the same guess every time — "Trusted
+    Launch needs a Gen2 size" — on deploys that never asked for Trusted Launch,
+    which sends the operator to audit a setting that was never involved.
+
+    The two states worth telling apart both read as "stuck" from the poller:
+    ARM never finished ALLOCATING the VM (a capacity/size/image-generation
+    problem, provisioningState stays Creating with no statuses), versus the VM
+    allocated and the guest never reported in (provisioningState Creating with
+    ProvisioningState/creating on the OS, i.e. the image does not boot here or
+    waagent is absent — the shape a VHD imported from another cloud fails in).
+
+    Best-effort by construction: this runs while a deploy is already failing, so
+    any error here is swallowed and the caller keeps its generic message.
+    """
+    bits = []
+    try:
+        vm = compute.virtual_machines.get(rg, vm_name)
+        state = getattr(vm, "provisioning_state", None)
+        if state:
+            bits.append(f"ARM provisioningState={state}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("stuck-VM diagnosis: get %s failed: %s", vm_name, exc)
+    try:
+        iv = compute.virtual_machines.instance_view(rg, vm_name)
+        for s in (getattr(iv, "statuses", None) or []):
+            code = getattr(s, "code", "") or ""
+            msg = (getattr(s, "message", "") or "").strip()
+            if code:
+                bits.append(f"{code}{': ' + msg[:200] if msg else ''}")
+        agent = getattr(iv, "vm_agent", None)
+        if agent is not None:
+            bits.append(f"guest agent={getattr(agent, 'vm_agent_version', None) or 'not reporting'}")
+        else:
+            # No agent block at all after 20 minutes: the guest never talked to the
+            # platform. That is the image, not the size.
+            bits.append("guest agent=absent (the OS never reported to the platform — "
+                        "the image may not boot on this size/generation, or it has no "
+                        "waagent)")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("stuck-VM diagnosis: instance_view %s failed: %s", vm_name, exc)
+    return "; ".join(bits)
+
+
 def _normalize_region(r: str) -> str:
     """Azure regions come back as 'centralus' or sometimes 'Central US' — fold to
     a canonical comparable form."""
@@ -1485,10 +1533,23 @@ def _deploy_vm_sync(
         deadline = time.monotonic() + _VM_DEPLOY_TIMEOUT_S
         while not poller.done():
             if time.monotonic() > deadline:
+                # Ask ARM what it thinks before the cleanup below deletes the evidence.
+                # The Trusted-Launch hint is conditional now: it is only a candidate
+                # cause when this deploy actually requested Trusted Launch, and naming
+                # it unconditionally made every stuck deploy look like a size/Gen2
+                # mismatch — including the ones (OT cells, any plain Linux deploy) that
+                # never set a security profile at all.
+                detail = _stuck_vm_diagnosis(compute, rg, vm_name)
+                hint = ("Trusted Launch was requested, so the size must be Gen2 with "
+                        "vTPM/Secure Boot" if trusted_launch else
+                        "the usual causes are an image whose Hyper-V generation the "
+                        "size cannot boot, an image version not replicated to this "
+                        "region, or an OS image with no Azure guest agent")
                 raise AzureError(
                     f"VM {vm_name} did not finish provisioning within "
-                    f"{_VM_DEPLOY_TIMEOUT_S // 60} min — provisioning appears stuck "
-                    f"(check that the size supports the image; Trusted Launch needs a Gen2 size)."
+                    f"{_VM_DEPLOY_TIMEOUT_S // 60} min — provisioning appears stuck. "
+                    f"{('Azure reports: ' + detail + '. ') if detail else ''}"
+                    f"On a stuck create {hint}."
                 )
             poller.wait(15)
         vm = poller.result()

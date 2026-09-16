@@ -606,10 +606,18 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
         job_service.set_completed(db, job_id, result)
         await cache_service.invalidate(cache_service.key_global("azure_vms"))
 
+    # `result` is passed on the failure paths too, not just to set_completed. A deploy
+    # that dies partway has usually already TAKEN things: the shared Gateway host
+    # reference (`jumpoint_mode`/`jumpoint_host_id`/`jumpoint_region`, acquired at step 1,
+    # before the VM), a vaulted Windows admin password reference, an ACI group name.
+    # Dropping them left the row with no record of anything to give back — and the
+    # gateway release reads exactly those keys, so a failed deploy held a billable
+    # Gateway VM that no code path could ever reclaim. set_failed merges `result` into
+    # metadata the same way set_completed does; error_message is unchanged.
     except AzureError as e:
-        job_service.set_failed(db, job_id, str(e))
+        job_service.set_failed(db, job_id, str(e), result)
     except Exception as e:
-        job_service.set_failed(db, job_id, f"Unexpected error: {e}")
+        job_service.set_failed(db, job_id, f"Unexpected error: {e}", result)
     finally:
         db.close()
 
