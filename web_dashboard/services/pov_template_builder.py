@@ -196,8 +196,19 @@ DOCKER_MISSING_MARKER = "docker: MISSING"
 _STATE_PROBE = ("systemctl is-active dashboard-bootstrap-runner 2>/dev/null "
                 "|| echo 'runner: INACTIVE'; "
                 f"docker --version 2>/dev/null || echo '{DOCKER_MISSING_MARKER}'; "
+                # The socket, reported separately from the command, because under Podman
+                # they disagree and only this one is the agent's. A Runner detail reading
+                # `podman version 4.9.4` beside no socket is a green-looking line about a
+                # template whose every POV enrols and then fails every job.
+                f"echo \"engine socket: $([ -e {AGENT_SOCKET_PATH} ] "
+                f"&& echo present || echo ABSENT)\"; "
                 "if systemctl cat docker.service >/dev/null 2>&1; then "
-                "echo \"docker at boot: $(systemctl is-enabled docker 2>&1)\"; fi")
+                "echo \"docker at boot: $(systemctl is-enabled docker 2>&1)\"; "
+                # Same question for a Podman guest, which has no docker.service to ask
+                # about and used to leave this line off the detail entirely.
+                "elif systemctl cat podman.socket >/dev/null 2>&1; then "
+                "echo \"podman at boot: socket=$(systemctl is-enabled podman.socket 2>&1) "
+                "service=$(systemctl is-enabled podman.service 2>&1)\"; fi")
 
 
 # ── the runner ───────────────────────────────────────────────────────────────
@@ -379,6 +390,20 @@ def render_docker_install(*, require_enabled_at_boot: bool = True,
        then fails every Gateway and Config-Management job on a socket nobody started. So
        the socket is brought up here and then checked as its own gate.
 
+       **Enabled AND started, and neither word is redundant.** ``systemctl enable`` writes
+       a symlink and starts nothing — a guest enabled and not started has no API until it
+       is rebooted. ``start`` without ``enable`` is the mirror image and is the trap
+       ``docker-ce`` sets on the RHEL family. Socket activation is tried first because it
+       is the idiomatic shape; ``podman.service`` is the fallback for a guest where that
+       produced no listening socket, and is what an operator reaches for by hand.
+
+       The boot gate asks the same question of Podman, which it previously skipped
+       entirely: ``systemctl cat docker.service`` is false on a podman-docker guest, so the
+       whole check fell through and a template could bake with a socket that answers only
+       because the install had just started it. Either ``podman.socket`` or
+       ``podman.service`` being enabled satisfies it — an operator who fixed a guest by
+       hand usually has the second, and failing that guest would be wrong.
+
     ``require_enabled_at_boot=False`` drops property 2's *second* gate, and only the second.
     That gate is a statement about a TEMPLATE — baked now, booted later, for every POV — and
     it is the wrong question to fail a live POV on. The bootstrap runs on a guest that is
@@ -526,11 +551,26 @@ fi
 # green, and then fail every Gateway and Config-Management job on a socket that was never
 # started. That failure reads as a permission or firewall problem and has cost days before.
 if command -v systemctl >/dev/null 2>&1 && [ ! -S {sock} ]; then
+  # ENABLE *and* START, and both words are load-bearing. `enable` only writes a symlink
+  # into sockets.target.wants -- it starts nothing -- so a guest enabled and not started
+  # has no API until it is rebooted, while `docker version` answers the whole time. The
+  # reverse is the trap docker-ce sets on the RHEL family: started by hand, dead after the
+  # next boot. Neither alone is a working broker.
   systemctl enable podman.socket >/dev/null 2>&1 || true
   systemctl start podman.socket >/dev/null 2>&1 || true
   # Now rather than at the next boot, and only ever as the symlink podman-docker itself
   # ships -- this does not invent a path, it stops waiting for a reboot to create one.
   systemd-tmpfiles --create >/dev/null 2>&1 || true
+  # Socket activation is the idiomatic path and is tried first, above. This is the fallback
+  # for a guest where it did not produce a listening socket -- an older podman, a
+  # sockets.target that has already run, a unit whose activation is masked. `podman.service`
+  # runs the same API persistently rather than on demand, which is the shape an operator
+  # reaches for by hand (`systemctl enable podman; systemctl start podman`) when the socket
+  # alone leaves them with nothing listening.
+  if [ ! -S {PODMAN_SOCKET_PATH} ]; then
+    systemctl enable podman.service >/dev/null 2>&1 || true
+    systemctl start podman.service >/dev/null 2>&1 || true
+  fi
   if [ ! -S {sock} ] && [ -S {PODMAN_SOCKET_PATH} ]; then
     ln -sf {PODMAN_SOCKET_PATH} {sock} || true
   fi
@@ -577,6 +617,21 @@ _DOCKER_BOOT_GATE = """# AND enabled at boot, which is the check that matters fo
 if command -v systemctl >/dev/null 2>&1 && systemctl cat docker.service >/dev/null 2>&1; then
   if ! systemctl is-enabled docker >/dev/null 2>&1; then
     echo "docker is running on the broker VM but its unit is NOT enabled at boot, and 'systemctl enable docker' did not take. A template is baked and then booted, so every POV built from this one would come up with no daemon and sit at 'enrolling'. Enable it on this VM before baking." >&2
+    exit 1
+  fi
+# The SAME rule for a Podman guest, which used to fall through this gate entirely. The
+# `systemctl cat docker.service` above is false on podman-docker -- there is no docker
+# unit to enable -- so the whole check was skipped, and a template could bake with a
+# socket that answers right now because the install just started it and is not enabled at
+# boot. Every POV from that template comes up with a working `docker` command and nothing
+# listening: the exact failure this gate exists to stop, one unit name over.
+elif command -v systemctl >/dev/null 2>&1 && systemctl cat podman.socket >/dev/null 2>&1; then
+  # Either is a real answer: socket activation (podman.socket) or the API service running
+  # persistently (podman.service). An operator who fixed this by hand usually has the
+  # second, so demanding the first would fail a guest that is genuinely correct.
+  if ! systemctl is-enabled podman.socket >/dev/null 2>&1 \\
+     && ! systemctl is-enabled podman.service >/dev/null 2>&1; then
+    echo "podman answers on this broker VM but NEITHER podman.socket NOR podman.service is enabled at boot. A template is baked and then booted, so every POV built from this one would come up with a working 'docker' command and nothing listening on the socket - which enrols, goes green, and fails every Gateway and Config-Management job. Run 'systemctl enable --now podman.socket' on this VM before baking." >&2
     exit 1
   fi
 fi
