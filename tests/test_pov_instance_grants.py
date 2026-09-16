@@ -435,6 +435,52 @@ def test_the_vendor_router_mints_credentials_and_is_gated_like_the_accessor_one(
         "vendor group on another")
 
 
+# ── what the page load costs the lab platform ────────────────────────────────
+
+def _pov_page_source():
+    with open(os.path.join(_ROOT, "web_dashboard", "templates", "pov", "index.html"),
+              encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_the_template_listing_is_not_read_on_page_load():
+    """The template list is a PAGED platform GET, taken against one instance-wide
+    credential that every SE on the install shares. Its only consumer is the create
+    form's picker, which is behind a button -- so fetching it in `load()` charged every
+    page load for a read most loads never use, and put a shared account's rate limit in
+    proportion to how many SEs happened to open the page.
+
+    Pinned because moving it back is a one-line edit that costs nothing visible: the
+    picker fills either way, and only the platform notices."""
+    load_fn = _pov_page_source().split("async load() {")[1].split("\n    },")[0]
+    assert "/api/pov/templates" not in load_fn, (
+        "templates/pov/index.html reads the platform's template catalogue on every page "
+        "load again -- it belongs in loadTemplates(), called when the create form opens")
+    # The environments listing DOES stay here: "All environments on the platform" renders
+    # unconditionally, so deferring it would defer the table it fills. It is the read that
+    # the pov_platform_cache table is for.
+    assert "/api/pov/environments" in load_fn
+
+
+def test_opening_the_create_form_is_what_reads_the_templates():
+    """The other half: deferred is only correct if something still asks. A picker that
+    never fills reads as "this platform has no templates", which is the same blank page
+    the grants above exist to prevent, arrived at from the other side."""
+    src = _pov_page_source()
+    toggle = src.split("async toggleCreate() {")[1].split("\n    },")[0]
+    assert "loadTemplates()" in toggle
+    assert "@click=\"toggleCreate()\"" in src, (
+        "the Build-by-hand button no longer goes through toggleCreate(), so opening the "
+        "form no longer loads the template picker")
+    loader = src.split("async loadTemplates() {")[1].split("\n    },")[0]
+    assert "/api/pov/templates" in loader
+    # Asked once, not once per open -- and not re-asked after a failure, which would put
+    # a rate-limited platform back under the load that rate-limited it.
+    assert "templatesLoaded" in loader and "templatesLoading" in loader
+    # `load()` is the single reset point, so Re-check and a platform switch refetch.
+    assert "resetTemplates()" in src.split("async load() {")[1].split("\n    },")[0]
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

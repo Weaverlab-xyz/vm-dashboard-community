@@ -84,7 +84,7 @@
               x-text="rechecking ? 'Checking…' : 'Re-check platform'"></button>
       <!-- Secondary now: the one-click strip below is the primary way in, and this opens
            the eleven-field form for the cases a saved recipe does not cover. -->
-      <button x-show="canProvision" @click="showCreate = !showCreate" :disabled="notConfigured"
+      <button x-show="canProvision" @click="toggleCreate()" :disabled="notConfigured"
               class="px-4 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
               x-text="showCreate ? 'Hide the full form' : 'Build by hand'"></button>
     </div>
@@ -186,13 +186,21 @@
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">Template</label>
-        <select x-model="form.template_id"
-                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-          <option value="">Choose a template…</option>
+        <!-- Populated when this form OPENS, not on page load -- see `loadTemplates`. The
+             list is disabled while that read is in flight rather than hidden: an empty
+             picker that fills in a second later reads as "this template is missing" to
+             somebody who opened the form to pick a specific one. -->
+        <select x-model="form.template_id" :disabled="templatesLoading"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm disabled:opacity-50">
+          <option value="" x-text="templatesLoading ? 'Reading the platform…' : 'Choose a template…'"></option>
           <template x-for="t in templates" :key="t.id">
             <option :value="t.id" x-text="t.name + (t.vm_count === null ? '' : ' (' + t.vm_count + ' VMs)')"></option>
           </template>
         </select>
+        <p x-show="templatesLoaded && !templatesLoading && !templates.length"
+           class="text-xs text-gray-400 mt-1">
+          This platform listed no templates in the configured project.
+        </p>
       </div>
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
@@ -1027,7 +1035,15 @@ function povPage() {
     archive: [],
     archiveTruncated: false,
     environments: [],
+    // The create form's template picker. NOT filled by `load()` -- a full platform
+    // template listing on every page load, for a picker behind a button most loads never
+    // press, was the page's second platform read and every SE paid it. `templatesLoaded`
+    // is the "we have asked" flag, so opening the form twice is one read and an empty
+    // catalogue does not re-ask on every open; `load()` clears it, which is what makes
+    // Re-check and a platform switch refetch.
     templates: [],
+    templatesLoaded: false,
+    templatesLoading: false,
     // `<kind>_field` rather than the API's `<kind>_tenant_id`, because the kinds come
     // from the server and building the key from one of them keeps the picker loop
     // generic — a fourth product is then a registry entry, not more markup.
@@ -1280,20 +1296,48 @@ function povPage() {
       await this.loadBlueprints();
       this.managed = await this.fetchList('/api/pov/managed', 'environments', true);
       await this.loadArchive();
-      if (this.notConfigured) { this.environments = []; this.templates = []; this.loading = false; return; }
+      if (this.notConfigured) { this.environments = []; this.resetTemplates(); this.loading = false; return; }
       // Both of these are pov:write. For a stakeholder they are not merely empty, they
       // are refused -- and fetchList reports a refusal as "Could not load environments
       // (403)" across the top of a page that is otherwise fine. Their only consumers are
       // the create form and the live platform table, both hidden below without write.
-      if (!this.canProvision) { this.environments = []; this.templates = []; this.loading = false; return; }
-      const [envs, tpls] = await Promise.all([
-        this.fetchList('/api/pov/environments', 'environments'),
-        this.fetchList('/api/pov/templates', 'templates'),
-      ]);
-      this.environments = envs;
-      this.templates = tpls;
+      if (!this.canProvision) { this.environments = []; this.resetTemplates(); this.loading = false; return; }
+      // The template listing used to be fetched here alongside this one. It is not any
+      // more: its only consumer is the create form's picker, which is behind a button,
+      // and the two reads together were a paged platform GET each -- against ONE
+      // instance-wide credential shared by every SE on the install. This one stays
+      // because "All environments on the platform" renders unconditionally below.
+      this.resetTemplates();
+      this.environments = await this.fetchList('/api/pov/environments', 'environments');
       this.loading = false;
       this.schedulePoll();
+    },
+
+    resetTemplates() {
+      this.templates = [];
+      this.templatesLoaded = false;
+    },
+
+    // Opening the form is what asks the platform for its templates. Closing it does not
+    // discard them -- the read is the expensive part, and a form reopened to correct one
+    // field should not pay for it twice.
+    async toggleCreate() {
+      this.showCreate = !this.showCreate;
+      if (this.showCreate) await this.loadTemplates();
+    },
+
+    async loadTemplates() {
+      if (this.templatesLoaded || this.templatesLoading) return;
+      this.templatesLoading = true;
+      try {
+        this.templates = await this.fetchList('/api/pov/templates', 'templates');
+        // Set even when the list came back empty or the read failed: `fetchList` has
+        // already surfaced a failure through `error`, and retrying it on every open
+        // would put a rate-limited platform back under the load that rate-limited it.
+        this.templatesLoaded = true;
+      } finally {
+        this.templatesLoading = false;
+      }
     },
 
     // Only poll while something is mid-flight. A POV lives for weeks; polling a settled

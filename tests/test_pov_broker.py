@@ -958,6 +958,98 @@ def test_the_adapter_exposes_inject_bootstrap():
     assert callable(getattr(mod, "inject_bootstrap", None))
 
 
+# ── the list projection ──────────────────────────────────────────────────────
+#
+# `describe_many` is the POV list's read and `describe` is the detail page's. They resolve
+# the same agent by the same precedence, so the two tests below pin the two ways that can
+# go wrong: the projections disagreeing, and the batch quietly going back to one query per
+# row. The second is the whole reason the function exists.
+
+def _agent(name, *, agent_id=None, public_key="k" * 64, active=True):
+    db = d.SessionLocal()
+    row = d.RemoteAgent(name=name, public_key=public_key, is_active=active,
+                        last_seen_at=d.datetime.utcnow())
+    if agent_id:
+        row.id = agent_id
+    db.add(row)
+    db.commit()
+    out = row.id
+    db.close()
+    return out
+
+
+def _describe_cases():
+    """Three envs covering all three rungs of the resolver: by id, by derived name, none.
+
+    Names carry a uuid because `agent_name` DERIVES the agent's name from the POV's, and
+    `remote_agents.name` is unique — a fixed name here passes against a fresh database and
+    fails the second time this file is run against a persisted one.
+    """
+    tag = uuid.uuid4().hex[:6]
+    by_id = _new_env(name=f"poc-byid-{tag}")
+    agent_id = _agent(f"some-unrelated-name-{tag}")
+    db = d.SessionLocal()
+    pov_env_service.get(db, by_id).broker_agent_id = agent_id
+    db.commit()
+    db.close()
+
+    by_name = _new_env(name=f"poc-byname-{tag}")
+    db = d.SessionLocal()
+    _agent(pov_broker.agent_name(pov_env_service.get(db, by_name)))
+    db.close()
+
+    return [by_id, by_name, _new_env(name=f"poc-none-{tag}")]
+
+
+def test_describe_many_agrees_with_describe_row_by_row():
+    """Whatever the batch decides, the detail page must decide the same. A list that named
+    a different broker than the page it links to would be worse than the per-row cost."""
+    env_ids = _describe_cases()
+    db = d.SessionLocal()
+    envs = [pov_env_service.get(db, i) for i in env_ids]
+    batch = pov_broker.describe_many(db, envs)
+    for env in envs:
+        assert batch[env.id] == pov_broker.describe(db, env), env.name
+    # And the three rungs really were distinct, or this test proves nothing.
+    statuses = {batch[i]["broker_status"] for i in env_ids}
+    assert "none" in statuses and "online" in statuses
+    assert batch[env_ids[1]]["broker_agent_name"].endswith("-broker")
+    db.close()
+
+
+def test_describe_many_does_not_scale_its_queries_with_the_row_count():
+    """The failure this replaced: `_agent_row` only skips its second query when
+    `broker_agent_id` is set, so every POV WITHOUT a broker — the common row — cost a
+    `remote_agents` lookup, once per row, on every page load by every SE."""
+    from sqlalchemy import event
+
+    counted = []
+
+    def _count(conn, cursor, statement, params, context, executemany):
+        if "remote_agents" in statement:
+            counted.append(statement)
+
+    ids = [_new_env(name=f"poc-n{i}") for i in range(12)]
+    db = d.SessionLocal()
+    envs = [pov_env_service.get(db, i) for i in ids]
+    event.listen(d.engine, "before_cursor_execute", _count)
+    try:
+        pov_broker.describe_many(db, envs)
+    finally:
+        event.remove(d.engine, "before_cursor_execute", _count)
+    db.close()
+    # Two: one by id, one by derived name. Never twelve, and never twenty-four.
+    assert len(counted) <= 2, f"{len(counted)} agent queries for 12 rows"
+
+
+def test_describe_many_tolerates_an_empty_page():
+    """A stakeholder with no POVs in scope reaches this with []. An `IN ()` against no
+    values is both pointless and, on some backends, invalid SQL."""
+    db = d.SessionLocal()
+    assert pov_broker.describe_many(db, []) == {}
+    db.close()
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
