@@ -599,6 +599,41 @@ class JobTracker {
     }
 }
 
+// ── the POV setup ladder, as colour and as a mark ────────────────────────────
+//
+// The six states come from services/pov_setup_steps, and they are rendered on more than
+// one surface now -- the POV list's per-row ladder and the home dashboard's POV band. A
+// second copy of this map would drift silently the day a seventh state is added, which is
+// exactly the failure the ladder exists to prevent somewhere else.
+//
+// `skipped` is GREY and never amber: a PRA-only POV is complete without a Resource
+// Broker, and painting that as a warning is how a correctly scoped evaluation reads as
+// half broken. An unknown state falls through to grey rather than throwing -- a state
+// added server-side must degrade to "no claim", not to a blank page.
+function povStepClass(s) {
+    const map = {
+        done: 'bg-green-50 text-green-700',
+        configured: 'bg-green-50 text-green-600',
+        running: 'bg-blue-50 text-blue-700',
+        ready: 'bg-blue-100 text-blue-800 font-medium',
+        blocked: 'bg-amber-50 text-amber-800',
+        skipped: 'bg-gray-50 text-gray-400',
+    };
+    return map[s.state] || 'bg-gray-50 text-gray-400';
+}
+
+// `configured` gets a HOLLOW tick, not a solid one. The Gateway and the Resource Broker
+// have no stored installed-signal to read, so a filled tick there would be a claim this
+// dashboard cannot make -- see the service's module docstring.
+function povStepMark(s) {
+    const map = {
+        done: '✓', configured: '○', running: '•',
+        ready: '→', blocked: '!', skipped: '–',
+    };
+    return map[s.state] || '–';
+}
+
+
 // ── Utilities ─────────────────────────────────────────────────────────────────
 function statusBadge(status) {
     const map = {

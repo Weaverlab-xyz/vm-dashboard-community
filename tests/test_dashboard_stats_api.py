@@ -62,11 +62,17 @@ class _User:
     """Enough of a User for the accessors. `is_admin` and `is_effective_admin` are set
     independently on purpose — that difference is the point of several tests below."""
 
-    def __init__(self, username="alice", is_admin=False, effective=None, workgroups=()):
+    def __init__(self, username="alice", is_admin=False, effective=None, workgroups=(),
+                 pov_env_ids=None, permissions=None):
         self.username = username
         self.is_admin = is_admin
         self.is_effective_admin = is_admin if effective is None else effective
         self.workgroups_list = list(workgroups)
+        # The two the POV tiles read. `pov_env_ids_list` is the per-instance grant and
+        # `effective_permissions_dict` the feature-area one; an empty dict means
+        # unrestricted, which is the pre-OIDC compatibility clause has_permission keeps.
+        self.pov_env_ids_list = list(pov_env_ids or [])
+        self.effective_permissions_dict = permissions or {}
 
 
 def _reset():
@@ -266,7 +272,11 @@ def test_the_endpoint_imports_nothing_that_can_dial_out():
     banned = {"aws_service", "azure_service", "gcp_service", "oci_service",
               "proxmox_service", "nutanix_service", "vsphere_service", "hyperv_service",
               "xcpng_service", "portainer_service", "cost_service", "storage_service",
-              "k8s_runner_service", "dashboard_collect_fetchers"}
+              "k8s_runner_service", "dashboard_collect_fetchers",
+              # The POV tiles are DB reads. These three describe the same rows and each
+              # dials -- an enrolled agent, the PRA appliance, the lab platform -- so
+              # reaching for one to enrich a tile is the plausible next mistake.
+              "pov_broker", "pov_gateway", "pov_reconcile"}
     found = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -379,6 +389,153 @@ def test_the_response_shape_matches_what_the_client_renders():
     # oldest_as_of feeds the page's one "as of" label.
     assert out["oldest_as_of"], "no page-level as_of to render"
 
+
+
+# ── the POV tiles ─────────────────────────────────────────────────────────────
+#
+# Two gates and a scope, all borrowed from api/pov.py rather than reinvented here — so
+# the three tests below are really one question asked three ways: can this endpoint ever
+# report a POV the /pov page would refuse to open?
+
+def _pov_env(env_id, name, *, status="active", vms=()):
+    """One POV and its guests. `vms` is [(name, pra_jump_id), ...]."""
+    from web_dashboard.database import PovEnvironment, PovEnvironmentVM
+    db = SessionLocal()
+    try:
+        db.add(PovEnvironment(id=env_id, platform="skytap", name=name, status=status,
+                              created_by="alice", created_at=datetime.utcnow()))
+        for vm_name, jump in vms:
+            db.add(PovEnvironmentVM(environment_id=env_id, platform_vm_id=vm_name,
+                                    name=vm_name, pra_jump_id=jump or ""))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _pov_reset():
+    from web_dashboard.database import PovEnvironment, PovEnvironmentVM
+    db = SessionLocal()
+    try:
+        db.query(PovEnvironmentVM).delete()
+        db.query(PovEnvironment).delete()
+        db.commit()
+    finally:
+        db.close()
+
+
+def _pov_tiles(user, *, enabled=True):
+    """Just the POV half, with the feature flag forced rather than configured.
+
+    The flag is masked off on an estate instance, which is the default this test database
+    resolves to — so without forcing it every case below would collapse into the
+    "not enabled" one and pass for the wrong reason.
+    """
+    from web_dashboard.services import feature_flags
+    original = feature_flags.enabled
+    feature_flags.enabled = lambda name, default=None: (
+        enabled if name == "pov_environments_enabled" else original(name, default))
+    db = SessionLocal()
+    try:
+        return api._pov_tiles(db, user)
+    finally:
+        db.close()
+        feature_flags.enabled = original
+
+
+def test_the_pov_tiles_honour_the_per_instance_grant():
+    """A narrowed user must not be told how many POVs exist. `require_pov_env_access`
+    closes that one route at a time and answers 404 rather than 403, precisely so an id
+    is not worth guessing — a COUNT here would hand back what those 404s withhold."""
+    _pov_reset()
+    _pov_env("env-a", "alpha", vms=[("vm1", "jump-1"), ("vm2", "")])
+    _pov_env("env-b", "bravo", vms=[("vm3", "jump-3")])
+    _pov_env("env-c", "charlie")
+
+    everything = _pov_tiles(_User(is_admin=True))
+    assert everything["pov_active"]["value"] == 3
+    assert everything["pov_guests"]["value"] == 3
+    assert everything["pov_guests"]["secondary"] == 2, "wired counts the jump items"
+
+    narrowed = _pov_tiles(_User(pov_env_ids=["env-a"]))
+    assert narrowed["pov_active"]["value"] == 1, (
+        "a user granted one POV is counting all of them")
+    assert narrowed["pov_guests"]["value"] == 2, (
+        "the guest tile counts guests of POVs this user cannot open")
+
+
+def test_a_destroyed_pov_is_not_counted():
+    """The /pov list filters them out, and so must the tile above it — otherwise the
+    number on the home page and the rows on the page it links to disagree."""
+    _pov_reset()
+    _pov_env("env-a", "alpha")
+    _pov_env("env-gone", "gone", status="destroyed")
+    assert _pov_tiles(_User(is_admin=True))["pov_active"]["value"] == 1
+
+
+def test_without_pov_read_every_pov_tile_is_forbidden_rather_than_a_number():
+    """One missing permission must never blank the page, and must never leak a count."""
+    _pov_reset()
+    _pov_env("env-a", "alpha", vms=[("vm1", "jump-1")])
+    tiles = _pov_tiles(_User(permissions={"aws": ["read"]}))
+    for key in ("pov_active", "pov_guests", "pov_coverage"):
+        assert tiles[key]["status"] == "forbidden", (
+            f"{key} answered {tiles[key]['status']!r} for a user without pov:read")
+        assert tiles[key]["value"] == api.UNAVAILABLE
+
+
+def test_an_empty_permission_map_is_still_unrestricted():
+    """The pre-OIDC compatibility clause in has_permission. Being stricter here than the
+    rest of the app would hide POVs from users who can already open them."""
+    _pov_reset()
+    _pov_env("env-a", "alpha")
+    assert _pov_tiles(_User(permissions={}))["pov_active"]["value"] == 1
+
+
+def test_an_instance_that_runs_no_povs_reports_unavailable_never_zero():
+    """0 is a plausible number and renders as one. "This instance does not do POVs" and
+    "this POV instance has none right now" are different facts, and the tile has to be
+    able to say which."""
+    _pov_reset()
+    tiles = _pov_tiles(_User(is_admin=True), enabled=False)
+    for key in ("pov_active", "pov_guests", "pov_coverage"):
+        assert tiles[key]["value"] == api.UNAVAILABLE, (
+            f"{key} reports {tiles[key]['value']!r} on an instance with the feature off")
+        assert tiles[key]["status"] == "unavailable"
+
+    # ...and with the feature ON and no POVs yet, zero IS the honest answer.
+    live = _pov_tiles(_User(is_admin=True))
+    assert live["pov_active"]["value"] == 0
+    assert live["pov_active"]["status"] == "ok"
+
+
+def test_a_failing_pov_source_degrades_to_its_own_tile():
+    """Same rule as every other source here: one failure is one unavailable tile, never a
+    500 that blanks a page whose other twenty tiles were fine."""
+    _pov_reset()
+    _pov_env("env-a", "alpha", vms=[("vm1", "jump-1")])
+    from web_dashboard.services import pov_use_cases
+    original = pov_use_cases.summary_for
+    pov_use_cases.summary_for = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    try:
+        tiles = _pov_tiles(_User(is_admin=True))
+    finally:
+        pov_use_cases.summary_for = original
+
+    assert tiles["pov_coverage"]["value"] == api.UNAVAILABLE
+    assert tiles["pov_active"]["value"] == 1, (
+        "the coverage tile failing took the environment count with it")
+    assert tiles["pov_guests"]["value"] == 1
+
+
+def test_the_coverage_denominator_counts_only_what_this_pov_can_run():
+    """A POV wired into one product has most of the catalog out of scope. Reporting
+    "3 of 32" against it would read as an evaluation going badly rather than a scoped one,
+    which is why the denominator travels as text rather than as a share of the catalog."""
+    _pov_reset()
+    _pov_env("env-a", "alpha", vms=[("vm1", "jump-1")])
+    tile = _pov_tiles(_User(is_admin=True))["pov_coverage"]
+    assert isinstance(tile["secondary"], str) and "in scope" in tile["secondary"], (
+        "the coverage secondary is not the free-form in-scope denominator")
 
 if __name__ == "__main__":
     import traceback
