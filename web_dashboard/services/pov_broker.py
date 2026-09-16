@@ -1123,7 +1123,11 @@ def describe(db: Session, env: PovEnvironment) -> dict:
     whole point of the field: "never installed" and "installed and offline" have different
     remedies, and a single "not working" hides which one you are looking at.
     """
-    agent = _agent_row(db, env)
+    return _described(env, _agent_row(db, env))
+
+
+def _described(env: PovEnvironment, agent: RemoteAgent | None) -> dict:
+    """``describe``'s projection, once the agent row has been resolved however."""
     return {
         "broker_vm_id": env.broker_vm_id or "",
         "broker_agent_id": env.broker_agent_id or "",
@@ -1131,3 +1135,45 @@ def describe(db: Session, env: PovEnvironment) -> dict:
         "broker_status": agent_service.status_of(agent) if agent is not None else "none",
         "broker_error": env.metadata_dict.get("broker_error", ""),
     }
+
+
+def describe_many(db: Session, envs: list[PovEnvironment]) -> dict[str, dict]:
+    """``describe`` for a whole page, in two queries instead of two per row.
+
+    Same resolution as :func:`_agent_row` and deliberately the same *precedence* — id
+    first, derived name as recovery — because a list that disagreed with the detail page
+    about which row is a POV's broker would be a worse bug than the one this replaces.
+
+    The reason it exists is the fallback. ``_agent_row`` only skips its second query when
+    ``broker_agent_id`` is set, so every POV *without* a broker — the common row on a busy
+    install — cost a full ``RemoteAgent.name`` lookup, and the POV list ran one per row.
+    At a hundred SEs the connection pool is what caps concurrency here, not the platform,
+    so this is the read that had to stop scaling with the page.
+
+    Returns ``{env.id: projection}``. A caller must tolerate a missing key rather than
+    assume one per input.
+    """
+    if not envs:
+        return {}
+
+    ids = {e.broker_agent_id for e in envs if e.broker_agent_id}
+    names = {agent_name(e) for e in envs}
+    by_id: dict[str, RemoteAgent] = {}
+    by_name: dict[str, RemoteAgent] = {}
+    if ids:
+        by_id = {a.id: a for a in
+                 db.query(RemoteAgent).filter(RemoteAgent.id.in_(sorted(ids))).all()}
+    if names:
+        by_name = {a.name: a for a in
+                   db.query(RemoteAgent).filter(RemoteAgent.name.in_(sorted(names))).all()}
+
+    out: dict[str, dict] = {}
+    for env in envs:
+        agent = by_id.get(env.broker_agent_id) if env.broker_agent_id else None
+        if agent is None:
+            if env.broker_agent_id:
+                logger.warning("POV %s: broker_agent_id %s points at no row; falling back "
+                               "to the derived name", env.id, env.broker_agent_id)
+            agent = by_name.get(agent_name(env))
+        out[env.id] = _described(env, agent)
+    return out

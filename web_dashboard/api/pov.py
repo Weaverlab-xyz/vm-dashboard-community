@@ -490,7 +490,11 @@ def list_managed(db: Session = Depends(get_db),
     if scope is not None:
         q = q.filter(PovEnvironment.id.in_(sorted(scope)))
     rows = q.order_by(PovEnvironment.created_at.desc()).all()
-    return {"environments": [_serialize(e, broker=pov_broker.describe(db, e))
+    # One pair of queries for the page, not a pair per row. `describe` is still the right
+    # call for a single environment; this list is the one caller where the per-row cost is
+    # multiplied by the inventory AND by every SE loading the page at once.
+    brokers = pov_broker.describe_many(db, rows)
+    return {"environments": [_serialize(e, broker=brokers.get(e.id))
                              for e in rows]}
 
 
