@@ -295,6 +295,11 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
     subnet = payload.subnetwork or _rc["subnetwork"]
     bt_enabled = _cfg_svc.get_bool("pra_enabled")
     jp: Optional[_JumpointRef] = None
+    # Hoisted out of the try alongside `jp` so the failure path below can still see it.
+    # Both name things this run ACQUIRES before the instance exists, and `final_meta` —
+    # the dict they are normally recorded into — is not built until after the launch
+    # returns, so a failure before that point had nothing to write them onto.
+    nat_name = None
     try:
         job_service.set_running(db, job_id)
 
@@ -342,7 +347,6 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         # subnet gets outbound internet. Opened BEFORE the launch so the instance has
         # egress from first boot — package installs during cloud-init would otherwise
         # hang. Removed again when the last VM in the region is destroyed.
-        nat_name = None
         if _cfg_svc.get_bool("gcp_vm_nat_enabled"):
             try:
                 from ..services import gcp_nat_service
@@ -470,7 +474,21 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
 
     except Exception as exc:
         logger.error("GCE deploy failed for job %s: %s", job_id, exc)
-        job_service.set_failed(db, job_id, str(exc))
+        # Persist what this run had already TAKEN. `final_meta` — the dict `jp.record`
+        # normally writes into — is only built after the launch returns, so a failure
+        # at or before step 1 left the row with no record of the Gateway at all. In
+        # PAIRED mode that Gateway is a dedicated `bt-jumpoint-<vm>` VM this deploy
+        # OWNS, and `_run_destroy`'s paired teardown finds it by the `jumpoint_name`
+        # key on the deploy row — so without this it kept running with nothing
+        # naming it and no destroy able to reclaim it. `jumpoint_error` matters for
+        # the same reason the k8s token rotation's warnings do: a step-1 remedy is
+        # lost the moment a later step raises.
+        partial: dict = {}
+        if nat_name:
+            partial["nat_name"] = nat_name
+        if jp:
+            jp.record(partial)
+        job_service.set_failed(db, job_id, str(exc), partial or None)
     finally:
         db.close()
 
