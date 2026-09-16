@@ -493,6 +493,16 @@ falling back would put the node in the *default* region's network while the form
 job and the row all said otherwise. Run that cloud's sandbox setup for the region, or
 add a per-region config under **Settings → Multi-region**.
 
+**Azure: deploy fails at 30% with "(InvalidRequestContent) … Could not find member
+'hardware_profile' on object of type 'ResourceDefinition'"** — Azure rejected the VM
+create request itself, so nothing was provisioned (no VM, no cost) and the job has no
+output. It is a dashboard-side bug, not a permission, quota or region problem: the
+`azure-mgmt-compute` SDK ≥ 38 sends a raw request body straight through to Azure
+instead of translating it to the REST shape. Fixed in this version — the Azure node
+launcher builds the request from SDK model objects — so **rebuild/redeploy the
+dashboard image** and deploy again. The same request kills the Rancher node deploy,
+since both land in the same launcher.
+
 **Azure: the node is RUNNING but nothing answers on 9443** — an Azure VM with a
 Standard public IP and no NSG rule denies *every* inbound packet, which looks identical
 to a closed allow-list. Confirm the node's NSG (`<node>-allow-mgmt`) exists and carries

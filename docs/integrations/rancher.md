@@ -538,6 +538,16 @@ security-group authorize/revoke — re-run `setup-aws.sh` to refresh
 `dashboard-app-policy`. **Azure**: `Contributor` on the resource group — re-run
 `setup-azure.sh`.
 
+**Azure: deploy fails at 30% with "(InvalidRequestContent) … Could not find member
+'hardware_profile' on object of type 'ResourceDefinition'"** — Azure rejected the VM
+create request itself, so nothing was provisioned (no VM, no cost) and the job has no
+output. It is a dashboard-side bug, not a permission, quota or region problem: the
+`azure-mgmt-compute` SDK ≥ 38 sends a raw request body straight through to Azure
+instead of translating it to the REST shape. Fixed in this version — the Azure node
+launcher builds the request from SDK model objects — so **rebuild/redeploy the
+dashboard image** and deploy again. The same request kills the Portainer node deploy,
+since both land in the same launcher.
+
 **Node is RUNNING but the URL won't load** — the node is closed. Set
 `rancher_allowed_source_cidrs` to include your IP (it fails closed by design) and
 redeploy to patch the rule. Check what is actually allowed with
