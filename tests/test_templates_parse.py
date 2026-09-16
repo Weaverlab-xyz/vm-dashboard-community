@@ -159,6 +159,33 @@ def test_inventory_column_count_matches_both_colspans():
             f"resource_expiry_enabled={flag}: {n_th} <th> but colspan(s) {sorted(colspans)}")
 
 
+def test_pov_ladder_colspan_matches_the_managed_table():
+    """The setup ladder is a full-width second row, so its colspan must equal the number
+    of columns above it.
+
+    Same failure as the inventory test above and the same reason nothing else catches it:
+    a new <th> in that table leaves the ladder row short, which does not error -- it just
+    renders misaligned. The managed table's <thead> is the only one in the file with a
+    Broker column, which is how it is told from the "all environments" and "Past POVs"
+    tables beside it.
+    """
+    full = os.path.join(_TEMPLATES, "pov", "index.html")
+    with open(full, encoding="utf-8") as fh:
+        src = fh.read()
+
+    theads = [m.group(0) for m in re.finditer(r"<thead\b.*?</thead>", src, re.S)]
+    managed = [t for t in theads if ">Broker<" in t]
+    assert len(managed) == 1, (
+        f"expected exactly one <thead> carrying a Broker column, found {len(managed)}")
+    n_th = len(re.findall(r"<th\b", managed[0]))
+
+    spans = {int(v) for v in re.findall(r':colspan="(\d+)"', src)}
+    spans |= {int(v) for v in re.findall(r'colspan="(\d+)"', src)}
+    assert spans == {n_th}, (
+        f"the managed POV table has {n_th} columns but the ladder row spans "
+        f"{sorted(spans)}")
+
+
 def _run_node(script, label):
     """Run a tests/*.js harness in its own node process. Skips when node isn't
     installed (it is on the CI runner)."""

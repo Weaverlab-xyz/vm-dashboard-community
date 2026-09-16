@@ -72,7 +72,7 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         lab_platforms, pov_blueprint_service, pov_broker, pov_env_service,
                         pov_accessor_entitle, pov_gateway, pov_reconcile,
                         pov_cloud_cost, pov_entitle_agent, pov_guest_step,
-                        pov_ps_config, pov_resource_broker,
+                        pov_ps_config, pov_resource_broker, pov_setup_steps,
                         suspend_schedule, pov_share, spend_policy, pov_summary,
                         pov_use_cases, pov_vendor_access, pov_wireup)
 from .auth import (get_current_user, has_permission, pov_env_scope,
@@ -276,6 +276,10 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
             # username, never a credential — see PovEnvironmentVM.login_username.
             "login_username": v.login_username or "",
         } for v in vms]
+    # LAST, and that is load-bearing: this reads the keys every `update()` above
+    # contributed. Computed any earlier it would see a half-built row and report every step
+    # blocked -- which would look like a POV problem rather than an ordering one.
+    out["setup"] = pov_setup_steps.describe(out)
     return out
 
 
@@ -383,6 +387,13 @@ async def list_platforms(current_user: User = Depends(get_current_user)):
         # thing. It hides UI, it does not grant anything -- every write route still
         # checks for itself.
         "can_provision": has_permission(current_user, "pov", "write"),
+        # Blueprints live on a DIFFERENT permission from POVs -- authoring a recipe is a
+        # `pov_templates` write, and plenty of users who may build a POV may not write
+        # one. Sent for the same reason and with the same caveat as `can_provision`: it
+        # hides the Save-as-blueprint control rather than granting anything, and the route
+        # still checks for itself. Without it that button renders for everyone and 403s
+        # for some of them, which reads as a broken page rather than as a permission.
+        "can_save_blueprints": has_permission(current_user, "pov_templates", "write"),
     }
 
 

@@ -1331,8 +1331,18 @@ def describe(db: Session, env: PovEnvironment) -> dict:
     """
     rows = (db.query(PovEnvironmentVM)
               .filter(PovEnvironmentVM.environment_id == env.id).all())
+    # Guests whose OS nobody has established yet. Counted HERE because `wireable` is the
+    # predicate that refuses them and it lives in this module, and because the LIST
+    # endpoint serves no per-VM rows -- so without this the POV page has no way to learn
+    # that a wire-up it is about to offer will skip every guest it is given. A skipped VM
+    # is not a failed one (see `run_env_wireup`'s gate), so that run would report success.
+    unknown = [r for r in rows if not r.guest_os]
     return {
         "vm_count": len(rows),
+        "os_unknown_count": len(unknown),
+        # Capped: this rides the list endpoint once per row, and the page needs enough to
+        # act on rather than the whole inventory.
+        "os_unknown_names": [(r.name or r.platform_vm_id or "?") for r in unknown][:4],
         "wired_count": sum(1 for r in rows if r.pra_jump_id),
         "onboarded_count": sum(1 for r in rows if r.ps_managed_system_id),
         "entitle_count": sum(1 for r in rows if r.entitle_integration_id),

@@ -484,6 +484,11 @@ def describe(db: Session, env: PovEnvironment) -> dict:
     """The RB's configured state for one POV row — no network calls."""
     return {
         "rb_vm_name": rb_vm_name(env),
+        # What was TYPED, beside the defaulted reader above. Same distinction `_serialize`
+        # already makes for `broker_vm_name` and for the same reason: a caller that copies
+        # a value the operator never chose -- saving this POV as a blueprint, say -- would
+        # pin the default into every POV made from it and switch the default OFF.
+        "rb_vm_name_stored": stored_rb_vm_name(env),
         "rb_zone": zone(env),
         "rb_asset": asset(env),
         "rb_has_key": has_installer_key(env),
