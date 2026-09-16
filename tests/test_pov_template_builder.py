@@ -119,7 +119,35 @@ dnf() { echo "PACKAGE-MANAGER-RAN" >&2; return 9; }
 yum() { echo "PACKAGE-MANAGER-RAN" >&2; return 9; }
 systemctl() { return 0; }
 service() { return 0; }
+systemd-tmpfiles() { return 0; }
+ln() { return 0; }
 """
+
+
+# The Engine API socket the install now gates on, faked as a plain file.
+#
+# A plain file and not a socket because **this repo's development machines cannot make an
+# AF_UNIX socket at all** — Windows Python has no `socket.AF_UNIX` — so a test that needed a
+# real one would pass in CI and fail here, which is the same as not having it. The gate is
+# written as the two ways the path is WRONG (absent, or a directory) rather than as one
+# `-S` assertion, and both of those are creatable anywhere, so what is pinned below is the
+# whole rule rather than the half a `-S` would leave testable.
+#
+# Forward slashes: `sh` on Windows is Git Bash, and a backslash in a `[ -e ]` is an escape,
+# not a separator.
+_SOCK_DIR = tempfile.mkdtemp(prefix="pov-broker-sock-")
+_FAKE_SOCKET = os.path.join(_SOCK_DIR, "docker.sock").replace("\\", "/")
+_MISSING_SOCKET = os.path.join(_SOCK_DIR, "absent.sock").replace("\\", "/")
+_DIR_SOCKET = os.path.join(_SOCK_DIR, "dir.sock").replace("\\", "/")
+with open(_FAKE_SOCKET, "w", encoding="utf-8"):
+    pass
+os.makedirs(_DIR_SOCKET, exist_ok=True)
+
+
+def _install(**kw) -> str:
+    """The install block, gated on a socket path this test run actually controls."""
+    kw.setdefault("socket_path", _FAKE_SOCKET)
+    return b.render_docker_install(**kw)
 
 
 def test_the_docker_install_is_valid_shell():
@@ -144,7 +172,7 @@ def test_the_generated_scripts_are_ascii_only():
 def test_a_guest_that_already_has_a_runtime_is_left_alone():
     """Reinstalling over a working runtime is how a build breaks a template that was
     fine — including the `podman` + `podman-docker` guest the contract accepts."""
-    p = _run_block(b.render_docker_install(),
+    p = _run_block(_install(),
                    _NO_PACKAGES + "\ndocker() { return 0; }\n")
     assert p.returncode == 0, f"rc={p.returncode} {p.stderr[:300]}"
     assert "PACKAGE-MANAGER-RAN" not in (p.stdout + p.stderr), \
@@ -156,7 +184,7 @@ def test_a_runtime_that_does_not_answer_fails_the_install():
     """The regression this exists for: a package that landed beside a daemon that will not
     start fails the bootstrap in exactly the same place as a guest that never had one, and
     the install script is the last moment anything is watching."""
-    p = _run_block(b.render_docker_install(),
+    p = _run_block(_install(),
                    _NO_PACKAGES + "\ndocker() { case \"$1\" in version) return 1 ;; esac; return 0; }\n")
     assert p.returncode != 0, "a runtime that cannot answer `docker version` must fail loudly"
     assert "enrolling" in p.stderr, \
@@ -168,7 +196,7 @@ def test_a_runtime_that_is_running_but_disabled_fails_the_install():
     family, and the guest it was found on was running only because somebody had just typed
     `systemctl start docker`. A template is baked and then booted — for every POV, every
     time — so "running now" is worth nothing here and this must not pass."""
-    p = _run_block(b.render_docker_install(), _NO_PACKAGES + """
+    p = _run_block(_install(), _NO_PACKAGES + """
 docker() { return 0; }
 systemctl() { case "$1" in is-enabled) return 1 ;; *) return 0 ;; esac; }
 """)
@@ -179,7 +207,7 @@ systemctl() { case "$1" in is-enabled) return 1 ;; *) return 0 ;; esac; }
 
 
 def test_a_runtime_that_is_running_and_enabled_passes():
-    p = _run_block(b.render_docker_install(), _NO_PACKAGES + """
+    p = _run_block(_install(), _NO_PACKAGES + """
 docker() { return 0; }
 systemctl() { return 0; }
 """)
@@ -192,7 +220,7 @@ def test_a_guest_with_no_docker_unit_is_not_failed_for_not_enabling_one():
     enable, and `is-enabled` on a unit that does not exist is not a finding about it. The
     gate asks whether there is a unit first — otherwise the check that protects RHEL-family
     templates would reject every Podman one."""
-    p = _run_block(b.render_docker_install(), _NO_PACKAGES + """
+    p = _run_block(_install(), _NO_PACKAGES + """
 docker() { return 0; }
 systemctl() { case "$1" in cat) return 1 ;; is-enabled) return 1 ;; *) return 0 ;; esac; }
 """)
@@ -243,15 +271,143 @@ def test_the_rhel_repo_is_chosen_by_id_and_not_by_id_like():
         "the fedora repo must be selected from ID, never from ID_LIKE"
 
 
-def test_an_unsupported_distro_names_itself_and_says_the_runner_landed():
-    """The build's Runner detail is the only place anyone reads this. "Unsupported" without
-    the distro's own name is a line an SE cannot act on, and without "the runner is already
-    in place" they re-run a script that had in fact done half its job."""
+# A guest with NO runtime cannot be simulated by stubbing `docker`, because `command -v`
+# finds a shell function as readily as a binary — defining one is the same as the guest
+# already having Docker, which is the other branch entirely. So absence is `PATH=""` and no
+# function at all, and the package manager DEFINES the function when it "installs",
+# which is what makes the `command -v docker` re-check after the fallback mean something.
+_NO_RUNTIME = """
+PATH=""
+systemctl() { return 0; }
+service() { return 0; }
+systemd-tmpfiles() { return 0; }
+ln() { return 0; }
+"""
+
+
+def test_a_guest_with_no_docker_ce_falls_back_to_the_distros_podman():
+    """The case this POV feature actually meets. A Skytap AlmaLinux 8 broker resolves
+    `appstream` and `baseos` perfectly and cannot reach download.docker.com at all, so
+    every step of the Docker CE install has to be non-fatal — otherwise the one guest the
+    fallback exists for never reaches it."""
+    p = _run_block(_install(), _NO_RUNTIME + """
+dnf() {
+  for a in "$@"; do
+    case "$a" in
+      docker-ce) echo "CE-ATTEMPTED" >&2; return 1 ;;
+      podman-docker) echo "PODMAN-INSTALLED" >&2; docker() { return 0; }; return 0 ;;
+    esac
+  done
+  return 0
+}
+""")
+    assert "PODMAN-INSTALLED" in p.stderr, \
+        f"a guest with no route to Docker's CDN must fall back to the distro's podman: {p.stderr[:400]}"
+    assert p.returncode == 0, \
+        f"and the fallback landing is a SUCCESS, not a tolerated failure: {p.stderr[:400]}"
+
+
+def test_docker_ce_is_attempted_before_the_podman_fallback():
+    """Ordering, asserted on the text because the branch that proves it behaviourally needs
+    an `/etc/os-release` this test cannot write. Docker CE is what the agent's Engine API
+    use is tested against; Podman is the answer to a guest that cannot reach Docker's CDN,
+    not a preference. Reversing these would quietly change what every future template
+    bakes."""
     block = b.render_docker_install()
-    tail = block[block.index("cannot install a container runtime automatically"):]
-    assert "$ID" in tail[:200], "the refusal must name the distro it found"
-    assert "already in place" in tail[:400], \
-        "the refusal must say the runner half landed, or the operator redoes it"
+    assert block.index("download.docker.com") < block.index(b.PODMAN_PACKAGES), \
+        "Docker CE must be tried first; podman is the fallback, not the default"
+    guard_at = block.index("if ! command -v docker")
+    install_at = block.index(f"dnf -y install {b.PODMAN_PACKAGES}")
+    assert guard_at < install_at, \
+        "the fallback must be guarded on Docker CE having actually failed, or a guest " \
+        "that got Docker CE has podman installed over it too"
+
+
+def test_the_docker_ce_install_is_never_fatal_on_its_own():
+    """Structural, because the behaviour above depends on it and a single missing `|| true`
+    puts it back: an `exit 1` or an unguarded install inside the Docker CE branches means a
+    guest that cannot reach download.docker.com never reaches the podman fallback at all.
+    Both of the guards that used to `exit 1` here — no VERSION_CODENAME, no VERSION_ID —
+    are now the fallback's reason to run rather than the script's reason to stop."""
+    block = b.render_docker_install()
+    ce = block[block.index('case " $ID $ID_LIKE " in'):block.index(b.PODMAN_PACKAGES)]
+    for line in ce.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("dnf -y install", "yum -y install", "apt-get -y -q install")):
+            assert stripped.endswith("|| true"), \
+                f"a fatal package install starves the podman fallback: {stripped}"
+    assert "exit 1" not in ce, \
+        "nothing in the Docker CE half may exit: the fallback below it is the answer"
+
+
+def test_neither_runtime_landing_refuses_and_names_both():
+    """The build's Runner detail is the only place anyone reads this. A refusal that named
+    only Docker would send an SE to a CDN their guest cannot reach, when the distro's own
+    package was the answer all along — so it names both attempts and the distro it found."""
+    p = _run_block(_install(), _NO_RUNTIME + """
+dnf() { return 1; }
+yum() { return 1; }
+""")
+    assert p.returncode != 0, "a guest with no runtime at all must fail loudly"
+    assert "download.docker.com" in p.stderr and b.PODMAN_PACKAGES in p.stderr, \
+        f"the refusal must name BOTH attempts, or half the remedy is invisible: {p.stderr[:400]}"
+    # And it names the distro. Asserted on the text: `$ID` is read from an /etc/os-release
+    # this test has no way to write, so it is empty in the run above.
+    block = b.render_docker_install()
+    refusal = block[block.index("could not install a container runtime"):]
+    assert "$ID" in refusal[:160], "the refusal must name the distro it found"
+
+
+def test_a_runtime_whose_socket_is_absent_is_refused_and_names_podman_socket():
+    """The trap `podman-docker` sets, and the reason this gate exists at all. The shim
+    answers `docker version` happily while NOTHING IS LISTENING — installing it does not
+    start `podman.socket`. The agent never runs the command; it speaks the Engine API over
+    the socket directly. So a guest in this state enrols, goes green, and fails every
+    Gateway and Config-Management job on a socket nobody started."""
+    p = _run_block(_install(socket_path=_MISSING_SOCKET), _NO_PACKAGES + """
+docker() { return 0; }
+""")
+    assert p.returncode != 0, \
+        "a working `docker` command over a dead socket must not pass as a working runtime"
+    assert "podman.socket" in p.stderr, \
+        f"the refusal must name the command that fixes it: {p.stderr[:400]}"
+
+
+def test_a_socket_path_that_is_a_directory_gets_its_own_refusal():
+    """A `docker run -v /var/run/docker.sock:...` against a host with no daemon creates a
+    DIRECTORY there, and every later run then mounts an empty one into the agent. It fails
+    the same gate as an absent socket and has a completely different remedy, so it gets its
+    own message rather than being folded into one `-S`."""
+    p = _run_block(_install(socket_path=_DIR_SOCKET), _NO_PACKAGES + """
+docker() { return 0; }
+""")
+    assert p.returncode != 0, "a directory where the socket belongs must not pass"
+    assert "rmdir" in p.stderr, \
+        f"this refusal must name its own remedy, not the socket one: {p.stderr[:400]}"
+
+
+def test_the_boot_gate_comes_off_for_a_live_pov_but_the_verify_never_does():
+    """`require_enabled_at_boot=False` is for `pov_broker.render_bootstrap`, where the guest
+    is already up and needs a runtime in the next ten minutes. Dropping the boot gate there
+    is right — refusing an install that was about to work leaves the POV with no agent at
+    all. Dropping the VERIFY would be a different thing entirely, and this pins that the
+    parameter does exactly one of them."""
+    running_but_disabled = _NO_PACKAGES.replace(
+        "systemctl() { return 0; }",
+        'systemctl() { case "$1" in is-enabled) return 1 ;; *) return 0 ;; esac; }')
+    p = _run_block(_install(require_enabled_at_boot=False),
+                   running_but_disabled + "\ndocker() { return 0; }\n")
+    assert p.returncode == 0, \
+        f"a live POV must not be refused over a unit that is not enabled at boot: {p.stderr[:300]}"
+    assert "power cycle" in p.stdout, \
+        f"it still has to SAY the broker will not survive a reboot: {p.stdout[:300]}"
+
+    # ...and the same call still refuses a runtime that does not answer at all.
+    p = _run_block(_install(require_enabled_at_boot=False), _NO_PACKAGES + """
+docker() { case "$1" in version) return 1 ;; esac; return 0; }
+""")
+    assert p.returncode != 0, \
+        "the boot gate is optional; a runtime that does not work is never optional"
 
 
 def test_the_runner_matches_the_marker_stem_not_the_version():
