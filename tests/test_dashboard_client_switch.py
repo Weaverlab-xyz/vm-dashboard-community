@@ -61,6 +61,7 @@ SERVER_ANSWERED = (
     "workstation_vms", "gateways", "ecs_tasks", "aci_containers",
     "gce_containers", "cloud_run_jobs", "rancher_nodes", "portainer_node",
     "portainer_endpoints", "active_jobs", "deployed_resources",
+    "pov_active", "pov_guests", "pov_coverage",
 )
 
 # Tiles that keep their own fetcher — a live host call unless agent-backed.

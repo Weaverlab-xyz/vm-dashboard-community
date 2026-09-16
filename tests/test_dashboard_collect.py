@@ -80,6 +80,13 @@ NOT_COLLECTED = {
     "gateways":           "gateway registry table (reconcile=false on the tile)",
     "ot_cells":           "Job rows (the cell's deploy child IS its inventory record)",
     "cloud_cost":         "already durable — services/cost_cache",
+    # The POV tiles. Indexed reads against the dashboard's own database, scoped by
+    # pov_env_scope rather than by workgroup -- so collecting them would force this
+    # module to re-encode a per-instance grant, the same reason the creator-scoped
+    # tiles above stay on the read endpoint's inline path.
+    "pov_active":         "PovEnvironment rows — dashboard DB, pov_env_scope'd",
+    "pov_guests":         "PovEnvironmentVM rows — dashboard DB, pov_env_scope'd",
+    "pov_coverage":       "PovUseCaseProgress + the fixed card registry — no provider",
     # The hypervisor listings are agent-synced DB reads when conn.via_agent, and a live
     # call otherwise. Collecting them needs the per-connection `scope` the table reserves
     # but nothing writes yet, so they stay on the read endpoint's inline path for now.

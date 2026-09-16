@@ -363,4 +363,12 @@ def feature_map() -> dict:
         "cloud_unmanaged_discovery": raw["cloud_unmanaged_discovery_enabled"],
         "vm_spend_cap": raw["vm_spend_cap_enabled"],
         "notifications": raw["notifications_enabled"],
+        # Not a feature flag -- the profile-owned page group, forwarded from flags()
+        # so the BROWSER reads the same answer main._profile_page_gate and
+        # _nav_links.html already do. Without it the dashboard's OT tile, whose only
+        # link is a cloud console, had no way to ask whether this instance serves one
+        # and would have had to re-derive it from the four cloud keys -- a second
+        # reader of a question that is deliberately allowed only one. See
+        # _PROFILE_PAGES.
+        "cloud_pages":  raw["cloud_pages"],
     }

@@ -259,6 +259,17 @@ def _db_tiles(db: Session, user: User) -> dict:
     _safe("gateways", _gateways)
 
     def _ot_cells():
+        # Every href this tile can produce is /{cloud}#ot, and
+        # main._profile_page_gate("cloud_pages") 404s all four of those pages on a POV
+        # instance. So the COUNT would be honest and the only link to it dead -- the
+        # dead-tile shape feature_flags._PROFILE_PAGES exists to stop, arriving by a
+        # third route. Resolved through the SAME reader as the nav link and the route,
+        # which is the rule profile_page_allowed was written to enforce. The client
+        # hides the tile for the same reason; this stops the endpoint computing a number
+        # nobody can follow.
+        from ..services import feature_flags
+        if not feature_flags.profile_page_allowed("cloud_pages"):
+            return _unavailable("the cloud consoles are not served on this instance")
         # OT demo cells across all three clouds. A cell's VM-deploy child row IS
         # its inventory record (metadata ot_cell=True), so this is a Job-table
         # read — never a cloud call, which is the whole contract of this endpoint.
@@ -303,6 +314,101 @@ def _db_tiles(db: Session, user: User) -> dict:
                 readable_clouds[0] if readable_clouds else "gcp")
         return _tile(total, secondary=wired, href=f"/{busiest}#ot")
     _safe("ot_cells", _ot_cells)
+
+    out.update(_pov_tiles(db, user))
+    return out
+
+
+# How the POV tiles are scoped, and what they cost.
+#
+# TWO GATES, both borrowed from api/pov.py rather than reinvented -- `pov:read` is the
+# feature-area permission its router carries, and `pov_env_scope` is the per-instance
+# grant `list_managed` applies to exactly this query. Anything looser would show a
+# narrowed SE a COUNT of POVs they cannot open, which is this page's version of the leak
+# require_pov_env_access closes one route at a time.
+#
+# COST: two queries plus one progress query per POV, all indexed, no network -- the number
+# to look at before a fourth POV tile is added here. `summary_for` is handed the wireup
+# dict built from the VM rows already in hand, which is what keeps that third query from
+# becoming two; see pov_use_cases.products_for.
+#
+# Note what is NOT imported: pov_broker, pov_gateway and pov_reconcile all dial (an agent,
+# PRA, the lab platform), and this endpoint makes no network call of any kind.
+
+def _pov_tiles(db: Session, user: User) -> dict:
+    """The POV tiles: environments, their guests, and evaluation coverage."""
+    from ..services import feature_flags
+    from .auth import has_permission, pov_env_scope
+
+    keys = ("pov_active", "pov_guests", "pov_coverage")
+
+    if not feature_flags.enabled("pov_environments_enabled"):
+        # NOT _tile(0). Zero is a plausible number and renders as one; an instance that
+        # does not run POVs has no answer, which is what the -1 sentinel is for.
+        return {k: _unavailable("POV environments are not enabled here") for k in keys}
+    if not has_permission(user, "pov", "read"):
+        return {k: _forbidden() for k in keys}
+
+    from ..database import PovEnvironment, PovEnvironmentVM
+    from ..services import pov_env_service, pov_use_cases
+
+    out: dict = {}
+
+    def _safe(key, fn):
+        try:
+            out[key] = fn()
+        except Exception as exc:                       # noqa: BLE001
+            logger.warning("dashboard stats: %s failed: %s", key, exc)
+            out[key] = _unavailable(f"{type(exc).__name__}")
+
+    q = db.query(PovEnvironment).filter(
+        PovEnvironment.status != pov_env_service.STATUS_DESTROYED)
+    scope = pov_env_scope(user)
+    if scope is not None:
+        q = q.filter(PovEnvironment.id.in_(sorted(scope)))
+    envs = q.all()
+    env_ids = [e.id for e in envs]
+
+    vms = (db.query(PovEnvironmentVM)
+             .filter(PovEnvironmentVM.environment_id.in_(env_ids)).all()
+           if env_ids else [])
+    by_env: dict = {}
+    for vm in vms:
+        by_env.setdefault(vm.environment_id, []).append(vm)
+
+    def _active():
+        # Secondary is what is still coming up, not what is running: a POV is routinely
+        # left suspended between sessions, and a green "N running" beside it would read
+        # as though the suspended ones had gone wrong.
+        provisioning = sum(1 for e in envs if e.status == "provisioning")
+        return _tile(len(envs), secondary=provisioning)
+    _safe("pov_active", _active)
+
+    def _guests():
+        # Wired means a PRA jump item exists for the guest -- the ARTIFACT, never a job's
+        # status. services/pov_setup_steps records why: a wire-up whose guests all report
+        # no OS skips every one of them and still completes green.
+        wired = sum(1 for v in vms if v.pra_jump_id)
+        return _tile(len(vms), secondary=wired)
+    _safe("pov_guests", _guests)
+
+    def _coverage():
+        done = total = 0
+        for env in envs:
+            rows = by_env.get(env.id, [])
+            wireup = {
+                "wired_count": sum(1 for v in rows if v.pra_jump_id),
+                "onboarded_count": sum(1 for v in rows if v.ps_managed_system_id),
+                "entitle_count": sum(1 for v in rows if v.entitle_integration_id),
+            }
+            summary = pov_use_cases.summary_for(db, env, wireup)
+            done += summary["done"]
+            total += summary["total"]
+        # The denominator counts only what these POVs can actually run, so it is not a
+        # fixed number the tile could label -- it travels as free-form text beside the
+        # value, the same shape the spend tile uses.
+        return _tile(done, secondary=f"of {total} in scope")
+    _safe("pov_coverage", _coverage)
 
     return out
 
