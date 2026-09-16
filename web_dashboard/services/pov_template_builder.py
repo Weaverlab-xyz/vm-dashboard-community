@@ -543,6 +543,20 @@ else
   service docker start >/dev/null 2>&1 || true
 fi
 
+# **Clear the debris a previous run left, before anything tries to link over it.**
+# `docker run -v {sock}:...` against a host whose daemon is not running does not fail --
+# the runtime CREATES the source as an empty DIRECTORY. The bootstrap has done exactly
+# that on a guest whose podman was installed but whose socket had not been started yet,
+# and every later run then mounts an empty directory into the agent.
+#
+# `rmdir` and never `rm -rf`: it removes the directory only if it is EMPTY, so debris goes
+# and anything with real content in it stays and is reported below. `-L` first, because a
+# working socket symlink also answers `-d` when it points at a directory, and removing
+# that would be the opposite of the repair.
+if [ -d {sock} ] && [ ! -L {sock} ]; then
+  rmdir {sock} >/dev/null 2>&1 || true
+fi
+
 # **The socket, which is the part a CLI check cannot see.** The agent does not run `docker`:
 # it speaks the Engine API over {sock} directly. Under Podman the `docker`
 # command is a shim that works perfectly while NOTHING IS LISTENING -- `podman.socket` is
@@ -571,8 +585,13 @@ if command -v systemctl >/dev/null 2>&1 && [ ! -S {sock} ]; then
     systemctl enable podman.service >/dev/null 2>&1 || true
     systemctl start podman.service >/dev/null 2>&1 || true
   fi
-  if [ ! -S {sock} ] && [ -S {PODMAN_SOCKET_PATH} ]; then
-    ln -sf {PODMAN_SOCKET_PATH} {sock} || true
+  # `! -e` and not `! -S`, which is the difference between a link and a mess. `ln -s X DIR`
+  # puts the link INSIDE the directory -- and `-n` does not save you, it only treats a
+  # SYMLINK to a directory as a file. So a directory still standing here would get
+  # `{sock}/podman.sock` created in it, which is invisible, fixes nothing, and makes the
+  # `rmdir` this script's own refusal recommends fail with "Directory not empty".
+  if [ ! -e {sock} ] && [ -S {PODMAN_SOCKET_PATH} ]; then
+    ln -s {PODMAN_SOCKET_PATH} {sock} || true
   fi
   # `--restart unless-stopped` is in the bootstrap's `docker run`, and under Podman that
   # flag only survives a reboot when this unit is enabled. Best-effort: the metadata runner
@@ -596,7 +615,7 @@ fi
 # have. A dangling podman-docker symlink and a leftover mount directory both fail a single
 # `-S` with one message that fits neither.
 if [ -d {sock} ]; then
-  echo "{sock} on this broker VM is a DIRECTORY, not a socket. A 'docker run -v {sock}:...' on a host whose daemon was not running creates one, and every later run then mounts an empty directory into the agent. Remove it with 'rmdir {sock}', make sure the daemon is up, and press Broker again." >&2
+  echo "{sock} on this broker VM is a DIRECTORY, not a socket, and it is NOT EMPTY so this script would not remove it. A 'docker run -v {sock}:...' on a host whose daemon was not running creates one, and every later run then mounts an empty directory into the agent. Look at what is inside it, remove it, make sure the daemon is up, and press Broker again." >&2
   exit 1
 fi
 if [ ! -e {sock} ]; then

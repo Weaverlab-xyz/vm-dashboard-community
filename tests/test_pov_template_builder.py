@@ -169,6 +169,22 @@ _TRACE = os.path.join(_SOCK_DIR, "systemctl.trace").replace("\\", "/")
 _TRACING_SYSTEMCTL = f'systemctl() {{ echo "$*" >> "{_TRACE}"; return 0; }}'
 
 
+# For the two tests that assert a real FILESYSTEM effect, where `PATH=""` is exactly wrong:
+# the script's repair is `rmdir`, and an empty PATH makes that not-found, so the test would
+# watch the guarded call do nothing and call it a pass.
+#
+# Safe without the fence because these runs stub `docker` as present, which skips the whole
+# install branch — no package manager is reached, and `dnf`/`yum` stay stubbed as functions
+# (which shadow the real binaries) so a regression that DID reach one is still caught.
+_REAL_FS = """
+dnf() { echo "PACKAGE-MANAGER-RAN" >&2; return 9; }
+yum() { echo "PACKAGE-MANAGER-RAN" >&2; return 9; }
+systemctl() { return 0; }
+service() { return 0; }
+docker() { return 0; }
+"""
+
+
 def _systemctl_trace() -> str:
     """What the stub recorded since `_reset_trace`, as one string."""
     try:
@@ -534,17 +550,53 @@ docker() { return 0; }
         f"the refusal must name the command that fixes it: {p.stderr[:400]}"
 
 
-def test_a_socket_path_that_is_a_directory_gets_its_own_refusal():
-    """A `docker run -v /var/run/docker.sock:...` against a host with no daemon creates a
-    DIRECTORY there, and every later run then mounts an empty one into the agent. It fails
-    the same gate as an absent socket and has a completely different remedy, so it gets its
-    own message rather than being folded into one `-S`."""
-    p = _run_block(_install(socket_path=_DIR_SOCKET), _NO_PACKAGES + """
-docker() { return 0; }
-""")
+def test_an_empty_directory_left_where_the_socket_belongs_is_cleared():
+    """The state a broker VM is actually left in, and the reason this is repaired rather
+    than only reported. `docker run -v /var/run/docker.sock:...` against a host whose daemon
+    is not running does not fail -- the runtime CREATES the source as an empty directory --
+    so a guest whose podman was installed but not yet started collects one, and every later
+    run mounts an empty directory into the agent.
+
+    `rmdir` and never `rm -rf`: empty goes, anything else stays and is reported.
+    """
+    empty = os.path.join(_SOCK_DIR, "empty_dir.sock").replace("\\", "/")
+    if os.path.exists(empty):
+        os.rmdir(empty)
+    os.makedirs(empty)
+    p = _run_block(_install(socket_path=empty), _REAL_FS)
+    assert not os.path.isdir(empty), \
+        "an EMPTY directory at the socket path is debris and must be cleared, not reported"
+    assert "PACKAGE-MANAGER-RAN" not in (p.stdout + p.stderr), \
+        "this run keeps a real PATH, so a fall-through to a package install must still fail"
+
+
+def test_a_non_empty_directory_at_the_socket_path_is_reported_not_deleted():
+    """The other half of the same rule. Something with content in it is not debris this
+    script understands, so it says so and stops -- and the message says it is not empty,
+    because "run rmdir" against a directory that has something in it is a remedy that
+    fails in front of the operator."""
+    with open(os.path.join(_DIR_SOCKET, "keep.txt"), "w", encoding="utf-8") as fh:
+        fh.write("not debris\n")
+    p = _run_block(_install(socket_path=_DIR_SOCKET), _REAL_FS)
+    assert os.path.isdir(_DIR_SOCKET), "a non-empty directory must survive this script"
     assert p.returncode != 0, "a directory where the socket belongs must not pass"
-    assert "rmdir" in p.stderr, \
-        f"this refusal must name its own remedy, not the socket one: {p.stderr[:400]}"
+    assert "DIRECTORY" in p.stderr and "NOT EMPTY" in p.stderr, \
+        f"the refusal must say which case this is: {p.stderr[:400]}"
+
+
+def test_the_socket_symlink_is_never_created_inside_a_directory():
+    """`ln -s X DIR` puts the link INSIDE the directory, and `-n` does not save you -- it
+    only treats a SYMLINK to a directory as a file. So a link guarded on `! -S` would fire
+    against a surviving directory, create `<sock>/podman.sock` in it, fix nothing, and make
+    the `rmdir` this script's own refusal recommends fail with "Directory not empty"."""
+    block = _install()
+    link_at = block.index(f"ln -s {b.PODMAN_SOCKET_PATH}")
+    guard = block[:link_at]
+    assert "[ ! -e " in guard, (
+        "the link must be guarded on the path not EXISTING, not merely on it not being a "
+        "socket, or a directory still standing gets a link created inside it")
+    assert guard.rindex("[ ! -e ") > guard.rindex("[ ! -S "), \
+        "the nearest guard above the link must be the `! -e` one"
 
 
 def test_the_boot_gate_comes_off_for_a_live_pov_but_the_verify_never_does():
