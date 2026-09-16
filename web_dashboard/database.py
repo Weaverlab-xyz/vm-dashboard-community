@@ -59,6 +59,14 @@ engine = create_engine(
     **_pool_kwargs,
 )
 
+# How long init_db's DDL transaction may wait for a table lock before giving up on one
+# statement. Deliberately short: the migrations are additive and idempotent, so skipping
+# one costs a boot, while WAITING costs the whole app (a pending ACCESS EXCLUSIVE on
+# `jobs` blocks every later reader of it -- see the comment at the SET LOCAL in init_db).
+# Not a settings field on purpose: it must hold before any config can be read out of the
+# database, which is the very thing init_db is creating.
+_DDL_LOCK_TIMEOUT_MS = 4000
+
 
 def pool_capacity() -> int:
     """Max connections this process's pool can hand out — what jobs_worker._limits clamps
@@ -3307,9 +3315,16 @@ def init_db():
     """Initialize database — create all tables and run lightweight migrations.
 
     On PostgreSQL, multiple Gunicorn workers start concurrently and both call
-    init_db().  A session-level advisory lock serializes them so only one worker
+    init_db().  A TRANSACTION-scoped advisory lock serializes them so only one worker
     runs the DDL at a time; the second worker proceeds after the first commits,
-    at which point create_all's checkfirst logic skips existing tables.
+    at which point create_all's checkfirst logic skips existing tables. (It was
+    session-level once; see the comment at the lock for why that wedged cold
+    app+worker co-deploys and must not come back.)
+
+    Every lock wait in here is bounded by _DDL_LOCK_TIMEOUT_MS, so a migration that
+    cannot get its table lock is SKIPPED and retried next boot rather than queued --
+    read the comment at the SET LOCAL before shortening or removing that, because an
+    unbounded wait here takes the entire app down, not just this transaction.
 
     On PostgreSQL, a failed ALTER TABLE aborts the enclosing transaction — use
     savepoints per migration so a "column already exists" error doesn't prevent
@@ -3325,6 +3340,37 @@ def init_db():
             # process and wedge every other caller (seen as app workers blocked
             # forever acquiring 20260101 once the jobs_worker held it).
             conn.execute(text("SELECT pg_advisory_xact_lock(20260101)"))
+
+            # Bound every lock wait this transaction makes. The advisory lock above
+            # only serializes init_db against ITSELF; it says nothing about the row
+            # and table locks the DDL below needs, and those are the ones that bite.
+            #
+            # `ALTER TABLE jobs ...` wants ACCESS EXCLUSIVE, so it queues behind any
+            # open transaction touching `jobs` -- and the jobs_worker holds exactly
+            # those, across network I/O, while it runs a job. The part that turns a
+            # wait into an outage is that **PostgreSQL lock queues are FIFO: a
+            # *pending* ACCESS EXCLUSIVE request blocks every LATER reader of that
+            # table too.** So one queued ALTER stalls every `SELECT ... FROM jobs`
+            # in the app, and because the routes serving those SELECTs are `async
+            # def` running synchronous SQLAlchemy, the stall lands on the event loop
+            # and takes the whole Gunicorn worker with it -- `/api/health` included.
+            # That is the 2026-09-16 pov.weaverlab.app outage: every path timing out
+            # at the 240s ingress limit, 0% CPU, and an idle database.
+            #
+            # With a bound, a contended migration fails fast instead: the
+            # per-statement savepoint below rolls it back, the remaining migrations
+            # still run, and the skipped one is retried on the next boot (they are
+            # all idempotent "add column if missing" statements). Availability of the
+            # whole app beats applying one additive column this boot.
+            #
+            # SET LOCAL, never a plain SET: LOCAL is scoped to this transaction and is
+            # gone at the commit below. A plain SET would outlive it on this pooled
+            # connection (QueuePool hands the same one out again) and silently put a
+            # 4s lock-wait ceiling on every ordinary application query that later
+            # borrowed it -- a far wider behaviour change than intended. LOCAL also
+            # needs an open transaction to do anything, which is satisfied: the
+            # advisory lock above started one.
+            conn.execute(text(f"SET LOCAL lock_timeout = '{_DDL_LOCK_TIMEOUT_MS}ms'"))
 
         # Pass the connection so create_all runs inside the same transaction
         # (and the same advisory-lock session on PostgreSQL).
@@ -3648,6 +3694,11 @@ def init_db():
             # are cluster-admin accounts serving PRA's brokered sessions, and the whole
             # point of this table is that nothing in it is cluster-admin.
         ]
+        # Migrations that never ran because they could not get their table lock in
+        # _DDL_LOCK_TIMEOUT_MS. Collected rather than raised: one contended statement
+        # must not stop the other ~60 from applying.
+        _lock_timed_out: list[str] = []
+
         for stmt in _migrations:
             if _is_sqlite:
                 try:
@@ -3663,8 +3714,28 @@ def init_db():
                 try:
                     conn.execute(text(stmt))
                     conn.execute(text("RELEASE SAVEPOINT _mig"))
-                except Exception:
+                except Exception as exc:  # noqa: BLE001 — see the docstring
                     conn.execute(text("ROLLBACK TO SAVEPOINT _mig"))
+                    # Nearly every exception here is the expected "column already
+                    # exists", which is why this block swallows by default. A LOCK
+                    # TIMEOUT is the one case that must not be silent: it means the
+                    # statement never ran, so the column is genuinely still missing and
+                    # some later reader will fail on it in a way that points nowhere
+                    # near here. SQLSTATE 55P03 = lock_not_available.
+                    if getattr(getattr(exc, "orig", None), "pgcode", None) == "55P03":
+                        _lock_timed_out.append(stmt)
+
+        if _lock_timed_out:
+            # WARNING, not an exception: the app boots and serves, which is the whole
+            # point of the timeout. But say exactly what was skipped and why, because
+            # the eventual symptom is an UndefinedColumn error from a random route.
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "init_db: %d migration(s) skipped -- could not acquire a table lock "
+                "within %dms, most likely because a long-running transaction (usually "
+                "the jobs_worker mid-job) held it. They are idempotent and will be "
+                "retried on the next boot. Skipped: %s",
+                len(_lock_timed_out), _DDL_LOCK_TIMEOUT_MS, "; ".join(_lock_timed_out))
 
         if not _is_sqlite:
             conn.commit()  # ends the txn → releases pg_advisory_xact_lock(20260101)
