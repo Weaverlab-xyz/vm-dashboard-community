@@ -259,7 +259,7 @@ class EnrollRequest(BaseModel):
 
 
 @router.post("/enroll")
-async def enroll_agent(body: EnrollRequest, request: Request,
+def enroll_agent(body: EnrollRequest, request: Request,
                        db: Session = Depends(get_db)):
     """Redeem a one-time enrolment code and bind the agent's public key.
 
@@ -388,7 +388,7 @@ class LeaseRequest(BaseModel):
 
 
 @router.post("/lease")
-async def lease_job(request: Request, body: LeaseRequest = LeaseRequest(),
+def lease_job(request: Request, body: LeaseRequest = LeaseRequest(),
                     agent: RemoteAgent = Depends(signed_agent),
                     db: Session = Depends(get_db)):
     """Claim the next queued job for this agent, or report an empty queue.
@@ -443,7 +443,7 @@ class HeartbeatRequest(BaseModel):
 
 
 @router.post("/jobs/{job_id}/heartbeat")
-async def heartbeat(job_id: str, body: HeartbeatRequest,
+def heartbeat(job_id: str, body: HeartbeatRequest,
                     agent: RemoteAgent = Depends(signed_agent),
                     db: Session = Depends(get_db)):
     """Report progress and collect the cancel signal.
@@ -466,7 +466,7 @@ class LogsRequest(BaseModel):
 
 
 @router.post("/jobs/{job_id}/logs")
-async def push_logs(job_id: str, body: LogsRequest,
+def push_logs(job_id: str, body: LogsRequest,
                     agent: RemoteAgent = Depends(signed_agent),
                     db: Session = Depends(get_db)):
     """Append Live Output. Lands in ``job_logs``, which is what the existing
@@ -658,7 +658,7 @@ class GatewayKeyRequest(BaseModel):
 
 
 @router.post("/jobs/{job_id}/gateway-key")
-async def job_gateway_key(job_id: str, body: GatewayKeyRequest, request: Request,
+def job_gateway_key(job_id: str, body: GatewayKeyRequest, request: Request,
                           agent: RemoteAgent = Depends(signed_agent),
                           db: Session = Depends(get_db)):
     """Hand this job's BeyondTrust Gateway deploy key to the agent, sealed.
@@ -1076,7 +1076,7 @@ def _install_hint(request: Request, code: str, audience: dict) -> dict:
 
 
 @router.post("", status_code=201)
-async def create_agent(body: CreateAgentRequest, request: Request,
+def create_agent(body: CreateAgentRequest, request: Request,
                        acknowledge_audience: bool = False,
                        current_user: User = Depends(require_explicit_permission("agents", "write")),
                        db: Session = Depends(get_db)):
@@ -1104,7 +1104,7 @@ async def create_agent(body: CreateAgentRequest, request: Request,
 
 
 @router.get("")
-async def list_agents(current_user: User = Depends(require_explicit_permission("agents", "read")),
+def list_agents(current_user: User = Depends(require_explicit_permission("agents", "read")),
                       db: Session = Depends(get_db)):
     """Every registered agent, with derived status and its running-job count."""
     agents = db.query(RemoteAgent).order_by(RemoteAgent.created_at.desc()).all()
@@ -1129,7 +1129,7 @@ def _enrolled_count(db: Session) -> int:
 
 
 @router.get("/audience")
-async def read_audience(request: Request, current_user: User = Depends(require_explicit_permission("agents", "read")),
+def read_audience(request: Request, current_user: User = Depends(require_explicit_permission("agents", "read")),
                         db: Session = Depends(get_db)):
     """The pinned signing audience and why it might be wrong. **Read-only.**
 
@@ -1147,7 +1147,7 @@ async def read_audience(request: Request, current_user: User = Depends(require_e
 
 
 @router.delete("/audience")
-async def reset_audience(request: Request, current_user: User = Depends(require_explicit_permission("agents", "write")),
+def reset_audience(request: Request, current_user: User = Depends(require_explicit_permission("agents", "write")),
                          db: Session = Depends(get_db)):
     """Clear the pin so the next minted code pins the audience again.
 
@@ -1201,13 +1201,13 @@ def _load(db: Session, agent_id: str) -> RemoteAgent:
 
 
 @router.get("/{agent_id}")
-async def get_agent(agent_id: str, current_user: User = Depends(require_explicit_permission("agents", "read")),
+def get_agent(agent_id: str, current_user: User = Depends(require_explicit_permission("agents", "read")),
                     db: Session = Depends(get_db)):
     return _agent_row(_load(db, agent_id))
 
 
 @router.post("/{agent_id}/enrollment-code")
-async def reissue_code(agent_id: str, request: Request,
+def reissue_code(agent_id: str, request: Request,
                        acknowledge_audience: bool = False,
                        current_user: User = Depends(require_explicit_permission("agents", "write")),
                        db: Session = Depends(get_db)):
@@ -1242,7 +1242,7 @@ class DiscoverRequest(BaseModel):
 
 
 @router.post("/{agent_id}/discover", status_code=202)
-async def queue_discovery(agent_id: str, body: DiscoverRequest, request: Request,
+def queue_discovery(agent_id: str, body: DiscoverRequest, request: Request,
                           current_user: User = Depends(require_explicit_permission("agents", "write")),
                           db: Session = Depends(get_db)):
     """Queue a discovery scan on one agent.
@@ -1326,7 +1326,7 @@ class AgentUpdateRequest(BaseModel):
 
 
 @router.patch("/{agent_id}")
-async def update_agent(agent_id: str, body: AgentUpdateRequest, request: Request,
+def update_agent(agent_id: str, body: AgentUpdateRequest, request: Request,
                        current_user: User = Depends(require_explicit_permission("agents", "write")),
                        db: Session = Depends(get_db)):
     """Grant or narrow what this agent may be given.
@@ -1352,7 +1352,7 @@ async def update_agent(agent_id: str, body: AgentUpdateRequest, request: Request
 
 
 @router.delete("/{agent_id}")
-async def revoke(agent_id: str, request: Request,
+def revoke(agent_id: str, request: Request,
                  current_user: User = Depends(require_explicit_permission("agents", "delete")),
                  db: Session = Depends(get_db)):
     """Revoke an agent and clear any work it was holding."""
@@ -1365,7 +1365,7 @@ async def revoke(agent_id: str, request: Request,
 
 
 @router.delete("/{agent_id}/record")
-async def remove_record(agent_id: str, request: Request,
+def remove_record(agent_id: str, request: Request,
                         current_user: User = Depends(require_explicit_permission("agents", "delete")),
                         db: Session = Depends(get_db)):
     """Permanently delete a **revoked** agent's row.
