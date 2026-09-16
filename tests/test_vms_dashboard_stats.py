@@ -13,7 +13,6 @@ Real throwaway SQLite; no agent.
 
 Runs under pytest, or standalone:  python tests/test_vms_dashboard_stats.py
 """
-import asyncio
 import json
 import os
 import sys
@@ -92,7 +91,12 @@ class _Dev:
 
 
 def _stats(db, user=None):
-    return asyncio.run(vms_api.dashboard_stats(db=db, current_user=user or _Admin()))
+    # Called directly, NOT through asyncio.run: this route is a plain `def` so its
+    # synchronous SQLAlchemy runs in Starlette's threadpool instead of on the event
+    # loop -- see tests/test_sync_db_routes_off_the_event_loop.py. asyncio.run on a
+    # non-coroutine raises "a coroutine was expected", which reads as a test bug
+    # rather than as the signature change it is.
+    return vms_api.dashboard_stats(db=db, current_user=user or _Admin())
 
 
 def test_an_install_with_nothing_synced_reports_zeros_rather_than_failing():

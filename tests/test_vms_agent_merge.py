@@ -20,7 +20,6 @@ Real throwaway SQLite; no agent.
 
 Runs under pytest, or standalone:  python tests/test_vms_agent_merge.py
 """
-import asyncio
 import json
 import os
 import sys
@@ -204,8 +203,10 @@ class _Dev:
 
 
 def _list_vms(db, user=None):
-    return asyncio.run(vms_api.list_vms(
-        workgroup=None, db=db, current_user=user or _Admin()))
+    # Called directly, not through asyncio.run: the route is a plain `def` so its
+    # synchronous SQLAlchemy runs off the event loop. See
+    # tests/test_sync_db_routes_off_the_event_loop.py.
+    return vms_api.list_vms(workgroup=None, db=db, current_user=user or _Admin())
 
 
 def test_cached_at_is_the_oldest_sync_not_the_time_of_the_response():
