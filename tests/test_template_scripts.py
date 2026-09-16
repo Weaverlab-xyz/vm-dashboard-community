@@ -189,6 +189,49 @@ def test_brackets_balance_in_every_inline_script():
     assert not bad, "unbalanced brackets in an inline <script>:\n  " + "\n  ".join(bad)
 
 
+def test_no_inline_script_contains_a_nested_script_open_tag():
+    """A doubled script tag kills the block exactly the way the raw newline above does.
+
+    Found live, 2026-09-16, while consolidating the Users and Groups pages into tabs: the
+    generated partial ended up with two nested open tags and two closes. HTML has no nested
+    script element -- the parser ends the first one at the FIRST close tag -- so the block's
+    body was the real code with a literal open tag glued to the front of it:
+
+        SyntaxError: Unexpected token '<'
+
+    Whole block discarded, `usersPage` never defined, `x-data="usersPage()"` resolves to
+    nothing, and the tab renders its table headers and 128 `ReferenceError`s. Identical
+    symptom to the bug this file was written for, from a different cause -- and NOTHING here
+    caught it: the bracket lexer sees balanced brackets, the quote lexer sees closed quotes,
+    and the block-extraction test only checks the END tag forms.
+
+    It is not reachable by hand-editing one template, which is why it went unnoticed: you
+    have to ASSEMBLE a template, and the assembling is what a page merge does.
+    """
+    bad = []
+    for path, offset, src in _blocks():
+        # The extractor hands back the element's TEXT, so an open tag in here is a tag the
+        # HTML parser never opened -- i.e. a nested one. Checked case-insensitively and
+        # allowing whitespace, since `< script` and `<SCRIPT` parse the same.
+        m = re.search(r"<\s*script[\s>]", src, re.I)
+        if m:
+            bad.append("%s (block at line %d): a script open tag inside a script body, at "
+                       "offset %d" % (path.relative_to(_ROOT), offset, m.start()))
+    assert not bad, (
+        "a nested script open tag discards the whole block and leaves its x-data "
+        "undefined:\n  " + "\n  ".join(bad))
+
+
+def test_the_nested_tag_scanner_catches_the_bug_it_was_written_for():
+    """The guard above must fail on the real shape, or it is decoration."""
+    doubled = ("<script>\n<script>\nfunction page() { return {}; }\n"
+               "</script>\n</script>")
+    blocks = list(_extract(doubled))
+    assert blocks, "the extractor found no block in the doubled sample"
+    assert any(re.search(r"<\s*script[\s>]", src, re.I) for _, src in blocks), (
+        "the extractor no longer surfaces a nested open tag, so the guard above is blind")
+
+
 def test_the_scanner_actually_catches_the_bug_it_was_written_for():
     """A guard that cannot fail is not a guard. This is the literal shipped defect."""
     broken = """

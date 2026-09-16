@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..database import User, Fido2Credential, PersonalAccessToken, get_db, get_password_hash
 from ..models.user import UserResponse
+from ..services import role_service
 from .auth import (get_current_user, require_admin, validate_permissions_payload)
 from .tokens import _generate_raw, hash_pat, TokenCreateResponse
 
@@ -35,6 +36,9 @@ class UserCreateRequest(BaseModel):
     # Which POVs the new user may reach. Same column, same meaning as on update -- [] or
     # omitted is every POV their `pov` scope allows.
     pov_env_ids: Optional[List[str]] = None
+    # The access role to assign. Omitted = no role, which is the pre-roles behaviour and
+    # leaves `permissions` above as the only statement about this user's access.
+    role_id: Optional[str] = None
 
 
 class UserUpdateRequest(BaseModel):
@@ -55,6 +59,10 @@ class UserUpdateRequest(BaseModel):
     # the user back to their OIDC group's focus, or the instance default; None leaves it
     # alone, like every field above.
     persona: Optional[str] = None
+    # The access role this user holds. Three-state, the same contract `persona` above has
+    # and for the same reason: None = no change, "" = clear the assignment, an id = set it.
+    # Without the empty-string case an admin could assign a role and never remove one.
+    role_id: Optional[str] = None
 
 
 class UserTokenItem(BaseModel):
@@ -90,12 +98,31 @@ def _refuse_accessor(user: User) -> None:
                    "tab and removed when the POV is destroyed — edit or revoke it there.")
 
 
+def _resolve_role(db: Session, raw: Optional[str]):
+    """A role id from a request body to an `AccessRole`, or None to clear. 422 if unknown.
+
+    Shared by create and update so the two cannot drift on what an unknown id means. A 422
+    rather than silently storing it: an id with no role behind it makes
+    `effective_permissions_dict` return the deny sentinel, so the user would be able to do
+    nothing at all and the admin would have no row to look at.
+    """
+    if raw is None or not str(raw).strip():
+        return None
+    role = role_service.get(db, str(raw).strip())
+    if role is None:
+        raise HTTPException(status_code=422, detail=f"Unknown role '{raw}'")
+    return role
+
+
 @router.get("", response_model=List[UserResponse])
 async def list_users(
     _admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     users = db.query(User).filter(_NOT_AN_ACCESSOR).order_by(User.username).all()
+    # One lookup for the whole page rather than one per row: the list is the only place
+    # where a per-user role fetch would be an N+1.
+    _role_names = {r.id: r.name for r in role_service.list_all(db)}
     return [
         UserResponse(
             id=u.id,
@@ -109,6 +136,10 @@ async def list_users(
             mfa_required=u.mfa_required,
             permissions=u.permissions_dict or None,
             pov_env_ids=u.pov_env_ids_list,
+            # The role's NAME as well as its id, so the list renders the assignment
+            # without a second request per row.
+            role_id=u.role_id or "",
+            role_name=_role_names.get(u.role_id, ""),
             # The ASSIGNED value, not the resolved one: an admin editing this row needs to
             # see what is stored here, and `persona_source` tells them when the focus a
             # user actually gets comes from their group instead.
@@ -148,6 +179,11 @@ async def create_user(
         user.permissions_dict = body.permissions if body.permissions else None
     if body.pov_env_ids is not None:
         user.pov_env_ids_list = body.pov_env_ids
+    if body.role_id is not None:
+        # Assigned through role_service, which is the single writer of the two role columns
+        # and always writes them together -- an id without its materialised copy is a user
+        # who can do nothing, by way of the deny sentinel in database.py.
+        role_service.apply_role_to_user(db, user, _resolve_role(db, body.role_id))
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -163,6 +199,8 @@ async def create_user(
         mfa_required=user.mfa_required,
         permissions=user.permissions_dict or None,
         pov_env_ids=user.pov_env_ids_list,
+        role_id=user.role_id or "",
+        role_name=(role_service.get(db, user.role_id).name if user.role_id else ""),
     )
 
 
@@ -214,6 +252,21 @@ async def update_user(
         validate_permissions_payload(body.permissions)
         # Empty dict {} clears restrictions (full access); non-empty dict sets specific perms
         user.permissions_dict = body.permissions if body.permissions else None
+    if body.role_id is not None:
+        # Refuse an admin changing their OWN role, mirroring the is_admin guard above and
+        # for a strictly stronger reason: a role can be what confers their admin, so
+        # swapping it can lock them out of this very page with no way back short of the
+        # database. Another administrator can do it.
+        if user.id == admin.id:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot change your own role — ask another administrator.")
+        # Same refusal `pov_env_ids` gets below, for the same reason: an accessor is
+        # confined by a path allowlist no permission can widen, so a role on that row would
+        # be a second, contradictory statement about access.
+        _refuse_accessor(user)
+        # "" clears, an id sets. role_service writes both columns together.
+        role_service.apply_role_to_user(db, user, _resolve_role(db, body.role_id))
     if body.pov_env_ids is not None:
         # An accessor is already bound to exactly one POV by accessor_env_id, and confined
         # by a path allowlist that no permission can widen. A second, contradictory POV
@@ -236,6 +289,8 @@ async def update_user(
         mfa_required=user.mfa_required,
         permissions=user.permissions_dict or None,
         pov_env_ids=user.pov_env_ids_list,
+        role_id=user.role_id or "",
+        role_name=(role_service.get(db, user.role_id).name if user.role_id else ""),
     )
 
 

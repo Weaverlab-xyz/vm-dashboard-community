@@ -330,8 +330,12 @@ def test_logout_clears_both_persona_cookies():
 
 _USERS_API = os.path.join(_ROOT, "web_dashboard", "api", "users.py")
 _GROUPS_API = os.path.join(_ROOT, "web_dashboard", "api", "groups.py")
-_USERS_TPL = os.path.join(_ROOT, "web_dashboard", "templates", "users", "list.html")
-_GROUPS_TPL = os.path.join(_ROOT, "web_dashboard", "templates", "groups", "index.html")
+# The Users and Groups pages are now tabs of /rbac, so these are the partials rather than
+# whole pages. The assertions below are unchanged: each partial still carries its own Alpine
+# factory and still reads the injected persona options.
+_USERS_TPL = os.path.join(_ROOT, "web_dashboard", "templates", "rbac", "_users.html")
+_GROUPS_TPL = os.path.join(_ROOT, "web_dashboard", "templates", "rbac", "_groups.html")
+_ROLES_TPL = os.path.join(_ROOT, "web_dashboard", "templates", "rbac", "_roles.html")
 _DASHBOARD = os.path.join(_ROOT, "web_dashboard", "templates", "dashboard.html")
 _MAIN = os.path.join(_ROOT, "web_dashboard", "main.py")
 
@@ -381,10 +385,20 @@ def test_the_priority_is_not_stored_without_a_persona():
 
 def test_both_admin_pages_get_their_options_from_the_registry():
     """Injected, not hard-coded: the dropdown must not be able to offer a focus the
-    resolver does not know, and no persona key may be spelled in a template."""
+    resolver does not know, and no persona key may be spelled in a template.
+
+    Was a count of two injection sites, one per page. The two pages are now tabs of /rbac
+    sharing one `_rbac_context` helper, so the honest assertion is that the helper is the
+    single source -- a count of 1 here plus the route coverage asserted in
+    test_permission_catalog.py.
+    """
     main = _read(_MAIN)
-    assert main.count('"persona_options"') == 2, \
-        "persona_options is not injected into both the /users and /groups routes"
+    assert main.count('"persona_options"') == 1, \
+        ("persona_options is built in more than one place — _rbac_context is the one "
+         "source, and a second copy is how the dropdown starts offering a focus the "
+         "resolver does not know")
+    helper = main.split("def _rbac_context(", 1)[1].split("\n\n\n", 1)[0]
+    assert '"persona_options"' in helper, "_rbac_context does not inject persona_options"
     assert "personas.all_personas()" in main
     for path in (_USERS_TPL, _GROUPS_TPL):
         assert "{{ persona_options | tojson }}" in _read(path), \
@@ -405,7 +419,7 @@ def test_the_injected_name_cannot_be_overwritten_by_the_context_processor():
 
 def test_no_admin_template_hard_codes_a_persona_key():
     from web_dashboard.services import personas as P
-    for path in (_USERS_TPL, _GROUPS_TPL, _DASHBOARD):
+    for path in (_USERS_TPL, _GROUPS_TPL, _ROLES_TPL, _DASHBOARD):
         src = _read(path)
         for key in P.VALID_PERSONAS:
             k = re.escape(key)

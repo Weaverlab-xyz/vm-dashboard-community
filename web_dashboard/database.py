@@ -77,6 +77,65 @@ Base = declarative_base()
 
 # ========== DATABASE MODELS ==========
 
+# What `effective_permissions_dict` returns for a principal that HOLDS a role but whose
+# materialised copy of that role's map is missing (`role_id` set, `role_permissions` NULL).
+#
+# It has to be non-empty, and that is the whole point. `api/auth.has_permission` treats an
+# empty map as UNRESTRICTED -- so returning `{}` for an unresolvable role would promote that
+# user to every permission in the dashboard rather than refusing them. A map with one key
+# nobody can enforce takes the strict-allowlist branch instead and grants exactly nothing.
+#
+# The key is deliberately not a real scope: `tests/test_rbac_roles.py` asserts it is absent
+# from `PERMISSION_SCOPE_LEVELS`, so it can never grant even if some route were gated on it.
+# `api/auth.me` strips it from its response -- cosmetic, but an unexplained key in a JSON
+# body is a support call.
+#
+# Read `role_id` and never a relationship when deciding this: `api/mcp_server._validate_pat`
+# closes its session and keeps the User in a ContextVar for the whole MCP session, so that
+# instance is DETACHED. A loaded column still reads there; an unloaded relationship raises,
+# and the obvious `except: return {}` around it is the fail-open this constant exists to
+# make unwritable.
+_ROLE_UNRESOLVED = {"__role_unresolved__": []}
+
+
+def merge_permission_maps(*maps) -> dict:
+    """Union permission maps left to right. THE definition of how sources combine.
+
+    Three call sites had their own copy of this before a role made it four: this property
+    below, and twice inside `api/auth._complete_oauth_login` (a matched group's
+    `default_permissions`, and now the role that group confers). They agreed, which is the
+    only reason nobody noticed -- and a permission-merge rule that exists four times is one
+    that will eventually be four different rules, silently, in whichever direction the copy
+    someone edited happens to point.
+
+    Three kinds of value, and the asymmetry is deliberate:
+
+      ``is_admin``   OR'd. Any source granting admin grants admin.
+      a list        set-union, then sorted -- so the result is order-independent and
+                    comparable, which is what lets `reconcile` detect drift by equality.
+      anything else last write wins. Not a real case today; kept so an unexpected value
+                    survives a merge instead of vanishing, because a key that disappears
+                    here is a grant nobody can see to remove.
+
+    Earlier arguments are the lower-precedence ones for that last case. Callers pass the
+    role first, then the admin baseline, so a hand edit outranks a stored copy.
+    """
+    out: dict = {}
+    for src in maps:
+        for key, val in (src or {}).items():
+            if key == "is_admin":
+                out[key] = out.get(key, False) or bool(val)
+            elif isinstance(val, list):
+                existing = out.get(key)
+                if isinstance(existing, list):
+                    out[key] = sorted(set(existing) | set(val))
+                else:
+                    out[key] = sorted(set(val))
+            else:
+                out[key] = val
+    return out
+
+
 class User(Base):
     """User model for authentication and authorization"""
     __tablename__ = "users"
@@ -118,6 +177,45 @@ class User(Base):
     # which is what makes migrating from Entra groups to the REST integration a
     # gradual change rather than a cutover.
     jit_permissions = Column(Text, nullable=True)
+
+    # ── Access role (the fourth permission source) ───────────────────────────
+    # The named, reusable permission map this user is assigned. TWO columns, and they are
+    # always written together by `services/role_service.apply_role_to_user` -- the single
+    # writer. Never set one without the other.
+    #
+    #   role_id           WHICH role, for the editor, the assignee list and the guard
+    #   role_permissions  a materialised COPY of that role's map, unioned in below
+    #
+    # The copy is why there is no `relationship()` here, and that is a security decision
+    # rather than a performance one. `effective_permissions_dict` is read on a DETACHED User
+    # by `api/mcp_server` (see `_ROLE_UNRESOLVED` above), where a lazy load raises -- and
+    # because an empty map means unrestricted, any `except: return {}` written around such a
+    # load is a total authorization bypass. A plain column cannot fail that way.
+    #
+    # The copy is DERIVED, never authoritative: `role_service` fans a role edit out to every
+    # assignee in the same transaction, and `role_service.reconcile` rewrites every row from
+    # its role at boot. `permissions` above remains the column for per-user hand edits, which
+    # is what makes a role an assignment plus an optional override rather than a replacement.
+    # NO ForeignKey on either of these, and that is two decisions rather than an omission.
+    #
+    # First, it would be a CYCLE: `access_roles.created_by_user_id` points back here, so
+    # declaring the reverse constraint makes `users` and `access_roles` mutually dependent.
+    # SQLAlchemy cannot order that -- it warns "unresolvable cycles between tables" and then
+    # IGNORES those constraints when sorting, which on a fresh PostgreSQL install means
+    # CREATE TABLE users can run before access_roles exists and fail. SQLite accepts a
+    # REFERENCES to a table that is not there yet, so the whole test suite is blind to it.
+    #
+    # Second, it would only ever exist on SOME installs. The retrofit ALTER in the
+    # `_migrations` list below carries no REFERENCES clause -- it cannot, without rewriting
+    # the table -- so every upgraded install has no constraint here regardless. A constraint
+    # that holds on new deployments and not on the ones with data in them is worse than
+    # none: the bug it would catch surfaces only where nobody is looking for it.
+    #
+    # So referential integrity for a role assignment lives in `services/role_service`
+    # instead, where it is testable: `delete` refuses while assigned, `--force` clears both
+    # columns in one transaction, and `reconcile` clears a `role_id` whose role has gone.
+    role_id = Column(String(36), nullable=True, index=True)
+    role_permissions = Column(Text, nullable=True)
 
     # ── Persona (curation only) ──────────────────────────────────────────────
     # Which role's material the dashboard leads with for this user. NOT a permission:
@@ -261,6 +359,26 @@ class User(Base):
         self.jit_permissions = json.dumps(value) if value else None
 
     @property
+    def role_permissions_dict(self) -> dict:
+        """The materialised copy of this user's access role. See the column.
+
+        Note what this does NOT do: it never looks the role up. `role_id` is read on a
+        detached instance in `api/mcp_server`, and a query here would raise there -- while
+        the empty dict such a handler would return means UNRESTRICTED. The copy exists so
+        that this is a plain JSON parse with no failure mode.
+        """
+        if not self.role_permissions:
+            return {}
+        try:
+            return json.loads(self.role_permissions)
+        except Exception:
+            return {}
+
+    @role_permissions_dict.setter
+    def role_permissions_dict(self, value: dict):
+        self.role_permissions = json.dumps(value) if value else None
+
+    @property
     def effective_permissions_dict(self) -> dict:
         """Union of admin-baseline (permissions), group-derived
         (session_permissions) and Entitle-granted (jit_permissions).
@@ -271,35 +389,46 @@ class User(Base):
         Empty dict means "no explicit permissions" → require_permission
         treats this as unrestricted (existing pre-OIDC users keep working
         the same way they did pre-Phase-0).
+
+        FOUR sources now. An assigned access role (`role_permissions`) is unioned in
+        alongside the other three, which is what makes a role an assignment PLUS an
+        optional per-user override rather than a replacement for one.
+
+        The guard below is the load-bearing part of that addition. "No permissions at all"
+        means unrestricted, so a user who HOLDS a role but whose materialised copy is
+        missing would be promoted to every permission in the dashboard -- the exact
+        inversion of what assigning a restrictive role asks for. `role_id` being set is
+        therefore answered with a non-empty map that grants nothing (`_ROLE_UNRESOLVED`),
+        so the strict-allowlist branch runs instead. It is a column read, so it behaves the
+        same on a detached instance as on a live one.
         """
         baseline = self.permissions_dict
         session = self.session_permissions_dict
         jit = self.jit_permissions_dict
-        if not baseline and not session and not jit:
+        role = self.role_permissions_dict
+        if not baseline and not session and not jit and not role:
+            if self.role_id:
+                return dict(_ROLE_UNRESOLVED)
             return {}
-        out: dict = {}
-        for src in (baseline, session, jit):
-            for key, val in src.items():
-                if key == "is_admin":
-                    out[key] = out.get(key, False) or bool(val)
-                elif isinstance(val, list):
-                    existing = out.get(key)
-                    if isinstance(existing, list):
-                        out[key] = sorted(set(existing) | set(val))
-                    else:
-                        out[key] = sorted(set(val))
-                else:
-                    out[key] = val
-        return out
+        return merge_permission_maps(role, baseline, session, jit)
 
     @property
     def is_effective_admin(self) -> bool:
         """True if the persistent is_admin flag, a current session_permissions row,
-        or a live Entitle grant confers admin."""
+        a live Entitle grant, or an assigned access role confers admin.
+
+        The role term is required rather than tidy: the built-in `administrator` role's
+        map is exactly ``{"is_admin": true}``, so without it that user would hold a
+        NON-EMPTY map naming no scopes -- i.e. a strict allowlist of nothing -- and be
+        denied everything. `services/role_service` refuses ``is_admin`` on any role but
+        that one frozen built-in, which is what keeps "can edit a role" from becoming
+        "can mint an administrator".
+        """
         if bool(self.is_admin):
             return True
         return (bool(self.session_permissions_dict.get("is_admin", False))
-                or bool(self.jit_permissions_dict.get("is_admin", False)))
+                or bool(self.jit_permissions_dict.get("is_admin", False))
+                or bool(self.role_permissions_dict.get("is_admin", False)))
 
 
 class Fido2Credential(Base):
@@ -1034,7 +1163,72 @@ class OAuthGroupMapping(Base):
     # display_name so the outcome is always deterministic rather than row-order dependent.
     persona = Column(String(32), nullable=True)
     persona_priority = Column(Integer, nullable=True)
+    # The access role every member of this group is granted, unioned into their
+    # `session_permissions` at login alongside `default_permissions` above. NULL = this
+    # mapping confers no role, which is every mapping that predates the feature.
+    #
+    # Only an id, and deliberately no materialised copy of the map -- unlike `users`. The
+    # column it feeds is rebuilt from scratch on EVERY login, so there is nothing to keep
+    # in step and nothing to reconcile; the login path reads the role directly. The flip
+    # side is that a role edit reaches group members at their next sign-in rather than
+    # immediately, which is exactly how `default_permissions` has always behaved.
+    # Plain column, no ForeignKey -- see the note on `users.role_id` for both reasons. This
+    # one is not in the cycle, but an assignment that is constrained on one table and not
+    # the other is a distinction no reader would guess and no test could hold.
+    role_id = Column(String(36), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class AccessRole(Base):
+    """A named, reusable permission map that a user or a group mapping is assigned.
+
+    `AccessRole` and not `Role` because three unrelated `role` columns already exist in this
+    module -- `EntitleActivation.role` (an IAM policy name), `SpireLab.k8s_workload_role` and
+    `PovCloudTemplateVM.role` ("broker"|"target"). Only this one is about dashboard RBAC.
+
+    **`permissions` here inverts the meaning it has on `User`, and that is the single most
+    important thing to know before editing this model.** On a user, NULL/`{}` means
+    UNRESTRICTED. On a role it means the role grants NOTHING -- a role is a positive
+    statement about access, so "no map" cannot sensibly mean "all access", and an
+    unrestricted role would silently hand every assignee every scope added in future. The
+    create endpoint therefore REQUIRES the field rather than defaulting it, and the Roles
+    tab does not offer the grid's "Full access (unrestricted)" escape hatch at all.
+    "Everything" is spelled with the admin flag, which is auditable.
+
+    `slug` is the stable handle the built-in seeds are keyed by; it is derived from `name`,
+    so a duplicate name yields a duplicate slug and a 409 without a second constraint.
+    `is_builtin` can be a real Boolean with a default because this is a NEW table made by
+    `create_all` -- the `BOOLEAN DEFAULT 0` trap only bites an `ALTER TABLE` in the
+    `_migrations` list, where SQLite accepts an integer default on a boolean and PostgreSQL
+    rejects it, silently, inside its own savepoint.
+    """
+    __tablename__ = "access_roles"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    slug = Column(String(64), unique=True, nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    permissions = Column(Text, nullable=True)
+    is_builtin = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_by_user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"),
+                                nullable=True)
+
+    @property
+    def permissions_dict(self) -> dict:
+        """The map this role grants. Empty means it grants nothing -- see the class
+        docstring for why that is the opposite of `User.permissions_dict`."""
+        if not self.permissions:
+            return {}
+        try:
+            return json.loads(self.permissions)
+        except Exception:
+            return {}
+
+    @permissions_dict.setter
+    def permissions_dict(self, value: dict):
+        self.permissions = json.dumps(value) if value else None
 
 
 class Workgroup(Base):
@@ -3218,6 +3412,21 @@ _BACKFILL_V1_PHANTOM_ADMIN = (
     ("images", "write"), ("images", "delete"),
 )
 
+# A NOTE FOR WHOEVER WRITES THE NEXT ONE OF THESE. There are now THREE tables holding
+# permission maps, not two, and a scope added later has to widen all of them or the users
+# who lose it are the ones who look best configured:
+#
+#   users.permissions                       an admin's explicit per-user map
+#   oauth_group_mappings.default_permissions  what a matched group confers at login
+#   access_roles.permissions                  the BUILT-IN rows -- custom ones are the
+#                                             operator's own and must not be touched
+#
+# The third is the one that will be missed, and it is the widest blast radius of the three:
+# a built-in role is held by many people at once, and `services/role_service._BUILTIN_ROLES`
+# is a frozen literal that does NOT track the catalog (see the comment there for why
+# deriving it live is worse, not better). After widening those rows, call
+# `role_service.reconcile()` so every assignee's materialised copy picks the change up --
+# widening the role alone changes nothing for anyone already holding it.
 _BACKFILL_V1_MARKER = "rbac_scope_backfill_v1"
 
 
@@ -3639,7 +3848,28 @@ def init_db():
             # not: those are the credential THIS APPLICATION uses for its own cloud calls,
             # one per (cloud, purpose), and copying them in would make the dashboard's own
             # lease appear as a governed workload identity.
-            # `workload_k8s_tokens` needs no entry: create_all makes new tables, and empty
+            # Access roles. `access_roles` itself needs NO entry -- create_all makes new
+            # tables -- and needs no backfill either: an empty table is "nobody has defined
+            # a role yet", which `role_service.seed_builtins` fixes on the same boot.
+            #
+            # The two columns DO need entries, and three things about their shape are
+            # deliberate. No DEFAULT and no BOOLEAN, so the PostgreSQL trap described above
+            # cannot swallow them (`is_builtin` lives on the create_all table instead). And
+            # no REFERENCES clause: an upgraded install therefore has NO foreign key here,
+            # while a fresh one gets a real constraint from the model via create_all. That
+            # asymmetry is why deleting a role is guarded in `role_service` rather than left
+            # to `ondelete="SET NULL"` -- the constraint is absent on exactly the installs
+            # that have data, SQLite enforces nothing in the test suite either way, and a
+            # silent SET NULL would leave `role_permissions` populated behind a NULL
+            # `role_id`, which is drift no reader would notice.
+            #
+            # Both backfill to NULL = "this principal holds no role", which changes nobody's
+            # access and is what keeps `_backfill_new_permission_scopes` honest.
+            "ALTER TABLE users ADD COLUMN role_id VARCHAR(36)",
+            "CREATE INDEX ix_users_role_id ON users(role_id)",
+            "ALTER TABLE users ADD COLUMN role_permissions TEXT",
+            "ALTER TABLE oauth_group_mappings ADD COLUMN role_id VARCHAR(36)",
+                        # `workload_k8s_tokens` needs no entry: create_all makes new tables, and empty
             # means no workload identity has been onboarded yet — which is the state every
             # install is in before an operator uses the tab. Worth naming here rather than
             # leaving silent, because the table looks like it should have a backfill: it
@@ -3674,6 +3904,24 @@ def init_db():
     from .services import workgroup_service
     with SessionLocal() as _seed_db:
         workgroup_service.seed_if_empty(_seed_db)
+        # The eight built-in access roles, and then a repair pass over every user's
+        # materialised copy of the role they hold. Data, not DDL, so outside the
+        # advisory-locked transaction for the same reason as every seed below.
+        #
+        # Two calls and not one because they answer different questions: `seed_builtins`
+        # inserts what is missing and never updates, while `reconcile` rewrites a copy that
+        # has drifted from its role (a hand-edited database, a restore, an interrupted
+        # deploy) and clears a `role_id` whose role is gone. Neither needs a schema marker:
+        # the seed cannot re-grant because it skips the row it would touch, and reconcile
+        # only ever writes what the role already says.
+        try:
+            from .services import role_service
+            role_service.seed_builtins(_seed_db)
+            role_service.reconcile(_seed_db)
+        except Exception:  # noqa: BLE001 — a seed must never stop the app booting
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "access role seed/reconcile skipped", exc_info=True)
         # Widen every explicit permission map to cover the scopes added when the catalog
         # grew from 14 entries to one-per-nav-section. Data, not DDL, and outside the
         # advisory-locked transaction for the same reason as the seeds below it.

@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+
+{# Role-based access control. Three tabs over the halves of one job:
+
+     * Users  -- the accounts themselves, their role, and the per-user permission grid
+                 that overrides it (/api/users);
+     * Groups -- identity-provider group mappings, which provision users on first login and
+                 confer a workgroup, a role and a permission set (/api/groups);
+     * Roles  -- the named, reusable permission maps the other two tabs assign
+                 (/api/roles).
+
+   USERS AND GROUPS WERE TWO PAGES AND ARE NOT ANY MORE, because a person's effective
+   access is the UNION of what both of them say. Answering "what can this user do?" meant
+   holding two pages open and merging them in your head, and the two grids drifted apart
+   twice before they were extracted into partials/permission_matrix.html. A group mapping is
+   a user-provisioning rule; it belongs beside the users it provisions.
+
+   THREE ROUTES REACH THIS TEMPLATE -- see main.py. /rbac is the nav entry; /users and
+   /groups are still real routes that open their own tab, and they are NOT leftover aliases.
+   Four operator runbooks and two integration guides print those paths as things to open,
+   and settings.html links /groups from the single-sign-on panel. A 301 would also lose the
+   query string, and a redirect chain on a path somebody pasted from a runbook is a worse
+   answer than a page.
+
+   NOTE what is deliberately ABSENT, because the /agents precedent this copies has it and a
+   reader will look for it: there is NO per-tab feature gate, no single-tab retitle case and
+   no tab-bar suppression. Each Agents tab is gated because each tab's API ROUTER is
+   feature-gated and would 404 under the panel. Nothing here is: /api/users, /api/groups and
+   /api/roles are all always mounted and all require_admin. Gating the Groups tab on an
+   identity provider being configured would also hide it at exactly the moment it is needed
+   -- you add group mappings WHILE wiring single sign-on up, before the first SSO login can
+   possibly succeed. `tabs` is therefore a literal; it keeps the list/slug shape only so the
+   panel guards and the tab loop stay identical to the precedent, and so adding a real gate
+   later is a three-line change.
+
+   Two things about the structure are load-bearing:
+
+     * EACH TAB PARTIAL IS SELF-CONTAINED -- markup, its own Alpine factory, and its own
+       `{% from %}` import of the permission-matrix macro, which an {% include %} does not
+       inherit. That is what tests/test_template_scripts.py and test_templates_parse.py
+       require of any template naming an x-data.
+     * PANELS TOGGLE WITH x-show, so all three components mount on page load and each loads
+       its own list once. A script tag inside an `x-if` template is CLONED rather than
+       executed, so lazy-mounting a panel that way leaves a dead x-data and no error.
+       (Written as "script tag" and not as the literal element, because
+       test_template_scripts.py finds script blocks by scanning for that tag and would
+       start extracting one here -- a comment explaining a rule must not trip it.) #}
+
+{# The tab list, computed here rather than inside `content` so the <title> can see it too:
+   a top-level `set` in a child template is visible to every block. #}
+{% set tabs = [
+     {'slug': 'users',  'label': 'Users'},
+     {'slug': 'groups', 'label': 'Groups'},
+     {'slug': 'roles',  'label': 'Roles'}] %}
+{% set tab_slugs = tabs | map(attribute='slug') | list %}
+
+{% block title %}RBAC{% endblock %}
+
+{% block content %}
+{# No max-w/py wrapper: base.html already wraps this block in
+   <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">. A second one here would
+   double the padding and squeeze the nine-column users table. #}
+<div
+     {# SINGLE-QUOTED, AND THAT IS LOAD-BEARING. Jinja's |tojson escapes <, >, & and ' so
+        its output is safe in a script body or a single-quoted attribute -- but it does NOT
+        escape ", so in a DOUBLE-quoted attribute the first " of the array ends the
+        attribute, Alpine throws on the truncation, the container never initialises and
+        x-cloak is never lifted: the heading and the tab bar render, every panel stays
+        hidden and every tab does nothing. tests/test_templates_parse.py sweeps every
+        template for it.
+
+        `or ''` on the second argument because |tojson on an Undefined raises: a route that
+        forgot the key would take the whole page down rather than simply opening on the
+        first tab. #}
+     x-data='rbacPage({{ tab_slugs | tojson }}, {{ (initial_tab or "") | tojson }})'
+     x-init="init()">
+
+  <h1 class="text-2xl font-bold text-gray-900 mb-1">RBAC</h1>
+  <p class="text-sm text-gray-500 mb-6">
+    Who can use this dashboard, and what they may do with it. A <strong>role</strong> is a
+    named set of permissions you assign to a person or to a group from your identity
+    provider; the per-user grid stays available on top of it for the one-off case.
+    <a href="/docs/permissions" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>.
+  </p>
+
+  <div class="border-b border-gray-200 mb-6 flex flex-wrap gap-1" role="tablist" aria-label="RBAC sections">
+    {% for tab in tabs %}
+    <button @click="select('{{ tab.slug }}')" role="tab" type="button"
+            :aria-selected="activeTab === '{{ tab.slug }}' ? 'true' : 'false'"
+            :class="activeTab === '{{ tab.slug }}'
+                      ? 'border-blue-600 text-blue-700'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+            class="px-3 py-2 -mb-px border-b-2 text-sm font-medium">{{ tab.label }}</button>
+    {% endfor %}
+  </div>
+
+  {% if 'users' in tab_slugs %}
+  <div x-show="activeTab === 'users'" x-cloak role="tabpanel">
+    {% include "rbac/_users.html" %}
+  </div>
+  {% endif %}
+
+  {% if 'groups' in tab_slugs %}
+  <div x-show="activeTab === 'groups'" x-cloak role="tabpanel">
+    {% include "rbac/_groups.html" %}
+  </div>
+  {% endif %}
+
+  {% if 'roles' in tab_slugs %}
+  <div x-show="activeTab === 'roles'" x-cloak role="tabpanel">
+    {% include "rbac/_roles.html" %}
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// The container. It owns which tab is showing and the page's ONE auth gate, and nothing
+// else -- each tab's state stays in that tab's own component, so they cannot reach each
+// other's data.
+function rbacPage(slugs, initial) {
+  return {
+    activeTab: '',
+    // The tabs this render actually has, kept so select() can refuse one it does not.
+    slugs: slugs,
+
+    init() {
+      // THE SINGLE ADMIN GATE, and the reason it is here rather than in the partials: each
+      // of the three used to be its own page with its own check, and all three components
+      // mount on this one page load. Left in place that is three redirects to / racing each
+      // other, by two different mechanisms -- the old Users page awaited /api/auth/me while
+      // the old Groups page read the store.
+      //
+      // The store is the right source: it costs no request, and the real control is
+      // require_admin on every route this page calls. A client-side check is a convenience
+      // either way -- it stops an ordinary user landing on a page of empty tables and red
+      // toasts, and nothing more.
+      requireAuth();
+      if (!Alpine.store('auth').isAdmin) {
+        window.location.href = '/';
+        return;
+      }
+
+      // Three ways in, in precedence order. The fragment is what a bookmark or a
+      // cross-link carries; `initial` is what the ROUTE decided, which is how /groups opens
+      // on its own tab without a fragment it never had; then the first tab that exists. A
+      // slug this render does not have falls through to that last case rather than showing a
+      // page with no panel.
+      const want = (window.location.hash || '').replace(/^#/, '') || initial || '';
+      this.select(slugs.includes(want) ? want : slugs[0], false);
+    },
+
+    select(slug, push = true) {
+      if (!this.slugs.includes(slug)) return;
+      this.activeTab = slug;
+      // replaceState, not pushState: the back button should leave the page rather than walk
+      // the tabs the visitor clicked through. Deliberately NOT done on the initial select,
+      // so arriving at /users?x=1 does not rewrite the URL out from under a query string.
+      if (push) window.history.replaceState(null, '', '#' + slug);
+    },
+  };
+}
+</script>
+{% endblock %}

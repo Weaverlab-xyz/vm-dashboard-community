@@ -121,7 +121,7 @@ whether the groups claim you configured appears in the provider's
 ### Step 4 — Map groups to workgroups (authorization)
 
 Authentication proves *who* someone is; **group mappings decide what they can do.**
-On the **/groups** admin page, add a mapping for each provider group:
+On the **RBAC → Groups** tab (`/rbac#groups`), add a mapping for each provider group:
 
 - **Group ID** — the value that appears in the user's groups claim (for Entra, the
   group's **object ID**, not its name).
@@ -196,7 +196,7 @@ callback must match `<dashboard-base-url>/api/auth/oauth/oidc/callback` exactly,
 including scheme, host and port. Copy the value shown in the Settings panel.
 
 **`error=not_authorized` after login** — the user isn't in any mapped group, or the
-IdP isn't actually emitting the groups claim. Check **/groups**, confirm the app
+IdP isn't actually emitting the groups claim. Check **RBAC → Groups** (`/rbac#groups`), confirm the app
 emits the claim (Entra sends group **object IDs**, so map by ID not name), and set
 the **Groups claim** field to match your provider (e.g. `roles` for Okta).
 

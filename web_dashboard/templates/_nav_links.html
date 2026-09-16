@@ -7,10 +7,12 @@
    Order per issue #17:
      Dashboard → on-prem hypervisors (Workstation, Proxmox, vSphere, Hyper-V,
      Nutanix, XCP-ng) → AWS → Azure → GCP → Containers → Storage →
-     Configuration (renamed from "Config Mgmt") → Secrets → Users → Groups.
+     Configuration (renamed from "Config Mgmt") → Secrets → RBAC.
      Jobs, Images, and Workgroups are kept and slotted where they logically
-     belong (Jobs alongside other operational links, Workgroups with Groups
-     in the admin section, Images with Storage as a content section). #}
+     belong (Jobs alongside other operational links, Workgroups next to RBAC
+     in the admin section, Images with Storage as a content section).
+     RBAC is one link over three tabs -- Users, identity-provider Groups and
+     access Roles -- which is why there is no longer a link per page there. #}
 <a data-nav="dashboard" href="/" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/' %}{{ nav_active }}{% endif %}">Dashboard</a>
 
@@ -166,12 +168,19 @@
 <a x-show="$store.auth.isAdmin" data-nav="secrets" href="/secrets"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/secrets') %}{{ nav_active }}{% endif %}">Secrets</a>
-<a x-show="$store.auth.isAdmin" data-nav="users" href="/users"
+{# Users, identity-provider group mappings and access roles -- one page, three tabs.
+   /users and /groups light this link too, because they are the same page on its other tabs
+   and an admin who followed a runbook to /groups with no lit link reads as "you are
+   nowhere". Safe as written: no other route starts with /users or /groups, and /workgroups
+   does not start with /groups.
+
+   ONE link, unlike Agents/Connections, which keeps a second row for non-admins because its
+   Connections tab is governed by the `connections` SCOPE. Both rows here were admin-only
+   with no flag and no scope, so there is no viewer who reaches one tab and not the other --
+   a second row would only ever show an admin two links to the same page. #}
+<a x-show="$store.auth.isAdmin" data-nav="rbac" href="/rbac"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-   {% if request.url.path.startswith('/users') %}{{ nav_active }}{% endif %}">Users</a>
-<a x-show="$store.auth.isAdmin" data-nav="groups" href="/groups"
-   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-   {% if request.url.path.startswith('/groups') %}{{ nav_active }}{% endif %}">Groups</a>
+   {% if request.url.path.startswith('/rbac') or request.url.path.startswith('/users') or request.url.path.startswith('/groups') %}{{ nav_active }}{% endif %}">RBAC</a>
 <a x-show="$store.auth.isAdmin" data-nav="workgroups" href="/workgroups"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/workgroups') %}{{ nav_active }}{% endif %}">Workgroups</a>

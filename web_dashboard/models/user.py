@@ -47,6 +47,15 @@ class UserResponse(BaseModel):
     # it in an editable cookie acceptable at all.
     persona: str = ""
     persona_source: str = "none"
+    # The access role assigned to this user, if any. Both the id and its display name, so a
+    # list of users renders the assignment without a request per row.
+    #
+    # Deliberately NOT the role's permission map: the per-user grid on this response is the
+    # OVERRIDE, and a second grid-shaped field beside it would invite a client to edit the
+    # role through the user endpoint. `/api/roles` owns the map. `permissions` above stays
+    # the per-user override alone, while `/api/auth/me` returns the merged effective set.
+    role_id: str = ""
+    role_name: str = ""
 
     class Config:
         from_attributes = True

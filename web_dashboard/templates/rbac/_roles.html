@@ -1,0 +1,438 @@
+{# Access roles -- the Roles tab of the RBAC page.
+
+   A role is a named permission map that the Users and Groups tabs assign. This tab is where
+   one is created, cloned, edited and, most usefully, where "who holds this?" is answered --
+   the question that previously meant opening every user in turn.
+
+   Macro imported here, not inherited from the container -- see the note in _users.html.
+
+   TWO deliberate differences from the other two tabs' grids, both of which look like
+   omissions and are not:
+
+     * NO "Full access (unrestricted)" checkbox. That escape hatch stores {} , and on a USER
+       an empty map means unrestricted. A role whose map were empty would therefore hand
+       every assignee every permission in the dashboard, now and for every scope added in
+       future -- the exact opposite of what someone building a restricted role is doing. The
+       server refuses it too (role_service.validate_role_permissions). "Everything" is
+       spelled with the Administrator role, which is auditable.
+     * A BUILT-IN OFFERS NO EDIT CONTROL AT ALL, rather than a disabled grid. 31 rows x 4
+       disabled checkboxes invites "why can't I tick this?" and the grid has no room to
+       answer; and a rule enforced by the absence of a control cannot be defeated by a stale
+       :disabled binding. Clone is the supported path and is one click. #}
+{% from "partials/permission_matrix.html" import permission_matrix %}
+
+<div x-data="rolesPage()" x-init="init()">
+
+  <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between mb-3">
+    <p class="text-sm text-gray-500 max-w-2xl">
+      Assign a role instead of ticking permissions one by one. Editing a role changes it for
+      everyone who holds it &mdash; immediately for users, and at next sign-in for members of
+      a mapped group, whose permissions are rebuilt from their groups each time they log in.
+    </p>
+    <button @click="openCreate()" x-show="!noAccess"
+            class="shrink-0 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition">
+      + New Role
+    </button>
+  </div>
+
+  <!-- Toast -->
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-4 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <!-- A 403 from this tab alone. Reported in place rather than as a red toast: all three
+       panels mount on one page load, so a denial here must not read as the whole page being
+       broken for somebody who came to look at users. -->
+  <div x-show="noAccess" x-cloak
+       class="bg-white rounded-xl shadow-sm border border-gray-200 px-4 py-6 text-sm text-gray-500">
+    You do not have access to role administration.
+  </div>
+
+  <div x-show="!noAccess" x-cloak class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <table class="w-full text-sm">
+      <thead class="bg-gray-50 text-gray-500 uppercase text-xs">
+        <tr>
+          <th class="px-4 py-3 text-left">Role</th>
+          <th class="px-4 py-3 text-left">Grants</th>
+          <th class="px-4 py-3 text-left">Assigned to</th>
+          <th class="px-4 py-3 text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+        <template x-for="role in roles" :key="role.id">
+          <tbody class="divide-y divide-gray-100">
+            <tr class="hover:bg-gray-50">
+              <td class="px-4 py-3 align-top">
+                <div class="flex items-center gap-2">
+                  <span class="font-medium text-gray-900" x-text="role.name"></span>
+                  <!-- Grey for built-in, deliberately: a badge describing where a row came
+                       from must not read like an access grant. Same reasoning as the focus
+                       chip on the Groups tab. -->
+                  <span x-show="role.is_builtin"
+                        class="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">Built-in</span>
+                  <span x-show="!role.is_builtin"
+                        class="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">Custom</span>
+                </div>
+                <div class="text-xs text-gray-500 mt-0.5" x-text="role.description || ''"></div>
+              </td>
+              <td class="px-4 py-3 align-top">
+                <!-- Same chip rendering the Groups tab uses for a mapping's permission set,
+                     so a role's grants read identically to one. -->
+                <span x-show="role.permissions && role.permissions.is_admin"
+                      class="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">
+                  Administrator &mdash; bypasses the permission grid
+                </span>
+                <div x-show="!(role.permissions && role.permissions.is_admin)"
+                     class="flex flex-wrap gap-1 max-w-md">
+                  <template x-for="chip in grantChips(role)" :key="chip">
+                    <span class="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-600"
+                          x-text="chip"></span>
+                  </template>
+                  <span x-show="grantChips(role).length === 0" class="text-xs text-gray-400">
+                    Grants nothing
+                  </span>
+                </div>
+              </td>
+              <td class="px-4 py-3 align-top">
+                <button @click="toggleAssignees(role)" type="button"
+                        class="text-xs text-blue-600 hover:underline"
+                        x-text="assigneeLabel(role)"></button>
+              </td>
+              <td class="px-4 py-3 align-top text-right whitespace-nowrap">
+                <button @click="openClone(role)" type="button"
+                        class="text-xs text-gray-600 hover:text-gray-900">Clone</button>
+                <!-- No Edit for a built-in: see the header comment. -->
+                <button x-show="!role.is_builtin" @click="openEdit(role)" type="button"
+                        class="text-xs text-blue-600 hover:text-blue-800 ml-3">Edit</button>
+                <button x-show="!role.is_builtin" @click="confirmDelete(role)" type="button"
+                        class="text-xs text-red-600 hover:text-red-800 ml-3">Delete</button>
+              </td>
+            </tr>
+            <!-- Assignees, inline under the row. Not a modal: this page already owns a z-50
+                 flyout and a z-40 tokens modal, and a third overlay layer on a tab inside it
+                 is where stacking-context bugs live. -->
+            <tr x-show="expanded === role.id" x-cloak class="bg-gray-50">
+              <td colspan="4" class="px-4 py-3">
+                <div x-show="assigneesLoading" class="text-xs text-gray-500">Loading&hellip;</div>
+                <div x-show="!assigneesLoading">
+                  <div class="text-xs font-medium text-gray-600 mb-1">Users</div>
+                  <div class="flex flex-wrap gap-1 mb-3">
+                    <template x-for="u in (assignees[role.id] || {}).users || []" :key="u.id">
+                      <span class="text-xs px-1.5 py-0.5 rounded bg-white border border-gray-200"
+                            :class="u.is_active ? 'text-gray-700' : 'text-gray-400 line-through'"
+                            x-text="u.username"></span>
+                    </template>
+                    <span x-show="((assignees[role.id] || {}).users || []).length === 0"
+                          class="text-xs text-gray-400">No users</span>
+                  </div>
+                  <div class="text-xs font-medium text-gray-600 mb-1">
+                    Group mappings
+                    <span class="font-normal text-gray-400">
+                      &mdash; members pick a change up at their next sign-in
+                    </span>
+                  </div>
+                  <div class="flex flex-wrap gap-1">
+                    <template x-for="m in (assignees[role.id] || {}).group_mappings || []" :key="m.id">
+                      <span class="text-xs px-1.5 py-0.5 rounded bg-white border border-gray-200 text-gray-700"
+                            x-text="m.display_name"></span>
+                    </template>
+                    <span x-show="((assignees[role.id] || {}).group_mappings || []).length === 0"
+                          class="text-xs text-gray-400">No group mappings</span>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </template>
+      </tbody>
+    </table>
+    <div x-show="!loading && roles.length === 0" class="px-4 py-6 text-sm text-gray-500">
+      No roles yet.
+    </div>
+    <div x-show="loading" class="px-4 py-6 text-sm text-gray-500">Loading&hellip;</div>
+  </div>
+
+  <!--
+    Create / clone / edit flyout.
+
+    A right-side slide-over and NOT a centred dialog, and that is not a style choice: the
+    user form was a centred max-w-lg with no max-height and no scroll container, and at 31
+    permission rows the title went off the top of the viewport and Save off the bottom with
+    nothing to scroll -- permissions were literally ungrantable. The same grid lives here, so
+    the same defect is one careless copy away.
+
+    The <form> must wrap the header, the scrolling body AND the pinned footer, or the
+    footer's Save button stops submitting it.
+  -->
+  <div x-show="showModal" x-cloak class="fixed inset-0 z-50 overflow-hidden" role="dialog" aria-modal="true">
+    <div class="absolute inset-0 bg-black/40" @click="showModal = false"></div>
+    <div class="absolute inset-y-0 right-0 flex max-w-full pl-10">
+      <div x-show="showModal"
+           x-transition:enter="transform transition ease-in-out duration-300"
+           x-transition:enter-start="translate-x-full"
+           x-transition:enter-end="translate-x-0"
+           x-transition:leave="transform transition ease-in-out duration-300"
+           x-transition:leave-start="translate-x-0"
+           x-transition:leave-end="translate-x-full"
+           class="w-screen max-w-3xl">
+        <form @submit.prevent="save()" class="flex h-full flex-col bg-white shadow-xl">
+
+          <div class="flex-shrink-0 px-6 py-4 border-b border-gray-200">
+            <h2 class="text-lg font-semibold text-gray-900" x-text="modalTitle()"></h2>
+            <p class="text-xs text-gray-500 mt-0.5" x-text="modalHint()"></p>
+          </div>
+
+          <!-- The scroller. Deliberately NOT overflow-hidden anywhere on the way down: the
+               grid is taller than this panel, and a clipped checkbox still reports a perfect
+               bounding rect, so it looks fine and is a dead control. -->
+          <div class="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+              <input type="text" x-model="form.name" required maxlength="200"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                            focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">
+                Description <span class="text-gray-400 font-normal">(optional)</span>
+              </label>
+              <input type="text" x-model="form.description"
+                     placeholder="What this role is for"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                            focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+
+            {{ permission_matrix("Permissions", "", offer_unrestricted=False) }}
+
+            <p x-show="permGrantedCount() === 0" class="text-xs text-amber-600">
+              This role grants nothing, so anyone holding it will be able to sign in and see
+              nothing. Grant at least one section.
+            </p>
+          </div>
+
+          <div class="flex-shrink-0 px-6 py-4 border-t border-gray-200 flex items-center justify-end gap-3">
+            <button type="button" @click="showModal = false"
+                    class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+            <button type="submit" :disabled="saving"
+                    class="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm
+                           font-medium px-4 py-2 rounded-lg transition"
+                    x-text="saving ? 'Saving…' : 'Save'"></button>
+          </div>
+
+        </form>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function rolesPage() {
+  return {
+    roles: [],
+    loading: true,
+    noAccess: false,
+    toast: '',
+    toastType: 'success',
+
+    // Assignee lists, cached per role id -- the panel is toggled open and shut while an
+    // admin reads down the table, and re-fetching on each open would be a request per click.
+    expanded: null,
+    assignees: {},
+    assigneesLoading: false,
+
+    showModal: false,
+    saving: false,
+    // 'create' | 'clone' | 'edit'. `editing` holds the row for edit and the SOURCE for a
+    // clone, which is why the two are separate: a clone POSTs, an edit PATCHes.
+    mode: 'create',
+    editing: null,
+    form: { name: '', description: '', permissions: {}, permissionsUnrestricted: false },
+
+    // Filtering, grouping, bulk toggles and hasPerm/togglePerm come from app.js so this
+    // grid cannot drift from the two on the other tabs.
+    ...permissionGridState(),
+    // The permission catalog, from the page route context (api/auth.py). Inlined as
+    // component properties rather than module-level consts: re-declaring any one of these
+    // four names at module scope in two sibling partials is a SyntaxError that kills BOTH
+    // script blocks, and the per-block lexer in test_template_scripts.py sees nothing wrong
+    // with either one.
+    permissionScopes: {{ permission_scopes | tojson }},
+    permissionLevels: {{ permission_levels | tojson }},
+    permissionScopeLevels: {{ permission_scope_levels | tojson }},
+    permissionScopeGroups: {{ permission_scope_groups | tojson }},
+
+    async init() {
+      // No auth gate here -- rbacPage() in the container owns the single one.
+      await this.load();
+    },
+
+    isDenied(e) {
+      return String(e && e.message || e).includes('403');
+    },
+
+    showToast(msg, type = 'success') {
+      this.toast = msg;
+      this.toastType = type;
+      setTimeout(() => { this.toast = ''; }, 4000);
+    },
+
+    async load() {
+      this.loading = true;
+      try {
+        this.roles = await API.get('/api/roles') || [];
+      } catch (e) {
+        if (this.isDenied(e)) this.noAccess = true;
+        else this.showToast('Could not load roles: ' + e.message, 'error');
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    // ── Display helpers ────────────────────────────────────────────────────────
+    grantChips(role) {
+      const perms = role.permissions || {};
+      const out = [];
+      for (const scope of this.permissionScopes) {
+        const levels = perms[scope] || [];
+        if (levels.length) out.push(permissionScopeLabel(scope) + ' ' + levels.join('/'));
+      }
+      return out;
+    },
+
+    assigneeLabel(role) {
+      const u = role.user_count || 0;
+      const g = role.group_mapping_count || 0;
+      if (!u && !g) return 'Nobody';
+      const parts = [];
+      if (u) parts.push(u + (u === 1 ? ' user' : ' users'));
+      if (g) parts.push(g + (g === 1 ? ' group' : ' groups'));
+      return parts.join(', ');
+    },
+
+    async toggleAssignees(role) {
+      if (this.expanded === role.id) { this.expanded = null; return; }
+      this.expanded = role.id;
+      if (this.assignees[role.id]) return;
+      this.assigneesLoading = true;
+      try {
+        this.assignees[role.id] = await API.get('/api/roles/' + role.id + '/assignees');
+      } catch (e) {
+        this.showToast('Could not load assignees: ' + e.message, 'error');
+        this.expanded = null;
+      } finally {
+        this.assigneesLoading = false;
+      }
+    },
+
+    // ── The flyout ─────────────────────────────────────────────────────────────
+    modalTitle() {
+      if (this.mode === 'edit') return 'Edit role';
+      if (this.mode === 'clone') return 'Clone role';
+      return 'New role';
+    },
+
+    modalHint() {
+      if (this.mode === 'clone' && this.editing) {
+        return 'Starts from the grants of ' + this.editing.name + '. Edits here do not touch the original.';
+      }
+      if (this.mode === 'edit') {
+        return 'Saving changes this role for everyone who holds it.';
+      }
+      return 'Grant the sections this role needs. There is no "unrestricted" role — use Administrator for that.';
+    },
+
+    openCreate() {
+      this.mode = 'create';
+      this.editing = null;
+      this.form = { name: '', description: '', permissions: {}, permissionsUnrestricted: false };
+      this.showModal = true;
+    },
+
+    openEdit(role) {
+      this.mode = 'edit';
+      this.editing = role;
+      this.form = {
+        name: role.name,
+        description: role.description || '',
+        // Deep copy, matching openEdit on the users tab: a shallow one would let editing
+        // this grid mutate the list row it came from, so cancelling would still have
+        // changed what the table shows.
+        permissions: JSON.parse(JSON.stringify(role.permissions || {})),
+        permissionsUnrestricted: false,
+      };
+      this.showModal = true;
+    },
+
+    openClone(role) {
+      this.openEdit(role);
+      this.mode = 'clone';
+      this.editing = role;
+      this.form.name = role.name + ' copy';
+    },
+
+    async save() {
+      this.saving = true;
+      try {
+        // buildPermissionsPayload() materialises every scope key, which is what makes
+        // "restricted, nothing granted" expressible at all -- see app.js. On a role the
+        // unrestricted flag is always false, so this always returns the full map.
+        const permissions = this.buildPermissionsPayload();
+        const body = {
+          name: this.form.name,
+          description: this.form.description || null,
+        };
+        if (this.mode === 'edit') {
+          body.permissions = permissions;
+          const res = await API.patch('/api/roles/' + this.editing.id, body);
+          const n = (res && res.fanned_out) || 0;
+          this.showToast(n
+            ? 'Role saved — updated ' + n + (n === 1 ? ' user' : ' users') + '.'
+            : 'Role saved.');
+        } else if (this.mode === 'clone') {
+          // The clone endpoint copies the source's grants server-side, but this form may
+          // have edited them, so send what is on screen.
+          const created = await API.post('/api/roles/' + this.editing.id + '/clone', body);
+          if (created && created.id) {
+            await API.patch('/api/roles/' + created.id, { permissions: permissions });
+          }
+          this.showToast('Role created.');
+        } else {
+          body.permissions = permissions;
+          await API.post('/api/roles', body);
+          this.showToast('Role created.');
+        }
+        this.showModal = false;
+        this.assignees = {};
+        await this.load();
+      } catch (e) {
+        this.showToast(e.message || 'Could not save the role', 'error');
+      } finally {
+        this.saving = false;
+      }
+    },
+
+    async confirmDelete(role) {
+      const u = role.user_count || 0;
+      const g = role.group_mapping_count || 0;
+      let msg = 'Delete the role "' + role.name + '"?';
+      if (u || g) {
+        // The server refuses this without ?force. Saying so here, with the count, is the
+        // difference between a considered choice and a surprise 409.
+        msg = 'The role "' + role.name + '" is assigned to ' + this.assigneeLabel(role)
+            + '. Deleting it removes the role from them — they keep only whatever their own '
+            + 'permission grid grants. Continue?';
+      }
+      if (!confirm(msg)) return;
+      try {
+        await API.del('/api/roles/' + role.id + (u || g ? '?force=true' : ''));
+        this.showToast('Role deleted.');
+        this.assignees = {};
+        await this.load();
+      } catch (e) {
+        this.showToast(e.message || 'Could not delete the role', 'error');
+      }
+    },
+  };
+}
+</script>

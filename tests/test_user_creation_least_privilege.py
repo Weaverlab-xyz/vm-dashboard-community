@@ -169,7 +169,7 @@ def test_the_grid_serialises_every_scope_rather_than_only_the_ticked_ones():
 
 
 def test_the_create_form_defaults_to_restricted_and_shows_the_grid():
-    with open(os.path.join(_ROOT, "web_dashboard", "templates", "users", "list.html"),
+    with open(os.path.join(_ROOT, "web_dashboard", "templates", "rbac", "_users.html"),
               encoding="utf-8") as fh:
         src = fh.read()
     block = src.split("openCreate() {")[1].split("openEdit(")[0]

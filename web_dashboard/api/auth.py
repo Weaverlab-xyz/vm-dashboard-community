@@ -19,7 +19,7 @@ from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..database import User, Fido2Credential, PersonalAccessToken, OAuthGroupMapping, get_db, verify_password
+from ..database import User, Fido2Credential, PersonalAccessToken, OAuthGroupMapping, get_db, verify_password, merge_permission_maps
 from ..services import config_service
 from ..models.user import (
     TokenResponse,
@@ -836,26 +836,42 @@ def _complete_oauth_login(db, *, subject, email, display_name, groups, provider)
         # A user in `dashboard-aws-read` + `dashboard-vms-write` ends up
         # with both — and when Entitle revokes one of those memberships,
         # the next login drops the matching scope.
-        session_perms: dict = {}
+        # An access role assigned to a matched mapping is unioned in FIRST, so the mapping's
+        # own `default_permissions` reads as an additive override on top of its role --
+        # exactly the relationship a user's grid has to the role on their row.
+        #
+        # This is why the group side needs no materialised copy and no reconcile pass,
+        # unlike `users.role_permissions`: the column being built here is rebuilt from
+        # scratch on EVERY login, so there is nothing to keep in step. The trade is that a
+        # role edit reaches group members at their next sign-in rather than immediately,
+        # which is how `default_permissions` has always behaved and is the same mechanism
+        # that makes losing a group actually reduce access.
+        #
+        # Resolved with ONE query rather than per mapping: `matched` is usually short, but a
+        # login is on the critical path and a per-row lookup here would be an N+1 on it.
+        _role_maps = []
+        _matched_role_ids = {m.role_id for m, _ in matched if getattr(m, "role_id", None)}
+        if _matched_role_ids:
+            from ..database import AccessRole
+            _role_maps = [r.permissions_dict for r in
+                          db.query(AccessRole)
+                          .filter(AccessRole.id.in_(_matched_role_ids)).all()]
+
+        _grid_maps = []
         for _, dp in matched:
             if not dp:
                 continue
             try:
-                parsed = _json.loads(dp)
+                _grid_maps.append(_json.loads(dp))
             except Exception:
                 logger.warning("Skipping malformed default_permissions JSON in oauth_group_mapping: %r", dp[:80])
-                continue
-            for key, val in parsed.items():
-                if key == "is_admin":
-                    session_perms[key] = session_perms.get(key, False) or bool(val)
-                elif isinstance(val, list):
-                    existing = session_perms.get(key)
-                    if isinstance(existing, list):
-                        session_perms[key] = sorted(set(existing) | set(val))
-                    else:
-                        session_perms[key] = sorted(set(val))
-                else:
-                    session_perms[key] = val
+
+        # Roles first, then each mapping's own grid, so a mapping's explicit permissions read
+        # as an addition ON TOP OF the role it confers -- the same relationship a user's grid
+        # has to the role on their row. `merge_permission_maps` is the one definition of the
+        # rule (database.py); this used to be a second hand-written copy of it, and the role
+        # union above would have been a third.
+        session_perms = merge_permission_maps(*(_role_maps + _grid_maps))
         matched_session_permissions = session_perms if session_perms else None
     else:
         matched_workgroups = None  # no mappings configured — legacy path
@@ -1153,6 +1169,19 @@ async def oauth_oidc_callback(
 
 # ── Profile ───────────────────────────────────────────────────────────────────
 
+def _public_permissions(user: User):
+    """`effective_permissions_dict` with internal keys removed, or None when empty.
+
+    Only the presentation layer strips these. Every AUTHORIZATION path must keep reading the
+    raw property -- a sentinel filtered out before `has_permission` sees it would turn the
+    deny it exists to produce back into an empty map, i.e. unrestricted.
+    """
+    from ..database import _ROLE_UNRESOLVED
+    perms = user.effective_permissions_dict or {}
+    perms = {k: v for k, v in perms.items() if k not in _ROLE_UNRESOLVED}
+    return perms or None
+
+
 @router.get("/me", response_model=UserResponse)
 async def me(current_user: User = Depends(get_current_user)):
     """The caller's own profile.
@@ -1183,7 +1212,11 @@ async def me(current_user: User = Depends(get_current_user)):
         # derived session_permissions). The frontend uses this to gate
         # nav entries / action buttons, so it must reflect what
         # require_permission would actually allow.
-        permissions=current_user.effective_permissions_dict or None,
+        # The deny sentinel never leaves the server. `database._ROLE_UNRESOLVED` is a
+        # non-empty map precisely so an unresolvable role DENIES rather than reading as
+        # unrestricted, but its key is not a real scope, the grid would not render it, and
+        # an unexplained `__role_unresolved__` in this body is a support call.
+        permissions=_public_permissions(current_user),
         # "" rather than None for a normal user, so the client tests one falsy value
         # instead of learning the difference between absent and null.
         accessor_env_id=current_user.accessor_env_id or "",

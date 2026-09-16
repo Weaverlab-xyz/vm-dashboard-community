@@ -6,7 +6,7 @@ Two independent questions, and keeping them apart is the whole model:
 
 | Question | Answered by | Where |
 |---|---|---|
-| What may this user **do**? | a **scope** and a **level** | the Permissions grid on Users / Groups |
+| What may this user **do**? | a **role**, or a **scope** and a **level** | RBAC &rarr; Users / Groups / Roles |
 | Which **objects** may they do it to? | a workgroup tag, or a POV grant | Workgroups; the POV access picker |
 
 A scope is a feature area — roughly one per section in the navigation. A level is
@@ -45,7 +45,7 @@ behaving exactly as it did.
 
 ## New users start restricted
 
-Creating a user from **Users → + New User** gives them a permission map with nothing
+Creating a user from **RBAC → Users → + New User** gives them a permission map with nothing
 granted. The grid is on the create panel for that reason: grant what they need before you
 save, or they will be able to sign in and see nothing. The panel says so when you are about
 to create one that way.
@@ -142,11 +142,12 @@ grant. If you are emailing a link to an evaluation, mint an accessor.
 
 ## Where a user's permissions actually come from
 
-Three sources, unioned. A level granted by any of them counts.
+Four sources, unioned. A level granted by any of them counts.
 
 | Source | Set by | Lifetime |
 |---|---|---|
-| Baseline | an admin, on the Users page | until changed |
+| Role | an admin, on RBAC &rarr; Roles | until the role changes or is unassigned |
+| Baseline | an admin, on RBAC &rarr; Users | until changed |
 | Group-derived | OIDC group membership → group mapping | **rewritten on every login** |
 | Just-in-time | Entitle, over the REST integration | until Entitle revokes |
 
@@ -157,19 +158,65 @@ stored separately for exactly this reason, so they survive.
 
 ## Groups
 
-A group mapping turns an Entra group into a workgroup plus a default permission set. Two
-things to know:
+A group mapping turns a group from your identity provider into a workgroup, an optional
+role, and a default permission set. **Not Entra-only** — any OIDC provider works, and the
+"Group Object ID" field takes whatever identifier that provider's groups claim emits. The
+stored column is still called `entra_group_id`, which is why you will see that name in the
+API and in the database.
 
-- There is **no edit**. To change a mapping's permissions, delete it and add it again.
+Two things to know:
+
 - Its permissions are re-applied to every member **at each login**, so a mistake in a
-  mapping keeps reasserting itself until the mapping is fixed.
+  mapping keeps reasserting itself until the mapping is fixed — and a change you make
+  reaches existing members at their *next sign-in*, not immediately.
+- That includes the role. Editing a role changes it immediately for users who hold it
+  directly, and at next sign-in for everyone who gets it through a group.
+
+## Roles
+
+A role is a named set of permissions you assign to a person or to a group, instead of
+ticking boxes for each of them. Editing the role changes it for everyone who holds it.
+
+Eight roles ship with the dashboard:
+
+| Role | For |
+|---|---|
+| **Administrator** | Everything, including the admin-only pages. The grid is not consulted. |
+| **Operator** | Day-to-day work: deploy, run and use, but delete nothing. |
+| **Read-Only** | Every section at its read level, and nothing else. |
+| **POV Presenter** | Run a proof of value — tick use cases, wake environments. Pair it with the POV access picker. |
+| **Auditor** | The audit trail, job history and inventory. No writes. |
+| **Cloud Admin** | Full control of the cloud accounts and what runs in them. |
+| **DBA** | Cloud databases end to end, plus the secrets a database run needs. |
+| **Platform / K8s** | Clusters, containers, functions, and the images and configuration behind them. |
+
+**Built-in roles cannot be edited or deleted.** Use **Clone** and change the copy — that
+keeps what the shipped roles mean stable, so a support conversation about "the Auditor
+role" is about the same thing on every install. A custom role can be edited and deleted
+freely; deleting one that is still assigned asks first, and the people who held it keep
+only whatever their own permission grid grants.
+
+**A role and the grid add up.** The grid on a user or a group mapping is an *override*
+layered on top of their role, not a replacement for it — so the usual shape is "give them
+Operator, plus `storage:delete` because they look after the share". If you want someone to
+have exactly their role and nothing more, leave the grid untouched.
+
+**There is no "unrestricted" role**, and that is deliberate. Unrestricted is stored as an
+empty permission map, and an empty map on a *person* means full access — so an unrestricted
+role would hand everyone who holds it every permission in the dashboard, including every
+section added in future. Use the Administrator role, or the Admin flag on the user, both of
+which are visible for what they are.
+
+**Who holds this role?** Click the count in the *Assigned to* column. That question used to
+mean opening every user in turn, and it is most of the reason roles exist.
 
 ## Scopes that are deliberately not grantable
 
 Some things answer only to the **Admin** flag, because a grantable version of them would be
 a way to become an administrator:
 
-- **Users, Groups** — anyone who can edit a user can make themselves admin.
+- **RBAC (Users, Groups, Roles)** — anyone who can edit a user, or a role a user
+  holds, can make themselves admin.
 - **Settings / first-run setup**, and the **secret vault registry**.
 - **Worker concurrency and preflight**, which are instance-wide plumbing.
 
@@ -219,7 +266,7 @@ scope needs, in the same change:
 3. a **backfill** in `web_dashboard/database.py` granting exactly the levels a non-admin
    with an explicit map could already reach;
 4. the right *form* of the check — see the table below;
-5. an entry in `_NAV_SCOPE` in `tests/test_permission_catalog.py`, which fails if a nav
+5. an entry in `_NAV_SCOPE` or `_NAV_EXEMPT` in `tests/test_permission_catalog.py`, which fails if a nav
    section has no scope or a route enforces a scope the catalog does not contain.
 
 What the route was before decides both 3 and 4 together, and there are three cases:
