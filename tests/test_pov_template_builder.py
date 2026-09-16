@@ -108,18 +108,26 @@ def _run_block(block: str, prelude: str) -> subprocess.CompletedProcess:
                           encoding="utf-8", errors="replace")
 
 
-# `apt-get` cannot be a shell function — POSIX function names take no hyphen and dash
-# refuses one outright — so the Debian branch is fenced off with an empty PATH instead:
-# if this block ever falls through to a package install, every command in it is
-# not-found and the run fails. `dnf` and `yum` are named because they *can* be, and a
-# named stub says which branch ran instead of only that something did.
+# **No hyphens in these names, ever.** POSIX function names take no hyphen and dash
+# refuses one outright — so `apt-get` and `systemd-tmpfiles` cannot be stubbed here, and
+# they do not need to be: the empty PATH below makes every unstubbed command not-found,
+# and the script calls both of them guarded. If a block ever falls through to a real
+# package install, every command in it is not-found and the run fails, which is the point.
+#
+# This is a Windows/Linux trap and not a theoretical one. `sh` on a developer's Windows
+# box is Git Bash, which ALLOWS a hyphen; `sh` in CI is dash, which does not. A stub with
+# a hyphen therefore passes locally and takes out every test in this section in CI with
+# "Syntax error: Bad function name" — it has done so once already.
+# `test_the_stub_preludes_use_only_posix_function_names` pins it on any platform.
+#
+# `dnf` and `yum` are named because they *can* be, and a named stub says which branch ran
+# instead of only that something did.
 _NO_PACKAGES = """
 PATH=""
 dnf() { echo "PACKAGE-MANAGER-RAN" >&2; return 9; }
 yum() { echo "PACKAGE-MANAGER-RAN" >&2; return 9; }
 systemctl() { return 0; }
 service() { return 0; }
-systemd-tmpfiles() { return 0; }
 ln() { return 0; }
 """
 
@@ -148,6 +156,28 @@ def _install(**kw) -> str:
     """The install block, gated on a socket path this test run actually controls."""
     kw.setdefault("socket_path", _FAKE_SOCKET)
     return b.render_docker_install(**kw)
+
+
+def test_the_stub_preludes_use_only_posix_function_names():
+    """The preludes in this file are shell, and they run under whatever `sh` is.
+
+    POSIX function names take no hyphen: dash refuses `systemd-tmpfiles() { ... }` with
+    "Syntax error: Bad function name" and abandons the whole script. Git Bash — which is
+    `sh` on a Windows workstation — accepts it. So a hyphenated stub passes every local
+    run and takes out every test in this section in CI, reported as an assertion about
+    podman or sockets rather than as a syntax error in the harness. That has happened.
+
+    Asserted on the TEXT rather than by parsing, deliberately: `sh -n` here is the
+    permissive shell, so a parse check is exactly the thing that cannot see this.
+    """
+    for name, prelude in (("_NO_PACKAGES", _NO_PACKAGES), ("_NO_RUNTIME", _NO_RUNTIME)):
+        for line in prelude.splitlines():
+            head = line.split("(")[0].strip()
+            if "()" in line.replace(" ", "") and head:
+                assert "-" not in head, (
+                    f"{name} stubs {head!r} as a shell function, and a hyphen in a "
+                    f"function name is a dash syntax error that kills the whole prelude. "
+                    f"Let PATH='' make it not-found instead.")
 
 
 def test_the_docker_install_is_valid_shell():
@@ -280,7 +310,6 @@ _NO_RUNTIME = """
 PATH=""
 systemctl() { return 0; }
 service() { return 0; }
-systemd-tmpfiles() { return 0; }
 ln() { return 0; }
 """
 
