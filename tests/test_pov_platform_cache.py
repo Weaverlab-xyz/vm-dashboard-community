@@ -550,6 +550,33 @@ def test_reconcile_itself_still_lists_live():
         "reconcile is reading a cached listing to decide what is missing")
 
 
+def test_the_managed_rows_do_not_read_their_runstate_out_of_the_cached_listing():
+    """The trap this change walked into and had to walk back out of.
+
+    `/pov` renders two tables. The managed one showed a runstate labelled `live` when it
+    could find the same environment in the second, read-only table — which was sound while
+    that table was a live platform read taken on the same page load. It is a CACHE now,
+    written by the same sweep as the rows, so a hit there is a second remembered value
+    with no per-row timestamp, wearing the word "live".
+
+    The consequence was not just a wrong label. It fed `staleRunstate`, which gates the
+    power buttons: a remembered `running` hides Start from a POV the platform has already
+    suspended, which is the incident docs/profiles/pov/lifecycle.md records.
+    """
+    with open(os.path.join(_ROOT, "web_dashboard", "templates", "pov", "index.html"),
+              encoding="utf-8") as fh:
+        src = fh.read()
+    for helper in ("runstateOf(e) {", "staleRunstate(e) {", "seenAgo(e) {",
+                   "rateLimited(e) {"):
+        body = src.split(helper)[1].split("\n    },")[0]
+        assert "this.environments" not in body and "liveFor" not in body, (
+            f"{helper.split('(')[0]} reads the cached platform listing again — that is a "
+            f"remembered runstate presented as a live one")
+    # And the helper that did it is gone rather than merely unused, so there is nothing
+    # for the next reader to reconnect.
+    assert "liveFor" not in src
+
+
 def test_the_page_routes_do_not_call_the_adapter_directly():
     """The whole change, pinned at the route. Either listing going back to `mod.list_*()`
     puts a paged platform GET back in the request path for every SE."""

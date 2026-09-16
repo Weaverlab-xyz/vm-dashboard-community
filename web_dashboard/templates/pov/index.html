@@ -339,12 +339,13 @@
                    class="ml-2 text-xs text-blue-600 underline">job</a>
               </td>
               <td class="px-4 py-2 text-gray-600">
-                {# The live read this page already makes when it can, and what the
-                   reconcile sweep last confirmed otherwise -- see runstateOf(). Either way
-                   the row SAYS which, because a remembered value shown as a current one is
+                {# What the reconcile sweep last confirmed, and WHEN -- see runstateOf().
+                   The row says when, because a remembered value shown as a current one is
                    the bug this column had: a POV the platform suspended on its idle timer
                    sat here reading "running" forever, and the Start button that would have
-                   undone it was hidden on the strength of that. #}
+                   undone it was hidden on the strength of that. The platform listing below
+                   is deliberately not consulted; it is a cache now, so a hit there would
+                   be a second remembered value wearing the word "live". #}
                 <span x-text="runstateOf(e) || '—'"
                       :class="staleRunstate(e) ? 'text-gray-400' : ''"></span>
                 <span class="block text-xs text-gray-400"
@@ -1110,32 +1111,32 @@ function povPage() {
     // extra button, not a wrong one.
     STALE_AFTER_MS: 30 * 60 * 1000,
 
-    // The live platform read for a managed row, if this load found one.
+    // THE ROW, not the platform listing below, and that changed when the listing became
+    // a cache.
     //
-    // `load()` already fetches every environment on the platform for the read-only table
-    // below -- the same collection read a reconcile makes. So the freshest possible answer
-    // is ALREADY on this page, and asking the server for it again would be a third
-    // platform call on a page that makes two, against an account this integration is
-    // careful not to rate-limit. The server-side sweep still runs on its timer: it is what
-    // keeps the ROWS honest for everything that reads them when no page is open.
-    liveFor(e) {
-      if (!e.platform_environment_id) return null;
-      return this.environments.find(
-        x => String(x.id) === String(e.platform_environment_id)) || null;
-    },
-
-    // What to show and what to gate the power buttons on: the live read when this load
-    // got one, else what the reconcile sweep last confirmed.
+    // This used to cross-reference `this.environments` and treat a hit as a live reading:
+    // `load()` fetched every environment on the platform anyway, so the freshest possible
+    // answer really was already on the page, and `seenAgo` said `live` for it. That
+    // premise is gone. The listing is now served from `pov_platform_cache` and written by
+    // the same reconcile pass that writes these rows, so it is neither fresher than
+    // `runstate` nor accompanied by a per-row timestamp — and labelling a ten-minute-old
+    // reading `live` is exactly the failure this column exists to prevent. Worse, it fed
+    // `staleRunstate`, which gates the power buttons: a remembered `running` would have
+    // hidden Start from a POV the platform had already suspended, which is the incident
+    // docs/profiles/pov/lifecycle.md records.
+    //
+    // So there is one source for "what state is this POV in" — the reconciled row, which
+    // carries `platform_seen_at` and says how old it is. It is also the better one during
+    // the window that matters: after a power action the page polls /api/pov/managed every
+    // five seconds, and that is the row.
     runstateOf(e) {
-      const live = this.liveFor(e);
-      return (live && live.runstate) || e.runstate || '';
+      return e.runstate || '';
     },
 
     // A runstate nobody has confirmed, or confirmed too long ago to gate a control on.
-    // A live read is never stale. `platform_seen_at` is empty for every row that predates
-    // the reconcile sweep, which is exactly the estate whose runstate is least trustworthy.
+    // `platform_seen_at` is empty for every row that predates the reconcile sweep, which
+    // is exactly the estate whose runstate is least trustworthy.
     staleRunstate(e) {
-      if (this.liveFor(e)) return false;
       if (!e.platform_seen_at) return true;
       const seen = Date.parse(e.platform_seen_at + 'Z');
       if (Number.isNaN(seen)) return true;
@@ -1143,7 +1144,6 @@ function povPage() {
     },
 
     seenAgo(e) {
-      if (this.liveFor(e)) return 'live';
       if (!e.platform_seen_at) return 'not confirmed';
       const seen = Date.parse(e.platform_seen_at + 'Z');
       if (Number.isNaN(seen)) return 'not confirmed';
@@ -1155,8 +1155,7 @@ function povPage() {
     },
 
     rateLimited(e) {
-      const live = this.liveFor(e);
-      return live ? !!live.rate_limited : !!e.rate_limited;
+      return !!e.rate_limited;
     },
 
     // The API column name for a kind. One place, because the picker, the row and the
