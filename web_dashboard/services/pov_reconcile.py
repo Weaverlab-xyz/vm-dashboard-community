@@ -511,6 +511,12 @@ async def run_reconcile(job_id: str, meta: dict) -> None:
             job_service.append_job_log(
                 db, job_id, f"removed {reaped} expired or orphaned PRA vendor group(s)")
 
+        # Imported here rather than at module scope, like the two sweeps above and for the
+        # same two reasons: it is one call on one path, and a module-level service import
+        # in this file puts that service's whole stack in front of every reader of this one
+        # — which is how a test stub of `database` starts needing symbols it never used.
+        from . import pov_platform_cache
+
         summaries, failures = [], []
         for platform in lab_platforms.VALID_PLATFORMS:
             try:
@@ -523,6 +529,16 @@ async def run_reconcile(job_id: str, meta: dict) -> None:
                 failures.append(f"{platform}: {exc}")
                 db.rollback()
                 job_service.append_job_log(db, job_id, f"{platform} FAILED: {exc}")
+            # Refill the POV page's two platform listings, in THIS process, so no SE's
+            # page load has to. Outside the try above and never raising, because a warm is
+            # a convenience: `pov_platform_cache` records its own failures on the row and
+            # serves the last good listing, so there is nothing for the job to report.
+            #
+            # A separate listing from `reconcile`'s own, deliberately. That one decides
+            # whether a POV is GONE from the platform, which a ten-minute-old answer
+            # cannot be trusted to do — it would flag an environment created since the
+            # last pass as missing. Reconcile stays live; this fills the cache.
+            await pov_platform_cache.warm(platform)
 
         result = {"platforms": summaries, "accessors_reaped": reaped}
         if failures:

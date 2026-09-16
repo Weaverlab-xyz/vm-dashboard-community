@@ -58,6 +58,7 @@ Every endpoint takes ``?platform=`` and resolves it through ``lab_platforms``. S
 only adapter today; the parameter exists so the second one is a registry entry rather than a
 second router.
 """
+import asyncio
 import logging
 import re
 
@@ -70,7 +71,8 @@ from ..config import settings
 from ..services import (bt_tenant_service, config_service, expiry_policy,
                         expiry_reaper, job_service,
                         lab_platforms, pov_blueprint_service, pov_broker, pov_env_service,
-                        pov_accessor_entitle, pov_gateway, pov_reconcile,
+                        pov_accessor_entitle, pov_gateway, pov_platform_cache,
+                        pov_reconcile,
                         pov_cloud_cost, pov_entitle_agent, pov_guest_step,
                         pov_ps_config, pov_resource_broker, pov_setup_steps,
                         suspend_schedule, pov_share, spend_policy, pov_summary,
@@ -408,13 +410,18 @@ async def list_platforms(current_user: User = Depends(get_current_user)):
 
 @router.get("/templates", dependencies=_POV_WRITE)
 async def list_templates(platform: str = Query(_DEFAULT_PLATFORM),
+                         refresh: bool = Query(False),
+                         db: Session = Depends(get_db),
                          current_user: User = Depends(get_current_user)):
-    """Templates a POV environment could be created from."""
-    name, mod = _adapter(platform)
-    try:
-        return {"platform": name, "templates": await mod.list_templates()}
-    except Exception as exc:  # noqa: BLE001
-        raise _platform_error(exc, f"listing {name} templates") from exc
+    """Templates a POV environment could be created from.
+
+    Served from ``pov_platform_cache``, not from the platform — see the note above
+    ``list_environments``.
+    """
+    name, _mod = _adapter(platform)
+    return {"platform": name,
+            **await _cached_listing(db, pov_platform_cache.KIND_TEMPLATES, name,
+                                    "templates", refresh=refresh)}
 
 
 @router.get("/templates/{template_id}/vms", dependencies=_POV_WRITE)
@@ -442,8 +449,71 @@ async def list_template_vms(template_id: str, platform: str = Query(_DEFAULT_PLA
             "vms": detail.get("vms") or []}
 
 
+async def _cached_listing(db: Session, kind: str, platform: str, key: str, *,
+                          refresh: bool) -> dict:
+    """One platform listing, out of the table rather than off the platform.
+
+    Reads through the REQUEST's session. ``get_current_user`` already depends on
+    ``get_db`` and FastAPI caches that within a request, so opening a ``SessionLocal``
+    here would take a second connection out of a pool of ten while the first is still
+    held — the hazard ``api/dashboard.dashboard_snapshot`` carries the same note about.
+    ``refresh_one`` does open its own, because it must not hold one across the listing.
+
+    Through ``asyncio.to_thread``, like ``api/cloud_identity.sweep_now``, and not because
+    one indexed SELECT is slow. These two routes are ``async def`` — they have to be, they
+    await the cold-start listing — so any synchronous SQLAlchemy in the body lands on the
+    event loop, and a query that is merely BLOCKED on a lock is as bad there as a slow
+    one. That is the failure ``tests/test_sync_db_routes_off_the_event_loop.py`` is a
+    ratchet against; it exempts a genuinely-async route like this one, which makes doing
+    it by hand the only thing that covers it.
+
+    The cold case — a row with no payload at all, on a fresh install or the first load
+    after a deploy — does list synchronously, once. ``claim`` is what makes that safe: the
+    first caller takes the lease and the rest are told ``in-flight`` and get the note, so
+    ten SEs opening the page in the same second are one platform call and not ten. Every
+    later load is one indexed query.
+    """
+    snap = await asyncio.to_thread(pov_platform_cache.read, db, kind, platform)
+
+    # `have` and not `fresh`: a stale listing is served as-is and refreshed by the
+    # reconcile pass. Fetching here on staleness would put a platform round trip back in
+    # the request path at every TTL boundary, which is the dead stale-serve branch
+    # `cache_service`'s docstring is written about.
+    if refresh or not snap["have"]:
+        snap = await pov_platform_cache.refresh_one(kind, platform, refresh=refresh)
+
+    # Nothing to serve AND the platform just refused: report it, with its own words, the
+    # way this router did before there was a cache. This is the one case the cache has
+    # nothing better to offer, and it is the case that most needs a real answer — an empty
+    # table where the truth is "Skytap rejected this API token" sends an SE to debug the
+    # dashboard. The 400/409/502 ladder at the top of this section is only useful while
+    # 502 still means what it says.
+    if not snap["have"] and snap.get("error"):
+        raise _platform_error(Exception(snap["error"]), f"listing {platform} {key}")
+
+    return {key: snap["items"], "as_of": snap["as_of"], "stale": not snap["fresh"],
+            "note": snap["note"]}
+
+
+# Both listings below are served from `services/pov_platform_cache` and NOT from the
+# platform. They are the two collection reads templates/pov/index.html makes, they go out
+# on the ONE username and API token in Settings, and the answer is identical for every SE
+# on the install — so a live read here made the call volume scale with how many people had
+# the page open, against an account that answers saturation with 423 and a Retry-After.
+#
+# What that means for anyone reading these rows: they are last-known-good plus an `as_of`,
+# refreshed by the POV reconcile pass, and a platform that is unreachable now serves the
+# previous listing with a `note` rather than an error. Deliberately — a 423 must not be
+# able to empty a table that was correct a minute ago.
+#
+# `reconcile` still lists environments LIVE for itself. Do not point it here: it decides
+# whether a POV is gone from the platform, and a cached answer would flag an environment
+# created since the last pass as missing.
+
 @router.get("/environments", dependencies=_POV_WRITE)
 async def list_environments(platform: str = Query(_DEFAULT_PLATFORM),
+                            refresh: bool = Query(False),
+                            db: Session = Depends(get_db),
                             current_user: User = Depends(get_current_user)):
     """Environments visible on the platform.
 
@@ -451,11 +521,10 @@ async def list_environments(platform: str = Query(_DEFAULT_PLATFORM),
     SE's existing hand-built POVs are exactly what they want to see next to the managed
     ones.
     """
-    name, mod = _adapter(platform)
-    try:
-        return {"platform": name, "environments": await mod.list_environments()}
-    except Exception as exc:  # noqa: BLE001
-        raise _platform_error(exc, f"listing {name} environments") from exc
+    name, _mod = _adapter(platform)
+    return {"platform": name,
+            **await _cached_listing(db, pov_platform_cache.KIND_ENVIRONMENTS, name,
+                                    "environments", refresh=refresh)}
 
 
 @router.get("/environments/{platform_env_id}", dependencies=_POV_WRITE)
@@ -545,6 +614,12 @@ async def reconcile_now(platform: str = Query(_DEFAULT_PLATFORM),
         summary = await pov_reconcile.reconcile(db, name)
     except Exception as exc:  # noqa: BLE001
         raise _platform_error(exc, f"reading {name} environments back") from exc
+    # Re-check is also the operator's way to force the two cached listings, which is what
+    # makes "I just fixed the token in Settings" a button rather than a ten-minute wait
+    # for the next reconcile pass. Subject to `claim` like every other path — including
+    # the cooldown, so mashing it at a rate-limited account does not compound the problem
+    # — and never raising, because the listings are not what was asked for here.
+    await pov_platform_cache.warm(name, refresh=True)
     return {"reconciled": summary}
 
 

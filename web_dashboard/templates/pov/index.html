@@ -958,9 +958,15 @@
     </div>
   </div>
 
-  <!-- Live platform read. Fed by GET /api/pov/environments, which is pov:write: it
-       lists environments this dashboard did not create, so on a shared lab account it
-       is other customers' POVs. Never rendered without write. -->
+  <!-- Fed by GET /api/pov/environments, which is pov:write: it lists environments this
+       dashboard did not create, so on a shared lab account it is other customers' POVs.
+       Never rendered without write.
+
+       NOT a live read any more -- it is served from `pov_platform_cache` and refreshed by
+       the POV reconcile pass, because this table was a paged platform GET on every page
+       load by every SE, all on one instance-wide credential. Hence `envAsOf`: the same
+       rule the managed rows follow with `platform_seen_at`, which is that presenting a
+       stale answer as current is the bug the cache must not introduce. -->
   <div x-show="canProvision && !loading && !notConfigured" class="space-y-3">
     <div class="flex items-baseline justify-between">
       <h2 class="text-lg font-medium text-gray-900">All environments on the platform</h2>
@@ -968,6 +974,12 @@
     </div>
     <p class="text-xs text-gray-400">
       Includes environments this dashboard did not create. Read-only — it does not own them.
+    </p>
+    <!-- Only when there is something to say: a fresh listing needs no caption, and one on
+         every load would train people to stop reading it. -->
+    <p x-show="envNote" class="text-xs text-amber-700">
+      <span x-text="envNote"></span>
+      <span class="text-gray-400">Press Re-check platform to read it again.</span>
     </p>
     <div x-show="environments.length" class="overflow-hidden border border-gray-200 rounded-lg">
       <table class="min-w-full divide-y divide-gray-200 text-sm">
@@ -1035,6 +1047,13 @@ function povPage() {
     archive: [],
     archiveTruncated: false,
     environments: [],
+    // Per-list freshness, filled by `fetchList`. `{note, as_of, stale}` per list key.
+    meta: {},
+    // The one-line caption under "All environments on the platform", or "" when the
+    // listing is current. A getter rather than a field so it cannot drift from `meta`.
+    get envNote() {
+      return (this.meta.environments || {}).note || '';
+    },
     // The create form's template picker. NOT filled by `load()` -- a full platform
     // template listing on every page load, for a picker behind a button most loads never
     // press, was the page's second platform read and every SE paid it. `templatesLoaded`
@@ -1400,7 +1419,14 @@ function povPage() {
           if (!quiet) this.error = body.detail || `Could not load ${key} (${res.status}).`;
           return [];
         }
-        return (await res.json())[key] || [];
+        const body = await res.json();
+        // Kept beside the list rather than merged into it: the two cached platform
+        // listings carry an `as_of` and a `note`, and a cache that cannot say how old it
+        // is would be the bug it exists to avoid. Keyed by `key`, so the environments
+        // read and the templates read do not overwrite each other's caption.
+        this.meta[key] = {note: body.note || '', as_of: body.as_of || null,
+                          stale: !!body.stale};
+        return body[key] || [];
       } catch (e) {
         if (!quiet) this.error = `Could not load ${key}.`;
         return [];

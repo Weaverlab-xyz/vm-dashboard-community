@@ -11,8 +11,16 @@ looking like a dashboard bug:
     502  the platform answered badly — its own words are carried through
 
 Mounts the router on a bare FastAPI app rather than importing `main`, so no setup-complete
-middleware, no database and no feature-gate wiring is in the way. The gate itself is
-covered by tests/test_install_profile.py.
+middleware and no feature-gate wiring is in the way. The gate itself is covered by
+tests/test_install_profile.py.
+
+**It does need a database now, and the 502 above is why.** `/environments` and `/templates`
+are served out of `pov_platform_cache` rather than off the platform, so the ladder only
+still holds on a COLD row: with a last-known-good listing in the table those two routes
+answer 200 and a `note`, deliberately, because a rate-limited account must not be able to
+empty a table that was correct a minute ago. `_Fixture` therefore clears the cache on
+entry — every test below is testing the cold path, which is the only one that can still
+reach the platform and so the only one where these assertions mean anything.
 
 Runs under pytest, or standalone:
     python tests/test_pov_api.py
@@ -32,9 +40,13 @@ except ImportError:  # pragma: no cover
     print("SKIP: fastapi/httpx not installed")
     sys.exit(0)
 
+from web_dashboard import database as d  # noqa: E402
+
+d.Base.metadata.create_all(bind=d.engine)
+
 from web_dashboard.api import pov as pov_api  # noqa: E402
 from web_dashboard.api.auth import get_current_user  # noqa: E402
-from web_dashboard.services import skytap_service  # noqa: E402
+from web_dashboard.services import pov_platform_cache, skytap_service  # noqa: E402
 from web_dashboard.services.skytap_client import SkytapClient, SkytapCreds  # noqa: E402
 
 _CREDS = SkytapCreds(username="u", api_token="t", base_url="https://skytap.test")
@@ -54,21 +66,66 @@ class _Operator:
     pov_env_ids_list = []
 
 
+def _db():
+    db = d.SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
 def _app():
     app = FastAPI()
     app.include_router(pov_api.router)
     app.dependency_overrides[get_current_user] = lambda: _Operator()
+    # The two cached listings take a session. Overridden rather than left to the real
+    # `get_db` so the router's other routes cannot reach a half-set-up one.
+    app.dependency_overrides[d.get_db] = _db
     return TestClient(app, raise_server_exceptions=False)
+
+
+def _clear_cache():
+    """Empty `pov_platform_cache`, so the next read takes the cold path and reaches the
+    fake transport. Without this the first test to populate a row decides the answer for
+    every test after it — and they would pass while testing nothing."""
+    db = d.SessionLocal()
+    db.query(d.PovPlatformCache).delete(synchronize_session=False)
+    db.commit()
+    db.close()
+    # The project scope is read from config, which this file does not set. Pinned so a
+    # developer's own `skytap_project_id` cannot move the row these tests address.
+    pov_platform_cache.scope_of = lambda platform: ""
+
+
+def _age_cache(seconds=None):
+    """Put every row's read time far enough back that the minimum-refresh floor and the
+    per-platform pacing gap do not block the claim a test is about to make."""
+    from datetime import timedelta
+    if seconds is None:
+        seconds = pov_platform_cache.min_refresh_interval_seconds() + 5
+    db = d.SessionLocal()
+    db.query(d.PovPlatformCache).update(
+        {d.PovPlatformCache.fetched_at:
+            pov_platform_cache._utcnow() - timedelta(seconds=seconds),
+         d.PovPlatformCache.next_query_allowed_at: None},
+        synchronize_session=False)
+    db.commit()
+    db.close()
 
 
 class _Fixture:
     """Swap the adapter's credentials + transport for the duration of a test."""
 
-    def __init__(self, handler, configured=True):
+    def __init__(self, handler, configured=True, keep_cache=False):
         self.handler = handler
         self.configured = configured
+        # Every test here wants a cold row -- see the module docstring -- except the one
+        # whose whole subject is what happens when there IS a listing to serve.
+        self.keep_cache = keep_cache
 
     def __enter__(self):
+        if not self.keep_cache:
+            _clear_cache()
         self._client = skytap_service._client
         self._conf = skytap_service.configured
 
@@ -145,6 +202,38 @@ def test_a_bad_token_surfaces_as_502_naming_the_token():
     assert r.status_code == 502
     assert "API token" in r.json()["detail"], \
         "a 401 should tell the operator it is the token, not the password"
+
+
+def test_the_502_is_only_for_a_cold_row():
+    """The boundary between the ladder above and the cache, and the reason the cache
+    exists at all: once there is a listing to serve, a platform that starts refusing must
+    not be able to empty a table that was correct a minute ago. Before, every SE's page
+    load went to the platform, so one 423 was an error banner for all of them.
+
+    Note what is asserted in the same breath — the row says it is NOT current. Serving an
+    old listing is only defensible while the page admits it is old."""
+    good = [{"id": "7", "name": "poc-alpha", "runstate": "running"}]
+    with _Fixture(_json(good)):                     # cold: this one goes to the platform
+        assert _app().get("/api/pov/environments").status_code == 200
+
+    # Now the account starts refusing, and the SE presses Re-check -- the press somebody
+    # makes when a page looks wrong, and the one that used to make a throttle worse.
+    with _Fixture(_json({"error": "the account is unavailable"}, status=500),
+                  keep_cache=True):
+        _age_cache()                                # past the minimum-refresh floor
+        r = _app().get("/api/pov/environments?refresh=true")
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [e["id"] for e in body["environments"]] == ["7"], \
+        "a 500 replaced the last good listing"
+    assert body["as_of"], "a served listing must say when it was read"
+    # `note`, not `stale`. They are different axes and this is the case that shows it:
+    # the listing is well inside its TTL (so `stale` is correctly False) while the
+    # platform is refusing right now. `note` is the field the page renders, and it is the
+    # only one that can carry "current data, dead platform".
+    assert "unavailable" in body["note"], \
+        "the page was handed a listing with nothing to say the platform is refusing"
 
 
 # ── the reads ────────────────────────────────────────────────────────────────

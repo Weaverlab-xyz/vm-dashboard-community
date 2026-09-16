@@ -628,6 +628,24 @@ async def _invalidate_data_caches() -> None:
     finally:
         db.close()
 
+    # The POV platform listings, on exactly the same terms.
+    #
+    # NOT what stops a project change serving the previous project's environments — on a
+    # shared lab account those are other customers' POVs, and the thing that prevents it
+    # is `project_id` being part of that table's PRIMARY KEY, so a changed id addresses a
+    # different row rather than a stale one. This is for the save that does NOT move the
+    # key: a corrected username, token or base URL, where the scope is the same and the
+    # only question is whether we may ask again yet.
+    db = SessionLocal()
+    try:
+        from ..services import pov_platform_cache
+        pov_platform_cache.mark_stale(db)
+        pov_platform_cache.clear_cooldowns(db)
+    except Exception as exc:  # noqa: BLE001 — a wizard save must not fail on a cache detail
+        logger.warning("setup: POV platform cache invalidation failed: %s", exc)
+    finally:
+        db.close()
+
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 

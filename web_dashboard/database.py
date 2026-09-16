@@ -1644,6 +1644,74 @@ class DashboardStatCache(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class PovPlatformCache(Base):
+    """One lab platform's last-known-good inventory listing — its environments or its
+    templates — plus the throttle state that decides whether we may ask it again.
+
+    Same three reasons as :class:`CloudCostCache` and :class:`DashboardStatCache`; read
+    ``services/cost_cache``'s module docstring first, because this is deliberately the
+    same shape. What makes it necessary here is who the caller is: the POV page's two
+    platform listings went out on an INSTANCE-WIDE credential, so every SE on the install
+    shared one account's rate limit, and the number of calls scaled with how many of them
+    happened to have the page open. Skytap answers a saturated account with 423 plus a
+    Retry-After — a property of the account, not of a process, so "we were just throttled"
+    has to outlive a redeploy or every image rebuild re-earns it.
+
+    NOT a second use of :class:`DashboardStatCache`, though the columns would have fitted.
+    That table is read with a single ``read_all`` and maintained with table-wide
+    ``mark_stale`` / ``clear_cooldowns``, and ``api/dashboard.dashboard_refresh`` derives
+    its minimum-refresh floor from the NEWEST row in the whole table. Rows for a POV
+    listing would therefore have suppressed the dashboard's Refresh button whenever
+    somebody opened /pov — one store serving two unrelated consumers, where a maintenance
+    call on either silently reaches the other.
+
+    ``payload`` is written ONLY on a successful listing. A failure writes the error and
+    cooldown columns and leaves ``payload``/``fetched_at`` exactly where they were. That
+    asymmetry is the reason this is a table and not a cache entry with a TTL: a 423 during
+    a rate-limit window must not be able to blank the environments table for a TTL, and a
+    generic cache cannot tell that answer from an empty account.
+    """
+    __tablename__ = "pov_platform_cache"
+
+    # environments | templates. The two collection reads templates/pov/index.html makes.
+    kind = Column(String(24), primary_key=True)
+    # The lab platform, e.g. "skytap" | "azure". Also what pacing keys on, so a platform
+    # whose account is saturated is left alone for BOTH its listings at once.
+    platform = Column(String(24), primary_key=True)
+    # The configured project id the listing was taken under, "" for the account-wide
+    # scope. IN THE PRIMARY KEY and load-bearing: `skytap_project_id` is a Settings field,
+    # blank is the widest scope, and a key that omitted it would serve the previous
+    # project's environment names — on a shared lab account, other customers' POVs —
+    # until the TTL expired. Widening a primary key later is not an ALTER.
+    project_id = Column(String(64), primary_key=True, default="")
+
+    # ── last-known-good (written ONLY on a successful listing) ───────────────
+    payload = Column(Text, nullable=True)          # JSON list, shape owned by the adapter
+    payload_version = Column(Integer, nullable=False, default=0)
+    fetched_at = Column(DateTime, nullable=True, index=True)
+    # Set by a Settings save. Read as "not fresh" while the payload is still SERVED, so
+    # fixing a credential re-lists without emptying the table in the meantime.
+    stale = Column(Boolean, nullable=False, default=False)
+
+    # ── failure / backoff (written ONLY on a failed attempt) ─────────────────
+    last_attempt_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    consecutive_failures = Column(Integer, nullable=False, default=0)
+    # Hard gate: while this is in the future nothing lists this platform, including an
+    # explicit ?refresh=true. Set from the platform's own Retry-After when it gave one.
+    cooldown_until = Column(DateTime, nullable=True, index=True)
+
+    # ── single-flight ────────────────────────────────────────────────────────
+    # A liveness bound, not a mutex: a process that dies mid-listing releases its claim by
+    # expiry. The advisory lock only makes the claim's read-modify-write atomic; it is
+    # never held across the network call.
+    lease_until = Column(DateTime, nullable=True)
+    lease_owner = Column(String(64), nullable=True)   # "host:pid" — diagnostics only
+    next_query_allowed_at = Column(DateTime, nullable=True)
+
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class RegisteredImage(Base):
     """Operator-registered image artefacts. The dashboard's source-of-truth
     record for "this image exists, here's where the artefact lives, here's
@@ -3883,6 +3951,9 @@ def init_db():
             # `dashboard_stat_cache` needs no entry for the same two reasons: create_all
             # makes it, and an empty table means "nothing collected yet", which every tile
             # already renders as unavailable.
+            # `pov_platform_cache` likewise. Empty means "this platform has not been
+            # listed yet", which the POV page renders as an empty table with a note —
+            # and the first reconcile pass after a deploy fills it.
             #
             # PRA Vendor Onboarding per POV. All four backfill to NULL, which reads as
             # "this POV uses the tenant's Jump Group and has no vendor group" — the right
