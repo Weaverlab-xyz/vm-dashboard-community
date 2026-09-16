@@ -214,7 +214,7 @@ def test_the_users_api_refuses_pov_grants_on_an_accessor():
     # needs no guard -- it makes a brand-new row, so `accessor_env_id` is unset by
     # construction and there is nothing to contradict. Splitting on the first occurrence
     # of the marker would silently start reading THAT block instead of this one.
-    patch_fn = src.split("async def update_user(")[1]
+    patch_fn = src.split("def update_user(")[1]
     block = patch_fn.split("if body.pov_env_ids is not None:")[1].split("db.commit")[0]
     assert "_refuse_accessor(user)" in block, (
         "PATCH /api/users lets an admin set pov_env_ids on a POV accessor")

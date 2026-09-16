@@ -88,7 +88,7 @@ def _env_or_404(db: Session, env_id: str) -> PovEnvironment:
 
 
 @router.get("/managed/{env_id}/accessors")
-async def list_accessors(env_id: str, db: Session = Depends(get_db),
+def list_accessors(env_id: str, db: Session = Depends(get_db),
                          current_user: User = Depends(get_current_user)):
     """This POV's live accessors. Never a password — see the service's describe_one."""
     env = _env_or_404(db, env_id)
@@ -96,7 +96,7 @@ async def list_accessors(env_id: str, db: Session = Depends(get_db),
 
 
 @router.post("/managed/{env_id}/accessors", status_code=201)
-async def create_accessor(env_id: str, payload: AccessorRequest,
+def create_accessor(env_id: str, payload: AccessorRequest,
                           db: Session = Depends(get_db),
                           current_user: User = Depends(get_current_user)):
     """Mint an accessor. **The password is in this response and nowhere else.**
@@ -122,7 +122,7 @@ async def create_accessor(env_id: str, payload: AccessorRequest,
 
 
 @router.delete("/managed/{env_id}/accessors/{accessor_id}")
-async def revoke_accessor(env_id: str, accessor_id: str, db: Session = Depends(get_db),
+def revoke_accessor(env_id: str, accessor_id: str, db: Session = Depends(get_db),
                           current_user: User = Depends(get_current_user)):
     """Revoke one. Deletes the login; the binding stays as the record that it existed."""
     env = _env_or_404(db, env_id)
@@ -147,7 +147,7 @@ async def revoke_accessor(env_id: str, accessor_id: str, db: Session = Depends(g
 
 
 @router.get("/managed/{env_id}/accessor-integration")
-async def accessor_integration(env_id: str, request: Request,
+def accessor_integration(env_id: str, request: Request,
                                db: Session = Depends(get_db),
                                current_user: User = Depends(get_current_user)):
     """Whether this POV's adapter is registered, and what stops it if not.
@@ -197,7 +197,7 @@ async def remove_accessor_integration(env_id: str, request: Request,
 # ── the accessor's own view ──────────────────────────────────────────────────
 
 @self_router.get("/self")
-async def accessor_self(db: Session = Depends(get_db),
+def accessor_self(db: Session = Depends(get_db),
                         current_user: User = Depends(get_current_user)):
     """The POV this login is attached to, and its use-case checklist.
 
@@ -234,7 +234,7 @@ def _accessor_env(db: Session, user: User) -> PovEnvironment:
 
 
 @self_router.post("/self/use-cases/{card_id}")
-async def set_self_use_case(card_id: str, payload: SelfUseCaseRequest,
+def set_self_use_case(card_id: str, payload: SelfUseCaseRequest,
                             db: Session = Depends(get_db),
                             current_user: User = Depends(get_current_user)):
     """The customer ticks a card off, and optionally says how it went.
@@ -258,7 +258,7 @@ async def set_self_use_case(card_id: str, payload: SelfUseCaseRequest,
 
 
 @self_router.delete("/self/use-cases/{card_id}")
-async def clear_self_use_case(card_id: str, db: Session = Depends(get_db),
+def clear_self_use_case(card_id: str, db: Session = Depends(get_db),
                               current_user: User = Depends(get_current_user)):
     """Un-tick. Removing a row nobody wrote is success — the button is a toggle."""
     env = _accessor_env(db, current_user)
@@ -271,7 +271,7 @@ async def clear_self_use_case(card_id: str, db: Session = Depends(get_db),
 
 
 @self_router.post("/self/wake")
-async def wake_self(db: Session = Depends(get_db),
+def wake_self(db: Session = Depends(get_db),
                     current_user: User = Depends(get_current_user)):
     """Start the POV this login is attached to.
 
@@ -293,7 +293,7 @@ async def wake_self(db: Session = Depends(get_db),
 
 
 @self_router.post("/self/share/reveal")
-async def reveal_self_share_password(db: Session = Depends(get_db),
+def reveal_self_share_password(db: Session = Depends(get_db),
                                      current_user: User = Depends(get_current_user)):
     """The lab link's password.
 

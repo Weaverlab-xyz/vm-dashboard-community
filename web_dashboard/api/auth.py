@@ -603,7 +603,7 @@ def _enforce_login_throttle(db: Session, username: str, ip: str) -> None:
 
 
 @router.post("/login")
-async def login(
+def login(
     request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db),
@@ -669,7 +669,7 @@ async def login(
 # ── Login (step 2: FIDO2 assertion) ──────────────────────────────────────────
 
 @router.post("/login/mfa", response_model=TokenResponse)
-async def login_mfa(
+def login_mfa(
     request: Request,
     body: MfaLoginRequest,
     db: Session = Depends(get_db),
@@ -749,7 +749,7 @@ async def login_mfa(
 # ── FIDO2 authentication begin (challenge generation for login) ───────────────
 
 @router.get("/webauthn/login/begin", response_model=Fido2AuthBeginResponse)
-async def webauthn_login_begin(
+def webauthn_login_begin(
     request: Request,
     username: str,
     db: Session = Depends(get_db),
@@ -991,7 +991,7 @@ def _build_redirect_uri(request: Request) -> str:
 
 
 @router.get("/oauth/azure/login")
-async def oauth_azure_login(request: Request, db: Session = Depends(get_db)):
+def oauth_azure_login(request: Request, db: Session = Depends(get_db)):
     """Redirect the browser to Azure AD for OAuth login."""
     client_id, _, tenant_id = _oauth_cfg()
     if not client_id or not tenant_id:
@@ -1021,7 +1021,7 @@ async def oauth_azure_login(request: Request, db: Session = Depends(get_db)):
 
 
 @router.get("/oauth/azure/callback")
-async def oauth_azure_callback(
+def oauth_azure_callback(
     code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
@@ -1101,7 +1101,7 @@ def _oidc_redirect_uri(request: Request) -> str:
 
 
 @router.get("/oauth/oidc/login")
-async def oauth_oidc_login(request: Request, db: Session = Depends(get_db)):
+def oauth_oidc_login(request: Request, db: Session = Depends(get_db)):
     """Redirect to the configured OIDC provider (authorization code + PKCE)."""
     from ..services import oidc_service
     if not oidc_service.is_configured():
@@ -1126,7 +1126,7 @@ async def oauth_oidc_login(request: Request, db: Session = Depends(get_db)):
 
 
 @router.get("/oauth/oidc/callback")
-async def oauth_oidc_callback(
+def oauth_oidc_callback(
     code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,

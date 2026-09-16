@@ -28,10 +28,10 @@ change rather than dropping a keyword, so this sweep does not cover them.
 **Before converting a batch, grep the tests for the literal ``async def <name>(``.** A
 number of tests in this suite slice a function body out of the source with
 ``src.split("async def foo(")[1]``, and dropping the keyword makes that raise
-``IndexError`` from a test that looks unrelated to the change. Known live example:
-``tests/test_pov_instance_grants.py`` does this to ``api/users.py::update_user``, and
-``tests/test_bt_tenants.py`` to ``verify_tenant`` -- both still in the backlog below, so
-whoever converts those files has to update the test in the same commit. Beware the
+``IndexError`` from a test that looks unrelated to the change. Both live cases are now
+fixed by anchoring on ``def foo(``, which matches either spelling:
+``tests/test_pov_instance_grants.py`` for ``api/users.py::update_user`` and
+``tests/test_bt_tenants.py`` for ``verify_tenant``. Beware the
 false positive too: a test DOUBLE can define a method with the same name as a route
 (``tests/test_pov_add_vms.py`` has ``async def add_vms`` on a fake Skytap adapter, and
 ``tests/test_portainer_import_service.py`` an ``async def deploy_stack``), which is not a
@@ -43,14 +43,21 @@ Those end at the *next* def of that kind, so converting a neighbouring function 
 MOVES the boundary -- and the test then asserts over the wrong amount of source while
 still passing. A false pass, not an error, so nothing tells you.
 
-That is why ``api/auth.py`` (7 routes) is still in the backlog despite being clean on
-every other axis: ``tests/test_persona_identity.py`` slices
-``_complete_oauth_login`` and terminates on the next ``async def``, which IS
-``oauth_azure_login``. Converting that route would stretch the inspected block from ~190
-lines to the rest of the file. ``api/pov_accessor.py`` is held back for a related reason
--- ``tests/test_pov_accessor.py`` has an ``AsyncFunctionDef``-only ``next(...)`` over
-``accessor_self`` (``StopIteration``) and a ``checked >= 4`` count over accessor write
-routes, which is a security invariant that would silently drop to 0.
+``api/auth.py`` was the live case: ``tests/test_persona_identity.py`` sliced
+``_complete_oauth_login`` and terminated on the next ``async def``, which was
+``oauth_azure_login``, so converting that route would have stretched the inspected block
+from ~190 lines to the rest of the file. It now terminates on the next ``@router.``
+decorator -- the same span (auth.py:993 rather than :994) and immune to the keyword.
+Note that "the next def of EITHER kind" would NOT have been equivalent: that is
+``_oauth_cfg`` at :965, which shortens the block by ~29 lines and could change the
+``len(writes) == 2`` count one of those tests makes.
+
+``api/pov_accessor.py`` had two ``AsyncFunctionDef``-only AST filters: a ``next(...)``
+over ``accessor_self`` (which would raise ``StopIteration``) and a ``checked >= 4`` count
+over the ``self_router`` write routes. That count is a security invariant -- every
+``/self`` route resolves the POV from the session, so none may take an ``env_id`` -- and
+it would have silently dropped to 0. Both now match both node kinds, which makes the
+invariant cover sync routes too rather than merely surviving the change.
 
 When checking this, do NOT pass an escaped pattern through a shell grep -- it mangles the
 backslash and reports 0 hits for a pattern that really has 59. Build the needle as
@@ -75,11 +82,10 @@ INTENTIONALLY_ASYNC = {
 # The remaining backlog, by file. Converting a file means LOWERING its number (and
 # deleting the entry at zero). The number is exact on purpose: this is a ratchet, and
 # an exact count is what makes progress visible and prevents silent regrowth.
-NOT_YET_CONVERTED = {
-    "web_dashboard/api/auth.py": 7,
-    "web_dashboard/api/bt_tenants.py": 5,
-    "web_dashboard/api/pov_accessor.py": 9,
-    "web_dashboard/api/users.py": 9,
+NOT_YET_CONVERTED: dict[str, int] = {
+    # EMPTY, and that is the finish line: every route that runs synchronous
+    # SQLAlchemy without awaiting anything is now a plain `def`. A new entry
+    # here would be a step backwards -- make the route `def` instead.
 }
 
 

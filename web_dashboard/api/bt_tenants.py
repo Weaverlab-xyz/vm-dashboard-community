@@ -81,7 +81,7 @@ def _refuse(exc: bt_tenant_service.BTTenantError) -> HTTPException:
 
 
 @router.get("")
-async def list_tenants(kind: str = "", db: Session = Depends(get_db),
+def list_tenants(kind: str = "", db: Session = Depends(get_db),
                        current_user: User = Depends(get_current_user)):
     """Every tenant, plus the registry's own shape so the UI does not hardcode it.
 
@@ -122,7 +122,7 @@ async def list_tenants(kind: str = "", db: Session = Depends(get_db),
 
 
 @router.post("", status_code=201)
-async def create_tenant(payload: TenantCreate, db: Session = Depends(get_db),
+def create_tenant(payload: TenantCreate, db: Session = Depends(get_db),
                         current_user: User = Depends(require_explicit_permission("pov_templates", "write"))):
     try:
         return {"tenant": bt_tenant_service.create(
@@ -136,7 +136,7 @@ async def create_tenant(payload: TenantCreate, db: Session = Depends(get_db),
 
 
 @router.patch("/{tenant_id}")
-async def update_tenant(tenant_id: str, payload: TenantUpdate,
+def update_tenant(tenant_id: str, payload: TenantUpdate,
                         db: Session = Depends(get_db),
                         current_user: User = Depends(require_explicit_permission("pov_templates", "write"))):
     # exclude_unset, not exclude_none: the service distinguishes "not supplied" from
@@ -151,7 +151,7 @@ async def update_tenant(tenant_id: str, payload: TenantUpdate,
 
 
 @router.post("/{tenant_id}/default")
-async def make_default(tenant_id: str, db: Session = Depends(get_db),
+def make_default(tenant_id: str, db: Session = Depends(get_db),
                        current_user: User = Depends(require_explicit_permission("pov_templates", "write"))):
     try:
         return {"tenant": bt_tenant_service.set_default(db, tenant_id)}
@@ -200,7 +200,7 @@ async def verify_tenant(tenant_id: str, db: Session = Depends(get_db),
 
 
 @router.delete("/{tenant_id}", status_code=204)
-async def delete_tenant(tenant_id: str, db: Session = Depends(get_db),
+def delete_tenant(tenant_id: str, db: Session = Depends(get_db),
                         current_user: User = Depends(require_explicit_permission("pov_templates", "delete"))):
     try:
         bt_tenant_service.delete(db, tenant_id)
