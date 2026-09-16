@@ -82,10 +82,11 @@
       <button x-show="canProvision" @click="recheck()" :disabled="notConfigured || rechecking"
               class="px-3 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
               x-text="rechecking ? 'Checking…' : 'Re-check platform'"></button>
+      <!-- Secondary now: the one-click strip below is the primary way in, and this opens
+           the eleven-field form for the cases a saved recipe does not cover. -->
       <button x-show="canProvision" @click="showCreate = !showCreate" :disabled="notConfigured"
-              class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
-        New POV
-      </button>
+              class="px-4 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+              x-text="showCreate ? 'Hide the full form' : 'Build by hand'"></button>
     </div>
   </div>
 
@@ -105,6 +106,57 @@
   <div x-show="notice" class="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3">
     <p class="text-sm text-blue-800" x-text="notice"></p>
   </div>
+
+  {# ── Build from a blueprint, in one press ──────────────────────────────────────
+     A blueprint already carries every field the form below asks except the name, and the
+     PROVISION ENDPOINT already applies it: `POST /api/pov/managed {blueprint_id, name}`
+     resolves the recipe, fills the template, project, broker VM, idle timer and all three
+     tenants, and prefills the Gateway and Resource Broker panels. So this needs no new
+     endpoint -- it is the same call the form makes, with the fields left out.
+
+     Deliberately NOT routed through applyBlueprint(): that fills the form client-side so
+     an SE can SEE what a recipe chose before sending it, which is the right behaviour for
+     the form and pointless here. The server applies the same defaults either way, which is
+     what stops the two from drifting. #}
+  <div x-show="canProvision && !notConfigured && blueprints.length" class="space-y-3">
+    <div class="flex flex-wrap items-end gap-3">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Build a POV</label>
+        <input type="text" x-model="quickName" placeholder="poc-014"
+               @keydown.enter="buildFromBlueprint(quickBlueprint())"
+               class="border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+        {# The same warning the by-hand field carries, and it has to be here too: a form
+           whose only input is a name is exactly where a customer name gets typed, and this
+           database holds none by decision. #}
+        <p class="text-xs text-gray-400 mt-1">
+          Lowercase letters, digits and hyphens. Use a reference, not a customer name.
+        </p>
+      </div>
+    </div>
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      <template x-for="b in blueprints" :key="'quick-' + b.id">
+        <div class="border border-gray-200 rounded-lg p-3 bg-white flex flex-col gap-1">
+          <p class="text-sm font-medium text-gray-900" x-text="b.name"></p>
+          <p x-show="b.description" class="text-xs text-gray-500" x-text="b.description"></p>
+          <p class="text-xs text-gray-400">
+            <span x-text="b.template_name || b.template_id"></span>
+            <span x-text="' · ' + blueprintProducts(b)"></span>
+          </p>
+          <div class="mt-1">
+            <button @click="buildFromBlueprint(b)"
+                    :disabled="!quickName || creating"
+                    class="w-full px-3 py-1.5 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    x-text="creating ? 'Building…' : 'Build'"></button>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+  <p x-show="canProvision && !notConfigured && !blueprints.length && !loading"
+     class="text-sm text-gray-500">
+    Save a recipe on <a href="/pov/templates" class="underline">POV Templates</a> to build a
+    POV in one press, or use <span class="font-medium">Build by hand</span>.
+  </p>
 
   <!-- Create -->
   <div x-show="canProvision && showCreate && !notConfigured" x-transition
@@ -253,8 +305,12 @@
             <th class="px-4 py-2 text-right font-medium">Actions</th>
           </tr>
         </thead>
-        <tbody class="divide-y divide-gray-100 bg-white">
-          <template x-for="e in managed" :key="e.id">
+        {# One TBODY PER POV, not one for the table. A table may hold several, and this is
+           what lets each POV own two rows -- its columns, then its setup ladder. It cannot
+           be two sibling <tr> inside the x-for: that template clones its first ELEMENT
+           child and the second row would silently never render. #}
+        <template x-for="e in managed" :key="e.id">
+          <tbody class="divide-y divide-gray-100 bg-white">
             <tr>
               <td class="px-4 py-2">
                 <!-- The way into this POV's own page. Deliberately the NAME rather than a
@@ -622,12 +678,57 @@
                         :title="e.broker_status === 'none' ? 'Install the agent inside this environment' : 'Re-issue the enrolment code and re-write the bootstrap'"
                         class="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
                         x-text="e.broker_status === 'online' ? 'Re-broker' : 'Broker'"></button>
+                {# Turns a POV somebody built by hand into a one-press recipe. Writes
+                   through the ordinary create endpoint, so the name, its uniqueness and
+                   the three tenant ids are validated server-side at SAVE -- which is the
+                   rule pov_blueprint_service exists to keep: a stored selection that only
+                   failed at provision time would move a form error into somebody else's
+                   job, weeks later. #}
+                <button x-show="canSaveBlueprints" @click="saveAsBlueprint(e)" :disabled="savingBlueprint"
+                        title="Save this POV's settings as a reusable recipe"
+                        class="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">Save as blueprint</button>
                 <button @click="destroy(e)" :disabled="!actionable(e)"
                         class="text-xs px-2 py-1 rounded border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed">Destroy</button>
               </td>
             </tr>
-          </template>
-        </tbody>
+
+            {# The setup ladder. A second row rather than a seventeenth column: the order
+               of the steps is the point, and it needs width to say WHY a step is blocked.
+               Rendered inline and never as a popover -- the wrapper above is
+               `overflow-hidden`, which clips a floating layer into a dead control. #}
+            <tr x-show="e.setup && e.setup.steps">
+              <td :colspan="16" class="px-4 pb-3 pt-0">
+                <div class="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+                  <template x-for="s in (e.setup ? e.setup.steps : [])" :key="s.key">
+                    <span class="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded"
+                          :class="stepClass(s)"
+                          :title="s.label + (s.detail ? ' — ' + s.detail : '')">
+                      <span x-text="stepMark(s)"></span>
+                      <span x-text="s.label"></span>
+                    </span>
+                  </template>
+                </div>
+
+                {# The whole reason the ladder exists: one sentence naming the next thing
+                   to press, or why it cannot be pressed yet. #}
+                <p x-show="e.setup && e.setup.next" class="mt-1.5 text-xs">
+                  <span class="font-medium"
+                        :class="e.setup.next_blocked ? 'text-amber-700' : 'text-blue-700'"
+                        x-text="(e.setup.next_blocked ? 'Blocked: ' : 'Next: ') + e.setup.next_label"></span>
+                  <span class="text-gray-500" x-show="e.setup.next_detail"
+                        x-text="' — ' + e.setup.next_detail"></span>
+                </p>
+                <p x-show="e.setup && e.setup.busy" class="mt-1.5 text-xs text-gray-500">
+                  Something is running on this POV; the other actions are refused until it
+                  finishes.
+                </p>
+                <p x-show="e.setup && e.setup.complete" class="mt-1.5 text-xs text-green-700">
+                  Everything this dashboard can do to this POV is done.
+                </p>
+              </td>
+            </tr>
+          </tbody>
+        </template>
       </table>
     </div>
   </div>
@@ -908,6 +1009,9 @@ function povPage() {
     loading: true,
     creating: false,
     showCreate: false,
+    // The one-click strip's only input.
+    quickName: '',
+    savingBlueprint: false,
     error: '',
     notice: '',
     notConfigured: false,
@@ -915,6 +1019,7 @@ function povPage() {
     // before the server has said it may be: the wrong way round would flash a New POV
     // button at a stakeholder and then take it away.
     canProvision: false,
+    canSaveBlueprints: false,
     platform: '',
     cloudPlatform: '',
     platforms: [],
@@ -1127,6 +1232,34 @@ function povPage() {
       return e.status === 'active' || e.status === 'failed';
     },
 
+    // The six states of services/pov_setup_steps, as colour. `skipped` is GREY and never
+    // amber: a PRA-only POV is complete without a Resource Broker, and painting that as a
+    // warning is how a correctly scoped evaluation reads as half broken.
+    // An unknown state falls through to grey rather than throwing -- a state added
+    // server-side must degrade to "no claim", not to a blank page.
+    stepClass(s) {
+      const map = {
+        done: 'bg-green-50 text-green-700',
+        configured: 'bg-green-50 text-green-600',
+        running: 'bg-blue-50 text-blue-700',
+        ready: 'bg-blue-100 text-blue-800 font-medium',
+        blocked: 'bg-amber-50 text-amber-800',
+        skipped: 'bg-gray-50 text-gray-400',
+      };
+      return map[s.state] || 'bg-gray-50 text-gray-400';
+    },
+
+    // `configured` gets a HOLLOW tick, not a solid one. The Gateway and the Resource
+    // Broker have no stored installed-signal to read, so a filled tick there would be a
+    // claim this dashboard cannot make -- see the service's module docstring.
+    stepMark(s) {
+      const map = {
+        done: '✓', configured: '○', running: '•',
+        ready: '→', blocked: '!', skipped: '–',
+      };
+      return map[s.state] || '–';
+    },
+
     async init() {
       try {
         const res = await this.apiFetch('/api/pov/platforms');
@@ -1140,6 +1273,8 @@ function povPage() {
         // pov:write, so a read-only stakeholder must not be shown it or made to fetch
         // it. The server decides; this only draws what it was told.
         this.canProvision = !!data.can_provision;
+        // A separate permission -- see the endpoint's own note.
+        this.canSaveBlueprints = !!data.can_save_blueprints;
       } catch (e) {
         this.error = 'Could not reach the dashboard API.';
         this.loading = false;
@@ -1294,6 +1429,90 @@ function povPage() {
         this.error = e.message;
       } finally {
         this.creating = false;
+      }
+    },
+
+    // Which recipe an Enter in the name field means. Only unambiguous with exactly one
+    // saved, because guessing between two recipes is guessing which POV to build.
+    quickBlueprint() {
+      return this.blueprints.length === 1 ? this.blueprints[0] : null;
+    },
+
+    // Which BeyondTrust products a recipe wires into, for the card. Named from the tenant
+    // references it carries rather than from anything it installs -- a recipe holds no
+    // secret and installs nothing (see pov_blueprint_service).
+    blueprintProducts(b) {
+      const names = [];
+      if (b.pra_tenant_id) names.push('PRA');
+      if (b.ps_tenant_id) names.push('Password Safe');
+      if (b.entitle_tenant_id) names.push('Entitle');
+      return names.length ? names.join(' + ') : 'no tenants chosen';
+    },
+
+    // The one press. Identical call to create()'s, with everything except the name left
+    // out for the server's own blueprint defaults to fill -- so there is still exactly one
+    // provision path and one set of refusals.
+    async buildFromBlueprint(b) {
+      if (!b || !this.quickName) return;
+      this.creating = true;
+      this.error = ''; this.notice = '';
+      try {
+        await this.post('/api/pov/managed', {
+          platform: b.platform || this.platform,
+          blueprint_id: b.id,
+          name: this.quickName,
+        });
+        this.notice = `Building ${this.quickName} from ${b.name}. `
+                    + 'Its setup ladder below says what comes next.';
+        this.quickName = '';
+        await this.load();
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        this.creating = false;
+      }
+    },
+
+    // Save an existing POV's settings as a blueprint, so the next one is one press.
+    //
+    // `rb_vm_name_stored` and `broker_vm_name` are both the TYPED values, never the
+    // defaulted readers: copying a default into a recipe would pin it and switch the
+    // auto-detection off for every POV built from it.
+    async saveAsBlueprint(env) {
+      const name = window.prompt(
+        'Name for this recipe (lowercase letters, digits and hyphens) — not a customer name',
+        '');
+      if (!name) return;
+      this.savingBlueprint = true;
+      this.error = ''; this.notice = '';
+      const sched = env.schedule || {};
+      try {
+        await this.post('/api/pov/blueprints', {
+          platform: env.platform,
+          name: name,
+          template_id: env.template_id,
+          template_name: env.template_name,
+          project_id: env.project_id,
+          broker_vm_name: env.broker_vm_name,
+          suspend_on_idle_seconds: env.suspend_on_idle_seconds || 0,
+          pra_tenant_id: env.pra_tenant_id,
+          ps_tenant_id: env.ps_tenant_id,
+          entitle_tenant_id: env.entitle_tenant_id,
+          gateway_name: env.gateway_name,
+          rb_windows_vm_name: env.rb_vm_name_stored || '',
+          rb_zone: env.rb_zone,
+          rb_asset: env.rb_asset,
+          suspend_at_local: sched.suspend_at_local || '',
+          resume_at_local: sched.resume_at_local || '',
+          schedule_timezone: sched.schedule_timezone || '',
+          schedule_days: sched.schedule_days || '',
+        });
+        this.notice = `Saved ${name}. It is in the Build a POV strip above.`;
+        await this.loadBlueprints();
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        this.savingBlueprint = false;
       }
     },
 
