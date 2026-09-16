@@ -75,8 +75,8 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         pov_ps_config, pov_resource_broker, pov_setup_steps,
                         suspend_schedule, pov_share, spend_policy, pov_summary,
                         pov_use_cases, pov_vendor_access, pov_wireup)
-from .auth import (get_current_user, has_permission, pov_env_scope,
-                   require_permission, require_pov_env_access)
+from .auth import (get_current_user, has_explicit_permission, has_permission,
+                   pov_env_scope, require_permission, require_pov_env_access)
 
 logger = logging.getLogger(__name__)
 
@@ -393,7 +393,16 @@ async def list_platforms(current_user: User = Depends(get_current_user)):
         # hides the Save-as-blueprint control rather than granting anything, and the route
         # still checks for itself. Without it that button renders for everyone and 403s
         # for some of them, which reads as a broken page rather than as a permission.
-        "can_save_blueprints": has_permission(current_user, "pov_templates", "write"),
+        #
+        # **`has_explicit_permission`, matching the form the ROUTE is gated with.**
+        # `pov_templates:write` was admin-only before the permission catalog, so
+        # `api/pov_templates.py` uses `require_explicit_permission` and `write` is
+        # deliberately absent from `_BACKFILL_V1_SCOPES`. The permissive predicate answers
+        # True for a legacy NULL-map user -- so it would draw this button for precisely
+        # the users the route then refuses, which is the failure the flag exists to stop,
+        # inverted. `test_permission_catalog` pins the two forms agreeing.
+        "can_save_blueprints": has_explicit_permission(
+            current_user, "pov_templates", "write"),
     }
 
 
