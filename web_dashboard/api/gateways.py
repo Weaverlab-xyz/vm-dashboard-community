@@ -101,7 +101,7 @@ async def list_gateways(
 
 
 @router.get("/suggest-name")
-async def suggest_name(
+def suggest_name(
     cloud: str,
     region: str = "",
     db: Session = Depends(get_db),
@@ -116,7 +116,7 @@ async def suggest_name(
 
 
 @router.post("/deploy", status_code=202)
-async def deploy_gateway(
+def deploy_gateway(
     req: DeployGatewayRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("gateways", "write")),
@@ -165,7 +165,7 @@ async def deploy_gateway(
 
 
 @router.delete("/{gateway_id}", status_code=202)
-async def destroy_gateway(
+def destroy_gateway(
     gateway_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("gateways", "delete")),

@@ -134,7 +134,7 @@ async def last_sweep(current_user: User = Depends(require_admin)) -> dict:
 
 
 @router.post("/sweep")
-async def force_sweep(
+def force_sweep(
     force: bool = Query(False, description="Enqueue even if a pass is already active"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),

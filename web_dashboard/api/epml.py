@@ -68,7 +68,7 @@ class SyncPackagesRequest(BaseModel):
 
 
 @router.post("/sync-packages", dependencies=[Depends(require_permission("epml", "write"))])
-async def sync_packages(
+def sync_packages(
     payload: SyncPackagesRequest | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),

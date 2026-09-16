@@ -77,27 +77,9 @@ INTENTIONALLY_ASYNC = {
 # an exact count is what makes progress visible and prevents silent regrowth.
 NOT_YET_CONVERTED = {
     "web_dashboard/api/auth.py": 7,
-    "web_dashboard/api/aws.py": 4,
-    "web_dashboard/api/azure.py": 2,
     "web_dashboard/api/bt_tenants.py": 5,
-    "web_dashboard/api/config_mgmt.py": 4,
-    "web_dashboard/api/epml.py": 1,
-    "web_dashboard/api/expiry.py": 1,
-    "web_dashboard/api/gateways.py": 3,
-    "web_dashboard/api/gcp.py": 3,
-    "web_dashboard/api/mfa.py": 4,
-    "web_dashboard/api/nutanix.py": 4,
-    "web_dashboard/api/oci.py": 1,
-    "web_dashboard/api/ot.py": 4,
-    "web_dashboard/api/packer.py": 3,
     "web_dashboard/api/pov_accessor.py": 9,
-    "web_dashboard/api/pov_vendor.py": 1,
-    "web_dashboard/api/proxmox.py": 3,
-    "web_dashboard/api/spend.py": 3,
-    "web_dashboard/api/suspend.py": 2,
-    "web_dashboard/api/tokens.py": 3,
     "web_dashboard/api/users.py": 9,
-    "web_dashboard/api/vms.py": 3,
 }
 
 

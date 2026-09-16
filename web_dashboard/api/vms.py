@@ -130,7 +130,7 @@ def _accessible(user: User) -> Optional[list]:
 # ── List ──────────────────────────────────────────────────────────────────────
 
 @router.get("", response_model=VMListResponse)
-async def list_vms(
+def list_vms(
     workgroup: Optional[str] = Query(None, description="Filter by workgroup name"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("vms", "read")),
@@ -153,7 +153,7 @@ async def list_vms(
 
 
 @router.get("/dashboard-stats")
-async def dashboard_stats(
+def dashboard_stats(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("vms", "read")),
 ):
@@ -182,7 +182,7 @@ async def dashboard_stats(
 # ── Sync ──────────────────────────────────────────────────────────────────────
 
 @router.post("/sync")
-async def sync_inventory(
+def sync_inventory(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("vms", "read")),
 ):
