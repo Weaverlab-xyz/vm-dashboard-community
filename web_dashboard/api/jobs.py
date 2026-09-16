@@ -40,7 +40,7 @@ def _job_to_response(job) -> JobResponse:
 
 
 @router.get("", response_model=JobListResponse)
-async def list_jobs(
+def list_jobs(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     status: Optional[str] = Query(None),
@@ -91,7 +91,7 @@ async def list_jobs(
 # Declared BEFORE /{job_id}: FastAPI matches in declaration order, so the catch-all
 # path param would otherwise swallow /batches/... and 404 on a missing "job".
 @router.get("/batches/{batch_id}")
-async def get_batch_summary(
+def get_batch_summary(
     batch_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -108,7 +108,7 @@ async def get_batch_summary(
 
 
 @router.get("/{job_id}", response_model=JobResponse)
-async def get_job(
+def get_job(
     job_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -157,7 +157,7 @@ async def get_job_logs(
 
 
 @router.get("/{job_id}/findings")
-async def get_job_findings(
+def get_job_findings(
     job_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -359,7 +359,7 @@ async def force_unlock_job_state(
 
 
 @router.delete("/{job_id}")
-async def cancel_job(
+def cancel_job(
     job_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
