@@ -90,15 +90,33 @@ _COOLDOWN_MAX_S = 1800
 # ── tunables ─────────────────────────────────────────────────────────────────
 
 def _cfg_int(key: str, default: int) -> int:
-    """A Settings integer, read live so a change takes effect on the next pass."""
+    """A config_service integer with a config.py fallback, read live so a Settings change
+    takes effect on the next pass. Same three-rung shape as ``cost_cache._cfg_int`` —
+    without the middle rung these knobs are not settable by environment variable, which is
+    the only way they are meant to be set at all (see config.py).
+
+    Emptiness is tested explicitly rather than by truthiness, for the reason the sibling
+    gives: ``0`` is meaningful for ``query_gap_seconds`` (it disables pacing), and
+    ``raw or fallback`` would silently substitute the default for it.
+    """
+    from ..config import settings
+    from . import config_service
+
+    def _blank(v):
+        return v is None or str(v).strip() == ""
+
     try:
-        from . import config_service
         raw = config_service.get(key)
-        if raw:
-            return int(raw)
-    except Exception:  # noqa: BLE001 — a malformed setting must not break the read path
-        pass
-    return default
+    except Exception:  # noqa: BLE001 — a config backend blip must not break a page read
+        raw = None
+    if _blank(raw):
+        raw = getattr(settings, key, None)
+    if _blank(raw):
+        return default
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
 
 
 def ttl_seconds() -> int:

@@ -120,14 +120,22 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+_REAL_GAP = store.query_gap_seconds
+
+
 def _gap(seconds):
-    """Set the per-platform pacing gap.
+    """Set the per-platform pacing gap, or restore the real one with None.
 
     `warm` SLEEPS this between kinds rather than skipping the second one, so the real
     5-second default would make every test that calls it five seconds slower for no
-    coverage. The one test that is actually about the gap sets it back.
+    coverage.
+
+    The restore is not tidiness. These helpers patch a MODULE function, so a test that
+    pins the gap at 0 leaves it there for every test that sorts after it — which is how
+    `test_every_knob_is_declared_in_config_py` came to read 0 where config.py says 5 and
+    blamed the declaration.
     """
-    store.query_gap_seconds = lambda: seconds
+    store.query_gap_seconds = _REAL_GAP if seconds is None else (lambda: seconds)
 
 
 # ── the asymmetry ────────────────────────────────────────────────────────────
@@ -416,7 +424,7 @@ def test_pacing_holds_the_second_listing_off_the_same_account():
     """Both kinds go to one account, so the templates read waits out the gap the
     environments read just set. Pacing is per PLATFORM, not per kind."""
     _scope()
-    _gap(30)
+    _gap(None)                                    # the real default, 5s
     _reset()
     _reset("templates")
     adapter = FakeAdapter(environments=[{"id": "sky-1"}], templates=[{"id": "t1"}])
@@ -499,6 +507,29 @@ def store_snapshot():
 
 
 # ── the wiring ───────────────────────────────────────────────────────────────
+
+def test_every_knob_is_declared_in_config_py():
+    """These are env/config-only knobs, like the cost and dashboard-stat families they are
+    modelled on — deliberately NOT Setup panel fields, because a panel field that is not
+    bound both ways is discarded on save without an error.
+
+    `_cfg_int` falls back config_service -> config.py -> literal, so an UNDECLARED key
+    silently skips the middle rung: the literal still works, `POV_PLATFORM_CACHE_*=` in
+    the environment quietly does nothing, and that is the only way these are meant to be
+    set. Pinned because nothing else notices."""
+    _gap(None)          # another test pins this at 0; see _gap
+    from web_dashboard.config import settings
+    for fn, key in ((store.ttl_seconds, "pov_platform_cache_ttl_seconds"),
+                    (store.lease_seconds, "pov_platform_cache_lease_seconds"),
+                    (store.min_refresh_interval_seconds,
+                     "pov_platform_cache_min_refresh_seconds"),
+                    (store.query_gap_seconds, "pov_platform_cache_query_gap_seconds")):
+        assert hasattr(settings, key), f"{key} is not declared in config.py"
+        # And the literal agrees with the declaration, or the two defaults disagree about
+        # what this install does and only one of them is reachable.
+        assert fn() == getattr(settings, key), \
+            f"{key}: config.py says {getattr(settings, key)}, the code default differs"
+
 
 def test_the_ttl_outlasts_the_sweep_that_fills_it():
     """A TTL equal to the reconcile cadence expires every row in the instant before the

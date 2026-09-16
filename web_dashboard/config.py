@@ -128,6 +128,19 @@ class Settings(BaseSettings):
     # app takes over within one window. Must stay comfortably above the worker's interval.
     dashboard_stats_stale_after_seconds: int = 300
     dashboard_refresh_min_interval_seconds: int = 30  # floor between two forced refreshes
+    # Durable POV lab-platform listing cache (services/pov_platform_cache.py). Env/config.py
+    # only, for the same reason as the two families above: they pace a listing against a
+    # shared account, they are not features, and a Settings field that isn't bound both
+    # ways is silently discarded on save.
+    #
+    # The TTL is deliberately LONGER than pov_reconcile's 600s interval, because that sweep
+    # is what refreshes this table — equal values expire every row in the instant before
+    # the pass that renews it, so a late pass captions a table that is about to be correct.
+    pov_platform_cache_ttl_seconds: int = 900      # how old a listing may get
+    pov_platform_cache_lease_seconds: int = 300    # single-flight claim expiry; must outlast
+                                                   # a paged listing plus its 423 retries
+    pov_platform_cache_min_refresh_seconds: int = 30  # floor under an explicit ?refresh=true
+    pov_platform_cache_query_gap_seconds: int = 5  # min spacing between listings of ONE platform
     # Action-level policy guardrails (pre-action admission control via OPA). Master
     # flag; when off, admission_service.enforce() is a no-op. Which actions are gated
     # is the list `admission_gated_actions` (default none). The caps below are injected
