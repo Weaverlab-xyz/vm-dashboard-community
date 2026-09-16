@@ -17,11 +17,19 @@ current value. **Re-check platform** on the POV page runs the same pass on deman
 Three properties are worth knowing, because each is a way this could do more harm than the
 staleness it fixes:
 
-**The page prefers a live read when it has one.** Opening `/pov` already reads every
-environment on the platform for the read-only table, so the managed table shows that and
-labels it `live`. The sweep is what keeps the *rows* honest for everything that reads them
-when no page is open. Each row says which it is showing — `live`, `confirmed 8m ago`, or
-`not confirmed` — because a remembered value presented as a current one is the whole bug.
+**The row is the only source, and it says how old it is.** Each row reports
+`confirmed 8m ago` or `not confirmed`, because a remembered value presented as a current
+one is the whole bug.
+
+The page used to prefer a live read: opening `/pov` read every environment on the platform
+for the read-only table anyway, so the managed table showed that and labelled it `live`.
+That stopped being true when the read-only table became a cache. Both the listing and
+these rows are now written by the same sweep, so the listing is not fresher — it just has
+no per-row timestamp, which would have made `live` a label on a reading up to a sweep
+interval old. It also fed the staleness test that gates the power buttons, so a remembered
+`running` would have hidden Start from a POV the platform had already suspended: the
+failure the next property exists to prevent, reintroduced by the thing meant to make the
+page cheaper.
 
 **Both power buttons show while a reading is stale.** Gating Start on a remembered runstate
 is what hid it from every POV the platform had suspended: the cost feature working exactly
