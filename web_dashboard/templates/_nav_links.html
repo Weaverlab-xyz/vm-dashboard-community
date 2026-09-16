@@ -8,11 +8,11 @@
      Dashboard → on-prem hypervisors (Workstation, Proxmox, vSphere, Hyper-V,
      Nutanix, XCP-ng) → AWS → Azure → GCP → Containers → Storage →
      Configuration (renamed from "Config Mgmt") → Secrets → RBAC.
-     Jobs, Images, and Workgroups are kept and slotted where they logically
-     belong (Jobs alongside other operational links, Workgroups next to RBAC
-     in the admin section, Images with Storage as a content section).
-     RBAC is one link over three tabs -- Users, identity-provider Groups and
-     access Roles -- which is why there is no longer a link per page there. #}
+     Jobs and Images are kept and slotted where they logically belong (Jobs
+     alongside other operational links, Images with Storage as a content section).
+     RBAC is one link over FOUR tabs -- Users, identity-provider Groups, access
+     Roles and Workgroups -- which is why there is no longer a link per page there.
+     Workgroups moved in because it is the object half of the same question. #}
 <a data-nav="dashboard" href="/" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/' %}{{ nav_active }}{% endif %}">Dashboard</a>
 
@@ -180,10 +180,7 @@
    a second row would only ever show an admin two links to the same page. #}
 <a x-show="$store.auth.isAdmin" data-nav="rbac" href="/rbac"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-   {% if request.url.path.startswith('/rbac') or request.url.path.startswith('/users') or request.url.path.startswith('/groups') %}{{ nav_active }}{% endif %}">RBAC</a>
-<a x-show="$store.auth.isAdmin" data-nav="workgroups" href="/workgroups"
-   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-   {% if request.url.path.startswith('/workgroups') %}{{ nav_active }}{% endif %}">Workgroups</a>
+   {% if request.url.path.startswith('/rbac') or request.url.path.startswith('/users') or request.url.path.startswith('/groups') or request.url.path.startswith('/workgroups') %}{{ nav_active }}{% endif %}">RBAC</a>
 {% if entitle_user_jit_enabled and entitle_request_portal_url %}
 <a data-nav="request_access" href="{{ entitle_request_portal_url }}" target="_blank" rel="noopener noreferrer"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}"

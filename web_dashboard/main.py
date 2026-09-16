@@ -1855,8 +1855,22 @@ async def groups_page(request: Request):
 
 @app.get("/workgroups", response_class=HTMLResponse, include_in_schema=False)
 async def workgroups_page(request: Request):
+    """The Workgroups TAB of the RBAC page.
+
+    A workgroup is the object half of access control -- a permission scope says what a
+    principal may DO, a workgroup says which VMs, databases and clusters they may do it TO --
+    so it belongs beside the tabs that grant the scopes. `docs/permissions.md` has always
+    opened by calling those two questions the whole model.
+
+    Kept as a real route for the same reasons as /users and /groups, plus one of its own:
+    unlike them, this page is reachable by a NON-ADMIN. 7 of the 8 /api/workgroups routes
+    are gated on the grantable `workgroups` scope rather than require_admin, and the page it
+    replaced carried no admin redirect, so somebody holding `workgroups:read` has always been
+    able to open it. The container gates per tab rather than per page to preserve exactly
+    that -- see rbacPage() in rbac/index.html.
+    """
     return templates.TemplateResponse(
-        "workgroups/index.html", {"request": request})
+        "rbac/index.html", _rbac_context(request, "workgroups"))
 
 
 # ── Health / diagnostic ───────────────────────────────────────────────────────
