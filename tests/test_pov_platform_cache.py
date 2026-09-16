@@ -500,6 +500,16 @@ def store_snapshot():
 
 # ── the wiring ───────────────────────────────────────────────────────────────
 
+def test_the_ttl_outlasts_the_sweep_that_fills_it():
+    """A TTL equal to the reconcile cadence expires every row in the instant before the
+    pass that renews it, so a sweep running a little late paints "last read 10 minutes
+    ago" over a table about to be correct. Same looseness, same reason, as the page's own
+    STALE_AFTER_MS."""
+    from web_dashboard.services import pov_reconcile
+    assert store.ttl_seconds() > pov_reconcile.DEFAULT_INTERVAL_S, (
+        "the listing TTL is not longer than the sweep interval that refreshes it")
+
+
 def test_the_lock_id_is_not_shared_with_another_store():
     """A shared class id would serialize two unrelated stores against each other for no
     reason — the note every module carrying one of these repeats."""

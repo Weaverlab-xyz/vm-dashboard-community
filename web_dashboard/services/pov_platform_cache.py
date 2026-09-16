@@ -104,11 +104,16 @@ def _cfg_int(key: str, default: int) -> int:
 def ttl_seconds() -> int:
     """How long a listing is considered current.
 
-    Defaults to the POV reconcile interval, because that sweep is what refreshes this
-    table — a TTL shorter than the cadence that fills it would mark every row not-fresh
-    between passes and hand the request path a fetch it was built to avoid.
+    Keyed to the POV reconcile interval, because that sweep is what refreshes this table,
+    and deliberately LOOSER than it — the same reasoning `STALE_AFTER_MS` carries on the
+    page itself. A TTL equal to the cadence that fills it expires every row in the instant
+    before the pass that renews it, so a sweep running a little late puts a "last read
+    10 minutes ago" caption over a table that is about to be correct. 900 against a
+    600-second default absorbs a late pass; the cost of being loose here is a caption
+    arriving slightly later, and `note` still names a platform that is actually refusing
+    regardless of the TTL.
     """
-    return _cfg_int("pov_platform_cache_ttl_seconds", 600)
+    return _cfg_int("pov_platform_cache_ttl_seconds", 900)
 
 
 def lease_seconds() -> int:
