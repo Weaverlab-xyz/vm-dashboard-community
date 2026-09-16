@@ -119,12 +119,19 @@ def _effective_workgroups(user: User):
     return inventory_service.accessible_workgroups(user)
 
 
-def _creator_scoped(rows: list, user: User) -> list:
+def _resource_scoped(rows: list, user: User) -> list:
     """The rule ``api/cloud_databases.py``, ``api/k8s.py`` and ``api/cloud_functions.py``
-    all apply: non-effective-admins see only what they created."""
-    if getattr(user, "is_effective_admin", False):
-        return rows
-    return [r for r in rows if r.get("created_by") == user.username]
+    all apply, delegated rather than re-derived: an effective admin sees everything, a
+    tagged row is visible to its workgroup, an untagged one only to its creator.
+
+    Was ``_creator_scoped``, and renamed because the creator comparison is now only half
+    the rule. Cloud databases and K8s clusters carry a workgroup; cloud functions still
+    do not, so for those every row takes the creator branch exactly as before.
+    """
+    from ..services import inventory_service
+    accessible = _effective_workgroups(user)
+    return [r for r in rows
+            if inventory_service.row_visible_to(r, accessible, user.username)]
 
 
 # ── extra_data redaction ──────────────────────────────────────────────────────
@@ -623,7 +630,7 @@ async def list_containers(endpoint_id: int, all_containers: bool = True) -> dict
         db.close()
 
 
-# ── Tools: creator-scoped resources ───────────────────────────────────────────
+# ── Tools: per-row-scoped resources ──────────────────────────────────────────
 
 
 @mcp.tool()
@@ -638,7 +645,7 @@ async def list_databases() -> dict:
     db = SessionLocal()
     try:
         from ..services import cloud_database_service
-        rows = _creator_scoped(cloud_database_service.list_databases(db), user)
+        rows = _resource_scoped(cloud_database_service.list_databases(db), user)
         return {"databases": rows, "count": len(rows)}
     except Exception as exc:
         return {"error": str(exc)}
@@ -658,7 +665,7 @@ async def list_k8s_clusters() -> dict:
     db = SessionLocal()
     try:
         from ..services import k8s_service
-        rows = _creator_scoped(k8s_service.list_clusters(db), user)
+        rows = _resource_scoped(k8s_service.list_clusters(db), user)
         return {"clusters": rows, "count": len(rows)}
     except Exception as exc:
         return {"error": str(exc)}
@@ -678,7 +685,7 @@ async def list_functions() -> dict:
     db = SessionLocal()
     try:
         from ..services import cloud_function_service
-        rows = _creator_scoped(cloud_function_service.list_functions(db), user)
+        rows = _resource_scoped(cloud_function_service.list_functions(db), user)
         return {"functions": rows, "count": len(rows)}
     except Exception as exc:
         return {"error": str(exc)}

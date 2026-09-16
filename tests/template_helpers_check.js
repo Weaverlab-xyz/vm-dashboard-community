@@ -629,7 +629,7 @@ async function ociPlacementChecks() {
 
   const k = withQuery('?register=1&name=k8s-10-20-0-5&api_server=https://10.20.0.5:6443',
                       'k8s/index.html', 'openFromQuery',
-                      {}, 'openFromQuery', 'openRegister');
+                      {}, 'openFromQuery', 'openRegister', 'defaultWorkgroup');
   ok('k8s/index.html ?register= opens the form with the finding prefilled',
      k.showRegister === true && k.form.name === 'k8s-10-20-0-5' &&
      k.discoveredApiServer === 'https://10.20.0.5:6443');
@@ -638,13 +638,13 @@ async function ociPlacementChecks() {
   ok('k8s/index.html the prefill leaves the kubeconfig empty', k.form.kubeconfig === '');
 
   const plain = withQuery('', 'k8s/index.html', 'openFromQuery',
-                          {showRegister: false}, 'openFromQuery', 'openRegister');
+                          {showRegister: false}, 'openFromQuery', 'openRegister', 'defaultWorkgroup');
   ok('k8s/index.html a normal page load opens nothing', plain.showRegister === false);
 
   const d = withQuery('?register=1&engine=mariadb&host=10.20.0.9&port=3306',
                       'databases/index.html', 'openFromQuery',
                       {loadRegAccounts() { this._lookedUp = true; }},
-                      'openFromQuery', 'openRegister');
+                      'openFromQuery', 'openRegister', 'defaultWorkgroup');
   // mariadb is probed under its own name but has no option in the select; registering
   // it as mysql is correct, and leaving 'mariadb' selected would be a value the API
   // rejects on submit.
@@ -656,7 +656,7 @@ async function ociPlacementChecks() {
 
   const junk = withQuery('?register=1&engine=notarealengine&port=notanumber',
                          'databases/index.html', 'openFromQuery',
-                         {loadRegAccounts() {}}, 'openFromQuery', 'openRegister');
+                         {loadRegAccounts() {}}, 'openFromQuery', 'openRegister', 'defaultWorkgroup');
   ok('databases/index.html an unknown engine is ignored, not selected',
      junk.reg.engine === 'postgres' && junk.reg.port === null);
 

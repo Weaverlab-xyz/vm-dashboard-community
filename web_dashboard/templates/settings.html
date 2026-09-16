@@ -704,8 +704,10 @@
                    placeholder="platform, shared-infra">
             <p class="text-[11px] text-gray-400 mt-1">
               Comma-separated. Resources in these workgroups never get a timer and are never
-              deleted. Only <strong>VMs</strong> carry a workgroup — databases, clusters and
-              desktop seats don't, so use "never expires" for those instead. Blank = none.
+              deleted. <strong>VMs, cloud databases and Kubernetes clusters</strong> carry a
+              workgroup; cloud functions and desktop seats don't, so use "never expires" for
+              those instead. A database or cluster left untagged has no workgroup to match
+              here either. Blank = none.
             </p>
           </div>
 

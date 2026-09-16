@@ -1817,6 +1817,10 @@ class CloudDatabase(Base):
     agent_id = Column(String(36), ForeignKey("remote_agents.id", ondelete="SET NULL"),
                       index=True, nullable=True)
 
+    # Workgroup scoping. NULL (the state every row predating this column is in)
+    # falls back to creator-scoping in inventory_service.visible_to, so adding the
+    # column changed nobody's access -- a row becomes shared only when someone tags it.
+    workgroup = Column(String(100), nullable=True, index=True)
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     # Auto-delete timer — NULL = never (see Job.expires_at). Only ever stamped on a
@@ -2454,6 +2458,10 @@ class K8sCluster(Base):
     ps_pra_vault_account_id = Column(String(64), nullable=True)  # PS ManagedAccount id of the "PRA Vault Token" mirror
     pra_vault_account_id = Column(String(64), nullable=True)     # sra_vault_token_account id the rotation is mirrored into
 
+    # Workgroup scoping, same contract as CloudDatabase.workgroup: NULL means
+    # creator-scoped, a name means everyone in that workgroup. The kubeconfig behind
+    # this row is cluster-admin, so tagging one is a real grant, not a label.
+    workgroup = Column(String(100), nullable=True, index=True)
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     # Auto-delete timer — NULL = never (see Job.expires_at). Only ever stamped on a
@@ -3923,6 +3931,21 @@ def init_db():
             # existing `ps-token` registrations to migrate into it. They must NOT. Those
             # are cluster-admin accounts serving PRA's brokered sessions, and the whole
             # point of this table is that nothing in it is cluster-admin.
+
+            # Workgroup scoping for cloud databases and K8s clusters, which until now
+            # were creator-scoped only. NULL on every existing row, and that is the
+            # point: inventory_service.visible_to falls back to the creator when a row
+            # carries no workgroup, so this migration grants and revokes nothing. A row
+            # becomes team-visible only once an admin retags it.
+            #
+            # No DEFAULT clause, deliberately. A new column with a DEFAULT has been
+            # rejected by PostgreSQL here before, and because each statement runs in its
+            # own savepoint that rollback is silent -- the column simply never appears,
+            # while SQLite (which tolerates it) keeps every test green.
+            "ALTER TABLE cloud_databases ADD COLUMN workgroup VARCHAR(100)",
+            "CREATE INDEX ix_cloud_databases_workgroup ON cloud_databases(workgroup)",
+            "ALTER TABLE k8s_clusters ADD COLUMN workgroup VARCHAR(100)",
+            "CREATE INDEX ix_k8s_clusters_workgroup ON k8s_clusters(workgroup)",
         ]
         # Migrations that never ran because they could not get their table lock in
         # _DDL_LOCK_TIMEOUT_MS. Collected rather than raised: one contended statement

@@ -61,6 +61,7 @@
           <th class="px-4 py-3">Name</th>
           <th class="px-4 py-3">Cloud</th>
           <th class="px-4 py-3">Region</th>
+          <th class="px-4 py-3">Workgroup</th>
           <th class="px-4 py-3">Status</th>
           <th class="px-4 py-3">Management</th>
           <th class="px-4 py-3">API server</th>
@@ -80,6 +81,14 @@
               <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-gray-100 text-gray-600" x-text="c.cloud"></span>
             </td>
             <td class="px-4 py-3 text-xs text-gray-500" x-text="c.region || '–'"></td>
+            <!-- Who can see and manage this cluster. Blank means untagged, which is
+                 creator-scoped: only whoever registered it, plus admins. The kubeconfig
+                 behind it is cluster-admin, so this is a real grant, not a label. -->
+            <td class="px-4 py-3 text-xs text-gray-500">
+              <span x-show="c.workgroup" x-text="c.workgroup"></span>
+              <span x-show="!c.workgroup" class="text-gray-300"
+                    title="Not assigned to a workgroup, so only its creator and administrators can see it.">&ndash;</span>
+            </td>
             <td class="px-4 py-3">
               <span class="text-xs font-medium px-1.5 py-0.5 rounded"
                     :class="{
@@ -93,6 +102,12 @@
             <td class="px-4 py-3 text-xs text-gray-400 font-mono truncate max-w-[14rem]" x-text="c.api_server"></td>
             <td class="px-4 py-3">
               <div class="flex flex-wrap justify-end items-center gap-1">
+              <!-- Admin-only: retagging hands the cluster, and its cluster-admin
+                   kubeconfig, to a different set of people. Matches require_admin on
+                   PATCH /api/k8s/clusters/{id}/workgroup. -->
+              <button @click="openRetag(c)" x-show="$store.auth.isAdmin" x-cloak
+                      title="Assign this cluster to a workgroup, or clear it. Everyone in the workgroup can then see and manage it."
+                      class="text-xs px-2 py-1 text-gray-600 hover:underline">Workgroup</button>
               {# "Launch mgmt" (Rancher management plane) hidden pending a full Rancher
                  setup — the deploy needs rancher_server_url + a designated mgmt cluster +
                  cert-manager/ingress/LB (fails "rancher_server_url is not configured"
@@ -157,6 +172,45 @@
   </div>
 
   <!-- Register modal -->
+  <!-- Retag modal (admin only) -- the ONLY way a cluster that predates the workgroup
+       column gets one. Those rows are NULL, and NULL means creator-scoped. -->
+  <div x-show="retagTarget" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="retagTarget = null">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="text-lg font-semibold">Workgroup</h3>
+        <button @click="retagTarget = null" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-5 space-y-3">
+        <p class="text-sm text-gray-500">
+          Everyone in the chosen workgroup can see and manage
+          <span class="font-mono text-gray-700" x-text="retagTarget ? retagTarget.name : ''"></span>
+          &mdash; including its cluster-admin kubeconfig, brokered access, and its
+          auto-delete timer. Clearing the workgroup returns it to its creator.
+        </p>
+        <select x-model="retagValue" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <option value="">(none &mdash; creator and admins only)</option>
+          <template x-for="w in availableWorkgroups" :key="w">
+            <option :value="w" x-text="w"></option>
+          </template>
+        </select>
+        <div x-show="retagError" x-cloak
+             class="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2"
+             x-text="retagError"></div>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-2">
+        <button @click="retagTarget = null"
+                class="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
+        <button @click="submitRetag()" :disabled="retagSaving"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50">
+          <span x-show="!retagSaving">Save</span>
+          <span x-show="retagSaving" x-cloak>Saving&hellip;</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <div x-show="showRegister" x-cloak
        class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
        @click.self="showRegister = false">
@@ -206,6 +260,24 @@
             <option value="headlamp">headlamp</option>
           </select>
         </div>
+        <!-- Optional, unlike the cloud VM deploy forms where it is required. Blank keeps
+             the cluster creator-scoped, which is what every cluster registered before
+             this field existed already is. -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup</label>
+          <select x-model="form.workgroup" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">(none &mdash; only you and admins)</option>
+            <template x-for="w in availableWorkgroups" :key="w">
+              <option :value="w" x-text="w"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1">
+            Everyone in this workgroup can see and manage this cluster &mdash; its
+            kubeconfig is cluster-admin, so this is a real grant. Leave blank and only
+            you and administrators can.
+          </p>
+        </div>
+
       </div>
       <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
         <button @click="showRegister = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
@@ -251,6 +323,21 @@
               <option value="gcp">gcp (GKE)</option>
               <option value="oci">oci (OKE)</option>
             </select>
+          </div>
+          <!-- Optional, unlike the cloud VM deploy forms where it is required. Blank
+               keeps the cluster creator-scoped. -->
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup</label>
+            <select x-model="provForm.workgroup" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="">(none &mdash; only you and admins)</option>
+              <template x-for="w in availableWorkgroups" :key="w">
+                <option :value="w" x-text="w"></option>
+              </template>
+            </select>
+            <p class="text-xs text-gray-400 mt-1">
+              Everyone in this workgroup can see and manage this cluster. Its kubeconfig
+              is cluster-admin, so this is a real grant.
+            </p>
           </div>
         </div>
         <div x-show="loadingProvOpts" x-cloak class="text-center text-gray-400 text-sm py-1">
@@ -945,12 +1032,17 @@ function k8sPage() {
     clusters: [], loading: true, toast: '', toastType: 'success',
     filterRegion: '',
     showRegister: false, saving: false,
-    form: { name: '', cloud: 'local', kubeconfig: '', mgmt_kind: '' },
+    form: { name: '', cloud: 'local', kubeconfig: '', mgmt_kind: '', workgroup: '' },
     // Set when a discovery finding sent us here — shown as a hint so the operator can
     // confirm the kubeconfig they paste points at the cluster the agent actually found.
     discoveredApiServer: '',
     showProvision: false, provBusy: false,
-    provForm: { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, vpc_cidr: '', authorized_cidrs: '', zone: '', enable_ebs_csi: false, register_token_in_passwordsafe: false },
+    provForm: { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, vpc_cidr: '', authorized_cidrs: '', zone: '', enable_ebs_csi: false, register_token_in_passwordsafe: false, workgroup: '' },
+
+    // Workgroup picker, same source every other page uses.
+    availableWorkgroups: [],
+    // Retag (admin only). `retagTarget` doubles as the modal's open flag.
+    retagTarget: null, retagValue: '', retagSaving: false, retagError: '',
     provOptions: { cloud: '', region: '', regions: [], node_instance_types: [], k8s_versions: [], subnets: [], configured_subnet_ids: [] },
     loadingProvOpts: false, provOptsError: '',
     showBroker: false, brokering: false, brokerTarget: null,
@@ -975,8 +1067,51 @@ function k8sPage() {
     async init() {
       requireAuth();
       this.loadSecretBackends();
+      this.loadWorkgroups();
       await this.refresh();
       this.openFromQuery();
+    },
+
+    loadWorkgroups() {
+      API.get('/api/groups/workgroups')
+        .then(r => { this.availableWorkgroups = r || []; })
+        .catch(() => { this.availableWorkgroups = []; });
+    },
+
+    // Preselect `default` when it exists, matching the AWS deploy form. The fallback is
+    // '' and NOT availableWorkgroups[0]: blank is legal here, and tagging a cluster into
+    // whichever workgroup sorts first would hand its cluster-admin kubeconfig to a team
+    // nobody chose.
+    defaultWorkgroup() {
+      // `|| []` is not defensive padding: openRegister()/openProvision() call
+      // this, and tests/template_helpers_check.js builds an object holding only
+      // the methods a scenario names -- so `this` legitimately has no state.
+      return (this.availableWorkgroups || []).includes('default') ? 'default' : '';
+    },
+
+    openRetag(c) {
+      this.retagTarget = c;
+      this.retagValue = c.workgroup || '';
+      this.retagError = '';
+    },
+
+    async submitRetag() {
+      if (!this.retagTarget) return;
+      this.retagSaving = true;
+      this.retagError = '';
+      try {
+        // '' is meaningful and must be sent: it CLEARS the workgroup, returning the
+        // cluster to creator-scoped. That is the only way back from a mis-tag.
+        await API.patch(`/api/k8s/clusters/${this.retagTarget.id}/workgroup`,
+                        { workgroup: this.retagValue || '' });
+        this.retagTarget = null;
+        await this.refresh();
+        this.flash('Workgroup updated.');
+      } catch (e) {
+        this.retagError = e.message || 'Could not update the workgroup.';
+      } finally {
+        this.retagSaving = false;
+      }
     },
 
     // ?register=1&name=…&api_server=… prefill for this form.
@@ -1014,7 +1149,8 @@ function k8sPage() {
     },
 
     openRegister() {
-      this.form = { name: '', cloud: 'local', kubeconfig: '', mgmt_kind: '' };
+      this.form = { name: '', cloud: 'local', kubeconfig: '', mgmt_kind: '',
+                    workgroup: this.defaultWorkgroup() };
       this.discoveredApiServer = '';
       this.showRegister = true;
     },
@@ -1024,6 +1160,7 @@ function k8sPage() {
       try {
         const body = { name: this.form.name, cloud: this.form.cloud, kubeconfig: this.form.kubeconfig };
         if (this.form.mgmt_kind) body.mgmt_kind = this.form.mgmt_kind;
+        if (this.form.workgroup) body.workgroup = this.form.workgroup;
         await API.post('/api/k8s/clusters', body);
         this.showRegister = false;
         this.flash('Cluster registered.');
@@ -1036,7 +1173,12 @@ function k8sPage() {
     },
 
     openProvision() {
-      this.provForm = { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, vpc_cidr: '', authorized_cidrs: '', zone: '', enable_ebs_csi: false };
+      // Repeat `workgroup` here as well as in the state literal above: this
+      // assignment REPLACES this.provForm, so a key omitted here is silently
+      // dropped and the select stops binding with no error. That is exactly why
+      // register_token_in_passwordsafe is missing from this object.
+      this.provForm = { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, vpc_cidr: '', authorized_cidrs: '', zone: '', enable_ebs_csi: false,
+                        workgroup: this.defaultWorkgroup() };
       this.provOptions = { cloud: '', region: '', regions: [], node_instance_types: [], k8s_versions: [], subnets: [], configured_subnet_ids: [] };
       this.provOptsError = '';
       this.showProvision = true;
@@ -1099,6 +1241,7 @@ function k8sPage() {
         if (f.cloud === 'gcp' && f.zone && f.zone.trim()) body.zone = f.zone.trim();
         if (f.cloud === 'aws' && f.enable_ebs_csi) body.enable_ebs_csi = true;
         if (f.register_token_in_passwordsafe) body.register_token_in_passwordsafe = true;
+        if (f.workgroup) body.workgroup = f.workgroup;
         const r = await API.post('/api/k8s/clusters/provision', body);
         this.showProvision = false;
         this.flash('Provisioning cluster… (takes ~10–15 min; watch the status)');
