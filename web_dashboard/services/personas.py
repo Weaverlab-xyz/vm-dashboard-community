@@ -1024,7 +1024,7 @@ _SECURITY = Persona(
           "and what should have expired already.",
     section_order=("overview", "managed", "cloud", "containers", "hypervisors"),
     tile_emphasis=("active_jobs", "deployed_resources"),
-    nav_pins=("dashboard", "inventory", "jobs", "secrets", "users", "groups"),
+    nav_pins=("dashboard", "inventory", "jobs", "secrets", "rbac"),
     quick_deploy=(),
     docs=("profiles/demo/personas/security",),
     preset_flags=("admission_control_enabled",),

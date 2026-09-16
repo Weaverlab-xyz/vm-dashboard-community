@@ -106,7 +106,7 @@ def test_the_permission_grid_maps_the_scope_to_a_label():
     grid = _read(_tpl("partials", "permission_matrix.html"))
     assert "permissionScopeLabel(scope)" in grid, (
         "the shared permission grid renders the raw scope key")
-    for rel in (("users", "list.html"), ("groups", "index.html")):
+    for rel in (("rbac", "_users.html"), ("rbac", "_groups.html"), ("rbac", "_roles.html")):
         src = _read(_tpl(*rel))
         assert "permission_matrix" in src, (
             f"{rel} no longer uses the shared grid — check it did not grow its own copy")

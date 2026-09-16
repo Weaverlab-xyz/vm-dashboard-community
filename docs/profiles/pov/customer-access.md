@@ -204,9 +204,9 @@ different people.
 |---|---|---|
 | Who it is for | a prospect you are emailing a credential to | a named person — a customer champion, or a colleague covering the account |
 | What they get | one POV's checklist, five endpoints, nothing else in the product | an ordinary dashboard login whose POV pages show only the POVs you named |
-| How it is created | POV page → Access → mint | Users page → Permissions: `POV` = `read` + `use`, then pick their POV under the grid |
+| How it is created | POV page → Access → mint | RBAC → Users → Permissions: `POV` = `read` + `use`, then pick their POV under the grid |
 | Lifetime | expires, and is deleted when the POV is reaped | until you change it |
-| Shows up on the Users page | no | yes |
+| Shows up on the RBAC → Users tab | no | yes |
 | Can hold anything else | never | yes — whatever else you grant them |
 
 Rule of thumb: if you would put their name in an org chart, give them a user with a POV

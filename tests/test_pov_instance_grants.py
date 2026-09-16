@@ -369,7 +369,7 @@ def test_a_narrowing_outlives_the_permission_map_and_stays_visible():
     assert auth_mod.pov_env_scope(u) == {"env-theirs"}, (
         "an unrestricted user with pov_env_ids is still narrowed — that is the point")
 
-    with open(os.path.join(_ROOT, "web_dashboard", "templates", "users", "list.html"),
+    with open(os.path.join(_ROOT, "web_dashboard", "templates", "rbac", "_users.html"),
               encoding="utf-8") as fh:
         src = fh.read()
     assert 'x-show="povNarrowingVisible()"' in src, (

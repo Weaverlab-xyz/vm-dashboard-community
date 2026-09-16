@@ -45,7 +45,7 @@ The dashboard already has two pieces of Entitle integration:
 
 What's missing is the **third leg**: a user-level authorization
 JIT. Today the dashboard's permissions are statically assigned —
-either via admin → Users → set permissions, or via OAuth group
+either via admin → RBAC → Users → set permissions, or via OAuth group
 mapping seeding `default_permissions` on auto-created users.
 Either way, once a user has `aws:write`, they keep it indefinitely
 until an admin removes it.

@@ -9,20 +9,29 @@
   grid drifts from what require_permission enforces). The edited map is `form.permissions`
   and the escape hatch is `form.permissionsUnrestricted`.
 
+  `offer_unrestricted` defaults True and is False for exactly one caller, the Roles tab.
+  "Unrestricted" is stored as an EMPTY map, and an empty map means unrestricted only on a
+  PRINCIPAL -- on a role it would hand every assignee every scope, present and future, which
+  is the opposite of what building a restricted role means. The server refuses it as well
+  (services/role_service.validate_role_permissions), so this only keeps the UI from offering
+  something that would 422; the rule does not live here.
+
   Usage:
     {% from "partials/permission_matrix.html" import permission_matrix %}
     {{ permission_matrix("Permissions", "User has unrestricted access to all sections.") }}
 #}
-{% macro permission_matrix(label, unrestricted_note) %}
+{% macro permission_matrix(label, unrestricted_note, offer_unrestricted=True) %}
 <div>
   <div class="flex items-center justify-between mb-2 gap-3">
     <label class="block text-sm font-medium text-gray-700">{{ label }}</label>
+    {% if offer_unrestricted %}
     <label class="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer shrink-0">
       <input type="checkbox" x-model="form.permissionsUnrestricted"
              @change="toggleUnrestricted()"
              class="rounded border-gray-300 text-blue-600">
       Full access (unrestricted)
     </label>
+    {% endif %}
   </div>
 
   <div x-show="!form.permissionsUnrestricted">

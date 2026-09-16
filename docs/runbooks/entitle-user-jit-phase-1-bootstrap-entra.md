@@ -167,13 +167,13 @@ won't disturb `dashboard-vms-read`, and vice versa.
 
 ## Step 8 — Operator-edited mappings are preserved
 
-If an operator hand-edited a mapping in the `/groups` admin UI
+If an operator hand-edited a mapping in the **RBAC → Groups** tab
 (e.g. changed `dashboard-baseline`'s `default_permissions` to add
 `images:["read"]`), re-running the bootstrap does NOT overwrite
 the edit. The upsert matches on `entra_group_id`; once a row
 exists, the script logs `exists` for the mapping and moves on.
 
-To force a reset, delete the row in `/groups` first, then re-run
+To force a reset, delete the row on the **RBAC → Groups** tab first, then re-run
 the bootstrap.
 
 ## Step 9 — Rollback

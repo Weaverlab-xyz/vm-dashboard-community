@@ -1,15 +1,22 @@
-{% extends "base.html" %}
+{# Identity-provider group mappings -- the Groups tab of the RBAC page.
+
+   NOT Entra-only, and the prose here now says so. `entra_group_id` is the stored column and
+   part of the /api/groups contract, so the IDENTIFIER keeps its name; but the app has a
+   fully generic OIDC login path beside the Entra one (api/auth.oauth_oidc_callback) and the
+   field takes whatever identifier the provider's groups claim emits -- an Entra group Object
+   ID, an Okta group id, a Keycloak group name. Same identifier-vs-prose split as
+   Gateway/Jumpoint; the vocabulary matches docs/integrations/oidc.md.
+
+   Macro imported here, not inherited -- see the note in _users.html. #}
 {% from "partials/permission_matrix.html" import permission_matrix %}
 
-{% block title %}Entra Group Mappings{% endblock %}
+<div class="max-w-3xl" x-data="groupsPage()" x-init="init()">
 
-{% block content %}
-<div class="max-w-3xl mx-auto py-8 px-4" x-data="groupsPage()" x-init="init()">
-
-  <h1 class="text-2xl font-bold text-gray-800 mb-1">Entra ID Group Mappings</h1>
-  <p class="text-sm text-gray-500 mb-8">
-    Map Azure Entra ID groups to dashboard workgroups. Members of a mapped group are
-    automatically provisioned on first login — no manual user creation needed.
+  <p class="text-sm text-gray-500 mb-6">
+    Map groups from your identity provider onto dashboard workgroups, a permission set and
+    an access role. Members of a mapped group are provisioned automatically on first login
+    &mdash; no manual user creation needed.
+    <a href="/docs/integrations/oidc" target="_blank" class="text-blue-600 hover:underline">Set up single sign-on</a>.
   </p>
 
   <!-- Toast -->
@@ -45,7 +52,8 @@
         <thead>
           <tr class="text-left text-xs text-gray-500 uppercase tracking-wide border-b border-gray-100">
             <th class="pb-2 pr-4">Display Name</th>
-            <th class="pb-2 pr-4">Entra Group Object ID</th>
+            <th class="pb-2 pr-4">Group Object ID</th>
+            <th class="pb-2 pr-4">Role</th>
             <th class="pb-2 pr-4">Workgroup</th>
             <th class="pb-2 pr-4">Focus</th>
             <th class="pb-2 pr-4">Default Permissions</th>
@@ -57,6 +65,15 @@
             <tr class="border-b border-gray-50 hover:bg-gray-50">
               <td class="py-2.5 pr-4 font-medium text-gray-800" x-text="m.display_name"></td>
               <td class="py-2.5 pr-4 font-mono text-xs text-gray-500" x-text="m.entra_group_id"></td>
+              <!-- Grey like the focus chip, not the workgroup's accent: this names WHERE the
+                   grant comes from. The permission chips two columns over are the mapping's
+                   own additions on top of it. -->
+              <td class="py-2.5 pr-4 text-xs">
+                <span x-show="!m.role_name" class="text-gray-400">&mdash;</span>
+                <span x-show="m.role_name"
+                      class="inline-flex items-center px-2 py-0.5 rounded-full text-xs
+                             font-medium bg-gray-100 text-gray-600" x-text="m.role_name"></span>
+              </td>
               <td class="py-2.5 pr-4">
                 <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700"
                       x-text="m.workgroup"></span>
@@ -113,8 +130,11 @@
 
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">
-          Entra Group Object ID
-          <span class="text-gray-400 font-normal">(Entra ID → Groups → your group → Object ID)</span>
+          Group Object ID
+          <span class="text-gray-400 font-normal">
+            (in Entra ID: Groups &rarr; your group &rarr; Object ID; on another provider,
+            whatever value its groups claim emits)
+          </span>
         </label>
         <input x-model="form.entra_group_id" type="text" required
                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
@@ -162,7 +182,27 @@
         </p>
       </div>
 
-      <!-- Default Permissions for auto-provisioned users. Same grid as /users, from
+      <!-- Access role. Above the grid deliberately: a role is the normal way to grant
+           access and the grid below it is this mapping's addition on top. -->
+      <div class="mb-4">
+        <label class="block text-sm font-medium text-gray-700 mb-1">
+          Role <span class="text-gray-400 font-normal">(optional)</span>
+        </label>
+        <select x-model="form.role_id"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                       focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <option value="">No role &mdash; use the permissions below only</option>
+          <template x-for="r in availableRoles" :key="r.id">
+            <option :value="r.id" x-text="r.name + (r.is_builtin ? '' : ' (custom)')"></option>
+          </template>
+        </select>
+        <p class="text-xs text-gray-500 mt-1">
+          Every member of this group gets the role's permissions, re-applied at each
+          sign-in. Anything ticked below is added on top of it.
+        </p>
+      </div>
+
+      <!-- Default Permissions for auto-provisioned users. Same grid as the Users tab, from
            the same partial: two copies of it had already drifted apart in their method
            names, and every future improvement would have had to be made twice. -->
       {{ permission_matrix(
@@ -187,10 +227,10 @@
     <p class="font-medium mb-1">How it works</p>
     <ul class="list-disc list-inside space-y-1 text-blue-700">
       <li>Users sign in via <strong>Sign in with Microsoft</strong> on the login page.</li>
-      <li>Their Entra group memberships are checked against this table.</li>
+      <li>The group memberships in their token are checked against this table.</li>
       <li>Matching users are auto-created and assigned the corresponding workgroup(s).</li>
       <li>If a user is in multiple mapped groups they receive all matching workgroups.</li>
-      <li>Workgroup assignments are re-synced from Entra on every login.</li>
+      <li>Workgroup, permission and role assignments are re-synced from the provider on every login.</li>
     </ul>
     <p class="mt-3 font-medium">Required App Registration setup</p>
     <ul class="list-disc list-inside space-y-1 text-blue-700 mt-1">
@@ -202,15 +242,6 @@
 </div>
 
 <script>
-// Sourced from the backend catalog (api/auth.py PERMISSION_SCOPES /
-// PERMISSION_LEVELS) via the page route context — do not hard-code, or
-// the grid will drift from what require_permission actually enforces.
-const PERMISSION_SCOPES_G = {{ permission_scopes | tojson }};
-const PERMISSION_LEVELS_G = {{ permission_levels | tojson }};
-// Which levels each scope offers, so this grid cannot offer one the server will 422.
-const PERMISSION_SCOPE_LEVELS_G = {{ permission_scope_levels | tojson }};
-// How the grid lays them out. See the same const on the Users page.
-const PERMISSION_SCOPE_GROUPS_G = {{ permission_scope_groups | tojson }};
 
 function groupsPage() {
   return {
@@ -222,24 +253,40 @@ function groupsPage() {
     // Shared with /users -- see app.js::permissionGridState. This page used to carry
     // its own copy of the toggle logic under different method names.
     ...permissionGridState(),
-    permissionScopes: PERMISSION_SCOPES_G,
-    permissionLevels: PERMISSION_LEVELS_G,
-    permissionScopeLevels: PERMISSION_SCOPE_LEVELS_G,
-    permissionScopeGroups: PERMISSION_SCOPE_GROUPS_G,
+    // The permission catalog, straight from the page route context (api/auth.py
+    // PERMISSION_SCOPES / PERMISSION_LEVELS / PERMISSION_SCOPE_LEVELS and
+    // grouped_permission_scopes()). Never hard-coded, or the grid drifts from what
+    // require_permission actually enforces.
+    //
+    // Inlined as component properties rather than module-level consts, and on a tabbed page
+    // that is load-bearing: this partial and its sibling both need the same four values, and
+    // re-declaring any one of these four names at module scope in two sibling partials is a
+    // SyntaxError that kills BOTH script blocks -- the page renders its heading and nothing
+    // else. The old separate pages dodged it by suffixing one copy's names, which only
+    // worked while they were separate documents. Nothing in the suite can see that break:
+    // test_template_scripts.py lexes each block independently and both lex fine.
+    permissionScopes: {{ permission_scopes | tojson }},
+    permissionLevels: {{ permission_levels | tojson }},
+    permissionScopeLevels: {{ permission_scope_levels | tojson }},
+    permissionScopeGroups: {{ permission_scope_groups | tojson }},
     loading: true,
+    availableRoles: [],
     showAdd: false,
     saving: false,
     toast: '',
     toastType: 'success',
     form: { display_name: '', entra_group_id: '', workgroup: '', persona: '', persona_priority: null,
-            permissions: {}, permissionsUnrestricted: true },
+            role_id: '', permissions: {}, permissionsUnrestricted: true },
+
+    roleName(id) {
+      const r = (this.availableRoles || []).find(x => x.id === id);
+      return r ? r.name : '';
+    },
 
     async init() {
-      requireAuth();
-      if (!Alpine.store('auth').isAdmin) {
-        window.location.href = '/';
-        return;
-      }
+      // No auth gate here -- rbacPage() in the container owns the single one.
+      // Roles for the picker. Fetched, not injected -- see the note in _users.html.
+      try { this.availableRoles = await API.get('/api/roles') || []; } catch (e) {}
       await this.loadMappings();
     },
 
@@ -266,6 +313,9 @@ function groupsPage() {
           // api/groups.py turns a falsy map into NULL, i.e. unrestricted -- the exact
           // inversion of what the admin asked for. See buildPermissionsPayload.
           default_permissions: this.form.permissionsUnrestricted ? null : this.buildPermissionsPayload(),
+          // Blank sent as null: on create there is no "no change" state to tell apart, and
+          // the API reads a blank as no role.
+          role_id: this.form.role_id || null,
           persona: this.form.persona || null,
           // Only meaningful alongside a persona, so it is not sent without one -- a
           // priority on a mapping that expresses no focus is a value nothing reads.
@@ -302,7 +352,7 @@ function groupsPage() {
 
     resetForm() {
       this.permFilter = '';
-      this.form = { display_name: '', entra_group_id: '', workgroup: '', persona: '', persona_priority: null,
+      this.form = { display_name: '', entra_group_id: '', workgroup: '', persona: '', role_id: '', persona_priority: null,
                     permissions: {}, permissionsUnrestricted: true };
     },
 
@@ -314,4 +364,3 @@ function groupsPage() {
   };
 }
 </script>
-{% endblock %}

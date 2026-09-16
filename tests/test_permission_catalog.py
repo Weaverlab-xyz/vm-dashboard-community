@@ -133,9 +133,12 @@ def test_the_catalog_and_its_list_form_agree():
 _NAV_EXEMPT = {
     # Gating the home page locks every user out of the dashboard.
     "dashboard": "aggregate landing page",
-    # A grantable scope on these IS privilege escalation: they administer identity.
-    "users": "identity administration (require_admin)",
-    "groups": "identity administration (require_admin)",
+    # A grantable scope on this IS privilege escalation: it administers identity. One page,
+    # three tabs (Users / identity-provider Groups / access Roles) -- and anyone who can edit
+    # a user, or a role a user holds, can make themselves an administrator. The prose twin of
+    # this entry is the "Scopes that are deliberately not grantable" section of
+    # docs/permissions.md; the two must keep saying the same thing.
+    "rbac": "identity administration (require_admin)",
     "workgroups": "has the `workgroups` scope already",
     # Reads the POV API, so `pov:read` already governs what it can show.
     "use_cases": "renders /api/pov/managed, governed by pov:read",
@@ -442,7 +445,9 @@ def test_both_grids_render_only_the_levels_a_scope_offers():
     assert "permissionScopeAllowsLevel" in js, (
         "permissionGridState no longer delegates to the shared level-map helper")
 
-    for rel in (("templates", "users", "list.html"), ("templates", "groups", "index.html")):
+    for rel in (("templates", "rbac", "_users.html"),
+                ("templates", "rbac", "_groups.html"),
+                ("templates", "rbac", "_roles.html")):
         src = _read("web_dashboard", *rel)
         where = "/".join(rel)
         assert "permission_scope_levels | tojson" in src, (
@@ -451,10 +456,36 @@ def test_both_grids_render_only_the_levels_a_scope_offers():
             f"{where} does not use the shared grid")
 
 
-def test_the_page_context_ships_the_level_map_to_both_pages():
+def test_the_shared_rbac_context_is_the_one_source_of_the_level_map():
+    """Three routes render the RBAC page, and all three must take their context from
+    _rbac_context.
+
+    This replaces a literal count of two injection sites, which was the cheapest way to say
+    "every route that renders the grid injects the catalog" while there were two routes and
+    two templates. With one shared helper a count is not merely stale, it is misleading in
+    both directions: it would pass at 2 for a third route that forgot the catalog, and fail
+    at 3 while everything was correct. Assert the single source and the routes that use it.
+    """
     src = _read("web_dashboard", "main.py")
-    assert src.count('"permission_scope_levels": auth.PERMISSION_SCOPE_LEVELS') == 2, (
-        "the /users and /groups routes must both inject the level map, or one grid drifts")
+    assert src.count('"permission_scope_levels": auth.PERMISSION_SCOPE_LEVELS') == 1, (
+        "the level map is built in more than one place — _rbac_context is the one source, "
+        "and a second copy is how a grid drifts from what require_permission enforces")
+
+    helper = src.split("def _rbac_context(", 1)[1].split("\n\n\n", 1)[0]
+    for key in ("permission_scopes", "permission_levels", "permission_scope_levels",
+                "permission_scope_groups", "persona_options", "workgroups"):
+        assert '"%s"' % key in helper, "_rbac_context does not inject %s" % key
+
+    for path in ("/rbac", "/users", "/groups"):
+        marker = '@app.get("%s", response_class=HTMLResponse' % path
+        assert marker in src, "%s is not an HTML page route" % path
+        body = src.split(marker, 1)[1].split("@app.get(", 1)[0]
+        assert "rbac/index.html" in body, "%s does not render the RBAC page" % path
+        assert "_rbac_context(" in body, (
+            "%s does not take its context from _rbac_context, so nothing checks its keys"
+            % path)
+        assert "permission_scope" not in body, (
+            "%s builds its own catalog dict instead of using the helper" % path)
 
 
 def test_the_entra_bootstrap_iterates_the_per_scope_levels():

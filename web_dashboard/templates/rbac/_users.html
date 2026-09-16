@@ -1,16 +1,15 @@
-{% extends "base.html" %}
-{% from "partials/permission_matrix.html" import permission_matrix %}
-{% block title %}Users{% endblock %}
+{# Users tab of the RBAC page. Self-contained: markup and Alpine factory in this one
+   file, which is what tests/test_template_scripts.py and tests/test_templates_parse.py
+   require of any template naming an x-data.
 
-{% block content %}
+   The macro is imported HERE rather than inherited from the container: an {% include %}
+   does not carry the includer's imports, and a missing one fails at RENDER time --
+   test_templates_parse.py only parses, so nothing in the suite would catch it. #}
+{% from "partials/permission_matrix.html" import permission_matrix %}
+
 <div x-data="usersPage()" x-init="init()">
 
-  <!-- Header -->
-  <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-6">
-    <div>
-      <h1 class="text-2xl font-bold text-gray-900">User Management</h1>
-      <p class="text-sm text-gray-500 mt-1">Manage dashboard and API users</p>
-    </div>
+  <div class="flex justify-end mb-3">
     <button @click="openCreate()"
             class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition">
       + New User
@@ -28,7 +27,7 @@
           <th class="px-4 py-3 text-left">Workgroups</th>
           <th class="px-4 py-3 text-left">Auth</th>
           <th class="px-4 py-3 text-left">MFA</th>
-          <th class="px-4 py-3 text-left">Role</th>
+          <th class="px-4 py-3 text-left">Access</th>
           <th class="px-4 py-3 text-left">Status</th>
           <th class="px-4 py-3 text-left">Actions</th>
         </tr>
@@ -60,10 +59,18 @@
                     class="text-xs px-2 py-0.5 rounded-full"
                     x-text="u.mfa_required ? 'On' : 'Off'"></span>
             </td>
+            <!-- Admin flag AND assigned role in ONE cell, deliberately. A separate Role
+                 column would have to move the empty-state colspan below with it, and
+                 nothing on this table guards that number -- one cell keeps the count
+                 right by construction. -->
             <td class="px-4 py-3">
               <span :class="u.is_admin ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-500'"
                     class="text-xs px-2 py-0.5 rounded-full"
                     x-text="u.is_admin ? 'Admin' : 'User'"></span>
+              <!-- Withheld for an admin rather than shown alongside: the flag bypasses the
+                   permission grid, so naming a role there would suggest it still applies. -->
+              <div x-show="!u.is_admin && u.role_name" class="text-xs text-gray-500 mt-0.5"
+                   x-text="u.role_name"></div>
             </td>
             <td class="px-4 py-3">
               <span :class="u.is_active ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'"
@@ -202,6 +209,24 @@
           has_permission -- so every user made here held every non-admin permission in the
           dashboard until somebody re-opened them. The grid is the whole point of the form.
         -->
+        <!-- Access role. Above the grid deliberately: a role is the normal way to grant
+             access and the grid below it is the per-user override, so the reading order
+             matches the model. -->
+        <div x-show="!form.is_admin">
+          <label class="block text-sm font-medium text-gray-700 mb-1">
+            Role <span class="text-gray-400 font-normal">(optional)</span>
+          </label>
+          <select x-model="form.role_id"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-1
+                         focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">No role &mdash; use the grid below only</option>
+            <template x-for="r in availableRoles" :key="r.id">
+              <option :value="r.id" x-text="r.name + (r.is_builtin ? '' : ' (custom)')"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-500 mb-3" x-text="roleHint()"></p>
+        </div>
+
         <div x-show="!form.is_admin">
           {{ permission_matrix(
                "Permissions",
@@ -371,22 +396,8 @@
   </div>
 
 </div>
-{% endblock %}
 
-{% block scripts %}
 <script>
-// Sourced from the backend catalog (api/auth.py PERMISSION_SCOPES /
-// PERMISSION_LEVELS) via the page route context — do not hard-code, or
-// the grid will drift from what require_permission actually enforces.
-const PERMISSION_SCOPES = {{ permission_scopes | tojson }};
-const PERMISSION_LEVELS = {{ permission_levels | tojson }};
-// Which levels each scope offers. Same source, same reason: a scope that enforces nothing
-// at a level must not show a checkbox there, or the save 422s.
-const PERMISSION_SCOPE_LEVELS = {{ permission_scope_levels | tojson }};
-// How the grid LAYS those scopes out: [[group label, [scope, ...]], ...] covering every
-// scope exactly once. Presentation only -- an unlisted scope lands in "Ungrouped" rather
-// than disappearing, because a scope that renders nowhere is an ungrantable permission.
-const PERMISSION_SCOPE_GROUPS = {{ permission_scope_groups | tojson }};
 
 function usersPage() {
   return {
@@ -396,15 +407,31 @@ function usersPage() {
     // Filtering, grouping, bulk toggles, hasPerm/togglePerm and buildPermissionsPayload
     // all live in app.js so this page and /groups cannot drift apart again.
     ...permissionGridState(),
-    permissionScopes: PERMISSION_SCOPES,
-    permissionLevels: PERMISSION_LEVELS,
-    permissionScopeLevels: PERMISSION_SCOPE_LEVELS,
-    permissionScopeGroups: PERMISSION_SCOPE_GROUPS,
+    // The permission catalog, straight from the page route context (api/auth.py
+    // PERMISSION_SCOPES / PERMISSION_LEVELS / PERMISSION_SCOPE_LEVELS and
+    // grouped_permission_scopes()). Never hard-coded, or the grid drifts from what
+    // require_permission actually enforces.
+    //
+    // Inlined as component properties rather than module-level consts, and on a tabbed page
+    // that is load-bearing: this partial and its sibling both need the same four values, and
+    // re-declaring any one of these four names at module scope in two sibling partials is a
+    // SyntaxError that kills BOTH script blocks -- the page renders its heading and nothing
+    // else. The old separate pages dodged it by suffixing one copy's names, which only
+    // worked while they were separate documents. Nothing in the suite can see that break:
+    // test_template_scripts.py lexes each block independently and both lex fine.
+    permissionScopes: {{ permission_scopes | tojson }},
+    permissionLevels: {{ permission_levels | tojson }},
+    permissionScopeLevels: {{ permission_scope_levels | tojson }},
+    permissionScopeGroups: {{ permission_scope_groups | tojson }},
     // POV environments, for the per-POV picker. Loaded lazily and allowed to stay empty:
     // the POV router is feature-gated, so on a demo install it 404s and the picker falls
     // back to free-text ids rather than claiming there are no POVs.
     povEnvironments: [],
     povEnvironmentsLoaded: false,
+    // Access roles, for the picker. Fetched rather than injected by the route: an HTML
+    // route here carries no identity, so a server-rendered list would be readable
+    // anonymously. /api/roles is require_admin and this page is admin-only anyway.
+    availableRoles: [],
 
     // user modal
     showUserModal: false,
@@ -422,13 +449,24 @@ function usersPage() {
     newTokenExpiry: '',
     newTokenValue: '',
 
-    async init() {
-      requireAuth();
-      const me = await API.get('/api/auth/me');
-      if (!me || !me.is_admin) {
-        window.location.href = '/';
-        return;
+    roleHint() {
+      const r = (this.availableRoles || []).find(x => x.id === this.form.role_id);
+      if (!r) return 'Without a role, this user gets only what the grid below grants.';
+      if (r.permissions && r.permissions.is_admin) {
+        return 'Administrator bypasses the permission grid entirely.';
       }
+      return 'Grants come from the role. Anything ticked below is added on top of it.';
+    },
+
+    async init() {
+      // No auth gate here: rbacPage() in the container owns the single one for all
+      // three tabs. This call is a DATA fetch -- currentUserId is what hides Deactivate
+      // and Delete on your own row, and an admin who cannot see that has no way to tell
+      // why one row looks different.
+      const me = await API.get('/api/auth/me');
+      // Allowed to fail quietly and stay empty: the picker then offers "No role" alone,
+      // which is exactly the pre-roles behaviour rather than a broken form.
+      try { this.availableRoles = await API.get('/api/roles') || []; } catch (e) {}
       this.currentUserId = me.id;
       // The flyout is full-height and scrolls internally; without this the page behind it
       // scrolls too, which on a phone reads as the panel jumping. Same approach as the nav
@@ -456,6 +494,9 @@ function usersPage() {
         is_admin: false, is_active: true,
         permissions: {}, permissionsUnrestricted: false,
         povEnvIds: [], povEnvToAdd: '', persona: '',
+        // No role by default. A new account therefore starts with the grid alone, and the
+        // grid starts at nothing granted -- least privilege on both axes.
+        role_id: '',
       };
       this.permFilter = '';
       this.showUserModal = true;
@@ -482,6 +523,9 @@ function usersPage() {
         // The stored assignment. Empty when their focus comes from a group instead --
         // persona_source says which, and the table shows it.
         persona: u.persona || '',
+        // The role they hold, if any. The grid beside it holds their per-user override, so
+        // both are editable independently and neither implies the other.
+        role_id: u.role_id || '',
       };
       this.permFilter = '';
       this.showUserModal = true;
@@ -566,6 +610,9 @@ function usersPage() {
             // Always sent, so clearing the dropdown actually clears the assignment. The
             // API reads "" as "hand them back to their group" and null as "no change".
             persona: this.form.persona || '',
+            // Always sent, for the same reason as persona: "" clears the assignment, and
+            // without the empty string an admin could assign a role but never remove one.
+            role_id: this.form.role_id || '',
           };
           if (this.form.password) body.password = this.form.password;
           // Admin bypasses the map entirely, so sending one would store a restriction
@@ -590,6 +637,9 @@ function usersPage() {
             // Sent on create too. Omitting it is what left the column NULL, and NULL is
             // unrestricted -- the bug this form existed to avoid and instead caused.
             permissions: this.form.is_admin ? null : this.buildPermissionsPayload(),
+            // Omitted as "" rather than null: the API reads null as "no change", which on
+            // create means no role, so either works -- but "" says it on purpose.
+            role_id: this.form.role_id || '',
             // Reachable on create now that the grid is: ticking POV read shows the
             // picker. Focus is not -- it stays edit-only, as its comment above says.
             pov_env_ids: this.form.povEnvIds || [],
@@ -684,4 +734,3 @@ function usersPage() {
   };
 }
 </script>
-{% endblock %}

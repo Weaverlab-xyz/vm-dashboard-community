@@ -31,7 +31,7 @@ Takes ~20 minutes. Run on the community edition
   (`docker compose up` from the community repo).
 - Azure OAuth configured (`AZURE_OAUTH_CLIENT_ID/SECRET/TENANT_ID/REDIRECT_URI`).
 - Three Entra security groups available for testing (any names — they
-  will be wired to dashboard mappings via the `/groups` admin page):
+  will be wired to dashboard mappings via the `/rbac#groups` admin page):
   - `T_GROUP_A` — will map to `default_permissions = {"aws": ["read"]}`
   - `T_GROUP_B` — will map to `default_permissions = {"vms": ["read"]}`
   - `T_GROUP_C` — will map to `default_permissions = {"is_admin": true}`
@@ -54,7 +54,7 @@ present in `database.py:_migrations`.
 
 ## Step 2 — Wire up test group mappings
 
-Sign in as an existing admin user. Open `/groups`. For each of the
+Sign in as an existing admin user. Open `/rbac#groups`. For each of the
 three Entra groups created in prerequisites, add an `oauth_group_mappings`
 row:
 
@@ -109,7 +109,7 @@ in Phase 2+ flows directly through this code path.
 
 ## Step 5 — Admin baseline survives a JIT-only revocation
 
-1. As admin, in `/users`, hand-grant the test user
+1. As admin, in `/rbac#users`, hand-grant the test user
    `permissions = {"images": ["read"]}` (this is the admin-set baseline,
    independent of group claims).
 2. In Entra, remove the test account from `T_GROUP_A` as well so it has
@@ -156,7 +156,7 @@ Phase 0 ships the resolver. The Entra/Entitle bootstrap that produces
 the actual `dashboard-*` groups is Phases 1–2 of the
 [Entitle user-JIT design](../design/entitle-user-jit.md). Until then,
 the resolver works against any Entra group mapping seeded via the
-`/groups` admin page — exactly as it did before, but now correctly
+`/rbac#groups` admin page — exactly as it did before, but now correctly
 computing the union and re-applying on every login.
 
 ## Step 9 — Rollback

@@ -901,6 +901,7 @@ from .api import budgets as budgets_api  # noqa: E402
 from .api import suspend as suspend_api  # noqa: E402
 from .api import docs_pages  # noqa: E402
 from .api import workgroups as workgroups_api  # noqa: E402
+from .api import roles as roles_api  # noqa: E402
 from .api import workgroup_overrides as workgroup_overrides_api  # noqa: E402
 from .api import cloud_identity as cloud_identity_api  # noqa: E402
 from .api import gateways as gateways_api  # noqa: E402
@@ -991,6 +992,10 @@ app.include_router(mfa.router)
 app.include_router(tokens.router)
 app.include_router(users.router)
 app.include_router(groups.router)
+# Access roles. No _feature_gate: identity administration exists on every install, and
+# every route on it is require_admin — see the module docstring for why there is no
+# grantable `roles` scope.
+app.include_router(roles_api.router)
 app.include_router(workgroups_api.router)
 app.include_router(workgroup_overrides_api.router)
 app.include_router(jobs.router)
@@ -1750,66 +1755,102 @@ async def pov_detail_page(request: Request, env_id: str):
                                       {"request": request, "env_id": env_id})
 
 
+def _rbac_context(request: Request, initial_tab: str) -> dict:
+    """The shared context for the RBAC page, which THREE routes render.
+
+    One copy of the permission catalog, not three. This block used to be duplicated verbatim
+    between the /users and /groups routes, and its whole purpose is that the grid cannot
+    drift from what `require_permission` enforces -- so keeping N copies of it was the one
+    thing most likely to reintroduce the drift.
+
+    **No key here may be named `persona`, `persona_label` or `persona_source`.** The
+    `_profile_context` processor returns those, and a processor's return is applied AFTER a
+    route's own context and overwrites it silently -- the value simply does not arrive, with
+    nothing to debug. Same reason the persona picker's key is `persona_options`.
+
+    **The role list is deliberately NOT injected here**, unlike the permission catalog. Every
+    HTML route in this app is an unauthenticated shell -- the token lives in localStorage and
+    is sent as a Bearer header on /api/* only -- so anything rendered into this template is
+    readable by an anonymous GET. The catalog is a static property of the build and safe;
+    the roles an operator has defined are their configuration. The pickers fetch /api/roles
+    with the token, like every other list on this page, and that endpoint is require_admin.
+    It also avoids putting a database call on an HTML route that has no other reason to
+    touch one.
+    """
+    return {
+        "request": request,
+        # Which tab this route opens on. The container also honours a #fragment, which wins,
+        # so a bookmarked /rbac#roles still lands where the reader left it.
+        "initial_tab": initial_tab,
+        "workgroups": list(settings.workgroups.keys()),
+        # Injected from the backend catalog so the assignment grid can't drift from
+        # api/auth.py (it was hard-coded in the template once, and had already drifted).
+        "permission_scopes": auth.PERMISSION_SCOPES,
+        # Same reasoning for the persona picker: injected from the registry so the
+        # dropdown cannot name a focus the resolver does not know. NOT called
+        # "persona"/"persona_label"/"persona_source" -- see the docstring above.
+        "persona_options": [{"key": p.key, "label": p.label}
+                            for p in personas.all_personas()],
+        "permission_levels": auth.PERMISSION_LEVELS,
+        # Which levels each scope actually offers, so the grid renders a checkbox only
+        # where one means something. Same anti-drift reasoning: a hard-coded copy in the
+        # template would keep offering "delete" on a read-only scope, and the server
+        # would 422 the save.
+        "permission_scope_levels": auth.PERMISSION_SCOPE_LEVELS,
+        # How the grid groups those scopes into collapsible sections. Derived, and it
+        # covers every scope: one absent from the group map falls into "Ungrouped"
+        # rather than rendering nowhere, because a scope with no row is a permission
+        # nobody can grant.
+        "permission_scope_groups": auth.grouped_permission_scopes(),
+    }
+
+
+@app.get("/rbac", response_class=HTMLResponse, include_in_schema=False)
+async def rbac_page(request: Request):
+    """Role-based access control: users, identity-provider group mappings, and roles.
+
+    DELIBERATELY UNGATED, like /agents and the other always-present pages. There is no
+    feature flag to hide identity administration behind -- every install has users -- and no
+    grantable permission scope either: every route this page calls is `require_admin`,
+    because anyone who can edit a user, or a role a user holds, can make themselves an
+    administrator. `tests/test_permission_catalog._NAV_EXEMPT` records that reasoning, and
+    `docs/permissions.md` states it in prose.
+    """
+    return templates.TemplateResponse("rbac/index.html", _rbac_context(request, "users"))
+
+
 @app.get("/users", response_class=HTMLResponse, include_in_schema=False)
 async def users_page(request: Request):
-    return templates.TemplateResponse(
-        "users/list.html",
-        {
-            "request": request,
-            "workgroups": list(settings.workgroups.keys()),
-            # Inject the backend permission catalog so the assignment grid
-            # can't drift from api/auth.py (was hard-coded in the template).
-            "permission_scopes": auth.PERMISSION_SCOPES,
-            # Same reasoning for the persona picker: injected from the registry so the
-            # dropdown cannot name a focus the resolver does not know. NOT called
-            # "persona"/"persona_label"/"persona_source" -- _profile_context returns
-            # those and its return OVERWRITES a route's context, silently.
-            "persona_options": [{"key": p.key, "label": p.label}
-                                for p in personas.all_personas()],
-            "permission_levels": auth.PERMISSION_LEVELS,
-            # Which levels each scope actually offers, so the grid renders a
-            # checkbox only where one means something. Same anti-drift reasoning as
-            # the two above: a hard-coded copy in the template would keep offering
-            # "delete" on a read-only scope, and the server would 422 the save.
-            "permission_scope_levels": auth.PERMISSION_SCOPE_LEVELS,
-            # How the grid groups those scopes into collapsible sections. Derived, and it
-            # covers every scope: one absent from the group map falls into "Ungrouped"
-            # rather than rendering nowhere, because a scope with no row is a permission
-            # nobody can grant.
-            "permission_scope_groups": auth.grouped_permission_scopes(),
-        },
-    )
+    """The Users TAB of the RBAC page.
+
+    It stopped being a page of its own: a user's effective access is the union of their own
+    grid and whatever their identity-provider groups confer, so answering "what can this
+    person do?" meant holding this page and /groups open together.
+
+    This route stayed, rendering the same template opened on that tab, and it is NOT a
+    leftover alias. `docs/runbooks/entitle-user-jit-phase-0-resolver.md` and
+    `docs/design/entitle-user-jit.md` print `/users` as a thing to open, and a 301 cannot
+    carry a query string. Unlike /connections -- the other route in this codebase that
+    survives its page's consolidation -- there is no gate here for a test to parse out of the
+    body, because identity administration is never feature-gated. Do not add a decorative one
+    to make the two look alike.
+    """
+    return templates.TemplateResponse("rbac/index.html", _rbac_context(request, "users"))
 
 
 @app.get("/groups", response_class=HTMLResponse, include_in_schema=False)
 async def groups_page(request: Request):
-    return templates.TemplateResponse(
-        "groups/index.html",
-        {
-            "request": request,
-            "workgroups": list(settings.workgroups.keys()),
-            # Inject the backend permission catalog so the assignment grid
-            # can't drift from api/auth.py (was hard-coded in the template).
-            "permission_scopes": auth.PERMISSION_SCOPES,
-            # Same reasoning for the persona picker: injected from the registry so the
-            # dropdown cannot name a focus the resolver does not know. NOT called
-            # "persona"/"persona_label"/"persona_source" -- _profile_context returns
-            # those and its return OVERWRITES a route's context, silently.
-            "persona_options": [{"key": p.key, "label": p.label}
-                                for p in personas.all_personas()],
-            "permission_levels": auth.PERMISSION_LEVELS,
-            # Which levels each scope actually offers, so the grid renders a
-            # checkbox only where one means something. Same anti-drift reasoning as
-            # the two above: a hard-coded copy in the template would keep offering
-            # "delete" on a read-only scope, and the server would 422 the save.
-            "permission_scope_levels": auth.PERMISSION_SCOPE_LEVELS,
-            # How the grid groups those scopes into collapsible sections. Derived, and it
-            # covers every scope: one absent from the group map falls into "Ungrouped"
-            # rather than rendering nowhere, because a scope with no row is a permission
-            # nobody can grant.
-            "permission_scope_groups": auth.grouped_permission_scopes(),
-        },
-    )
+    """The Groups TAB of the RBAC page -- identity-provider group mappings.
+
+    Kept as a real route for the same reasons as /users above, and rather more of them: the
+    two Entitle runbooks and `docs/integrations/oidc.md` walk an operator through opening
+    `/groups`, and `templates/settings.html` links it from the single-sign-on panel.
+
+    Not gated on an identity provider being configured, even though the tab is only useful
+    with one. You add group mappings WHILE wiring single sign-on up -- before the first SSO
+    login can succeed -- so a gate would 404 the page at precisely the moment it is needed.
+    """
+    return templates.TemplateResponse("rbac/index.html", _rbac_context(request, "groups"))
 
 
 @app.get("/workgroups", response_class=HTMLResponse, include_in_schema=False)
