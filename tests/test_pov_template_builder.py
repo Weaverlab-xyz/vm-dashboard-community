@@ -158,6 +158,31 @@ def _install(**kw) -> str:
     return b.render_docker_install(**kw)
 
 
+# Where a stubbed `systemctl` records what it was asked to do.
+#
+# A FILE and not stderr, because every `systemctl` call in the block is written
+# `systemctl ... >/dev/null 2>&1 || true` -- deliberately, since none of them is an error
+# worth stopping on -- so a stub that echoed would be silenced by the script's own
+# redirect and the assertion would read "never called" for a call that happened.
+_TRACE = os.path.join(_SOCK_DIR, "systemctl.trace").replace("\\", "/")
+
+_TRACING_SYSTEMCTL = f'systemctl() {{ echo "$*" >> "{_TRACE}"; return 0; }}'
+
+
+def _systemctl_trace() -> str:
+    """What the stub recorded since `_reset_trace`, as one string."""
+    try:
+        with open(_TRACE, encoding="utf-8") as fh:
+            return fh.read()
+    except FileNotFoundError:
+        return ""
+
+
+def _reset_trace() -> None:
+    if os.path.exists(_TRACE):
+        os.remove(_TRACE)
+
+
 def test_the_stub_preludes_use_only_posix_function_names():
     """The preludes in this file are shell, and they run under whatever `sh` is.
 
@@ -392,6 +417,106 @@ yum() { return 1; }
     block = b.render_docker_install()
     refusal = block[block.index("could not install a container runtime"):]
     assert "$ID" in refusal[:160], "the refusal must name the distro it found"
+
+
+def test_the_podman_socket_is_both_enabled_and_started():
+    """Found the hard way on the live broker: `systemctl enable podman.socket` writes a
+    symlink and starts NOTHING, so a guest that was only enabled has no API until it is
+    rebooted -- while `docker version` answers the whole time. `start` without `enable` is
+    the mirror image and is the trap docker-ce sets on the RHEL family. Neither alone is a
+    working broker, so both words are asserted."""
+    _reset_trace()
+    p = _run_block(_install(), f"""
+PATH=""
+dnf() {{ return 9; }}
+yum() {{ return 9; }}
+service() {{ return 0; }}
+ln() {{ return 0; }}
+docker() {{ return 0; }}
+{_TRACING_SYSTEMCTL}
+""")
+    trace = _systemctl_trace()
+    assert p.returncode == 0, f"rc={p.returncode} {p.stderr[:300]}"
+    assert "enable podman.socket" in trace, \
+        f"enable, or the broker has no API after the next power cycle: {trace!r}"
+    assert "start podman.socket" in trace, \
+        f"and start, or it has none until then: {trace!r}"
+
+
+def test_podman_service_is_the_fallback_when_socket_activation_gives_nothing():
+    """Socket activation is the idiomatic path and is tried first. But an operator fixing
+    this by hand ends up at `systemctl enable podman; systemctl start podman` -- the API
+    service running persistently -- precisely because the socket alone sometimes leaves
+    nothing listening. The script has to reach the same place on its own."""
+    block = _install()
+    socket_at = block.index("enable podman.socket")
+    service_at = block.index("enable podman.service")
+    assert socket_at < service_at, "socket activation is tried first, service is the fallback"
+    guard = block[socket_at:service_at]
+    assert f"[ ! -S {b.PODMAN_SOCKET_PATH} ]" in guard, \
+        "the service fallback must be guarded on the socket not having appeared, or a " \
+        "guest where activation worked gets a second, redundant API service"
+
+
+def test_the_boot_gate_asks_podman_the_same_question_it_asks_docker():
+    """The hole this closes. `systemctl cat docker.service` is false on a podman-docker
+    guest -- there is no docker unit -- so the boot gate used to fall through entirely and
+    a template could bake with a socket that answers only because the install had just
+    started it. Every POV from that template comes up with a working `docker` command and
+    nothing listening."""
+    p = _run_block(_install(), """
+PATH=""
+dnf() { return 9; }
+yum() { return 9; }
+service() { return 0; }
+ln() { return 0; }
+docker() { return 0; }
+systemctl() {
+  case "$1" in
+    cat) case "$2" in docker.service) return 1 ;; podman.socket) return 0 ;; esac ;;
+    is-enabled) return 1 ;;
+  esac
+  return 0
+}
+""")
+    assert p.returncode != 0, \
+        "a podman template whose socket is not enabled at boot must not bake"
+    assert "podman.socket" in p.stderr and "boot" in p.stderr, \
+        f"the refusal must name the unit and say it is about boot: {p.stderr[:400]}"
+
+
+def test_a_podman_guest_enabled_through_the_service_satisfies_the_boot_gate():
+    """Either answer is a real one: socket activation, or the API service running
+    persistently. An operator who fixed a guest by hand usually has the second, and failing
+    a guest that is genuinely correct is how a gate gets disabled by the next person."""
+    p = _run_block(_install(), """
+PATH=""
+dnf() { return 9; }
+yum() { return 9; }
+service() { return 0; }
+ln() { return 0; }
+docker() { return 0; }
+systemctl() {
+  case "$1" in
+    cat) case "$2" in docker.service) return 1 ;; podman.socket) return 0 ;; esac ;;
+    is-enabled) case "$2" in podman.service) return 0 ;; *) return 1 ;; esac ;;
+  esac
+  return 0
+}
+""")
+    assert p.returncode == 0, \
+        f"podman.service enabled at boot is a correct guest: {p.stderr[:400]}"
+
+
+def test_the_state_probe_reports_the_socket_and_podmans_boot_state():
+    """The Runner column is where an SE reads this, and `podman version 4.9.4` beside no
+    socket is a green-looking line about a template whose every POV enrols and then fails
+    every job. The command and the socket disagree under Podman, and only the socket is
+    the agent's."""
+    assert b.AGENT_SOCKET_PATH in b._STATE_PROBE, \
+        "the probe must report whether the engine socket is there at all"
+    assert "podman.socket" in b._STATE_PROBE and "podman.service" in b._STATE_PROBE, \
+        "a podman guest has no docker.service, so its boot state needs asking for by name"
 
 
 def test_a_runtime_whose_socket_is_absent_is_refused_and_names_podman_socket():

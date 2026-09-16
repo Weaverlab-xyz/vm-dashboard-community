@@ -116,9 +116,13 @@ and before the `docker rm -f`, so a slow or failed install costs a re-broker not
 
 **Podman is a supported runtime here.** It serves the same Engine API on the same socket,
 and the agent only ever speaks that API — it never runs the `docker` command. Which is why
-the install also enables `podman.socket` and then checks that something is actually
-listening: the shim answering while nothing serves the API is a broker that enrols, goes
-green, and fails every Gateway and Config-Management job.
+the install **enables and starts** `podman.socket` and then checks that something is
+actually listening: the shim answering while nothing serves the API is a broker that
+enrols, goes green, and fails every Gateway and Config-Management job.
+
+Enabling alone leaves the guest with no API until its next reboot; starting alone leaves it
+with none after that reboot. Where socket activation yields no listening socket the install
+falls back to `podman.service`, the API service running persistently.
 
 ### Telling the dashboard what a guest runs
 

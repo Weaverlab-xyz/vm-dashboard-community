@@ -332,8 +332,22 @@ lab VM is a supported outcome here, not a degraded one.**
 > `podman-docker` is not optional garnish. Podman alone gives no `docker` command and no
 > `/var/run/docker.sock`, and the agent speaks the Engine API over that path directly —
 > it never runs the CLI. Nor does installing the package *start* anything: the install
-> enables `podman.socket` itself, because a guest where the shim answers and nothing is
-> listening enrols, goes green, and then fails every Gateway and Config-Management job.
+> **enables and starts** `podman.socket` itself, because a guest where the shim answers
+> and nothing is listening enrols, goes green, and then fails every Gateway and
+> Config-Management job.
+>
+> Both verbs matter, and they fail differently. `systemctl enable podman.socket` writes a
+> symlink and starts nothing, so an enabled-only guest has no API **until it is
+> rebooted**; starting without enabling is the mirror image, and is the trap `docker-ce`
+> sets on the RHEL family. Where socket activation produces no listening socket the
+> install falls back to `podman.service` — the API service running persistently, which is
+> what an operator reaches for by hand.
+
+The **boot gate asks Podman the same question**. It used to skip a podman-docker guest
+entirely, because `systemctl cat docker.service` is false there and there is no docker unit
+to enable — so a template could bake with a socket that answered only because the install
+had just started it, and every POV from it came up with a working `docker` command and
+nothing listening. Either `podman.socket` or `podman.service` being enabled satisfies it.
 
 Three more things are worth knowing before you rely on it:
 
