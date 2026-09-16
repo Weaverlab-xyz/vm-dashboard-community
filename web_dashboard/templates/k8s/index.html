@@ -1083,7 +1083,10 @@ function k8sPage() {
     // whichever workgroup sorts first would hand its cluster-admin kubeconfig to a team
     // nobody chose.
     defaultWorkgroup() {
-      return this.availableWorkgroups.includes('default') ? 'default' : '';
+      // `|| []` is not defensive padding: openRegister()/openProvision() call
+      // this, and tests/template_helpers_check.js builds an object holding only
+      // the methods a scenario names -- so `this` legitimately has no state.
+      return (this.availableWorkgroups || []).includes('default') ? 'default' : '';
     },
 
     openRetag(c) {
