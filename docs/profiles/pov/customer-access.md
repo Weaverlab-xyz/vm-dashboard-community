@@ -27,26 +27,28 @@ That page **reads**. Each row shows a ✓ or a – and the word for it, not a co
 card off lives on the POV's own page, which is where every other action on that POV lives too,
 and a checkbox on a page that records nothing would be worse than no checkbox.
 
-Every role and every card is always on the page. The product mix decides what each card
-**says**, never whether you can see it:
+The page shows the cards **this POV can run**. The product mix decides what each one says:
 
 | The card | What it means | What it offers |
 |---|---|---|
 | Live | This POV has the products, and the wire-up has run for them | A link to the tab that runs it |
 | Needs wiring | The tenant is set and the artifact is not | What to run, and a link to the Wired tab |
-| Not part of this POV | No tenant for that product on this row | Nothing — the fix is a decision about the evaluation, not a button |
 
-The "not part of this POV" cards are grouped into their own dashed section at the foot of each
-role on your page, headed *not part of this POV*. They are still tickable there — if you showed
-one anyway, that counts — and the customer never sees them at all.
+A card for a product this POV has no tenant for is **not shown**, on your page or the
+customer's, and a product with nothing else in it gets no heading either — a POV scoped to
+Password Safe shows the Password Safe and environment cards, and that is the whole page.
+Which products the evaluation includes is on the **Overview** tab, next to the tenants that
+decide it; add a tenant there and that product's cards appear, with nothing to re-enable.
 
-That last row is the one worth reading twice. It is **not** the same state as an estate-only
-feature being masked on this instance: nobody can turn it on from Settings, because there
-is nothing wrong. A POV scoped to Password Safe is a normal POV, and a page that greyed
-those cards out as unavailable would say the opposite.
+Those cards are not gone, only undrawn: nothing subtracts them from the catalog and no route
+is closed. This is **not** the same state as an estate-only feature being masked on this
+instance — nothing is wrong, and nobody needs to turn anything on from Settings. Earlier
+builds did list them on your page, in a dashed *not part of this POV* section, which on a
+one-product evaluation put two products' worth of rows you could not act on above the handful
+you were there for.
 
-A card that names two products, on a POV missing one of them, reads "not part of this POV"
-rather than "needs wiring". "Run the wire-up" would send you to a button that skips the
+A card that names two products needs both. On a POV missing one of them it is out of scope
+rather than "needs wiring" — "run the wire-up" would send you to a button that skips the
 half you came for.
 
 ### Ticking them off

@@ -9,19 +9,23 @@
   Broker, Wired, Share, Expires. The use-case checklist does not fit that shape — it is
   per-role, per-product and stateful — so this is where a POV stops being a row.
 
-  The Use cases tab is the reason the page exists, and its one rule is the same one
-  /use-cases keeps: **it never filters.** Every role and every card is always present. What
-  this POV is wired into decides each card's STATE, never whether you can see it — because
-  "we did not include Entitle in this evaluation" is a scoping decision worth reading, and
-  hiding those cards would make a Password-Safe-only POV look like a broken one.
+  The Use cases tab is the reason the page exists, and its one rule is that it shows what
+  this POV can run. The API always serves every group and every card — nothing is filtered
+  server-side, so a card is never LOST — but a card with no tenant behind it is not drawn:
+  it cannot be demoed, it cannot be ticked into meaning anything, and a Password-Safe-only
+  POV rendering two whole products' worth of un-runnable rows buries the six that matter.
+  Which products this evaluation includes is the Overview tab's job, stated once, and the
+  Summary tab reports against the in-scope denominator for the same reason.
 
   Three states, and their words are deliberately not /use-cases's three:
 
     ready         this POV has the products AND the wire-up has run for them
     needs_wiring  the tenant is there and the artifact is not — actionable, so it says
                   what to run and links to the tab with the button on it
-    out_of_scope  this POV has no tenant for that product — NO href and NO action link,
-                  because the fix is a decision about the evaluation, not a button
+    out_of_scope  this POV has no tenant for that product — dropped by `inScope()` before
+                  it reaches a row, because the fix is a decision about the evaluation
+                  rather than anything on this page. A group with nothing else in it
+                  renders no heading at all.
 
   Nothing here hard-codes a group key or a card id: the groups, their order, their copy
   and every card's state arrive from /api/pov/managed/<id>/use-cases, which reads
@@ -467,8 +471,8 @@
 
         <div class="chk-page-header">
           <p>
-            Grouped by the product each one proves. Every group is always here; what this
-            POV is wired into decides what each card says.
+            Grouped by the product each one proves, and narrowed to the products this POV
+            includes. What is wired decides what each card says.
           </p>
           <p class="chk-progress">
             <b x-text="summary.done"></b> run ·
@@ -477,98 +481,78 @@
           </p>
         </div>
 
-        <!-- One section per group, plus a second DASHED one for the cards this POV has no
-             tenant for. Both are driven by `sections(g)` and both use the row below, so
-             there is exactly one definition of a row and the two cannot drift.
-
-             An out-of-scope card stays TICKABLE. "We showed them anyway" is a thing that
-             happens in a POV, and a section that made those cards read-only would be
-             pretending it does not. -->
+        <!-- One section per group, carrying only the cards this POV can actually run. A
+             group with nothing in scope renders nothing at all — not an empty heading —
+             which is the same thing the customer's page and the /use-cases lead do. -->
         <template x-for="g in groups" :key="g.group">
-          <!-- The wrapper is load-bearing, not decoration: x-for clones its template's
-               first ELEMENT child, so a <template x-for> nested directly inside another
-               relies on a cloned <template> bringing its own content along. Every other
-               nested loop in this app goes template > div > template. -->
-          <div>
-          <template x-for="s in sections(g)" :key="s.key">
-            <div class="chk-section" :class="s.deferred ? 'chk-deferred' : ''">
-              <h2>
-                <span x-text="g.label"></span>
-                <span x-show="s.deferred"> · not part of this POV</span>
-                <span class="chk-count"
-                      x-text="s.deferred ? s.cards.length + ' out of scope'
-                              : s.cards.length + ' of ' + g.use_cases.length + ' in scope'"></span>
-              </h2>
-              <p class="chk-blurb" x-show="!s.deferred && g.blurb" x-text="g.blurb"></p>
+          <div class="chk-section" x-show="inScope(g).length">
+            <h2>
+              <span x-text="g.label"></span>
+              <span class="chk-count" x-text="inScope(g).length + ' in scope'"></span>
+            </h2>
+            <p class="chk-blurb" x-show="g.blurb" x-text="g.blurb"></p>
 
-              <template x-for="c in s.cards" :key="c.id">
-                <div class="chk-item chk-clickable"
-                     @click="rowClick(c, $event)"
-                     :class="c.progress.state === 'done' ? 'chk-done'
-                             : (c.progress.state === 'skipped' ? 'chk-skipped' : '')">
-                  <!-- Bound to `change`, not `click`: change fires after the browser has
-                       already flipped the box, so `el.checked` is the value the operator
-                       asked for rather than the one they are leaving. `toggleDone` then
-                       re-derives the box from what the server accepted, so a failed write
-                       snaps the tick back instead of leaving a tick nothing recorded. -->
-                  <input type="checkbox" class="chk-box"
-                         :checked="c.progress.state === 'done'"
-                         :disabled="busy === c.id"
-                         @change="toggleDone(c, $event.target)"
-                         :aria-label="'Mark ' + c.title + ' done'">
-                  <div class="chk-txt">
-                    <!-- Two elements rather than one conditional href: an <a> with no href
-                         is still focusable and still announces as a link, and the point of
-                         out_of_scope is that there is nowhere to go. -->
-                    <a x-show="c.state === 'ready'" :href="c.target"
-                       class="chk-name" x-text="c.title"></a>
-                    <span x-show="c.state !== 'ready'" class="chk-name" x-text="c.title"></span>
-                    <span class="chk-note" x-text="c.summary"></span>
-                    <span class="chk-tail">
-                      <span x-text="c.minutes + ' min'"></span>
-                      <button type="button" class="chk-btn"
-                              :class="c.progress.state === 'skipped' ? 'chk-btn-on' : ''"
-                              :disabled="busy === c.id"
-                              @click="mark(c, c.progress.state === 'skipped' ? '' : 'skipped')"
-                              x-text="c.progress.state === 'skipped' ? '✓ Skipped' : 'Skip'"></button>
-                      <a x-show="c.docs" :href="c.docs" target="_blank" rel="noopener noreferrer"
-                         class="chk-guide">Guide →</a>
-                    </span>
+            <template x-for="c in inScope(g)" :key="c.id">
+              <div class="chk-item chk-clickable"
+                   @click="rowClick(c, $event)"
+                   :class="c.progress.state === 'done' ? 'chk-done'
+                           : (c.progress.state === 'skipped' ? 'chk-skipped' : '')">
+                <!-- Bound to `change`, not `click`: change fires after the browser has
+                     already flipped the box, so `el.checked` is the value the operator
+                     asked for rather than the one they are leaving. `toggleDone` then
+                     re-derives the box from what the server accepted, so a failed write
+                     snaps the tick back instead of leaving a tick nothing recorded. -->
+                <input type="checkbox" class="chk-box"
+                       :checked="c.progress.state === 'done'"
+                       :disabled="busy === c.id"
+                       @change="toggleDone(c, $event.target)"
+                       :aria-label="'Mark ' + c.title + ' done'">
+                <div class="chk-txt">
+                  <!-- Two elements rather than one conditional href: an <a> with no href
+                       is still focusable and still announces as a link, and a
+                       needs_wiring card has nowhere to send you yet. -->
+                  <a x-show="c.state === 'ready'" :href="c.target"
+                     class="chk-name" x-text="c.title"></a>
+                  <span x-show="c.state !== 'ready'" class="chk-name" x-text="c.title"></span>
+                  <span class="chk-note" x-text="c.summary"></span>
+                  <span class="chk-tail">
+                    <span x-text="c.minutes + ' min'"></span>
+                    <button type="button" class="chk-btn"
+                            :class="c.progress.state === 'skipped' ? 'chk-btn-on' : ''"
+                            :disabled="busy === c.id"
+                            @click="mark(c, c.progress.state === 'skipped' ? '' : 'skipped')"
+                            x-text="c.progress.state === 'skipped' ? '✓ Skipped' : 'Skip'"></button>
+                    <a x-show="c.docs" :href="c.docs" target="_blank" rel="noopener noreferrer"
+                       class="chk-guide">Guide →</a>
+                  </span>
 
-                    <!-- needs_wiring is ACTIONABLE, so it says what to run and links to the
-                         tab with the button. out_of_scope is not: the fix is a tenant on the
-                         POV row, which is a decision about the evaluation rather than a
-                         click, so it gets no link at all. -->
-                    <p class="chk-sub" x-show="c.state === 'needs_wiring'"
-                       :title="c.needs.join(', ')">
-                      Needs <span x-text="c.needs.join(', ')"></span> —
-                      <a :href="c.action_link" class="chk-link">see what is wired</a>
-                    </p>
-                    <p class="chk-sub" x-show="c.state === 'out_of_scope'"
-                       :title="c.needs.join(', ')">
-                      Not part of this POV — no
-                      <span x-text="c.needs.join(' or ')"></span> tenant
-                    </p>
+                  <!-- needs_wiring is ACTIONABLE, so it says what to run and links to the
+                       tab with the button. out_of_scope never reaches a row here — those
+                       cards are dropped by inScope(), because the fix is a tenant on the
+                       POV row rather than anything on this page. -->
+                  <p class="chk-sub" x-show="c.state === 'needs_wiring'"
+                     :title="c.needs.join(', ')">
+                    Needs <span x-text="c.needs.join(', ')"></span> —
+                    <a :href="c.action_link" class="chk-link">see what is wired</a>
+                  </p>
 
-                    <p class="chk-sub chk-by" x-show="c.progress.state">
-                      <span x-text="c.progress.state === 'done' ? 'Run by' : 'Skipped by'"></span>
-                      <span x-text="c.progress.by || 'someone'"></span>
-                      <span x-show="c.progress.by_kind === 'accessor'">(the customer)</span>
-                    </p>
+                  <p class="chk-sub chk-by" x-show="c.progress.state">
+                    <span x-text="c.progress.state === 'done' ? 'Run by' : 'Skipped by'"></span>
+                    <span x-text="c.progress.by || 'someone'"></span>
+                    <span x-show="c.progress.by_kind === 'accessor'">(the customer)</span>
+                  </p>
 
-                    <!-- The customer's own words, and the reason this feature is worth more
-                         than a row of ticks. Rendered with x-text, never x-html: it is text
-                         somebody outside the account typed. -->
-                    <div class="chk-sub" x-show="c.progress.note">
-                      <p class="chk-quote"
-                         :class="c.progress.by_kind === 'accessor' ? 'chk-quote-customer' : ''"
-                         x-text="c.progress.note"></p>
-                    </div>
+                  <!-- The customer's own words, and the reason this feature is worth more
+                       than a row of ticks. Rendered with x-text, never x-html: it is text
+                       somebody outside the account typed. -->
+                  <div class="chk-sub" x-show="c.progress.note">
+                    <p class="chk-quote"
+                       :class="c.progress.by_kind === 'accessor' ? 'chk-quote-customer' : ''"
+                       x-text="c.progress.note"></p>
                   </div>
                 </div>
-              </template>
-            </div>
-          </template>
+              </div>
+            </template>
           </div>
         </template>
       </div>
@@ -1629,25 +1613,15 @@
         ];
       },
 
-      // Two sections per group at most: what this POV can run, and what it has no tenant
-      // for. Both are rendered from the ONE row definition in the markup, because the
-      // out-of-scope cards must stay tickable and a second copy of the row is how one of
-      // them quietly stops being.
+      // What this POV can actually run. A card with no tenant behind it is dropped rather
+      // than stated: this page is the SE's working checklist, and the products an
+      // evaluation does not include are already spelled out on the Overview tab — a wall
+      // of rows nobody can tick only makes the list longer to read past.
       //
-      // `.filter(` is fine here and not in loadUseCases(): a product mix may STATE a card,
-      // never remove it, and both lists are always rendered.
-      sections(g) {
-        const cards = g.use_cases || [];
-        const out = [{
-          key: g.group + ':scope',
-          deferred: false,
-          cards: cards.filter(c => c.state !== 'out_of_scope'),
-        }];
-        const deferred = cards.filter(c => c.state === 'out_of_scope');
-        if (deferred.length) {
-          out.push({ key: g.group + ':deferred', deferred: true, cards: deferred });
-        }
-        return out;
+      // Same name and same body as the customer's page and the /use-cases lead, which is
+      // now the one rule across all three surfaces rather than two of them.
+      inScope(g) {
+        return (g.use_cases || []).filter(c => c.state !== 'out_of_scope');
       },
 
       // The box is the source of truth for what the operator ASKED for; the server is the
