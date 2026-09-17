@@ -252,13 +252,14 @@ _SHELL = """<!doctype html>
   :root {{ color-scheme: light dark; }}
   body {{ margin:0; background:{body_bg}; color:#0f172a;
          font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }}
-  header {{ background:{nav_bg}; color:#fff; }}
+  header {{ background:{nav_bg}; color:{nav_fg}; }}
   header .lockup {{ max-width:820px; margin:0 auto; padding:.85rem 1.25rem;
                     display:flex; align-items:center; gap:.6rem; }}
   header .brand {{ font-size:1.05rem; font-weight:700; letter-spacing:-.01em; }}
   header .slash {{ color:{nav_weft}; font-weight:300; }}
   header .product {{ font-size:.85rem; opacity:.9; }}
   .rail {{ height:4px; background:{rail}; }}
+  header img.logo {{ height:26px; width:auto; max-width:200px; display:block; }}
   main {{ max-width:820px; margin:0 auto; padding:2.5rem 1.25rem 4rem; }}
   a {{ color:{link}; }}
   h1,h2,h3 {{ line-height:1.25; margin-top:2rem; }}
@@ -274,9 +275,7 @@ _SHELL = """<!doctype html>
 </style></head>
 <body>
 <header><div class="lockup">
-<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke-width="2.2"
-     stroke-linecap="round" aria-hidden="true">
-<path d="{mark_warp}" stroke="{nav_warp}"/><path d="{mark_weft}" stroke="{nav_weft}"/></svg>
+{mark}
 <span class="brand">{brand}</span><span class="slash">/</span><span class="product">{product}</span>
 </div></header>{rail_el}
 <main>
@@ -288,7 +287,7 @@ _SHELL = """<!doctype html>
 def _shell(title: str, body: str) -> str:
     """Wrap rendered Markdown in the branded shell.
 
-    One helper rather than two direct ``.format()`` call sites: the shell now takes ten
+    One helper rather than two direct ``.format()`` call sites: the shell takes a dozen
     fields instead of two, and threading those through both callers by hand is how one of
     them ends up a version behind.
 
@@ -297,6 +296,11 @@ def _shell(title: str, body: str) -> str:
     than taking the whole dashboard down -- ``install_profile()`` reads ``config_service``,
     so a database that is down or not yet migrated must yield an unbranded-but-readable
     page, never a 500. The env default is the same fallback ``feature_flags`` itself uses.
+
+    An uploaded logo renders here too, which means it is served to anonymous visitors. That
+    is already true of the brand name below and of the sign-in page, so it is not a new
+    exposure -- but it is a decision: an operator who uploads an internal-only mark is
+    publishing it to anyone who can reach ``/docs``.
 
     Note ``/docs`` is public and unauthenticated, so this makes the profile name readable
     without signing in. That is deliberate, and already true of ``GET /api/features`` which
@@ -319,17 +323,38 @@ def _shell(title: str, body: str) -> str:
         profile = settings.install_profile
     theme = ui_theme.theme_for(profile, settings.app_env, **branding.overrides())
     rail = theme["hex"]["rail"]
+
+    # The third copy of the brand mark, and the one that cannot be a template conditional:
+    # _SHELL is a .format() string, not Jinja. Built here rather than as a second _SHELL
+    # variant for the reason this function exists at all (see the docstring above) -- two
+    # shells is how one of them ends up a version behind.
+    #
+    # This is HTML we construct, so unlike `brand` and `product` it must NOT be escaped.
+    # The URL is safe because it is built from a digest that services.branding matched
+    # against ^[0-9a-f]{64}$ -- never from a raw config read. Keep it that way: _SHELL does
+    # not autoescape, and this page is public.
+    logo = theme.get("logo")
+    if logo:
+        mark = f'<img class="logo" src="{logo["url"]}" alt="" aria-hidden="true">'
+    else:
+        mark = (
+            '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke-width="2.2"'
+            ' stroke-linecap="round" aria-hidden="true">'
+            f'<path d="{theme["mark_warp_path"]}" stroke="{theme["hex"]["nav_warp"]}"/>'
+            f'<path d="{theme["mark_weft_path"]}" stroke="{theme["hex"]["nav_weft"]}"/></svg>'
+        )
+
     return _SHELL.format(
+        mark=mark,
         title=title,
         body=body,
         brand=_html.escape(theme["brand"]),
         product=_html.escape(theme["product"]),
         favicon=theme["favicon"],
-        mark_warp=theme["mark_warp_path"],
-        mark_weft=theme["mark_weft_path"],
         rail=rail or "transparent",
         rail_el='<div class="rail"></div>' if rail else "",
-        **{k: theme["hex"][k] for k in ("nav_bg", "nav_warp", "nav_weft", "body_bg", "link")},
+        **{k: theme["hex"][k]
+           for k in ("nav_bg", "nav_fg", "nav_warp", "nav_weft", "body_bg", "link")},
     )
 
 

@@ -192,24 +192,217 @@
         </div>
       </div>
 
+      <!-- Logo -->
+      {#
+        Applies on choosing a file, not on Save -- the helper text says so, because every
+        other control in this card is deferred. See uploadLogo for why: a binary deferred
+        behind the same button would be two writes with one outcome to report.
+
+        The `accept` attribute is a file-picker hint, not a filter. The control is the
+        server-side magic-number sniffer in services/brand_logo, which also rejects an SVG
+        carrying script or external references.
+      #}
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Logo</label>
+        <p class="text-xs text-gray-400 mb-2">
+          Replaces the mark in the navigation bar, the menu and the sign-in card.
+          PNG, JPEG, WebP<span x-show="brandingLogoSvgOk"> or SVG</span>, up to 512&nbsp;KB.
+          A wide wordmark works better than a square icon. Saved as soon as you choose a
+          file. The browser-tab icon is not changed.
+        </p>
+        <div class="flex flex-wrap items-center gap-4">
+          {# A neutral backdrop, not white: a white-on-transparent logo is invisible on this
+             card, which is a real and common way to think an upload failed. #}
+          <div class="flex items-center justify-center h-14 min-w-[6rem] px-3 rounded-lg border border-gray-200 bg-gray-100">
+            <template x-if="brandingLogo">
+              <img :src="brandingLogo.url" alt="Current logo"
+                   class="h-10 w-auto max-w-48 object-contain">
+            </template>
+            {# What they are replacing, so "Default" is a visible state rather than an
+               empty box. Mirrors _brand_mark.html's paths at the login card's weight. #}
+            <template x-if="!brandingLogo">
+              <div class="flex items-center gap-2 text-gray-400">
+                <svg class="h-8 w-8" viewBox="0 0 24 24" fill="none" stroke-width="2.2"
+                     stroke-linecap="round" aria-hidden="true">
+                  <path d="{{ theme.mark_warp_path }}" stroke="currentColor"/>
+                  <path d="{{ theme.mark_weft_path }}" stroke="currentColor" class="opacity-60"/>
+                </svg>
+                <span class="text-xs font-medium">Default</span>
+              </div>
+            </template>
+          </div>
+
+          <div class="flex-1 min-w-0">
+            <input type="file" @change="uploadLogo($event)" :disabled="brandingLogoBusy"
+                   :accept="brandingLogoSvgOk
+                     ? 'image/png,image/jpeg,image/webp,image/svg+xml'
+                     : 'image/png,image/jpeg,image/webp'"
+                   class="block w-full text-xs text-gray-600 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 file:cursor-pointer disabled:opacity-50">
+            <p class="text-xs text-gray-400 mt-1" x-show="brandingLogo" x-cloak>
+              <span x-text="brandingLogo ? (brandingLogo.filename || 'Uploaded') : ''"></span>
+              <span x-show="brandingLogo && brandingLogo.bytes">
+                &middot; <span x-text="brandingLogo ? Math.round(brandingLogo.bytes / 1024) : ''"></span>&nbsp;KB
+              </span>
+              <span x-show="brandingLogo && brandingLogo.width">
+                &middot; <span x-text="brandingLogo ? brandingLogo.width + '&times;' + brandingLogo.height : ''"></span>
+              </span>
+            </p>
+          </div>
+
+          <button type="button" @click="removeLogo()" x-show="brandingLogo" x-cloak
+                  :disabled="brandingLogoBusy"
+                  class="text-xs text-gray-500 hover:text-gray-700 font-medium disabled:opacity-50">
+            Remove logo
+          </button>
+        </div>
+        <p x-show="brandingLogoError" x-cloak x-text="brandingLogoError"
+           class="text-xs text-red-600 mt-2"></p>
+      </div>
+
       <!-- Accent -->
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">Accent colour</label>
-        <p class="text-xs text-gray-400 mb-2">Colours the navigation bar, the menu and the sign-in page. Each option is checked for contrast, so the text stays readable.</p>
+        <p class="text-xs text-gray-400 mb-2">Colours the navigation bar, the menu and the sign-in page. Each preset is checked for contrast, so the text stays readable; a custom palette is checked in the preview instead.</p>
         <div class="flex flex-wrap gap-2">
-          <button type="button" @click="branding.brand_accent = ''"
+          <button type="button" @click="pickPreset('')"
                   class="px-3 py-2 rounded-lg border text-xs font-medium transition-colors"
-                  :class="branding.brand_accent ? 'border-gray-200 text-gray-600 hover:border-gray-300' : 'border-blue-500 ring-2 ring-blue-200 text-gray-900'">
+                  :class="(branding.brand_accent || brandingCustom) ? 'border-gray-200 text-gray-600 hover:border-gray-300' : 'border-blue-500 ring-2 ring-blue-200 text-gray-900'">
             Default
           </button>
           <template x-for="a in brandingAccents" :key="a.key">
-            <button type="button" @click="branding.brand_accent = a.key"
+            <button type="button" @click="pickPreset(a.key)"
                     class="flex items-center gap-2 px-3 py-2 rounded-lg border text-xs font-medium transition-colors"
                     :class="branding.brand_accent === a.key ? 'border-blue-500 ring-2 ring-blue-200 text-gray-900' : 'border-gray-200 text-gray-600 hover:border-gray-300'">
               <span class="h-4 w-4 rounded-full flex-shrink-0 border border-black/10"
                     :style="'background-color: ' + a.swatch"></span>
               <span x-text="a.label"></span>
             </button>
+          </template>
+          {# The tenth option. Its swatch splits the two colours that dominate the result --
+             the nav surface and the accent -- so the button previews the choice rather than
+             only naming it. #}
+          <button type="button" @click="brandingCustom = true; branding.brand_accent = ''"
+                  class="flex items-center gap-2 px-3 py-2 rounded-lg border text-xs font-medium transition-colors"
+                  :class="brandingCustom ? 'border-blue-500 ring-2 ring-blue-200 text-gray-900' : 'border-gray-200 text-gray-600 hover:border-gray-300'">
+            <span class="h-4 w-4 rounded-full flex-shrink-0 border border-black/10"
+                  :style="'background: linear-gradient(135deg, ' + (branding.brand_secondary || '#030973') + ' 0 50%, ' + (branding.brand_accent_hex || '#ff5400') + ' 50% 100%)'"></span>
+            <span>Custom&hellip;</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Custom brand colours -->
+      {#
+        Three free hexes, which the eight presets deliberately are not. They work because
+        ui_theme resolves them to hand-written CSS classes rather than to Tailwind
+        utilities -- see the header of templates/_brand_css.html for why that distinction
+        is what makes an arbitrary colour possible here at all.
+
+        All three or none: the API returns 422 on a partial set, because twenty-one chrome
+        slots cannot be derived from one colour without inventing the other twenty.
+      #}
+      <div x-show="brandingCustom" x-cloak class="rounded-lg border border-gray-200 p-4 space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <p class="text-xs text-gray-500">
+            Paste the hex values from the customer's brand guide. All three are required.
+          </p>
+          <template x-for="(preset, key) in brandPresets" :key="key">
+            <button type="button" @click="applyBrandPreset(key)"
+                    class="text-xs font-medium text-blue-600 hover:text-blue-700">
+              Use <span x-text="preset.label"></span> colours
+            </button>
+          </template>
+        </div>
+
+        {#
+          The TEXT box is the primary affordance and the bound one: a brand guide hands you
+          "#FF5400", and typing it beats hunting for it on a colour wheel.
+
+          The colour well is deliberately NOT x-model. An input[type=color] coerces any
+          value it cannot parse to #000000, so two-way binding would rewrite a half-typed
+          hex to black on every keystroke and make the text box unusable.
+        #}
+        <div class="grid sm:grid-cols-3 gap-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Primary</label>
+            <div class="flex items-center gap-2">
+              <input type="color" :value="branding.brand_primary || '#000000'"
+                     @input="branding.brand_primary = $event.target.value"
+                     class="h-10 w-12 flex-shrink-0 border border-gray-300 rounded-lg cursor-pointer">
+              <input type="text" x-model="branding.brand_primary" maxlength="7"
+                     @change="normaliseHex('brand_primary')" placeholder="#1903A6"
+                     class="w-full min-w-0 border border-gray-300 rounded-lg px-2 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <p class="text-xs text-gray-400 mt-1">Buttons, links and the selected menu row.</p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Secondary</label>
+            <div class="flex items-center gap-2">
+              <input type="color" :value="branding.brand_secondary || '#000000'"
+                     @input="branding.brand_secondary = $event.target.value"
+                     class="h-10 w-12 flex-shrink-0 border border-gray-300 rounded-lg cursor-pointer">
+              <input type="text" x-model="branding.brand_secondary" maxlength="7"
+                     @change="normaliseHex('brand_secondary')" placeholder="#030973"
+                     class="w-full min-w-0 border border-gray-300 rounded-lg px-2 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <p class="text-xs text-gray-400 mt-1">The navigation bar and the menu.</p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Accent</label>
+            <div class="flex items-center gap-2">
+              <input type="color" :value="branding.brand_accent_hex || '#000000'"
+                     @input="branding.brand_accent_hex = $event.target.value"
+                     class="h-10 w-12 flex-shrink-0 border border-gray-300 rounded-lg cursor-pointer">
+              <input type="text" x-model="branding.brand_accent_hex" maxlength="7"
+                     @change="normaliseHex('brand_accent_hex')" placeholder="#FF5400"
+                     class="w-full min-w-0 border border-gray-300 rounded-lg px-2 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <p class="text-xs text-gray-400 mt-1">Badges, highlights and the logo strand.</p>
+          </div>
+        </div>
+
+        {#
+          The same colour jobs the nav bar and the sign-in card will use, computed the way
+          the server computes them, so a bad pick is visible here rather than after the
+          reload. Every text colour is chosen by luminance, not assumed.
+        #}
+        <div x-show="branding.brand_primary && branding.brand_secondary && branding.brand_accent_hex">
+          <p class="text-xs text-gray-500 mb-1">Preview</p>
+          <div class="rounded-lg overflow-hidden border border-gray-200">
+            <div class="flex items-center gap-2 px-3 py-2"
+                 :style="'background-color: ' + branding.brand_secondary + '; color: ' + textOn(branding.brand_secondary)">
+              <span class="text-sm font-bold tracking-tight">Infrastructure</span>
+              <span class="text-xs font-semibold px-2 py-0.5 rounded-full"
+                    :style="'background-color: ' + branding.brand_accent_hex + '; color: ' + textOn(branding.brand_accent_hex)">Production</span>
+              <span class="ml-auto text-xs px-2 py-1 rounded"
+                    :style="'background-color: ' + branding.brand_primary + '; color: ' + textOn(branding.brand_primary)">Selected</span>
+            </div>
+            <div class="flex flex-wrap items-center gap-3 px-3 py-3 bg-white">
+              <span class="text-xs font-semibold px-3 py-2 rounded-lg"
+                    :style="'background-color: ' + branding.brand_primary + '; color: ' + textOn(branding.brand_primary)">Sign in</span>
+              <a href="#" @click.prevent class="text-xs font-medium underline"
+                 :style="'color: ' + inkOn(branding.brand_primary)">A link on a white page</a>
+            </div>
+          </div>
+          {#
+            Amber and non-blocking. The presets are hand-checked for contrast and these are
+            not, but a customer's brand is not negotiable -- naming the cost is the useful
+            thing to do; refusing to save is not.
+          #}
+          <template x-if="brandingContrastWarnings().length">
+            <div class="mt-2 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
+              <p class="text-xs font-medium text-amber-800">
+                Readable, but below the WCAG AA target of 4.5:1:
+              </p>
+              <ul class="mt-1 text-xs text-amber-700 list-disc list-inside">
+                <template x-for="w in brandingContrastWarnings()" :key="w">
+                  <li x-text="w"></li>
+                </template>
+              </ul>
+              <p class="mt-1 text-xs text-amber-700">
+                Link text is darkened automatically to stay legible on white.
+              </p>
+            </div>
           </template>
         </div>
       </div>
@@ -6596,12 +6789,28 @@ function settingsPage() {
     branding: {
       brand_name: '', brand_full: '', brand_accent: '',
       brand_env_label: '', brand_env_color: '',
+      brand_primary: '', brand_secondary: '', brand_accent_hex: '',
     },
     // Swatches come from the server (ui_theme.accent_choices) rather than being repeated
     // here, so the colour shown on the button is the colour the theme will apply.
     brandingAccents: [],
     brandingDefaults: {},
     brandingSaving: false,
+    // UI-only: which half of the colour control is showing. Not a config row, hence no
+    // brand_ prefix -- everything named brand_* in this object is persisted verbatim.
+    brandingCustom: false,
+    // The three hexes as a named set, so "match our brand" is one click for the customer
+    // this was built for. Lowercase to match what the API stores.
+    brandPresets: {
+      bt: { label: 'BeyondTrust', primary: '#1903a6', secondary: '#030973', accent: '#ff5400' },
+    },
+    // The uploaded logo. Deliberately NOT a member of `branding`: that object is PATCHed
+    // wholesale when Save is pressed, so a logo in it would carry ~700 KB of base64 along
+    // with every colour change. It has its own endpoints and applies immediately.
+    brandingLogo: null,       // {url, mime, bytes, width, height, filename} or null
+    brandingLogoBusy: false,
+    brandingLogoError: '',
+    brandingLogoSvgOk: true,
     integrations: [
       { key: 'vmware',       label: 'VMware Workstation',      hasConfig: false, enabled: false,
         desc: 'VM management on a Windows host. Toggle to enable.' },
@@ -6796,8 +7005,14 @@ function settingsPage() {
         // same five keys, but assigning the response wholesale would hand Alpine whatever
         // an older or newer build happens to send.
         this.branding = { ...this.branding, ...(data.config || {}) };
+        // The stored trio is the only record that custom mode was chosen; theme_for zeroes
+        // brand_accent when it wins, so there is nothing else to read it back from.
+        this.brandingCustom = !!this.branding.brand_primary;
         this.brandingAccents = data.accents || [];
         this.brandingDefaults = data.defaults || {};
+        // Its own key, not spread into `branding` -- see the note on brandingLogo.
+        this.brandingLogo = (data.logo && data.logo.url) ? data.logo : null;
+        this.brandingLogoSvgOk = data.logo_svg_allowed !== false;
       } catch (e) {
         // Non-fatal — the card keeps its defaults and the rest of the page still works.
       }
@@ -6815,9 +7030,114 @@ function settingsPage() {
       return (0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2]) > 0.179 ? '#0f172a' : '#ffffff';
     },
 
+    // ── Custom brand colours ─────────────────────────────────────────────
+    // These five mirror ui_theme's _luminance / _ratio / _mix / _step / _ink, for the same
+    // reason textOn above is duplicated and says so: the chrome is baked into the page by
+    // the server-side context processor, so the only way to show a colour before the
+    // reload is to recompute it here -- and a preview that disagreed with the server would
+    // be worse than no preview at all. Keep the constants (0.179, 4.5, the 19 5% steps)
+    // identical on both sides.
+    lumin(hex) {
+      const m = /^#([0-9a-f]{6})$/i.exec(hex || '');
+      if (!m) return null;
+      const ch = [0, 2, 4].map(i => {
+        const c = parseInt(m[1].substr(i, 2), 16) / 255;
+        return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+      });
+      return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
+    },
+
+    contrastRatio(a, b) {
+      const la = this.lumin(a), lb = this.lumin(b);
+      if (la === null || lb === null) return 1;
+      return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+    },
+
+    mixHex(a, b, t) {
+      const pa = /^#([0-9a-f]{6})$/i.exec(a || '');
+      const pb = /^#([0-9a-f]{6})$/i.exec(b || '');
+      if (!pa || !pb) return a || '#000000';
+      return '#' + [0, 2, 4].map(i => {
+        const ca = parseInt(pa[1].substr(i, 2), 16);
+        const cb = parseInt(pb[1].substr(i, 2), 16);
+        return Math.round(ca + (cb - ca) * t).toString(16).padStart(2, '0');
+      }).join('');
+    },
+
+    // Toward the surface's OWN legible foreground, not a fixed lighten or darken -- see
+    // the note on ui_theme._step for why either fixed direction is wrong half the time.
+    stepHex(bg, t) { return this.mixHex(bg, this.textOn(bg), t); },
+
+    // A brand colour darkened until it passes AA as text on white. A colour chosen to work
+    // as a filled surface is usually too light to read at 16px.
+    inkOn(hex) {
+      let out = hex;
+      for (let i = 0; i < 19; i++) {
+        out = this.mixHex(hex, '#000000', i * 0.05);
+        if (this.contrastRatio(out, '#ffffff') >= 4.5) return out;
+      }
+      return out;
+    },
+
+    // Selecting a preset and selecting custom are mutually exclusive: ui_theme lets the
+    // trio outrank a stored accent, so leaving both set would show a selected swatch that
+    // is not what renders.
+    pickPreset(key) {
+      this.branding.brand_accent = key;
+      this.brandingCustom = false;
+      this.branding.brand_primary = '';
+      this.branding.brand_secondary = '';
+      this.branding.brand_accent_hex = '';
+    },
+
+    applyBrandPreset(key) {
+      const p = this.brandPresets[key];
+      if (!p) return;
+      this.brandingCustom = true;
+      this.branding.brand_accent = '';
+      this.branding.brand_primary = p.primary;
+      this.branding.brand_secondary = p.secondary;
+      this.branding.brand_accent_hex = p.accent;
+    },
+
+    // Normalise what a person typed or pasted. Accepts '1903A6' and '#1903a6'; anything
+    // else is left alone so a half-typed value is not destroyed mid-keystroke.
+    normaliseHex(field) {
+      let v = (this.branding[field] || '').trim().toLowerCase();
+      if (/^[0-9a-f]{6}$/.test(v)) v = '#' + v;
+      if (/^#[0-9a-f]{6}$/.test(v)) this.branding[field] = v;
+    },
+
+    // Only the pairs that actually fail. Advisory, never blocking: a customer's brand is
+    // what it is, and the job is to make the cost visible before the reload rather than to
+    // refuse it. The foregrounds are computed, so these fire only for a genuine mid-tone
+    // where neither black nor white clears AA.
+    brandingContrastWarnings() {
+      const p = this.branding.brand_primary;
+      const s = this.branding.brand_secondary;
+      const a = this.branding.brand_accent_hex;
+      if (!p || !s || !a) return [];
+      const out = [];
+      const check = (label, bg) => {
+        const r = this.contrastRatio(this.textOn(bg), bg);
+        if (r < 4.5) out.push(label + ' is ' + r.toFixed(1) + ':1.');
+      };
+      check('Navigation text on your secondary colour', s);
+      check('Button text on your primary colour', p);
+      check('Badge text on your accent colour', a);
+      return out;
+    },
+
     // The swatch the banner falls back to when no colour is picked. '#1e3a8a' is the
     // shipped blue, used when no accent is chosen either.
+    //
+    // A custom palette answers first, because theme_for resolves the banner's default to
+    // hex.nav_bg and the custom trio sets that to the secondary colour. Reading the accent
+    // list here instead would show a blue strip and then render a navy one.
     accentSwatch() {
+      if (this.brandingCustom && this.branding.brand_secondary) {
+        return this.branding.brand_secondary;
+      }
       const a = this.brandingAccents.find(x => x.key === this.branding.brand_accent);
       return a ? a.swatch : '#1e3a8a';
     },
@@ -6838,11 +7158,75 @@ function settingsPage() {
       }
     },
 
+    // Applies immediately rather than on Save. One request, one outcome to report -- a
+    // deferred binary would mean two writes behind one button and a toast that cannot
+    // honestly describe a half-failure.
+    async uploadLogo(ev) {
+      const file = ev.target.files && ev.target.files[0];
+      // Clear the input straight away, or re-picking the SAME file after a rejection does
+      // not fire @change and the retry silently does nothing.
+      ev.target.value = '';
+      if (!file) return;
+
+      this.brandingLogoError = '';
+      // A local check for a fast message; the server enforces the real limit.
+      if (file.size > 512 * 1024) {
+        this.brandingLogoError = 'That file is ' + Math.round(file.size / 1024)
+          + ' KB. The limit is 512 KB.';
+        return;
+      }
+
+      this.brandingLogoBusy = true;
+      try {
+        const data = await API.post('/api/setup/branding/logo', {
+          filename: file.name,
+          content_type: file.type || '',
+          content_b64: await window.fileToBase64(file),
+        });
+        this.brandingLogo = data;
+        this.showToast('Logo uploaded.');
+        // Same reason saveBranding reloads: the mark is rendered by the server-side
+        // context processor, so there is nothing here for Alpine to repaint.
+        setTimeout(() => window.location.reload(), 600);
+      } catch (e) {
+        this.brandingLogoError = e.message || 'The upload failed.';
+        this.brandingLogoBusy = false;
+      }
+    },
+
+    async removeLogo() {
+      this.brandingLogoBusy = true;
+      this.brandingLogoError = '';
+      try {
+        await API.delete('/api/setup/branding/logo');
+        this.brandingLogo = null;
+        this.showToast('Logo removed.');
+        setTimeout(() => window.location.reload(), 600);
+      } catch (e) {
+        this.brandingLogoError = e.message || 'Could not remove the logo.';
+        this.brandingLogoBusy = false;
+      }
+    },
+
     async resetBranding() {
       this.branding = {
         brand_name: '', brand_full: '', brand_accent: '',
         brand_env_label: '', brand_env_color: '',
+        brand_primary: '', brand_secondary: '', brand_accent_hex: '',
       };
+      this.brandingCustom = false;
+      // "Reset to defaults" that left a customer logo in the nav bar would read as a bug.
+      // Guarded so a failed delete does not abort the colour reset -- the two are separate
+      // writes, and the colours are the ones the button is named after.
+      if (this.brandingLogo) {
+        try {
+          await API.delete('/api/setup/branding/logo');
+          this.brandingLogo = null;
+        } catch (e) {
+          this.brandingLogoError = 'The colours were reset, but the logo could not be '
+            + 'removed: ' + (e.message || 'unknown error');
+        }
+      }
       await this.saveBranding();
     },
 

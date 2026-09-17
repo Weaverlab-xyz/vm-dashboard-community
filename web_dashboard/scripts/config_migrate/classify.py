@@ -183,6 +183,16 @@ _RUNTIME_HANDLE_PREFIXES = (
     "entitle_k8s_tfstate_",
     "rancher_cluster_id_",
     "rancher_manifest_url_",
+    # The uploaded logo's pointer rows (etag/mime/w/h). The bytes live in `brand_asset`,
+    # which this tool does not carry -- its scope is app_config -- so a migrated pointer is
+    # an orphan of exactly the kind this tier exists for: the target would render an <img>
+    # at a digest it has never stored, and the public logo route answers 404. That is a
+    # broken image in the nav bar of every page, including the sign-in screen.
+    #
+    # Dropped rather than carried, so the target falls back to the built-in mark and the
+    # operator re-uploads. The three brand COLOURS are plain hex strings with no such
+    # dependency and migrate normally, which is the behaviour you want.
+    "brand_logo_",
 )
 
 

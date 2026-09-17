@@ -1,0 +1,101 @@
+{# The operator's own three colours, as real CSS.
+
+   The shipped palettes in services/ui_theme are literal Tailwind utilities, because the
+   app is on the Play CDN and a composed class name would not survive a build step that
+   purges by scanning source. An arbitrary hex cannot be a utility at all, so a custom
+   palette fills the same chrome slots with the hand-written class names below. They are
+   not Tailwind classes: nothing purges them, and the class attribute in base.html that
+   interpolates theme.nav_bg does not change.
+
+   Two rules govern every edit to this file.
+
+   1. EVERY SELECTOR IS SCOPED to `.brand-custom`, which ui_theme puts on <html>. A bare
+      `.brand-nav` is specificity (0,1,0) -- a tie with any Tailwind utility on the same
+      element setting the same property, and a tie is broken by source order, which for a
+      sheet the CDN injects at runtime is script timing. The overlaps are real and
+      deliberate: base.html:114 carries `text-white` beside theme.nav_bg, :161 and :260
+      carry `hover:text-white`, :260 carries `bg-white/10`, and login.html:77 and :136
+      carry `text-white` beside theme.login_btn. The descendant selector makes these
+      (0,2,0) and the question never has to be asked. _checklist_styles.html's header
+      states the same rule for the same reason.
+
+   2. VALUES COME FROM VARIABLES, NEVER FROM JINJA. The only interpolation in this file is
+      the declaration list in :root, which ui_theme._custom_palette builds out of
+      _mix/_text_on/_ink output and hexes that matched its ^#[0-9a-f]{6}$ check. That
+      matters more here than anywhere else in the app: this is inside a <style> element,
+      where autoescaping buys nothing -- CSS does not decode HTML entities, so a closing
+      style tag in a stored value would end the block and the rest would parse as markup.
+      A new rule that interpolates a config value directly is a script-injection bug, not
+      a styling choice.
+
+   Known limitation, recorded rather than fixed: `border-white/15` at base.html:208 and
+   :258 and `bg-white/10` at :260 are hardcoded and go nearly invisible on a pale nav.
+   Overriding them means selecting on a Tailwind-generated class name, which is exactly
+   the coupling rule 1 exists to avoid. Revisit only if somebody reports it.
+
+   Absent entirely when custom mode is off, so an instance that never opened the
+   Appearance panel renders byte-identical HTML to what it always did. #}
+{% if theme.brand_css %}
+<style>
+  :root { {{ theme.brand_css }} }
+
+  /* The nav bar and the flyout drawer. Sets `color` as well as the surface, which is what
+     overrides the hardcoded text-white on a light brand. */
+  .brand-custom .brand-nav {
+    background-color: var(--brand-secondary);
+    color: var(--brand-secondary-fg);
+  }
+  .brand-custom .brand-nav-hover:hover { background-color: var(--brand-secondary-hover); }
+  /* For a descendant of the bar that sets its own colour and so does not inherit the
+     bar's -- the drawer's wordmark. Every shipped palette puts `text-white` in this slot,
+     which is what the markup used to hardcode. */
+  .brand-custom .brand-nav-fg { color: var(--brand-secondary-fg); }
+  .brand-custom .brand-nav-active {
+    background-color: var(--brand-primary);
+    color: var(--brand-primary-fg);
+  }
+
+  /* Secondary text in the bar and the drawer -- the username, the muted link rows. Derived
+     from the nav's own foreground, so it stays legible on a pale nav too. */
+  .brand-custom .brand-nav-muted { color: var(--brand-warp); }
+  .brand-custom .brand-nav-muted:hover { color: var(--brand-secondary-fg); }
+
+  /* Primary action: sign in, sign out. Two slots, one job. */
+  .brand-custom .brand-btn {
+    background-color: var(--brand-primary);
+    color: var(--brand-primary-fg);
+  }
+  .brand-custom .brand-btn:hover { background-color: var(--brand-primary-hover); }
+
+  .brand-custom .brand-lockup-hover:hover { color: var(--brand-accent); }
+  .brand-custom .brand-body { background-color: var(--brand-secondary-tint); }
+
+  /* The mark. Both paths stroke with currentColor, so a rule that sets `color` is exactly
+     what _brand_mark.html already expects -- the warp stays neutral, the weft carries the
+     accent, which is the brand system the two-path split exists for. */
+  .brand-custom .brand-warp { color: var(--brand-warp); }
+  .brand-custom .brand-weft { color: var(--brand-accent); }
+
+  .brand-custom .brand-chip {
+    background-color: var(--brand-accent);
+    color: var(--brand-accent-fg);
+  }
+
+  .brand-custom .brand-login-bg {
+    background-image: linear-gradient(
+      to bottom right, var(--brand-secondary-deep), var(--brand-secondary));
+  }
+
+  /* The pale circle behind the mark on the login card, and the ink on it. `-ink` variants
+     are the brand colour darkened until it passes AA as text, because a colour picked to
+     work as a filled surface is usually too light to read at 16px on white. */
+  .brand-custom .brand-tint { background-color: var(--brand-primary-tint); }
+  .brand-custom .brand-ink { color: var(--brand-primary-ink); }
+  .brand-custom .brand-accent-ink { color: var(--brand-accent-ink); }
+
+  /* Focus ring. Only the colour: the box-shadow comes from Tailwind's own `focus:ring-2`,
+     which stays on the input in custom mode, and `--tw-ring-color` is the variable it
+     reads. Setting box-shadow here instead would fight it. */
+  .brand-custom .brand-ring:focus { --tw-ring-color: var(--brand-accent); }
+</style>
+{% endif %}

@@ -5,13 +5,33 @@ arguments. This module owns *where the operator's choices are stored*, and is th
 that touches the database. The split is deliberate: the theme stays unit-testable without a
 session, and this stays the one place a stored value is trusted or rejected.
 
-Five keys, all global rows (community is single-workgroup):
+Eight keys, all global rows (community is single-workgroup):
 
     brand_name        replaces "Weaver Lab" everywhere it renders
     brand_full        replaces "Weaver Lab Applications" on the login card
     brand_accent      a key of ui_theme._ACCENTS
     brand_env_label   short text for the banner under the nav bar; empty = no banner
     brand_env_color   #rrggbb for that banner; empty = the accent's own nav colour
+    brand_primary     #rrggbb -- buttons, links, the selected menu row
+    brand_secondary   #rrggbb -- the navigation bar and the flyout drawer
+    brand_accent_hex  #rrggbb -- badges, focus rings, the mark's accent strand
+
+The last three are all-or-nothing and outrank ``brand_accent``: see ``ui_theme``'s
+``_custom_palette`` for why a partial trio cannot be honoured. Note ``brand_accent`` and
+``brand_accent_hex`` are different types -- a preset name and a colour -- which is what
+the suffix is for.
+
+Four more rows point at an uploaded logo, and are written by ``api/setup``'s own logo
+endpoints rather than by ``patch_branding``:
+
+    brand_logo_etag   sha256 of the stored bytes; also the URL segment and the ETag
+    brand_logo_mime   one of ``brand_logo._ALLOWED``
+    brand_logo_w      pixel width, if the format declared one
+    brand_logo_h      pixel height, if the format declared one
+
+The image itself is a row in ``brand_asset``, not here -- see that model for why -- and
+``services/brand_logo`` owns it. This module only decides whether the pointer is
+trustworthy enough to render, which is the same job it does for the colours.
 
 Validation happens on READ, not only on write, and that is the point of this module rather
 than a couple of ``config_service.get`` calls at the call site. ``app_config`` is not a
@@ -40,6 +60,17 @@ _MAX_ENV_LABEL = 24
 # attribute being broken out of; it does not stop extra declarations inside it.
 _HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
+# A sha256 hex digest, exactly. This value is interpolated into a URL and then into an
+# ``src`` attribute -- including on the public docs shell, which is a ``.format()`` template
+# with no autoescaping at all -- so the same argument that makes ``_HEX_RE`` strict applies
+# here. Nothing but a digest can reach the markup.
+_LOGO_ETAG_RE = re.compile(r"^[0-9a-f]{64}$")
+
+# Mirrors ``brand_logo._ALLOWED``. Duplicated rather than imported so that a stored row
+# naming a type this app no longer serves is dropped on read, the way a stale accent name
+# is -- and so this module keeps its "the only thing that trusts a stored value" role.
+_ALLOWED_LOGO_MIMES = ("image/png", "image/jpeg", "image/webp", "image/svg+xml")
+
 
 def _clean_text(value: str, limit: int) -> str:
     """Strip, drop control characters, collapse runs of whitespace, truncate.
@@ -59,6 +90,34 @@ def _clean_color(value: str) -> str:
     """``#rrggbb`` lowercased, or ``""`` if it is anything else."""
     candidate = (value or "").strip()
     return candidate.lower() if _HEX_RE.match(candidate) else ""
+
+
+def _logo_override() -> dict:
+    """``{"logo": {...}}`` when a valid logo pointer is stored, else ``{}``.
+
+    Reads only the four short pointer rows, never the blob: this runs on every render, and
+    ``config_service`` already holds those rows in its cache, so the cost is dict lookups.
+    The bytes are fetched by their own route, once, and then cached by the browser.
+
+    Dimensions are optional -- an SVG need not declare any -- and are carried only so the
+    markup can reserve the right aspect ratio and not reflow the nav bar when the image
+    lands. A non-numeric stored value is dropped rather than rendered.
+    """
+    etag = (config_service.get_raw("brand_logo_etag") or "").strip().lower()
+    mime = (config_service.get_raw("brand_logo_mime") or "").strip().lower()
+    if not _LOGO_ETAG_RE.match(etag) or mime not in _ALLOWED_LOGO_MIMES:
+        return {}
+
+    def _dim(key: str) -> int | None:
+        raw = (config_service.get_raw(key) or "").strip()
+        return int(raw) if raw.isdigit() and 0 < int(raw) <= 100000 else None
+
+    return {"logo": {
+        "url": f"/api/setup/branding/logo/{etag}",
+        "mime": mime,
+        "width": _dim("brand_logo_w"),
+        "height": _dim("brand_logo_h"),
+    }}
 
 
 def overrides() -> dict:
@@ -97,6 +156,19 @@ def overrides() -> dict:
         if accent in ui_theme._ACCENTS:
             out["accent"] = accent
 
+        # The operator's own three, passed only when all three survive the hex check. The
+        # API rejects a partial trio at save time, so this gate is for the other ways a row
+        # reaches app_config -- config_migrate, a restored dump, psql -- where half a
+        # palette must be inert rather than half-applied. ui_theme refuses a partial set
+        # too; this is the cheaper of the two backstops, not the only one.
+        trio = {
+            "primary": _clean_color(config_service.get_raw("brand_primary")),
+            "secondary": _clean_color(config_service.get_raw("brand_secondary")),
+            "accent_hex": _clean_color(config_service.get_raw("brand_accent_hex")),
+        }
+        if all(trio.values()):
+            out.update(trio)
+
         label = _clean_text(config_service.get_raw("brand_env_label"), _MAX_ENV_LABEL)
         if label:
             out["env_label"] = label
@@ -106,6 +178,8 @@ def overrides() -> dict:
             color = _clean_color(config_service.get_raw("brand_env_color"))
             if color:
                 out["env_color"] = color
+
+        out.update(_logo_override())
         return out
     except Exception:
         return {}

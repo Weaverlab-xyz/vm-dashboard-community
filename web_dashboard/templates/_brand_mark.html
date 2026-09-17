@@ -1,16 +1,52 @@
-{# Mark A, "the weave" -- the Weaver Lab logo, as inline SVG.
+{# The brand mark: an operator's uploaded logo if there is one, else Mark A, "the weave".
 
-   Two paths, and the split is the brand system: the warp (vertical) is neutral on both
-   instances, the weft (horizontal) carries the profile accent. Same loom, one strand
-   dyed differently. Path data lives in services/ui_theme so the docs browser -- which
-   does not render through Jinja -- reads the same strings.
+   Mark A is the Weaver Lab logo as inline SVG. Two paths, and the split is the brand
+   system: the warp (vertical) is neutral on both instances, the weft (horizontal) carries
+   the profile accent. Same loom, one strand dyed differently. Path data lives in
+   services/ui_theme so the docs browser -- which does not render through Jinja -- reads the
+   same strings.
 
    Callers pass mark_warp / mark_weft / mark_size / mark_stroke via {% with %}, because
    {% include %} hands the child a COPY of the context: a {% set %} in here would not
-   reach the includer, and the two call sites need different sizes and palettes. #}
-<svg class="{{ mark_size|default('h-7 w-7') }} flex-shrink-0" viewBox="0 0 24 24" fill="none"
-     stroke-width="{{ mark_stroke|default('2.2') }}" stroke-linecap="round"
-     aria-hidden="true">
-  <path d="{{ theme.mark_warp_path }}" class="{{ mark_warp }}" stroke="currentColor"/>
-  <path d="{{ theme.mark_weft_path }}" class="{{ mark_weft }}" stroke="currentColor"/>
-</svg>
+   reach the includer, and the two call sites need different sizes and palettes.
+
+   An uploaded logo takes mark_h and mark_max instead of mark_size. Two reasons it is not
+   the same parameter: the built-in mark is a 24x24 viewBox and so is always square, while
+   a customer wordmark is wide, and a square box would squash it. So the image is sized by
+   HEIGHT with width:auto, and mark_max is the ceiling on how wide it may get.
+
+   That ceiling is load-bearing, not cosmetic. See the note at base.html's lockup: a flex
+   item's min-width is its content, so an unbounded image pushes the settings cog and the
+   hamburger off the right edge, and -- now that the bar no longer clips -- makes the whole
+   DOCUMENT scroll sideways on a phone. Pass mark_max at every call site.
+
+   The classes cannot be derived from mark_size by string surgery: composed class names do
+   not survive on the Tailwind Play CDN, which is the same constraint recorded over
+   ui_theme._ACCENTS. Pass them literally.
+
+   SECURITY: the logo is ALWAYS an img element and is NEVER inlined, and it must stay that
+   way. An SVG referenced by img is in image context -- no script, no event handlers, no
+   external fetches. Inlining these bytes, or piping them through `safe`, turns an
+   operator-uploaded file into stored XSS. services/brand_logo has the full reasoning, and
+   tests/test_brand_logo asserts on this file's source text to keep it true. #}
+{% if theme.logo %}
+  {# alt is empty and the element is hidden from the accessibility tree on purpose: both
+     call sites render the brand or product NAME as adjacent text, so a describing alt
+     would make a screen reader announce it twice.
+
+     No loading="lazy" -- this is above the fold on every page in the app. aspect-ratio,
+     when the format declared its dimensions, reserves the box so the nav bar does not
+     reflow when the image arrives. #}
+  <img src="{{ theme.logo.url }}" alt="" aria-hidden="true" decoding="async"
+       class="{{ mark_h|default('h-7') }} w-auto flex-shrink-0 {{ mark_max|default('max-w-40') }}"
+       {% if theme.logo.width and theme.logo.height %}
+       style="aspect-ratio: {{ theme.logo.width }} / {{ theme.logo.height }}"
+       {% endif %}>
+{% else %}
+  <svg class="{{ mark_size|default('h-7 w-7') }} flex-shrink-0" viewBox="0 0 24 24" fill="none"
+       stroke-width="{{ mark_stroke|default('2.2') }}" stroke-linecap="round"
+       aria-hidden="true">
+    <path d="{{ theme.mark_warp_path }}" class="{{ mark_warp }}" stroke="currentColor"/>
+    <path d="{{ theme.mark_weft_path }}" class="{{ mark_weft }}" stroke="currentColor"/>
+  </svg>
+{% endif %}
