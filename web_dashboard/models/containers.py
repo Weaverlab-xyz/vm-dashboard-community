@@ -289,6 +289,44 @@ class PortainerDeployRequest(BaseModel):
     vault_account_group_id: Optional[int] = None  # PRA Vault account group for the admin credential
 
 
+class PortainerAdapterPairRequest(BaseModel):
+    """Deploy the ``portainer_access`` Entitle adapter beside the configured Portainer.
+
+    All three fields are for the case where the dashboard did NOT deploy the Portainer
+    it is pointed at: there is no node to take a placement from, and no way to know
+    whether a VPC-attached function could reach it. For a managed node every field is
+    ignored — the adapter has to sit in the node's own cloud and region to reach it
+    over the VPC, and a picker that let an operator choose otherwise would only offer
+    a deploy that fails every grant.
+    """
+    cloud: Optional[str] = None          # aws | azure | gcp
+    region: Optional[str] = None         # region the adapter function runs in
+    network_mode: Optional[str] = None   # public | vpc
+    # Armed by default, deliberately: the button exists to make Portainer requestable,
+    # and a silently no-op adapter is the worse surprise. Same call the Databases page
+    # makes for db_grant.
+    dry_run: bool = False
+
+
+class PortainerAdapterResponse(BaseModel):
+    """State of the Portainer page's just-in-time access card."""
+    name: str = ""                       # the adapter's deterministic function name
+    workload: str = ""
+    viable: bool = False                 # the Deploy button's enabled state
+    ineligible_reason: str = ""          # why it is not, in the operator's terms
+    entitle_enabled: bool = False        # entitle_registration_enabled
+    fn_id: str = ""                      # blank when no adapter is deployed
+    status: str = ""                     # the CloudFunction row's status
+    cloud: str = ""
+    region: str = ""
+    network_mode: str = ""
+    invoke_url: str = ""                 # the endpoint Entitle calls
+    entitle_integration_id: str = ""     # blank when the Entitle leg was skipped
+    target_url: str = ""                 # the Portainer the adapter was told about
+    dry_run: bool = True                 # unset FN_PORTAINER_DRY_RUN means dry run
+    source_cidrs: list[str] = []         # ranges added to the node firewall for it
+
+
 class PortainerEdgeRequest(BaseModel):
     """Register an Edge-agent environment on the configured Portainer."""
     name: str                                # environment name shown in Portainer

@@ -224,6 +224,41 @@ def test_jumpoint_cidrs_joins_the_merged_firewall_set():
     assert st["opened"] is True, st
 
 
+def test_the_entitle_adapters_subnet_joins_the_merged_firewall_set():
+    """The portainer_access adapter is a VPC-attached Cloud Function that reaches this
+    node at its INTERNAL IP, and a source-restricted firewall applies to intra-VPC
+    ingress too — so without its range in the merged set every Entitle grant times
+    out against a node that looks perfectly healthy."""
+    _reset(gcp_project_id="proj", gcp_zone="us-central1-a",
+           portainer_allowed_source_cidrs="10.0.0.0/8",
+           portainer_dashboard_egress_cidr="203.0.113.5",
+           portainer_adapter_source_cidr="10.128.0.0/20")
+    st = portainer_node_service.firewall_status()
+    assert "10.128.0.0/20" in st["merged"], st
+    # Attributed rather than anonymous, so the Settings readout can say what it is for.
+    assert st["adapter_cidrs"] == ["10.128.0.0/20"], st
+
+
+def test_several_adapter_subnets_are_admitted():
+    """AWS attaches a function to a LIST of subnets (one per AZ), so the key is a CSV
+    and a single-value read would admit only the first."""
+    _reset(gcp_project_id="proj", gcp_zone="us-central1-a",
+           portainer_adapter_source_cidr="10.0.1.0/24, 10.0.2.0/24")
+    st = portainer_node_service.firewall_status()
+    assert st["adapter_cidrs"] == ["10.0.1.0/24", "10.0.2.0/24"], st
+    assert st["merged"] == ["10.0.1.0/24", "10.0.2.0/24"], st
+
+
+def test_no_adapter_leaves_the_firewall_exactly_as_it_was():
+    """The key is runtime-set and blank on every install that has never paired, so it
+    must not widen — or close — anything by existing."""
+    _reset(gcp_project_id="proj", gcp_zone="us-central1-a",
+           portainer_allowed_source_cidrs="10.0.0.0/8")
+    st = portainer_node_service.firewall_status()
+    assert st["adapter_cidrs"] == [], st
+    assert st["merged"] == ["10.0.0.0/8"], st
+
+
 def test_a_user_deployed_gateway_is_admitted_from_the_registry():
     """The gap that let a hand-deployed gateway sit outside the allow list: only the
     single remembered "shared gateway" IP was ever admitted, while every gateway in the

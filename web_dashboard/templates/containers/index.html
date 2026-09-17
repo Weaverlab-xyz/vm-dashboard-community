@@ -438,6 +438,141 @@
           (tcp 9443/8000; Settings). Stop deletes the VM + firewall and clears the node's runtime config.
         </p>
 
+        <!-- ── Just-in-time access (Entitle) ───────────────────────────────
+             Portainer has no Entitle connector at all, so the portainer_access Cloud
+             Function is the only route to JIT access for it. This card is the supported
+             way to get one: the adapter reads its target from its own environment, so a
+             hand-deploy from the Cloud Functions form that named the wrong Portainer
+             cannot be corrected afterwards.
+
+             `viable` and `ineligible_reason` both come from the API, which reads them
+             from the same portainer_adapter_service.ineligible_reason the pair endpoint
+             checks — so this button can never offer what the endpoint refuses. -->
+        <div class="mt-4 pt-4 border-t border-gray-100">
+          <div class="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <h3 class="text-sm font-semibold text-gray-800">Just-in-time access (Entitle)</h3>
+              <p class="mt-1 text-xs text-gray-500">
+                Makes Portainer <strong>requestable in Entitle</strong> through a REST integration in
+                Ephemeral Accounts mode. A granted request mints a <code>jit-</code> user and adds it to
+                the team the requester asked for; a revoke removes that membership and the account.
+                Access is granted through <strong>team membership</strong>, so configure the environment
+                access policy on a team once and the per-request part stays reversible. Your real
+                Portainer users are never listed to Entitle, and the adapter refuses to delete an
+                account it did not create.
+              </p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2 sm:flex-shrink-0">
+              <button @click="pairPortainerAdapter()"
+                      x-show="portainerAdapter.viable && !portainerAdapter.fn_id"
+                      :disabled="portainerAdapterPending"
+                      class="px-3 py-1.5 text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 rounded-lg transition">
+                <span x-show="!portainerAdapterPending">Deploy adapter</span>
+                <span x-show="portainerAdapterPending" x-cloak>Deploying…</span>
+              </button>
+              <button @click="removePortainerAdapter()"
+                      x-show="portainerAdapter.fn_id" x-cloak
+                      :disabled="portainerAdapterPending"
+                      class="px-3 py-1.5 text-sm font-medium text-red-600 border border-red-200 hover:bg-red-50 disabled:opacity-50 rounded-lg transition">
+                Remove adapter
+              </button>
+            </div>
+          </div>
+
+          <!-- Not deployable yet — say which prerequisite is missing rather than
+               showing a dead button. -->
+          <p x-show="!portainerAdapter.viable && portainerAdapter.ineligible_reason" x-cloak
+             class="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">
+            Not available yet: <span x-text="portainerAdapter.ineligible_reason"></span>
+          </p>
+
+          <!-- Placement, only when there is no managed node to take one from. For a
+               managed node the adapter MUST sit in its cloud and region to reach it
+               over the VPC, so offering a choice would only offer a broken deploy. -->
+          <div x-show="portainerAdapter.viable && !portainerAdapter.fn_id && !portainerNodes.length" x-cloak
+               class="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-700">Cloud</label>
+              <select x-model="portainerAdapterForm.cloud" @change="portainerAdapterCloudChanged()"
+                      class="mt-1 w-full px-3 py-2 text-sm border border-gray-300 rounded-lg font-mono">
+                <template x-for="c in portainerClouds" :key="c">
+                  <option :value="c" x-text="c.toUpperCase()"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-700">Region</label>
+              <select x-model="portainerAdapterForm.region"
+                      class="mt-1 w-full px-3 py-2 text-sm border border-gray-300 rounded-lg font-mono">
+                <option value="">(pick a region)</option>
+                <template x-for="r in (portainerRegionsByCloud[portainerAdapterForm.cloud] || portainerRegions)" :key="r">
+                  <option :value="r" x-text="r"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-700">Network</label>
+              <select x-model="portainerAdapterForm.network_mode"
+                      class="mt-1 w-full px-3 py-2 text-sm border border-gray-300 rounded-lg font-mono">
+                <option value="public">public</option>
+                <option value="vpc">vpc</option>
+              </select>
+              <p class="mt-1 text-xs text-gray-400">
+                <code>vpc</code> only if this Portainer is reachable from the function's subnet.
+              </p>
+            </div>
+          </div>
+
+          <!-- Deployed. The endpoint and the integration id are what an operator needs
+               when reconciling this against Entitle's own view. -->
+          <div x-show="portainerAdapter.fn_id" x-cloak
+               class="mt-3 text-xs text-gray-600 space-y-1">
+            <p>
+              <span class="font-medium text-gray-700">Adapter:</span>
+              <code x-text="portainerAdapter.name"></code>
+              <span x-text="'(' + portainerAdapter.cloud.toUpperCase() + ' / ' + portainerAdapter.region + ', ' + portainerAdapter.network_mode + ')'"></span>
+              <span :class="portainerAdapter.status === 'available'
+                      ? 'bg-green-100 text-green-700 ring-1 ring-green-200'
+                      : 'bg-gray-100 text-gray-700 ring-1 ring-gray-200'"
+                    class="ml-1 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
+                    x-text="portainerAdapter.status"></span>
+              <span x-show="portainerAdapter.dry_run" x-cloak
+                    class="ml-1 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 ring-1 ring-amber-200">
+                DRY RUN
+              </span>
+            </p>
+            <p x-show="portainerAdapter.target_url" x-cloak>
+              <span class="font-medium text-gray-700">Targets:</span>
+              <code x-text="portainerAdapter.target_url"></code>
+            </p>
+            <p x-show="portainerAdapter.invoke_url" x-cloak>
+              <span class="font-medium text-gray-700">Endpoint Entitle calls:</span>
+              <code class="break-all" x-text="portainerAdapter.invoke_url"></code>
+            </p>
+            <p x-show="portainerAdapter.entitle_integration_id" x-cloak>
+              <span class="font-medium text-gray-700">Entitle integration:</span>
+              <code x-text="portainerAdapter.entitle_integration_id"></code>
+            </p>
+            <p x-show="portainerAdapter.source_cidrs.length" x-cloak>
+              <span class="font-medium text-gray-700">Added to the node firewall:</span>
+              <code x-text="portainerAdapter.source_cidrs.join(', ')"></code>
+            </p>
+            <!-- The one skippable leg. An adapter with no integration is deployed and
+                 pointed at its Portainer but nothing can request it yet. -->
+            <p x-show="!portainerAdapter.entitle_integration_id && !portainerAdapter.entitle_enabled" x-cloak
+               class="text-amber-700">
+              Entitle registration is disabled, so the adapter is deployed but not requestable.
+              Set <code>entitle_registration_enabled</code> in Settings, then use
+              <strong>Register in Entitle</strong> on the Cloud Functions page.
+            </p>
+            <p x-show="!portainerAdapter.entitle_integration_id && portainerAdapter.entitle_enabled" x-cloak
+               class="text-amber-700">
+              No Entitle integration is recorded for this adapter — check the
+              <code>cloudfn_entitle_register</code> job, or register it from the Cloud Functions page.
+            </p>
+          </div>
+        </div>
+
         <!-- ── Connect a Docker host (Edge agent) ─────────────────────────── -->
         <div x-show="portainerNodeTokenConfigured" x-cloak
              class="mt-4 pt-4 border-t border-gray-100">
@@ -1785,6 +1920,18 @@ function containersDashboard() {
     // from the node URL, so agents joined before the change have silently stopped.
     portainerNodeStaleEdgeKeys: '',
 
+    // The portainer_access Entitle adapter. Seeded with the shape the API returns so
+    // every `x-show` on the card reads a defined field before the first fetch lands —
+    // `source_cidrs` in particular, whose .length would throw on undefined.
+    portainerAdapter: { viable: false, ineligible_reason: '', entitle_enabled: false,
+                        name: '', fn_id: '', status: '', cloud: '', region: '',
+                        network_mode: '', invoke_url: '', entitle_integration_id: '',
+                        target_url: '', dry_run: true, source_cidrs: [] },
+    portainerAdapterPending: false,
+    // Only ever used when there is NO managed node — a managed one dictates its own
+    // placement, because a function has to share the node's region to reach its VPC.
+    portainerAdapterForm: { cloud: 'gcp', region: '', network_mode: 'public' },
+
     // Edge agent registration. edgeResult holds a ONE-TIME key — never persisted
     // server-side, so navigating away loses it and a new one must be minted.
     edgeForm: { name: '' },
@@ -2448,7 +2595,14 @@ function containersDashboard() {
         // Seed the per-deploy toggle from the CONFIGURED default — see the Rancher fetch
         // above for the defect this closes.
         if (typeof opts.web_jump_enabled === 'boolean') this.portainerDeployForm.web_jump_enabled = opts.web_jump_enabled;
+        // The adapter's own cloud picker shares this payload rather than fetching it
+        // again; it is only reachable when there is no managed node to infer from.
+        if (opts.cloud) this.portainerAdapterForm.cloud = opts.cloud;
       } catch (e) { /* leave defaults — the select still offers "(current / default)" */ }
+      // Folded in here rather than given its own init hook, so one tab switch fetches
+      // the node and its adapter together and the two can never disagree about
+      // whether a node exists.
+      await this.loadPortainerAdapter();
     },
 
     // Switching cloud invalidates both the region and the zone: a region name from
@@ -2458,6 +2612,84 @@ function containersDashboard() {
       this.portainerDeployForm.region = '';
       this.portainerDeployForm.zone = '';
       this.portainerRegions = this.portainerRegionsByCloud[this.portainerDeployForm.cloud] || [];
+    },
+
+    // ── The portainer_access Entitle adapter ───────────────────────────────
+
+    async loadPortainerAdapter() {
+      try {
+        // Assigned only when there IS a payload: API.get answers null on a 401 (it
+        // logs out and returns), and null here would break every binding on the card
+        // rather than leaving the last known state in place.
+        const data = await API.get('/api/containers/portainer/adapter');
+        if (data) this.portainerAdapter = data;
+      } catch (e) {
+        // Quiet: the card's own "not available yet" line covers every state an
+        // operator can act on, and a toast on every tab switch for an install that
+        // has not enabled Cloud Functions is noise.
+        this.portainerAdapter = { ...this.portainerAdapter, viable: false,
+                                  ineligible_reason: e.message };
+      }
+    },
+
+    portainerAdapterCloudChanged() {
+      // A region name from another cloud is a 400 the operator did not ask for.
+      this.portainerAdapterForm.region = '';
+    },
+
+    // Deploys the adapter ARMED. The confirm says so, because the alternative — a
+    // deployed adapter that silently grants nothing — is the worse surprise. The
+    // adapter never initiates anything: it is an HTTP endpoint behind a fail-closed
+    // bearer gate that only Entitle holds, and ENTITLE owns the approval.
+    async pairPortainerAdapter() {
+      const managed = this.portainerNodes.length > 0;
+      // A managed node dictates the placement (the function has to share its region to
+      // reach its VPC), so name the node's cloud rather than a picker the card hides.
+      const nodeCloud = (this.portainerNodes[0] || {}).cloud || '';
+      const where = managed
+        ? nodeCloud.toUpperCase() + ', in the Portainer node\'s own region'
+        : this.portainerAdapterForm.cloud.toUpperCase() + ' / '
+          + (this.portainerAdapterForm.region || '(no region chosen)');
+      if (!confirm(`Deploy the portainer_access Entitle adapter into ${where}?
+
+`
+        + `It is deployed ARMED: once registered, an Entitle grant creates a real Portainer account `
+        + `and adds it to the requested team, and a revoke deletes it. The API token stays in the `
+        + `cloud's own secret store — it is never passed to the function as a value.
+
+`
+        + `The adapter creates nothing by itself; Entitle owns the approval. Track progress in Jobs.`)) return;
+      this.portainerAdapterPending = true;
+      try {
+        const body = {};
+        if (!managed) {
+          body.cloud = this.portainerAdapterForm.cloud;
+          body.region = this.portainerAdapterForm.region;
+          body.network_mode = this.portainerAdapterForm.network_mode;
+        }
+        const resp = await API.post('/api/containers/portainer/adapter-pair', body);
+        window.location.href = `/jobs/${resp.job_id}`;
+      } catch (e) {
+        toast(e.message || 'Adapter deployment failed.', 'error');
+        this.portainerAdapterPending = false;
+      }
+    },
+
+    async removePortainerAdapter() {
+      if (!confirm(`Remove the Portainer Entitle adapter?
+
+`
+        + `This deregisters the Entitle integration, destroys the function, retires its staged `
+        + `Portainer API token and drops its range from the node firewall. Portainer itself and any `
+        + `accounts already granted are unaffected — revoke those in Entitle first if you want them gone.`)) return;
+      this.portainerAdapterPending = true;
+      try {
+        const resp = await API.post('/api/containers/portainer/adapter-retire', {});
+        window.location.href = `/jobs/${resp.job_id}`;
+      } catch (e) {
+        toast(e.message || 'Adapter removal failed.', 'error');
+        this.portainerAdapterPending = false;
+      }
     },
 
     async deployPortainerNode() {
