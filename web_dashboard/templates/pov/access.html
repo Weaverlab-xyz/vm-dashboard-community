@@ -309,9 +309,10 @@
           this.loading = false;
         },
 
-        // Out-of-scope cards are dropped here rather than greyed: on the SE's page they
-        // explain a scoping decision to somebody who made it, and to a prospect they would
-        // read as a list of things that do not work.
+        // Out-of-scope cards are dropped here rather than greyed: to a prospect they read
+        // as a list of things that do not work. The SE's page drops them the same way, so
+        // the two lists are the same length and a card cannot be ticked on one surface and
+        // invisible on the other.
         inScope(g) {
           return (g.use_cases || []).filter(c => c.state !== 'out_of_scope');
         },

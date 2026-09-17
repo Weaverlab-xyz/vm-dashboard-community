@@ -39,10 +39,16 @@ was asking.
 | Role (demo profile only) | `services/personas.py` | **Curates.** Reorders, surfaces, never hides |
 | This POV's products | `services/pov_cards.py` + `services/pov_use_cases.py` | **States.** Says what this environment can run |
 
-The third one is emphatically **not** a gate. A POV with no Entitle tenant still sees
-every Entitle card; it is told they are out of scope for this environment. That is the
-same promise the role axis makes on the other profile, and it is the property that keeps
-this from becoming a second `install_profile`.
+The third one is emphatically **not** a gate. The catalog is whole for all eight product
+mixes and the API serves every group and every card on every one of them (pinned); a mix
+decides each card's **state**, and nothing anywhere subtracts a card, 404s a route or
+disables a feature. Set the Entitle tenant on the POV row and its six cards are simply
+there, with no migration and nothing to re-enable. That is the property that keeps this
+from becoming a second `install_profile`.
+
+What the **pages** then draw is a presentation decision on top of that, and all three draw
+only the in-scope cards — see [One format, three surfaces](#one-format-three-surfaces) for
+why, and for what the SE's page used to do instead.
 
 The middle row is the one that moved. The 32 POV cards used to live in eight
 `Persona.pov_use_cases` tuples and render under **role** headings, which sorted a customer's
@@ -71,7 +77,7 @@ PRA-first stories; a test pins that the tuple order stays a decision.
 |---|---|---|
 | `ready` | This POV has the products, and the wire-up has run for them | Links to the POV page tab |
 | `needs_wiring` | The tenant is set, the artifact is not | No link; names what to run, points at the Wired tab |
-| `out_of_scope` | This POV has no tenant for that product at all | No link, no action |
+| `out_of_scope` | This POV has no tenant for that product at all | Nothing — dropped before it reaches a row |
 
 `out_of_scope` is deliberately not `masked`. Masked means *this instance's profile refuses
 the feature* and no operator can change it. Out of scope means *this customer's POV was
@@ -436,11 +442,18 @@ because a tick somebody believed is a card they will not demo again. For the sam
 mark is blank rather than an empty box outline: an outlined square that does nothing when
 clicked is a control.
 
-`out_of_scope` cards get the reference format's dashed "only if asked" section, on the SE's
-page only, headed *not part of this POV*. They stay **tickable** there — "we showed them
-anyway" is a thing that happens in a POV, and one row definition serves both sections so the
-deferred one cannot quietly drift read-only. The two surfaces answering "what next?" drop them
-instead: a card whose answer is "not on this evaluation" is not an answer to that question.
+`out_of_scope` cards are **not drawn on any of the three**, and a group left with nothing in
+it renders no heading either. All three go through an `inScope()` helper with the same name
+and the same one-line body, pinned by a test, because the failure mode is one surface being
+edited and the others not.
+
+The SE's page used to be the exception: it rendered those cards in a dashed section at the
+foot of each group, headed *not part of this POV*, on the reasoning that a scoping decision is
+worth reading and a card an SE demoed anyway is still a card they demoed. In practice a POV
+scoped to one product put two whole products' worth of un-tickable rows — most of the page —
+between the SE and the handful of cards they were there for, under a heading that disagreed
+with the in-scope denominator printed directly above it. Which products an evaluation includes
+is now stated once, on the Overview tab, where the tenants that decide it already live.
 
 The stylesheet is [`templates/_checklist_styles.html`](../../../../web_dashboard/templates/_checklist_styles.html)
 — one definition, reached through a new `{% block head %}` in `base.html` by the two surfaces

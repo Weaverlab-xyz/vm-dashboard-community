@@ -493,9 +493,11 @@ def test_the_nav_link_lights_on_a_pov_page_but_never_on_the_builder():
 
 # ── the page ─────────────────────────────────────────────────────────────────
 
-def test_the_page_renders_all_three_states():
+def test_the_page_renders_both_runnable_states():
+    """`out_of_scope` is the third state the API serves and the one state the page does not
+    draw -- it is filtered out before a row exists (see the test below)."""
     src = _read(_DETAIL)
-    for state in ("ready", "needs_wiring", "out_of_scope"):
+    for state in ("ready", "needs_wiring"):
         assert f"'{state}'" in src, f"pov/detail.html never mentions the {state} state"
 
 
@@ -508,11 +510,15 @@ def test_only_a_ready_card_gets_an_anchor():
             f"a card anchor is not gated on the ready state: {tag[:90]}"
 
 
-def test_an_out_of_scope_card_is_offered_no_action_on_the_page():
+def test_the_page_draws_no_row_at_all_for_an_out_of_scope_card():
+    """The card is not drawn, so there is no branch that could offer it an action. Pinned as
+    the ABSENCE of an `x-show` on that state: the previous shape rendered those cards in a
+    dashed section, and re-adding one is the regression this guards."""
     src = _read(_DETAIL)
-    branch = src.split("c.state === 'out_of_scope'", 1)[1].split("</p>", 1)[0]
-    assert "action_link" not in branch and "href" not in branch, \
-        "the out_of_scope branch offers a link; the fix is a tenant, not a click"
+    assert "c.state === 'out_of_scope'" not in src, (
+        "pov/detail.html branches on out_of_scope again — those cards are dropped by "
+        "inScope(), so a row that renders one is a row nobody can act on"
+    )
 
 
 def test_the_needs_wiring_card_does_link_to_the_wire_up():
@@ -568,24 +574,42 @@ def test_the_operator_ticks_a_card_with_a_real_checkbox():
         "value, so every tick would write the opposite of what was asked for.")
 
 
-def test_an_out_of_scope_card_is_set_apart_and_still_tickable():
-    """out_of_scope earns its own dashed section -- it is a scoping decision worth reading,
-    not a failure, and grey is what the wall of masked cards looked like. A card an SE
-    demoed anyway is still a card they demoed, so the row stays tickable there.
+def test_all_three_checklist_surfaces_drop_an_out_of_scope_card_the_same_way():
+    """One rule, three surfaces, one spelling. The SE's page used to render those cards in
+    its own dashed section while the other two dropped them, which made the SE's list the
+    only one whose length disagreed with the in-scope denominator it printed above itself.
 
-    One row definition serves both sections, which is what stops the deferred one drifting
-    read-only on a later edit. Counted on `class="chk-box"` rather than on the checkbox
-    input: this page has three other, unrelated checkboxes (the VM opt-in, the power-on
-    toggle, the VM picker), and only the checklist's carries that class.
+    Pinned as a same-named, same-bodied helper rather than three loose filters, because the
+    failure mode is one surface being edited and the others not.
     """
-    src = _read(_DETAIL)
-    assert "chk-deferred" in src, "out-of-scope cards have no section of their own"
-    assert src.count('class="chk-box"') == 1, (
-        "the checklist row is defined more than once. Both sections must render the same "
-        "row, or one of them quietly stops being tickable.")
-    body = src.split("sections(g) {", 1)[1].split("\n      },", 1)[0]
-    assert "c.state === 'out_of_scope'" in body and "c.state !== 'out_of_scope'" in body, \
-        "sections() does not split the group into in-scope and out-of-scope"
+    for name in ("pov/detail.html", "pov/access.html", "use_cases.html"):
+        src = _read(os.path.join(_TPL, *name.split("/")))
+        body = src.split("inScope(g) {", 1)
+        assert len(body) == 2, f"{name} has no inScope() helper"
+        body = body[1].split("}", 1)[0]
+        assert "c.state !== 'out_of_scope'" in body, \
+            f"{name}'s inScope() does not drop the out-of-scope cards"
+        assert 'x-for="c in inScope(g)"' in src, \
+            f"{name} loops over something other than inScope(g)"
+
+
+def test_a_group_with_nothing_in_scope_renders_no_heading():
+    """A Password-Safe-only POV has two whole products out of scope. An empty heading with
+    "0 in scope" under it is the wall of rows this change removed, one layer up."""
+    for name in ("pov/detail.html", "pov/access.html", "use_cases.html"):
+        src = _read(os.path.join(_TPL, *name.split("/")))
+        sec = re.search(r'<div class="chk-section"[^>]*>', src)
+        assert sec, f"{name} has no checklist section"
+        assert 'x-show="inScope(g).length"' in sec.group(0), \
+            f"{name} renders a group heading for a group with nothing in scope"
+
+
+def test_the_checklist_row_is_defined_exactly_once():
+    """Counted on `class="chk-box"` rather than on the checkbox input: this page has three
+    other, unrelated checkboxes (the VM opt-in, the power-on toggle, the VM picker), and
+    only the checklist's carries that class."""
+    assert _read(_DETAIL).count('class="chk-box"') == 1, \
+        "the checklist row is defined more than once and the copies will drift"
 
 
 def test_the_page_never_filters_the_groups():

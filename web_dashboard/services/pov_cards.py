@@ -24,10 +24,15 @@ What survives from that arrangement, deliberately:
     knowing which registry produced which, and that is the whole reason a runbook needed no
     changes to the page when it arrived.
   * **Never subtracting.** Every group and every card is present for every product mix. The
-    mix decides each card's STATE and nothing else, so a POV wired into one product still
-    sees what the other two would have shown it -- explained, not hidden. A
-    ``Password Safe``-only POV renders the PRA and Entitle groups entirely out of scope,
-    which is a clearer statement than "0 of 4 in scope" ever was under a role heading.
+    mix decides each card's STATE and nothing else: a ``Password Safe``-only POV is served
+    the PRA and Entitle groups too, marked ``out_of_scope`` to a card. Set that tenant on
+    the POV row and they are simply in scope, with nothing to backfill or re-enable --
+    which is the property that keeps this from being a second ``install_profile``.
+
+    What the PAGES draw is theirs to decide, and all three of them drop the out-of-scope
+    cards (``inScope()``, in each template). That is a presentation choice on top of a whole
+    catalog, not a gate; this module must keep serving them either way, because the summary
+    denominators and the runbook gating both read the state.
   * **Knowing nothing about the database.** The resolvers take a plain **products dict** of
     booleans; ``services/pov_use_cases`` is the module that knows about ``PovEnvironment``.
     Keeping the row out of here is what lets this module be imported from anywhere.

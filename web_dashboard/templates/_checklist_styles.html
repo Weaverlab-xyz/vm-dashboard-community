@@ -136,15 +136,11 @@
      role matched the viewer's. It went with the role grouping — these groups are products
      now, and a POV instance has no focus for one of them to match. The demo catalog's own
      chip on /use-cases is inline Tailwind and never used this class. */
-  /* The reference's "only if asked / if time" group, doing the POV job: the cards this
-     evaluation has no tenant for. Dashed and warm rather than grey, because grey is what
-     the old wall of masked cards looked like and this is a scoping FACT, not a failure. */
-  .chk-section.chk-deferred { border-style: dashed; }
-  .chk-section.chk-deferred h2 {
-    color: var(--bt-orange-dark);
-    background: #FFF3EC;
-    border-bottom-color: #F5D8C7;
-  }
+  /* `.chk-deferred` lived here: a dashed, warm-headed section at the foot of each group on
+     the SE's POV page holding the cards that POV had no tenant for. All three checklist
+     surfaces drop those cards now — see `inScope()` — so there is no second section for it
+     to style, and a rule with no section is how the next dashed thing gets styled by
+     accident. */
   .chk-blurb {
     padding: 6px 16px;
     border-bottom: 1px solid var(--bt-border);

@@ -341,9 +341,9 @@
 
       // Out-of-scope cards are dropped from this lead rather than stated. This page is the
       // short answer to "what can I show them next?", and a card whose answer is "not on
-      // this evaluation" is not an answer to that question. The card is not lost: the POV's
-      // own page states it, in its own dashed section, and that is where somebody who wants
-      // to argue with the scoping decision is already going.
+      // this evaluation" is not an answer to that question. The POV's own page drops them
+      // too, on the same reasoning; which products an evaluation includes is stated on that
+      // page's Overview tab, which is where somebody arguing with the scoping goes.
       inScope(g) {
         return (g.use_cases || []).filter(c => c.state !== 'out_of_scope');
       },
