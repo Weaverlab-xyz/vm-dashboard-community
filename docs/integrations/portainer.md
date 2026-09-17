@@ -236,6 +236,13 @@ The node's ingress opens **tcp 9443 and 8000** to a merged source set:
   because the worker bootstraps and polls the node over its public IP. If you egress
   from a proxy *pool*, set `portainer_dashboard_egress_cidr` to the pool's range by
   hand; detection will not clobber a broader range that already contains the detected IP.
+  The last few detected `/32`s stay admitted too (`portainer_dashboard_egress_recent`,
+  bounded), because a host whose own outbound address is not fixed — an Azure Container
+  Apps environment with no NAT Gateway, say — would otherwise lock the deploy out of the
+  node it just launched. The tell is a job that reports the node "serving" and then
+  "cannot reach" it seconds later: the readiness poll needs one lucky attempt, the
+  bootstrap that follows needs several consecutive ones. On a dropped connect the deploy
+  re-detects, re-applies the ingress and retries the bootstrap once.
 - A `/32` per dashboard-deployed Gateway, when the
   [PRA Web Jump](#pra-web-jump-optional) is on.
 
@@ -426,6 +433,7 @@ on the run form is irrelevant — nothing is installed on it.
 | `portainer_verify_ssl` | `true` | Verify the server's TLS certificate; a managed deploy turns this off |
 | `portainer_allowed_source_cidrs` | `""` | CSV of manual firewall sources; empty is fail-closed |
 | `portainer_dashboard_egress_cidr` | `""` | The dashboard's own egress CIDR; auto-detected on deploy |
+| `portainer_dashboard_egress_recent` | (runtime) | Bounded CSV of recently-detected egress `/32`s, also admitted — covers a host with no stable outbound address |
 | `portainer_admin_password` | `""` | First-run admin password; blank auto-generates one |
 | `portainer_ready_timeout_s` | `300` | How long the deploy waits for Portainer to serve |
 | `portainer_node_cloud` | `gcp` | `aws` \| `azure` \| `gcp` — which cloud hosts the node. Picked on the deploy form and rewritten to where it actually landed, so teardown and bare redeploys stay put. Defaults to `gcp` because every node deployed before this key existed is a GCE VM |

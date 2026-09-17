@@ -54,14 +54,52 @@ class PortainerNotConfigured(PortainerError):
 
 def _wrap_transport_errors(fn):
     """Convert httpx transport failures (unreachable host, TLS, timeout) into
-    PortainerError so every caller sees one error contract instead of raw 500s."""
+    PortainerError so every caller sees one error contract instead of raw 500s.
+
+    The CLASS NAME carries the diagnosis and the message usually does not: httpx builds
+    its transport exceptions from the httpcore one's message, which is empty for every
+    timeout and connect failure, so ``f"...: {exc}"`` alone rendered a bare "Cannot reach
+    Portainer: " as a deploy's only recorded error. The distinction it was throwing away
+    is the whole diagnosis -- ConnectTimeout means the SYN was DROPPED (a firewall, since
+    a closed port would answer with a reset), while ConnectError means it was refused.
+    """
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
         try:
             return await fn(*args, **kwargs)
         except httpx.HTTPError as exc:
-            raise PortainerError(f"Cannot reach Portainer: {exc}") from exc
+            kind = type(exc).__name__
+            detail = str(exc).strip() or _TRANSPORT_HINTS.get(kind, "")
+            raise PortainerError(
+                f"Cannot reach Portainer: {kind}: {detail}" if detail
+                else f"Cannot reach Portainer: {kind}"
+            ) from exc
     return wrapper
+
+
+# What an empty-messaged httpx transport failure actually means, so a job record that
+# has nothing else still says something actionable.
+_TRANSPORT_HINTS = {
+    "ConnectTimeout": "the TCP connect got no answer — the packets are being dropped, "
+                      "which is a firewall/security-group rule, not a closed port",
+    "ConnectError":   "the connection was refused or could not be routed",
+    "ReadTimeout":    "connected, but the node sent no response in time",
+    "WriteTimeout":   "connected, but the request could not be sent in time",
+    "PoolTimeout":    "no connection slot became free in time — a client-side limit",
+}
+
+
+def is_unreachable(exc: Exception) -> bool:
+    """True when ``exc`` is a :class:`PortainerError` raised because no connection could
+    be established at all — as opposed to an HTTP status, a bad payload, or a mid-stream
+    timeout.
+
+    Tests the CAUSE rather than the message text: ``_wrap_transport_errors`` re-raises
+    ``from exc``, so the original httpx exception is the authoritative signal and stays
+    correct if the wording ever changes.
+    """
+    return isinstance(exc, PortainerError) and isinstance(
+        getattr(exc, "__cause__", None), (httpx.ConnectTimeout, httpx.ConnectError))
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────

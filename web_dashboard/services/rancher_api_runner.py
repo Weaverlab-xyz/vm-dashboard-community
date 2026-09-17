@@ -78,9 +78,12 @@ def _node_region(cloud: str = "") -> str:
     node region at every runner call. ``""`` when unknown (no node deployed yet, or
     config unreadable) — the caller then keeps the runner's default region.
 
-    The two clouds spell a zone differently, and neither split is safe on the other:
-    GCP is ``<region>-<letter>`` (``us-east1-b``), AWS is ``<region><letter>``
+    The clouds spell a zone differently, and no split is safe on the others: GCP is
+    ``<region>-<letter>`` (``us-east1-b``), AWS is ``<region><letter>``
     (``us-east-1a``), so ``us-east-1a`` naively rsplit on ``-`` would yield ``us-east``.
+    Azure does not model zones for these nodes at all — ``resolve_placement`` persists
+    the LOCATION in the zone key — so the value is already the region and any split
+    would corrupt it.
     """
     cloud = cloud or _node_cloud()
     try:
@@ -96,6 +99,8 @@ def _node_region(cloud: str = "") -> str:
         return zone.rsplit("-", 1)[0] if zone.count("-") >= 2 else ""
     if cloud == "aws":
         return zone[:-1] if zone[-1:].isalpha() else zone
+    if cloud == "azure":
+        return zone
     return ""
 
 
@@ -200,19 +205,47 @@ def _resolve_aci():
     The container group must sit on a VNet-DELEGATED subnet in the node's VNet, or it
     has no route to the node's private address -- the same requirement the k8s runner
     already has for private cluster APIs, which is why its subnet fallback chain is
-    reused rather than a second one invented. Azure has no cross-region wrinkle to undo
-    here: the resource group and location already come from the node's own placement.
+    reused rather than a second one invented.
+
+    Azure DOES have the cross-region wrinkle this once claimed it did not. The k8s
+    runner's resolution reads the FLAT ``azure_location`` / ``azure_resource_group`` /
+    ``ansible_aci_subnet_id``, which are the dashboard's primary placement, while
+    ``resolve_placement`` puts the node on its own region's per-region set. On a node
+    outside the default region that lands the container group in the WRONG VNet, where
+    ``AllowVnetInBound`` does not apply and there is no peering -- so the SYN is dropped
+    and the probe burns the whole readiness budget before dying with a generic timeout.
+    Re-point all three from the node's region, exactly as the ECS path does.
 
     The node's NSG must admit the container group's address, which is what
     ``rancher_runner_source_cidr`` is for (set it to the runner subnet's CIDR). It is
     auto-merged into the allow-list while the transport is ``runner``.
     """
-    from . import k8s_runner_service
+    from . import k8s_runner_service, region_catalog, region_config
     try:
         cfg = k8s_runner_service._resolve_aci()
     except Exception as exc:
         raise RancherRunnerError(
             f"Rancher API runner (ACI) is not configured: {exc}") from exc
+    node_region = _node_region("azure")
+    # Normalised on both sides: azure_location is operator-entered and Azure accepts
+    # display names ("West US 2"), so a raw compare would read a spelling difference as
+    # a relocation and log a re-pin that changes nothing.
+    if node_region and (region_catalog.normalize("azure", node_region)
+                        != region_catalog.normalize("azure", cfg.get("location") or "")):
+        rc = region_config.resolve_region("azure", node_region) or {}
+        subnet = (rc.get("aci_subnet_id") or "").strip()
+        if not subnet:
+            raise RancherRunnerError(
+                f"The Rancher node is in {node_region} but no runner subnet is configured "
+                f"there (aci_subnet_id for that region), so an ACI container group has no "
+                f"route to the node's private IP -- a delegated subnet is regional and the "
+                f"default location's cannot be used. Add a per-region config under "
+                f"Settings -> Multi-region, or move the node.")
+        rg = (rc.get("resource_group") or "").strip() or cfg.get("rg")
+        logger.info("Rancher runner: pinning the ACI container group to the node's "
+                    "location %s (was %s) -- a group in another VNet cannot reach the node",
+                    node_region, cfg.get("location"))
+        cfg = {**cfg, "location": node_region, "rg": rg, "subnet_id": subnet}
     if not cfg.get("subnet_id"):
         raise RancherRunnerError(
             "rancher_api_transport=runner needs VNet reach to the node's internal IP: "

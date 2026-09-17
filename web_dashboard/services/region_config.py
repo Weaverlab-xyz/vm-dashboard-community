@@ -78,6 +78,12 @@ _SPECS: dict[str, _Spec] = {
             # Gateway hosts are per-region like every other subnet here; AWS and GCP
             # already carried this field and Azure was the only cloud without it.
             "jumpoint_subnet_id":     "azure_jumpoint_subnet_id",
+            # An ACI container group attaches to a VNet-DELEGATED subnet, which is
+            # regional — so a runner that must reach a private address in another
+            # region needs that region's own subnet. AWS already had this as
+            # ecs_subnet_id; Azure read only the flat key, which put every runner in
+            # the default region's VNet with no route to an out-of-region node.
+            "aci_subnet_id":          "ansible_aci_subnet_id",
             "gallery_name":           "azure_shared_image_gallery",
             "gallery_resource_group": "azure_gallery_resource_group",
             "default_vm_size":        "azure_desktops_vm_size",
@@ -87,8 +93,11 @@ _SPECS: dict[str, _Spec] = {
             # per-region functions subnet, so a second region had nothing to resolve.
             "functions_subnet_id":    "azure_functions_subnet_id",
         },
-        # Historical: a blank vnet RG inherits the resource group.
-        secondary_fallbacks={"vnet_resource_group": "azure_resource_group"},
+        # Historical: a blank vnet RG inherits the resource group. The ACI subnet
+        # keeps the k8s/Ansible runners' own fallback chain (shared runner subnet,
+        # then the jumpoint's delegated subnet) so a runner install needs nothing new.
+        secondary_fallbacks={"vnet_resource_group": "azure_resource_group",
+                             "aci_subnet_id": "azure_aci_subnet_id"},
     ),
     "aws": _Spec(
         configs_key="aws_region_configs",

@@ -79,6 +79,11 @@ class NodeSpec:
         return f"{self.feature}_dashboard_egress_cidr"
 
     @property
+    def dashboard_recent_key(self) -> str:
+        """CSV of recently-detected egress /32s — see :func:`dashboard_cidr`."""
+        return f"{self.feature}_dashboard_egress_recent"
+
+    @property
     def web_jump_enabled_key(self) -> str:
         return f"{self.feature}_ui_web_jump_enabled"
 
@@ -225,18 +230,49 @@ def jumpoint_cidrs(spec: NodeSpec, db=None) -> list:
 
 
 def dashboard_cidr(spec: NodeSpec) -> list:
-    """/32 for the DASHBOARD's own public egress IP.
+    """Source CIDRs for the DASHBOARD's own public egress.
 
-    The worker bootstraps and polls the node over its PUBLIC IP, so this is the
-    source address that hits the node's source-restricted ingress rule -- without it
+    The worker bootstraps and polls the node over its PUBLIC IP, so these are the
+    source addresses that hit the node's source-restricted ingress rule -- without them
     a (re)deploy cannot reach its own node and the readiness poll times out. Sourced
     from ``<feature>_dashboard_egress_cidr`` (auto-detected + persisted on deploy, or
     set manually); a bare IP is normalized to ``/32``.
+
+    The RECENTLY-seen addresses come too. One pinned /32 is a snapshot of an address
+    that is not guaranteed stable: a host behind a SNAT pool with no fixed outbound
+    address (an Azure Container Apps environment with no NAT Gateway, a corp proxy
+    pool) egresses from whichever address the platform picks per connection. The
+    readiness poll only needs ONE attempt to land on the admitted address, so it
+    passes; the bootstrap that follows needs several CONSECUTIVE calls and gets
+    dropped -- which reads as "the node was serving a second ago and is now
+    unreachable". Admitting the recent set closes that window. Bounded, so a genuinely
+    roaming address cannot grow the allow-list without limit.
     """
-    val = (config_service.get(spec.dashboard_cidr_key) or "").strip()
-    if not val:
-        return []
-    return [val if "/" in val else f"{val}/32"]
+    vals = [(config_service.get(spec.dashboard_cidr_key) or "").strip()]
+    vals += _recent_egress_cidrs(spec)
+    out = []
+    for val in vals:
+        if val and val not in out:
+            out.append(val if "/" in val else f"{val}/32")
+    return out
+
+
+# How many previously-seen egress addresses stay admitted. Enough to ride out a SNAT
+# pool rotation mid-deploy; small enough that the allow-list stays reviewable.
+_RECENT_EGRESS_MAX = 4
+
+
+def _recent_egress_cidrs(spec: NodeSpec) -> list:
+    """Previously-detected egress /32s, most recent first ("" entries dropped)."""
+    csv = config_service.get(spec.dashboard_recent_key) or ""
+    return [c.strip() for c in csv.split(",") if c.strip()]
+
+
+def _record_recent_egress(spec: NodeSpec, cidr: str) -> None:
+    """Remember ``cidr`` as a recently-seen egress address (most recent first)."""
+    recent = [c for c in _recent_egress_cidrs(spec) if c != cidr]
+    recent.insert(0, cidr)
+    config_service.set(spec.dashboard_recent_key, ",".join(recent[:_RECENT_EGRESS_MAX]))
 
 
 def ready_timeout_s(spec: NodeSpec) -> int:
@@ -298,9 +334,13 @@ async def ensure_dashboard_egress_cidr(spec: NodeSpec, detect=None) -> str:
             except ValueError:
                 pass  # malformed stored value - fall through and replace it
         cidr = f"{ip}/32"
+        # Recorded whether or not it CHANGED: the point is to accumulate the addresses
+        # a SNAT pool actually uses, and re-seeing one still makes it current.
+        _record_recent_egress(spec, cidr)
         if existing != cidr:
             config_service.set(spec.dashboard_cidr_key, cidr)
-            logger.info("%s ingress: dashboard egress IP detected as %s", spec.label, cidr)
+            logger.info("%s ingress: dashboard egress IP detected as %s (was %s)",
+                        spec.label, cidr, existing or "unset")
         return cidr
     if not existing:
         logger.warning(

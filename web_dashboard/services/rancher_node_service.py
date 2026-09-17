@@ -130,6 +130,33 @@ def _runner_cidr() -> list[str]:
     return [val if "/" in val else f"{val}/32"]
 
 
+def _runner_route_hint(cloud: str, region: str) -> str:
+    """Why an in-cloud runner might not reach the node's private address, in the terms
+    of the cloud the node is ACTUALLY on.
+
+    Each backend is region-locked for a different reason and is configured by different
+    keys, so a shared message sends the operator to settings that do not exist on their
+    cloud -- a westus2 Azure node used to be diagnosed as a Cloud Run VPC problem, naming
+    gcp_run_network and GCP container logs.
+    """
+    if cloud == "gcp":
+        return (f"Cloud Run direct VPC egress reaches only SAME-region internal IPs, so the "
+                f"runner is pinned to {region}; confirm gcp_run_network / gcp_run_subnetwork "
+                f"reach the node's VPC and that a subnet of that name exists in {region}.")
+    if cloud == "aws":
+        return (f"An ECS task only reaches the node's private IP from inside its own VPC, so "
+                f"the runner is pinned to {region}; confirm ansible_ecs_subnet_id for {region} "
+                f"is in the node's VPC and its security group allows egress to the node.")
+    if cloud == "azure":
+        return (f"An ACI container group only reaches the node's private IP from a "
+                f"VNet-delegated subnet in the node's OWN VNet, so the runner is pinned to "
+                f"{region}; confirm aci_subnet_id for {region} (Settings -> Multi-region) is "
+                f"delegated to Microsoft.ContainerInstance in that VNet, and that the node's "
+                f"NSG admits it -- set rancher_runner_source_cidr to the runner subnet's CIDR.")
+    return (f"The runner must be able to route to the node's private address from inside "
+            f"{cloud} {region}.")
+
+
 def _ready_timeout_s() -> int:
     """Readiness poll budget (config ``rancher_ready_timeout_s``, default 360s)."""
     return managed_node_service.ready_timeout_s(_SPEC)
@@ -606,14 +633,11 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
                     job_service.set_failed(
                         db, job_id,
                         f"Rancher did not become ready within {ready_timeout}s. The in-cloud runner "
-                        f"probes the node's INTERNAL address {internal} from region {p['region']} "
-                        f"(Cloud Run direct VPC egress reaches only SAME-region internal IPs, so the "
-                        f"runner is pinned there). Likely causes: the container is still initialising "
-                        f"(cold rancher/rancher pull — raise rancher_ready_timeout_s and redeploy), or "
-                        f"the runner can't route to the internal IP (confirm gcp_run_network / "
-                        f"gcp_run_subnetwork reach the node's VPC and that a subnet of that name exists "
-                        f"in {p['region']}). See the worker log's runner probe tail for the exact curl "
-                        f"error, or the node's container logs in GCP (google-logging-enabled is on).")
+                        f"probes the node's INTERNAL address {internal} from region {p['region']}. "
+                        f"{_runner_route_hint(cloud, p['region'])} The other likely cause is that the "
+                        f"container is still initialising (cold rancher/rancher pull — raise "
+                        f"rancher_ready_timeout_s and redeploy). See the worker log's runner probe "
+                        f"tail for the exact curl error, or the node's container logs on {cloud}.")
                     return
                 # Direct transport: the worker dials the node's PUBLIC IP, so its own
                 # egress must be in the node firewall (auto-detect can miss a pooled /
@@ -624,9 +648,11 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
                     db, job_id,
                     f"Rancher did not become ready at {url} within {ready_timeout}s. "
                     f"If the node is RUNNING, its firewall must allow the dashboard's egress IP "
-                    f"({dash}); currently allowed: {allowed}. Otherwise the container may still be "
-                    f"initialising — raise rancher_ready_timeout_s and redeploy, or check the node's "
-                    f"container logs in GCP (google-logging-enabled is on).")
+                    f"({dash}); currently allowed: {allowed}. That address is auto-detected per "
+                    f"deploy and is not stable on every host — if the dashboard's outbound IP has "
+                    f"moved since, the node silently drops its packets. Otherwise the container "
+                    f"may still be initialising — raise rancher_ready_timeout_s and redeploy, "
+                    f"or check the node's container logs on {cloud}.")
                 return
             job_service.update_progress(db, job_id, 75, "Bootstrapping Rancher admin")
             token = await rancher_service.bootstrap_direct(

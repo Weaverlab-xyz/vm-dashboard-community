@@ -259,7 +259,15 @@ and-egg problem. The dashboard now manages the allow-list for you:
   from a **pool** of IPs (consecutive requests can leave from different addresses),
   so a single detected `/32` isn't reliable there — set the pool's CIDR (e.g.
   `104.28.182.0/24`) in `rancher_dashboard_egress_cidr`; detection keeps a stored
-  CIDR that already contains the detected IP instead of clobbering it.
+  CIDR that already contains the detected IP instead of clobbering it. The last few
+  detected `/32`s also stay admitted (`rancher_dashboard_egress_recent`, bounded), so
+  a host whose *own* outbound address is not fixed — an Azure Container Apps
+  environment with no NAT Gateway, for instance — does not lock the deploy out of the
+  node it just launched. That failure is distinctive: the readiness poll needs only
+  **one** attempt to land on the admitted address and passes, then the bootstrap needs
+  several **consecutive** calls and is dropped, so the job reports "serving" and
+  "cannot reach it" seconds apart. If you hit it, the durable fix is a stable egress
+  (a NAT Gateway) or a manual pool CIDR.
 - **API runner** — when `rancher_api_transport=runner` (see
   [Corp TLS inspection](#corp-tls-inspection-api-transport)), the runner's own source
   range (`rancher_runner_source_cidr`) is auto-added so its internal traffic is
@@ -371,7 +379,13 @@ Two ways out:
    the node's private IP — and the failure is a dropped SYN, not an error. On
    **Azure** the container group needs a VNet-**delegated** subnet in the node's VNet
    (`ansible_aci_subnet_id`, falling back to `azure_aci_subnet_id`); without one it
-   runs with a public address and cannot route to the node at all.
+   runs with a public address and cannot route to the node at all. It is pinned to
+   the node's location the same way AWS is: a delegated subnet is regional, so a node
+   outside the default `azure_location` needs that region's own `aci_subnet_id` and
+   `resource_group` (Settings → Multi-region; the Azure sandbox emits both). Without
+   them the group lands in the default region's VNet, where `AllowVnetInBound` does
+   not apply and nothing is peered — so the probe just times out. The runner now
+   fails fast naming `aci_subnet_id` instead.
 
    Request payloads (API token, bootstrap password) travel to the job as a curl
    config over stdin — never in the container's argv. Note each API call costs a
@@ -480,6 +494,7 @@ apply immediately.
 | `rancher_node_cloud` | `gcp` | `aws` \| `azure` \| `gcp` — which cloud hosts the node. Picked on the deploy form and rewritten to where it actually landed, so teardown and bare redeploys stay put. Defaults to `gcp` because every node deployed before this key existed is a GCE VM |
 | `rancher_allowed_source_cidrs` | `""` | *Additive* manual CIDRs (tcp 80/443); the dashboard's own egress, provisioned clusters + the Web-Jump Gateway are auto-added. Empty + nothing auto-discovered = closed |
 | `rancher_dashboard_egress_cidr` | (runtime) | The dashboard's own public egress IP/CIDR, auto-detected + persisted on deploy so the worker can reach the node's public IP. Behind a corp proxy pool set the pool's CIDR — a stored CIDR containing the detected IP is kept, not clobbered. Bare IP → `/32` |
+| `rancher_dashboard_egress_recent` | (runtime) | Bounded CSV of recently-detected egress `/32`s, admitted alongside the current one so a host with no stable outbound address does not lock the deploy out mid-job |
 | `rancher_ready_timeout_s` | `360` | Seconds the deploy waits for Rancher to serve after boot; raise for slow disks / large images |
 | `rancher_api_transport` | `direct` | `direct` \| `runner` — run the Rancher API calls as curl in a one-shot job **in the node's own cloud** when this network's TLS inspection blocks the node's self-signed cert ([details](#corp-tls-inspection-api-transport)) |
 | `rancher_internal_url` | (runtime) | `https://<node internal IP>` captured at deploy — what the runner transport dials |

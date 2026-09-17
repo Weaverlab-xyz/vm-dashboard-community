@@ -366,6 +366,15 @@ async def _bootstrap(db, job_id: str, url: str, password: str,
             return "", ("The node already had an admin user with a different password, so no "
                         "API token could be minted automatically. Add a Portainer API token "
                         "in Settings → Containers.")
+        except portainer_service.PortainerError as init_exc:
+            # BOTH calls failed. The job record keeps only what is raised, so without
+            # this the login reason (the FIRST and usually more informative failure)
+            # survives just in the worker log and the operator sees the second one
+            # alone -- which is how "Cannot reach Portainer: " became a whole job's
+            # only error. Chain them so one message carries both.
+            raise type(init_exc)(
+                f"{init_exc} — and the admin login before it failed with: {exc}"
+            ) from init_exc.__cause__ or init_exc
         jwt = await portainer_service.login(url, _ADMIN_USERNAME, password)
 
     job_service.update_progress(db, job_id, 85, "Minting an API token")
@@ -376,6 +385,54 @@ async def _bootstrap(db, job_id: str, url: str, password: str,
     else:
         pat = await portainer_service.create_access_token(url, jwt, password)
     return pat, ""
+
+
+async def _readmit_and_retry(db, job_id: str, placement: dict, call):
+    """Run ``call()``; if it fails because the connection was DROPPED, re-detect the
+    dashboard's egress address, re-apply the node's ingress, and run it once more.
+
+    Reaching here means the readiness poll already succeeded, so the node IS serving
+    and a dropped connect is about the SOURCE address, not the node: the allow-list was
+    written from one detection at job start, and a host with no stable outbound address
+    egresses from whichever one the platform picks per connection. The poll needs a
+    single lucky attempt and passes; the bootstrap needs several consecutive ones and
+    does not. Re-detecting admits the address actually in use now
+    (``dashboard_cidr`` keeps the previous ones too, so this widens rather than swaps).
+
+    Deliberately ONE retry: if the second attempt is dropped as well, the cause is not a
+    rotation and looping would only spend the job's time before reporting the same
+    thing.
+    """
+    try:
+        return await call()
+    except portainer_service.PortainerError as exc:
+        if not portainer_service.is_unreachable(exc):
+            raise
+        logger.warning("Portainer bootstrap could not connect (%s) — re-detecting the "
+                       "dashboard's egress address and re-applying ingress", exc)
+        job_service.update_progress(db, job_id, 80, "Re-admitting the dashboard's egress IP")
+        before = firewall_status(db).get("merged") or []
+        try:
+            await _ensure_dashboard_egress_cidr()
+            await refresh_portainer_firewall(db, placement=placement)
+        except Exception as refresh_exc:  # noqa: BLE001 — report the ORIGINAL failure
+            logger.warning("Portainer ingress re-apply failed: %s", refresh_exc)
+            raise exc
+        after = firewall_status(db).get("merged") or []
+        if after == before:
+            # Nothing changed, so the retry would be dialling from the same address
+            # into the same rule. Say so instead of burning another timeout.
+            raise portainer_service.PortainerError(
+                f"{exc} The node is serving (the readiness poll passed) but the connection "
+                f"is being dropped, and re-detecting the dashboard's egress address "
+                f"produced no change (allowed: {', '.join(after) or 'none'}). Something "
+                f"between the worker and the node is discarding the packets — check the "
+                f"node's firewall rule, and set portainer_dashboard_egress_cidr manually "
+                f"to the worker's real outbound range if it egresses from a pool."
+            ) from exc.__cause__ or exc
+        logger.info("Portainer ingress re-applied (%s → %s) — retrying the bootstrap",
+                    before, after)
+        return await call()
 
 
 async def _launch_node(cloud: str, p: dict, *, admin_password_hash: str) -> dict:
@@ -836,8 +893,10 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             pat = existing_pat
         else:
             try:
-                pat, note = await _bootstrap(db, job_id, url, password,
-                                             state_preexisting=state_preexisting)
+                pat, note = await _readmit_and_retry(
+                    db, job_id, p,
+                    lambda: _bootstrap(db, job_id, url, password,
+                                       state_preexisting=state_preexisting))
             except portainer_service.PortainerInitWindowClosed as exc:
                 job_service.set_failed(db, job_id, f"{exc} {_LOCKED_NODE_REMEDY}")
                 return

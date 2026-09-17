@@ -34,6 +34,13 @@ _RESOLVED = {"project_id": "proj-test", "region": "us-central1",
              "vpc_network": "sandbox-vpc", "vpc_subnetwork": "sandbox-subnet"}
 _CONFIG_STORE = {}   # backs the default config_service stub
 
+# What k8s_runner_service._resolve_aci returns: the DASHBOARD's primary placement,
+# read from flat keys. The node may be somewhere else entirely.
+_RESOLVED_ACI = {"rg": "rg-primary", "location": "centralus",
+                 "subnet_id": "/subscriptions/s/rg-primary/subnets/aci-centralus",
+                 "image": "dtzar/helm-kubectl:latest", "acr_server": "",
+                 "acr_username": "", "acr_password": ""}
+
 
 def _install_stubs():
     gcp = types.ModuleType("web_dashboard.services.gcp_service")
@@ -42,6 +49,7 @@ def _install_stubs():
 
     krs = types.ModuleType("web_dashboard.services.k8s_runner_service")
     krs._resolve_gcp = lambda: dict(_RESOLVED)
+    krs._resolve_aci = lambda: dict(_RESOLVED_ACI)
     sys.modules["web_dashboard.services.k8s_runner_service"] = krs
 
     # Stub config_service at load so the REAL one is never imported: _resolve now
@@ -186,6 +194,94 @@ def _stub_config(store):
         else:
             sys.modules.pop("web_dashboard.services.config_service", None)
     return _restore
+
+
+def _stub_region_config(by_region):
+    """Install a region_config stub resolving from ``by_region``; return a restore fn.
+
+    Sets the PACKAGE ATTRIBUTE as well as sys.modules: ``_resolve_aci`` reaches it via
+    ``from . import region_config``, which resolves the attribute on the already-imported
+    ``web_dashboard.services`` package first — so a sys.modules-only stub is silently
+    ignored (the same trap the config_service note above describes)."""
+    import web_dashboard.services as pkg
+    prev_mod = sys.modules.get("web_dashboard.services.region_config")
+    prev_attr = getattr(pkg, "region_config", None)
+    mod = types.ModuleType("web_dashboard.services.region_config")
+    mod.resolve_region = lambda cloud, region: dict(by_region.get(region, {}))
+    sys.modules["web_dashboard.services.region_config"] = mod
+    pkg.region_config = mod
+
+    def _restore():
+        if prev_mod is not None:
+            sys.modules["web_dashboard.services.region_config"] = prev_mod
+        else:
+            sys.modules.pop("web_dashboard.services.region_config", None)
+        if prev_attr is not None:
+            pkg.region_config = prev_attr
+        else:
+            try:
+                delattr(pkg, "region_config")
+            except AttributeError:
+                pass
+    return _restore
+
+
+def test_resolve_aci_pins_container_group_to_node_region():
+    """An ACI container group attaches to a VNet-DELEGATED subnet, which is regional.
+    The k8s runner resolves the DASHBOARD's primary placement from flat keys, so a node
+    outside the default location would put the group in the wrong VNet — where
+    AllowVnetInBound does not apply and nothing is peered, so the SYN is dropped and the
+    probe burns the whole readiness budget (live 2026-09-17: a westus2 node, a
+    centralus runner). Location, RG and subnet must all come from the node's region."""
+    restore_cfg = _stub_config({"azure_rancher_zone": "westus2"})
+    restore_rc = _stub_region_config({"westus2": {
+        "resource_group": "sandbox-westus2-rg",
+        "aci_subnet_id": "/subscriptions/s/sandbox-westus2-rg/subnets/aci-westus2"}})
+    try:
+        cfg = rar._resolve_aci()
+        assert cfg["location"] == "westus2", cfg["location"]
+        assert cfg["rg"] == "sandbox-westus2-rg", cfg["rg"]
+        assert cfg["subnet_id"].endswith("aci-westus2"), cfg["subnet_id"]
+    finally:
+        restore_rc(); restore_cfg()
+
+
+def test_resolve_aci_without_a_region_subnet_raises():
+    """Fail fast and name the key. Launching anyway puts the group in the default
+    location's VNet, which cannot route — the silent-drop failure this replaces."""
+    restore_cfg = _stub_config({"azure_rancher_zone": "westus2"})
+    restore_rc = _stub_region_config({"westus2": {"resource_group": "sandbox-westus2-rg"}})
+    try:
+        rar._resolve_aci()
+        raised = None
+    except rar.RancherRunnerError as exc:
+        raised = str(exc)
+    finally:
+        restore_rc(); restore_cfg()
+    assert raised and "aci_subnet_id" in raised and "westus2" in raised, raised
+
+
+def test_resolve_aci_in_the_default_location_is_untouched():
+    """A single-region install must resolve to EXACTLY the flat keys it always did."""
+    restore_cfg = _stub_config({"azure_rancher_zone": "centralus"})
+    restore_rc = _stub_region_config({})
+    try:
+        cfg = rar._resolve_aci()
+        assert cfg["location"] == "centralus", cfg["location"]
+        assert cfg["rg"] == "rg-primary", cfg["rg"]
+        assert cfg["subnet_id"].endswith("aci-centralus"), cfg["subnet_id"]
+    finally:
+        restore_rc(); restore_cfg()
+
+
+def test_node_region_reads_azure_location_verbatim():
+    """Azure models no zone for these nodes — resolve_placement persists the LOCATION
+    in the zone key — so any split (the GCP/AWS ones) would corrupt it."""
+    restore = _stub_config({"azure_rancher_zone": "westus2"})
+    try:
+        assert rar._node_region("azure") == "westus2"
+    finally:
+        restore()
 
 
 def test_resolve_pins_direct_runner_to_node_region():
