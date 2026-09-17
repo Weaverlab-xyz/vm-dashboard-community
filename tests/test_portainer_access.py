@@ -272,6 +272,69 @@ def test_role_constants_are_distinct_and_documented():
     assert "ROLE IDS ARE NUMERIC AND EASY TO INVERT" in source
 
 
+def test_transport_error_names_the_exception_class():
+    """httpx builds its transport exceptions from the httpcore one's message, which is
+    EMPTY for every timeout and connect failure — so interpolating only ``{exc}`` gave
+    "Cannot reach Portainer: " and nothing else, which was a whole deploy's recorded
+    error (live 2026-09-17). The class name carries the diagnosis, so it must survive."""
+    import asyncio
+    import httpx
+
+    @ps._wrap_transport_errors
+    async def _boom():
+        raise httpx.ConnectTimeout("")
+
+    try:
+        asyncio.run(_boom())
+        msg = None
+    except ps.PortainerError as exc:
+        msg = str(exc)
+    assert msg, "a transport failure must raise PortainerError"
+    assert not msg.rstrip().endswith(":"), f"message still ends bare: {msg!r}"
+    assert "ConnectTimeout" in msg, msg
+    # A drop is a firewall, not a closed port — that distinction is the whole point.
+    assert "dropped" in msg, msg
+
+
+def test_transport_error_keeps_a_non_empty_httpx_message():
+    """When httpx DOES carry a message it must not be lost behind the class name."""
+    import asyncio
+    import httpx
+
+    @ps._wrap_transport_errors
+    async def _boom():
+        raise httpx.ConnectError("nodename nor servname provided")
+
+    try:
+        asyncio.run(_boom())
+        msg = None
+    except ps.PortainerError as exc:
+        msg = str(exc)
+    assert msg and "nodename nor servname provided" in msg, msg
+    assert "ConnectError" in msg, msg
+
+
+def test_is_unreachable_separates_a_drop_from_an_http_failure():
+    """The re-admit retry keys off this: a DROPPED connect means our source address is
+    no longer admitted, while an HTTP status means we got through and must not retry.
+    Tests the CAUSE, so it stays correct if the wording changes."""
+    import httpx
+
+    dropped = ps.PortainerError("x")
+    dropped.__cause__ = httpx.ConnectTimeout("")
+    refused = ps.PortainerError("x")
+    refused.__cause__ = httpx.ConnectError("")
+    mid_stream = ps.PortainerError("x")
+    mid_stream.__cause__ = httpx.ReadTimeout("")
+
+    assert ps.is_unreachable(dropped)
+    assert ps.is_unreachable(refused)
+    # Connected then stalled: the allow-list is not the problem, so no re-admit.
+    assert not ps.is_unreachable(mid_stream)
+    assert not ps.is_unreachable(ps.PortainerError("login: bad credentials"))
+    assert not ps.is_unreachable(ValueError("not a portainer error"))
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0

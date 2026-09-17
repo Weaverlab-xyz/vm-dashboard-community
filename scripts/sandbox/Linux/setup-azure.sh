@@ -656,6 +656,7 @@ _cfg=(
   "azure_region.$LOCATION.db_sqlserver_subnet_id=$DB_SQLSERVER_SUBNET_ID"
   "azure_region.$LOCATION.db_sqlserver_private_dns_zone_id=$DB_SQLSERVER_DNS_ZONE_ID"
   "azure_region.$LOCATION.jumpoint_subnet_id=$JP_SUBNET_ID"
+  "azure_region.$LOCATION.aci_subnet_id=$ACI_SUBNET_ID"
   "azure_region.$LOCATION.functions_subnet_id=$FN_SUBNET_ID"
   ""
   "# Image-registry hub + automated cross-cloud promote:"

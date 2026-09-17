@@ -161,6 +161,39 @@ def test_manual_cidrs_and_dashboard_cidr_merge_dedup_sorted():
     assert st["manual_cidrs"] == ["10.0.0.0/8", "203.0.113.5/32", "10.0.0.0/8"], st
 
 
+def test_recently_seen_egress_addresses_stay_admitted():
+    """One pinned /32 is a snapshot of an address that is not guaranteed stable: a host
+    behind a SNAT pool with no fixed outbound address (an ACA environment with no NAT
+    Gateway) egresses from whichever address the platform picks per connection. The
+    readiness poll needs ONE lucky attempt and passes; the bootstrap needs several
+    consecutive ones and gets dropped — "serving a second ago, unreachable now"
+    (live 2026-09-17). Admitting the recent set closes that window."""
+    _reset(gcp_project_id="proj", gcp_zone="us-central1-a",
+           portainer_dashboard_egress_cidr="172.193.115.158/32",
+           portainer_dashboard_egress_recent="172.193.115.158/32,135.237.231.126/32")
+    st = portainer_node_service.firewall_status()
+    assert st["merged"] == ["135.237.231.126/32", "172.193.115.158/32"], st
+    # The CURRENT pin still leads the singular field the Settings panel reads.
+    assert st["dashboard_egress_ip"] == "172.193.115.158/32", st
+
+
+def test_recent_egress_list_is_bounded_and_most_recent_first():
+    """A genuinely roaming address must not grow the allow-list without limit."""
+    from web_dashboard.services import managed_node_service as mns
+    _reset()
+    spec = portainer_node_service._SPEC
+    for i in range(7):
+        mns._record_recent_egress(spec, f"198.51.100.{i}/32")
+    recent = mns._recent_egress_cidrs(spec)
+    assert len(recent) == mns._RECENT_EGRESS_MAX, recent
+    assert recent[0] == "198.51.100.6/32", recent
+    # Re-seeing an address promotes it rather than duplicating it.
+    mns._record_recent_egress(spec, "198.51.100.4/32")
+    recent = mns._recent_egress_cidrs(spec)
+    assert recent[0] == "198.51.100.4/32", recent
+    assert len(recent) == len(set(recent)) == mns._RECENT_EGRESS_MAX, recent
+
+
 def test_jumpoint_cidrs_requires_the_web_jump_to_be_enabled():
     # An egress IP left over from a previous deploy must NOT open the firewall while
     # the Web Jump is off — the /32 is only justified by an active broker.
