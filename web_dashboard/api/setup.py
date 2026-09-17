@@ -491,14 +491,6 @@ def _apply_config(payload: SetupPayload) -> None:
     pairs: dict = {}
     if payload.profile is not None:
         pairs["install_profile"] = payload.profile.install_profile
-    # The instance's default focus. Note what this does NOT do: it writes no feature flag
-    # of its own. A persona's preset only PRE-TICKS the wizard's own toggles in the browser,
-    # so what lands in `pairs` below is whatever the operator submitted after seeing them --
-    # which is the difference between a starting point and a lock, made visible rather than
-    # asserted.
-    if payload.persona is not None:
-        pairs["default_persona"] = payload.persona.default_persona
-
     # A POV instance skips the cloud steps, and must therefore skip the cloud WRITES —
     # not merely the screens. The loops below persist every NON-secret field whether or
     # not it was filled in, so "clicked past it" would still land aws_region="us-east-2",
@@ -513,6 +505,28 @@ def _apply_config(payload: SetupPayload) -> None:
     from ..services import feature_flags
     profile = (payload.profile.install_profile if payload.profile is not None
                else feature_flags.install_profile())
+
+    # The instance's default focus. Note what this does NOT do: it writes no feature flag
+    # of its own. A persona's preset only PRE-TICKS the wizard's own toggles in the browser,
+    # so what lands in `pairs` below is whatever the operator submitted after seeing them --
+    # which is the difference between a starting point and a lock, made visible rather than
+    # asserted.
+    #
+    # Gated on the EFFECTIVE profile above rather than on personas.applies(), and that is
+    # the whole reason this block moved down here: applies() reads the STORED profile, and
+    # this function is the thing writing it. On a fresh POV install the stored value is
+    # still the default, so applies() would answer for the instance this is about to stop
+    # being. A non-empty focus is refused rather than dropped, because silently discarding
+    # a wizard field is how an operator learns to distrust the whole page; clearing stays
+    # allowed, matching api/users.py and the masked-flag rule below.
+    if payload.persona is not None:
+        want = (payload.persona.default_persona or "").strip()
+        if want and profile != "demo":
+            raise HTTPException(
+                status_code=409,
+                detail=f"A focus cannot be set on {feature_flags.profile_noun(profile)}.")
+        pairs["default_persona"] = payload.persona.default_persona
+
     if profile == "demo":
         for cloud in (payload.aws, payload.azure, payload.gcp, payload.oci):
             for field, value in cloud.model_dump().items():

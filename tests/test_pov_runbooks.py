@@ -87,24 +87,24 @@ def test_card_ids_are_unique_across_every_runbook():
     assert not dupes, f"duplicate runbook card ids: {dupes}"
 
 
-def test_a_runbook_card_id_never_collides_with_a_persona_card_id():
-    """The id is the primary key of a progress row. A collision would let a role's card
-    tick a runbook's off, and the rows outlive the copy that caused it."""
-    from web_dashboard.services import personas as P, pov_runbooks as R
-    persona_pov = {c.id for p in P.all_personas() for c in p.pov_use_cases}
+def test_a_runbook_card_id_never_collides_with_another_registrys():
+    """The id is the primary key of a progress row. A collision would let a product group's
+    card tick a runbook's off, and the rows outlive the copy that caused it."""
+    from web_dashboard.services import personas as P, pov_cards as C, pov_runbooks as R
+    product_pov = {c.id for c in C.cards()}
     persona_demo = {c.id for p in P.all_personas() for c in p.use_cases}
     mine = {c.id for _r, c in _all_cards()}
-    assert not (mine & persona_pov), f"shared with POV cards: {sorted(mine & persona_pov)}"
+    assert not (mine & product_pov), f"shared with POV cards: {sorted(mine & product_pov)}"
     assert not (mine & persona_demo), f"shared with demo cards: {sorted(mine & persona_demo)}"
-    assert not (set(R.VALID_RUNBOOKS) & set(P.VALID_PERSONAS)), \
-        "a runbook key collides with a persona key; both land in the same progress column"
+    assert not (set(R.VALID_RUNBOOKS) & set(C.GROUPS)), \
+        "a runbook key collides with a product group key; both land in the same column"
 
 
 def test_every_required_product_is_a_real_product():
-    from web_dashboard.services import personas as P
+    from web_dashboard.services import pov_cards as C
     for r, c in _all_cards():
         for product in c.requires_products:
-            assert product in P.POV_PRODUCTS, \
+            assert product in C.POV_PRODUCTS, \
                 f"{r.key}/{c.id} requires '{product}', not a real product"
 
 
@@ -151,7 +151,7 @@ def test_the_catalog_is_complete_for_every_product_mix():
     expected_cards = sum(len(r.use_cases) for r in R.all_runbooks())
     for mix in _mixes():
         cat = R.catalog(_ENV, mix)
-        assert [g["persona"] for g in cat] == list(R.VALID_RUNBOOKS), \
+        assert [g["group"] for g in cat] == list(R.VALID_RUNBOOKS), \
             f"{mix}: the catalog drops or reorders runbooks"
         total = sum(len(g["use_cases"]) for g in cat)
         assert total == expected_cards, \
@@ -173,16 +173,16 @@ def test_an_out_of_scope_card_carries_no_target():
     assert seen, "no mix put a runbook card out of scope; the gating is not being exercised"
 
 
-def test_the_group_shape_matches_the_persona_one():
-    """Every consumer -- the detail page's group loop, `pov_summary.by_persona`,
+def test_the_group_shape_matches_the_product_one():
+    """Every consumer -- the detail page's group loop, `pov_summary.by_group`,
     `pov_use_cases._summarize` -- takes both registries without knowing which is which.
     A missing key is a group that renders blank rather than one that errors."""
-    from web_dashboard.services import personas as P, pov_runbooks as R
+    from web_dashboard.services import pov_cards as C, pov_runbooks as R
     mix = _mixes()[-1]
-    persona_keys = set(P.pov_catalog(_ENV, mix)[0].keys())
+    product_keys = set(C.catalog(_ENV, mix)[0].keys())
     for g in R.catalog(_ENV, mix):
-        assert set(g.keys()) == persona_keys, \
-            f"{g.get('persona')!r} group keys differ: {sorted(set(g) ^ persona_keys)}"
+        assert set(g.keys()) == product_keys, \
+            f"{g.get('group')!r} group keys differ: {sorted(set(g) ^ product_keys)}"
 
 
 def test_an_unknown_runbook_key_yields_an_empty_group_never_none():

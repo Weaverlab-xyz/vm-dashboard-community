@@ -531,6 +531,54 @@ def test_turning_a_masked_integration_off_is_still_allowed():
         "flag that is already on")
 
 
+def test_a_pov_install_refuses_a_default_focus():
+    """A focus is a presenting decision and a POV instance is not presenting, so the wizard
+    does not offer the step there. This is the server half: a hand-rolled PUT must not be
+    able to store a default nothing resolves. Refused rather than dropped, because silently
+    discarding a submitted field is how an operator learns to distrust the whole page."""
+    src = _read(_SETUP)
+    body = src.split("def _apply_config", 1)[1].split("\ndef ", 1)[0]
+    assert 'if want and profile != "demo":' in body, \
+        "_apply_config stores default_persona on a POV install"
+    assert "profile_noun(profile)" in body, (
+        "the refusal must name the instance in words and must use the EFFECTIVE profile "
+        "— profile_noun() with no argument reads the stored one, which this function is "
+        "in the middle of changing")
+
+
+def test_the_focus_refusal_reads_the_effective_profile_not_the_stored_one():
+    """The ordering trap. `personas.applies()` and a bare `profile_noun()` both read the
+    STORED profile, and _apply_config is the thing writing it -- so on a fresh POV install
+    they answer for the instance this call is about to stop being. The refusal has to sit
+    BELOW the line that resolves the effective profile."""
+    src = _read(_SETUP)
+    body = src.split("def _apply_config", 1)[1].split("\ndef ", 1)[0]
+    i_profile = body.index("profile = (payload.profile.install_profile")
+    i_persona = body.index("if payload.persona is not None:")
+    assert i_profile < i_persona, (
+        "the focus write happens before the effective profile is known — on a fresh POV "
+        "install it would be checked against the default profile and stored anyway")
+    # Comment lines stripped first. The block deliberately EXPLAINS why it does not call
+    # the stored-profile predicate, and a naive substring search matches that prose and
+    # fails on the very comment warning the next author off the bug.
+    code = "\n".join(ln for ln in body.split("\n") if not ln.lstrip().startswith("#"))
+    assert "personas.applies()" not in code, (
+        "_apply_config asks the stored-profile predicate — it must use the effective "
+        "profile it computed")
+
+
+def test_clearing_the_default_focus_is_allowed_on_a_pov_instance():
+    """Same asymmetry as a masked flag: turning it off is always permitted. Without it an
+    instance reconfigured from estate to POV could never shed the default it was carrying."""
+    src = _read(_SETUP)
+    body = src.split("def _apply_config", 1)[1].split("\ndef ", 1)[0]
+    persona = body.split("if payload.persona is not None:", 1)[1]
+    assert "if want and" in persona, \
+        "the refusal is not conditional on a NON-EMPTY focus, so it cannot be cleared"
+    assert 'pairs["default_persona"] = payload.persona.default_persona' in persona, \
+        "_apply_config no longer persists the default focus at all"
+
+
 # ── the second instance's compose file agrees with the profile ──────────────
 
 def test_the_pov_compose_file_sets_the_profile_and_its_features():

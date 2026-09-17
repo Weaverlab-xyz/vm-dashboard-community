@@ -295,12 +295,43 @@ def test_the_lens_is_not_in_the_measured_nav_row():
 
 def test_the_lens_does_not_colour_itself_by_persona():
     """No per-persona accent, not even inside the content area: an emerald 'SRE' control
-    on a violet POV instance is the greyscale-screenshot confusion one layer in."""
+    on a violet POV instance is the greyscale-screenshot confusion one layer in.
+
+    The slice ends at the gate's ``{% endif %}`` rather than at a run of closing divs: the
+    lens is wrapped in ``{% if persona_focus %}`` (see the next test), and a terminator made
+    of markup that repeats later in the file would silently widen this slice to half the
+    page the moment the indentation moved."""
     src = _read(_DASHBOARD)
-    lens = src.split("<!-- Lens selector -->", 1)[1].split("</div>\n  </div>", 1)[0]
+    lens = src.split("<!-- Lens selector -->", 1)[1].split("{% endif %}", 1)[0]
     for token in ("theme.", "persona.color", "persona.accent", "persona.chip_class"):
         assert token not in lens, f"the lens reads {token} — it must carry no profile or " \
                                   "persona colour of its own"
+
+
+def test_the_lens_only_renders_where_a_focus_exists():
+    """The picker is wrapped in a SERVER-side gate, not an Alpine one.
+
+    A POV instance has no role whose material could lead, so the eight labels in the
+    dropdown were offering a choice with no outcome. Gating it in Jinja rather than on the
+    page's own `isPov` getter matters: `isPov` reads /api/features, which resolves after the
+    first paint, so an x-if would render the control and then take it away."""
+    src = _read(_DASHBOARD)
+    before = src.split("<!-- Lens selector -->", 1)[0]
+    assert before.rstrip().endswith("{% if persona_focus %}"), (
+        "the lens selector is not gated on persona_focus — it renders on a POV instance, "
+        "where there is no focus to pick")
+    assert "x-if=\"isPov\"" not in src.split("<!-- Lens selector -->", 1)[1][:400], (
+        "the lens is gated client-side — it would paint and then vanish")
+
+
+def test_the_gate_is_supplied_by_the_context_processor():
+    """`persona_focus` has to arrive on every route, for the same reason the flags do: the
+    dashboard is not the only template that renders a picker (see the RBAC tabs), and a
+    per-route key is the fifteen-missing-nav-links bug of #664 again."""
+    src = _read(_MAIN)
+    ctx = src.split("def _profile_context", 1)[1].split("\ntemplates = ", 1)[0]
+    assert '"persona_focus": personas.applies()' in ctx, (
+        "_profile_context does not supply persona_focus from personas.applies()")
 
 
 # ── the collector's parse survives ───────────────────────────────────────────

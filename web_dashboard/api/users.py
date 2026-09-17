@@ -237,8 +237,17 @@ def update_user(
         # Validated against the registry, never stored raw: a free-text column here would
         # be a focus that resolves to nothing and reads as "unset" with no way to tell why.
         # Writes `persona`, never `session_persona` -- that one belongs to the login path.
-        from ..services import personas
+        #
+        # Refused on an instance with no focus axis rather than stored inert: a value
+        # nothing resolves would start being honoured the day that instance was
+        # reconfigured to an estate one. Clearing is allowed on both profiles, matching
+        # groups.py::_valid_persona and the masked-flag rule in api/setup.py.
+        from ..services import feature_flags, personas
         want = (body.persona or "").strip().lower()
+        if want and not personas.applies():
+            raise HTTPException(
+                status_code=409,
+                detail=f"A focus cannot be assigned on {feature_flags.profile_noun()}.")
         if want and want not in personas.VALID_PERSONAS:
             raise HTTPException(status_code=422, detail=f"Unknown persona '{want}'")
         user.persona = want or None

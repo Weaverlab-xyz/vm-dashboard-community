@@ -5,7 +5,8 @@
 ## The problem
 
 `templates/dashboard.html` is an estate overview: tile bands for clouds, hypervisors,
-containers and managed services, a quick-deploy strip, a persona use-case band, and the
+containers and managed services, a quick-deploy strip, a role use-case band with its focus
+picker, and the
 jobs list. Every one of those is gated on something a POV instance does not have.
 
 Walked as a POV install, the page came out like this:
@@ -18,7 +19,8 @@ Walked as a POV install, the page came out like this:
 | Managed Services | one tile, OT Demo Cells — **whose only link 404s here** |
 | Quick deploy | gone — all eight shortcuts are estate-only |
 | Workgroup actions | gone |
-| Use cases for *persona* | rendered, and every card grey: "Not available on this instance" |
+| Use cases for *role* | rendered, and every card grey: "Not available on this instance" |
+| Focus picker | rendered, offering eight roles — none of which changed anything here |
 | Overview | Active Jobs, Deployed Resources |
 
 So the landing page of a POV install was an overview of nothing, with one dead link and one
@@ -37,7 +39,8 @@ data that was already computed, and the two surfaces read one serializer, so the
 disagree about what to press next.
 
 Beside it: three tiles (`pov_active`, `pov_guests`, `pov_coverage`), POV rows in **Needs
-attention**, and the persona use-case band suppressed.
+attention**, and both halves of the role axis gone — the use-case band and the focus picker
+in the header.
 
 ## The decisions worth knowing before you change it
 
@@ -45,13 +48,28 @@ attention**, and the persona use-case band suppressed.
 
 `services/personas` is curation only — it may reorder and emphasise, never hide. The
 profile is the other axis, the one that subtracts and already 404s whole pages. This band
-appears and the persona band disappears because of the **profile**, and no persona key
-appears anywhere in either.
+appears and the role band disappears because of the **profile**, and no persona key appears
+anywhere in either.
 
-Suppressing the persona band is a subtraction, so it has to leave a way back: `/use-cases`
+Suppressing the role band is a subtraction, so it has to leave a way back: `/use-cases`
 stays in the nav and renders the POV checklist there rather than the estate catalog. The
 band is wrapped, never deleted — a guard suite pins that it is still gated on a persona
-being set, and measures how far into its own marker comment that gate appears.
+being set, and measures how far into its own marker comment that gate appears. That budget
+is 500 characters: a comment added between the marker and the gate reports a *missing* gate.
+
+The **focus picker** went the same way, and it is the larger claim, so it is worth stating
+plainly. Hiding a band that had nothing in it is obvious. Removing the control that picks a
+focus says the axis does not exist here at all — and it does not: a focus is a presenting
+decision, a POV instance is one customer's evaluation, and the eight labels in that dropdown
+were a choice with no outcome. `services/personas.applies()` is the one reader, the five
+resolvers return neutral behind it, and the wizard step and the RBAC Focus fields are gone
+for the same reason. Nothing is less reachable; the dashboard simply renders in shipped
+order, which is what neutral always did.
+
+That gate is **Jinja**, not Alpine, and it is the one exception to the rule below. A picker
+gated on `isPov` paints and then vanishes, because `isPov` resolves after the first paint.
+`_profile_context` ships `persona_focus` for exactly this, and the guard suites parse around
+it because it wraps markup rather than sitting inside a JS literal.
 
 ### The branch reads `/api/features`, not `/api/persona`
 

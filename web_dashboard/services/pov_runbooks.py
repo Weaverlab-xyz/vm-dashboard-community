@@ -2,26 +2,26 @@
 
 The fourth axis, and the one that is not about this dashboard at all.
 
-``install_profile`` gates, ``personas`` curates by role, and ``pov_use_cases`` answers
-"can I run this on THIS POV?". None of them answers the question an SE working from a
-**published procedure** has in front of them: *where am I in the document?* A POV is run
-against a real runbook over several sessions — BeyondTrust's own Skytap Password Safe POC
+``install_profile`` gates, ``pov_cards`` groups a POV's use cases by the product each one
+proves, and ``pov_use_cases`` answers "can I run this on THIS POV?". None of them answers
+the question an SE working from a **published procedure** has in front of them: *where am
+I in the document?* A POV is run against a real runbook over several sessions — BeyondTrust's own Skytap Password Safe POC
 step-by-step is 75 pages and twenty use cases — and the thing an SE loses track of is
 which of those twenty they have actually shown.
 
-So a runbook is a group of cards like a persona is, and deliberately **not** a persona:
+So a runbook is a group of cards like a product is, and deliberately **not** a product:
 
-  * A persona is a **role** — it presets feature flags, orders dashboard tiles, pins nav
-    items, and appears in the setup wizard and the lens picker. "Password Safe POC
-    runbook" is not a job title, and putting it there would offer an SE a role they are
-    not, in four places that have nothing to do with a POV.
-  * A persona also owes ``docs/profiles/demo/personas/<key>.md`` a section per demo card, and demo cards
-    target the demo estate — pages a POV instance masks. A runbook has no demo half.
+  * A product group answers "what is this evaluation proving?" and its membership is
+    DERIVED — ``pov_cards.group_of`` reads the first product a card declares. A runbook is
+    an editorial list: which of a document's twenty use cases are worth showing, in the
+    document's own order, and that cannot be derived from anything.
+  * A product group is one of three the POV row was scoped by. "Password Safe Cloud POC
+    (Skytap)" is not a product; it is one path through two of them.
 
 What it DOES share is the card shape and every consumer: :class:`personas.UseCase` and
-:func:`personas.describe_pov_card` are reused verbatim, so a runbook card renders,
-resolves its product mix, withholds its target when out of scope, and records progress
-through exactly the code a persona card does.
+:func:`pov_cards.describe_card` are reused verbatim, so a runbook card renders, resolves
+its product mix, withholds its target when out of scope, and records progress through
+exactly the code a product card does.
 
 Two properties carried over from ``pov_use_cases``, for the same reasons:
 
@@ -31,6 +31,7 @@ Two properties carried over from ``pov_use_cases``, for the same reasons:
     different answers, and only one of them is somebody's next decision.
   * **The registry is the allowlist for writes.** :func:`find_card` is what
     ``pov_use_cases.set_state`` consults, so an unknown id is refused rather than stored.
+    It is the second half of that allowlist; ``pov_cards.find_card`` is the first.
 
 **A card is a demo an SE can actually give, so the runbook's unfinished use cases have
 none.** Seven of its twenty are unwritten, unQA'd since 2022, or the author's personal
@@ -47,7 +48,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from . import personas
+from . import pov_cards
 from .personas import UseCase
 
 
@@ -248,26 +249,29 @@ def get(key: str) -> Runbook | None:
 
 # ── the API shape ────────────────────────────────────────────────────────────
 #
-# Identical to `personas.describe_pov`, including the group's identity living under a key
-# called `persona`. That name is reused deliberately rather than added alongside: the POV
-# detail page keys its group loop on it, `pov_summary` reads it, and
-# `PovUseCaseProgress.persona` stores it -- so the field means "which GROUP this card came
-# from", and a second name for the same thing would be three consumers to teach.
+# Identical to `pov_cards.describe`, including the group's identity living under a key
+# called `group`. That name is shared deliberately rather than each registry adding its
+# own: the POV detail page keys its group loop on it, `pov_summary` reads it, and
+# `PovUseCaseProgress.group_key` stores it -- so the field means "which GROUP this card
+# came from", and a second name for the same thing would be three consumers to teach.
+#
+# It was called `persona` until the POV checklist stopped being grouped by role. A runbook
+# was never a role, which is why that name was already wrong here first.
 
 def describe(key: str, env_id: str, products: dict) -> dict:
     """One runbook's cards for one POV. Unknown key yields an empty group, never None."""
     runbook = get(key)
     if runbook is None:
-        return {"persona": "", "label": "", "blurb": "", "docs": [], "use_cases": []}
+        return {"group": "", "label": "", "blurb": "", "docs": [], "use_cases": []}
     return {
-        "persona": runbook.key,
+        "group": runbook.key,
         "label": runbook.label,
         # The source goes in the blurb rather than a field of its own: every consumer
         # already renders a blurb, and "which document is this" is the first thing an SE
         # opening somebody else's POV wants to know.
         "blurb": f"{runbook.blurb} Source: {runbook.source}.",
         "docs": [f"/docs/{d}" for d in runbook.docs],
-        "use_cases": [personas.describe_pov_card(c, env_id, products)
+        "use_cases": [pov_cards.describe_card(c, env_id, products)
                       for c in runbook.use_cases],
     }
 
@@ -281,8 +285,8 @@ def find_card(card_id: str) -> tuple:
     """``(runbook_key, UseCase)`` for a runbook card id, or ``("", None)``.
 
     The write allowlist, and the reason ``pov_use_cases.set_state`` consults this as well
-    as ``personas.find_pov_card``: the two registries are disjoint by id, and a card id
-    that matches neither must be refused rather than stored.
+    as ``pov_cards.find_card``: the two registries are disjoint by id, and a card id that
+    matches neither must be refused rather than stored.
     """
     target = (card_id or "").strip()
     if not target:

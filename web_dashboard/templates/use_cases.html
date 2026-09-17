@@ -90,15 +90,13 @@
       </p>
     </div>
 
-    <template x-for="g in povGroups" :key="'pov-' + g.persona">
+    <!-- These groups are PRODUCTS (services/pov_cards), not roles, so there is no "your
+         focus" chip on them: the viewer's focus is a demo-profile idea and a POV instance
+         has none. Comparing the two here is what kept the axes crossed. -->
+    <template x-for="g in povGroups" :key="'pov-' + g.group">
       <div class="chk-section" x-show="inScope(g).length">
         <h2>
           <span x-text="g.label"></span>
-          <!-- Constant, not persona-derived. Chrome colour is the tenancy signal
-               (services/ui_theme) and a colour that VARIES inside the content area is the
-               same confusion one layer in; this one is the same on every profile and under
-               every persona, so it carries no signal to confuse. -->
-          <span x-show="g.persona === active" class="chk-focus">your focus</span>
           <span class="chk-count" x-text="inScope(g).length + ' in scope'"></span>
         </h2>
 

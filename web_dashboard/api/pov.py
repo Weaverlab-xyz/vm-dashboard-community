@@ -1683,12 +1683,12 @@ def set_expiry(env_id: str, payload: ExpiryRequest,
 
 # ── use cases ────────────────────────────────────────────────────────────────
 #
-# The one place in the persona/use-case stack that WRITES. That is worth naming, because
-# services/personas opens by saying a card navigates and never starts work — a card that
-# POSTed a deploy would make "curation only" false. A tick is not that: it spends nothing,
-# builds nothing and touches no tenant. It also does not live in the persona layer at all;
-# the registry stays a pure read, and the write lands here, behind the same auth every
-# other POV action already carries.
+# The one place in the use-case stack that WRITES. That is worth naming, because a card
+# navigates and never starts work — a card that POSTed a deploy would make the registry
+# something that can spend money. A tick is not that: it spends nothing, builds nothing and
+# touches no tenant. It also does not live in the registry at all; services/pov_cards stays
+# a pure read, and the write lands here, behind the same auth every other POV action
+# already carries.
 
 
 class UseCaseRequest(BaseModel):
@@ -1807,11 +1807,12 @@ def set_spend_cap(env_id: str, payload: SpendCapRequest,
 @router.get("/managed/{env_id}/use-cases")
 def list_use_cases(env_id: str, db: Session = Depends(get_db),
                          current_user: User = Depends(get_current_user)):
-    """This POV's catalog, every role and every card, with each card's own state.
+    """This POV's catalog, every group and every card, with each card's own state.
 
-    Complete for every product mix. A POV wired into one product still gets all eight
-    groups and all their cards — the mix decides each card's state, never its presence,
-    which is the same promise /use-cases makes about the persona axis.
+    Complete for every product mix. A POV wired into one product still gets every group and
+    all their cards — the mix decides each card's state, never its presence. So a
+    Password-Safe-only POV renders the PRA and Entitle groups entirely out of scope, which
+    is a statement about the evaluation rather than a gap in the page.
     """
     env = _env_or_404(db, env_id)
     return pov_use_cases.describe(db, env)
@@ -1823,9 +1824,9 @@ def set_use_case(env_id: str, card_id: str, payload: UseCaseRequest,
                        current_user: User = Depends(get_current_user)):
     """Tick a card off, or mark it skipped. Idempotent.
 
-    A 400 on an unknown card id rather than a stored row: ``services/personas`` is the
-    allowlist, and these rows deliberately outlive registry edits, so an unvalidated id
-    would outlive the typo that made it.
+    A 400 on an unknown card id rather than a stored row: ``services/pov_cards`` and
+    ``services/pov_runbooks`` are the allowlist between them, and these rows deliberately
+    outlive registry edits, so an unvalidated id would outlive the typo that made it.
     """
     env = _env_or_404(db, env_id)
     try:

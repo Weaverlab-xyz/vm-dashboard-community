@@ -3085,15 +3085,21 @@ class PovUseCaseProgress(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     environment_id = Column(String(36), index=True, nullable=False)
-    # services/personas.UseCase.id, validated against the registry before any write --
-    # see pov_use_cases.set_state. An unvalidated column here would be a free-text store.
+    # A UseCase.id from `pov_cards` or `pov_runbooks`, validated against those registries
+    # before any write -- see pov_use_cases.set_state. An unvalidated column here would be
+    # a free-text store.
     card_id = Column(String(64), nullable=False)
-    # Which GROUP's list it came from -- a persona key, or a `pov_runbooks` key once a POV
-    # is being run against a published procedure. Denormalised from the registry so a card
-    # that later moves between groups keeps the answer it was ticked under, which is what
-    # the SE actually remembers. The two registries are disjoint by card id, so one column
-    # answers both without ambiguity.
-    persona = Column(String(32), nullable=False)
+    # Which GROUP's list it came from -- a `pov_cards` product key, or a `pov_runbooks` key
+    # once a POV is being run against a published procedure. Denormalised from the registry
+    # so a card that later moves between groups keeps the answer it was ticked under, which
+    # is what the SE actually remembers. The two registries are disjoint by card id, so one
+    # column answers both without ambiguity.
+    #
+    # Was `persona`, back when the checklist was grouped by role. Nothing READS this
+    # column -- `pov_summary` groups off the live registry -- and `set_state` rewrites it on
+    # every save, so the rows written under the old grouping self-correct the next time
+    # their card is touched. The rename is in the migration list below.
+    group_key = Column(String(32), nullable=False)
     # done | skipped. `skipped` is a real answer, not an absence: "we showed them and it
     # did not land" and "we never got to it" are different things to walk into a renewal
     # conversation with.
@@ -3727,6 +3733,16 @@ def init_db():
             "ALTER TABLE users ADD COLUMN session_persona VARCHAR(32)",
             "ALTER TABLE oauth_group_mappings ADD COLUMN persona VARCHAR(32)",
             "ALTER TABLE oauth_group_mappings ADD COLUMN persona_priority INTEGER",
+            # The POV checklist stopped being grouped by role, so the column that records
+            # which group a card was ticked under is no longer a persona key. A RENAME
+            # rather than an add-and-backfill because the column is NOT NULL: leaving the
+            # old one in place would make every new insert supply a value nothing means.
+            #
+            # Not idempotent, like the bare CREATE INDEX statements above -- it fails on
+            # every boot after the first and the per-statement savepoint swallows it. Safe
+            # to fail: nothing READS this column (pov_summary groups off the live registry),
+            # and set_state rewrites it on every save.
+            "ALTER TABLE pov_use_case_progress RENAME COLUMN persona TO group_key",
             # The `arn=` an awspca certificate address is built from. See CertLab.ca_arn
             # for why it is not pool_id wearing a second hat.
             "ALTER TABLE cert_labs ADD COLUMN ca_arn VARCHAR(255)",

@@ -36,13 +36,34 @@ was asking.
 | Axis | Module | Power |
 |---|---|---|
 | Tenancy | `feature_flags.install_profile` | **Gates.** Subtracts, 404s routes |
-| Role | `services/personas.py` | **Curates.** Reorders, surfaces, never hides |
-| This POV's products | `services/pov_use_cases.py` | **States.** Says what this environment can run |
+| Role (demo profile only) | `services/personas.py` | **Curates.** Reorders, surfaces, never hides |
+| This POV's products | `services/pov_cards.py` + `services/pov_use_cases.py` | **States.** Says what this environment can run |
 
 The third one is emphatically **not** a gate. A POV with no Entitle tenant still sees
 every Entitle card; it is told they are out of scope for this environment. That is the
-same promise the persona axis makes one layer up, and it is the property that keeps this
-from becoming a second `install_profile`.
+same promise the role axis makes on the other profile, and it is the property that keeps
+this from becoming a second `install_profile`.
+
+The middle row is the one that moved. The 32 POV cards used to live in eight
+`Persona.pov_use_cases` tuples and render under **role** headings, which sorted a customer's
+remaining work by an axis belonging to the other install profile — and a POV instance has no
+role axis at all (`personas.applies()` is false there; see
+[Personas](../../demo/personas/README.md)). They now live in `services/pov_cards`, grouped
+by the **product** each one proves, because that is what a POV is bought and scoped by. Four
+groups, in this order:
+
+| Group | Cards | What it is |
+|---|---|---|
+| `pra` — Privileged Remote Access | 13 | Reaching a machine without a VPN, an inbound port or a password on screen |
+| `password_safe` — Password Safe | 8 | The lab's own accounts under management, and rotated |
+| `entitle` — Entitle | 6 | Access that arrives when asked for and leaves on its own |
+| `environment` — The environment itself | 5 | The POV: who can reach it, what runs inside the customer's network, what teardown removes |
+
+A card's group is **derived, never authored**: `pov_cards.group_of` returns the first
+product the card declares, or the environment group when it declares none. So
+`requires_products` is the single field deciding both a card's group and its scope, and they
+cannot disagree. The four cards naming two products all lead with `pra` and all four are
+PRA-first stories; a test pins that the tuple order stays a decision.
 
 ### Three states, and three words that are not the estate page's
 
@@ -64,9 +85,9 @@ an operator to a button that will skip the half they came for.
 
 ### Where the line between the modules falls
 
-`services/personas.py` may not import `database`. That rule is load-bearing —
-`api/docs_pages` imports the module deliberately, to survive without the api layer — so
-the POV resolvers take a **dict of booleans**, never a row:
+`services/pov_cards.py` may not import `database`, and neither may `services/personas.py`
+— that one is load-bearing because `api/docs_pages` imports it deliberately, to survive
+without the api layer. So the POV resolvers take a **dict of booleans**, never a row:
 
 ```python
 {"pra": bool, "password_safe": bool, "entitle": bool,      # does this POV INCLUDE it?
@@ -75,7 +96,9 @@ the POV resolvers take a **dict of booleans**, never a row:
 
 `services/pov_use_cases.products_for` is the one function that turns a `PovEnvironment`
 into that dict, and it reads the counts `pov_wireup.describe` already computes rather than
-re-deriving them. The import direction is one-way and asserted by test.
+re-deriving them. The import direction is one-way and asserted by test — and so is the
+other direction: nothing in the POV checklist stack may import `services.personas` except
+for the shared `UseCase` dataclass. A card is a card; a role is not.
 
 The two halves of the dict are separate on purpose. "We did not include Entitle in this
 evaluation" and "we have not wired Entitle yet" are different sentences with different
@@ -106,11 +129,17 @@ next actions, and only one of them is somebody's next click.
 needs no migration — the discipline `PovEnvironment` already follows with its wire-up
 columns.
 
-This is the first thing in the persona stack that **writes**, which is worth naming:
-`services/personas` opens by arguing that a card navigates and never starts work. A tick is
-not that — it spends nothing, builds nothing, reaches no tenant — and it does not live in
-the persona layer at all. The registry stays a pure read; the write lands in `api/pov.py`,
-behind the auth every other POV action already carries.
+`group_key` records which group a card was ticked under, denormalised from the registry so
+a card that later moves keeps the answer it was ticked under. Nothing reads it — the summary
+groups off the live registry — and `set_state` rewrites it on every save, which is what
+healed the rows written while the checklist was grouped by role. It was called `persona`
+until then; `database.py`'s migration list carries the rename.
+
+This is the first thing in the card stack that **writes**, which is worth naming: a card
+navigates and never starts work. A tick is not that — it spends nothing, builds nothing,
+reaches no tenant — and it does not live in the registry at all. `services/pov_cards` stays
+a pure read; the write lands in `api/pov.py`, behind the auth every other POV action
+already carries.
 
 ## Slice 2 — the ephemeral accessor
 
@@ -381,8 +410,8 @@ because *hidden* is a claim about CSS and this is a claim about the DOM.
 
 Which axis does that is the part worth reading twice, because it looks like the rule this page
 rests on. A **persona** may reorder and emphasise and never subtract — unchanged, and still
-pinned: the groups assignment may not `.filter(`. This is the **profile** choosing which of two
-catalogs the page is *about*. The instance-wide one answers "can this instance run it?", which
+pinned on the estate profile: the groups assignment may not `.filter(`. This is the
+**profile** choosing which of two catalogs the page is *about*. The instance-wide one answers "can this instance run it?", which
 a POV page has no use for; the per-POV one answers "can I run this on this POV?". An estate
 instance renders the first, complete and unfiltered, exactly as it did before; a POV instance
 renders the second, and nothing else.
@@ -390,10 +419,10 @@ renders the second, and nothing else.
 ### One format, three surfaces
 
 The checklist is rendered in one dense, BeyondTrust-branded format everywhere it appears:
-sections with an uppercase role header and a right-floated count, and one row per card with
+sections with an uppercase group header and a right-floated count, and one row per card with
 the title and its summary on a single line, separated by an em-dash. It replaced a
 three-column grid of tall cards, which was correct and which nobody scanned mid-call — a POV
-carries 32 role cards plus up to 14 runbook ones.
+carries 32 product cards plus up to 14 runbook ones.
 
 | Surface | Who writes | The tick |
 |---|---|---|
@@ -444,7 +473,7 @@ wants it, which is a renewal conversation weeks later.
 | | |
 |---|---|
 | `archive(db, limit)` | "Which evaluations have we run?" A light row per POV, and deliberately **not** `_serialize`: that builds five describes per row — gateway, resource broker, wire-up, share, accessors — each asking a question about a *living* environment, every one meaningless and a wasted query for a POV that is gone. Coverage comes from one aggregate over the progress rows rather than resolving the whole catalog per row. It says when it truncated, because a list silently cut is one an SE trusts and should not |
-| `build(db, env)` | "What happened in that one?" The whole account: coverage, per role, every card somebody touched, and what they said |
+| `build(db, env)` | "What happened in that one?" The whole account: coverage per group, every card somebody touched, and what they said. Groups with nothing in scope are dropped, so on a scoped POV that breakdown *is* the product summary — the rows left standing are what the customer bought |
 
 `/api/pov/managed/archive` is declared **before** `/managed/{env_id}` — the third time this
 repo has met that trap, and pinned for the third time. Below it, "archive" is captured as an

@@ -23,10 +23,10 @@
     out_of_scope  this POV has no tenant for that product — NO href and NO action link,
                   because the fix is a decision about the evaluation, not a button
 
-  Nothing here hard-codes a persona key or a card id: the groups, their order, their copy
+  Nothing here hard-codes a group key or a card id: the groups, their order, their copy
   and every card's state arrive from /api/pov/managed/<id>/use-cases, which reads
-  services/personas through services/pov_use_cases. A key spelled in this file would let
-  the page and the registry disagree, invisibly.
+  services/pov_cards and services/pov_runbooks through services/pov_use_cases. A key
+  spelled in this file would let the page and the registry disagree, invisibly.
 
   The Access tab is where a prospect gets in. An accessor is an ephemeral login bound to
   this one POV: it can reach /pov/access and nothing else, it is refused everywhere else in
@@ -467,8 +467,8 @@
 
         <div class="chk-page-header">
           <p>
-            Grouped by the role they are for. Every role is always here; what this POV is
-            wired into decides what each card says.
+            Grouped by the product each one proves. Every group is always here; what this
+            POV is wired into decides what each card says.
           </p>
           <p class="chk-progress">
             <b x-text="summary.done"></b> run ·
@@ -484,7 +484,7 @@
              An out-of-scope card stays TICKABLE. "We showed them anyway" is a thing that
              happens in a POV, and a section that made those cards read-only would be
              pretending it does not. -->
-        <template x-for="g in groups" :key="g.persona">
+        <template x-for="g in groups" :key="g.group">
           <!-- The wrapper is load-bearing, not decoration: x-for clones its template's
                first ELEMENT child, so a <template x-for> nested directly inside another
                relies on a cloned <template> bringing its own content along. Every other
@@ -610,19 +610,19 @@
               <p x-show="notice" class="text-xs text-green-700 mt-2" x-text="notice"></p>
             </div>
 
-            <div x-show="summary_.by_persona.length"
+            <div x-show="summary_.by_group.length"
                  class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
               <div class="overflow-x-auto">
                 <table class="min-w-full text-sm">
                   <thead class="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
                     <tr>
-                      <th class="text-left px-5 py-2 font-medium">Role</th>
+                      <th class="text-left px-5 py-2 font-medium">Group</th>
                       <th class="text-left px-4 py-2 font-medium">Covered</th>
                       <th class="text-left px-4 py-2 font-medium">Skipped</th>
                     </tr>
                   </thead>
                   <tbody class="divide-y divide-gray-100">
-                    <template x-for="p in summary_.by_persona" :key="p.persona">
+                    <template x-for="p in summary_.by_group" :key="p.group">
                       <tr>
                         <td class="px-5 py-2 text-gray-900" x-text="p.label"></td>
                         <td class="px-4 py-2 text-gray-600">
@@ -650,7 +650,7 @@
                      :class="n.by_kind === 'accessor' ? 'text-violet-900' : 'text-gray-600'"
                      x-text="n.note"></p>
                   <p class="text-xs text-gray-400 mt-1">
-                    <span x-text="n.persona_label"></span> ·
+                    <span x-text="n.group_label"></span> ·
                     <span x-text="n.by_kind === 'accessor' ? 'the customer' : (n.by || 'your team')"></span>
                   </p>
                 </div>
@@ -1391,7 +1391,7 @@
           if (!rows.length) return;
           lines.push('', `## ${title}`, '');
           rows.forEach(r => {
-            lines.push(`- **${r.title}** — ${r.persona_label}` +
+            lines.push(`- **${r.title}** — ${r.group_label}` +
                        (r.by_kind === 'accessor' ? ' · marked by the customer' : ''));
             if (r.note) lines.push(`  > ${r.note.replace(/\n/g, ' ')}`);
           });
@@ -1639,13 +1639,13 @@
       sections(g) {
         const cards = g.use_cases || [];
         const out = [{
-          key: g.persona + ':scope',
+          key: g.group + ':scope',
           deferred: false,
           cards: cards.filter(c => c.state !== 'out_of_scope'),
         }];
         const deferred = cards.filter(c => c.state === 'out_of_scope');
         if (deferred.length) {
-          out.push({ key: g.persona + ':deferred', deferred: true, cards: deferred });
+          out.push({ key: g.group + ':deferred', deferred: true, cards: deferred });
         }
         return out;
       },

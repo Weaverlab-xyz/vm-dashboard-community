@@ -417,6 +417,72 @@ def test_the_injected_name_cannot_be_overwritten_by_the_context_processor():
         "be silently overwritten")
 
 
+def test_both_admin_pages_gate_the_focus_field_on_the_profile():
+    """A POV instance has no focus axis, so there is nothing for an admin to assign there.
+
+    Gated in Jinja on `persona_focus` (supplied by _profile_context) rather than in Alpine:
+    these are partials inside /rbac, and a client-side gate would paint the field and then
+    take it away. The options injection itself stays UNCONDITIONAL -- one source for the
+    list is the invariant the test above defends, and making it profile-aware in a second
+    place is exactly how the dropdown starts offering a focus the resolver does not know."""
+    for path in (_USERS_TPL, _GROUPS_TPL):
+        src = _read(path)
+        assert "{% if persona_focus %}" in src, \
+            f"{os.path.basename(path)} offers a focus on every profile"
+        assert "{{ persona_options | tojson }}" in src.split("{% endblock %}")[-1] \
+            or "{{ persona_options | tojson }}" in src, \
+            f"{os.path.basename(path)} lost the options injection"
+
+
+def test_the_groups_focus_column_header_and_cell_are_gated_together():
+    """Two conditions, or one of them forgotten, and every cell after Focus shifts one
+    column left -- a table that reads as corrupt rather than as a missing feature."""
+    src = _read(_GROUPS_TPL)
+    header = [ln for ln in src.split("\n") if ">Focus</th>" in ln]
+    assert header, "the Focus column header is gone entirely"
+    assert "{% if persona_focus %}" in header[0], \
+        f"the Focus <th> is not gated: {header[0].strip()}"
+    cell = src.split("x-show=\"!m.persona\"", 1)[0].rstrip().split("\n")[-3:]
+    assert any("{% if persona_focus %}" in ln for ln in cell), \
+        f"the Focus <td> is not gated on the same name as its header: {cell}"
+    assert src.count("{% if persona_focus %}") == src.count("{% endif %}"), \
+        "unbalanced persona_focus gates in _groups.html"
+
+
+def test_both_apis_refuse_a_focus_where_there_is_no_focus_axis():
+    """Refused rather than stored inert. A value nothing resolves would start being
+    honoured the day the instance was reconfigured to an estate one -- assignments nobody
+    made, arriving weeks later, with no event to point at.
+
+    409 and `profile_noun()`, matching api/setup.py's masked-flag refusal: the message has
+    to name the instance in words, never the raw config value."""
+    for path in (_USERS_API, _GROUPS_API):
+        src = _read(path)
+        assert "personas.applies()" in src, \
+            f"{os.path.basename(path)} stores a focus without asking whether one exists"
+        assert "status_code=409" in src, f"{os.path.basename(path)} does not refuse with 409"
+        assert "profile_noun()" in src, \
+            f"{os.path.basename(path)} builds the refusal from something other than " \
+            "profile_noun() — it must name the instance in words"
+        assert '"pov"' not in src, \
+            f"{os.path.basename(path)} spells the raw profile value"
+
+
+def test_clearing_a_focus_is_allowed_on_every_profile():
+    """The same asymmetry a masked feature flag has: turning it off is always permitted.
+    Without it an instance reconfigured from estate to POV could never shed the focus it
+    was carrying, because the only route that clears it would 409."""
+    users = _read(_USERS_API)
+    body = users.split("if body.persona is not None:", 1)[1].split("\n    if ", 1)[0]
+    assert "if want and not personas.applies()" in body, \
+        "api/users.py refuses an EMPTY persona too, so an assignment cannot be removed"
+    groups = _read(_GROUPS_API)
+    fn = groups.split("def _valid_persona(", 1)[1].split("\n\n\n", 1)[0]
+    i_empty, i_refuse = fn.index("if not want:"), fn.index("personas.applies()")
+    assert i_empty < i_refuse, \
+        "_valid_persona refuses before it checks for empty, so a focus cannot be cleared"
+
+
 def test_no_admin_template_hard_codes_a_persona_key():
     from web_dashboard.services import personas as P
     for path in (_USERS_TPL, _GROUPS_TPL, _ROLES_TPL, _DASHBOARD):

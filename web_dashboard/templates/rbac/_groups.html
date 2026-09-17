@@ -55,7 +55,9 @@
             <th class="pb-2 pr-4">Group Object ID</th>
             <th class="pb-2 pr-4">Role</th>
             <th class="pb-2 pr-4">Workgroup</th>
-            <th class="pb-2 pr-4">Focus</th>
+            {# Gated with its own <td> below on the SAME name. Two conditions, or one of
+               them forgotten, and every cell after it shifts one column left. #}
+            {% if persona_focus %}<th class="pb-2 pr-4">Focus</th>{% endif %}
             <th class="pb-2 pr-4">Default Permissions</th>
             <th class="pb-2"></th>
           </tr>
@@ -80,6 +82,7 @@
               </td>
               <!-- Grey, never the accent the workgroup chip uses: a focus is not an
                    access grant and must not read like one. -->
+              {% if persona_focus %}
               <td class="py-2.5 pr-4 text-xs">
                 <span x-show="!m.persona" class="text-gray-400">—</span>
                 <span x-show="m.persona" class="inline-flex items-center px-2 py-0.5 rounded-full
@@ -89,6 +92,7 @@
                         class="ml-1 text-gray-400" x-text="'#' + m.persona_priority"></span>
                 </span>
               </td>
+              {% endif %}
               <td class="py-2.5 pr-4 text-xs text-gray-500">
                 <span x-show="!m.default_permissions" class="text-gray-400">Full access</span>
                 <span x-show="m.default_permissions">
@@ -154,7 +158,10 @@
 
       <!-- Focus. Optional, and unlike the fields above it grants NOTHING: it decides
            which role's material the dashboard leads with for members of this group. A
-           broad catch-all group usually wants to leave it unset. -->
+           broad catch-all group usually wants to leave it unset.
+           Absent on a POV instance, along with its column in the table above: there is no
+           focus axis there for a group to confer. -->
+      {% if persona_focus %}
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div class="sm:col-span-2">
           <label class="block text-sm font-medium text-gray-700 mb-1">
@@ -181,6 +188,7 @@
           dashboard leads with, and the user can still switch it themselves.
         </p>
       </div>
+      {% endif %}
 
       <!-- Access role. Above the grid deliberately: a role is the normal way to grant
            access and the grid below it is this mapping's addition on top. -->
