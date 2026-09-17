@@ -208,9 +208,67 @@ usable over its public IP. Jump Group, Gateway and Vault group default to the
 Requires PRA to be configured (`bt_api_host`, `bt_client_id`, `bt_jumpoint_name`);
 the fieldset stays hidden otherwise.
 
+### Just-in-time access via Entitle (optional)
+
+A Web Jump brokers *your* access to the admin account. This is the other half: letting
+someone **request** Portainer access in Entitle, get an account minted for the duration,
+and have it deleted on revoke.
+
+Portainer has **no Entitle connector at all**, so the route is the `portainer_access`
+**Cloud Function** — an adapter that implements Entitle's Remote Adapter contract
+itself. **Just-in-time access (Entitle)** on the Portainer tab deploys and wires one in
+a single click; the deploy form on the Functions page remains the path for a Portainer
+outside this dashboard's reach.
+
+What the button does, as one `portainer_adapter_pair` job:
+
+1. **Stages the API token** in the node cloud's own secret store (Secrets Manager /
+   Key Vault / Secret Manager). The function resolves it from there — the token is
+   never a plain function setting, and never passes through Terraform state or the job
+   record.
+2. **Deploys the adapter** into the node's own cloud and region, **VPC-attached**, and
+   points it at the node's **internal** IP. This is not a preference: the node firewall
+   is fail-closed and a public function has no stable egress IP to allow, so a public
+   adapter would deploy cleanly and then time out on every grant.
+3. **Opens the firewall to it** — the function's own subnet range joins the merged
+   source set (`portainer_adapter_source_cidr`), the same way a Gateway's `/32` does.
+   VPC firewall rules apply to intra-VPC traffic too, so without this the function
+   reaches the internal IP and is dropped.
+4. **Registers it in Entitle** as a REST integration in **Ephemeral Accounts** mode.
+   Skipped, with a note in the job, when `entitle_registration_enabled` is off — the
+   adapter is still deployed and pointed at Portainer, and you can register it later
+   from the Functions page.
+
+Then, in Entitle: each Portainer **team** is an asset, with the team name as the role.
+Configure the environment (or environment-group) access policy on a team once; a grant
+is then a single membership row and a revoke removes it, so a revoke can never leave a
+half-dismantled access policy behind.
+
+> **The adapter is deployed ARMED.** Once registered, a grant creates a real Portainer
+> account and a revoke deletes it. That is the point of the button, and a silently
+> no-op adapter is the worse surprise — the card shows a `DRY RUN` badge if one ever is.
+
+Two guards bound the blast radius, and both live in the function rather than in policy:
+accounts are minted as **standard** users in **no team** (an actor whose grant never
+arrives can reach nothing), and the adapter only ever lists or deletes accounts it
+minted itself (the `jit-` prefix). Your real Portainer users are never shown to Entitle,
+and a request to delete one is refused. See
+[cloud-functions.md](cloud-functions.md#portainer_access).
+
+Needs Cloud Functions enabled, a stored `portainer_pat`, and a configured secret store
+for the node's cloud. The card names whichever of those is missing instead of offering
+a button that cannot work.
+
 ### Teardown
 
-**Stop** on the node row removes the PRA Web Jump (when one exists), deletes the VM
+**Stop** on the node row first retires the Entitle adapter — deregistering the
+integration, destroying the function and retiring its staged API token — because an
+adapter that outlives its Portainer is a billable function that can only fail and a
+grantable integration pointed at nothing. It is best-effort: an unreachable Entitle
+tenant leaves a warning in the job result rather than blocking the teardown. **Remove
+adapter** on the card does the same thing on its own.
+
+Stop then removes the PRA Web Jump (when one exists), deletes the VM
 and its ingress rule, then clears `portainer_url` and the node's other runtime config.
 On AWS it also reclaims the node's security group once the terminating instance
 releases it; on Azure it removes the NIC, the public IP and the NSG the VM owned.
@@ -445,6 +503,7 @@ on the run form is irrelevant — nothing is installed on it.
 | `portainer_ui_vault_account_group_id` | `""` | Vault account group the admin credential is stored in; blank = `bt_vault_account_group_id`, else the password is shown |
 | `portainer_ui_jumpoint_cloud` | `gcp` | Which managed Gateway host brokers the UI; its egress IP is auto-allowed |
 | `portainer_ui_jumpoint_egress_ip` | `""` | Captured egress IP of the SHARED Gateway (runtime-set; auto-added as a `/32`). Gateways you deploy yourself are read from the gateway registry instead, so every cluster node is allowed |
+| `portainer_adapter_source_cidr` | `""` | Subnet range(s) of the `portainer_access` Entitle adapter function, CSV (runtime-set when you deploy it; auto-added to the firewall, cleared when you remove it). A VPC firewall applies to intra-VPC traffic too, so without this the adapter reaches the node's internal IP and is dropped |
 
 ### Per-cloud node keys
 

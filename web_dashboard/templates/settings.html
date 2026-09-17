@@ -3281,6 +3281,14 @@
                         <code class="bg-white px-1 rounded mr-1" x-text="c"></code>
                       </template>
                     </p>
+                    <!-- The portainer_access Entitle adapter's own subnet. Named, so the
+                         range does not read as an unexplained entry in the merged list. -->
+                    <p x-show="(portainerFirewall.adapter_cidrs || []).length">
+                      <span class="text-gray-500">Entitle adapter:</span>
+                      <template x-for="c in portainerFirewall.adapter_cidrs || []" :key="c">
+                        <code class="bg-white px-1 rounded mr-1" x-text="c"></code>
+                      </template>
+                    </p>
                     <p>
                       <span class="text-gray-500">Merged allow-list:</span>
                       <span x-show="!(portainerFirewall.merged || []).length" class="text-red-600">none</span>

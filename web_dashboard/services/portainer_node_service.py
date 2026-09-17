@@ -127,6 +127,22 @@ def _dashboard_cidr() -> list[str]:
     return managed_node_service.dashboard_cidr(_SPEC)
 
 
+def _adapter_cidrs() -> list[str]:
+    """Subnet range(s) for the ``portainer_access`` Entitle adapter, if one is paired.
+
+    The adapter is a VPC-attached Cloud Function that reaches this node at its
+    INTERNAL IP, and a source-restricted firewall applies to intra-VPC ingress too --
+    so without this the function is dropped and every Entitle grant times out. Read
+    from config rather than resolved here: the range is discovered once, at pairing
+    time, by the side that knows which subnet the function actually landed in
+    (``portainer_adapter_service._open_firewall_to_adapter``).
+
+    Read by KEY NAME rather than by importing the adapter service, so the firewall
+    path has no dependency on the Cloud Functions feature being installed at all."""
+    csv = config_service.get("portainer_adapter_source_cidr") or ""
+    return [c.strip() for c in csv.split(",") if c.strip()]
+
+
 def _ready_timeout_s() -> int:
     """Readiness poll budget (config ``portainer_ready_timeout_s``, default 300s)."""
     return managed_node_service.ready_timeout_s(_SPEC)
@@ -154,7 +170,8 @@ async def refresh_portainer_firewall(db=None, placement=None) -> dict:
     """Recompute the node's firewall source set and re-apply it idempotently.
 
     The merged set is the manual CSV (``_allowed_cidrs``) plus the dashboard's own
-    egress /32 plus a /32 for every Gateway that can broker the Web Jump. Fail-closed
+    egress /32 plus a /32 for every Gateway that can broker the Web Jump plus the
+    subnet range of the Entitle adapter function, when one is paired. Fail-closed
     and idempotent behavior is inherited from the per-cloud apply (empty set → rule
     removed / every ingress permission revoked; ``0.0.0.0/0`` from allow_open dedupes
     harmlessly). No-op safe: returns early when the node's cloud has no account
@@ -169,7 +186,8 @@ async def refresh_portainer_firewall(db=None, placement=None) -> dict:
     cloud = p.get("cloud") or _node_cloud()
     if not p["account"]:
         return {"skipped": f"no {cloud} account configured"}
-    merged = sorted(set(_allowed_cidrs()) | set(_dashboard_cidr()) | set(_jumpoint_cidrs(db)))
+    merged = sorted(set(_allowed_cidrs()) | set(_dashboard_cidr())
+                    | set(_jumpoint_cidrs(db)) | set(_adapter_cidrs()))
     if not merged:
         logger.warning("Portainer node has NO allowed source CIDRs — firewall stays closed "
                        "(node unreachable). Set portainer_allowed_source_cidrs in Settings.")
@@ -185,7 +203,8 @@ def firewall_status(db=None) -> dict:
     which sources are allowed and why."""
     dash = _dashboard_cidr()
     jump = _jumpoint_cidrs(db)
-    merged = sorted(set(_allowed_cidrs()) | set(dash) | set(jump))
+    adapter = _adapter_cidrs()
+    merged = sorted(set(_allowed_cidrs()) | set(dash) | set(jump) | set(adapter))
     csv = config_service.get("portainer_allowed_source_cidrs") or ""
     return {
         "manual_cidrs": [c.strip() for c in csv.split(",") if c.strip()],
@@ -193,6 +212,9 @@ def firewall_status(db=None) -> dict:
         # Kept singular for the existing Settings panel; gateway_cidrs is the full set.
         "jumpoint_egress_ip": jump[0] if jump else "",
         "gateway_cidrs": jump,
+        # Named separately so the Settings readout attributes the extra range to the
+        # Entitle adapter rather than leaving it looking like an unexplained entry.
+        "adapter_cidrs": adapter,
         "merged": merged,
         "cloud": _node_cloud(),
         "allow_open": config_service.get_bool(_SPEC.allow_open_key(_node_cloud()), False),
@@ -976,7 +998,30 @@ async def run_teardown(db, *, job_id: str, meta: dict) -> None:
                 "No zone is known for the Portainer node — pass ?zone= to the stop call.")
             return
 
-        # Remove the PRA Web Jump first (best-effort) — it points at a URL that is
+        # Retire the Entitle adapter first, and BEFORE the config keys are cleared
+        # below: it authenticates with portainer_pat, and its staged copy of that
+        # token cannot be retired once the original is gone. Ordering matters on the
+        # Entitle side too -- the integration is the outward-facing half, so it goes
+        # before the Portainer it grants on ("shut the tap, then drain", the same
+        # ordering pov_accessor_entitle.teardown documents).
+        #
+        # Best-effort: an unreachable Entitle tenant must not be the reason a node
+        # teardown fails, but it IS worth saying so in the result, because what is
+        # left behind is a grantable integration that can only error.
+        adapter_note = ""
+        try:
+            from . import portainer_adapter_service
+            job_service.update_progress(db, job_id, 10, "Removing the Entitle adapter")
+            removed = await portainer_adapter_service.retire_adapter(
+                db, created_by="portainer-node-teardown")
+            if removed:
+                logger.info("Portainer node teardown: retired adapter fn_id=%s", removed)
+        except Exception as exc:
+            logger.warning("Portainer adapter retirement failed (continuing): %s", exc)
+            adapter_note = (f"The Entitle adapter was not fully removed: {exc} "
+                            f"Remove it from the Cloud Functions page.")
+
+        # Remove the PRA Web Jump next (best-effort) — it points at a URL that is
         # about to stop existing.
         if config_service.get("portainer_ui_web_jump_tfstate"):
             job_service.update_progress(db, job_id, 15, "Removing PRA Web Jump")
@@ -1001,7 +1046,11 @@ async def run_teardown(db, *, job_id: str, meta: dict) -> None:
         # the Containers page at a VM that no longer exists.
         cleared = ["portainer_url", _SPEC.infra_key(cloud, "zone"),
                    "portainer_ui_web_jump_id", "portainer_ui_web_jump_tfstate",
-                   "portainer_ui_vault_account_id", "portainer_ui_jumpoint_egress_ip"]
+                   "portainer_ui_vault_account_id", "portainer_ui_jumpoint_egress_ip",
+                   # retire_adapter clears this too; repeated here so a FAILED
+                   # retirement does not leave the adapter's range in the allow-list
+                   # of whatever node is deployed next.
+                   "portainer_adapter_source_cidr"]
         # The admin password and PAT live in Portainer's DB, so they survive exactly as
         # long as the data disk does. Clearing them alongside a PRESERVED disk is what
         # would break the next deploy: Portainer ignores --admin-password on an
@@ -1018,6 +1067,8 @@ async def run_teardown(db, *, job_id: str, meta: dict) -> None:
 
         result = {"name": name, "zone": zone, "cloud": cloud, "deleted": True,
                   "data_disk_deleted": bool(delete_data_disk and data_disk_name)}
+        if adapter_note:
+            result["adapter_warning"] = adapter_note
         if state_survives:
             result["note"] = (
                 f"The data disk '{data_disk_name}' was kept, so the admin credential and "

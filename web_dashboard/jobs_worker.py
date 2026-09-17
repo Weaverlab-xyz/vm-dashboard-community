@@ -58,6 +58,7 @@ HANDLED_TYPES = (
     "k8s_entra_federation", "k8s_ps_token",
     "rancher_node_deploy", "rancher_node_teardown", "rancher_entitle_register",
     "portainer_node_deploy", "portainer_node_teardown", "portainer_import",
+    "portainer_adapter_pair",
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
     "pov_env_provision", "pov_env_destroy", "pov_env_power", "pov_env_broker",
     "pov_env_wireup", "pov_env_jump_group_move", "pov_template_build",
@@ -111,6 +112,7 @@ HEAVY_TYPES = (
     "cloudfn_decommission",
     "certca_provision", "certca_decommission",        # cert_lab_service, terraform apply/destroy
     "clouddb_adapter_pair",                           # drives cloudfn_deploy's apply inline
+    "portainer_adapter_pair",                         # same, for the portainer_access adapter
     "clouddb_dbops_deploy",                           # same, twice (deploy then audience)
     "packer_aws_build", "packer_azure_build",         # packer_service._stream_command
     "packer_gcp_build", "packer_oci_build",
@@ -263,6 +265,11 @@ LIGHT_TYPES = (
 SINGLETON_TYPES = frozenset((
     "rancher_node_deploy", "rancher_node_teardown",
     "portainer_node_deploy", "portainer_node_teardown", "portainer_import",
+    # Singleton for the same match-then-create reason as portainer_import: the pairing
+    # refuses to redeploy an adapter that already exists, and two concurrent pairings
+    # would both look, both find nothing, and both deploy — leaving a duplicate row
+    # wedged in 'deploying' behind an "already exists" apply failure.
+    "portainer_adapter_pair",
     "expiry_sweep",
     "suspend_sweep",
     # Singleton for the same reason the other sweeps are: two concurrent passes would
@@ -470,6 +477,12 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
         elif job_type == "portainer_import":
             from .services import portainer_import_service
             await portainer_import_service.run_import(db, job_id=job_id, meta=meta)
+        elif job_type == "portainer_adapter_pair":
+            # Stages the API token, deploys the portainer_access adapter, opens the
+            # node firewall to it and registers it in Entitle — one job because the
+            # four stages are useless individually. Also serves the retire direction.
+            from .services import portainer_adapter_service
+            await portainer_adapter_service.run_job(db, job_id=job_id, meta=meta)
         elif job_type in ("pov_env_provision", "pov_env_destroy", "pov_env_power",
                           "pov_env_broker", "pov_env_wireup",
                           "pov_env_jump_group_move", "pov_template_build",

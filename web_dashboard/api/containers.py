@@ -15,6 +15,9 @@ Portainer CE container management endpoints.
   POST /api/containers/gce-compose/{name}/stop — delete a GCE compose instance
   POST /api/containers/portainer/import  — merge a migration bundle via job
   POST /api/containers/portainer/edge-endpoint — register an Edge agent env
+  GET  /api/containers/portainer/adapter — the Entitle JIT adapter's state
+  POST /api/containers/portainer/adapter-pair   — deploy + register it via job
+  POST /api/containers/portainer/adapter-retire — remove it via job
 """
 import base64
 import binascii
@@ -43,6 +46,8 @@ from ..models.containers import (
     ECSTaskListResponse,
     GCEJumpointInfo,
     GCEJumpointListResponse,
+    PortainerAdapterPairRequest,
+    PortainerAdapterResponse,
     PortainerDeployRequest,
     PortainerEdgeRequest,
     PortainerEdgeResponse,
@@ -1305,6 +1310,121 @@ def stop_portainer_node(
                   "delete_data_disk": bool(delete_data_disk)})
     return DeployContainerResponse(
         job_id=job.id, status="pending", message=f"Tearing down Portainer node '{name}'…")
+
+
+# ── Just-in-time Portainer access (the Entitle adapter) ──────────────────────
+# Portainer has no Entitle connector at all, so the portainer_access Cloud Function is
+# the only route to JIT access for it. These three routes are the supported way to get
+# one: the adapter reads its target from its own environment, so a hand-deploy from the
+# Cloud Functions form that named the wrong Portainer cannot be corrected afterwards.
+# See services/portainer_adapter_service.py.
+
+
+def _require_function_write(user: User) -> None:
+    """Deploying the portainer_access adapter is the ``cloud_function:write`` grant.
+
+    The pairing writes a ``cloud_functions`` row and runs a real Terraform apply — the
+    same thing ``POST /api/functions`` does, and that route requires this scope.
+    Without this check a holder of ``containers:write`` alone would have a way around
+    it. Same shape and reasoning as ``cloud_databases._require_function_write``: admin
+    and unrestricted (NULL-permission) users pass.
+    """
+    if getattr(user, "is_effective_admin", False):
+        return
+    perms = user.effective_permissions_dict   # {} / NULL → unrestricted (legacy)
+    if perms and "write" not in perms.get("cloud_function", []):
+        raise HTTPException(
+            status_code=403,
+            detail="The 'cloud_function:write' permission is required — the adapter is "
+                   "a Cloud Function.")
+
+
+@router.get("/portainer/adapter", response_model=PortainerAdapterResponse)
+def get_portainer_adapter(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("containers", "read")),
+):
+    """State of the Portainer page's just-in-time access card: whether an adapter can
+    be deployed (and if not, why), and the deployed one's endpoint, target and Entitle
+    integration id.
+
+    Deliberately cloud-free so the card can poll it — ``viable`` comes from the same
+    ``ineligible_reason`` the pair endpoint checks, so the button can never offer what
+    the endpoint refuses."""
+    from ..services import portainer_adapter_service
+    return PortainerAdapterResponse(**portainer_adapter_service.status(db))
+
+
+@router.post("/portainer/adapter-pair", response_model=DeployContainerResponse,
+             status_code=202)
+async def pair_portainer_adapter(
+    req: PortainerAdapterPairRequest = PortainerAdapterPairRequest(),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("containers", "write")),
+):
+    """Deploy the ``portainer_access`` adapter beside the configured Portainer and
+    register it in Entitle, so Portainer team access becomes requestable.
+
+    Async — enqueues a ``portainer_adapter_pair`` job that stages the API token in the
+    cloud's own secret store, deploys the function, opens the node firewall to it and
+    registers it; open the job for status/error.
+
+    The adapter is deployed **ARMED** (``FN_PORTAINER_DRY_RUN=0``): an Entitle grant
+    against it creates and deletes real Portainer accounts. That is the point of the
+    button, and a silently no-op adapter is the worse surprise.
+
+    Pre-flighted here rather than in the job so an impossible pairing fails at the
+    click. Mirrors the ``adapter-pair`` endpoint on the Databases page."""
+    from ..services import portainer_adapter_service as adapter
+
+    _require_function_write(current_user)
+    try:
+        await adapter.preflight(cloud=req.cloud or "", region=req.region or "",
+                                network_mode=req.network_mode or "")
+    except adapter.AdapterPairingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    # Refuse rather than redeploy: cloud_function_service.deploy does not look the name
+    # up and every deploy starts from an empty Terraform directory, so a second pairing
+    # leaves a duplicate row wedged in 'deploying' behind an "already exists" apply
+    # failure. Checked again in the job, which is minutes later.
+    existing = adapter.find_adapter(db)
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Portainer already has the adapter function "
+                   f"{adapter.adapter_name()!r} ({existing.status}) — remove it first, "
+                   f"or delete it on the Cloud Functions page.")
+    try:
+        result = adapter.start_pairing(
+            db, created_by=current_user.username, cloud=req.cloud or "",
+            region=req.region or "", network_mode=req.network_mode or "",
+            dry_run=bool(req.dry_run))
+    except adapter.AdapterPairingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return DeployContainerResponse(
+        job_id=result["job_id"], status="pending",
+        message="Deploying the Portainer Entitle adapter…")
+
+
+@router.post("/portainer/adapter-retire", response_model=DeployContainerResponse,
+             status_code=202)
+def retire_portainer_adapter(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("containers", "delete")),
+):
+    """Remove the Portainer Entitle adapter: deregister the integration, destroy the
+    function, retire its staged API token and drop its range from the node firewall.
+
+    Async — enqueues a ``portainer_adapter_pair`` job in the retire direction.
+    Unconditional by design: an adapter that should not have been deployed is exactly
+    the one that most needs removing."""
+    from ..services import portainer_adapter_service as adapter
+
+    _require_function_write(current_user)
+    result = adapter.start_retire(db, created_by=current_user.username)
+    return DeployContainerResponse(
+        job_id=result["job_id"], status="pending",
+        message="Removing the Portainer Entitle adapter…")
 
 
 # ── Bundle import ────────────────────────────────────────────────────────────

@@ -354,6 +354,16 @@ since packages are deterministic.
 Just-in-time Portainer access. Portainer has no Entitle connector at all, so this
 adapter is the only route to it.
 
+> **You probably do not want to deploy this by hand.** The Portainer page has a
+> **Just-in-time access (Entitle)** card that deploys it into the node's own cloud and
+> region, VPC-attached and aimed at the node's internal IP, with the API token staged
+> in the cloud's secret store, the node firewall opened to the function's subnet, and
+> the Entitle integration registered — all as one job. The adapter reads its target
+> from its own environment, so a hand-deploy that named the wrong Portainer cannot be
+> corrected afterwards. See
+> [portainer.md](portainer.md#just-in-time-access-via-entitle-optional). The form below
+> is the path for a Portainer that lives outside this dashboard's reach.
+
 | Setting | Notes |
 |---|---|
 | `FN_PORTAINER_URL` | base URL of the Portainer instance |
@@ -381,6 +391,12 @@ Two guards worth knowing about, because they bound the blast radius:
 
 If Portainer is reachable only from inside your network, deploy the adapter in
 `vpc` mode; otherwise `public` is fine.
+
+> For a **dashboard-managed** Portainer node, `vpc` is not a preference — the node's
+> firewall is fail-closed and a public function has no stable egress IP to allow, so a
+> public adapter deploys cleanly and then times out on every grant. That is why the
+> Portainer page's card does not offer the choice, and why it adds the function's own
+> subnet range to the node firewall.
 
 ### azure_role_grant
 

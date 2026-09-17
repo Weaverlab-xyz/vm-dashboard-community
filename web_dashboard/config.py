@@ -1018,6 +1018,11 @@ class Settings(BaseSettings):
     portainer_ui_vault_account_id: str = ""       # PRA Vault account id created for the Portainer admin credential (runtime-set; cleared on teardown)
     portainer_ui_jumpoint_cloud: str = "gcp"      # which dashboard-managed Jumpoint host brokers the Portainer UI (gcp|aws|azure); its egress IP is auto-whitelisted. gcp = same cloud as the node
     portainer_ui_jumpoint_egress_ip: str = ""     # dashboard-managed Web-Jump Jumpoint host egress IP (runtime-set; auto-added to the node firewall as a /32). all three managed Gateway hosts expose one: GCP + AWS via the host's public IP, Azure via a Standard, secure-by-default public IP on its NIC (Standard IPs block all inbound unless an NSG allows it, so it is egress-only)
+    # The portainer_access Entitle adapter (a Cloud Function) reaches the node over
+    # the VPC at its internal IP, and the node firewall applies to intra-VPC ingress
+    # too, so the function's own subnet range has to join the merged allow-list --
+    # the same way a Web-Jump Jumpoint's egress /32 does above.
+    portainer_adapter_source_cidr: str = ""   # adapter function subnet range(s), CSV (runtime-set on pair; auto-added to the node firewall, cleared on retire)
     ansible_local_image: str = "chrweav/ansible-winrm:latest"
     # Ansible runner image for Kubernetes-cluster / cloud-database config-management
     # targets (localhost plays that reach out via kubeconfig / DB login vars). Carries

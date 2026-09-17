@@ -30,6 +30,7 @@ Terraform provider:
 | MySQL database | **MySQL** ([docs](https://docs.beyondtrust.com/entitle/docs/entitle-integration-mysql)) |
 | SQL Server database | **Microsoft SQL Server** ([docs](https://docs.beyondtrust.com/entitle/docs/entitle-integration-microsoft-sql-server)) — **not currently registerable on any managed flavor**, see below |
 | Kubernetes cluster (EKS / AKS / GKE, and Rancher-managed) | **Kubernetes** ([docs](https://docs.beyondtrust.com/entitle/docs/entitle-integration-kubernetes)) — see [Kubernetes clusters](#kubernetes-clusters) |
+| Portainer (managed node, or one you pointed the dashboard at) | **REST API** in Ephemeral Accounts mode, served by the `portainer_access` Cloud Function. Portainer has no Entitle connector at all, so an adapter is the only route; deploy it from the Portainer page's **Just-in-time access (Entitle)** card. Assets are Portainer **teams**. See [portainer.md](portainer.md#just-in-time-access-via-entitle-optional) |
 
 > **Managed SQL Server is gated off.** The Entitle SQL Server connector needs
 > `sysadmin` / `CONTROL SERVER`, which RDS-standard, Azure SQL Database and Cloud SQL
