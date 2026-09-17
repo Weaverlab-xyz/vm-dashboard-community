@@ -151,8 +151,8 @@ def build(db: Session, env: PovEnvironment) -> dict:
             entry = {
                 "id": card["id"],
                 "title": card["title"],
-                "persona": group["persona"],
-                "persona_label": group["label"],
+                "group": group["group"],
+                "group_label": group["label"],
                 "minutes": card["minutes"],
                 "state": progress.get("state", ""),
                 "note": progress.get("note", ""),
@@ -191,7 +191,7 @@ def build(db: Session, env: PovEnvironment) -> dict:
         "covered": covered,
         "skipped": skipped,
         "notes": notes,
-        "by_persona": _by_persona(catalog),
+        "by_group": _by_group(catalog),
         "customer": {
             "accessors_issued": len(issued),
             # The claim worth making, and the only one the data supports: somebody outside
@@ -205,11 +205,13 @@ def build(db: Session, env: PovEnvironment) -> dict:
     }
 
 
-def _by_persona(catalog: dict) -> list:
-    """Coverage per role, so the summary maps to who was in the room.
+def _by_group(catalog: dict) -> list:
+    """Coverage per group, so the summary maps to what the evaluation was scoped to.
 
-    Roles with nothing in scope are dropped — a Password-Safe-only evaluation has several,
-    and reporting "0 of 0" against each is noise in a document somebody reads once.
+    Groups with nothing in scope are dropped — a Password-Safe-only evaluation has two of
+    them, and reporting "0 of 0" against each is noise in a document somebody reads once.
+    Which also means this list IS the product breakdown on such a POV: the groups that
+    survive are the ones the customer bought.
     """
     out = []
     for group in catalog["groups"]:
@@ -217,7 +219,7 @@ def _by_persona(catalog: dict) -> list:
         if not in_scope:
             continue
         out.append({
-            "persona": group["persona"],
+            "group": group["group"],
             "label": group["label"],
             "in_scope": len(in_scope),
             "done": sum(1 for c in in_scope

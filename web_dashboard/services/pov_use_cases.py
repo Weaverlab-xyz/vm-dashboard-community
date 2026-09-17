@@ -3,29 +3,28 @@
 The third axis, and the one that only exists because a POV is not an instance.
 
 It also owns the FOURTH. ``pov_runbooks`` groups the same card shape by the published
-procedure a POV is being run against rather than by role, and this module is where the two
-registries meet: :func:`_groups` appends its catalog and both write paths consult its
-``find_card``. The split is deliberate -- a persona presets feature flags, orders dashboard
-tiles and appears in the setup wizard, and a runbook is not a job title.
+procedure a POV is being run against rather than by product, and this module is where the
+two registries meet: :func:`_groups` appends its catalog and both write paths consult its
+``find_card``. The split is deliberate -- a product group's membership is derived from what
+a card declares, and a runbook's is an editorial list a document decided.
 
 ``feature_flags.install_profile`` gates — it decides whether a feature exists here at all.
-``personas`` curates — it decides which role's story leads. Neither can answer the question
-an SE actually has in front of a customer, which is **"can I run this on THIS POV?"** A POV
-carries its own PRA, Password Safe and Entitle tenants in three independent columns
-precisely because a Password-Safe-only evaluation, a PRA + Password Safe one and an
-all-three one are all normal shapes. On a POV instance every one of those has
+``pov_cards`` groups — it decides which product each card is proving. Neither can answer
+the question an SE actually has in front of a customer, which is **"can I run this on THIS
+POV?"** A POV carries its own PRA, Password Safe and Entitle tenants in three independent
+columns precisely because a Password-Safe-only evaluation, a PRA + Password Safe one and
+an all-three one are all normal shapes. On a POV instance every one of those has
 ``pra_enabled`` on, so the flag cannot tell them apart.
 
 So this module resolves cards against a **POV row**, and it keeps two properties:
 
-  * **It never subtracts.** Every persona and every card is present for every product mix.
+  * **It never subtracts.** Every group and every card is present for every product mix.
     A card whose product this POV does not include is rendered and explained as
-    ``out_of_scope`` — the same promise the persona layer makes, one layer down. A mix
-    decides a card's STATE and nothing else.
-  * **``personas`` still knows nothing about the database.** That module's dependency rule
-    is load-bearing (``api/docs_pages`` imports it deliberately), so it takes a dict of
-    booleans and this module is the one that owns ``PovEnvironment``. The import direction
-    is one-way: ``pov_use_cases`` imports ``personas``, never the reverse.
+    ``out_of_scope``. A mix decides a card's STATE and nothing else, so a
+    Password-Safe-only POV still sees what the other two products would have shown it.
+  * **``pov_cards`` knows nothing about the database.** It takes a dict of booleans and this
+    module is the one that owns ``PovEnvironment``. The import direction is one-way:
+    ``pov_use_cases`` imports ``pov_cards``, never the reverse.
 
 The progress half is the other reason this exists. A POV runs for weeks across many
 sessions and several people, so which demos have actually been run is state worth keeping —
@@ -40,7 +39,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from ..database import PovEnvironment, PovUseCaseProgress
-from . import personas, pov_runbooks, pov_wireup
+from . import pov_cards, pov_runbooks, pov_wireup
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +78,7 @@ def _now() -> datetime:
 # ── this POV's product mix ───────────────────────────────────────────────────
 
 def products_for(db: Session, env: PovEnvironment, wireup: dict | None = None) -> dict:
-    """The booleans ``personas.pov_catalog`` resolves cards against.
+    """The booleans ``pov_cards.catalog`` resolves cards against.
 
     Six keys in two halves, and the split is the whole point. The three tenant keys answer
     "does this POV INCLUDE the product?" — a question about the evaluation, whose answer an
@@ -134,15 +133,15 @@ def describe_row(row: PovUseCaseProgress | None) -> dict:
 def _groups(db: Session, env: PovEnvironment, products: dict) -> list:
     """The catalog for this POV with each card's progress merged in.
 
-    Two registries, appended rather than merged: `personas` groups cards by ROLE and
-    `pov_runbooks` groups them by the published PROCEDURE a POV is being run against. They
-    are disjoint by card id and both emit the same group shape, so every consumer below --
-    `_summarize`, the detail page's group loop, `pov_summary.by_persona` -- takes them
-    without knowing which is which. Runbooks come last because a role is what an SE IS and
-    a runbook is what they are working through today.
+    Two registries, appended rather than merged: `pov_cards` groups cards by the PRODUCT
+    each one proves and `pov_runbooks` groups them by the published PROCEDURE a POV is being
+    run against. They are disjoint by card id and both emit the same group shape, so every
+    consumer below -- `_summarize`, the detail page's group loop, `pov_summary.by_group` --
+    takes them without knowing which is which. Runbooks come last because a product is what
+    the evaluation was scoped to and a runbook is what somebody is working through today.
     """
     rows = _rows(db, env)
-    groups = (personas.pov_catalog(env.id, products)
+    groups = (pov_cards.catalog(env.id, products)
               + pov_runbooks.catalog(env.id, products))
     for group in groups:
         for card in group["use_cases"]:
@@ -212,11 +211,11 @@ def set_state(db: Session, env: PovEnvironment, card_id: str, *,
     just commented on would silently erase the comment — the one piece of evidence in this
     feature that cannot be reconstructed.
     """
-    persona_key, card = personas.find_pov_card(card_id)
+    group_key, card = pov_cards.find_card(card_id)
     if card is None:
         # The runbook registry is the second half of the allowlist, not a fallback: a card
         # id belongs to exactly one of the two, and an id in neither is still refused.
-        persona_key, card = pov_runbooks.find_card(card_id)
+        group_key, card = pov_runbooks.find_card(card_id)
     if card is None:
         raise UseCaseError(f"no POV use case with id {card_id!r}")
     if state not in VALID_STATES:
@@ -233,10 +232,11 @@ def set_state(db: Session, env: PovEnvironment, card_id: str, *,
         row = PovUseCaseProgress(environment_id=env.id, card_id=card.id)
         db.add(row)
 
-    # Written on every save, not only on insert: a card that moved between personas after
-    # it was ticked should report where it lives now, and this is the cheapest place that
-    # correction can happen.
-    row.persona = persona_key
+    # Written on every save, not only on insert: a card that moved between groups after it
+    # was ticked should report where it lives now, and this is the cheapest place that
+    # correction can happen. It is also what heals the rows written while the checklist was
+    # grouped by role -- each one is corrected the next time its card is touched.
+    row.group_key = group_key
     row.state = state
     if note is not None:
         row.note = (note.strip()[:NOTE_MAX]) or None
@@ -256,9 +256,9 @@ def clear(db: Session, env: PovEnvironment, card_id: str) -> bool:
     Deleting rather than writing a third state: "not started" is the absence of a row
     everywhere else in this module, and a row saying so would be a second way to spell it.
     """
-    persona_key, card = personas.find_pov_card(card_id)
+    _group_key, card = pov_cards.find_card(card_id)
     if card is None:
-        persona_key, card = pov_runbooks.find_card(card_id)
+        _group_key, card = pov_runbooks.find_card(card_id)
     if card is None:
         raise UseCaseError(f"no POV use case with id {card_id!r}")
     deleted = (db.query(PovUseCaseProgress)

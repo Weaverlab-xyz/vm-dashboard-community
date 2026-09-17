@@ -992,10 +992,11 @@ function wizard() {
     allSteps: [
       { key: 'admin',    label: 'Admin'    },
       { key: 'profile',  label: 'Purpose'  },
-      // No `profiles:` restriction, and that absence is the point: every focus is valid on
-      // both install profiles. A restriction here would be the first crack in the two axes
-      // being orthogonal.
-      { key: 'persona',  label: 'Focus'    },
+      // Demo-only, and it is the PROFILE doing the subtracting rather than the focus
+      // gaining a power: a POV instance is not presenting, so no role's material could
+      // lead its dashboard and the eight labels here would be a choice with no outcome.
+      // Sits immediately after Purpose, so picking POV removes it on the same keystroke.
+      { key: 'persona',  label: 'Focus',   profiles: ['demo'] },
       { key: 'aws',      label: 'AWS',   profiles: ['demo'] },
       { key: 'azure',    label: 'Azure', profiles: ['demo'] },
       { key: 'gcp',      label: 'GCP',   profiles: ['demo'] },
@@ -1484,7 +1485,13 @@ function wizard() {
             password: this.form.admin.password,
           },
           profile:  this.form.profile,
-          persona:  this.form.persona,
+          // Omitted entirely on a POV instance, not sent empty. `SetupPayload.persona` is
+          // `| None = None` so absence means "leave the row alone", and sending the empty
+          // form would CLEAR a stored focus every time a POV instance is reconfigured --
+          // then hand it back as a surprise if it ever became an estate one again. The API
+          // refuses a non-empty value there in any case.
+          ...(this.form.profile.install_profile === 'demo'
+                ? { persona: this.form.persona } : {}),
           aws:      this.form.aws,
           azure:    this.form.azure,
           gcp:      this.form.gcp,

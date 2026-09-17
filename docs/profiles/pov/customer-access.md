@@ -334,7 +334,8 @@ and whether the customer worked it themselves. Clicking one opens its Summary.
 
 ### The summary, and one distinction in it
 
-The Summary tab is the same on a live POV and a finished one: coverage overall and per role,
+The Summary tab is the same on a live POV and a finished one: coverage overall and per
+product group,
 every card somebody ticked or skipped, and **what was said** — the customer's own notes,
 marked as theirs.
 

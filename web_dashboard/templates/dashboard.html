@@ -24,6 +24,7 @@
          x-text="persona.blurb || (isPov ? 'Your proofs of value' : 'Infrastructure overview')"></p>
     </div>
 
+    {% if persona_focus %}
     <!-- Lens selector -->
     <div class="relative shrink-0" @keydown.escape="lensOpen = false">
       <button @click="lensOpen = !lensOpen"
@@ -67,6 +68,7 @@
         </div>
       </div>
     </div>
+    {% endif %}
   </div>
 
   <!-- Loading state -->

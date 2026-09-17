@@ -854,6 +854,15 @@ def _profile_context(request: Request) -> dict:
     persona = personas.get(persona_key)
     return {
         "install_profile": profile,
+        # Whether this instance has a focus axis at all -- false on a POV instance, where
+        # there is no role whose material could lead. The templates that render a PICKER
+        # ({% if persona_focus %}) read this; everything that renders the RESULT of a focus
+        # needs no gate, because personas.resolve already answers neutral there.
+        #
+        # Server-side rather than the dashboard's own `isPov` getter, because a picker
+        # gated in Alpine paints first and vanishes on the next tick. The name avoids the
+        # three below deliberately: those are the active focus, this is whether one exists.
+        "persona_focus": personas.applies(),
         # branding.overrides() is the operator's Appearance settings, already
         # validated; it is empty on an instance that never set any, which is what
         # keeps this call identical to what it was before branding existed.

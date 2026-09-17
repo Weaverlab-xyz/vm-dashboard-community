@@ -259,18 +259,19 @@ def test_the_archive_row_separates_a_login_issued_from_a_login_used():
         "the archive table collapses 'issued' and 'used' into one claim"
 
 
-def test_a_role_with_nothing_in_scope_is_dropped_from_the_breakdown():
-    """A Password-Safe-only evaluation has several, and "0 of 0" against each is noise in a
-    document somebody reads once."""
+def test_a_group_with_nothing_in_scope_is_dropped_from_the_breakdown():
+    """A Password-Safe-only evaluation has two, and "0 of 0" against each is noise in a
+    document somebody reads once. Which also means the surviving rows ARE the product
+    breakdown: the groups left standing are the ones the customer bought."""
     s = _fixture()
     db = SessionLocal()
     env = db.query(PovEnvironment).filter(PovEnvironment.id == s["done"]).first()
-    by_persona = pov_summary.build(db, env)["by_persona"]
+    by_group = pov_summary.build(db, env)["by_group"]
     db.close()
-    assert by_persona, "the breakdown is empty for a POV with two products"
-    assert all(p["in_scope"] > 0 for p in by_persona), \
-        "a role with nothing in scope is reported"
-    assert all(p["done"] <= p["in_scope"] for p in by_persona)
+    assert by_group, "the breakdown is empty for a POV with two products"
+    assert all(g["in_scope"] > 0 for g in by_group), \
+        "a group with nothing in scope is reported"
+    assert all(g["done"] <= g["in_scope"] for g in by_group)
 
 
 def test_the_products_are_read_off_the_row_not_probed():
@@ -333,13 +334,13 @@ def _runbook_card():
 
 
 def test_the_runbook_group_reaches_the_catalog():
-    from web_dashboard.services import personas, pov_runbooks
+    from web_dashboard.services import pov_cards, pov_runbooks
     st = _fixture()
     db = SessionLocal()
     env = db.query(PovEnvironment).filter(PovEnvironment.id == st["live"]).first()
     groups = pov_use_cases.describe(db, env)["groups"]
-    keys = [g["persona"] for g in groups]
-    expected = list(personas.VALID_PERSONAS) + list(pov_runbooks.VALID_RUNBOOKS)
+    keys = [g["group"] for g in groups]
+    expected = list(pov_cards.GROUPS) + list(pov_runbooks.VALID_RUNBOOKS)
     assert keys == expected, f"the catalog drops, reorders or duplicates a group: {keys}"
     db.close()
 
@@ -359,7 +360,7 @@ def test_the_runbook_cards_are_counted_in_the_summary_total():
 
 
 def test_a_runbook_card_can_be_ticked_and_records_its_runbook():
-    """`set_state` consults both registries. The `persona` column stores whichever group
+    """`set_state` consults both registries. The `group_key` column stores whichever group
     the card came from, which is what makes a runbook tick renderable later."""
     st = _fixture()
     db = SessionLocal()
@@ -377,8 +378,8 @@ def test_a_runbook_card_can_be_ticked_and_records_its_runbook():
     stored = (db.query(PovUseCaseProgress)
                 .filter(PovUseCaseProgress.environment_id == env.id,
                         PovUseCaseProgress.card_id == card).first())
-    misfiled = f"the tick was filed under {stored.persona!r}, not its runbook"
-    assert stored.persona == "ps-poc-skytap", misfiled
+    misfiled = f"the tick was filed under {stored.group_key!r}, not its runbook"
+    assert stored.group_key == "ps-poc-skytap", misfiled
 
     assert pov_use_cases.clear(db, env, card) is True
     db.close()

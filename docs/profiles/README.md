@@ -76,6 +76,7 @@ Two properties worth knowing:
 | Cloud databases, Kubernetes, containers, cloud functions | yes | — |
 | Virtual desktops, EPM-L, cost reporting | yes | — |
 | The AWS / Azure / GCP / OCI consoles and Images | yes | — |
+| Role focus (personas): the lens, the wizard step, the RBAC field | yes | — |
 | POV environments | — | yes |
 | Lab platforms (Skytap) | — | yes |
 | PRA, Password Safe, Entitle | yes | yes |
@@ -99,6 +100,16 @@ a playbook at all — and it has no cloud to put one in. The
 is the answer: a POV already runs an agent inside the customer's environment, and that
 agent can reach a share the dashboard cannot.
 
+The role-focus row is the other one that is not a feature flag, and it is not a page
+either: it is a set of **controls**. A persona only ever reorders, so nothing needed
+gating until the question became whether the axis exists at all — and on a POV instance it
+does not. `services/personas.applies()` is that one reader; it asks `install_profile()`,
+which is the permitted direction (`feature_flags` still knows nothing about personas). The
+five resolvers return neutral, `_profile_context` ships `persona_focus` for the templates,
+and the write paths refuse a non-empty focus with a 409. A POV instance is not presenting;
+its checklist is grouped by the product each use case proves. See
+[Personas](demo/personas/README.md).
+
 An estate-only integration on a POV instance is not merely toggled off — **Settings refuses to
 enable it**, with a 409 naming the profile. Accepting the write would store a flag that
 reads back as on while `enabled()` keeps returning `False`: a toggle that saves cleanly,
@@ -112,6 +123,12 @@ flag says. That is the mask, working.
 
 **Settings gives me a 409 when I enable an integration.** Also the mask. The message names
 the profile. That integration belongs on the other instance.
+
+**There is no Focus step in the wizard, and no focus picker on the dashboard.** Also the
+profile, and this one subtracts controls rather than pages. Everything is still reachable —
+the dashboard renders in shipped order and `/use-cases` is ungated on both profiles. If a
+user or an OIDC group has a focus assigned from before the instance became a POV one, it
+resolves as unset rather than being cleared, so it comes back if the profile changes again.
 
 **I switched the profile and a feature did not come back.** The mask only subtracts, so
 switching to `demo` stops masking — but the feature's own `*_enabled` flag still has to be

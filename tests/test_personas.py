@@ -506,6 +506,105 @@ def test_the_config_row_is_not_called_profile():
     assert 'config_service.get("profile' not in src
 
 
+# ── the axis does not exist on a POV instance ────────────────────────────────
+#
+# A persona is a PRESENTING decision. A POV instance is not presenting: it is one
+# customer's evaluation, its dashboard leads with that POV, and its /use-cases page shows
+# that POV's checklist rather than the role catalog. So there is no role whose material
+# could lead, and the eight labels in a picker were a choice with no outcome.
+#
+# Read the direction carefully before changing any of this. The PROFILE subtracts a
+# control, exactly as it subtracts the four cloud consoles; the persona layer has not
+# gained the power to subtract. Every page an estate instance reaches, a POV instance still
+# reaches -- in shipped order, which is what neutral has always meant.
+
+
+def _as_profile(name):
+    """Context-manager-free swap of feature_flags.install_profile, matching the style above."""
+    from web_dashboard.services import feature_flags as ff
+    real = ff.install_profile
+    ff.install_profile = lambda: name
+    return lambda: setattr(ff, "install_profile", real)
+
+
+def test_the_focus_axis_exists_only_on_an_estate_instance():
+    from web_dashboard.services import personas as P
+    for profile, expected in (("demo", True), ("pov", False)):
+        undo = _as_profile(profile)
+        try:
+            assert P.applies() is expected, f"applies() is wrong on '{profile}'"
+        finally:
+            undo()
+
+
+def test_every_resolver_answers_neutral_where_there_is_no_focus_axis():
+    """All five, not just the default: a `persona` cookie set while an instance was an
+    estate one would otherwise keep curating after it became a POV instance, and a shared
+    `?persona=` link would do it to anyone who clicked."""
+    from web_dashboard.services import personas as P
+
+    class _U:
+        persona = "ot"
+        session_persona = "dba"
+
+    class _M:
+        persona = "sre"
+        persona_priority = 1
+        display_name = "g"
+
+    undo = _as_profile("pov")
+    real_get = P.config_service.get
+    try:
+        P.config_service.get = lambda k, *a, **kw: "security" if k == "default_persona" \
+            else real_get(k, *a, **kw)
+        assert P.default_persona() == P.NEUTRAL, "a stored default still resolves"
+        assert P.resolve(_FakeRequest(query={"persona": "ot"})) == (P.NEUTRAL, "none")
+        assert P.resolve(_FakeRequest(cookies={"persona": "ot"})) == (P.NEUTRAL, "none")
+        assert P.resolve(_FakeRequest(
+            cookies={"persona_assigned": "user:ot"})) == (P.NEUTRAL, "none")
+        assert P.resolve_for_user(_U()) == (P.NEUTRAL, "none")
+        assert P.persona_for_groups([_M()]) == P.NEUTRAL
+    finally:
+        P.config_service.get = real_get
+        undo()
+
+
+def test_the_picker_is_offered_nothing_to_show():
+    """Empty rather than neutral-only: a list holding just "No focus" is a control that
+    offers one choice you already have."""
+    from web_dashboard.services import personas as P
+    undo = _as_profile("pov")
+    try:
+        assert P.options() == [], "the lens is still offered options on a POV instance"
+    finally:
+        undo()
+    assert P.options(), "the lens lost its options on an estate instance"
+
+
+def test_the_registry_itself_stays_profile_blind():
+    """The four resolvers answer neutral; the CATALOG does not shrink. /use-cases still
+    describes every card on both profiles (tests/test_use_cases_page pins that), and a
+    registry that varied by profile would make the docs pages lie on one of them."""
+    from web_dashboard.services import personas as P
+    undo = _as_profile("pov")
+    try:
+        assert len(P.all_personas()) == len(P.VALID_PERSONAS)
+        assert len(P.catalog()) == len(P.VALID_PERSONAS)
+        assert P.get("ot") is not None
+    finally:
+        undo()
+
+
+def test_the_resolvers_ask_the_profile_rather_than_each_caller_doing_it():
+    """One predicate, consulted inside the resolvers. Spread across the call sites instead,
+    the next caller added is the one that forgets."""
+    src = _read(_PERSONAS)
+    for fn in ("def default_persona", "def resolve_for_user", "def persona_for_groups",
+               "def resolve(request", "def options"):
+        body = src.split(fn, 1)[1].split("\ndef ", 1)[0]
+        assert "applies()" in body, f"{fn.split()[-1]} does not consult applies()"
+
+
 # ── content invariants ───────────────────────────────────────────────────────
 
 def test_every_persona_has_cards_and_every_card_has_copy():

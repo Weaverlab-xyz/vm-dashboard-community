@@ -1,16 +1,24 @@
 """Per-POV use cases: a third axis that states, and still never subtracts.
 
-`install_profile` GATES (tests/test_install_profile.py). A persona CURATES
+`install_profile` GATES (tests/test_install_profile.py). A persona CURATES the DEMO profile
 (tests/test_personas.py). This one answers "can I run this on THIS POV?" — and the whole
 risk of adding it is that it quietly becomes a fourth kind of gate, because unlike the
 other two it resolves against a customer's row rather than against configuration.
 
+The cards are grouped by the PRODUCT each one proves (`services/pov_cards`). They used to
+be eight `Persona.pov_use_cases` tuples rendered under role headings, which sorted a
+customer's remaining work by an axis belonging to the other install profile; the tests here
+now pin the opposite -- that nothing in this stack reaches for a persona.
+
 The properties pinned here are the ones whose absence would be invisible:
 
-  * **A product mix never shrinks the catalog.** Every persona and every card is present
+  * **A product mix never shrinks the catalog.** Every group and every card is present
     for all eight combinations of the three tenants. A Password-Safe-only POV is a normal
     shape, not a degraded one, and the moment a mix could remove a card this module would
     be an install_profile with extra steps.
+  * **A card's group is DERIVED.** It is the first product the card declares, so there is
+    no second field to drift from `requires_products` -- which is also the field that
+    decides scope, so a card can never be filed under a product it does not name.
   * **`out_of_scope` is not `masked`.** Different fact, different word, and — the half that
     actually bites — NO href and NO action link, because there is nowhere useful to send
     somebody: the fix is a tenant on the POV row, which is a decision about the evaluation.
@@ -21,12 +29,12 @@ The properties pinned here are the ones whose absence would be invisible:
   * **`/pov/{env_id}` is declared after `/pov/templates`.** Starlette matches in declaration
     order, so the reverse turns the builder page into "No such POV environment" and nothing
     else looks wrong.
-  * **`personas` still knows nothing about the database.** The POV resolvers take a dict of
+  * **`pov_cards` knows nothing about the database.** The resolvers take a dict of
     booleans precisely so that stays true; a row parameter would drag `database` into a
-    module `api/docs_pages` imports deliberately.
+    registry that is imported from everywhere.
 
 Source-shape assertions parse files and import nothing. The behavioural ones import
-personas, which needs only config_service, settings and feature_flags.
+pov_cards, which needs only the shared `UseCase` dataclass.
 
 Runs under pytest, or standalone:
     python tests/test_pov_use_cases.py
@@ -44,6 +52,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-pov-use-cases")
 _SVC = os.path.join(_ROOT, "web_dashboard", "services")
 _TPL = os.path.join(_ROOT, "web_dashboard", "templates")
 _PERSONAS = os.path.join(_SVC, "personas.py")
+_CARDS = os.path.join(_SVC, "pov_cards.py")
 _SERVICE = os.path.join(_SVC, "pov_use_cases.py")
 _MAIN = os.path.join(_ROOT, "web_dashboard", "main.py")
 _API = os.path.join(_ROOT, "web_dashboard", "api", "pov.py")
@@ -61,8 +70,9 @@ def _read(path):
 
 
 def _all_pov_cards():
-    from web_dashboard.services import personas as P
-    return [(p, c) for p in P.all_personas() for c in p.pov_use_cases]
+    """``(group_key, UseCase)`` for every registered POV card, in group order."""
+    from web_dashboard.services import pov_cards as C
+    return [(g, c) for g in C.GROUPS for c in C.cards(g)]
 
 
 def _mixes():
@@ -81,17 +91,54 @@ def _mixes():
 
 # ── every declared name is real ──────────────────────────────────────────────
 
-def test_every_persona_has_pov_cards_and_every_card_has_copy():
-    from web_dashboard.services import personas as P
-    for p in P.all_personas():
-        assert p.pov_use_cases, f"{p.key} has no POV cards"
-        for c in p.pov_use_cases:
-            assert c.id and c.title and c.summary and c.target, f"{p.key}: incomplete card"
-            assert c.minutes > 0, f"{p.key}/{c.id} claims {c.minutes} minutes"
+def test_every_group_has_cards_and_every_card_has_copy():
+    from web_dashboard.services import pov_cards as C
+    for g in C.GROUPS:
+        assert C.cards(g), f"{g} has no cards"
+        assert C._GROUP_LABELS.get(g), f"{g} has no label"
+        assert C._GROUP_BLURBS.get(g), f"{g} has no blurb"
+        assert C._GROUP_DOCS.get(g), f"{g} names no doc"
+        for c in C.cards(g):
+            assert c.id and c.title and c.summary and c.target, f"{g}: incomplete card"
+            assert c.minutes > 0, f"{g}/{c.id} claims {c.minutes} minutes"
 
 
-def test_pov_card_ids_are_unique_across_every_persona():
-    """The id is the primary key of a progress row, so a collision would let two roles'
+def test_every_group_doc_exists_on_disk():
+    from web_dashboard.services import pov_cards as C
+    for g in C.GROUPS:
+        for d in C._GROUP_DOCS[g]:
+            assert os.path.exists(os.path.join(_DOCS, d + ".md")), \
+                f"group {g} names docs '{d}', which is not a file under docs/"
+
+
+def test_a_cards_group_is_derived_from_the_product_it_declares():
+    """No second field. `requires_products` decides both a card's group and whether it is in
+    scope, so the two can never disagree -- and an author moves a card by reordering it."""
+    from web_dashboard.services import pov_cards as C
+    for g, c in _all_pov_cards():
+        assert C.group_of(c) == g, \
+            f"{c.id} sits in '{g}' but derives '{C.group_of(c)}'"
+    assert not any(c.requires_products for c in C.cards(C.ENVIRONMENT)), \
+        "a card in the environment group declares a product, so it belongs elsewhere"
+
+
+def test_a_two_product_cards_group_is_its_first_product_and_that_is_deliberate():
+    """Four cards name two products, and all four lead with `pra` because all four are
+    PRA-first stories -- reaching a machine, and what the session does once you are on it.
+    Reordering one of those tuples MOVES the card between headings, so this test exists to
+    make that a decision rather than a side effect."""
+    from web_dashboard.services import pov_cards as C
+    two = [(g, c) for g, c in _all_pov_cards() if len(c.requires_products) > 1]
+    assert len(two) == 4, f"the two-product set changed: {[c.id for _g, c in two]}"
+    for g, c in two:
+        assert g == c.requires_products[0], f"{c.id} is filed under {g}"
+        assert g == "pra", (
+            f"{c.id} now leads with {c.requires_products[0]!r} — it has moved out of the "
+            "PRA group. Fine if intended; this assertion is the place to say so.")
+
+
+def test_pov_card_ids_are_unique_across_every_group():
+    """The id is the primary key of a progress row, so a collision would let two groups'
     cards tick each other off."""
     ids = [c.id for _p, c in _all_pov_cards()]
     dupes = sorted({i for i in ids if ids.count(i) > 1})
@@ -106,30 +153,38 @@ def test_a_pov_card_id_never_collides_with_a_demo_card_id():
 
 
 def test_every_required_product_is_a_real_product():
-    from web_dashboard.services import personas as P
-    for p, c in _all_pov_cards():
+    from web_dashboard.services import pov_cards as C
+    for g, c in _all_pov_cards():
         for product in c.requires_products:
-            assert product in P.POV_PRODUCTS, \
-                f"{p.key}/{c.id} requires '{product}', not a real product"
+            assert product in C.POV_PRODUCTS, \
+                f"{g}/{c.id} requires '{product}', not a real product"
+
+
+def test_the_groups_are_the_products_plus_one():
+    """The order is POV_PRODUCTS order, then the product-free group. A product group is
+    what the evaluation was bought for; the environment group runs on every POV."""
+    from web_dashboard.services import pov_cards as C
+    assert C.GROUPS == C.POV_PRODUCTS + (C.ENVIRONMENT,), \
+        f"the group order is no longer products-then-environment: {C.GROUPS}"
 
 
 def test_every_product_has_a_label_an_artifact_and_a_remedy():
     """"Needs: password_safe" is not copy anyone can act on, and a product with no artifact
     key would silently resolve every card for it as ready."""
-    from web_dashboard.services import personas as P
-    for product in P.POV_PRODUCTS:
-        assert product in P._PRODUCT_LABELS, f"{product} has no human label"
-        assert product in P._PRODUCT_ARTIFACT, f"{product} names no wire-up artifact"
-        assert product in P._PRODUCT_REMEDY, f"{product} has no remedy copy"
+    from web_dashboard.services import pov_cards as C
+    for product in C.POV_PRODUCTS:
+        assert product in C._PRODUCT_LABELS, f"{product} has no human label"
+        assert product in C._PRODUCT_ARTIFACT, f"{product} names no wire-up artifact"
+        assert product in C._PRODUCT_REMEDY, f"{product} has no remedy copy"
 
 
 def test_every_pov_card_docs_path_exists_on_disk():
     """A card is content, and the first stale rename is a card linking to a 404."""
-    for p, c in _all_pov_cards():
+    for g, c in _all_pov_cards():
         if not c.docs:
             continue
         assert os.path.exists(os.path.join(_DOCS, c.docs + ".md")), \
-            f"{p.key}/{c.id} names docs '{c.docs}', which is not a file under docs/"
+            f"{g}/{c.id} names docs '{c.docs}', which is not a file under docs/"
 
 
 _DESIGN_NOTE = os.path.join(_DOCS, "profiles", "pov", "design", "use-cases.md")
@@ -169,9 +224,9 @@ def test_the_design_note_summary_agrees_with_its_own_slice_sections():
 def test_a_pov_card_declares_no_flag_or_cloud():
     """The two lists resolve through different readers. A POV card carrying requires_flags
     would be half-resolved by whichever one saw it first."""
-    for p, c in _all_pov_cards():
+    for g, c in _all_pov_cards():
         assert not c.requires_flags and not c.requires_any_flag and not c.requires_clouds, \
-            f"{p.key}/{c.id} is a POV card declaring instance-level requirements"
+            f"{g}/{c.id} is a POV card declaring instance-level requirements"
 
 
 def test_a_demo_card_declares_no_product():
@@ -188,7 +243,7 @@ def test_the_demo_card_tests_still_walk_only_the_demo_list():
     fail it for the wrong reason -- or, worse, get the assertion weakened to accommodate."""
     src = _read(os.path.join(_ROOT, "tests", "test_personas.py"))
     helper = src.split("def _all_cards():", 1)[1].split("\ndef ", 1)[0]
-    assert "p.use_cases" in helper and "pov_use_cases" not in helper, \
+    assert "p.use_cases" in helper and "pov_cards" not in helper, \
         "tests/test_personas._all_cards has been widened to include POV cards"
 
 
@@ -202,9 +257,9 @@ def _detail_tabs():
 
 
 def test_every_pov_card_target_is_a_fragment():
-    for p, c in _all_pov_cards():
+    for g, c in _all_pov_cards():
         assert c.target.startswith("#"), \
-            f"{p.key}/{c.id} targets {c.target!r}; POV cards carry a fragment, not a path"
+            f"{g}/{c.id} targets {c.target!r}; POV cards carry a fragment, not a path"
 
 
 def test_every_pov_card_fragment_is_a_real_tab():
@@ -212,27 +267,27 @@ def test_every_pov_card_fragment_is_a_real_tab():
     stale one is a card that silently lands on Overview."""
     tabs = _detail_tabs()
     assert tabs, "could not parse the tab list out of pov/detail.html"
-    for p, c in _all_pov_cards():
+    for g, c in _all_pov_cards():
         assert c.target[1:] in tabs, \
-            f"{p.key}/{c.id} targets '{c.target}', not a tab in pov/detail.html ({sorted(tabs)})"
+            f"{g}/{c.id} targets '{c.target}', not a tab in pov/detail.html ({sorted(tabs)})"
 
 
 def test_the_action_tab_is_a_real_tab():
-    from web_dashboard.services import personas as P
-    assert P._POV_ACTION_TAB[1:] in _detail_tabs(), \
-        f"the needs_wiring action link points at {P._POV_ACTION_TAB}, not a real tab"
+    from web_dashboard.services import pov_cards as C
+    assert C._POV_ACTION_TAB[1:] in _detail_tabs(), \
+        f"the needs_wiring action link points at {C._POV_ACTION_TAB}, not a real tab"
 
 
 # ── the mix states, and never filters ────────────────────────────────────────
 
 def test_the_catalog_is_complete_for_every_product_mix():
-    from web_dashboard.services import personas as P
-    expected_groups = len(P.VALID_PERSONAS)
-    expected_cards = sum(len(p.pov_use_cases) for p in P.all_personas())
+    from web_dashboard.services import pov_cards as C
+    expected_groups = len(C.GROUPS)
+    expected_cards = len(C.cards())
     for mix in _mixes():
-        cat = P.pov_catalog(_ENV, mix)
-        assert [g["persona"] for g in cat] == list(P.VALID_PERSONAS), \
-            f"{mix}: the catalog drops or reorders personas"
+        cat = C.catalog(_ENV, mix)
+        assert [g["group"] for g in cat] == list(C.GROUPS), \
+            f"{mix}: the catalog drops or reorders groups"
         assert len(cat) == expected_groups
         total = sum(len(g["use_cases"]) for g in cat)
         assert total == expected_cards, \
@@ -242,9 +297,9 @@ def test_the_catalog_is_complete_for_every_product_mix():
 def test_an_out_of_scope_card_carries_no_target_and_no_action():
     """The half that bites. A link the client merely styles as inert is one middle-click
     from proving there is nothing there for this POV."""
-    from web_dashboard.services import personas as P
+    from web_dashboard.services import pov_cards as C
     for mix in _mixes():
-        for g in P.pov_catalog(_ENV, mix):
+        for g in C.catalog(_ENV, mix):
             for c in g["use_cases"]:
                 if c["state"] == "out_of_scope":
                     assert not c["target"], f"{c['id']} is out of scope with a target"
@@ -255,11 +310,11 @@ def test_an_out_of_scope_card_carries_no_target_and_no_action():
 def test_a_card_with_no_products_is_ready_on_every_mix():
     """The oversight cards are why an empty requires_products exists: a POV wired into one
     product must still have something to run."""
-    from web_dashboard.services import personas as P
-    unconditional = {c.id for _p, c in _all_pov_cards() if not c.requires_products}
+    from web_dashboard.services import pov_cards as C
+    unconditional = {c.id for _g, c in _all_pov_cards() if not c.requires_products}
     assert unconditional, "no POV card is product-independent; the empty mix has nothing"
     for mix in _mixes():
-        for g in P.pov_catalog(_ENV, mix):
+        for g in C.catalog(_ENV, mix):
             for c in g["use_cases"]:
                 if c["id"] in unconditional:
                     assert c["state"] == "ready", \
@@ -267,79 +322,109 @@ def test_a_card_with_no_products_is_ready_on_every_mix():
 
 
 def test_a_tenant_without_its_artifact_is_needs_wiring_and_says_what_to_run():
-    from web_dashboard.services import personas as P
+    from web_dashboard.services import pov_cards as C
     mix = {"pra": True, "password_safe": True, "entitle": True,
            "wired": False, "onboarded": False, "entitle_wired": False}
     seen = 0
-    for g in P.pov_catalog(_ENV, mix):
+    for g in C.catalog(_ENV, mix):
         for c in g["use_cases"]:
             if not c["products"]:
                 continue
             seen += 1
             assert c["state"] == "needs_wiring", f"{c['id']} is {c['state']} with nothing wired"
             assert c["needs"], f"{c['id']} is unready but names nothing"
-            assert c["action_link"] == f"/pov/{_ENV}{P._POV_ACTION_TAB}"
+            assert c["action_link"] == f"/pov/{_ENV}{C._POV_ACTION_TAB}"
     assert seen, "no product-tagged cards were exercised"
 
 
 def test_absence_beats_unwired_when_a_card_names_two_products():
     """A card needing PRA and Password Safe on a POV with no PRA cannot be run at all, so
     "run the wire-up" would send an operator to a button that will skip what they came for."""
-    from web_dashboard.services import personas as P
-    two = [(p, c) for p, c in _all_pov_cards() if len(c.requires_products) > 1]
+    from web_dashboard.services import pov_cards as C
+    two = [(g, c) for g, c in _all_pov_cards() if len(c.requires_products) > 1]
     assert two, "no POV card names two products; this rule is untested"
-    for p, c in two:
+    for g, c in two:
         mix = {k: True for k in ("pra", "password_safe", "entitle")}
         mix.update({"wired": True, "onboarded": True, "entitle_wired": True})
         # Drop the first product's tenant, and leave a second one wired.
         mix[c.requires_products[0]] = False
-        state, _needs = P._pov_card_state(c, mix)
-        assert state == "out_of_scope", f"{p.key}/{c.id} is {state} with a tenant missing"
+        state, _needs = C.card_state(c, mix)
+        assert state == "out_of_scope", f"{g}/{c.id} is {state} with a tenant missing"
 
 
 def test_a_ready_card_targets_this_pov_and_only_this_pov():
-    from web_dashboard.services import personas as P
+    from web_dashboard.services import pov_cards as C
     mix = {k: True for k in ("pra", "password_safe", "entitle",
                              "wired", "onboarded", "entitle_wired")}
-    for g in P.pov_catalog(_ENV, mix):
+    for g in C.catalog(_ENV, mix):
         for c in g["use_cases"]:
             assert c["state"] == "ready", f"{c['id']} is {c['state']} on a fully wired POV"
             assert c["target"].startswith(f"/pov/{_ENV}#"), \
                 f"{c['id']} targets {c['target']!r}"
 
 
-def test_find_pov_card_is_the_allowlist_and_refuses_a_demo_id():
+def test_find_card_is_the_allowlist_and_refuses_a_demo_id():
     """The registry is what stops the progress table becoming a free-text store -- and the
     demo ids must not be a back door into it, since they name pages a POV cannot reach."""
-    from web_dashboard.services import personas as P
-    key, card = P.find_pov_card("pov-security-who-has-access")
-    assert card is not None and key == "security"
+    from web_dashboard.services import pov_cards as C
+    key, card = C.find_card("pov-security-who-has-access")
+    assert card is not None and key == C.ENVIRONMENT
+    key, card = C.find_card("pov-ot-vendor-jit")
+    assert card is not None and key == "pra"
     for bogus in ("", "   ", "nope", "cloudops-three-layers"):
-        assert P.find_pov_card(bogus) == ("", None), f"{bogus!r} resolved to a card"
+        assert C.find_card(bogus) == ("", None), f"{bogus!r} resolved to a card"
 
 
 # ── the module boundary ──────────────────────────────────────────────────────
 
-def test_personas_still_knows_nothing_about_the_database():
-    """The POV resolvers take a dict of booleans precisely so this stays true. A row
-    parameter would drag `database` into a module api/docs_pages imports deliberately."""
-    tree = ast.parse(_read(_PERSONAS))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            name = node.module or ""
-            assert "database" not in name and not name.startswith("api"), \
-                f"personas.py imports {name!r}"
-            for alias in node.names:
-                assert alias.name not in ("database",), \
-                    f"personas.py imports {alias.name!r}"
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                assert "database" not in alias.name, f"personas.py imports {alias.name!r}"
+def test_neither_registry_knows_anything_about_the_database():
+    """The resolvers take a dict of booleans precisely so this stays true. A row parameter
+    would drag `database` into personas.py, which api/docs_pages imports deliberately, and
+    into pov_cards.py, which is imported from everywhere the checklist appears."""
+    for path in (_PERSONAS, _CARDS):
+        who = os.path.basename(path)
+        for node in ast.walk(ast.parse(_read(path))):
+            if isinstance(node, ast.ImportFrom):
+                name = node.module or ""
+                assert "database" not in name and not name.startswith("api"), \
+                    f"{who} imports {name!r}"
+                for alias in node.names:
+                    assert alias.name not in ("database",), \
+                        f"{who} imports {alias.name!r}"
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert "database" not in alias.name, f"{who} imports {alias.name!r}"
+
+
+def test_the_persona_layer_owns_no_part_of_the_pov_checklist():
+    """The whole point of the split. A POV instance has no focus axis at all, so a checklist
+    that reached for a persona would be grouping a customer's remaining work by an axis
+    belonging to the other install profile -- which is exactly what it used to do.
+
+    `UseCase` is the ONE allowed import, and only as a from-import of that name: a card is a
+    card, and a shared dataclass is not an axis. Anything else from that module -- a
+    resolver, a registry, a label map -- is the coupling coming back."""
+    allowed = {"UseCase"}
+    for path in (_CARDS, _SERVICE, os.path.join(_SVC, "pov_summary.py"),
+                 os.path.join(_SVC, "pov_runbooks.py")):
+        who = os.path.basename(path)
+        for node in ast.walk(ast.parse(_read(path))):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("personas"):
+                taken = {a.name for a in node.names} - allowed
+                assert not taken, f"{who} imports {sorted(taken)} from personas"
+            elif isinstance(node, ast.ImportFrom) and node.module in (".", "", None):
+                taken = {a.name for a in node.names} & {"personas"}
+                assert not taken, (
+                    f"{who} imports the personas MODULE — the POV checklist is not grouped "
+                    "by role, and only the UseCase dataclass may cross")
+            elif isinstance(node, ast.Import):
+                assert not any("personas" in a.name for a in node.names), \
+                    f"{who} imports personas"
 
 
 def _imported_names(path):
-    """Every module name a file imports, from its AST -- so the `pov_use_cases` FIELD on
-    Persona is not mistaken for an import of the module that shares its name."""
+    """Every module name a file imports, from its AST -- so an attribute that happens to
+    share a module's name is not mistaken for an import of it."""
     names = set()
     for node in ast.walk(ast.parse(_read(path))):
         if isinstance(node, ast.ImportFrom):
@@ -351,21 +436,25 @@ def _imported_names(path):
 
 
 def test_the_import_direction_is_one_way():
-    """pov_use_cases imports personas. The reverse would put a database-backed module one
+    """pov_use_cases imports pov_cards. The reverse would put a database-backed module one
     indent away from a registry that must stay pure."""
-    assert "personas" in _imported_names(_SERVICE), \
-        "pov_use_cases does not import personas"
-    assert "pov_use_cases" not in _imported_names(_PERSONAS), \
-        "personas.py imports pov_use_cases; the dependency runs the other way"
+    assert "pov_cards" in _imported_names(_SERVICE), \
+        "pov_use_cases does not import pov_cards"
+    for path in (_CARDS, _PERSONAS):
+        assert "pov_use_cases" not in _imported_names(path), \
+            f"{os.path.basename(path)} imports pov_use_cases; the dependency runs the "
+    assert "pov_cards" not in _imported_names(_PERSONAS), \
+        "personas.py imports pov_cards; the demo axis must not know the POV checklist"
 
 
-def test_the_writes_live_in_the_api_layer_not_the_persona_layer():
-    """services/personas opens by saying a card navigates and never starts work. A tick is
-    not a deploy, but it IS a write, and it belongs behind the API's auth rather than in the
-    registry."""
-    src = _read(_PERSONAS)
-    for token in ("db.commit", "Session", "PovUseCaseProgress"):
-        assert token not in src, f"personas.py contains {token!r}; it must stay a pure registry"
+def test_the_writes_live_in_the_api_layer_not_the_registry():
+    """A card navigates and never starts work. A tick is not a deploy, but it IS a write,
+    and it belongs behind the API's auth rather than in a registry."""
+    for path in (_PERSONAS, _CARDS):
+        src = _read(path)
+        for token in ("db.commit", "Session", "PovUseCaseProgress"):
+            assert token not in src, (
+                f"{os.path.basename(path)} contains {token!r}; it must stay a pure registry")
 
 
 # ── the route, and the order it is declared in ───────────────────────────────
@@ -431,6 +520,36 @@ def test_the_needs_wiring_card_does_link_to_the_wire_up():
     branch = src.split("c.state === 'needs_wiring'", 1)[1].split("</p>", 1)[0]
     assert "action_link" in branch, \
         "the needs_wiring branch hides its own fix"
+
+
+def test_every_pov_surface_keys_its_groups_on_group_not_persona():
+    """One field name across three stores -- the group dict, `PovUseCaseProgress.group_key`
+    and the JS -- because the two registries both land in it and a second name for the same
+    thing is three consumers to teach.
+
+    `persona` is specifically the wrong name here and not merely an old one: these groups are
+    products, a POV instance has no focus axis, and the one place the two axes still touched
+    was a "your focus" chip on /use-cases comparing a POV group to the viewer's persona."""
+    surfaces = {
+        "pov/detail.html": _DETAIL,
+        "pov/access.html": os.path.join(_TPL, "pov", "access.html"),
+        "services/pov_summary.py": os.path.join(_SVC, "pov_summary.py"),
+        "services/pov_runbooks.py": os.path.join(_SVC, "pov_runbooks.py"),
+    }
+    for name, path in surfaces.items():
+        code = "\n".join(ln for ln in _read(path).split("\n")
+                         if not ln.lstrip().startswith(("#", "//", "<!--")))
+        for token in ("g.persona", "persona_label", "by_persona", '"persona"',
+                      "p.persona", ".persona ="):
+            assert token not in code, f"{name} still reads {token!r}"
+
+    pov_band = _read(os.path.join(_TPL, "use_cases.html")).split(
+        'x-for="g in povGroups"', 1)
+    assert len(pov_band) == 2, "the POV lead band on /use-cases has gone"
+    band = pov_band[1].split("</template>", 1)[0]
+    assert "g.persona" not in band and "chk-focus" not in band, (
+        "the POV lead band compares a product group to the viewer's focus — that chip is "
+        "the one place the two axes crossed")
 
 
 def test_the_operator_ticks_a_card_with_a_real_checkbox():

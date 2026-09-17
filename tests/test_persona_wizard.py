@@ -59,13 +59,31 @@ def test_the_focus_step_sits_after_purpose():
         f"Focus is not immediately after Purpose: {keys}"
 
 
-def test_the_focus_step_is_not_restricted_to_a_profile():
-    """Every focus is valid on both install profiles. A `profiles:` entry here would be the
-    first crack in the two axes being orthogonal."""
+def test_the_focus_step_is_demo_only():
+    """A focus is a PRESENTING decision, and a POV instance is not presenting: its dashboard
+    leads with that POV and its /use-cases page shows that POV's checklist, so no role's
+    material could lead and the eight labels would be a choice with no outcome.
+
+    Note which axis is doing the work. The profile subtracts a control, exactly as it
+    subtracts the four cloud console steps two lines below; the focus has not gained the
+    power to subtract anything. Every page an estate instance reaches, a POV instance still
+    reaches -- in shipped order, which is what neutral has always meant."""
     src = _read(_SETUP_HTML)
     block = src.split("allSteps: [", 1)[1].split("\n    ],", 1)[0]
     line = [ln for ln in block.split("\n") if "'persona'" in ln][0]
-    assert "profiles" not in line, f"the Focus step is profile-restricted: {line.strip()}"
+    assert "profiles: ['demo']" in line, \
+        f"the Focus step is not demo-only: {line.strip()}"
+
+
+def test_the_focus_is_not_submitted_on_a_pov_install():
+    """`SetupPayload.persona` is `| None = None` so absence means "leave the row alone".
+    Sending the empty form instead would CLEAR a stored focus on every POV reconfigure."""
+    src = _read(_SETUP_HTML)
+    body = src.split("const body = {", 1)[1].split("\n        };", 1)[0]
+    assert "install_profile === 'demo'" in body, \
+        "submit() sends the focus block unconditionally — a POV reconfigure would clear it"
+    assert "persona: this.form.persona" in body, \
+        "submit() no longer sends the focus on a demo install"
 
 
 def test_no_focus_is_an_option_and_it_is_first():
@@ -188,12 +206,20 @@ def test_the_payload_field_is_optional_and_defaults_to_none():
 
 
 def test_apply_config_writes_the_key_only_when_it_was_sent():
+    """Absent has to mean "leave the row alone". The write lives inside the
+    `payload.persona is not None` block, together with the POV refusal that shares it --
+    measured as "nothing else opens a block in between" rather than as adjacency, because
+    the refusal is legitimately between the two."""
     src = _read(_SETUP_PY)
     body = src.split("def _apply_config", 1)[1].split("\ndef ", 1)[0]
     assert 'pairs["default_persona"] = payload.persona.default_persona' in body
     guard = body.split('pairs["default_persona"]', 1)[0]
-    assert "if payload.persona is not None:" in guard.split("\n")[-2] + guard.split("\n")[-1], \
-        "the default_persona write is not guarded on the block being present"
+    i = guard.rfind("if payload.persona is not None:")
+    assert i != -1, "the default_persona write is not guarded on the block being present"
+    between = guard[i:]
+    assert "\n    if " not in between and "\n    for " not in between, (
+        "something at function level sits between the `payload.persona is not None` guard "
+        f"and the write, so the write is no longer inside it: {between!r}")
 
 
 def test_apply_config_writes_no_feature_flag_on_behalf_of_the_persona():

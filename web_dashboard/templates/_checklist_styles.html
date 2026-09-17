@@ -132,17 +132,10 @@
     letter-spacing: 0;
     text-transform: none;
   }
-  .chk-focus {
-    margin-left: 6px;
-    padding: 1px 6px;
-    border-radius: 9px;
-    background: #FFF3EC;
-    color: var(--bt-orange-dark);
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0;
-    text-transform: none;
-  }
+  /* `.chk-focus` lived here: an orange "your focus" chip on the checklist group whose
+     role matched the viewer's. It went with the role grouping — these groups are products
+     now, and a POV instance has no focus for one of them to match. The demo catalog's own
+     chip on /use-cases is inline Tailwind and never used this class. */
   /* The reference's "only if asked / if time" group, doing the POV job: the cards this
      evaluation has no tenant for. Dashed and warm rather than grey, because grey is what
      the old wall of masked cards looked like and this is a scoping FACT, not a failure. */

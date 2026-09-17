@@ -168,7 +168,10 @@
         </div>
         <!-- Focus. Edit only: it is a display preference, and asking for one before the
              account exists implies it matters more than it does. Grants NOTHING -- it
-             decides which role's material the dashboard leads with. -->
+             decides which role's material the dashboard leads with.
+             Absent on a POV instance, which has no focus axis at all: assigning one there
+             would write a default no page reads, and the API refuses the write anyway. -->
+        {% if persona_focus %}
         <div x-show="editingUser">
           <label class="block text-sm font-medium text-gray-700 mb-1">
             Focus <span class="text-gray-400 font-normal">(optional)</span>
@@ -186,6 +189,7 @@
             sets their default, not a restriction.
           </p>
         </div>
+        {% endif %}
 
         <!-- Flags -->
         <div class="flex gap-6">

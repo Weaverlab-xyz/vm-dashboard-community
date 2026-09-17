@@ -83,11 +83,21 @@ def _valid_persona(raw) -> Optional[str]:
     An unvalidated column would store a focus that resolves to nothing and then reads as
     "unset" with no way to tell it apart from a group that never had one -- and this value
     is chosen from a dropdown, so anything else arriving here is a client bug or a script.
+
+    Refused outright on an instance with no focus axis (``personas.applies``), because the
+    alternative is worse than a 409: the row would store a focus that nothing resolves, and
+    an instance later reconfigured to an estate one would start honouring group assignments
+    nobody made. CLEARING stays allowed on both profiles -- the same asymmetry a masked
+    feature flag has, where turning it off is always permitted.
     """
-    from ..services import personas
+    from ..services import feature_flags, personas
     want = (raw or "").strip().lower()
     if not want:
         return None
+    if not personas.applies():
+        raise HTTPException(
+            status_code=409,
+            detail=f"A focus cannot be assigned on {feature_flags.profile_noun()}.")
     if want not in personas.VALID_PERSONAS:
         raise HTTPException(status_code=422, detail=f"Unknown persona '{want}'")
     return want

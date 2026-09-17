@@ -194,12 +194,12 @@
           <h2>What to try</h2>
           <div class="chk-accent"></div>
           <p>
-            Grouped by the role each one is written for. Tick the ones you have seen, and
+            Grouped by the product each one is about. Tick the ones you have seen, and
             tell us how they went — your notes go straight back to your contact.
           </p>
         </div>
 
-        <template x-for="g in groups" :key="g.persona">
+        <template x-for="g in groups" :key="g.group">
           <div class="chk-section" x-show="inScope(g).length">
             <h2>
               <span x-text="g.label"></span>
