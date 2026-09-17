@@ -400,9 +400,15 @@ async def create_environment(template_id: str, name: str = "",
     # `POST /configurations.json`, which takes `template_id` and, optionally, `project_id`
     # and `name`. Posting to the v2 collection answers `404 {"error":"Not Found"}`, which
     # reads exactly like "that template id does not exist" and sent the first live
-    # template build looking at the wrong field. Every *other* call in this module is v2
-    # because every other call has a v2 form; these two creates do not. See
-    # `create_template`.
+    # template build looking at the wrong field.
+    #
+    # **Do not read this as "only the creates are v1".** It was written that way and the
+    # sentence was wrong: v2's coverage of the top-level objects is per-verb, not per-path.
+    # Verified against a live account — `GET`/`PUT` on `/v2/configurations/{id}` work,
+    # `DELETE` on it 404s, and on `/v2/templates/{id}` only `GET` does. The deletes are v1
+    # for that reason, and a 404 on one is no longer read as "already gone" without a
+    # confirming read. See `_confirm_gone`, `create_template` and the table in
+    # docs/profiles/pov/skytap.md.
     raw = await _client().request("POST", "/configurations.json", json=body)
     if not isinstance(raw, dict) or not raw.get("id"):
         raise SkytapError(
@@ -452,7 +458,7 @@ async def add_vms(env_id: str, template_id: str, vm_ids: list) -> dict:
     already uses for the name and the idle timer. Send ``template_id`` to the v2 form and
     it answers **200 with the environment unchanged** — no error, no VMs, nothing to
     investigate. That is worse than the 404 the two creates give, which at least says
-    something happened. See "The two calls that are v1" in docs/profiles/pov/skytap.md.
+    something happened. See "The calls that are v1" in docs/profiles/pov/skytap.md.
 
     ``vm_ids`` is optional in the API and required here. Omitting it merges the template
     **whole**, and against a POV that means silently doubling the environment — a
@@ -760,9 +766,16 @@ async def create_share(env_id: str, password: str = "",
 async def delete_share(env_id: str, share_id: str) -> None:
     """Revoke a share link.
 
-    Idempotent for the same reason ``delete_environment`` is: a 404 means it is already
-    gone, and a revoke that fails on "it was already revoked" leaves a row whose stored
-    ``share_id`` can never be cleared.
+    Idempotent for the same reason ``delete_environment`` is: a revoke that fails on "it
+    was already revoked" leaves a row whose stored ``share_id`` can never be cleared.
+
+    Unlike that one, this reads a 404 as "already gone" **without** the confirming read
+    :func:`_confirm_gone` makes, and the difference is deliberate rather than an oversight.
+    The nested publish-set path is the verb-and-path combination this account is known to
+    serve — live logs show these `DELETE`s answering 200, where the top-level environment
+    `DELETE` answered 404 every time — and the environment delete that follows on the
+    destroy path takes any survivor with it anyway. If a publish set is ever seen to
+    outlive its revoke, this is the next call to put the rule on.
     """
     env_id = str(env_id or "").strip()
     share_id = str(share_id or "").strip()
@@ -779,22 +792,59 @@ async def delete_share(env_id: str, share_id: str) -> None:
         raise
 
 
+async def _confirm_gone(read_path: str, what: str, call: str) -> None:
+    """Turn a 404 on a DELETE into either silence or a loud failure. Never silence alone.
+
+    **A 404 on a delete is not proof the thing is gone**, and reading it as proof is what
+    let six Skytap environments outlive their POVs while the dashboard recorded every
+    destroy as a clean success. The deletes below are idempotent on purpose — a teardown
+    that fails on "it is already gone" leaves a row nobody can ever clean up — but the
+    evidence for "already gone" has to be a **direct read**, never the status code of the
+    delete itself. Exactly the rule ``pov_reconcile`` states for the listing: absence is a
+    question, and only a 404 from a read of the object is an answer.
+
+    A read that fails with anything else — 423, 500, a network blip — re-raises rather than
+    guessing. The destroy job records that as a problem and can be re-run; claiming success
+    is the one outcome that cannot be undone.
+    """
+    try:
+        await _client().get(read_path)
+    except SkytapError as exc:
+        if "(404)" in str(exc):
+            logger.info("Skytap: %s was already gone", what)
+            return
+        raise
+    raise SkytapError(
+        f"Skytap answered 404 to {call}, but the {what} is still there on a direct read — "
+        f"so the delete did NOT happen. Treat the 404 as being about the ENDPOINT, not the "
+        f"id: see 'The calls that are v1' in docs/profiles/pov/skytap.md.")
+
+
 async def delete_environment(env_id: str) -> None:
     """Delete the environment and everything Skytap keeps inside it.
 
-    Idempotent by design: a 404 means somebody already deleted it, and a teardown that
-    fails on "it is already gone" leaves a row nobody can ever clean up.
+    **v1, and that is not a typo.** Skytap serves `GET` and `PUT` on
+    ``/v2/configurations/{id}`` and **not** `DELETE`: the v2 path answers
+    `404 {"error":"Not Found"}` for every id, including one that is plainly alive. That is
+    the same trap the two creates carry, one verb further on — and it was worse here,
+    because the `404` fell straight into the idempotency branch below and every destroy
+    reported a clean success while the environment kept running and kept billing. The
+    working call is the v1 ``DELETE /configurations/{id}.json``, the same v1 resource
+    ``create_environment`` posts to and ``add_vms`` puts to.
+
+    Idempotent, but only on evidence: see :func:`_confirm_gone`.
     """
     env_id = str(env_id or "").strip()
     if not env_id:
         raise SkytapError("an environment id is required")
     try:
-        await _client().request("DELETE", f"/v2/configurations/{env_id}")
+        await _client().request("DELETE", f"/configurations/{env_id}.json")
     except SkytapError as exc:
-        if "(404)" in str(exc):
-            logger.info("Skytap: environment %s was already gone", env_id)
-            return
-        raise
+        if "(404)" not in str(exc):
+            raise
+        await _confirm_gone(f"/v2/configurations/{env_id}",
+                            f"environment {env_id}",
+                            f"DELETE /configurations/{env_id}.json")
 
 
 async def get_environment(env_id: str) -> dict:
@@ -872,8 +922,9 @@ async def create_template(env_id: str, name: str, description: str = "") -> dict
         raise SkytapError("a template name is required")
 
     # v1, for the same reason `create_environment` posts to `/configurations.json`: there
-    # is no POST on the v2 templates collection. The follow-up PUT below is v2, which does
-    # implement it.
+    # is no POST on the v2 templates collection. The follow-up description PUT below is v1
+    # too — it WAS v2, and a live build showed `PUT /v2/templates/{id}` answering 404, so
+    # the description was silently never set.
     try:
         raw = await _client().request("POST", "/templates.json",
                                       json={"configuration_id": env_id, "name": name})
@@ -900,7 +951,7 @@ async def create_template(env_id: str, name: str, description: str = "") -> dict
     if description:
         try:
             updated = await _client().request(
-                "PUT", f"/v2/templates/{out['id']}", json={"description": description})
+                "PUT", f"/templates/{out['id']}.json", json={"description": description})
             if isinstance(updated, dict):
                 out = _template(updated)
         except SkytapError:
@@ -912,19 +963,25 @@ async def create_template(env_id: str, name: str, description: str = "") -> dict
 async def delete_template(template_id: str) -> None:
     """Delete a template.
 
-    Idempotent on 404 for the same reason `delete_environment` is: a teardown that fails
-    because the thing is already gone leaves a row nobody can ever clean up.
+    **v1, like the environment delete.** ``/v2/templates/{id}`` serves `GET` and nothing
+    else on this account — the description `PUT` in ``create_template`` above answers 404
+    there, which is the same shape as the `DELETE` that never removed an environment. So
+    this uses the v1 resource ``POST /templates.json`` creates, and ``_confirm_gone`` makes
+    a wrong guess loud rather than silent.
+
+    Idempotent, but only on evidence: see :func:`_confirm_gone`.
     """
     template_id = str(template_id or "").strip()
     if not template_id:
         raise SkytapError("a template id is required")
     try:
-        await _client().request("DELETE", f"/v2/templates/{template_id}")
+        await _client().request("DELETE", f"/templates/{template_id}.json")
     except SkytapError as exc:
-        if "(404)" in str(exc):
-            logger.info("Skytap: template %s was already gone", template_id)
-            return
-        raise
+        if "(404)" not in str(exc):
+            raise
+        await _confirm_gone(f"/v2/templates/{template_id}",
+                            f"template {template_id}",
+                            f"DELETE /templates/{template_id}.json")
 
 
 # ── published services ───────────────────────────────────────────────────────
