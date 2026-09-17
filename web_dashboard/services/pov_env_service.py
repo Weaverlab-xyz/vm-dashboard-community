@@ -683,6 +683,14 @@ async def run_env_destroy(job_id: str, meta: dict) -> None:
             try:
                 mod = _adapter(env)
                 await mod.delete_environment(env.platform_environment_id)
+                # Said out loud, in the one place that survives the row being archived.
+                # The Skytap delete spent six environments reporting a success it had not
+                # had, and the job log of every one of those destroys was silent about the
+                # platform step entirely — the evidence was only ever in a container log.
+                job_service.append_job_log(
+                    db, job_id,
+                    f"deleted {env.platform} environment "
+                    f"{env.platform_environment_id} and everything in it")
             except Exception as exc:  # noqa: BLE001
                 problems.append(f"platform delete failed: {exc}")
         else:

@@ -474,30 +474,57 @@ a link-local address every twenty seconds.
 > instead and pull `user_data` out of the JSON document. The payload is what matters; the
 > path is Skytap's.
 
-## The two calls that are v1
+## The calls that are v1
 
-Everything the dashboard sends is the v2 API **except the two creates**, which have no v2
-form: Skytap's v2 documents only `GET`/`PUT`/`DELETE` on `/v2/configurations` and
-`/v2/templates`.
+Most of what the dashboard sends is the v2 API. **Which calls have a v2 form is decided
+per verb, not per path**, and the paths that look most settled are the ones that are not:
+`/v2/configurations/{id}` serves `GET` and `PUT` and **not** `DELETE`, and
+`/v2/templates/{id}` serves only `GET`. Every one of these was learned from a live account
+answering `404 {"error":"Not Found"}` — never from the documentation, which reads as though
+both objects support the full set.
 
-| Create | Call |
-|---|---|
-| An environment from a template | `POST /configurations.json` — `template_id`, optionally `project_id` and `name` |
-| A template from an environment | `POST /templates.json` — `configuration_id`, `name` |
+| Operation | Call | Why not v2 |
+|---|---|---|
+| Create an environment from a template | `POST /configurations.json` — `template_id`, optionally `project_id` and `name` | no `POST` on the v2 collection |
+| Create a template from an environment | `POST /templates.json` — `configuration_id`, `name` | no `POST` on the v2 collection |
+| Copy VMs into an existing environment | `PUT /configurations/{id}.json` — `template_id`, `vm_ids[]` | the v2 `PUT` answers **200 and does nothing** — see below |
+| **Delete an environment** | `DELETE /configurations/{id}.json` | `DELETE /v2/configurations/{id}` 404s for **every** id, including a running one |
+| **Delete a template** | `DELETE /templates/{id}.json` | `/v2/templates/{id}` serves only `GET` |
+| Set a template's description | `PUT /templates/{id}.json` — `description` | same; the v2 `PUT` 404s |
 
-Posting either one to the v2 collection answers **`404 {"error":"Not Found"}`**, and that
-is the trap worth remembering: the message reads exactly like "the id you sent does not
-exist", so the first live template build was spent inspecting a base template id that was
-perfectly good. A 404 on a *create* means the endpoint, not the payload.
+Everything **nested** under those paths is v2 and works: `…/vms/{id}/user_data.json`,
+`…/publish_sets`, `…/vms/{id}/interfaces/{id}/services`, `…/vms/{id}/credentials`. So is
+`PUT /v2/configurations/{id}` for a name, a runstate or an idle timer.
 
-### And a third, which is worse
+A 404 on one of these means **the endpoint, not the id** — and that is the trap worth
+remembering, because the message reads exactly like "the id you sent does not exist". The
+first live template build was spent inspecting a base template id that was perfectly good.
 
-Adding VMs to an environment that already exists is v1 too — and it is a **PUT**, at a path
-the v2 API also serves:
+### A 404 on a DELETE is not proof the thing is gone
 
-| Operation | Call |
-|---|---|
-| Copy VMs from a template into an existing environment | `PUT /configurations/{id}.json` — `template_id`, `vm_ids[]` |
+The delete rows above cost six environments. `delete_environment` sent the v2 path, Skytap
+404ed it, and the adapter read that 404 as "somebody already deleted it" — so every POV
+destroy reported a clean success, marked the row `destroyed`, wrote *"The infrastructure is
+gone"* on the archive page and deleted the VM rows that were the only record of what had
+been inside. The environments went on running, and on billing, invisible to every sweep:
+`pov_reconcile` only asks about rows that are **not** destroyed.
+
+The deletes are still idempotent — a teardown that fails because the thing is already gone
+leaves a row nobody can ever clean up — but the evidence for "already gone" is now a
+**direct read of the object**, never the status code of the delete
+(`skytap_service._confirm_gone`). A 404 on the delete with a readable object raises, which
+puts the POV row in `failed` with a re-runnable Destroy rather than in `destroyed` with an
+orphan. It is the same refusal to guess that makes `pov_reconcile` confirm a missing
+environment with a direct read before flagging it, and it is worth applying to any delete
+added here later.
+
+A read that fails with something else — a 423, a 500, a network blip — re-raises rather
+than being guessed either way.
+
+### The merge, which is quieter still
+
+The VM copy in the table above is the one with no failure signal at all. It is v1 and a
+**PUT**, at a path the v2 API also serves.
 
 Skytap's v2 reference says plainly that "VMs are created indirectly, either by creating an
 environment from a template or by merging a template into an existing environment", and
@@ -564,7 +591,7 @@ a platform lacks degrades visibly instead of failing late:
 | Project scoping | yes — `/v2/projects/{id}/templates` and `/v2/projects/{id}/configurations` |
 | Template authoring | yes — `POST /templates.json` with a `configuration_id`. There is no *edit a template* call on any lab platform, so authoring is always instantiate → change → bake. Used by [building a template](#building-a-template) |
 | Published services | yes — `…/interfaces/{id}/services`, a guest port NAT-ed to a public `ip:port`. Used **only** by a template build, for the length of one build |
-| Add VMs to a live environment | yes — `PUT /configurations/{id}.json` with `template_id` + `vm_ids[]`. The only platform that can: a cloud POV's VM set is whatever its template service created. See [the third v1 trap](#and-a-third-which-is-worse) |
+| Add VMs to a live environment | yes — `PUT /configurations/{id}.json` with `template_id` + `vm_ids[]`. The only platform that can: a cloud POV's VM set is whatever its template service created. See [the quietest v1 trap](#the-merge-which-is-quieter-still) |
 
 > **The two project paths are not yet confirmed against a live account.** Three things are
 > assumed: that they return the same object shape as the account-wide collections, that

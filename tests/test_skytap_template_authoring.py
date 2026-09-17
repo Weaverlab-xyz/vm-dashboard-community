@@ -128,7 +128,10 @@ def test_a_failed_description_does_not_lose_the_template():
     out, _ = _run(handler,
                   lambda: sk.create_template("env-1", "saas-base", "a description"))
     assert out["id"] == "77", out
-    assert ("PUT", "/v2/templates/77") in calls, calls
+    # v1: `/v2/templates/{id}` serves GET and nothing else on a live account — this PUT
+    # was logged 404ing there, so no baked template ever got its description. See
+    # tests/test_skytap_delete_paths.py, which pins the path.
+    assert ("PUT", "/templates/77.json") in calls, calls
 
 
 def test_create_template_requires_an_environment_and_a_name():
