@@ -591,7 +591,7 @@ a platform lacks degrades visibly instead of failing late:
 | Project scoping | yes — `/v2/projects/{id}/templates` and `/v2/projects/{id}/configurations` |
 | Template authoring | yes — `POST /templates.json` with a `configuration_id`. There is no *edit a template* call on any lab platform, so authoring is always instantiate → change → bake. Used by [building a template](#building-a-template) |
 | Published services | yes — `…/interfaces/{id}/services`, a guest port NAT-ed to a public `ip:port`. Used **only** by a template build, for the length of one build |
-| Add VMs to a live environment | yes — `PUT /configurations/{id}.json` with `template_id` + `vm_ids[]`. The only platform that can: a cloud POV's VM set is whatever its template service created. See [the third v1 trap](#and-a-third-which-is-worse) |
+| Add VMs to a live environment | yes — `PUT /configurations/{id}.json` with `template_id` + `vm_ids[]`. The only platform that can: a cloud POV's VM set is whatever its template service created. See [the quietest v1 trap](#the-merge-which-is-quieter-still) |
 
 > **The two project paths are not yet confirmed against a live account.** Three things are
 > assumed: that they return the same object shape as the account-wide collections, that
