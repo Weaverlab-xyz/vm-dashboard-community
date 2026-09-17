@@ -189,6 +189,25 @@ window.API = {
     putBlob: (path, blob, headers) => API.sendBlob('PUT', path, blob, headers),
 };
 
+// ── File -> base64, for the JSON upload lanes ─────────────────────────────────
+// Every upload in this app is base64-in-JSON rather than multipart (see the note on
+// api/containers' import endpoint for why), and there are now two callers: the storage
+// page's inline lane and the Appearance card's logo.
+//
+// Chunked rather than a per-byte loop, and NOT FileReader.readAsDataURL: a per-byte loop
+// over a large file blocks the UI thread long enough to look like a hung page, and a data
+// URL would have to be sliced apart again to get at the payload. CHUNK stays below the
+// argument-count limit of Function.apply.
+window.fileToBase64 = async function (file) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const CHUNK = 0x8000;
+    const parts = [];
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+        parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK)));
+    }
+    return btoa(parts.join(''));
+};
+
 // ── Reusable secret picker ────────────────────────────────────────────────────
 // Spread into any Alpine page component (`...secretPickerState()`), call
 // `loadSecretBackends()` once (e.g. in init), and render the picker with the

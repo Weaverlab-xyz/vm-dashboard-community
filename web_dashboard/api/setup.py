@@ -8,8 +8,8 @@ GET  /api/setup/config     — current config with secrets redacted (admin JWT i
 """
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-from pydantic import BaseModel, ValidationInfo, field_validator
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
+from pydantic import BaseModel, ValidationInfo, field_validator, model_validator
 
 from ..services import notify_policy
 
@@ -378,8 +378,13 @@ class SetupPayload(BaseModel):
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
-def _require_admin(request: Request) -> None:
-    """Verify the request carries a valid admin JWT. Raises 401/403 on failure."""
+def _require_admin(request: Request) -> str:
+    """Verify the request carries a valid admin JWT. Raises 401/403 on failure.
+
+    Returns the username, for the handful of callers that record who acted. Every other
+    call site ignores the return value, which is why this could start handing one back
+    without touching them.
+    """
     from jose import JWTError, jwt
     from ..config import settings
     from ..database import SessionLocal, User
@@ -407,6 +412,7 @@ def _require_admin(request: Request) -> None:
             raise HTTPException(status_code=403, detail="Admin access required")
     finally:
         db.close()
+    return username
 
 
 def _upsert_admin(username: str, password: str) -> None:
@@ -2573,7 +2579,7 @@ def patch_preview_flag(key: str, payload: dict, request: Request):
 # and give it an `enabled` toggle that means nothing. The preview-flags endpoints above are
 # the precedent for a standalone settings card with its own pair of routes.
 #
-# The five keys are plain app_config rows, so there is no migration: app_config is
+# The keys are plain app_config rows, so there is no migration: app_config is
 # key-value. services/branding.py is the reader and re-validates everything this model
 # checks, because these rows are also reachable from scripts/config_migrate and from psql.
 
@@ -2583,7 +2589,17 @@ _BRANDING_KEYS = (
     "brand_accent",
     "brand_env_label",
     "brand_env_color",
+    "brand_primary",
+    "brand_secondary",
+    "brand_accent_hex",
 )
+
+# NOT here on purpose: the brand_logo_* pointer rows. patch_branding below writes every key
+# in the tuple above on every save, including the empty ones, so that clearing a field
+# erases its row. A logo pointer listed here would therefore be wiped every time somebody
+# changed a colour -- orphaning the brand_asset blob and reverting the nav to the built-in
+# mark, with a success toast. api/setup owns those rows through their own endpoints instead.
+# tests/test_brand_logo pins this exclusion.
 
 
 class BrandingConfig(BaseModel):
@@ -2594,6 +2610,9 @@ class BrandingConfig(BaseModel):
     brand_accent: str = ""
     brand_env_label: str = ""
     brand_env_color: str = ""
+    brand_primary: str = ""
+    brand_secondary: str = ""
+    brand_accent_hex: str = ""
 
     @field_validator("brand_name", "brand_full", "brand_env_label")
     @classmethod
@@ -2622,7 +2641,9 @@ class BrandingConfig(BaseModel):
             raise ValueError(f"Unknown accent '{v}'")
         return key
 
-    @field_validator("brand_env_color")
+    @field_validator(
+        "brand_env_color", "brand_primary", "brand_secondary", "brand_accent_hex"
+    )
     @classmethod
     def _color(cls, v: str) -> str:
         from ..services import branding
@@ -2633,6 +2654,24 @@ class BrandingConfig(BaseModel):
         if not cleaned:
             raise ValueError("Colour must be a #rrggbb hex value")
         return cleaned
+
+    @model_validator(mode="after")
+    def _all_three_brand_colours(self):
+        """The custom palette is all three or none.
+
+        ui_theme derives twenty-one chrome slots from these, and it cannot fill the ones it
+        was not given without inventing colours -- which is what the presets are for. So a
+        partial trio is *inert* there, and an inert setting that saved cleanly is exactly
+        the "saves, reports success, changes nothing" shape worth a 422 instead. The
+        settings card makes this hard to hit; psql and config_migrate do not.
+        """
+        trio = (self.brand_primary, self.brand_secondary, self.brand_accent_hex)
+        if any(trio) and not all(trio):
+            raise ValueError(
+                "Set all three brand colours (primary, secondary, accent), "
+                "or leave all three blank"
+            )
+        return self
 
 
 @router.get("/branding")
@@ -2647,11 +2686,17 @@ def get_branding(request: Request):
     rest of the app was cleaned of it.
     """
     _require_admin(request)
-    from ..services import config_service, ui_theme
+    from ..services import brand_logo, config_service, ui_theme
     return {
         "config": {k: config_service.get_raw(k) for k in _BRANDING_KEYS},
         "accents": ui_theme.accent_choices(),
         "defaults": {"brand_name": ui_theme.BRAND, "brand_full": ui_theme.BRAND_FULL},
+        # Not folded into `config`: the panel PATCHes that object back wholesale, and the
+        # logo is owned by its own endpoints. Read from the row rather than the pointer
+        # rows because this is the admin panel, not the render path, and it wants the size
+        # and filename too.
+        "logo": brand_logo.metadata(),
+        "logo_svg_allowed": brand_logo.svg_allowed(),
     }
 
 
@@ -2659,9 +2704,10 @@ def get_branding(request: Request):
 def patch_branding(payload: BrandingConfig, request: Request):
     """Persist branding. Admin JWT required.
 
-    Writes all five keys every time, including the empty ones: clearing a field has to
-    erase the stored row, and a PATCH that only wrote non-empty values would make "Reset to
-    defaults" a no-op that looks like it worked.
+    Writes every key in ``_BRANDING_KEYS`` every time, including the empty ones: clearing a
+    field has to erase the stored row, and a PATCH that only wrote non-empty values would
+    make "Reset to defaults" a no-op that looks like it worked. That is also why the
+    ``brand_logo_*`` pointers are deliberately not in that tuple -- see the note above it.
 
     Takes effect within ``config_service``'s 5s cache TTL. Under multiple gunicorn workers
     the other worker keeps serving the old branding until its own cache expires, because
@@ -2673,7 +2719,162 @@ def patch_branding(payload: BrandingConfig, request: Request):
     values = {k: getattr(payload, k) for k in _BRANDING_KEYS}
     config_service.set_many(values)
     logger.info(
-        "Branding updated: name=%r accent=%r env_label=%r",
+        "Branding updated: name=%r accent=%r env_label=%r custom=%r",
         values["brand_name"], values["brand_accent"], values["brand_env_label"],
+        bool(values["brand_primary"]),
     )
     return {"ok": True, "config": values}
+
+
+# ── Appearance: the uploaded logo ─────────────────────────────────────────────
+#
+# Its own endpoints rather than fields on BrandingConfig, for two reasons. The payload is
+# an image, and the colours are five short strings that the panel PATCHes wholesale on a
+# Save button -- merging them would mean carrying ~700 KB of base64 in the browser until
+# somebody pressed Save, then reporting one outcome for two unrelated writes.
+#
+# The pointer rows these write are deliberately absent from _BRANDING_KEYS. See the note
+# there: patch_branding blanks every key in that tuple on every save, so a pointer listed
+# there would be erased whenever an operator changed a colour.
+_LOGO_KEYS = ("brand_logo_etag", "brand_logo_mime", "brand_logo_w", "brand_logo_h")
+
+
+class BrandLogoUpload(BaseModel):
+    """base64-in-JSON, matching api/storage's inline lane rather than multipart.
+
+    python-multipart is in requirements.txt but no route in this app uses it; the base64
+    shape is the convention the codebase states for itself (see api/containers' import
+    endpoint). It also keeps the browser side on the existing authenticated `API.post`,
+    which matters here: this app has no auth cookie, and a hand-rolled FormData fetch that
+    forgets the bearer header is a documented way to ship an endpoint that 401s.
+
+    `content_type` is advisory. brand_logo.sniff is the control.
+    """
+
+    filename: str = ""
+    content_type: str = ""
+    content_b64: str
+
+
+@router.post("/branding/logo", status_code=201)
+def upload_branding_logo(payload: BrandLogoUpload, request: Request):
+    """Store an uploaded logo. Admin JWT required.
+
+    Applies immediately rather than waiting for the Appearance card's Save button: one
+    request, one outcome to report. The colours stay deferred, and the card says so.
+    """
+    import base64
+    username = _require_admin(request)
+    from ..services import brand_logo, config_service
+
+    # Before the decode, so a hostile multi-megabyte body does not get expanded into
+    # memory first. Not a hard ceiling -- Starlette has already buffered the JSON by the
+    # time this runs, and capping that needs content-length middleware this app does not
+    # have -- but it is the cheap half, and it is free.
+    b64 = payload.content_b64 or ""
+    if len(b64) > (brand_logo._MAX_LOGO_BYTES * 4) // 3 + 1024:
+        raise HTTPException(
+            status_code=413,
+            detail=f"The logo must be under {brand_logo._MAX_LOGO_BYTES // 1024} KB.",
+        )
+    try:
+        data = base64.b64decode(b64, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="The upload was not valid base64.")
+
+    try:
+        mime, width, height = brand_logo.sniff_and_validate(data, payload.content_type)
+    except brand_logo.RejectedLogo as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message)
+
+    digest = brand_logo.store(
+        data, mime, filename=payload.filename, width=width, height=height,
+        username=username,
+    )
+    config_service.set_many({
+        "brand_logo_etag": digest,
+        "brand_logo_mime": mime,
+        "brand_logo_w": str(width) if width else "",
+        "brand_logo_h": str(height) if height else "",
+    })
+    logger.info(
+        "Branding logo uploaded by %s: %s, %d bytes, sha256=%s",
+        username, mime, len(data), digest[:16],
+    )
+    return {
+        "ok": True,
+        "url": brand_logo.url_for(digest),
+        "mime": mime,
+        "bytes": len(data),
+        "width": width,
+        "height": height,
+        "filename": payload.filename or None,
+    }
+
+
+@router.delete("/branding/logo")
+def delete_branding_logo(request: Request):
+    """Remove the uploaded logo and fall back to the built-in mark. Admin JWT required."""
+    username = _require_admin(request)
+    from ..services import brand_logo, config_service
+
+    brand_logo.remove()
+    # Empty strings rather than deleting the rows, matching patch_branding: clearing a
+    # setting has to leave a row that reads as "unset" through the same code path.
+    config_service.set_many({k: "" for k in _LOGO_KEYS})
+    logger.info("Branding logo removed by %s", username)
+    return {"ok": True}
+
+
+@router.get("/branding/logo/{etag}")
+def get_branding_logo(etag: str, request: Request):
+    """The logo bytes. **Deliberately unauthenticated.**
+
+    No _require_admin, and that is not an oversight. The sign-in page and the public docs
+    shell both render the brand mark, and this app has NO auth cookie -- only a bearer
+    header, which a browser cannot attach to an img element's request. An admin gate here
+    would make every logo a broken image, silently, with a 401 nobody sees.
+
+    Nothing is disclosed by that: the same image is on the sign-in page of an instance
+    anyone can reach, which is the point of a logo. The bytes are a public asset.
+
+    Lives under /api/setup because that prefix is in main._SETUP_BYPASS_PREFIXES, so the
+    image also loads before setup is complete.
+
+    Sync `def` on purpose: this does a blocking SQLAlchemy query on a cache miss, and a
+    sync route runs in the threadpool where that is fine. As `async def` it would block the
+    event loop -- and this endpoint is hit by every cold browser.
+    """
+    from ..services import brand_logo
+
+    found = brand_logo.load(etag)
+    if found is None:
+        # 404 rather than a redirect to the current logo. A stale page's img failing is a
+        # briefly missing image; a redirect would let the browser cache the CURRENT bytes
+        # under the OLD immutable URL, and that is a wrong image nobody can flush.
+        raise HTTPException(status_code=404, detail="No such logo")
+    data, mime = found
+
+    headers = {
+        "ETag": f'"{etag}"',
+        # The digest is in the path, so these bytes can never change meaning. A new upload
+        # changes the URL the server renders, which busts every cache at once.
+        "Cache-Control": "public, max-age=31536000, immutable",
+        # There is no CSP middleware in this app, so these four headers ARE the control
+        # that makes accepting SVG safe, not decoration on top of one. An SVG reached
+        # through an img element cannot run script; these stop it being reached any other
+        # way. Do not drop them, and do not move this to FileResponse without carrying
+        # them over.
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+    }
+    if mime == "image/svg+xml":
+        # An img element ignores Content-Disposition and still renders, so this costs
+        # nothing visually -- it only means an operator who pastes the URL into the address
+        # bar gets a download instead of navigating into a document that could be active.
+        headers["Content-Disposition"] = 'attachment; filename="logo.svg"'
+
+    if request.headers.get("if-none-match", "").strip('"') == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=data, media_type=mime, headers=headers)

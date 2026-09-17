@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" x-data>
+<html lang="en" x-data class="{{ theme.brand_scope }}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -61,6 +61,11 @@
     main code, main pre { overflow-wrap: anywhere; }
     main pre { max-width: 100%; overflow-x: auto; }
   </style>
+  {# The operator's own three colours, if they set any. Included here rather than through
+     {% block head %} because it is app-wide chrome, not a feature's stylesheet -- the same
+     distinction the note below draws -- and placed after the block above so a page's own
+     head additions can still outrank it. #}
+  {% include '_brand_css.html' %}
   {# Per-page <head> additions. Added for the POV checklist's stylesheet, which three
      surfaces share and only two of them reach through this shell -- pov/access.html is
      standalone on purpose and includes the same partial itself.
@@ -133,7 +138,11 @@
            no longer clips, means the whole DOCUMENT scrolls sideways to reach them. #}
         <div class="flex items-center space-x-2.5 min-w-0">
           <a href="/" class="flex items-center space-x-2.5 min-w-0 {{ theme.brand_hover }} transition">
-            {% with mark_warp = theme.warp, mark_weft = theme.weft %}
+            {# mark_max is what keeps an uploaded wordmark from pushing the cog and the
+               hamburger off the right edge -- see the min-w-0 note above, and the partial's
+               own header. 10rem leaves room for the product word at 320px. #}
+            {% with mark_warp = theme.warp, mark_weft = theme.weft,
+                    mark_h = 'h-7', mark_max = 'max-w-40' %}
               {% include '_brand_mark.html' %}
             {% endwith %}
             <span class="text-lg font-bold tracking-tight truncate">{{ theme.product }}</span>
@@ -208,7 +217,11 @@
       <div class="flex-shrink-0 flex items-start justify-between gap-2 px-4 pt-4 pb-3 border-b border-white/15">
         <div class="min-w-0">
           <div class="flex items-center gap-2 min-w-0">
-            <span class="text-base font-bold tracking-tight text-white truncate">{{ theme.brand }}</span>
+            {# theme.nav_fg, not a literal text-white: this span sets its own colour, so it
+               does not inherit the drawer's, and an operator's pale brand colour would
+               leave the wordmark white on white. Every shipped palette fills the slot with
+               `text-white`, so this renders exactly as it did. #}
+            <span class="text-base font-bold tracking-tight {{ theme.nav_fg }} truncate">{{ theme.brand }}</span>
             <span class="text-xs font-semibold {{ theme.chip_class }} px-2 py-0.5 rounded-full whitespace-nowrap">{{ theme.chip_label }}</span>
           </div>
           <p class="mt-1.5 text-sm {{ user_text }} truncate" x-text="$store.auth.username"></p>

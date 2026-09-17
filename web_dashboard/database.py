@@ -1383,6 +1383,52 @@ class AppConfig(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class BrandAsset(Base):
+    """An uploaded branding image -- today just the operator's logo.
+
+    Its own table rather than an `app_config` row, for reasons that compound:
+    `config_service` caches the WHOLE config table in every worker and reloads it from the
+    database every 5 seconds, so a base64 logo there would be a per-worker resident string
+    re-selected and Fernet-decrypted twelve times a minute forever, whether or not anybody
+    is looking at a page. `get_all_public()` also returns every global row, which would
+    quietly put the image in the settings payload. And a data URI inlined into the HTML
+    cannot be cached by the browser at all, on every page, including /login.
+
+    `slot` is the primary key, which is what makes "one global logo" a property of the
+    schema instead of a rule the application has to remember. It leaves room for a
+    `favicon` or `logo_dark` slot later without a second table.
+
+    Deliberately NOT Fernet-encrypted, unlike every other sensitive column here. These
+    bytes are served verbatim to anonymous browsers -- the sign-in page and the public docs
+    shell both render the mark -- so they are by definition not a secret. Encrypting them
+    would add ~37% to the stored size, put a decrypt on the pre-auth render path for every
+    cache miss, and inherit the JWT_SECRET_KEY rotation hazard, whose symptom here would be
+    a corrupt image rather than an error anybody could act on.
+
+    `sha256` is the content hash and does double duty: it is the HTTP ETag and the last
+    segment of the URL, so a new upload busts every browser cache immediately while the
+    bytes themselves can be served `immutable`. Never add this table to a view that does
+    `SELECT *` -- read it by primary key for the bytes, or project the metadata columns.
+
+    No migration entry is needed: `create_all` makes new tables.
+    """
+    __tablename__ = "brand_asset"
+
+    slot = Column(String(32), primary_key=True)        # "logo"
+    content_type = Column(String(64), nullable=False)  # from the sniffer, never the client
+    data = Column(LargeBinary, nullable=False)
+    sha256 = Column(String(64), nullable=False)        # hex digest; the ETag
+    byte_size = Column(Integer, nullable=False)
+    # Nullable because an SVG need not declare pixel dimensions, and there is no image
+    # library in requirements.txt to infer them. Only used to reserve the right aspect
+    # ratio so the nav bar does not reflow when the image lands.
+    width = Column(Integer, nullable=True)
+    height = Column(Integer, nullable=True)
+    filename = Column(String(255), nullable=True)      # display only, in the settings card
+    uploaded_by = Column(String(128), nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class SchemaMarker(Base):
     """"This one-time data migration has run." One row per migration, never deleted.
 

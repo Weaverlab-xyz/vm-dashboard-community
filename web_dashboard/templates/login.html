@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="{{ theme.brand_scope }}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -8,6 +8,9 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
   <script src="/static/js/app.js"></script>
+  {# This page owns its own head and inherits nothing from base.html, so the brand CSS has
+     to be included again here -- the same reason the environment banner is repeated below. #}
+  {% include '_brand_css.html' %}
 </head>
 <body class="{{ theme.login_bg }} min-h-screen flex items-center justify-center">
 
@@ -34,9 +37,13 @@
 
     <!-- Logo -->
     <div class="flex justify-center mb-5">
-      <div class="{{ theme.login_icon_bg }} rounded-full p-4">
+      {# The tinted circle is right for a 24x24 mark and wrong for a wide wordmark, which
+         would be cropped by the rounded corners at this padding. So an uploaded logo drops
+         the circle and gets the card's width instead -- max-w-56 against a max-w-sm card. #}
+      <div class="{% if not theme.logo %}{{ theme.login_icon_bg }} rounded-full p-4{% endif %}">
         {% with mark_warp = theme.login_mark_warp, mark_weft = theme.login_mark_weft,
-                mark_size = 'h-10 w-10', mark_stroke = '2' %}
+                mark_size = 'h-10 w-10', mark_stroke = '2',
+                mark_h = 'h-12', mark_max = 'max-w-56' %}
           {% include '_brand_mark.html' %}
         {% endwith %}
       </div>
