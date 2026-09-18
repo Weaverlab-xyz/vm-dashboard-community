@@ -606,6 +606,19 @@ _OT = Persona(
             requires_clouds=("gcp", "aws", "azure"),
         ),
         UseCase(
+            id="ot-kubectl-brokered",
+            title="kubectl into the plant, through PRA",
+            summary="The cell runs its simulators on KubeSolo, so the plant IPC really is "
+                    "a single-node Kubernetes host — brokered on a tunnel of its own, so "
+                    "a vendor can be granted the PLC and not the cluster, and every "
+                    "session is recorded.",
+            target="/gcp#ot",
+            minutes=10,
+            docs="kubesolo",
+            requires_flags=("pra_enabled",),
+            requires_clouds=("gcp", "aws", "azure"),
+        ),
+        UseCase(
             id="ot-vendor-jit",
             title="Time-bound vendor access to one cell",
             summary="Give a third-party integrator two hours on a single cell, then watch "

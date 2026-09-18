@@ -1,6 +1,6 @@
 # KubeSolo
 
-> **Audience:** operator · **Profile:** `both` · **Read this when:** you need the Entitle agent on a plant-floor or edge host that will not carry a real Kubernetes cluster.
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you need the Entitle agent on a plant-floor or edge host that will not carry a real Kubernetes cluster — or you are demoing the OT cell, which runs on KubeSolo.
 
 OT customers turn down Kubernetes-based agents for two reasons that have nothing to do
 with the agent: the compute a cluster costs, and the burden of maintaining one at a site
@@ -16,6 +16,25 @@ customer finds it.
 The plays live in [`examples/playbooks/kubesolo/`](https://github.com/Weaverlab-xyz/vm-dashboard-community/tree/main/examples/playbooks/kubesolo)
 and run through [Config Management](config-management.md), against an on-prem host
 reached by a [remote agent](remote-agents.md).
+
+## Seeing one without an on-prem host
+
+The [OT Demo Cell](profiles/demo/ot-demo-cell.md) **is** a KubeSolo host. Its baked
+image installs KubeSolo (the `-offline` build, pinned at `v1.2.0`) and runs the plant
+simulators and the FUXA HMI as Deployments in its `ot-sim` namespace — a plant IPC with
+a real cluster on it, in a subnet with no route out, which is the configuration this
+page describes. Deploy a cell, tick **Kubernetes API (KubeSolo)** on the form, and
+`kubectl` reaches it through a PRA protocol tunnel and nowhere else.
+
+What the cell shows: the footprint on a 4 GB machine, that stock manifests and Helm
+charts apply unchanged, that a single-node cluster survives with no registry to pull
+from, and what brokered `kubectl` into a plant looks like in a recorded session.
+
+What it cannot show is the agent. Everything below about egress applies: the agent's
+validators fail closed without a path to `agent.<region>.entitle.io`, and the cell
+deliberately has none. For the agent, use an on-prem host through a remote agent —
+which is what the plays below are written for — or accept that giving a cell egress
+ends the air-gapped part of that demo.
 
 ## What KubeSolo brings, and what it does not
 
@@ -198,5 +217,5 @@ the play hands it to helm through a 0600 values file rather than `--set`, becaus
 - [Config Management](config-management.md) — the run form, targets and runners
 - [Remote Agents](remote-agents.md) — reaching an on-prem host at all
 - [Entitle](integrations/entitle.md) — the integration this agent serves
-- [OT Demo Cell](profiles/demo/ot-demo-cell.md) — the demo cell and protocol simulators this sits beside
+- [OT Demo Cell](profiles/demo/ot-demo-cell.md) — a cell that already runs KubeSolo, with its plant simulators on top
 - [Kubernetes](kubernetes.md) — the managed-cluster path, where the agent install is a button

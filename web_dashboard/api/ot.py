@@ -4,8 +4,9 @@ OT (operational technology) demo endpoints.
 Two features, gated behind ``pra_enabled`` at router-include time (see main.py):
 
 * Standalone OT protocol tunnels — a generic-TCP PRA protocol tunnel to ANY
-  reachable OT endpoint, with port presets (Modbus/OPC UA/DNP3/S7/EtherNet-IP).
-  Each tunnel rides one cloud's shared gateway (``cloud`` on the request).
+  reachable OT endpoint, with port presets (Modbus/OPC UA/DNP3/S7/EtherNet-IP,
+  plus the KubeSolo API an edge host serves). Each tunnel rides one cloud's
+  shared gateway (``cloud`` on the request).
 * The one-click OT demo cell — a queued VM-deploy child (the VM from the
   Packer-baked ``ot-sim`` image; ``gce_deploy`` / ``ec2_deploy`` /
   ``azure_deploy`` per cloud) driven by an ``ot_cell_deploy`` parent job that
@@ -100,7 +101,7 @@ def _validate_cell_protocols(payload) -> list:
         "protocol": getattr(payload, "protocol", "") or "",
     })
     if not protocols:
-        raise OTError("pick at least one PLC protocol for the cell")
+        raise OTError("pick at least one protocol for the cell")
     servable = set(ot_service.cell_protocols())
     single = len(protocols) == 1
     for protocol in protocols:
@@ -149,7 +150,7 @@ async def list_presets(
     (same reasoning as /api/pra/pickers)."""
     return OTPresetsResponse(presets=[
         OTPresetInfo(key=key, label=info["label"], port=info["port"],
-                     cell=bool(info.get("cell")))
+                     cell=bool(info.get("cell")), plc=bool(info.get("plc")))
         for key, info in ot_service.OT_PORT_PRESETS.items()
     ])
 

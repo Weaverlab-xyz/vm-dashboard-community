@@ -8,6 +8,14 @@ The operator-facing write-up — egress, trust stores, sizing, and the limitatio
 raising before a customer finds it — is [docs/kubesolo.md](../../../docs/kubesolo.md).
 This file is the quick reference.
 
+**On the demo cell, KubeSolo is already there.** The
+[OT demo cell](../../../docs/profiles/demo/ot-demo-cell.md) bakes it in and runs its
+plant simulators on it, with kubectl and helm on the host — so `kubesolo-install.yml`
+has nothing to do on a cell, and these plays are for the on-prem hosts the cell stands
+in for. `entitle-agent-install.yml` is the one that cannot move to a cell at all: the
+agent needs a path to its tenant, and the cell's whole claim is that no path out
+exists.
+
 | File | Purpose |
 |---|---|
 | `kubesolo-install.yml` | Install KubeSolo, helm and kubectl; optionally trust a corporate root CA first |

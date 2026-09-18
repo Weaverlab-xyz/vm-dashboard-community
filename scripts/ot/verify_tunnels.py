@@ -34,6 +34,11 @@ you never actually proved that protocol.
 DNP3 (:20000) is deliberately absent -- the cell does not simulate it (opendnp3 needs
 a source build, which the image's pinned-wheel contract cannot honour). A DNP3 preset
 is a standalone tunnel to real gear.
+
+The cell's Kubernetes API (:6443) is absent for the opposite reason: it is not a
+fieldbus and its client is kubectl. Check it with the kubeconfig the cell writes for
+the tunnel -- `kubectl --kubeconfig <cell>/var/lib/ot-sim/kubeconfig-via-tunnel.yaml
+get nodes` -- as docs/profiles/demo/ot-protocol-clients.md describes.
 """
 import argparse
 import json

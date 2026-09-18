@@ -76,6 +76,20 @@ def test_the_zero_runtime_egress_contract_holds():
         assert "compose" in src and "up -d" in src, (
             f"{os.path.basename(path)}: the bake-time smoke test is gone — a dead "
             "stack would only be discovered inside an air-gapped subnet")
+        if "get.kubesolo.io" not in src:
+            continue
+        # Same contract one layer down for the KubeSolo runtime: a cluster whose
+        # images live in a registry, or whose workloads were never started here,
+        # would only fail on a cell — where there is no egress to fix it with.
+        assert "KUBESOLO_OFFLINE=true" in src, (
+            f"{os.path.basename(path)}: KubeSolo's default build pulls its images at "
+            "first start; the cell has nowhere to pull them from")
+        assert re.search(r"ctr --address .* images import", src), (
+            f"{os.path.basename(path)}: the workload images are never imported into "
+            "KubeSolo's containerd — the cell would boot ErrImageNeverPull")
+        assert "imagePullPolicy: Never" in src, (
+            f"{os.path.basename(path)}: without imagePullPolicy Never a missing image "
+            "reads as a firewall problem rather than a missing image")
 
 
 def _embedded_python(path):
@@ -162,9 +176,10 @@ def test_the_fuxa_seed_never_fails_the_bake():
         src = _read(path)
         if "fuxa_seed.py" not in src:
             continue
-        m = re.search(r"if docker run[^\n]*fuxa_seed[^\n]*\n(.*?)\nfi\n", src, re.S)
-        if m is None:
-            m = re.search(r"(if docker run.*?\nfi\n)", src, re.S)
+        # Runtime-agnostic: the seed used to run in a container and now runs on the
+        # host (the KubeSolo runtime has no docker left to run it with), but either
+        # way it has to sit inside a guard that tolerates failure.
+        m = re.search(r"\nif [^\n]*fuxa_seed[^\n]*\n(.*?)\nfi\n", src, re.S)
         assert m, f"{os.path.basename(path)}: the FUXA seed is not in an if/else guard"
         assert "die " not in m.group(0), (
             f"{os.path.basename(path)}: the FUXA seed calls die — a convenience must "

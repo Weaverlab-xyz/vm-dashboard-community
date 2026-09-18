@@ -31,7 +31,7 @@ What a demo has to show, concretely:
 
 | layer | what it does here |
 |---|---|
-| **Provisioning** | Stands up a simulated cell — PLC simulators plus a web SCADA/HMI — inside a private, egress-less subnet. The air gap *is* the demo. |
+| **Provisioning** | Stands up a simulated cell — PLC simulators plus a web SCADA/HMI, running on KubeSolo — inside a private, egress-less subnet. The air gap *is* the demo. |
 | **PRA** | The only way in. A Web Jump to the HMI, and one protocol-aware tunnel per protocol, so a policy can grant Siemens and Rockwell separately rather than as one opaque item. |
 | **Password Safe** | Owns the cell's admin credential, mirrors it into the PRA vault and rotates it, so a rep injects a real secret without seeing it. |
 | **Entitle** | Makes the vendor's access time-boxed instead of standing. |
@@ -56,6 +56,19 @@ EtherNet/IP, each as its own tunnel. This is what turns "we are a Siemens shop" 
 a Rockwell shop" into the same demo rather than two.
 
 **Guide:** [OT Demo Cell](../ot-demo-cell.md)
+
+### kubectl into the plant, through PRA
+
+The cell's simulators are workloads of [KubeSolo](../../../kubesolo.md), the single-node
+Kubernetes small enough for plant hardware — so the answer to "we cannot run a cluster on
+the plant floor" is a running cell rather than a slide. Its API gets a tunnel of its own,
+which is what makes "this vendor may read the PLC but not the cluster" a policy decision
+instead of a network one.
+
+The agent half of that story does not belong here: the Entitle agent needs a path to its
+tenant and this cell deliberately has none, so run it against an on-prem host instead.
+
+**Guide:** [KubeSolo](../../../kubesolo.md) · [OT Demo Cell](../ot-demo-cell.md)
 
 ### Time-bound vendor access to one cell
 

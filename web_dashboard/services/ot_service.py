@@ -11,6 +11,10 @@ Two surfaces share this module:
   the shared GCP gateway via ``active_standalone_tunnel_count()``, which
   ``jumpoint_host_service`` adds to its idle-teardown sum.
 
+  The cell's own KubeSolo API is one of these presets: the baked image runs its
+  simulators on single-node Kubernetes, so brokered ``kubectl`` into the plant is
+  the same kind of jump item as brokered Modbus.
+
 * **The OT demo cell** (job type ``ot_cell_deploy``, dispatched by ``jobs_worker``)
   — drives one ``queued`` VM-deploy child (``gce_deploy`` / ``ec2_deploy`` /
   ``azure_deploy``, per the parent's ``cloud``) through that cloud's vm service
@@ -43,22 +47,35 @@ class OTCellError(Exception):
 
 
 # ── Protocol presets ──────────────────────────────────────────────────────────
-# Canonical TCP ports for the OT protocols a PRA protocol tunnel is most often
-# demoed against. "custom" (any port) is accepted everywhere a preset key is.
+# Canonical TCP ports for the endpoints a PRA protocol tunnel is most often demoed
+# against on a plant network. "custom" (any port) is accepted everywhere a preset
+# key is.
 #
-# ``cell`` marks the protocols the baked ``ot-sim`` image actually SERVES
-# (provisioners/ot/ot-sim-debian.sh runs a simulator per marked protocol). The
-# rest are still offered for standalone tunnels to real lab gear — but a cell
-# form must not offer one, because a tunnel to a port with no listener is a
-# session failure indistinguishable from a firewall block. tests/test_ot_ports.py
-# holds this table and the image's compose services to each other.
+# ``cell`` marks what the baked ``ot-sim`` image actually SERVES
+# (provisioners/ot/ot-sim-debian.sh runs a simulator per marked protocol, and
+# KubeSolo itself serves the Kubernetes API). The rest are still offered for
+# standalone tunnels to real lab gear — but a cell form must not offer one,
+# because a tunnel to a port with no listener is a session failure
+# indistinguishable from a firewall block. tests/test_ot_ports.py holds this table
+# and what the image runs to each other.
+#
+# ``plc`` separates the fieldbus protocols from the cell's platform endpoints. Both
+# kinds are brokered exactly the same way — one generic-TCP tunnel jump each, so a
+# Jump Group policy can grant the Rockwell PLC and the cluster API to different
+# people — but they are not the same claim, and a form that lists "Kubernetes API"
+# under "PLC protocols" invites the wrong one.
 
 OT_PORT_PRESETS = {
-    "modbus":      {"port": 502,   "label": "Modbus TCP",      "cell": True},
-    "opcua":       {"port": 4840,  "label": "OPC UA",          "cell": True},
-    "dnp3":        {"port": 20000, "label": "DNP3",            "cell": False},
-    "s7":          {"port": 102,   "label": "Siemens S7comm",  "cell": True},
-    "ethernet-ip": {"port": 44818, "label": "EtherNet/IP",     "cell": True},
+    "modbus":      {"port": 502,   "label": "Modbus TCP",      "cell": True,  "plc": True},
+    "opcua":       {"port": 4840,  "label": "OPC UA",          "cell": True,  "plc": True},
+    "dnp3":        {"port": 20000, "label": "DNP3",            "cell": False, "plc": True},
+    "s7":          {"port": 102,   "label": "Siemens S7comm",  "cell": True,  "plc": True},
+    "ethernet-ip": {"port": 44818, "label": "EtherNet/IP",     "cell": True,  "plc": True},
+    # The cell's own single-node Kubernetes (KubeSolo), which is what runs the
+    # simulators above. Brokered like everything else here: a rep gets kubectl into
+    # the plant cluster through a recorded PRA session and no other way in exists.
+    "kubesolo":    {"port": 6443,  "label": "Kubernetes API (KubeSolo)",
+                    "cell": True,  "plc": False},
 }
 
 # The default a cell deploys with when the form sends nothing.
@@ -68,6 +85,11 @@ DEFAULT_CELL_PROTOCOLS = ("modbus",)
 def cell_protocols() -> list:
     """Preset keys the baked cell image serves, in table order."""
     return [k for k, v in OT_PORT_PRESETS.items() if v.get("cell")]
+
+
+def plc_protocols() -> list:
+    """The fieldbus half of the table — everything a PLC actually speaks."""
+    return [k for k, v in OT_PORT_PRESETS.items() if v.get("plc")]
 
 
 def resolve_cell_protocols(ot_params: dict) -> list:
@@ -853,9 +875,9 @@ def purdue_cell_ports(cmeta: dict) -> list:
 
     22 (Shell Jump) and the HMI are always there; the PLC port is whatever the deploy
     chose. The remaining preset ports ride along because the baked image answers OPC UA
-    and EtherNet/IP too, and a standalone tunnel to this cell on one of them is a
-    supported demo — an allow-list that only knew about the cell's OWN tunnel would
-    make those quietly fail.
+    and EtherNet/IP too — and, on the KubeSolo runtime, the cluster API on 6443 — and a
+    standalone tunnel to this cell on one of them is a supported demo; an allow-list
+    that only knew about the cell's OWN tunnel would make those quietly fail.
     """
     ports = {22, int(cmeta.get("ot_hmi_port") or 1881)}
     ot_params = cmeta.get("ot_params") or {}

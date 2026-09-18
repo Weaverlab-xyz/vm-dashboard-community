@@ -1,7 +1,13 @@
 #!/bin/sh
 # ot-sim-debian.sh — bake a self-contained OT/ICS demo cell into a Debian-family image.
 #
-# What the built image runs at boot (systemd unit `ot-sim`, docker compose):
+# The cell is a plant IPC, so it runs what a plant IPC can run: KubeSolo, the
+# single-node Kubernetes this repo already recommends for OT hosts too small for a
+# real cluster (docs/kubesolo.md). The simulators below are its workloads — same
+# images, same ports, same PRA wiring as when they ran on docker compose, which is
+# still available as OT_RUNTIME=docker.
+#
+# What the built image runs at boot (systemd unit `ot-sim`):
 #   plc   — a Modbus TCP "PLC" simulator on :502 (pymodbus, BUILT at bake time from
 #           python:3.12-slim) whose holding registers tick every second: a counter,
 #           a sine-wave temperature (x10 °C) and flow value, and a run flag — so a
@@ -25,6 +31,18 @@
 # cloud-default user). POSIX sh only — no [[ ]], no arrays, no <<<.
 #
 # Operator-overridable via Packer build env:
+#   OT_RUNTIME       what runs the workloads: kubesolo (default) or docker. KubeSolo
+#                    makes the cell a single-node Kubernetes host — Docker is then a
+#                    BUILD-time dependency only and is purged before KubeSolo goes on
+#                    (its installer refuses a host that still has Docker).
+#   OT_KUBESOLO_VERSION  KubeSolo release to bake (default: v1.2.0). It must have an
+#                    -offline build: that variant carries every image KubeSolo itself
+#                    needs inside the binary, which is what lets the cell boot with no
+#                    egress at all.
+#   OT_HELM_VERSION      helm to put on the host (default: v3.16.3 — the pin the
+#                    KubeSolo plays in examples/playbooks/kubesolo/ use)
+#   OT_KUBECTL_VERSION   kubectl to put on the host (default: whatever dl.k8s.io calls
+#                    stable at bake time). KubeSolo ships neither client.
 #   OT_ADMIN_USER    Password-Safe-managed bootstrap account name (default: adminuser)
 #   OT_FUXA_IMAGE    FUXA image ref (default: frangoteam/fuxa:1.3.4 — pin a version,
 #                    never :latest; a floating tag makes bakes unreproducible)
@@ -47,6 +65,17 @@ set -eu
 
 log() { echo "[ot-sim] $*"; }
 die() { echo "[ot-sim] ERROR: $*" >&2; exit 1; }
+
+# What runs the cell's workloads. `kubesolo` is the default because the cell is the
+# only plant floor this repo ships: KubeSolo is offered to OT customers as the way to
+# carry Kubernetes on plant hardware, and a demo cell running docker compose could
+# never show it. `docker` keeps the previous compose stack, unchanged — the fallback
+# if a KubeSolo bake ever fails on a platform this script has not met.
+OT_RUNTIME="$(echo "${OT_RUNTIME:-kubesolo}" | tr '[:upper:]' '[:lower:]')"
+case "$OT_RUNTIME" in
+  kubesolo|docker) ;;
+  *) die "OT_RUNTIME must be 'kubesolo' or 'docker' (got '$OT_RUNTIME')" ;;
+esac
 
 # ── 1. OS-family gate ────────────────────────────────────────────────────────
 [ -f /etc/debian_version ] || die "not a Debian-family system (no /etc/debian_version)"
@@ -87,8 +116,14 @@ if ! visudo -c -f "$SUDOERS" >/dev/null; then
 fi
 
 # ── 4. Docker Engine + compose plugin (from download.docker.com, not Docker Hub) ─
+# On the KubeSolo runtime this is a BUILD-time dependency only: it builds the sim
+# image and pulls FUXA, then section 5b purges it, because KubeSolo's installer
+# refuses a host that still has Docker on it.
+#
+# python3 goes on with it: the FUXA project seed and the bake's port probes both run
+# on the host now, in either runtime, so they cannot depend on a container being up.
 log "installing Docker Engine + compose plugin"
-apt-get -y -q install ca-certificates curl gnupg
+apt-get -y -q install ca-certificates curl gnupg python3
 . /etc/os-release
 case "${ID:-}" in
   debian|ubuntu) ;;
@@ -416,6 +451,29 @@ EOF
 
 # One image, four entrypoints: the sims share a base layer and a single pip
 # install, so a bake pulls python:3.12-slim once and the cell carries one copy.
+# Built here, before the runtime split below, because both runtimes run the same
+# images — the KubeSolo one just carries them as tarballs instead of in Docker's
+# store.
+log "building the simulators and pre-pulling FUXA ($OT_FUXA_IMAGE)"
+docker build -t ot-plc-sim:baked /opt/ot-sim/plc-sim
+docker pull "$OT_FUXA_IMAGE"
+
+# What has to answer once the stack is up, whichever runtime carries it. The docker
+# runtime additionally asserts every container is running; the KubeSolo one waits on
+# the rollouts. Both then prove the listener, because "the container is up" has never
+# been the same claim as "the PLC answers".
+OT_SMOKE_PORTS="502 1881"
+if sim_enabled opcua; then OT_SMOKE_PORTS="$OT_SMOKE_PORTS 4840"; fi
+if sim_enabled enip; then OT_SMOKE_PORTS="$OT_SMOKE_PORTS 44818"; fi
+if sim_enabled s7; then OT_SMOKE_PORTS="$OT_SMOKE_PORTS 102"; fi
+
+# Where FUXA dials the Modbus PLC: a compose service name on docker, the node's own
+# loopback on KubeSolo (the pods share the node's network namespace — see 5b).
+FUXA_PLC_ADDRESS=plc
+
+if [ "$OT_RUNTIME" = "docker" ]; then
+
+# ── 5a. Runtime: docker compose (the pre-KubeSolo stack, kept as the fallback) ─
 cat > /opt/ot-sim/docker-compose.yml <<EOF
 # OT demo cell -- baked by provisioners/ot/ot-sim-debian.sh. Real compose on the
 # VM (volumes allowed), unlike the dashboard's cloud-compose subset.
@@ -489,10 +547,6 @@ volumes:
   fuxa_appdata:
 EOF
 
-log "building the simulators and pre-pulling FUXA ($OT_FUXA_IMAGE)"
-docker compose -f /opt/ot-sim/docker-compose.yml build plc
-docker compose -f /opt/ot-sim/docker-compose.yml pull hmi
-
 # Smoke-test the stack now, while a failure still fails the BAKE instead of
 # producing an image that boots dead in an air-gapped subnet nobody can debug into.
 log "smoke-testing the stack ($OT_SMOKE_CONTAINERS)"
@@ -505,7 +559,456 @@ for c in $OT_SMOKE_CONTAINERS; do
   fi
 done
 
-# ── 5b. Seed the FUXA project (best-effort) ──────────────────────────────────
+else
+
+# ── 5b. Runtime: KubeSolo — the cell IS a single-node Kubernetes host ─────────
+# Why the demo cell runs Kubernetes at all: KubeSolo is the answer this repo gives an
+# OT customer who cannot put a cluster on the plant floor (docs/kubesolo.md), and the
+# cell is the only plant floor it ships. On docker compose that answer was a slide.
+# The simulators do not change — same images, same ports, same PRA wiring — they just
+# become the workloads of a cluster that also has room for the Entitle agent.
+#
+# Docker cannot stay. KubeSolo's installer refuses a host with docker on PATH, a
+# docker.sock, or an active docker service: it brings its own containerd and CNI, and
+# two of those arguing over iptables is precisely the failure that only shows up in
+# front of a customer. So the order is: build with Docker, export, purge Docker,
+# install KubeSolo, import into ITS containerd.
+OT_KUBESOLO_VERSION="${OT_KUBESOLO_VERSION:-v1.2.0}"
+OT_HELM_VERSION="${OT_HELM_VERSION:-v3.16.3}"
+OT_KUBECTL_VERSION="${OT_KUBECTL_VERSION:-}"
+KUBESOLO_PATH=/var/lib/kubesolo
+KUBESOLO_KUBECONFIG=$KUBESOLO_PATH/pki/admin/admin.kubeconfig
+KUBESOLO_SOCK=$KUBESOLO_PATH/containerd/containerd.sock
+OT_IMAGE_DIR=/var/lib/ot-sim/images
+OT_ARCH="$(dpkg --print-architecture)"
+
+# The pods run with hostNetwork (see the manifest), so FUXA reaches the PLC on the
+# node's own loopback rather than by a compose service name.
+FUXA_PLC_ADDRESS=127.0.0.1
+
+log "exporting the built images — the cell has no registry to pull them back from"
+mkdir -p "$OT_IMAGE_DIR" /var/lib/ot-sim/fuxa
+docker save ot-plc-sim:baked -o "$OT_IMAGE_DIR/ot-plc-sim.tar"
+docker save "$OT_FUXA_IMAGE" -o "$OT_IMAGE_DIR/fuxa.tar"
+
+# FUXA's project data is a hostPath here, not a named volume, and nothing copies the
+# image's own _appdata into an empty hostPath the way docker does for a fresh volume.
+# Do it now, while Docker can still read the image — otherwise FUXA starts against an
+# empty directory and the seed below has no project to add a device to.
+log "priming FUXA's appdata directory from the image"
+if docker create --name ot-fuxa-appdata "$OT_FUXA_IMAGE" >/dev/null 2>&1; then
+  docker cp "ot-fuxa-appdata:/usr/src/app/FUXA/server/_appdata/." /var/lib/ot-sim/fuxa/ \
+    || log "WARNING: could not copy FUXA's appdata out of the image — it starts empty"
+  docker rm ot-fuxa-appdata >/dev/null 2>&1 || true
+fi
+# The cell is a single-purpose appliance and this directory is its own state, so a
+# permissive mode beats guessing which UID the pinned FUXA image runs as.
+chmod 0777 /var/lib/ot-sim/fuxa
+
+# containerd's own client, kept because it is how an image gets into a containerd that
+# has no registry behind it. A CLI, not an engine — KubeSolo's prerequisite check is
+# about Docker, and /usr/local/bin survives the purge because apt does not own it.
+if [ ! -x /usr/bin/ctr ]; then
+  die "containerd.io did not provide /usr/bin/ctr — without it the baked images cannot \
+be loaded into KubeSolo, and the cell has no registry to pull them from"
+fi
+install -m 0755 /usr/bin/ctr /usr/local/bin/ctr
+
+log "removing Docker — KubeSolo's installer refuses a host that still carries it"
+systemctl disable --now docker.service docker.socket containerd.service >/dev/null 2>&1 || true
+apt-get -y -q purge docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+apt-get -y -q autoremove
+rm -rf /var/lib/docker /var/lib/containerd /etc/docker /var/run/docker.sock
+rm -f /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.asc
+ip link delete docker0 >/dev/null 2>&1 || true
+if command -v docker >/dev/null 2>&1; then
+  die "docker is still on PATH after the purge — KubeSolo's installer would refuse this host"
+fi
+apt-get update -q
+# Docker pulled iptables in as a dependency, so autoremove above may have taken it
+# with it — and kube-proxy needs it. Ask for it by name, so it is a manual package
+# nothing can reclaim.
+apt-get -y -q install iptables
+# Docker's chains and its FORWARD policy of DROP live in the running kernel, not in
+# the packages, so they would outlive the purge until a reboot the bake never does —
+# and the first thing they break is KubeSolo's pod networking, starting with CoreDNS.
+iptables -P FORWARD ACCEPT >/dev/null 2>&1 || true
+for _table in filter nat mangle; do
+  iptables -t "$_table" -F >/dev/null 2>&1 || true
+  iptables -t "$_table" -X >/dev/null 2>&1 || true
+done
+
+log "installing kubectl and helm — KubeSolo ships neither, and the plays expect both"
+if [ -z "$OT_KUBECTL_VERSION" ]; then
+  OT_KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
+fi
+curl -fsSLo /usr/local/bin/kubectl \
+  "https://dl.k8s.io/release/$OT_KUBECTL_VERSION/bin/linux/$OT_ARCH/kubectl"
+chmod 0755 /usr/local/bin/kubectl
+curl -fsSL "https://get.helm.sh/helm-$OT_HELM_VERSION-linux-$OT_ARCH.tar.gz" -o /tmp/helm.tar.gz
+tar -xzf /tmp/helm.tar.gz -C /tmp
+install -m 0755 "/tmp/linux-$OT_ARCH/helm" /usr/local/bin/helm
+rm -rf /tmp/helm.tar.gz "/tmp/linux-$OT_ARCH"
+
+# The -offline build, not the default one: it carries CoreDNS, the CNI plugins and the
+# rest of what KubeSolo starts INSIDE the binary. The default build pulls them from a
+# registry at first start, which in the cell's egress-less subnet means a cluster that
+# never comes up — and the bake would not notice, because the BUILD VM has egress.
+log "installing KubeSolo $OT_KUBESOLO_VERSION (-offline build: its images ride in the binary)"
+# Downloaded, then run — not piped: sh in a pipeline reports ITS status, so a failed
+# download would silently install nothing and only surface five minutes later as
+# "KubeSolo never wrote its kubeconfig".
+curl -sfL https://get.kubesolo.io -o /tmp/kubesolo-install.sh \
+  || die "could not download the KubeSolo installer from get.kubesolo.io"
+KUBESOLO_VERSION="$OT_KUBESOLO_VERSION" KUBESOLO_OFFLINE=true \
+  KUBESOLO_PATH="$KUBESOLO_PATH" sh /tmp/kubesolo-install.sh \
+  || die "the KubeSolo installer failed — its own output is above; \
+a release with no -offline build is the usual cause"
+rm -f /tmp/kubesolo-install.sh
+
+export KUBECONFIG="$KUBESOLO_KUBECONFIG"
+log "waiting for the KubeSolo API and a Ready node"
+_waited=0
+while [ ! -f "$KUBECONFIG" ]; do
+  _waited=$((_waited + 1))
+  if [ "$_waited" -gt 60 ]; then
+    journalctl -u kubesolo --no-pager -n 40 2>/dev/null || true
+    die "KubeSolo never wrote $KUBECONFIG"
+  fi
+  sleep 5
+done
+kubectl wait --for=condition=Ready node --all --timeout=300s \
+  || die "the KubeSolo node never became Ready (journalctl -u kubesolo)"
+
+# containerd normalises a bare image name to docker.io/library/<name> and a
+# single-slash name to docker.io/<name>; a name that already carries a registry host
+# is stored verbatim. Recording what it ends up called is what lets the boot-time
+# importer tell "already loaded" from "must import" without re-deriving these rules.
+normalize_ref() {
+  case "$1" in
+    */*/*) echo "$1" ;;
+    */*)
+      case "${1%%/*}" in
+        *.*|*:*|localhost) echo "$1" ;;
+        *) echo "docker.io/$1" ;;
+      esac ;;
+    *) echo "docker.io/library/$1" ;;
+  esac
+}
+
+log "importing the baked images into KubeSolo's containerd"
+: > "$OT_IMAGE_DIR/images.txt"
+for _pair in "ot-plc-sim:baked|ot-plc-sim.tar" "$OT_FUXA_IMAGE|fuxa.tar"; do
+  _ref="$(normalize_ref "${_pair%%|*}")"
+  _tarball="${_pair##*|}"
+  ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images import "$OT_IMAGE_DIR/$_tarball" \
+    || die "ctr could not import $_tarball into KubeSolo's containerd"
+  # Proven here rather than assumed: the manifests pull nothing (imagePullPolicy:
+  # Never), so a name containerd does not hold is a cell that boots ErrImageNeverPull.
+  if ! ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images ls -q | grep -qx "$_ref"; then
+    die "$_tarball imported but containerd does not list $_ref — the pods would never start"
+  fi
+  echo "$_ref $_tarball" >> "$OT_IMAGE_DIR/images.txt"
+done
+
+log "writing /opt/ot-sim/kubesolo (the plant workloads, as KubeSolo runs them)"
+mkdir -p /opt/ot-sim/kubesolo
+cat > /opt/ot-sim/kubesolo/ot-sim.yaml <<EOF
+# The OT demo cell's plant workloads -- baked by provisioners/ot/ot-sim-debian.sh.
+# Same images and same ports as the docker runtime's compose stack.
+#
+# hostNetwork, and no Service: a PLC answers on the machine's own address, which is
+# also what the PRA protocol tunnels dial (the Gateway reaches <cell ip>:502, never a
+# cluster IP). It also keeps the fieldbus ports off the CNI's portmap path, so the
+# cell cannot boot with Kubernetes healthy and the plant unreachable.
+#
+# imagePullPolicy: Never, because there is no registry and no egress: the images come
+# from the tarballs in /var/lib/ot-sim/images, loaded by apply.sh. A missing one then
+# fails as ErrImageNeverPull -- "it is not in the local store" -- instead of an
+# ImagePullBackOff that reads like a blocked firewall.
+#
+# strategy: Recreate everywhere: a rolling update would start the new pod while the
+# old one still holds the host port, and the rollout would wedge.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ot-sim
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ot-plc
+  namespace: ot-sim
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ot-plc
+  template:
+    metadata:
+      labels:
+        app: ot-plc
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: plc
+          image: ot-plc-sim:baked
+          imagePullPolicy: Never
+          command: ["python", "/app/plc_sim.py"]
+          ports:
+            - containerPort: 502
+              hostPort: 502
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ot-hmi
+  namespace: ot-sim
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ot-hmi
+  template:
+    metadata:
+      labels:
+        app: ot-hmi
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: hmi
+          image: $OT_FUXA_IMAGE
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 1881
+              hostPort: 1881
+          volumeMounts:
+            - name: appdata
+              mountPath: /usr/src/app/FUXA/server/_appdata
+      volumes:
+        - name: appdata
+          hostPath:
+            path: /var/lib/ot-sim/fuxa
+            type: DirectoryOrCreate
+EOF
+
+OT_SMOKE_DEPLOYS="ot-plc ot-hmi"
+
+if sim_enabled opcua; then
+  cat >> /opt/ot-sim/kubesolo/ot-sim.yaml <<'EOF'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ot-opcua
+  namespace: ot-sim
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ot-opcua
+  template:
+    metadata:
+      labels:
+        app: ot-opcua
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: opcua
+          image: ot-plc-sim:baked
+          imagePullPolicy: Never
+          command: ["python", "/app/opcua_sim.py"]
+          ports:
+            - containerPort: 4840
+              hostPort: 4840
+EOF
+  OT_SMOKE_DEPLOYS="$OT_SMOKE_DEPLOYS ot-opcua"
+fi
+
+if sim_enabled enip; then
+  cat >> /opt/ot-sim/kubesolo/ot-sim.yaml <<'EOF'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ot-enip
+  namespace: ot-sim
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ot-enip
+  template:
+    metadata:
+      labels:
+        app: ot-enip
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: enip
+          image: ot-plc-sim:baked
+          imagePullPolicy: Never
+          command: ["python", "/app/enip_sim.py"]
+          ports:
+            - containerPort: 44818
+              hostPort: 44818
+EOF
+  OT_SMOKE_DEPLOYS="$OT_SMOKE_DEPLOYS ot-enip"
+fi
+
+if sim_enabled s7; then
+  # :102 is privileged. The container runs as root and Kubernetes leaves
+  # CAP_NET_BIND_SERVICE in the default set, so the bind succeeds exactly as it did
+  # under docker. The pure-python server logs a COTP framing warning on some client
+  # handshakes; reads are unaffected, so it must not be read as a failure.
+  cat >> /opt/ot-sim/kubesolo/ot-sim.yaml <<'EOF'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ot-s7
+  namespace: ot-sim
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ot-s7
+  template:
+    metadata:
+      labels:
+        app: ot-s7
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: s7
+          image: ot-plc-sim:baked
+          imagePullPolicy: Never
+          command: ["python", "/app/s7_sim.py"]
+          ports:
+            - containerPort: 102
+              hostPort: 102
+EOF
+  OT_SMOKE_DEPLOYS="$OT_SMOKE_DEPLOYS ot-s7"
+fi
+
+cat > /opt/ot-sim/kubesolo/apply.sh <<'EOF'
+#!/bin/sh
+# Bring the OT demo cell's plant workloads up on KubeSolo. Baked by
+# provisioners/ot/ot-sim-debian.sh, run at boot by ot-sim.service, and safe to re-run
+# by hand: kubectl apply is declarative and an image already in the store is skipped.
+set -eu
+
+KUBESOLO_PATH=/var/lib/kubesolo
+KUBECONFIG=$KUBESOLO_PATH/pki/admin/admin.kubeconfig
+export KUBECONFIG
+IMAGE_DIR=/var/lib/ot-sim/images
+CTR="ctr --address $KUBESOLO_PATH/containerd/containerd.sock --namespace k8s.io"
+
+log() { echo "[ot-sim] $*"; }
+
+# 1. Wait for the API. The bake drops the cluster's identity so that every cell mints
+#    its own CA, node and state on first boot -- so this is a real wait, not a
+#    formality, and it is the step that takes the time on a cell's first start.
+tries=0
+while [ ! -f "$KUBECONFIG" ] || ! kubectl get --raw /readyz >/dev/null 2>&1; do
+  tries=$((tries + 1))
+  if [ "$tries" -gt 120 ]; then
+    echo "[ot-sim] ERROR: KubeSolo's API never came up (journalctl -u kubesolo)" >&2
+    exit 1
+  fi
+  sleep 5
+done
+kubectl wait --for=condition=Ready node --all --timeout=300s >/dev/null
+
+# 2. Load the images. There is no registry inside the plant network: these tarballs
+#    ARE the image source, which is why the manifest sets imagePullPolicy: Never.
+while read -r ref tarball; do
+  [ -n "${ref:-}" ] || continue
+  if $CTR images ls -q | grep -qx "$ref"; then continue; fi
+  log "importing $ref"
+  # </dev/null so the import cannot consume the image list this loop is reading.
+  $CTR images import "$IMAGE_DIR/$tarball" </dev/null
+done < "$IMAGE_DIR/images.txt"
+
+# 3. Apply, then wait on each Deployment, so a boot that only half-worked says so in
+#    `systemctl status ot-sim` instead of in front of a customer.
+kubectl apply -f /opt/ot-sim/kubesolo/ot-sim.yaml
+for deploy in $(kubectl -n ot-sim get deploy -o name); do
+  kubectl -n ot-sim rollout status "$deploy" --timeout=300s
+done
+
+# 4. A kubeconfig that works through the PRA protocol tunnel. The tunnel listens on
+#    127.0.0.1:6443 on the REP's machine, while the API server's certificate is issued
+#    to this node -- so the name to verify against has to travel with the file rather
+#    than be something the rep is expected to know.
+node_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+if [ -n "$node_ip" ] && [ -f "$KUBECONFIG" ]; then
+  KUBECONFIG_SRC="$KUBECONFIG" NODE_IP="$node_ip" python3 - \
+    > /var/lib/ot-sim/kubeconfig-via-tunnel.yaml <<'PY'
+import os
+import re
+
+src = open(os.environ["KUBECONFIG_SRC"], encoding="utf-8").read()
+print(re.sub(r"(?m)^(\s*)server: https://.*$",
+             lambda m: "%sserver: https://127.0.0.1:6443\n%stls-server-name: %s"
+                       % (m.group(1), m.group(1), os.environ["NODE_IP"]),
+             src), end="")
+PY
+  chmod 0600 /var/lib/ot-sim/kubeconfig-via-tunnel.yaml
+fi
+
+log "the plant workloads are up (kubectl -n ot-sim get pods)"
+EOF
+chmod 0755 /opt/ot-sim/kubesolo/apply.sh
+
+log "starting the plant workloads on KubeSolo ($OT_SMOKE_DEPLOYS)"
+/opt/ot-sim/kubesolo/apply.sh || die "the workloads did not come up on KubeSolo — \
+refusing to bake an image whose plant is dead"
+
+# A Ready rollout still is not a listener: the same distinction verify_tunnels.py
+# draws for the rep is drawn here, while a failure can still fail the BAKE.
+wait_for_port() {
+  _tries=0
+  while [ "$_tries" -lt 60 ]; do
+    if python3 -c "import socket, sys; s = socket.socket(); s.settimeout(2); \
+sys.exit(0 if s.connect_ex(('127.0.0.1', $1)) == 0 else 1)"; then
+      return 0
+    fi
+    _tries=$((_tries + 1))
+    sleep 5
+  done
+  return 1
+}
+
+log "smoke-testing the stack (ports: $OT_SMOKE_PORTS)"
+for _port in $OT_SMOKE_PORTS; do
+  if ! wait_for_port "$_port"; then
+    kubectl -n ot-sim get pods -o wide || true
+    for _d in $OT_SMOKE_DEPLOYS; do
+      kubectl -n ot-sim logs "deploy/$_d" --tail=20 2>&1 | tail -n 20 || true
+    done
+    die "nothing answers on :$_port - refusing to bake a dead image"
+  fi
+done
+
+fi
+
+# ── 5c. Seed the FUXA project (best-effort) ──────────────────────────────────
 # Without this, every cell costs ~a minute of clicking before it shows anything:
 # Connections -> add a ModbusTCP device -> add a tag per holding register. The
 # project format is version-coupled to the pinned FUXA, which is why it is not
@@ -525,8 +1028,13 @@ that changed shape fails the round-trip check instead of writing a broken projec
 Modbus addressing, per FUXA's modbus driver:
   memaddress "400000" = holding registers, address = 1-BASED offset in that region.
   So holding register 0 (what plc_sim.py ticks first) is address "1".
+
+The PLC's address comes from FUXA_PLC_ADDRESS, because the two runtimes reach it
+differently: `plc` is the compose service name on docker, and 127.0.0.1 on KubeSolo,
+where the pods share the node's network namespace.
 """
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -535,6 +1043,7 @@ import urllib.request
 BASE = "http://127.0.0.1:1881"
 DEVICE_ID = "ot_sim_plc"
 DEVICE_NAME = "PLC"
+PLC_ADDRESS = os.environ.get("FUXA_PLC_ADDRESS") or "plc"
 # (tag id suffix, display name, 1-based holding-register address)
 TAGS = [("counter", "Counter", "1"),
         ("temperature", "Temperature", "2"),
@@ -579,9 +1088,10 @@ def _device():
     return {
         "id": DEVICE_ID, "name": DEVICE_NAME, "enabled": True, "type": "ModbusTCP",
         "polling": 1000, "tags": tags,
-        # `plc` is the compose service name -- resolvable on the cell's own docker
-        # network, and never from outside it.
-        "property": {"address": "plc", "port": "502", "slaveid": "1", "options": {}},
+        # Reachable only from inside the cell either way: a compose service name on
+        # the cell's own docker network, or the node's loopback under KubeSolo.
+        "property": {"address": PLC_ADDRESS, "port": "502", "slaveid": "1",
+                     "options": {}},
     }
 
 
@@ -627,10 +1137,11 @@ if __name__ == "__main__":
         sys.exit(1)
 EOF
 
-log "seeding the FUXA project (device + holding-register tags)"
-if docker run --rm --network host \
-     -v /opt/ot-sim/plc-sim/fuxa_seed.py:/seed.py:ro \
-     ot-plc-sim:baked python /seed.py; then
+# Run on the HOST with stdlib python3, not inside a container: FUXA answers on the
+# node's :1881 under either runtime, and the KubeSolo one has no docker left to run
+# the seed with.
+log "seeding the FUXA project (device + holding-register tags, PLC at $FUXA_PLC_ADDRESS)"
+if FUXA_PLC_ADDRESS="$FUXA_PLC_ADDRESS" python3 /opt/ot-sim/plc-sim/fuxa_seed.py; then
   log "FUXA project seeded - the cell opens on a wired PLC connection"
 else
   log "WARNING: FUXA project NOT seeded (see the error above). The image is still"
@@ -638,9 +1149,12 @@ else
   log "         provisioners/ot/README.md (FUXA project seeding)."
 fi
 
-docker compose -f /opt/ot-sim/docker-compose.yml down
+if [ "$OT_RUNTIME" = "docker" ]; then
+  docker compose -f /opt/ot-sim/docker-compose.yml down
+fi
 
-log "installing the ot-sim systemd unit"
+log "installing the ot-sim systemd unit ($OT_RUNTIME runtime)"
+if [ "$OT_RUNTIME" = "docker" ]; then
 cat > /etc/systemd/system/ot-sim.service <<'EOF'
 [Unit]
 Description=OT demo cell (Modbus PLC simulator + FUXA HMI)
@@ -656,6 +1170,26 @@ ExecStop=/usr/bin/docker compose -f /opt/ot-sim/docker-compose.yml down
 [Install]
 WantedBy=multi-user.target
 EOF
+else
+cat > /etc/systemd/system/ot-sim.service <<'EOF'
+[Unit]
+Description=OT demo cell workloads on KubeSolo (PLC simulators + FUXA HMI)
+After=kubesolo.service
+Requires=kubesolo.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# A first boot mints the cluster's CA and node and loads ~a gigabyte of baked image
+# tarballs, because there is no registry to pull from; the default 90s start timeout
+# would kill that half way through and leave the plant dark.
+TimeoutStartSec=1200
+ExecStart=/opt/ot-sim/kubesolo/apply.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
 systemctl daemon-reload
 systemctl enable ot-sim.service
 
@@ -673,6 +1207,32 @@ else
   rm -rf /var/lib/cloud/instances /var/lib/cloud/instance
   find /var/log -type f -name 'cloud-init*.log' -exec truncate -s 0 {} + 2>/dev/null || true
   apt-get -y -q clean
+  if [ "$OT_RUNTIME" = "kubesolo" ]; then
+    # Same reasoning as the ssh host keys above, one layer up: a baked cluster would
+    # hand every cell the same CA and admin credential, and its Node object still
+    # carries the BAKE VM's hostname — which no cell will ever have, so the pods bound
+    # to it would sit there unscheduled while Kubernetes reported itself healthy.
+    log "resetting the cluster's identity (each cell mints its own CA, node and state)"
+    systemctl stop ot-sim.service >/dev/null 2>&1 || true
+    systemctl stop kubesolo >/dev/null 2>&1 || true
+    for _dir in /var/lib/kubesolo/*; do
+      [ -e "$_dir" ] || continue
+      # Everything but the image store: those layers cannot be re-pulled inside the
+      # plant network. (Losing them is survivable, not fatal — apply.sh re-imports
+      # from /var/lib/ot-sim/images on boot — but it costs minutes on every cell.)
+      case "$_dir" in */containerd) continue ;; esac
+      rm -rf "$_dir"
+    done
+    # Written by the bake's own run of apply.sh, and describing the BUILD VM: its CA
+    # and address, both wrong on a cell. Each cell writes its own at boot.
+    rm -f /var/lib/ot-sim/kubeconfig-via-tunnel.yaml
+  fi
 fi
 
-log "ot-sim bake complete — sims [$OT_SIMS], FUXA HMI on :1881, PS account '$OT_ADMIN_USER'"
+if [ "$OT_RUNTIME" = "kubesolo" ]; then
+  log "ot-sim bake complete — KubeSolo runtime, sims [$OT_SIMS], FUXA HMI on :1881, \
+Kubernetes API on :6443, PS account '$OT_ADMIN_USER'"
+else
+  log "ot-sim bake complete — docker runtime, sims [$OT_SIMS], FUXA HMI on :1881, \
+PS account '$OT_ADMIN_USER'"
+fi

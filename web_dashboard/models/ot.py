@@ -7,10 +7,14 @@ class OTPresetInfo(BaseModel):
     key: str            # e.g. "modbus"
     label: str          # e.g. "Modbus TCP"
     port: int           # canonical TCP port, e.g. 502
-    # True when the baked ot-sim image actually simulates this protocol. The cell
+    # True when the baked ot-sim image actually serves this endpoint. The cell
     # form offers only these; the standalone-tunnel form offers them all, since it
     # points at real gear.
     cell: bool = False
+    # True for a fieldbus protocol, False for a platform endpoint on the same host
+    # (the cell's KubeSolo API). Both are brokered identically; the forms group
+    # them so "Kubernetes API" is not listed as something a PLC speaks.
+    plc: bool = True
 
 
 class OTPresetsResponse(BaseModel):
@@ -55,13 +59,17 @@ class OTTunnelResponse(BaseModel):
 
 class OTCellDeployRequest(BaseModel):
     """One-click OT demo cell: a VM from the Packer-baked ``ot-sim`` image plus the
-    BeyondTrust access layer (Web Jump → HMI, protocol tunnel → PLC port, and the
-    Shell Jump / Password Safe onboarding the normal GCE deploy already does)."""
+    BeyondTrust access layer (Web Jump → HMI, a protocol tunnel per brokered
+    endpoint, and the Shell Jump / Password Safe onboarding the normal GCE deploy
+    already does). The image runs its simulators on KubeSolo, so the cell is also a
+    single-node Kubernetes host and its API is one of the endpoints on offer."""
     image_self_link: str
     image_name: str = ""
     instance_name: str
-    # e2-medium, not e2-small: the cell runs Docker + the PLC sim + FUXA, and a
-    # 2 GB e2-small proved too tight in live use (validated on ot-cell-01).
+    # e2-medium, not e2-small: the cell runs KubeSolo, the PLC sims and FUXA, and a
+    # 2 GB e2-small proved too tight in live use (validated on ot-cell-01). The
+    # KubeSolo control plane idles at ~200 MB on top; installing the Entitle agent
+    # into the cell as well wants an 8 GB shape, for the agent's own 1Gi request.
     machine_type: str = "e2-medium"
     zone: str = ""                    # defaults to configured gcp_zone
     subnetwork: str = ""              # defaults to the sandbox vm-subnet
@@ -93,7 +101,7 @@ class OTCellDeployRequestAWS(BaseModel):
     ami_name: str = ""
     instance_name: str
     # t3.medium (4 GB) — the same budget as the GCP default e2-medium: the cell
-    # runs Docker + the PLC sim + FUXA, and 2 GB proved too tight in live use.
+    # runs KubeSolo, the PLC sims and FUXA, and 2 GB proved too tight in live use.
     instance_type: str = "t3.medium"
     region: Optional[str] = None      # defaults to the configured aws_region
     subnet_id: str
