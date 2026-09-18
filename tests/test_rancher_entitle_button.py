@@ -350,16 +350,25 @@ def test_the_register_job_reports_an_unresolvable_allow_list():
     assert "reachability_warning" in body
 
 
-def test_the_published_table_is_not_quietly_populated_with_guesses():
-    """Inbound-firewall values: too narrow drops grants, too broad exposes a management
-    plane. If a range ever lands in this table it must come from BeyondTrust's
-    documented list — this test failing is the prompt to check that it did, and to
-    delete this test once the provenance is recorded elsewhere."""
+def test_every_published_address_is_a_cidr_with_recorded_provenance():
+    """Inbound-firewall values: too narrow silently drops grants, too broad exposes a
+    management plane. Two things have to hold for every entry.
+
+    A bare address admits a single host and looks identical to a range in a diff, so
+    the prefix length is never optional. And the addresses are per-DEPLOYMENT, not
+    merely per-region — ``entitle_api_url`` can only tell us the region, so which
+    deployment these belong to has to be written down or the next reader cannot tell
+    whether they apply to their tenant.
+    """
     egress = _read(os.path.join(_ROOT, "web_dashboard", "services", "entitle_egress.py"))
-    table = egress.split("_PUBLISHED: dict = {")[1].split("}")[0]
-    assert not re.search(r"\d+\.\d+\.\d+\.\d+", table), (
-        "a range appeared in the published table — confirm it came from the documented "
-        "allow-list, then update this test")
+    table = egress.split("_PUBLISHED: dict = {")[1].split("\n}")[0]
+    addrs = re.findall(r"\d+\.\d+\.\d+\.\d+(?:/\d+)?", table)
+    assert addrs, "the published table is empty — nothing to check"
+    for addr in addrs:
+        assert "/" in addr, f"{addr} has no prefix length"
+    assert "deployment" in table.lower(), (
+        "name the Entitle deployment these belong to — a tenant on another one "
+        "egresses from different addresses")
 
 
 def test_the_override_wins_over_the_published_list():

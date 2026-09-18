@@ -441,17 +441,43 @@ def test_the_region_comes_from_the_api_url():
     assert eg.region() == "us"
 
 
-def test_the_operator_override_wins_and_an_empty_set_reads_as_unknown():
+def test_the_us_region_resolves_to_the_published_deployment_addresses():
+    """The default region, so an install that never touched entitle_api_url gets a
+    working allow-list rather than the warning."""
     eg = _real_egress()
     CONF.clear()
-    assert eg.cidrs() == [], "the published table ships empty on purpose"
+    assert eg.region() == "us"
+    us = eg.cidrs()
+    assert us and all("/" in c for c in us), us
+    assert eg.configured() is True
+    assert eg.unconfigured_warning() == ""
+
+
+def test_a_region_with_no_published_list_reads_as_unknown_not_as_fine():
+    """"Empty" must never be mistaken for "no ranges needed" — that is the difference
+    between a warning and a registration that silently cannot grant."""
+    eg = _real_egress()
+    CONF.clear()
+    CONF["entitle_api_url"] = "https://api.eu.entitle.io/v1"
+    assert eg.region() == "eu"
+    assert eg.cidrs() == []
     assert eg.configured() is False
     warn = eg.unconfigured_warning()
     assert "entitle_source_cidrs" in warn and "time out" in warn, warn
+    assert "'eu'" in warn, "name the region so the operator knows which list to find"
 
-    CONF["entitle_source_cidrs"] = "203.0.113.0/24, 198.51.100.7/32"
+
+def test_the_operator_override_replaces_the_published_list_rather_than_extending_it():
+    """A tenant on a different Entitle DEPLOYMENT egresses from different addresses, so
+    merging the two would admit hosts that never call while still being incomplete.
+    The override has to win outright."""
+    eg = _real_egress()
+    CONF.clear()
+    published = set(eg.cidrs())
+    assert published, "expected a published US list to override"
+    CONF["entitle_source_cidrs"] = "198.51.100.7/32, 203.0.113.0/24"
     assert eg.cidrs() == ["198.51.100.7/32", "203.0.113.0/24"], "sorted + deduped"
-    assert eg.configured() is True
+    assert not published & set(eg.cidrs()), "the published list must not survive"
     assert eg.unconfigured_warning() == ""
 
 

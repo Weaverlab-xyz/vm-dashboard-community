@@ -460,16 +460,24 @@ Where the ranges come from, in order:
 
 | Source | Notes |
 |---|---|
-| `entitle_source_cidrs` | CSV of CIDRs; a bare address needs its `/32`. Always wins, so a tenant on dedicated addresses — or one that learns of a change first — is never blocked on a dashboard release |
+| `entitle_source_cidrs` | CSV of CIDRs; a bare address needs its `/32`. **Replaces** the list below rather than extending it |
 | the published list | BeyondTrust's documented allow-list, keyed off the region already in `entitle_api_url` (`api.us.entitle.io` → `us`), in [`services/entitle_egress.py`](../../web_dashboard/services/entitle_egress.py) |
 
-> **The published table ships empty**, deliberately. These are inbound-firewall
-> values: too narrow silently drops grants, too broad opens a management plane to
-> strangers, and they are not discoverable — the API host is behind a load balancer
-> and is not the connector's egress. So until the documented list is filled in,
-> `entitle_source_cidrs` **is** the source, and the register job says so in its
-> result rather than reporting a registration that cannot grant as healthy. The node
-> row says the same thing.
+**Entitle US (Pathfinder deployment)** ships in that list, so a US tenant needs no
+configuration — register, and the node admits Entitle. EU is not populated; an EU
+tenant supplies its own via `entitle_source_cidrs`.
+
+> **These addresses are per-DEPLOYMENT, not merely per-region.** `entitle_api_url`
+> can only tell us the region, so a tenant on a US deployment *other* than Pathfinder
+> egresses from different addresses — and the built-in list would then admit three
+> hosts that never call the node while still dropping every real grant. That is why
+> `entitle_source_cidrs` overrides rather than extends: if you are not on Pathfinder,
+> set it.
+
+A region with no published list reads as **unknown**, never as "no ranges needed":
+the register job puts the gap in its result and the node row says the integration is
+registered but unreachable, rather than reporting something that cannot grant as
+healthy.
 
 For tenants who lock the node behind CIDRs that Entitle can't traverse, set
 `entitle_rancher_private = true` to attach the shared Entitle agent token instead.
@@ -572,7 +580,7 @@ apply immediately.
 | `rancher_ui_jumpoint_egress_ip` | (runtime) | Captured egress IP of the SHARED Web-Jump Gateway (auto-added to the firewall). Gateways you deploy yourself come from the gateway registry, so every cluster node is allowed |
 | `rancher_ui_vault_account_group_id` | `""` | PRA Vault account group (numeric id) the admin credential is vaulted into for Web-Jump injection; usually chosen per-deploy |
 | `rancher_ui_vault_account_id` | (runtime) | PRA Vault account id created for the admin credential; cleared on teardown |
-| `entitle_source_cidrs` | `""` | CSV of Entitle's own egress CIDRs, merged into the node firewall while a directly-registered integration exists. Blank falls back to the published per-region list, which ships empty — so on most installs this key is the source |
+| `entitle_source_cidrs` | `""` | CSV of Entitle's own egress CIDRs, merged into the node firewall while a directly-registered integration exists. Blank falls back to the published per-region list (US/Pathfinder is built in). Set it only if your tenant is on another deployment |
 | `entitle_rancher_private` | `false` | Attach the Entitle agent token (node not reachable from Entitle's cloud). Makes `entitle_source_cidrs` irrelevant — no inbound ranges are opened. Env/config only — no Settings widget |
 | `entitle_rancher_integration_id` | (runtime) | The registered Entitle integration; blank = not registered. Drives the node row's `Entitle ✓` chip and hides **Register** so a re-register cannot orphan it |
 | `entitle_rancher_tfstate` | (runtime) | Terraform state for that integration, and the only handle `deregister` has on it. Cleared on teardown |

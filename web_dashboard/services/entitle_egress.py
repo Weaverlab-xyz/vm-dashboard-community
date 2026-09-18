@@ -13,10 +13,14 @@ other directly-registered target (later) resolve the same answer.
 Two sources, in order:
 
   1. ``entitle_source_cidrs`` — an operator-supplied CSV. Always wins, so a tenant on
-     dedicated addresses, or one that learns of a change before this file does, is
-     never blocked waiting on a dashboard release.
+     a different Entitle deployment than the one recorded below, on dedicated
+     addresses, or one that learns of a change before this file does, is never blocked
+     waiting on a dashboard release.
   2. :data:`_PUBLISHED` — BeyondTrust's published list for the tenant's region, keyed
      off the region already encoded in ``entitle_api_url`` (``api.us.entitle.io`` → us).
+     Region is the coarsest key that ``entitle_api_url`` can answer; the addresses are
+     really per-DEPLOYMENT, so read the note on that table before trusting it for a
+     tenant you did not set up.
 
 **These are inbound-firewall values, so a wrong one fails in one of two bad ways:** a
 range that is too narrow silently drops grants, and one that is too broad opens a
@@ -33,17 +37,23 @@ from . import config_service
 
 logger = logging.getLogger(__name__)
 
-#: BeyondTrust's published egress ranges for Entitle's cloud, per tenant region.
+#: BeyondTrust's published egress addresses for Entitle's cloud, per tenant region.
 #:
-#: EMPTY ON PURPOSE, and not a stub to be filled with a plausible guess: see the module
-#: docstring for why a wrong value here is worse than no value. Until a region is
-#: populated, an operator supplies the ranges through ``entitle_source_cidrs`` and the
-#: register path says so out loud rather than pretending the firewall is handled.
+#: Nothing here is guessed or derived — see the module docstring for why a wrong value
+#: is worse than no value. A region left empty means "not known to this dashboard",
+#: and the register path says so out loud rather than pretending the firewall is
+#: handled. Bare addresses get their ``/32`` here, not at the call site.
 #:
-#: Populate from the tenant's documented list (docs.beyondtrust.com → Entitle → the
-#: allow-list article), as CIDR strings — a bare address needs its ``/32``.
+#: **These are per-DEPLOYMENT, not merely per-region.** The three US addresses below
+#: are the **Pathfinder** deployment's. A tenant on a different US deployment egresses
+#: from different addresses, and admitting these would then open the node to three
+#: hosts that never call it while still dropping every real grant — which is why
+#: ``entitle_source_cidrs`` overrides this rather than extending it, and why the
+#: deployment is named here instead of being flattened into "us".
 _PUBLISHED: dict = {
-    "us": (),
+    # Entitle US — Pathfinder deployment.
+    "us": ("52.45.229.219/32", "54.88.235.213/32", "3.224.15.134/32"),
+    # Not published to us yet. An EU tenant supplies them via entitle_source_cidrs.
     "eu": (),
 }
 
