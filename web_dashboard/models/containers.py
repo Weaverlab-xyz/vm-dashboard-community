@@ -203,6 +203,22 @@ class RancherNodeResponse(BaseModel):
     configured: bool       # node cloud credentials + bootstrap password present
     server_url: str = ""   # the pinned rancher_server_url (if the node is bootstrapped)
     login_hint: str = ""   # how to log in (username + which configured password); never the secret itself
+    # Entitle registration state, for the node row's Register / Deregister actions.
+    # Rancher has a NATIVE Entitle connector, so unlike Portainer there is no Cloud
+    # Function in the picture -- these three describe an integration the dashboard
+    # creates directly. Same pair of names PortainerAdapterResponse uses, so the two
+    # Entitle controls on this page read alike.
+    entitle_enabled: bool = False        # entitle_registration_enabled
+    # entitle_rancher_integration_id. Blank = not registered, and the Register action
+    # is gated on that blank: register_rancher_in_entitle is NOT idempotent -- a second
+    # register overwrites entitle_rancher_tfstate and leaves the first integration
+    # alive in Entitle, where deregister can no longer reach it.
+    entitle_integration_id: str = ""
+    # Whether the CALLER may act. The register route lives on the k8s router and wants
+    # `k8s:write`, while every other control on this tab is `containers:*` -- so this
+    # is computed server-side rather than letting a containers-only user click a button
+    # that can only 403.
+    entitle_can_register: bool = False
 
 
 class RancherDeployRequest(BaseModel):

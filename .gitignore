@@ -38,6 +38,10 @@ docker-compose.override.windows.yml
 *.key
 *.p12
 *.pfx
+# Functional-account definitions dropped in the repo root while wiring up a
+# Password Safe integration. They carry a plaintext `Password` alongside the
+# AccountName/PlatformID, so they are credentials, not config.
+fa-sa.json
 
 # Config migration bundles — plaintext credentials read out of one instance to
 # be written into another. scripts/migrate-config.sh defaults them to

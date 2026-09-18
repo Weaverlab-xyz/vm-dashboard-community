@@ -402,21 +402,60 @@ the cloud, cleanly) or a proxy exception.
 
 ## Entitle registration
 
+Rancher has a **native** Entitle connector, so — unlike Portainer — there is no
+Cloud Function adapter in the picture. Entitle mints an ephemeral account per
+grant and removes it on revoke.
+
 If **Entitle resource registration** is enabled
 (`entitle_registration_enabled`), the node auto-registers as an Entitle
 **Rancher** integration at the end of the deploy job, so users can request
-just-in-time Rancher RBAC through Entitle. You can also register/deregister
-manually:
+just-in-time Rancher RBAC through Entitle.
+
+### Register and deregister by hand
+
+The node row on **Containers → Rancher** carries the state and the controls: an
+`Entitle ✓` chip with the integration id once registered, **Register in Entitle**
+when it isn't, and **Deregister** when it is. Both enqueue a
+`rancher_entitle_register` job.
+
+You need this more often than the auto-register suggests. That registration is
+**best-effort** — it logs a warning and lets the deploy succeed — so a node can be
+running and unregistered with nothing else saying so. Turning
+`entitle_registration_enabled` on *after* a node is already up leaves it
+unregistered too.
+
+> **Register is hidden once an integration exists, and that is deliberate.**
+> Registering twice writes a second integration over the first one's Terraform
+> state, so the original stays alive in Entitle with nothing able to remove it.
+> Deregister first if you want to re-register.
+
+The same operations over the API:
 
 ```
 POST /api/k8s/rancher/entitle-register   {"action": "register"}   # or "deregister"
 ```
 
+Note the permission: that route is on the k8s router and requires `k8s:write`, not
+the `containers:write` the rest of the Rancher tab uses. The buttons are hidden
+from anyone who lacks it rather than shown and then refused.
+
+### Reachability — the failure that does not announce itself
+
 Because the node is publicly reachable, Entitle's cloud connects to it directly
-(no agent token). For tenants who lock the node behind CIDRs that Entitle can't
-traverse, set `entitle_rancher_private = true` to attach the shared Entitle agent
-token instead. See the [Entitle guide](entitle.md) for enabling
+(no agent token). **That means Entitle's egress ranges have to be allowed by
+`rancher_allowed_source_cidrs`.** Registration talks to Entitle's API, not to your
+node, so it succeeds either way — and a grant then fails at connect time, which
+reads like a broken integration rather than a firewall rule. Nothing auto-adds
+these; the dashboard cannot discover them.
+
+For tenants who lock the node behind CIDRs that Entitle can't traverse, set
+`entitle_rancher_private = true` to attach the shared Entitle agent token instead.
+It is an env/config-only switch today — it appears in neither the Settings panel
+nor `EntitleFeatureConfig`. See the [Entitle guide](entitle.md) for enabling
 resource registration.
+
+A node **teardown** deregisters for you before the VM goes away, and clears
+`entitle_rancher_integration_id` either way — so the chip reverts on its own.
 
 ---
 
@@ -509,7 +548,9 @@ apply immediately.
 | `rancher_ui_jumpoint_egress_ip` | (runtime) | Captured egress IP of the SHARED Web-Jump Gateway (auto-added to the firewall). Gateways you deploy yourself come from the gateway registry, so every cluster node is allowed |
 | `rancher_ui_vault_account_group_id` | `""` | PRA Vault account group (numeric id) the admin credential is vaulted into for Web-Jump injection; usually chosen per-deploy |
 | `rancher_ui_vault_account_id` | (runtime) | PRA Vault account id created for the admin credential; cleared on teardown |
-| `entitle_rancher_private` | `false` | Attach the Entitle agent token (node not reachable from Entitle's cloud) |
+| `entitle_rancher_private` | `false` | Attach the Entitle agent token (node not reachable from Entitle's cloud). Env/config only — no Settings widget |
+| `entitle_rancher_integration_id` | (runtime) | The registered Entitle integration; blank = not registered. Drives the node row's `Entitle ✓` chip and hides **Register** so a re-register cannot orphan it |
+| `entitle_rancher_tfstate` | (runtime) | Terraform state for that integration, and the only handle `deregister` has on it. Cleared on teardown |
 
 ### Per-cloud node keys
 
