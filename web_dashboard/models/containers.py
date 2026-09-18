@@ -219,6 +219,15 @@ class RancherNodeResponse(BaseModel):
     # is computed server-side rather than letting a containers-only user click a button
     # that can only 403.
     entitle_can_register: bool = False
+    # Entitle's own egress ranges, which the node firewall is opened to while a
+    # directly-registered integration exists. Empty means UNKNOWN, not "none needed":
+    # registration talks to Entitle's API rather than to the node, so it succeeds
+    # either way and an empty list is a grant that will time out.
+    entitle_source_cidrs: list[str] = []
+    # Agent-brokered mode. Entitle reaches the node from inside instead, so the ranges
+    # above are neither needed nor added — which makes an empty list fine here and a
+    # problem otherwise, and the card has to tell those apart.
+    entitle_private: bool = False
 
 
 class RancherDeployRequest(BaseModel):

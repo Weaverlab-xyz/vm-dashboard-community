@@ -274,7 +274,7 @@ class _Jobs:
         self.failed.append((job_id, msg))
 
 
-def _worker_stubs():
+def _worker_stubs(firewall=None):
     jobs = _Jobs()
     _stub("web_dashboard.services.job_service",
           set_running=jobs.set_running, set_completed=jobs.set_completed,
@@ -285,6 +285,20 @@ def _worker_stubs():
         return None
 
     _stub("web_dashboard.api.websocket", broadcast_progress=_broadcast)
+
+    # Stubbed rather than left to reach the real module: without a db session it would
+    # raise, get swallowed by the best-effort guard, and the test would pass while
+    # asserting nothing about the firewall leg.
+    jobs.firewall_calls = []
+
+    async def _refresh(db, placement=None):
+        jobs.firewall_calls.append(placement)
+        if firewall is not None:
+            return firewall()
+        return {}
+
+    _stub("web_dashboard.services.rancher_node_service",
+          refresh_rancher_firewall=_refresh)
     return jobs
 
 
@@ -306,6 +320,139 @@ def test_the_worker_fails_the_job_with_the_reason():
     asyncio.run(k.run_rancher_entitle_register(None, job_id="j2", action="register"))
     assert jobs.completed == []
     assert len(jobs.failed) == 1 and "not running" in jobs.failed[0][1]
+
+
+# ── Allow-listing Entitle on the node firewall ───────────────────────────────
+# A `private = false` integration is dialled directly by Entitle's cloud, so its
+# egress addresses hit the node's allow-list like a Gateway's /32 does. Registration
+# talks to Entitle's API and never to the node, so it succeeds whether or not the
+# node admits Entitle -- which is why the register job has to do this and has to say
+# when it could not.
+
+def _egress(cidrs=(), region="us"):
+    from web_dashboard.services import entitle_egress
+    _stub("web_dashboard.services.entitle_egress",
+          cidrs=lambda: list(cidrs),
+          configured=lambda: bool(cidrs),
+          region=lambda: region,
+          unconfigured_warning=(lambda: "" if cidrs else
+                                entitle_egress.unconfigured_warning.__doc__ and
+                                "ranges are not known ... entitle_source_cidrs"))
+
+
+def test_the_firewall_is_reapplied_after_a_register():
+    """Otherwise the ranges only land on the next node DEPLOY, and the registration
+    the operator just performed still cannot grant."""
+    _registered()
+    _entitle()
+    jobs = _worker_stubs()
+    _egress(cidrs=["203.0.113.0/24"])
+    asyncio.run(k.run_rancher_entitle_register(None, job_id="j1", action="register"))
+    assert len(jobs.firewall_calls) == 1
+    assert jobs.completed == ["j1"]
+
+
+def test_the_firewall_is_reapplied_after_a_deregister_too():
+    """Symmetric: the ranges were only ever open while the integration existed."""
+    _registered(entitle_rancher_integration_id="int-1",
+                entitle_rancher_tfstate="{state-1}")
+    _entitle()
+    jobs = _worker_stubs()
+    _egress(cidrs=["203.0.113.0/24"])
+    asyncio.run(k.run_rancher_entitle_register(None, job_id="j2", action="deregister"))
+    assert len(jobs.firewall_calls) == 1
+
+
+def test_a_firewall_failure_does_not_fail_a_real_registration():
+    """The integration exists either way; failing the job would report a registration
+    that DID happen as not having happened. The outcome goes in the result instead."""
+    _registered()
+    _entitle()
+
+    def _boom():
+        raise RuntimeError("403 on compute.firewalls.update")
+
+    jobs = _worker_stubs(firewall=_boom)
+    _egress(cidrs=["203.0.113.0/24"])
+    asyncio.run(k.run_rancher_entitle_register(None, job_id="j3", action="register"))
+    assert jobs.completed == ["j3"], "a firewall hiccup must not fail the job"
+
+
+def test_registering_with_unknown_ranges_warns_in_the_job_result():
+    """The one case where the job completes and the feature still does not work: the
+    integration is live and healthy-looking while being unable to grant. Nothing
+    downstream will say so, so the result has to."""
+    _registered()
+    _entitle()
+    jobs = _worker_stubs()
+    _egress(cidrs=[])
+    asyncio.run(k.run_rancher_entitle_register(None, job_id="j4", action="register"))
+    assert jobs.completed == ["j4"]
+    svc_src = open(os.path.join(_ROOT, "web_dashboard", "services", "k8s_service.py"),
+                   encoding="utf-8").read()
+    body = svc_src.split("async def run_rancher_entitle_register(")[1]
+    assert "reachability_warning" in body
+
+
+def test_agent_brokered_mode_does_not_warn():
+    """In private mode the agent reaches the node from inside, so having no inbound
+    ranges is the correct state and warning about it would be noise."""
+    _registered(entitle_rancher_private=True)
+    _entitle()
+    jobs = _worker_stubs()
+    _egress(cidrs=[])
+    asyncio.run(k.run_rancher_entitle_register(None, job_id="j5", action="register"))
+    assert jobs.completed == ["j5"]
+
+
+# ── The range resolver ───────────────────────────────────────────────────────
+
+def _real_egress():
+    """The REAL resolver, re-imported.
+
+    `_egress()` above installs a fake `entitle_egress` for the worker tests, and it
+    stays in sys.modules — so importing here without evicting it first would hand back
+    the stub and the assertions would be testing the lambdas. Test order makes that a
+    coin flip rather than a reliable failure, which is worse.
+    """
+    import importlib
+    sys.modules.pop("web_dashboard.services.entitle_egress", None)
+    parent = sys.modules.get("web_dashboard.services")
+    if parent is not None and hasattr(parent, "entitle_egress"):
+        delattr(parent, "entitle_egress")
+    _stub("web_dashboard.services.config_service",
+          get=lambda key, default="", workgroup=None: CONF.get(key, default),
+          get_bool=lambda key, default=False: bool(CONF.get(key, default)),
+          set=lambda key, value: CONF.__setitem__(key, value))
+    return importlib.import_module("web_dashboard.services.entitle_egress")
+
+
+def test_the_region_comes_from_the_api_url():
+    """A second config key for the same fact is a second thing to get wrong, and the
+    API URL is already the regional one."""
+    eg = _real_egress()
+    CONF.clear()
+    CONF["entitle_api_url"] = "https://api.eu.entitle.io/v1"
+    assert eg.region() == "eu"
+    # An unrecognised or bare host falls back rather than guessing a region.
+    CONF["entitle_api_url"] = "https://api.entitle.io"
+    assert eg.region() == "us"
+    CONF["entitle_api_url"] = ""
+    assert eg.region() == "us"
+
+
+def test_the_operator_override_wins_and_an_empty_set_reads_as_unknown():
+    eg = _real_egress()
+    CONF.clear()
+    assert eg.cidrs() == [], "the published table ships empty on purpose"
+    assert eg.configured() is False
+    warn = eg.unconfigured_warning()
+    assert "entitle_source_cidrs" in warn and "time out" in warn, warn
+
+    CONF["entitle_source_cidrs"] = "203.0.113.0/24, 198.51.100.7/32"
+    assert eg.cidrs() == ["198.51.100.7/32", "203.0.113.0/24"], "sorted + deduped"
+    assert eg.configured() is True
+    assert eg.unconfigured_warning() == ""
 
 
 def test_both_actions_are_the_declared_ones():

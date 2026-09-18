@@ -1468,14 +1468,33 @@
               off (<code>entitle_registration_enabled</code> in Settings → Integrations), so this
               node is not requestable.
             </p>
-            <!-- The silent-failure mode worth naming: registration and reachability are
-                 separate problems, and only the first one reports itself. -->
-            <p x-show="rancherEntitle.integration_id" x-cloak class="text-gray-400">
-              Entitle's cloud connects to this node over its <strong>public</strong> IP, so its
-              egress ranges have to be in <code>rancher_allowed_source_cidrs</code> — otherwise
-              registration succeeds and every grant then fails at connect time. Set
-              <code>entitle_rancher_private</code> to broker through the shared Entitle agent
-              instead.
+            <!-- Reachability. Registering opens the firewall to Entitle automatically,
+                 so the only thing left to say is which ranges — or that we do not know
+                 them, which is the one case where a healthy-looking integration still
+                 cannot grant. Three states, because "empty" means UNKNOWN here, never
+                 "none needed". -->
+            <p x-show="rancherEntitle.integration_id && rancherEntitle.private" x-cloak
+               class="text-gray-400">
+              Agent-brokered (<code>entitle_rancher_private</code>): the shared Entitle agent
+              reaches this node from inside, so no inbound ranges are opened for Entitle.
+            </p>
+            <p x-show="rancherEntitle.integration_id && !rancherEntitle.private
+                       && rancherEntitle.source_cidrs.length" x-cloak class="text-gray-400">
+              Entitle's cloud dials this node directly, and its egress ranges are allowed on the
+              node firewall for as long as the integration exists:
+              <code x-text="rancherEntitle.source_cidrs.join(', ')"></code>. Deregistering takes
+              them away again.
+            </p>
+            <p x-show="rancherEntitle.integration_id && !rancherEntitle.private
+                       && !rancherEntitle.source_cidrs.length" x-cloak
+               class="text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">
+              <span class="font-medium">Registered, but Entitle cannot reach it.</span>
+              Entitle's cloud dials this node directly and its egress ranges are not known to
+              this dashboard, so the firewall was not opened to them. Registration succeeded
+              regardless — it talks to Entitle's API, not to the node — and a grant will time
+              out until you set <code>entitle_source_cidrs</code> (Entitle's published
+              allow-list for your region) or switch to agent-brokered mode with
+              <code>entitle_rancher_private</code>.
             </p>
           </div>
         </template>
@@ -1960,7 +1979,8 @@ function containersDashboard() {
     // Entitle registration state for the node row. Seeded with the shape GET /rancher
     // returns so every x-show on the row reads a defined field before the first fetch
     // lands — an undefined there reads as false and the control just vanishes.
-    rancherEntitle: { enabled: false, integration_id: '', can_register: false },
+    rancherEntitle: { enabled: false, integration_id: '', can_register: false,
+                      source_cidrs: [], private: false },
     rancherEntitlePending: false,
     rancherImportName: '',
     rancherManifestCmd: '',
@@ -2444,6 +2464,9 @@ function containersDashboard() {
           enabled: !!data.entitle_enabled,
           integration_id: data.entitle_integration_id || '',
           can_register: !!data.entitle_can_register,
+          // Defaulted to [] rather than left undefined: the card calls .length on it.
+          source_cidrs: data.entitle_source_cidrs || [],
+          private: !!data.entitle_private,
         };
       } catch (e) {
         this.rancherError = e.message;

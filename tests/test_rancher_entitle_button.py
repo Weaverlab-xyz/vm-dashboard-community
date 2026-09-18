@@ -278,14 +278,103 @@ def test_the_page_explains_all_three_states():
     assert "entitle_registration_enabled" in block
 
 
-def test_the_page_warns_about_the_reachability_failure():
-    """Registration talks to Entitle's API, not to the node, so it succeeds regardless
-    and the grant fails later — which reads as a broken integration rather than a
-    firewall rule."""
+def test_the_page_distinguishes_all_three_reachability_states():
+    """"Empty" means UNKNOWN here, never "none needed" — so agent-brokered, allowed,
+    and ranges-unknown have to be three separate messages. Collapsing the last two is
+    how a registration that cannot grant reads as healthy."""
     page = _read(_PAGE)
     block = page.split("Entitle registration state")[1].split("Reachability is governed")[0]
-    assert "rancher_allowed_source_cidrs" in block
-    assert "entitle_rancher_private" in block
+    assert "rancherEntitle.private" in block, "agent-brokered needs no ranges at all"
+    assert "rancherEntitle.source_cidrs.length" in block
+    assert "!rancherEntitle.source_cidrs.length" in block
+    assert "entitle_source_cidrs" in block, "name the key that fixes it"
+
+
+def test_the_unknown_ranges_state_says_registration_still_succeeded():
+    """The confusing part, and the reason the warning exists: the integration is real
+    and healthy-looking while being unable to grant."""
+    page = _read(_PAGE)
+    block = page.split("Entitle registration state")[1].split("Reachability is governed")[0]
+    # Whitespace-normalised: the copy is hard-wrapped, so a phrase check against the
+    # raw markup fails on wherever the line happened to break.
+    warn = " ".join(block.split("!rancherEntitle.source_cidrs.length")[1].split())
+    assert "Entitle's API" in warn
+    assert "time out" in warn
+
+
+def test_the_firewall_merge_admits_entitle():
+    """The whole point of the allow-listing: Entitle's ranges have to reach the merged
+    set, or registering opens nothing and every grant times out."""
+    node = _read(os.path.join(_ROOT, "web_dashboard", "services",
+                              "rancher_node_service.py"))
+    assert "def _entitle_cidrs(" in node
+    merge = node.split("async def refresh_rancher_firewall(")[1].split("\ndef ")[0]
+    assert "_entitle_cidrs()" in merge
+    status = node.split("def firewall_status(")[1].split("\ndef ")[0]
+    assert "_entitle_cidrs()" in status
+    assert '"entitle_cidrs"' in status, "attribute the ranges in the readout"
+
+
+def test_the_ranges_are_only_open_while_an_integration_exists():
+    """Symmetry with deregister: no reason to open the node to Entitle before there is
+    anything to grant, and a deregister has to close it again."""
+    node = _read(os.path.join(_ROOT, "web_dashboard", "services",
+                              "rancher_node_service.py"))
+    body = node.split("def _entitle_cidrs(")[1].split("\ndef ")[0]
+    assert "entitle_rancher_integration_id" in body
+
+
+def test_agent_brokered_mode_opens_nothing():
+    """In private mode the agent reaches the node from inside and Entitle's cloud never
+    touches it, so these would be holes that buy nothing."""
+    node = _read(os.path.join(_ROOT, "web_dashboard", "services",
+                              "rancher_node_service.py"))
+    body = node.split("def _entitle_cidrs(")[1].split("\ndef ")[0]
+    assert "entitle_rancher_private" in body
+
+
+def test_the_register_job_reapplies_the_firewall():
+    """Otherwise the ranges only land on the next node deploy, and the registration the
+    operator just performed still cannot grant."""
+    svc = _read(os.path.join(_ROOT, "web_dashboard", "services", "k8s_service.py"))
+    body = svc.split("async def run_rancher_entitle_register(")[1].split("\nasync def ")[0]
+    assert "refresh_rancher_firewall" in body
+
+
+def test_the_register_job_reports_an_unresolvable_allow_list():
+    """The one case where the job completes and the feature still does not work, so it
+    has to be in the RESULT an operator opens — nothing downstream will say it."""
+    svc = _read(os.path.join(_ROOT, "web_dashboard", "services", "k8s_service.py"))
+    body = svc.split("async def run_rancher_entitle_register(")[1].split("\nasync def ")[0]
+    assert "unconfigured_warning" in body
+    assert "reachability_warning" in body
+
+
+def test_the_published_table_is_not_quietly_populated_with_guesses():
+    """Inbound-firewall values: too narrow drops grants, too broad exposes a management
+    plane. If a range ever lands in this table it must come from BeyondTrust's
+    documented list — this test failing is the prompt to check that it did, and to
+    delete this test once the provenance is recorded elsewhere."""
+    egress = _read(os.path.join(_ROOT, "web_dashboard", "services", "entitle_egress.py"))
+    table = egress.split("_PUBLISHED: dict = {")[1].split("}")[0]
+    assert not re.search(r"\d+\.\d+\.\d+\.\d+", table), (
+        "a range appeared in the published table — confirm it came from the documented "
+        "allow-list, then update this test")
+
+
+def test_the_override_wins_over_the_published_list():
+    """A tenant on dedicated addresses, or one that learns of a change before this file
+    does, must not be blocked waiting on a release."""
+    egress = _read(os.path.join(_ROOT, "web_dashboard", "services", "entitle_egress.py"))
+    body = egress.split("def cidrs(")[1].split("\ndef ")[0]
+    assert body.index("entitle_source_cidrs") < body.index("_PUBLISHED")
+
+
+def test_an_empty_range_set_is_reported_as_unknown_not_as_fine():
+    """The distinction the whole warning rests on."""
+    egress = _read(os.path.join(_ROOT, "web_dashboard", "services", "entitle_egress.py"))
+    assert "def configured(" in egress
+    assert "def unconfigured_warning(" in egress
 
 
 def test_the_docs_cover_the_buttons_and_the_reachability_trap():
@@ -298,8 +387,12 @@ def test_the_docs_cover_the_buttons_and_the_reachability_trap():
     flat = " ".join(re.sub(r"(?m)^\s*>\s?", "", section).split())
     assert "Register in Entitle" in flat
     assert "Deregister" in flat
-    assert "rancher_allowed_source_cidrs" in flat
     assert "k8s:write" in flat, "say which permission the buttons need"
+    # The allow-listing, and the key that drives it. Deliberately NOT
+    # rancher_allowed_source_cidrs: registering now opens the firewall to Entitle
+    # itself, so pointing operators at the manual CSV would document the old workaround.
+    assert "entitle_source_cidrs" in flat
+    assert "entitle_rancher_private" in flat, "the mode where no ranges are needed"
     # And the hazard, so the hidden-Register behaviour reads as deliberate rather than
     # as an oversight someone should "fix".
     assert "Terraform state" in flat or "tfstate" in flat

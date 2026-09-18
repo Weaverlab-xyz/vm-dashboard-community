@@ -2499,8 +2499,17 @@ async def register_rancher_in_entitle(action: str = "register") -> None:
 async def run_rancher_entitle_register(db: Session, *, job_id: str,
                                        action: str = "register") -> None:
     """Worker entry for a ``rancher_entitle_register`` job: drive
-    :func:`register_rancher_in_entitle` with Job tracking."""
-    from . import job_service
+    :func:`register_rancher_in_entitle` with Job tracking, then re-apply the node's
+    firewall so Entitle can actually reach what it just registered.
+
+    The firewall half is not incidental. A `private = false` integration is dialled
+    DIRECTLY by Entitle's cloud, and its egress ranges are a source hitting the node's
+    allow-list exactly like a Gateway's /32 — but registration talks to Entitle's API,
+    never to the node, so it succeeds whether or not the node admits Entitle. Without
+    this the first symptom is a GRANT that times out, which reads like a broken
+    integration rather than a missing firewall rule.
+    """
+    from . import config_service, entitle_egress, job_service
     from ..api.websocket import broadcast_progress
     job_service.set_running(db, job_id)
     try:
@@ -2510,7 +2519,36 @@ async def run_rancher_entitle_register(db: Session, *, job_id: str,
         job_service.set_failed(db, job_id, str(exc))
         logger.exception("entitle rancher register job failed action=%s", action)
         return
-    job_service.set_completed(db, job_id)
+
+    # Both directions: register ADDS Entitle's ranges, deregister takes them away
+    # again. Best-effort — the integration is real either way, and failing the job
+    # here would report a registration that did happen as not having happened — but
+    # the outcome is carried in the result rather than left in the worker's log.
+    result: dict = {"action": action}
+    private = config_service.get_bool("entitle_rancher_private", False)
+    try:
+        await broadcast_progress(job_id, 70, "Updating the node firewall…")
+        from . import rancher_node_service
+        fw = await rancher_node_service.refresh_rancher_firewall(db)
+        result["firewall"] = fw.get("skipped") or "updated"
+    except Exception as exc:
+        logger.warning("Rancher firewall refresh after entitle %s failed "
+                       "(continuing): %s", action, exc)
+        result["firewall_warning"] = (
+            f"The node firewall was not re-applied: {exc} Re-apply it from "
+            f"Settings → Kubernetes, or redeploy the node.")
+
+    if action == "register" and not private:
+        gap = entitle_egress.unconfigured_warning()
+        if gap:
+            # The one case where the job completes and the feature still does not
+            # work. Said here, in the result an operator opens, because nothing
+            # downstream will say it: the integration is live and looks healthy.
+            logger.warning("Rancher entitle register: %s", gap)
+            result["reachability_warning"] = gap
+        else:
+            result["entitle_source_cidrs"] = entitle_egress.cidrs()
+    job_service.set_completed(db, job_id, result)
 
 
 async def run_tunnel(db: Session, *, cluster_id: str, job_id: str, action: str = "register",

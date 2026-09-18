@@ -918,7 +918,7 @@ async def get_rancher_node(
     and report whether the integration is configured + its pinned server URL, plus
     the node's Entitle registration state for the row's Register / Deregister
     actions (which POST to the k8s router's ``/rancher/entitle-register``)."""
-    from ..services import config_service, managed_node_service
+    from ..services import config_service, entitle_egress, managed_node_service
     from ..services.gcp_service import GCPError
 
     spec = managed_node_service.RANCHER
@@ -959,6 +959,12 @@ async def get_rancher_node(
         # deliberately the ONE implementation of this rule (see its docstring), and the
         # register route gates on exactly this scope.
         "entitle_can_register": has_permission(current_user, "k8s", "write"),
+        # What the firewall is (or would be) opened to for Entitle's cloud, and
+        # whether that even applies. Read from the resolver rather than from the
+        # config key directly, so the card shows the same answer the firewall merge
+        # uses — including the per-region published fallback.
+        "entitle_source_cidrs": entitle_egress.cidrs(),
+        "entitle_private": config_service.get_bool("entitle_rancher_private", False),
     }
     if not account:
         # Not configured yet — return an empty, not-configured shell (no 503, so

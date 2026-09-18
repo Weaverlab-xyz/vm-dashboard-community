@@ -439,20 +439,44 @@ Note the permission: that route is on the k8s router and requires `k8s:write`, n
 the `containers:write` the rest of the Rancher tab uses. The buttons are hidden
 from anyone who lacks it rather than shown and then refused.
 
-### Reachability — the failure that does not announce itself
+### Reachability — Entitle is allow-listed for you
 
-Because the node is publicly reachable, Entitle's cloud connects to it directly
-(no agent token). **That means Entitle's egress ranges have to be allowed by
-`rancher_allowed_source_cidrs`.** Registration talks to Entitle's API, not to your
-node, so it succeeds either way — and a grant then fails at connect time, which
-reads like a broken integration rather than a firewall rule. Nothing auto-adds
-these; the dashboard cannot discover them.
+Because the node is publicly reachable, Entitle's cloud connects to it **directly**
+(no agent token). So its egress addresses are a source hitting the node's
+source-restricted firewall, exactly like a Gateway's `/32` is.
+
+**Registering allow-lists Entitle automatically.** The register job re-applies the
+node firewall with Entitle's ranges merged in, and deregistering removes them
+again — they are only ever open while an integration exists. The breakdown in
+**Settings → Kubernetes → Effective firewall allow-list** names them as
+`Entitle egress` so they don't read as unexplained entries.
+
+This matters more than it sounds, because the failure is silent otherwise:
+registration talks to Entitle's **API**, never to your node, so it succeeds whether
+or not the node admits Entitle — and the first symptom is a *grant* that times out,
+which reads like a broken integration rather than a firewall rule.
+
+Where the ranges come from, in order:
+
+| Source | Notes |
+|---|---|
+| `entitle_source_cidrs` | CSV of CIDRs; a bare address needs its `/32`. Always wins, so a tenant on dedicated addresses — or one that learns of a change first — is never blocked on a dashboard release |
+| the published list | BeyondTrust's documented allow-list, keyed off the region already in `entitle_api_url` (`api.us.entitle.io` → `us`), in [`services/entitle_egress.py`](../../web_dashboard/services/entitle_egress.py) |
+
+> **The published table ships empty**, deliberately. These are inbound-firewall
+> values: too narrow silently drops grants, too broad opens a management plane to
+> strangers, and they are not discoverable — the API host is behind a load balancer
+> and is not the connector's egress. So until the documented list is filled in,
+> `entitle_source_cidrs` **is** the source, and the register job says so in its
+> result rather than reporting a registration that cannot grant as healthy. The node
+> row says the same thing.
 
 For tenants who lock the node behind CIDRs that Entitle can't traverse, set
 `entitle_rancher_private = true` to attach the shared Entitle agent token instead.
-It is an env/config-only switch today — it appears in neither the Settings panel
-nor `EntitleFeatureConfig`. See the [Entitle guide](entitle.md) for enabling
-resource registration.
+The agent reaches the node from inside, so no inbound ranges are opened at all and
+`entitle_source_cidrs` is irrelevant. It is an env/config-only switch today — it
+appears in neither the Settings panel nor `EntitleFeatureConfig`. See the
+[Entitle guide](entitle.md) for enabling resource registration.
 
 A node **teardown** deregisters for you before the VM goes away, and clears
 `entitle_rancher_integration_id` either way — so the chip reverts on its own.
@@ -548,7 +572,8 @@ apply immediately.
 | `rancher_ui_jumpoint_egress_ip` | (runtime) | Captured egress IP of the SHARED Web-Jump Gateway (auto-added to the firewall). Gateways you deploy yourself come from the gateway registry, so every cluster node is allowed |
 | `rancher_ui_vault_account_group_id` | `""` | PRA Vault account group (numeric id) the admin credential is vaulted into for Web-Jump injection; usually chosen per-deploy |
 | `rancher_ui_vault_account_id` | (runtime) | PRA Vault account id created for the admin credential; cleared on teardown |
-| `entitle_rancher_private` | `false` | Attach the Entitle agent token (node not reachable from Entitle's cloud). Env/config only — no Settings widget |
+| `entitle_source_cidrs` | `""` | CSV of Entitle's own egress CIDRs, merged into the node firewall while a directly-registered integration exists. Blank falls back to the published per-region list, which ships empty — so on most installs this key is the source |
+| `entitle_rancher_private` | `false` | Attach the Entitle agent token (node not reachable from Entitle's cloud). Makes `entitle_source_cidrs` irrelevant — no inbound ranges are opened. Env/config only — no Settings widget |
 | `entitle_rancher_integration_id` | (runtime) | The registered Entitle integration; blank = not registered. Drives the node row's `Entitle ✓` chip and hides **Register** so a re-register cannot orphan it |
 | `entitle_rancher_tfstate` | (runtime) | Terraform state for that integration, and the only handle `deregister` has on it. Cleared on teardown |
 
