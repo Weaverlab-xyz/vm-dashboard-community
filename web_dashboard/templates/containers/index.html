@@ -1403,6 +1403,33 @@
                     </span>
                   </td>
                   <td class="px-4 py-3 text-sm text-right">
+                    <!-- Entitle registration. Rancher has a NATIVE connector, so this is a
+                         direct integration — no Cloud Function adapter, unlike Portainer.
+
+                         The Register/Deregister split is the SAFETY guard, not just
+                         cosmetics: register_rancher_in_entitle is not idempotent, and a
+                         second register overwrites entitle_rancher_tfstate while leaving the
+                         first integration alive in Entitle, where deregister can no longer
+                         reach it. Gating Register on a blank integration_id is what makes
+                         that unreachable from the UI. Same x-show shape the Databases page
+                         uses for its native-connector pair. -->
+                    <span x-show="rancherEntitle.integration_id" x-cloak
+                          :title="'Entitle integration ' + rancherEntitle.integration_id"
+                          class="mr-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-fuchsia-100 text-fuchsia-700 ring-1 ring-fuchsia-200">
+                      Entitle ✓
+                    </span>
+                    <button @click="registerRancherEntitle()"
+                            x-show="rancherEntitle.enabled && rancherEntitle.can_register
+                                    && !rancherEntitle.integration_id && n.status === 'RUNNING'"
+                            :disabled="rancherEntitlePending" x-cloak
+                            title="Register this Rancher as an Entitle integration so users request just-in-time Rancher RBAC in Entitle"
+                            class="mr-2 text-xs px-2 py-1 bg-fuchsia-600 hover:bg-fuchsia-700 disabled:opacity-50 text-white rounded font-medium">Register in Entitle</button>
+                    <button @click="deregisterRancherEntitle()"
+                            x-show="rancherEntitle.enabled && rancherEntitle.can_register
+                                    && rancherEntitle.integration_id"
+                            :disabled="rancherEntitlePending" x-cloak
+                            title="Remove this Rancher's Entitle integration — the node itself is unaffected"
+                            class="mr-2 text-xs px-2 py-1 text-fuchsia-700 hover:underline disabled:opacity-50">Deregister</button>
                     <button @click="stopRancher(n)"
                             :disabled="rancherActionPending === n.name"
                             class="text-red-600 hover:underline disabled:opacity-40">Stop</button>
@@ -1415,6 +1442,63 @@
         <p x-show="rancherLoginHint" class="mt-2 text-xs text-gray-600" x-cloak>
           <span class="font-medium text-gray-700">Access:</span> <span x-text="rancherLoginHint"></span>
         </p>
+
+        <!-- ── Entitle registration state ───────────────────────────────────
+             Three genuinely different situations, and the remedy differs in each, so
+             they get three messages rather than one hedged one. The middle case is the
+             one this whole control exists for: a deploy auto-registers best-effort and
+             only logs a warning, so a node can sit here unregistered with nothing
+             saying so. -->
+        <template x-if="rancherNodes.length">
+          <div class="mt-2 text-xs space-y-1">
+            <p x-show="rancherEntitle.integration_id" x-cloak class="text-gray-600">
+              <span class="font-medium text-gray-700">Entitle:</span> registered as
+              <code x-text="rancherEntitle.integration_id"></code> — users request
+              just-in-time Rancher RBAC in Entitle, which mints an ephemeral account per grant.
+            </p>
+            <p x-show="rancherEntitle.enabled && !rancherEntitle.integration_id" x-cloak
+               class="text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">
+              <span class="font-medium">Entitle: not registered.</span>
+              A node deploy registers automatically, and it is best-effort — so either that
+              attempt failed, or <code>entitle_registration_enabled</code> was switched on
+              afterwards. Use <strong>Register in Entitle</strong> above; track it in Jobs.
+            </p>
+            <p x-show="!rancherEntitle.enabled" x-cloak class="text-gray-400">
+              <span class="font-medium text-gray-500">Entitle:</span> resource registration is
+              off (<code>entitle_registration_enabled</code> in Settings → Integrations), so this
+              node is not requestable.
+            </p>
+            <!-- Reachability. Registering opens the firewall to Entitle automatically,
+                 so the only thing left to say is which ranges — or that we do not know
+                 them, which is the one case where a healthy-looking integration still
+                 cannot grant. Three states, because "empty" means UNKNOWN here, never
+                 "none needed". -->
+            <p x-show="rancherEntitle.integration_id && rancherEntitle.private" x-cloak
+               class="text-gray-400">
+              Agent-brokered (<code>entitle_rancher_private</code>): the shared Entitle agent
+              reaches this node from inside, so no inbound ranges are opened for Entitle.
+            </p>
+            <p x-show="rancherEntitle.integration_id && !rancherEntitle.private
+                       && rancherEntitle.source_cidrs.length" x-cloak class="text-gray-400">
+              Entitle's cloud dials this node directly, and its egress ranges are allowed on the
+              node firewall for as long as the integration exists:
+              <code x-text="rancherEntitle.source_cidrs.join(', ')"></code>. Deregistering takes
+              them away again.
+            </p>
+            <p x-show="rancherEntitle.integration_id && !rancherEntitle.private
+                       && !rancherEntitle.source_cidrs.length" x-cloak
+               class="text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">
+              <span class="font-medium">Registered, but Entitle cannot reach it.</span>
+              Entitle's cloud dials this node directly and its egress ranges are not known to
+              this dashboard, so the firewall was not opened to them. Registration succeeded
+              regardless — it talks to Entitle's API, not to the node — and a grant will time
+              out until you set <code>entitle_source_cidrs</code> (Entitle's published
+              allow-list for your region) or switch to agent-brokered mode with
+              <code>entitle_rancher_private</code>.
+            </p>
+          </div>
+        </template>
+
         <p class="mt-2 text-xs text-gray-400">
           Reachability is governed by the <code>rancher_allowed_source_cidrs</code> firewall rule (Settings).
           Stop deletes the VM + firewall and clears the node's runtime config.
@@ -1892,6 +1976,12 @@ function containersDashboard() {
     rancherRegions: [],
     deployForm: { cloud: 'gcp', region: '', zone: '', web_jump_enabled: false, jump_group: '', jumpoint_name: '', vault_account_group_id: null },
     rancherActionPending: null,
+    // Entitle registration state for the node row. Seeded with the shape GET /rancher
+    // returns so every x-show on the row reads a defined field before the first fetch
+    // lands — an undefined there reads as false and the control just vanishes.
+    rancherEntitle: { enabled: false, integration_id: '', can_register: false,
+                      source_cidrs: [], private: false },
+    rancherEntitlePending: false,
     rancherImportName: '',
     rancherManifestCmd: '',
     rancherImporting: false,
@@ -2367,6 +2457,17 @@ function containersDashboard() {
         this.rancherNodes = data.nodes || [];
         this.rancherServerUrl = data.server_url || '';
         this.rancherLoginHint = data.login_hint || '';
+        // Off the payload this call already fetches — one source, so the buttons and
+        // the endpoint that serves them cannot disagree about whether a registration
+        // exists (which is what keeps the non-idempotent re-register unreachable).
+        this.rancherEntitle = {
+          enabled: !!data.entitle_enabled,
+          integration_id: data.entitle_integration_id || '',
+          can_register: !!data.entitle_can_register,
+          // Defaulted to [] rather than left undefined: the card calls .length on it.
+          source_cidrs: data.entitle_source_cidrs || [],
+          private: !!data.entitle_private,
+        };
       } catch (e) {
         this.rancherError = e.message;
         this.rancherNodes = [];
@@ -2431,6 +2532,53 @@ function containersDashboard() {
       } catch (e) {
         toast(e.message, 'error');
         this.rancherActionPending = null;
+      }
+    },
+
+    // ── The Rancher node's Entitle registration ────────────────────────────
+    // Both post to the K8S router, not the containers one: the route is node-scoped
+    // Rancher RBAC and lives with the rest of the Entitle registration endpoints. That
+    // is also why the button is gated on `can_register` (k8s:write) rather than the
+    // containers:write every other control on this tab uses.
+
+    async registerRancherEntitle() {
+      if (!confirm(`Register this Rancher as an Entitle integration?
+
+`
+        + `Entitle's native Rancher connector mints an EPHEMERAL account per grant and `
+        + `removes it on revoke, so users request just-in-time Rancher RBAC rather than `
+        + `holding standing access. No Cloud Function is involved.
+
+`
+        + `Entitle reaches the node over its public IP, so its egress ranges must be allowed `
+        + `by rancher_allowed_source_cidrs. Track progress in Jobs.`)) return;
+      this.rancherEntitlePending = true;
+      try {
+        const resp = await API.post('/api/k8s/rancher/entitle-register', { action: 'register' });
+        window.location.href = `/jobs/${resp.job_id}`;
+      } catch (e) {
+        toast(e.message || 'Entitle registration failed.', 'error');
+        this.rancherEntitlePending = false;
+      }
+    },
+
+    async deregisterRancherEntitle() {
+      if (!confirm(`Deregister this Rancher from Entitle?
+
+`
+        + `This destroys the Entitle integration. The node, its PRA Web Jump and any imported `
+        + `clusters are unaffected, and accounts Entitle already granted are left alone — `
+        + `revoke those in Entitle first if you want them gone.
+
+`
+        + `A node teardown does this for you; doing it here keeps the node.`)) return;
+      this.rancherEntitlePending = true;
+      try {
+        const resp = await API.post('/api/k8s/rancher/entitle-register', { action: 'deregister' });
+        window.location.href = `/jobs/${resp.job_id}`;
+      } catch (e) {
+        toast(e.message || 'Entitle deregistration failed.', 'error');
+        this.rancherEntitlePending = false;
       }
     },
 

@@ -1820,6 +1820,14 @@ class Settings(BaseSettings):
     # accounts / PostgreSQL / MySQL / SQL Server) via the entitleio/entitle
     # Terraform provider. OFF by default = no registration calls.
     entitle_registration_enabled: bool = False
+    # Entitle's OWN egress ranges — the source addresses its cloud dials a directly
+    # registered (private=False) target from, so the target's firewall has to admit
+    # them. CSV of CIDRs; a bare address needs its /32. Blank falls back to the
+    # published list for the tenant's region in services/entitle_egress.py, which is
+    # empty until BeyondTrust's documented list is pasted in -- so on most installs
+    # this key IS the source. Not discoverable: the API host is behind a load balancer
+    # and is not the connector's egress. See services/entitle_egress.py.
+    entitle_source_cidrs: str = ""
     entitle_api_key: str = ""                       # entitleio/entitle TF provider key (ENTITLE_API_KEY); falls back to entitle_api_token
     # API base for the TF provider. Blank does NOT mean the provider's own built-in
     # default (the unprefixed https://api.entitle.io) — _provider_endpoint derives it

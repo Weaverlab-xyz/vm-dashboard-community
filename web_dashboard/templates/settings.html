@@ -5297,6 +5297,12 @@
                   <span class="text-gray-500">Dashboard egress:</span>
                   <span class="ml-1 font-mono text-gray-700" x-text="rancherFirewall.dashboard_egress_ip"></span>
                 </div>
+                <!-- Entitle's own egress, added while a directly-registered integration
+                     exists. Named so the ranges do not read as unexplained entries. -->
+                <div class="mb-1" x-show="rancherFirewall.entitle_cidrs && rancherFirewall.entitle_cidrs.length">
+                  <span class="text-gray-500">Entitle egress:</span>
+                  <span class="ml-1 font-mono text-gray-700" x-text="(rancherFirewall.entitle_cidrs || []).join(', ')"></span>
+                </div>
                 <div class="mb-1" x-show="rancherFirewall.gateway_cidrs && rancherFirewall.gateway_cidrs.length">
                   <span class="text-gray-500">Web-Jump Gateways:</span>
                   <span class="ml-1 font-mono text-gray-700" x-text="(rancherFirewall.gateway_cidrs || []).join(', ')"></span>

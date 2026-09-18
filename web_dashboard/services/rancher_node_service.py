@@ -102,6 +102,32 @@ def _jumpoint_cidrs(db=None) -> list[str]:
     return managed_node_service.jumpoint_cidrs(_SPEC, db)
 
 
+def _entitle_cidrs() -> list[str]:
+    """Ranges for Entitle's own cloud — but only when it actually dials this node.
+
+    A registered integration with ``private = false`` means Entitle connects
+    DIRECTLY, so its egress addresses are a source hitting this firewall exactly like
+    a Gateway's /32 is. Nothing else adds them, and their absence does not announce
+    itself: registration talks to Entitle's API rather than to the node, so it
+    succeeds either way and the first symptom is a GRANT that times out.
+
+    Two conditions, and both matter:
+
+      * an integration exists (``entitle_rancher_integration_id``). No reason to open
+        the node to Entitle before there is anything to grant, and dropping the ranges
+        again on deregister is the symmetric half of that.
+      * it is NOT agent-brokered (``entitle_rancher_private``). In private mode the
+        shared Entitle agent reaches the node from inside, and Entitle's cloud never
+        touches it — so admitting these would be holes that buy nothing.
+    """
+    if not (config_service.get("entitle_rancher_integration_id") or "").strip():
+        return []
+    if config_service.get_bool("entitle_rancher_private", False):
+        return []
+    from . import entitle_egress
+    return entitle_egress.cidrs()
+
+
 def _dashboard_cidr() -> list[str]:
     """/32 for the DASHBOARD's own public egress IP.
 
@@ -185,7 +211,8 @@ async def refresh_rancher_firewall(db, placement=None) -> dict:
 
     The merged set is the manual CSV (``_allowed_cidrs``) plus the auto-discovered
     dashboard-provisioned cluster egress /32s plus a /32 for every Gateway that can
-    broker the Web Jump. Called from every lifecycle event that changes the set (node
+    broker the Web Jump plus Entitle's own egress ranges when a directly-registered
+    integration exists. Called from every lifecycle event that changes the set (node
     deploy, cluster provision/import/decommission, Web Jump enable). Fail-closed
     and idempotent behavior is inherited from the per-cloud apply (empty set → rule
     removed / every ingress permission revoked; ``0.0.0.0/0`` from allow_open dedupes
@@ -201,7 +228,8 @@ async def refresh_rancher_firewall(db, placement=None) -> dict:
     if not p["account"]:
         return {"skipped": f"no {cloud} account configured"}
     merged = sorted(set(_allowed_cidrs()) | set(_auto_cluster_cidrs(db))
-                    | set(_jumpoint_cidrs(db)) | set(_dashboard_cidr()) | set(_runner_cidr()))
+                    | set(_jumpoint_cidrs(db)) | set(_dashboard_cidr()) | set(_runner_cidr())
+                    | set(_entitle_cidrs()))
     # Warn on the FINAL merged set only — an empty manual CSV alone is normal
     # (auto-discovered sources usually populate the set on their own).
     if not merged:
@@ -224,8 +252,9 @@ def firewall_status(db) -> dict:
     jump = _jumpoint_cidrs(db)
     dash = _dashboard_cidr()
     runner = _runner_cidr()
+    entitle = _entitle_cidrs()
     merged = sorted(set(_allowed_cidrs()) | set(_auto_cluster_cidrs(db))
-                    | set(jump) | set(dash) | set(runner))
+                    | set(jump) | set(dash) | set(runner) | set(entitle))
     csv = config_service.get("rancher_allowed_source_cidrs") or ""
     return {
         "manual_cidrs": [c.strip() for c in csv.split(",") if c.strip()],
@@ -235,6 +264,9 @@ def firewall_status(db) -> dict:
         "gateway_cidrs": jump,
         "dashboard_egress_ip": dash[0] if dash else "",
         "runner_source_cidr": runner[0] if runner else "",
+        # Named separately so the readout attributes these to Entitle rather than
+        # leaving them looking like unexplained entries in the merged list.
+        "entitle_cidrs": entitle,
         "merged": merged,
         "cloud": _node_cloud(),
         "ports": list(_SPEC.ports),

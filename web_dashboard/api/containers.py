@@ -84,7 +84,7 @@ from ..services.azure_service import AzureError
 from ..services.compose_service import ComposeError
 from ..services.portainer_service import PortainerError, PortainerNotConfigured
 from ..services.storage_service import StorageError
-from .auth import get_current_user, require_permission
+from .auth import get_current_user, has_permission, require_permission
 
 logger = logging.getLogger(__name__)
 
@@ -915,8 +915,10 @@ async def get_rancher_node(
     current_user: User = Depends(require_permission("containers", "read")),
 ):
     """List the Rancher management-node COS instance(s) (labels.purpose=rancher)
-    and report whether the integration is configured + its pinned server URL."""
-    from ..services import config_service, managed_node_service
+    and report whether the integration is configured + its pinned server URL, plus
+    the node's Entitle registration state for the row's Register / Deregister
+    actions (which POST to the k8s router's ``/rancher/entitle-register``)."""
+    from ..services import config_service, entitle_egress, managed_node_service
     from ..services.gcp_service import GCPError
 
     spec = managed_node_service.RANCHER
@@ -944,11 +946,32 @@ async def get_rancher_node(
             login_hint = "Log in as admin with your configured Rancher admin password."
         else:
             login_hint = "Log in as admin with your Rancher bootstrap password."
+    # Entitle registration state for the node row's Register / Deregister actions.
+    # Two config reads and one permission predicate — no cloud call, so the tab's
+    # existing poll stays as cheap as it was. Resolved BEFORE the early return below
+    # so both exits carry the same answer: a half-configured install that fell through
+    # to the shell would otherwise report "not registered" from the field default even
+    # when an integration exists.
+    entitle = {
+        "entitle_enabled": config_service.get_bool("entitle_registration_enabled", False),
+        "entitle_integration_id": config_service.get("entitle_rancher_integration_id") or "",
+        # has_permission, not a hand-rolled effective_permissions_dict check: it is
+        # deliberately the ONE implementation of this rule (see its docstring), and the
+        # register route gates on exactly this scope.
+        "entitle_can_register": has_permission(current_user, "k8s", "write"),
+        # What the firewall is (or would be) opened to for Entitle's cloud, and
+        # whether that even applies. Read from the resolver rather than from the
+        # config key directly, so the card shows the same answer the firewall merge
+        # uses — including the per-region published fallback.
+        "entitle_source_cidrs": entitle_egress.cidrs(),
+        "entitle_private": config_service.get_bool("entitle_rancher_private", False),
+    }
     if not account:
         # Not configured yet — return an empty, not-configured shell (no 503, so
         # the tab can render the setup card like Portainer does).
         return RancherNodeResponse(nodes=[], cloud=cloud, account="", project_id="",
-                                   count=0, configured=False, server_url=server_url)
+                                   count=0, configured=False, server_url=server_url,
+                                   **entitle)
     try:
         raw = await managed_node_service.list_nodes(cloud, spec, placement)
     except (GCPError, managed_node_service.ManagedNodeError) as exc:
@@ -967,7 +990,7 @@ async def get_rancher_node(
                                project_id=account if cloud == "gcp" else "",
                                count=len(nodes),
                                configured=configured, server_url=server_url,
-                               login_hint=login_hint)
+                               login_hint=login_hint, **entitle)
 
 
 @router.get("/rancher/firewall")
