@@ -124,6 +124,15 @@ and `docker logs ot-plc` is `kubectl -n ot-sim logs deploy/ot-plc`. `kubectl` an
 expect both). Baking with **`OT_RUNTIME=docker`** brings the old compose stack back
 unchanged if a KubeSolo bake ever fails on a platform the script has not met.
 
+**Tell the form which one you baked.** The deploy form has an *Image runtime* picker,
+because the dashboard cannot read this off an image — both bakes produce an `ot-sim`
+image, and the runtime is a bake-time environment variable that leaves no trace the
+cloud exposes. It gates one thing: the cell's own platform endpoints, which exist
+because the cell runs a cluster. Pick `docker` and the *Kubernetes API (KubeSolo)*
+entry disappears from the protocol list, and the deploy refuses it if you send it
+anyway — a tunnel to :6443 on a cell with no cluster is a session that fails exactly
+like a blocked firewall, which is the most expensive kind of demo failure there is.
+
 **The agent does not run here** — it runs on the plant's DMZ broker, one zone over, and
 that is the whole point of [Who brokers identity in the plant](#who-brokers-identity-in-the-plant).
 The plant floor keeps a true air gap; the machine with a way out is a different machine.
@@ -202,8 +211,23 @@ Each of these is refused **before any VM is launched**, with the remedy in the j
   `gcp_run_subnetwork` or `gcp_ansible_vpc_connector`) and
   **`ot_config_runner_source_cidr`** — the dashboard host has no route to a private
   broker, so the agent is installed from inside the VPC, and the broker's firewall has
-  to admit that runner;
-- **`entitle_registration_enabled`** and a configured tenant;
+  to admit that runner. **On all three clouds**, deliberately: SSM SendCommand and Azure
+  Run Command would drop that inbound rule, but the SSM agent reaches AWS through three
+  interface VPC endpoints on 443 that the DMZ zone denies, and a command's parameters
+  are retained in its history — so the token would either need a fourth endpoint to
+  fetch itself from, or would sit in that history as a live credential. One named source
+  range inbound is the smaller hole and the better sentence: the broker's egress stays
+  at exactly one destination;
+- **`entitle_registration_enabled`** and a configured tenant **on `routing: v1`**. The
+  token is a base64 JSON blob that says which it is, and the deploy reads it between
+  minting and the first launch. A `v0` tenant's agent pulls straight from `ghcr.io` and
+  `gcr.io/datadoghq`, which are CDN-backed and cannot be named in a narrow allow-list —
+  so it would reach `CrashLoopBackOff` inside a subnet with no egress to fix it from.
+  The same read compares the token's `platform` against the region the hole was drawn
+  for: `entitle_egress.region()` derives that from `entitle_api_url` and falls back to a
+  default when the URL is a proxy or a bare host, so a tenant can quietly be on `eu`
+  while the rule points at `agent.us.entitle.io`. Either mismatch refuses, names the
+  key, and destroys the token it just minted;
 - the **8 GB broker shape** (`e2-standard-2`): the agent requests 1Gi on its own;
 - the thing each cloud's zone needs in order to **name the PRA Gateway** as a source:
   nothing on GCP (a network tag always exists), **`bt_ecs_jumpoint_security_group_id`**
@@ -575,10 +599,19 @@ Notes that save demo time:
 - **Clear** (`DELETE /api/ot/cell/{vm_job_id}`) is the exit for a cell whose VM
   deploy *failed*, which Destroy cannot see — see
   [Clearing a cell whose VM never deployed](#clearing-a-cell-whose-vm-never-deployed).
-  It destroys nothing; it refuses if the VM is still there.
+  It destroys no VM; it refuses if either the cell **or its DMZ broker** is still there.
+  The broker matters because it deploys *first*, so the common failure is "broker up,
+  cell failed" — clearing only the cell would retire the card while a VM carrying a
+  working Entitle agent kept running and kept billing. Clear does destroy one thing: the
+  plant's **agent token**, which is minted before either VM exists and which the normal
+  destroy runner only ever collects for a deploy that *completed*.
 - **Expiry**: the child is a normal deploy row for its cloud, so the cell participates
   in the auto-delete timer with no extra configuration (see
-  [auto-delete-timer](../../auto-delete-timer.md)).
+  [auto-delete-timer](../../auto-delete-timer.md)). A cell with a broker gives the
+  broker **its own expiry**, not the policy default: on separate clocks the two diverge
+  the moment anyone extends one, and whichever reaped first would leave the other
+  useless — an agent brokering access to a plant that is gone, or a cell whose Entitle
+  grants quietly stop working.
 - **Air-gap**: keep the on-demand egress flags **off** for the cell's cloud
   (`gcp_vm_nat_enabled` / `aws_nat_instance_enabled`; Azure VMs have no dashboard
   NAT toggle). Turning one on gives cell subnets egress and silently deflates the
@@ -758,7 +791,10 @@ the bake fails on a platform the script has not met.
 | An S7 / OPC UA / EtherNet-IP tunnel connects but nothing answers | That sim was not baked — `OT_SIMS` at bake time selects them (default is all four), and an image baked before Siemens was added has no `ot-s7`. `kubectl -n ot-sim get pods` on the cell shows which are running |
 | `kubectl` through the tunnel fails on a certificate error | The kubeconfig is not the one the cell wrote: the API certificate names the cell, not your loopback. Use `/var/lib/ot-sim/kubeconfig-via-tunnel.yaml`, which carries `tls-server-name` |
 | A pod is `ErrImageNeverPull` | Its image is not in the node's containerd. The cell pulls nothing by design — re-run `/opt/ot-sim/kubesolo/apply.sh`, which re-imports from `/var/lib/ot-sim/images` |
-| The KubeSolo tunnel connects but nothing answers on :6443 | The image was baked with `OT_RUNTIME=docker`, so the cell runs no cluster. Rebake with the default runtime, or untick that entry |
+| The KubeSolo tunnel connects but nothing answers on :6443 | The image was baked with `OT_RUNTIME=docker`, so the cell runs no cluster. A new deploy refuses this — set *Image runtime* to match what you baked — so a cell in this state predates that guard, or was deployed through the API with the wrong `runtime`. Rebake with the default runtime, or untick that entry and Re-wire |
+| The deploy refuses, naming `routing` | The tenant is on `routing: v0`, whose agent pulls its image from `ghcr.io` / `gcr.io/datadoghq`. No narrow allow-list can name a CDN, so the agent could not start inside the plant. Ask BeyondTrust to migrate the tenant, or deploy the cell without Entitle |
+| The deploy refuses, saying the token's region is not the one the hole was drawn for | `entitle_api_url` is a proxy or a bare host, so the region fell back to the default while the tenant is somewhere else. Set it to the regional URL and redeploy — otherwise the agent would dial a host the plant denies, with nothing saying why |
+| Clear refuses, naming the DMZ broker | The broker outlived its failed cell — it deploys first, so this is the common shape. Destroy it from the cloud's VMs tab, then clear the cell |
 | The Entitle grant approves but the vendor's login is refused | The agent cannot reach the cell on :22. On a cell with its own broker, check `<cell>-ot-ingress-agent` exists; on one without, that is the old shared-agent arrangement, which the Purdue zoning blocks by design — redeploy with Entitle ticked |
 | The agent install job fails at "Prove the agent's network path" | Working as designed, and it names which leg failed: DNS, 443/8080, or the cell's :22. Pod SNAT, the DNS hole and the destination set are the three candidates, in that order |
 | The agent was fine and now is not | The Entitle endpoint's addresses moved. They are pinned at wiring time unless `ot_entitle_egress_cidrs` is set — **Re-wire** re-resolves and replaces the rule |

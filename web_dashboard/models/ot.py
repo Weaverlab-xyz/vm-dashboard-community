@@ -86,6 +86,11 @@ class OTCellDeployRequest(BaseModel):
     plc_port: Optional[int] = Field(default=None, ge=1, le=65535)          # override the preset port
     tunnel_local_port: Optional[int] = Field(default=None, ge=1, le=65535)  # rep-side listen port
     hmi_port: int = Field(default=1881, ge=1, le=65535)
+    # Which runtime the chosen image was baked with (provisioners/ot/README.md).
+    # The dashboard cannot read this off an image, so it is asserted here and
+    # recorded on the cell; it gates the platform presets, which only the
+    # KubeSolo runtime serves.
+    runtime: str = "kubesolo"
     register_in_passwordsafe: bool = True
     # Ticking this deploys the plant's own industrial-DMZ broker beside the cell and
     # runs the Entitle agent on it: an agent that manages access to plant resources
@@ -120,6 +125,11 @@ class OTCellDeployRequestAWS(BaseModel):
     plc_port: Optional[int] = Field(default=None, ge=1, le=65535)
     tunnel_local_port: Optional[int] = Field(default=None, ge=1, le=65535)
     hmi_port: int = Field(default=1881, ge=1, le=65535)
+    # Which runtime the chosen image was baked with (provisioners/ot/README.md).
+    # The dashboard cannot read this off an image, so it is asserted here and
+    # recorded on the cell; it gates the platform presets, which only the
+    # KubeSolo runtime serves.
+    runtime: str = "kubesolo"
     register_in_passwordsafe: bool = True
     register_in_entitle: bool = False
     # The plant's DMZ broker, from a second image baked with OT_ROLE=broker. Only read
@@ -152,6 +162,11 @@ class OTCellDeployRequestAzure(BaseModel):
     plc_port: Optional[int] = Field(default=None, ge=1, le=65535)
     tunnel_local_port: Optional[int] = Field(default=None, ge=1, le=65535)
     hmi_port: int = Field(default=1881, ge=1, le=65535)
+    # Which runtime the chosen image was baked with (provisioners/ot/README.md).
+    # The dashboard cannot read this off an image, so it is asserted here and
+    # recorded on the cell; it gates the platform presets, which only the
+    # KubeSolo runtime serves.
+    runtime: str = "kubesolo"
     register_in_passwordsafe: bool = True
     register_in_entitle: bool = False
     # The plant's DMZ broker — see OTCellDeployRequestAWS above.
