@@ -106,7 +106,11 @@ def test_per_resource_keys_are_denied():
                 "entitle_agent_azure_client_id_abc123",
                 "entitle_agent_azure_key_vault_name_abc123",
                 "entitle_k8s_integration_id_abc123", "entitle_k8s_tfstate_abc123",
-                "rancher_cluster_id_abc123", "rancher_manifest_url_abc123"):
+                "rancher_cluster_id_abc123", "rancher_manifest_url_abc123",
+                # The OT demo cell's per-cell Entitle agent token, keyed by the broker's
+                # job id. A live credential for an agent running in the source deployment.
+                "ot/9c1f2a34-5555-6666-7777-888899990000/entitle_agent_token",
+                "ot/9c1f2a34-5555-6666-7777-888899990000/entitle_agent_token_tf_state"):
         assert classify.exclusion_reason(key, "v") == classify.RUNTIME_HANDLE, key
 
 
@@ -115,7 +119,9 @@ def test_per_resource_prefixes_do_not_swallow_real_settings():
     for key in ("entitle_k8s_user_prefix", "clouddb_ps_workgroup",
                 "clouddb_ps_platform_postgres", "entra_rbac_group_id",
                 "entra_rbac_group_role", "k8s_runner", "k8s_runner_image",
-                "rancher_verify_tls", "rancher_ready_timeout_s"):
+                "rancher_verify_tls", "rancher_ready_timeout_s",
+                "ot_purdue_firewall_enabled", "ot_entitle_egress_cidrs",
+                "ot_config_runner_source_cidr"):
         assert classify.exclusion_reason(key, "v") is None, (
             f"{key} is a Settings panel key and must migrate")
 

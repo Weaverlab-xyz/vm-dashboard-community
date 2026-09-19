@@ -133,6 +133,7 @@ k8s_ps_rotator_bootstrap_namespace k8s_ps_rotator_bootstrap_sa
 pra_k8s_namespace pra_k8s_sa_name bt_vault_account_group_id
 ot_ps_pra_checkout_enabled ot_ps_pravault_platform ot_ps_pravault_functional_account
 ot_ps_checkout_converge ot_aws_require_private_subnet ot_purdue_firewall_enabled
+ot_entitle_egress_cidrs ot_dmz_egress_open_ports ot_config_runner_source_cidr
 passwordsafe_vault_sync_enabled passwordsafe_vault_sync_converge
 passwordsafe_vault_sync_platform passwordsafe_vault_sync_functional_account
 """.split())
@@ -186,6 +187,26 @@ passwordsafe_vault_sync_platform passwordsafe_vault_sync_functional_account
 # that had already been fixed. It is a key rather than a constant because it is the one
 # number trading a longer registration against a registration that fails with its own
 # fix already in place.
+
+# ADDED since the split, deliberately: the three keys that draw the OT demo cell's
+# industrial-DMZ broker. The cell's Entitle agent now lives INSIDE the plant, on a second
+# VM tagged `ot-dmz`, because an agent outside the plant reaching in over SSH is the
+# architecture the cell exists to argue against. That broker is the only thing with a way
+# out, and these three say exactly how wide the way is:
+# `ot_entitle_egress_cidrs` is the address set it may reach on 443/8080 (a firewall rule
+# takes addresses, not names, and BeyondTrust publishes no contractual range, so this is
+# the operator's firewall ticket); `ot_dmz_egress_open_ports` is the opt-in escape hatch
+# that allows those two ports to anywhere FROM THE DMZ TAG ONLY, for a site that cannot
+# pin them; `ot_config_runner_source_cidr` is the source range the broker admits on :22,
+# because the agent is installed by the in-cloud Ansible runner and the dashboard host has
+# no route to a private cell.
+#
+# On the PRA panel, next to `ot_purdue_firewall_enabled` and
+# `ot_aws_require_private_subnet`: they are zoning for a PRA-brokered demo cell, not
+# Password Safe objects (which is what puts the `ot_ps_*` keys on the other panel). They
+# have to be findable here for a second reason — all three deploy guards refuse by name
+# and send the operator to "Settings → Integrations → Privileged Remote Access", so a key
+# declared and unbound would make the remedy a dead end.
 
 # RETIRED, deliberately absent from LEGACY_KEYS above: the six `k8s_token_sync_*` keys
 # (enabled / interval_minutes / request_duration_min / max_per_pass / max_failures /

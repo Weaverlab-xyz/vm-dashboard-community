@@ -193,6 +193,13 @@ _RUNTIME_HANDLE_PREFIXES = (
     # operator re-uploads. The three brand COLOURS are plain hex strings with no such
     # dependency and migrate normally, which is the behaviour you want.
     "brand_logo_",
+    # The OT demo cell's per-cell Entitle agent token and its Terraform state, keyed by the
+    # broker VM's job id (`ot/<vm_job_id>/entitle_agent_token`, `…_tf_state`). The token is
+    # a live credential for an agent running on a VM in the SOURCE deployment, and the job
+    # row it is named after stays behind, so a migrated copy is both an orphan and a second
+    # dashboard's standing claim on someone else's plant. Note the slash: every
+    # operator-settable OT key spells itself `ot_`, so this prefix cannot reach one.
+    "ot/",
 )
 
 
