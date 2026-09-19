@@ -99,22 +99,35 @@ async def _resolve_vm_private_key(tag: str, secret_name: str = "") -> str:
 
 async def register(db, job_id: str, vm_name: str, hostname: str, *,
                    private: bool, result: dict, tag: str = "cloud",
-                   private_key: str = "", sudo_user: str = "", ssh_key_secret: str = "") -> None:
+                   private_key: str = "", sudo_user: str = "", ssh_key_secret: str = "",
+                   agent_token_name: str = "") -> None:
     """Register a built VM as an Entitle SSH ephemeral-accounts integration.
 
-    ``private`` attaches the shared Entitle agent (unreachable hosts); a public VM
-    needs no agent. The SSH private key is the VM's own keypair, resolved from the
-    same per-cloud secret the deploy used (``ssh_key_secret`` = the per-launch override
-    when set, else the configured default); callers may also pass a resolved
+    ``private`` attaches an Entitle agent (unreachable hosts); a public VM needs none.
+    The SSH private key is the VM's own keypair, resolved from the same per-cloud
+    secret the deploy used (``ssh_key_secret`` = the per-launch override when set, else
+    the configured default); callers may also pass a resolved
     ``private_key``/``sudo_user`` explicitly. Writes ``entitle_integration_id`` +
     ``entitle_registration_tf_state`` onto ``result`` (the latter is stored in job
-    metadata for teardown). Non-fatal."""
+    metadata for teardown). Non-fatal.
+
+    ``agent_token_name`` names a SPECIFIC agent to broker this host, instead of the
+    install-wide ``entitle_agent_token_name``. The OT demo cell passes its own,
+    because the agent that manages a plant's resources runs in that plant — on the
+    cell's DMZ broker — and an integration pointed at the shared agent outside it
+    would be brokered by something with no route in (services/ot_service.py).
+    """
     from . import entitle_registration_service as ent, job_service
     pk = _normalize_private_key(
         private_key
         or await _resolve_vm_private_key(tag, ssh_key_secret)
         or resolve_ssh_private_key(_cfg("entitle_ssh_private_key_ref")))
     su = sudo_user or _cfg("entitle_ssh_sudo_user")
+    # A context built ONLY to carry the agent name: it puts the name in the HCL fields,
+    # where _common_attrs_hcl prefers it over the configured default, and stays in this
+    # install's own tenant (local_tenant_ctx, not tenant_ctx, which is for a customer's
+    # and refuses a missing key).
+    ctx = ent.local_tenant_ctx(agent_token_name=agent_token_name) if agent_token_name else None
     try:
         r = await ent.register_ssh_host(
             name=vm_name,
@@ -123,6 +136,7 @@ async def register(db, job_id: str, vm_name: str, hostname: str, *,
             private_key=pk,
             private=private,
             tag=tag,
+            ctx=ctx,
         )
         result["entitle_integration_id"] = r.get("integration_id")
         result["entitle_registration_tf_state"] = r.get("tf_state_json")

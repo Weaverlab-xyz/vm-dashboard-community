@@ -15,6 +15,14 @@ import sys
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SVC = os.path.join(_ROOT, "web_dashboard", "services", "ot_service.py")
 
+# "Does this provisioner install KubeSolo?", matched on the installer's own download
+# line rather than on the bare hostname. The scheme has to be part of the pattern: a
+# comment or a die message that merely NAMES the host would otherwise read as a
+# KubeSolo bake, and a bare `"get.kubesolo.io" in script` is the substring check
+# CodeQL flags as incomplete URL sanitization (py/incomplete-url-substring-sanitization).
+# The dots are escaped for the same reason py/incomplete-hostname-regexp exists.
+_INSTALLS_KUBESOLO = re.compile(r"https://get\.kubesolo\.io\b")
+
 
 def _load():
     spec = importlib.util.spec_from_file_location("ot_service_under_test", _SVC)
@@ -26,7 +34,7 @@ def _load():
 def test_the_preset_table_carries_the_canonical_ot_ports():
     ot = _load()
     expected = {"modbus": 502, "opcua": 4840, "dnp3": 20000,
-                "s7": 102, "ethernet-ip": 44818}
+                "s7": 102, "ethernet-ip": 44818, "kubesolo": 6443}
     actual = {k: v["port"] for k, v in ot.OT_PORT_PRESETS.items()}
     assert actual == expected, f"preset ports drifted: {actual}"
     for key, info in ot.OT_PORT_PRESETS.items():
@@ -65,39 +73,66 @@ def test_the_slug_matches_the_pra_hcl_normalisation():
 
 # ── the presets the CELL offers must be the ones the image serves ─────────────
 
-def test_every_cell_protocol_has_a_simulator_in_the_baked_image():
-    """A cell form offering a protocol the image doesn't serve provisions a tunnel
+def _baked_listeners(script):
+    """Every TCP port a cell baked from this script leaves listening.
+
+    Two sources, because the cell has two kinds of listener. The workloads publish
+    their ports 1:1 — compose mappings on the docker runtime, hostPort on the
+    KubeSolo one (the manifests and the compose file are held to each other in
+    tests/test_ot_kubesolo.py, so either is a complete list). KubeSolo itself serves
+    the Kubernetes API, and the port that counts there is the one the baked
+    tunnel-ready kubeconfig points a rep at.
+
+    Scanned across the whole script rather than per heredoc: the base stack carries
+    plc + hmi and every `sim_enabled` block APPENDS its own, so a per-heredoc scan
+    would see Modbus alone and call every other simulator missing.
+    """
+    ports = {int(m.group(1)) for m in re.finditer(r'"(\d+):(\d+)"', script)
+             if m.group(1) == m.group(2)}
+    ports |= {int(p) for p in re.findall(r"hostPort:\s*(\d+)", script)}
+    api = re.search(r"server: https://127\.0\.0\.1:(\d+)", script)
+    if api and _INSTALLS_KUBESOLO.search(script):
+        ports.add(int(api.group(1)))
+    return ports
+
+
+def test_every_cell_protocol_is_served_by_the_baked_image():
+    """A cell form offering something the image doesn't serve provisions a tunnel
     to a port with no listener — and that session failure is indistinguishable
     from a blocked firewall, which is the most expensive kind of demo failure.
 
-    So the `cell` flag on each preset is held against the compose stack the
-    provisioner actually writes: every cell protocol needs a service publishing
-    its canonical port, and every published port (bar the HMI) needs a preset."""
+    So the `cell` flag on each preset is held against what the provisioner actually
+    leaves listening: every cell-served preset needs a listener on its canonical
+    port, and every listener (bar the HMI, which is a Web Jump rather than a
+    tunnel) needs a preset."""
     ot = _load()
     script = open(os.path.join(_ROOT, "provisioners", "ot", "ot-sim-debian.sh"),
                   encoding="utf-8").read()
-    # The whole script, not one heredoc: the base compose carries plc + hmi and each
-    # `sim_enabled` block APPENDS its service, so a per-heredoc scan would see only
-    # Modbus and call every other simulator missing. Port mappings appear nowhere
-    # else in the script, so scanning it whole is both correct and structure-proof.
-    #
-    # 1:1 mappings only ("502:502"): the baked stack deliberately never translates a
-    # port, so a published host port IS the protocol's canonical port.
-    published = {int(m.group(1)) for m in re.finditer(r'"(\d+):(\d+)"', script)
-                 if m.group(1) == m.group(2)}
+    listening = _baked_listeners(script)
 
     for key in ot.cell_protocols():
         port = ot.OT_PORT_PRESETS[key]["port"]
-        assert port in published, (
-            f"preset {key!r} is marked cell-served but nothing in the baked compose "
-            f"publishes :{port} — the cell would offer a tunnel to a dead port")
+        assert port in listening, (
+            f"preset {key!r} is marked cell-served but nothing the bake installs "
+            f"listens on :{port} — the cell would offer a tunnel to a dead port")
 
     hmi_port = 1881
-    for port in published - {hmi_port}:
+    for port in listening - {hmi_port}:
         assert any(p["port"] == port and p.get("cell")
                    for p in ot.OT_PORT_PRESETS.values()), (
-            f"the image publishes :{port} but no cell-served preset names it — the "
-            "simulator is unreachable from the cell form")
+            f"the image serves :{port} but no cell-served preset names it — it is "
+            "unreachable from the cell form")
+
+
+def test_only_the_cells_own_platform_endpoints_are_marked_non_plc():
+    """The forms group the table into "what the PLC speaks" and "the cell itself",
+    and a fieldbus protocol quietly landing in the second group would tell a
+    customer their PLC speaks Kubernetes."""
+    ot = _load()
+    assert set(ot.plc_protocols()) == {"modbus", "opcua", "dnp3", "s7", "ethernet-ip"}
+    assert [k for k, v in ot.OT_PORT_PRESETS.items() if not v.get("plc")] == ["kubesolo"]
+    # Ticking nothing still deploys a plant, not a bare cluster.
+    assert ot.DEFAULT_CELL_PROTOCOLS == ("modbus",)
 
 
 def test_dnp3_is_not_offered_on_the_cell():

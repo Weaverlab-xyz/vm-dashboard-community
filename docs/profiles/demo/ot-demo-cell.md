@@ -13,14 +13,19 @@ that the air-gapped subnet *is* the plant network, and every path in is PRA-brok
   image (`provisioners/ot/ot-sim-debian.sh`). Everything is baked at build time, so the
   running cell needs **zero outbound internet**: a PLC simulator whose holding registers
   tick every second (:502), the same four process values over **Siemens S7comm** (:102),
-  **Rockwell EtherNet/IP** (:44818) and **OPC UA** (:4840), FUXA (:1881) with its PLC
-  connection pre-seeded, Docker, and a systemd unit that starts the stack at boot.
+  **Rockwell EtherNet/IP** (:44818) and **OPC UA** (:4840), and FUXA (:1881) with its PLC
+  connection pre-seeded. They run as workloads of **[KubeSolo](../../kubesolo.md)** —
+  the single-node Kubernetes this repo puts on plant hosts — so the cell is a plant IPC
+  running a real cluster, and its Kubernetes API (:6443) is one more thing PRA can
+  broker. A systemd unit applies the workloads at boot.
 - **Layer 1 — PRA** *(reach it)* — auto-provisioned per cell:
   - **Web Jump** → `http://<vm>:1881` (the HMI, rendered and recorded on the gateway);
-  - **one Protocol Tunnel per protocol you tick** (generic TCP), named
+  - **one Protocol Tunnel per endpoint you tick** (generic TCP), named
     `ot-<cell>-<protocol>` — so a rep sees the Siemens PLC and the Rockwell PLC as
     distinct targets and a Jump Group policy can grant them separately, rather than
-    one opaque item opening every port;
+    one opaque item opening every port. The cell's own **Kubernetes API** is on the
+    same list (`ot-<cell>-kubesolo` → :6443), so "read the PLC but not the cluster"
+    is a policy decision rather than a network one;
   - **Shell Jump** → SSH, inherited from the cloud's normal VM deploy path.
 - **Layer 2 — Password Safe** *(manage its secrets)* — *optional, default on.* The
   image's `adminuser` is onboarded via the cloud-native plugin the cloud's VM deploy
@@ -34,7 +39,10 @@ that the air-gapped subnet *is* the plant network, and every path in is PRA-brok
   start — see
   [PRA checkout of the cell's admin credential](#pra-checkout-of-the-cells-admin-credential).
 - **Layer 3 — Entitle** *(grant time-boxed access)* — *optional.* SSH ephemeral
-  accounts, inherited from the VM deploy path.
+  accounts — brokered by an agent running **in the plant**, on a DMZ host deployed
+  beside the cell, because that is the only arrangement in which "Entitle manages
+  access to plant resources" is true as stated. See
+  [Who brokers identity in the plant](#who-brokers-identity-in-the-plant).
 
 Runs on **GCP, AWS and Azure** — each cloud page has its own *OT Demo Cell* tab, and
 the cell's VM is that cloud's plain deploy child (`gce_deploy` / `ec2_deploy` /
@@ -58,10 +66,159 @@ S7comm, Rockwell EtherNet/IP and OPC UA**, so the story holds whichever protocol
 customer's plant speaks. Ticking several protocols on one cell is what turns "we are a
 Siemens shop" and "we are a Rockwell shop" into the same demo.
 
-For the *identity* half of the same conversation — governing who gets access to what,
-from a host inside the plant rather than from the cloud — see
-[KubeSolo](../../kubesolo.md): a single-node Kubernetes small enough for a plant IPC,
-running the same BeyondTrust Entitle agent as the datacenter.
+The cell also **is** a [KubeSolo](../../kubesolo.md) host — the simulators are its
+workloads — so the other half of the OT conversation, "we cannot carry Kubernetes on
+plant hardware", has a running answer instead of a slide. See
+[The cell runs on KubeSolo](#the-cell-runs-on-kubesolo).
+
+## The cell runs on KubeSolo
+
+The baked image installs **[KubeSolo](../../kubesolo.md)** — single-node, etcd-free
+Kubernetes, a control plane of about 200 MB — and runs the four simulators and FUXA on
+it as Deployments in the `ot-sim` namespace. Nothing the customer sees changes: same
+images, same ports, same Web Jump, same protocol tunnels. Every workload runs with
+`hostNetwork`, so it binds the node's own address, which is exactly what the Gateway
+dials.
+
+What changes is what the cell stands for. KubeSolo is the answer this repo gives an OT
+customer who cannot put a cluster on plant hardware, and the cell is the only plant
+floor it ships; while that ran docker compose, the answer was a slide. Now the plant
+IPC carries a real cluster, takes stock Helm charts, and the only route to its API is a
+recorded PRA session.
+
+Tick **Kubernetes API (KubeSolo)** on the deploy form and the cell gets a tunnel to
+`:6443` beside its fieldbus ones, named `ot-<cell>-kubesolo`. With that jump started in
+the rep console:
+
+```bash
+# once, through the Shell Jump: the cell writes a kubeconfig aimed at the tunnel
+sudo cat /var/lib/ot-sim/kubeconfig-via-tunnel.yaml    # → save it as ot-cell.yaml
+
+# then from your own machine, through the tunnel
+kubectl --kubeconfig ot-cell.yaml -n ot-sim get pods -o wide
+kubectl --kubeconfig ot-cell.yaml -n ot-sim logs deploy/ot-plc
+```
+
+That file is the admin kubeconfig with two edits: `server: https://127.0.0.1:6443` (the
+tunnel's local end) and a `tls-server-name` of the cell's private IP, because the API
+certificate is issued to the cell and not to your loopback. Without the second line the
+first command fails on a certificate error that reads like a broken tunnel.
+
+**How it stays air-gapped.** The cell has no egress and no registry, so both halves of
+the image supply are baked: KubeSolo is installed from its **`-offline` build**, whose
+binary carries CoreDNS and the rest of what it starts, and the simulator and FUXA
+images are exported to `/var/lib/ot-sim/images` and imported into KubeSolo's containerd
+(`imagePullPolicy: Never`, so a missing image says *not in the local store* instead of
+producing an `ImagePullBackOff` that reads like a firewall). The first boot of a cell
+therefore takes a few minutes longer than a docker one: it mints the cluster's own CA
+and node identity — the bake deliberately does not clone those into every cell — and
+re-imports whatever is not already in its store. `systemctl status ot-sim` shows that
+progress; the Web Jump is worth trying only once it reports `active (exited)`.
+
+**Docker is not on the cell.** KubeSolo's installer refuses a host that still carries
+Docker — it brings its own containerd and CNI — so the bake builds the images with
+Docker and then purges it. `docker ps` on a cell is now `kubectl -n ot-sim get pods`,
+and `docker logs ot-plc` is `kubectl -n ot-sim logs deploy/ot-plc`. `kubectl` and
+`helm` are on the cell (KubeSolo ships neither, and the plays in
+[`examples/playbooks/kubesolo/`](https://github.com/Weaverlab-xyz/vm-dashboard-community/tree/main/examples/playbooks/kubesolo)
+expect both). Baking with **`OT_RUNTIME=docker`** brings the old compose stack back
+unchanged if a KubeSolo bake ever fails on a platform the script has not met.
+
+**The agent does not run here** — it runs on the plant's DMZ broker, one zone over, and
+that is the whole point of [Who brokers identity in the plant](#who-brokers-identity-in-the-plant).
+The plant floor keeps a true air gap; the machine with a way out is a different machine.
+
+## Who brokers identity in the plant
+
+Tick **Register the VM in Entitle** on the cell form and the deploy stands up a second
+machine: the plant's **industrial-DMZ broker**, `<cell>-dmz`. It runs the same KubeSolo
+the cell does and carries the BeyondTrust Entitle agent and nothing else — no
+simulators, because a DMZ host that answers Modbus is a lie about where it sits.
+
+The reason it is a separate host is the reason a real plant has one: the thing with a
+way out does not sit on the plant floor. With `ot_purdue_firewall_enabled` on, the two
+zones are firewall rules you can read out loud:
+
+| Zone | Rule | Effect |
+|---|---|---|
+| cell (`ot-sim`) | `<cell>-ot-egress-deny` | **no route out, ever** — the plant floor gets no allow at all |
+| | `<cell>-ot-ingress-allow` | the PRA Gateway, on the cell's own ports |
+| | `<cell>-ot-ingress-agent` | **tcp 22 from the DMZ zone** — the agent's only reach into the plant floor |
+| | `<cell>-ot-ingress-deny` | everything else stops at the boundary |
+| broker (`ot-dmz`) | `<broker>-dmz-egress-entitle-<hash>` | **tcp 443 + 8080 to the Entitle channel**, and nothing else |
+| | `<broker>-dmz-egress-dns-udp` / `-tcp` | DNS to the metadata resolver |
+| | `<broker>-dmz-egress-deny` | the rest of the internet |
+| | `<broker>-dmz-ingress-allow` | tcp 22 from the PRA Gateway and the Config-Management runner |
+| | `<broker>-dmz-ingress-deny` | everything else |
+
+So the sentences the demo can now make, and prove in the console:
+
+- nothing on the plant floor has a route out — not the HMI, not the PLCs, nothing;
+- exactly one machine in the plant has one, and it is two ports to one destination;
+- the agent that grants a vendor time-boxed access to the cell **runs inside the
+  plant**, and reaches the cell on port 22 and no other port;
+- stop the broker and the grants stop working, because there is no second path.
+
+### The address problem, stated plainly
+
+A firewall rule takes addresses; `agent.<region>.entitle.io` is a name, and BeyondTrust
+publishes no range for it. So:
+
+1. **`ot_entitle_egress_cidrs`** is the supported answer — the firewall ticket a real
+   plant would have. Set it and the rule is built from it.
+2. Left blank, the wiring **resolves the hostname once, at wiring time**, and records
+   that it did. Honest, and not a contract: if BeyondTrust rotates those addresses the
+   agent loses its channel until you **Re-wire**, which re-resolves. The rule's name
+   carries a digest of the address set, so a changed set arrives as a new rule rather
+   than being silently ignored.
+3. Neither → the deploy **refuses**, naming the key. It never quietly widens to
+   `0.0.0.0/0`. If you genuinely cannot get a list, `ot_dmz_egress_open_ports` allows
+   the broker 443/8080 to anywhere — a weaker claim, opted into deliberately, and the
+   plant floor is unaffected either way.
+
+What a production site does instead is FQDN egress (Cloud NGFW, AWS Network Firewall
+domain lists, Azure Firewall application rules) or an L3.5 forward proxy. All three
+cost real per-hour infrastructure, which is why the demo pins addresses — and saying
+so is part of the conversation, not an apology for it.
+
+### The probe, and why it exists
+
+The agent runs as a **pod**, so whether its traffic leaves with the node's address is a
+property of the CNI — and KubeSolo documents nothing about masquerade. Before helm runs,
+the install play starts a one-shot pod that checks, in order: DNS resolves the endpoint →
+tcp 443 opens → tcp 8080 opens → the cell's :22 opens. A failure names the three
+candidates (pod SNAT, the DNS hole, the destination set) and stops. It is also the thing
+to run in front of a customer who asks "so what else can this host reach?"
+
+### What it needs, and what it costs
+
+Each of these is refused **before any VM is launched**, with the remedy in the job error:
+
+- a **broker image** baked with `OT_ROLE=broker` (see `provisioners/ot/README.md`);
+- **`ot_purdue_firewall_enabled` on** — the agent's way out is a hole in the plant
+  boundary, and without the boundary there is nothing to make a hole in;
+- a **destination set**, per above;
+- an **in-cloud Config-Management runner** (`ansible_runner_gcp`, plus
+  `gcp_run_subnetwork` or `gcp_ansible_vpc_connector`) and
+  **`ot_config_runner_source_cidr`** — the dashboard host has no route to a private
+  broker, so the agent is installed from inside the VPC, and the broker's firewall has
+  to admit that runner;
+- **`entitle_registration_enabled`** and a configured tenant;
+- the **8 GB broker shape** (`e2-standard-2`): the agent requests 1Gi on its own;
+- **GCP** — AWS and Azure cells have no Purdue zoning yet, so they have no plant
+  boundary to hang this on, and the deploy says so rather than half-doing it.
+
+The cost is a second VM per cell, and the `gcp_vm_nat_enabled` guidance **inverts**: the
+subnet needs a NAT path for the broker's one hole to lead anywhere, and the plant's own
+priority-800 deny outranks the NAT's priority-900 allow, so the cell stays closed with
+the toggle on. That inversion only holds *with the Purdue zoning enabled* — which is
+why the feature refuses without it.
+
+The agent install runs the **same play an on-prem site runs**
+([`kubesolo/entitle-agent-install.yml`](https://github.com/Weaverlab-xyz/vm-dashboard-community/tree/main/examples/playbooks/kubesolo)),
+against the broker, with the token bound by reference through the run form's secret
+channel. Its output is on its own job page, and the cell card shows *agent installing* /
+*agent installed*.
 
 ## Deploying a cell
 
@@ -77,12 +234,14 @@ running the same BeyondTrust Entitle agent as the datacenter.
      Linux builds always publish a **Compute Gallery image version** — Azure's
      managed-image export path is broken, gallery-version is the supported route.
 2. **The cloud page → OT Demo Cell tab**: pick the image (the picker pre-filters names
-   containing `ot-sim`), name the cell, **tick the protocols to broker** — Modbus is
-   pre-checked and each ticked protocol becomes its own PRA tunnel — then pick the
+   containing `ot-sim`), name the cell, **tick what to broker** — Modbus is pre-checked,
+   each ticked entry becomes its own PRA tunnel, and the list's second group is the
+   cell's own Kubernetes API rather than anything a PLC speaks — then pick the
    **PRA Jump Group + Gateway** that match the cell's region (see below) and deploy.
    The VM defaults
    to the 4 GB shape everywhere (`e2-medium` / `t3.medium` / `Standard_B2s`) — a 2 GB
-   cell proved too tight for Docker + the PLC sim + FUXA in live use. On GCP and Azure
+   cell proved too tight for the PLC sims + FUXA in live use, and KubeSolo's control
+   plane idles at ~200 MB on top of them. On GCP and Azure
    the cell never gets a public IP (the form pins it); the GCP cell also carries the
    **`ot-sim`** network tag, which
    [Purdue-zone firewalling](#purdue-zone-firewalling-gcp) keys off. **On AWS there is no
@@ -175,6 +334,12 @@ Two deliberate properties:
   the allow fails, the wiring stops there and says so: a cell fenced away from the
   Gateway brokering the session you would use to fix it is the one failure worth
   designing against.
+
+A cell that brokers its own identity gets a fourth rule, `<cell>-ot-ingress-agent`:
+**tcp 22 from the `ot-dmz` zone**, so the plant's own Entitle agent can mint ephemeral
+accounts and do nothing else. Its own line rather than another source on the Gateway's,
+so the audit reads as the sentence it is — and the DMZ host gets a zone of its own,
+described in [Who brokers identity in the plant](#who-brokers-identity-in-the-plant).
 
 The rules are recorded on the child job as they are created, so a destroy removes
 exactly what exists and **Re-wire** adds them to a cell deployed before you turned the
@@ -281,6 +446,7 @@ Per-protocol, with a client to demo with:
 | OPC UA | 4840 | UaExpert, `opcua-client` (endpoint `opc.tcp://127.0.0.1:4840`) | **Yes** — `Objects/Plant` → Counter, Temperature, Flow, Running; anonymous, no security policy |
 | EtherNet/IP | 44818 | pylogix, cpppo (`Logix` driver at 127.0.0.1) | **Yes** — the same four values as `DINT` tags |
 | Siemens S7comm | 102 | python-snap7 (`db_read(1, 0, 8)`), TIA Portal (PLC at 127.0.0.1) | **Yes** — the same four values as big-endian DB1 words at offsets 0/2/4/6 |
+| Kubernetes API (KubeSolo) | 6443 | `kubectl --kubeconfig ot-cell.yaml` — the file the cell writes at `/var/lib/ot-sim/kubeconfig-via-tunnel.yaml` | **Yes** — the cell's own cluster; the simulators are its `ot-sim` namespace |
 | DNP3 | 20000 | OpenDNP3 master, Axon Test | No — standalone tunnel to real/lab gear |
 
 Notes that save demo time:
@@ -293,11 +459,17 @@ Notes that save demo time:
   stack. `OT_SIMS` at bake time picks which sims the image carries (default: all four).
   Siemens was in the same excluded bucket until python-snap7 3.0 reimplemented its S7
   server in pure Python; an image baked before that carries no `ot-s7` container.
-- **A cell gets a tunnel per protocol you tick** — Modbus is pre-checked, and each
+- **A cell gets a tunnel per endpoint you tick** — Modbus is pre-checked, and each
   extra vendor becomes its own named jump item, so showing a Siemens PLC *and* a
   Rockwell PLC on one air-gapped host, each brokered separately, needs no manual
   wiring. To reach a protocol the image does not simulate (DNP3) or a different host,
   the **standalone tunnel** card still points anywhere the Gateway can reach.
+- **The Kubernetes API is on that list but is not a fieldbus protocol**, and the form
+  groups it apart for that reason: it is the cell's own KubeSolo cluster, the thing
+  running the simulators. The same preset on the **standalone tunnel** card brokers a
+  real plant host's KubeSolo — the install
+  [`kubesolo/kubesolo-install.yml`](https://github.com/Weaverlab-xyz/vm-dashboard-community/tree/main/examples/playbooks/kubesolo)
+  puts on an on-prem IPC — without opening anything else on it.
 - **One protocol per tunnel jump.** A tunnel carries one `local;remote` port pair. A
   cell gets one PLC tunnel (chosen at deploy); to speak a second protocol to the same
   cell or host, create a standalone tunnel with a different **name** and (if both run
@@ -354,11 +526,16 @@ per-protocol clients: [Using the protocol tunnels](#using-the-protocol-tunnels).
 ## FUXA wiring
 
 The bake **pre-seeds the project** with a `ModbusTCP` device named `PLC` (address
-`plc`, port `502`) and four tags for holding registers 0–3, by asking the running FUXA
-for its own project, adding the device and posting it back. So inside the recorded Web
-Jump session the remaining step is just to **drop the tags on a view** — a FUXA view is
-SVG and its item format is the most version-coupled part of the project, so the bake
+`127.0.0.1`, port `502`) and four tags for holding registers 0–3, by asking the running
+FUXA for its own project, adding the device and posting it back. So inside the recorded
+Web Jump session the remaining step is just to **drop the tags on a view** — a FUXA view
+is SVG and its item format is the most version-coupled part of the project, so the bake
 does not generate one.
+
+The address is the loopback because every workload runs with `hostNetwork`: FUXA and the
+simulators share the node's network namespace, so they reach each other exactly as a
+client through a tunnel does. (An image baked with `OT_RUNTIME=docker` uses the compose
+service names — `plc`, `s7`, `enip`, `opcua` — instead.)
 
 If your bake log says `WARNING: FUXA project NOT seeded`, the pinned FUXA rejected the
 shape and the image is exactly as it was before seeding existed: add the connection by
@@ -366,14 +543,14 @@ hand, once per cell (~1 minute) — FUXA → Connections → **ModbusTCP** at `p
 then tags for holding registers 0–3. Either way the project persists on the VM.
 
 Only the Modbus device is seeded, but FUXA also speaks the other three, and every
-simulator is reachable from it by compose service name — so adding a second vendor to
-the same view is a one-minute job:
+simulator answers on the same address it does — so adding a second vendor to the same
+view is a one-minute job:
 
 | Device type | Address | Port | Tags |
 |---|---|---|---|
-| S7 | `s7` | 102 | DB1 words at offsets 0, 2, 4, 6 |
-| EthernetIP | `enip` | 44818 | `COUNTER`, `TEMPERATURE`, `FLOW`, `RUNNING` |
-| OPC UA | `opcua` (`opc.tcp://opcua:4840/freeopcua/server/`) | 4840 | `Plant/Counter`, `…/Temperature`, `…/Flow`, `…/Running` |
+| S7 | `127.0.0.1` | 102 | DB1 words at offsets 0, 2, 4, 6 |
+| EthernetIP | `127.0.0.1` | 44818 | `COUNTER`, `TEMPERATURE`, `FLOW`, `RUNNING` |
+| OPC UA | `opc.tcp://127.0.0.1:4840/freeopcua/server/` | 4840 | `Plant/Counter`, `…/Temperature`, `…/Flow`, `…/Running` |
 
 A single recorded HMI session showing a **Siemens and a Rockwell** device side by side,
 on a host with no route to the internet, is the demo this cell exists for.
@@ -393,18 +570,27 @@ have not been E2E-verified live** — this checklist is the script for that pass
 The `ot-sim` image, the FUXA seed, the extra protocol sims and the Purdue rules have
 **not been exercised on a live bake or cell** either: they are covered by unit and
 structural tests, and the sims themselves were run and read against real clients
-outside the image. Step 2a and step 10 below are their first live pass.
+outside the image. The **KubeSolo runtime is the newest of these** — the Docker purge,
+the offline install, the image side-load and the identity reset are held by
+`tests/test_ot_kubesolo.py` and by the bake's own smoke test, and nothing more. Steps
+2a, 4a and 10 below are their first live pass; `OT_RUNTIME=docker` is the fallback if
+the bake fails on a platform the script has not met.
 
 1. Settings: `pra_enabled` on; `bt_api_host` / `bt_client_id` / `bt_client_secret` /
    `bt_jump_group_name` / `bt_jumpoint_name` set; `gcp_jumpoint_machine_type=e2-medium`
    (delete an existing gateway VM so it recreates); `gcp_vm_nat_enabled` **off**;
    Password Safe registration on with the GCP functional account.
-2. Bake `ot-sim`; it appears in the OT tab's image picker. Watch the bake log for
-   the five containers passing the smoke test and for either `FUXA project seeded` or
-   the `NOT seeded` warning.
-   - **2a.** On the deployed cell (Shell Jump): `docker ps` shows `ot-plc`, `ot-hmi`,
-     `ot-opcua`, `ot-enip`, `ot-s7`; the Web Jump opens FUXA on a project that already
-     has the `PLC` connection and its four tags.
+2. Bake `ot-sim`; it appears in the OT tab's image picker. Watch the bake log for the
+   Docker purge, `installing KubeSolo …`, every image importing into containerd, the
+   five ports answering the smoke test, and either `FUXA project seeded` or the
+   `NOT seeded` warning.
+   - **2a.** On the deployed cell (Shell Jump): `systemctl status ot-sim` is
+     `active (exited)`, `kubectl -n ot-sim get pods` shows `ot-plc`, `ot-hmi`,
+     `ot-opcua`, `ot-enip` and `ot-s7` **Running on the node's own IP** (`-o wide`),
+     `docker` is absent, and the Web Jump opens FUXA on a project that already has the
+     `PLC` connection and its four tags. `kubectl get nodes` names *this* cell, not the
+     build VM, and `kubectl -n kube-system get pods` is healthy with no image pulls
+     pending — that is the offline install doing its job.
 3. Deploy a cell **with several protocols ticked** and the Jump Group + Gateway
    pickers set to the cell's region; the parent job completes; the child holds Shell
    Jump id + private IP; **one tunnel jump per ticked protocol** appears, each named
@@ -425,6 +611,12 @@ outside the image. Step 2a and step 10 below are their first live pass.
    `python scripts/ot/verify_tunnels.py` does all four in one pass and distinguishes
    "no listener" from "listener, no answer" from "answers but frozen" — see
    [OT protocol clients on Windows](ot-protocol-clients.md).
+   - **4a. The cluster, through PRA.** With the cell deployed with **Kubernetes API
+     (KubeSolo)** ticked: the jump item `ot-<cell>-kubesolo` exists, and with it
+     started, `kubectl --kubeconfig <the cell's /var/lib/ot-sim/kubeconfig-via-tunnel.yaml>
+     -n ot-sim get pods` answers from the rep machine — no certificate error, because
+     that file carries the `tls-server-name` the cell wrote. Stop the jump and the same
+     command fails to connect: the cluster has no other way in.
 5. Password Safe: managed system `projectId/zone/instanceName` exists; the mirror
    system `<cell>-pravault` exists with account `<cell>-adminuser`; the pair shows
    under `adminuser`'s **Synced Accounts**; rotate `adminuser` and watch the change
@@ -433,6 +625,16 @@ outside the image. Step 2a and step 10 below are their first live pass.
    console / `/login`, and is **offered for injection** when starting the cell's Shell
    Jump; after the rotation in step 5, checkout returns the NEW credential and SSH with
    it succeeds.
+6a. **The plant's own agent (GCP).** Deploy a cell with **Register in Entitle** ticked
+   and a broker image picked. The parent job shows: token minted → broker deployed →
+   cell deployed → PRA wiring → both zones applied → agent install queued.
+   `gcloud compute firewall-rules list` shows the two zones from
+   [Who brokers identity in the plant](#who-brokers-identity-in-the-plant). From the
+   broker (Shell Jump): `kubectl -n entitle get pods` is Running and the install job's
+   probe passed. From the cell: every `curl` fails. Then request access in Entitle and
+   confirm the ephemeral account appears **on the cell** — that is the agent reaching it
+   from inside the plant — and that SSH with it through the Shell Jump works and expires
+   on its own. Destroy: both VMs, both rule sets, the agent token and the integration go.
 7. Negative test: set the gateway to `e2-micro` → a new cell fails fast with the sizing
    remedy in the job error (not a mid-session OOM). With a Gateway override picked, the
    same deploy proceeds (guard skipped, noted in progress).
@@ -465,10 +667,19 @@ outside the image. Step 2a and step 10 below are their first live pass.
 |---|---|
 | Cell deploy fails immediately with a sizing message | Working as designed — the gateway is <2 GB; follow the remedy in the error |
 | Web Jump session dies with "internal timeout starting session" | Gateway too small (if the guard was bypassed by resizing after deploy), or the gateway host is down — check the Gateways tab against reality |
-| Tunnel connects but the Modbus client times out | The cell VM isn't running the stack — Shell Jump in and check `systemctl status ot-sim` / `docker ps` |
+| Tunnel connects but the Modbus client times out | The cell VM isn't running the stack — Shell Jump in and check `systemctl status ot-sim` / `kubectl -n ot-sim get pods` |
+| Everything times out for the first few minutes of a fresh cell | Working as designed — first boot mints the cluster's CA and node identity and loads the baked images, with no registry to shortcut it. `systemctl status ot-sim` shows the progress and reaches `active (exited)` |
 | Azure: Web Jump/Shell Jump work but the tunnel never establishes | The cell's Gateway resolves to an **ACI** gateway — ACI is serverless and cannot do protocol tunneling. Keep `azure_vm_jumpoint_mode=shared` and point `azure_jumpoint_name` / the form's Gateway picker at the shared **VM** gateway |
-| Registers read but never change | The sim container restarted into a crash loop — `docker logs ot-plc` (S7: `ot-s7`; OPC UA: `ot-opcua`; EtherNet/IP: `ot-enip`) |
-| An S7 / OPC UA / EtherNet-IP tunnel connects but nothing answers | That sim was not baked — `OT_SIMS` at bake time selects them (default is all four), and an image baked before Siemens was added has no `ot-s7`. `docker ps` on the cell shows which are running |
+| Registers read but never change | The sim restarted into a crash loop — `kubectl -n ot-sim logs deploy/ot-plc` (S7: `ot-s7`; OPC UA: `ot-opcua`; EtherNet/IP: `ot-enip`) |
+| An S7 / OPC UA / EtherNet-IP tunnel connects but nothing answers | That sim was not baked — `OT_SIMS` at bake time selects them (default is all four), and an image baked before Siemens was added has no `ot-s7`. `kubectl -n ot-sim get pods` on the cell shows which are running |
+| `kubectl` through the tunnel fails on a certificate error | The kubeconfig is not the one the cell wrote: the API certificate names the cell, not your loopback. Use `/var/lib/ot-sim/kubeconfig-via-tunnel.yaml`, which carries `tls-server-name` |
+| A pod is `ErrImageNeverPull` | Its image is not in the node's containerd. The cell pulls nothing by design — re-run `/opt/ot-sim/kubesolo/apply.sh`, which re-imports from `/var/lib/ot-sim/images` |
+| The KubeSolo tunnel connects but nothing answers on :6443 | The image was baked with `OT_RUNTIME=docker`, so the cell runs no cluster. Rebake with the default runtime, or untick that entry |
+| The Entitle grant approves but the vendor's login is refused | The agent cannot reach the cell on :22. On a cell with its own broker, check `<cell>-ot-ingress-agent` exists; on one without, that is the old shared-agent arrangement, which the Purdue zoning blocks by design — redeploy with Entitle ticked |
+| The agent install job fails at "Prove the agent's network path" | Working as designed, and it names which leg failed: DNS, 443/8080, or the cell's :22. Pod SNAT, the DNS hole and the destination set are the three candidates, in that order |
+| The agent was fine and now is not | The Entitle endpoint's addresses moved. They are pinned at wiring time unless `ot_entitle_egress_cidrs` is set — **Re-wire** re-resolves and replaces the rule |
+| Deploying with Entitle refuses, naming a setting | Working as designed: the in-plant agent needs the Purdue zoning, a broker image, a destination set, an in-cloud runner and an 8 GB broker. The error names the one that is missing |
+| The bake fails saying Docker is installed | KubeSolo's installer refuses a host with Docker on it and the purge did not complete — read the lines above it in the bake log; `OT_RUNTIME=docker` skips the whole step |
 | FUXA opens with no PLC connection | The bake's project seed was skipped — search the bake log for `FUXA project NOT seeded`, and wire it by hand (`provisioners/ot/README.md`) |
 | AWS cell deploy fails immediately naming the subnet | Working as designed — that subnet auto-assigns public IPs; use the private sandbox subnet or clear `ot_aws_require_private_subnet` |
 | GCP cell unreachable right after enabling Purdue firewalling | The Gateway you are brokering through is not the managed one, so it does not carry the `bt-jumpoint` tag the ingress allow matches. Delete the cell's `*-ot-ingress-deny` rule, then either use the managed Gateway or add that tag to yours |

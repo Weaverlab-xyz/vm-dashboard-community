@@ -264,6 +264,12 @@ image ships no `kubernetes.core`.
 
 ### Installing the agent
 
+The [OT demo cell](../../docs/profiles/demo/ot-demo-cell.md) already runs KubeSolo —
+its image bakes it in and runs the plant simulators on it — so these plays are for the
+on-prem hosts the cell stands in for. The exception is `entitle-agent-install.yml`: the
+cell has no egress, and the agent needs some, so the agent half belongs on a real host
+reached by a remote agent.
+
 1. `kubesolo-install.yml` — set `node_ca_pem` if an inspecting proxy re-signs your
    egress, because containerd's pull fails first and looks like a blocked port.
 2. `kubesolo-status.yml` — captures the idle baseline.

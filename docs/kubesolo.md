@@ -1,6 +1,6 @@
 # KubeSolo
 
-> **Audience:** operator · **Profile:** `both` · **Read this when:** you need the Entitle agent on a plant-floor or edge host that will not carry a real Kubernetes cluster.
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you need the Entitle agent on a plant-floor or edge host that will not carry a real Kubernetes cluster — or you are demoing the OT cell, which runs on KubeSolo.
 
 OT customers turn down Kubernetes-based agents for two reasons that have nothing to do
 with the agent: the compute a cluster costs, and the burden of maintaining one at a site
@@ -16,6 +16,28 @@ customer finds it.
 The plays live in [`examples/playbooks/kubesolo/`](https://github.com/Weaverlab-xyz/vm-dashboard-community/tree/main/examples/playbooks/kubesolo)
 and run through [Config Management](config-management.md), against an on-prem host
 reached by a [remote agent](remote-agents.md).
+
+## Seeing one without an on-prem host
+
+The [OT Demo Cell](profiles/demo/ot-demo-cell.md) **is** a KubeSolo host. Its baked
+image installs KubeSolo (the `-offline` build, pinned at `v1.2.0`) and runs the plant
+simulators and the FUXA HMI as Deployments in its `ot-sim` namespace — a plant IPC with
+a real cluster on it, in a subnet with no route out, which is the configuration this
+page describes. Deploy a cell, tick **Kubernetes API (KubeSolo)** on the form, and
+`kubectl` reaches it through a PRA protocol tunnel and nowhere else.
+
+What the cell shows: the footprint on a 4 GB machine, that stock manifests and Helm
+charts apply unchanged, that a single-node cluster survives with no registry to pull
+from, and what brokered `kubectl` into a plant looks like in a recorded session.
+
+**The agent runs there too — on a host of its own.** Ticking Entitle on a cell deploys a
+second KubeSolo machine beside it, the plant's industrial-DMZ broker, and installs the
+agent there with the same play below. Everything this page says about egress still
+applies, which is exactly why it is a separate host: the broker gets a narrow,
+allow-listed path to `agent.<region>.entitle.io` on 443 and 8080, and the plant floor
+keeps a true air gap. See
+[Who brokers identity in the plant](profiles/demo/ot-demo-cell.md#who-brokers-identity-in-the-plant)
+for the rules that make that claim checkable.
 
 ## What KubeSolo brings, and what it does not
 
@@ -39,7 +61,7 @@ kubeconfig is at `/var/lib/kubesolo/pki/admin/admin.kubeconfig`.
 | Architectures | ARM, ARM64, x86_64, RISC-V 64 |
 | Kubernetes line | 1.34 as of KubeSolo v1.1.0 |
 | Idle control plane | ~200 MB; 512 MB is the documented floor |
-| Practical minimum here | **2 vCPU / 4 GB** — set by the *agent's* 1Gi request, not by KubeSolo |
+| Practical minimum here | **2 vCPU / 4 GB** — set by the *agent's* 1Gi request, not by KubeSolo (the OT demo's broker uses 8 GB, since it also carries the cluster it installs into) |
 
 ## Egress: one hostname, two ports, and one of them is not TLS
 
@@ -198,5 +220,5 @@ the play hands it to helm through a 0600 values file rather than `--set`, becaus
 - [Config Management](config-management.md) — the run form, targets and runners
 - [Remote Agents](remote-agents.md) — reaching an on-prem host at all
 - [Entitle](integrations/entitle.md) — the integration this agent serves
-- [OT Demo Cell](profiles/demo/ot-demo-cell.md) — the demo cell and protocol simulators this sits beside
+- [OT Demo Cell](profiles/demo/ot-demo-cell.md) — a cell that already runs KubeSolo, with its plant simulators on top
 - [Kubernetes](kubernetes.md) — the managed-cluster path, where the agent install is a button

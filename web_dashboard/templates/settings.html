@@ -2808,6 +2808,53 @@
                 <em>Re-wire</em>. AWS and Azure cells are unaffected.
               </p>
             </div>
+            <div class="mb-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">OT demo cell: Entitle egress ranges <span class="text-gray-400 font-normal">(GCP)</span></label>
+              <input type="text" x-model="panelCfg.ot_entitle_egress_cidrs"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="203.0.113.10/32, 203.0.113.11/32">
+              <p class="text-xs text-gray-400 mt-1">
+                The only way out of the plant. The cell's industrial-DMZ broker runs the
+                Entitle agent, and this is the comma-separated set of addresses it may reach
+                on 443 and 8080 — everything else, from both the broker and the cell, is
+                denied. A firewall rule takes addresses, not names, so an address list from
+                BeyondTrust is the supported answer, and it is the same firewall ticket a real
+                plant raises. Left blank the deploy resolves
+                <span class="font-mono">agent.&lt;region&gt;.entitle.io</span> itself and labels
+                the result <em>resolved, not published</em> on the cell card; if that fails it
+                refuses rather than widening to <span class="font-mono">0.0.0.0/0</span>.
+              </p>
+            </div>
+            <div class="mb-3">
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" x-model="panelCfg.ot_dmz_egress_open_ports" class="rounded text-blue-600">
+                OT demo cell: let the DMZ broker reach 443/8080 anywhere
+              </label>
+              <p class="text-xs text-gray-400 mt-1">
+                The escape hatch for a site that cannot pin BeyondTrust's addresses. Allows tcp
+                443 and 8080 to <span class="font-mono">0.0.0.0/0</span> <em>from the
+                <span class="font-mono">ot-dmz</span> tag only</em> — the PLC cell keeps its
+                true air gap and the broker still gets no other port. It is a weaker claim than
+                an address list, so the job summary and the cell card name which of the two drew
+                the rule; the demo owns the difference out loud rather than implying a pinned
+                path it does not have.
+              </p>
+            </div>
+            <div class="mb-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">OT demo cell: Config-Management runner range <span class="text-gray-400 font-normal">(GCP)</span></label>
+              <input type="text" x-model="panelCfg.ot_config_runner_source_cidr"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="10.10.0.0/28">
+              <p class="text-xs text-gray-400 mt-1">
+                The broker has no public address, so the agent is installed over SSH by the
+                in-cloud Ansible runner — and the broker admits :22 from the PRA Gateway and
+                this range alone. Set it to the range the runner sources from: the direct VPC
+                egress subnet (<span class="font-mono">gcp_run_subnetwork</span>) or the
+                Serverless VPC connector (<span class="font-mono">gcp_ansible_vpc_connector</span>).
+                Unset, the deploy refuses — an agent that cannot be installed also cannot be
+                repaired on a <em>Re-wire</em>.
+              </p>
+            </div>
             <p class="text-xs text-gray-400 mb-2">GCP overrides — leave blank to reuse the AWS values above.</p>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>

@@ -1235,9 +1235,9 @@
 
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">PLC Protocols (one tunnel each)</label>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Protocols to broker (one tunnel each)</label>
             <div class="border border-gray-300 rounded-lg p-2 space-y-1">
-              <template x-for="p in cellPresets()" :key="p.key">
+              <template x-for="p in cellPlcPresets()" :key="p.key">
                 <label class="flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
                   <input type="checkbox" :value="p.key"
                          @change="toggleOTProtocol($event, p.key)"
@@ -1246,11 +1246,28 @@
                   <span class="text-xs text-gray-700" x-text="p.label + ' (:' + p.port + ')'"></span>
                 </label>
               </template>
+              <template x-if="cellPlatformPresets().length">
+                <div class="pt-1 mt-1 border-t border-gray-200 space-y-1">
+                  <p class="text-[10px] uppercase tracking-wide text-gray-400">The cell itself</p>
+                  <template x-for="p in cellPlatformPresets()" :key="p.key">
+                    <label class="flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
+                      <input type="checkbox" :value="p.key"
+                             @change="toggleOTProtocol($event, p.key)"
+                             :checked="otForm.protocols.includes(p.key)"
+                             class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                      <span class="text-xs text-gray-700" x-text="p.label + ' (:' + p.port + ')'"></span>
+                    </label>
+                  </template>
+                </div>
+              </template>
             </div>
             <p class="text-xs text-gray-400 mt-1">
-              The cell simulates all of these at once — each gets its own PRA protocol
-              tunnel, so access can be granted per vendor. Protocols the image does not
-              simulate (e.g. DNP3) stay available on the standalone tunnel card below.
+              The cell simulates every PLC protocol at once — each gets its own PRA protocol
+              tunnel, so access can be granted per vendor. It also runs those simulators on
+              KubeSolo, so the cell's own Kubernetes API can be brokered the same way: a
+              recorded <span class="font-mono">kubectl</span> into the plant cluster, with no
+              other route in. Protocols the image does not simulate (e.g. DNP3) stay available
+              on the standalone tunnel card below.
             </p>
           </div>
         </div>
@@ -1867,10 +1884,22 @@ function azureDashboard() {
       }
     },
 
-    // Only the protocols the baked image actually simulates. The standalone
+    // Only the endpoints the baked image actually serves. The standalone
     // tunnel card keeps offering every preset, since it points at real gear.
     cellPresets() {
       return (this.otPresets || []).filter(p => p.cell);
+    },
+
+    // Split for the form: the fieldbus protocols a PLC speaks, and the cell's own
+    // platform endpoints — today its KubeSolo API. Both are brokered identically,
+    // one tunnel jump each, but listing "Kubernetes API" as a PLC protocol would
+    // tell the customer something untrue.
+    cellPlcPresets() {
+      return this.cellPresets().filter(p => p.plc);
+    },
+
+    cellPlatformPresets() {
+      return this.cellPresets().filter(p => !p.plc);
     },
 
     toggleOTProtocol(event, key) {

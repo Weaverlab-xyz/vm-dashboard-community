@@ -31,7 +31,7 @@ What a demo has to show, concretely:
 
 | layer | what it does here |
 |---|---|
-| **Provisioning** | Stands up a simulated cell — PLC simulators plus a web SCADA/HMI — inside a private, egress-less subnet. The air gap *is* the demo. |
+| **Provisioning** | Stands up a simulated cell — PLC simulators plus a web SCADA/HMI, running on KubeSolo — inside a private, egress-less subnet. The air gap *is* the demo. |
 | **PRA** | The only way in. A Web Jump to the HMI, and one protocol-aware tunnel per protocol, so a policy can grant Siemens and Rockwell separately rather than as one opaque item. |
 | **Password Safe** | Owns the cell's admin credential, mirrors it into the PRA vault and rotates it, so a rep injects a real secret without seeing it. |
 | **Entitle** | Makes the vendor's access time-boxed instead of standing. |
@@ -57,12 +57,33 @@ a Rockwell shop" into the same demo rather than two.
 
 **Guide:** [OT Demo Cell](../ot-demo-cell.md)
 
+### kubectl into the plant, through PRA
+
+The cell's simulators are workloads of [KubeSolo](../../../kubesolo.md), the single-node
+Kubernetes small enough for plant hardware — so the answer to "we cannot run a cluster on
+the plant floor" is a running cell rather than a slide. Its API gets a tunnel of its own,
+which is what makes "this vendor may read the PLC but not the cluster" a policy decision
+instead of a network one.
+
+The agent half of that story runs next door, on the cell's DMZ broker — same KubeSolo,
+same chart, inside the plant. See
+[Who brokers identity in the plant](../ot-demo-cell.md#who-brokers-identity-in-the-plant).
+
+**Guide:** [KubeSolo](../../../kubesolo.md) · [OT Demo Cell](../ot-demo-cell.md)
+
 ### Time-bound vendor access to one cell
 
 Grant the integrator two hours on a single cell, then watch the grant expire and the tunnel
 close by itself. The point to land is that nobody had to remember to revoke it.
 
-**Guide:** [Entitle user JIT](../../../design/entitle-user-jit.md)
+What makes it land in an OT room is *where the broker sits*: the Entitle agent runs on a
+DMZ host inside the plant, not in a cluster somewhere else reaching in. The plant floor has
+no route out at all; the DMZ host has two ports to one destination; and the rules that say
+so are readable in the cloud console. If the customer's first question is "so what did you
+open in my plant?", that list is the answer.
+
+**Guide:** [Who brokers identity in the plant](../ot-demo-cell.md#who-brokers-identity-in-the-plant)
+· [Entitle user JIT](../../../design/entitle-user-jit.md)
 
 ### Check out the cell's admin credential in PRA
 

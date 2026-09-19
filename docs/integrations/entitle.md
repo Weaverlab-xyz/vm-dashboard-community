@@ -66,6 +66,13 @@ The agent is **shared**: one per VPC/network serves every private integration in
 referenced by `entitle_agent_token_name`. So you provision the agent **once per
 environment** (not per build).
 
+> **Except an OT demo cell,** which mints its own. A cell registers against an agent
+> running *in its own plant* — on a DMZ broker deployed beside it — because an agent
+> outside the plant both misrepresents the architecture and, with the cell's Purdue
+> zoning on, cannot reach it at all: the registration succeeds, the grant approves, and
+> the login fails. See
+> [Who brokers identity in the plant](../profiles/demo/ot-demo-cell.md#who-brokers-identity-in-the-plant).
+
 "Only in a Kubernetes cluster" does not have to mean a real one. For an edge or
 plant-floor host that will not carry a cluster, [KubeSolo](../kubesolo.md) is a
 single-node, etcd-free distribution that takes the same chart unmodified — Config

@@ -198,6 +198,35 @@ client.disconnect()
 `Expected COTP DT, got 0x80` on stderr during connect is harmless noise from the
 pure-Python server; the reads still work.
 
+### Kubernetes API — `127.0.0.1:6443`
+
+Not a fieldbus protocol: this is the cell's own [KubeSolo](../../kubesolo.md) cluster,
+the thing the four simulators run on. The client is `kubectl`, and the only setup is
+collecting the kubeconfig the cell writes for exactly this path — once, through the
+Shell Jump:
+
+```bash
+sudo cat /var/lib/ot-sim/kubeconfig-via-tunnel.yaml
+```
+
+Save it on the rep machine as `ot-cell.yaml`. It is the cell's admin kubeconfig with
+`server: https://127.0.0.1:6443` (the tunnel's local end) and a `tls-server-name` of
+the cell's private IP, because the API server's certificate is issued to the cell and
+not to your loopback. With the `ot-<cell>-kubesolo` jump started:
+
+```bash
+kubectl --kubeconfig ot-cell.yaml get nodes
+kubectl --kubeconfig ot-cell.yaml -n ot-sim get pods -o wide
+kubectl --kubeconfig ot-cell.yaml -n ot-sim logs deploy/ot-plc --tail=5
+```
+
+The pods answer on the node's own address — that is `hostNetwork`, and it is why the
+protocol tunnels above reach them. Stop the jump and every command fails to connect,
+which is the point worth making out loud: the plant's cluster has no other way in.
+
+`verify_tunnels.py` does not check this one; a stopped jump and a wrong kubeconfig fail
+differently enough to tell apart (`connection refused` versus a certificate error).
+
 ### DNP3 — not simulated
 
 The cell does not serve DNP3. `opendnp3` needs a library built from source, which the
@@ -249,8 +278,9 @@ port, so a client that wanders off it just hangs.
 |---|---|
 | `verify_tunnels.py` says nothing is listening, on every protocol | The tunnel jumps are not started in the representative console, or the session dropped. The listener only exists for the life of the session |
 | Nothing listening on **one** protocol | That jump item uses a different local port — check the jump item and pass `--<protocol>-port` |
-| Listener answers nothing | That sim was not baked into the image (`OT_SIMS` selects them at bake time; an image baked before Siemens was added has no `ot-s7`), or its container died. Shell Jump to the cell and run `docker ps` |
-| Values answer but never change | The sim's updater thread is wedged — `docker restart` the container, or redeploy the cell |
+| Listener answers nothing | That sim was not baked into the image (`OT_SIMS` selects them at bake time; an image baked before Siemens was added has no `ot-s7`), or its pod died. Shell Jump to the cell and run `kubectl -n ot-sim get pods` |
+| Values answer but never change | The sim's updater thread is wedged — `kubectl -n ot-sim rollout restart deploy/ot-plc` (or the sim's own deployment), or redeploy the cell |
+| `kubectl` says `x509: certificate is valid for …, not 127.0.0.1` | You are not using the cell's `/var/lib/ot-sim/kubeconfig-via-tunnel.yaml`, which carries the `tls-server-name` that makes the tunnel verify |
 | The tunnel will not bind the local port | Something else holds it: `Get-NetTCPConnection -LocalPort 502`. Hyper-V and WSL also reserve port ranges — `netsh int ipv4 show excludedportrange protocol=tcp`. Give the jump item a different local port and pass it to the script |
 | pip fails with `CERTIFICATE_VERIFY_FAILED` | TLS-inspecting proxy — set `PIP_CERT` to your corporate root CA (above) |
 | `TypeError` on `read_holding_registers` | pymodbus version drift on the unit-id kwarg — try `slave=1` instead of `device_id=1` |

@@ -26,6 +26,7 @@ import sys
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SIM = os.path.join(_ROOT, "provisioners", "ot", "ot-sim-debian.sh")
 _VERIFY = os.path.join(_ROOT, "scripts", "ot", "verify_tunnels.py")
+_SVC = os.path.join(_ROOT, "web_dashboard", "services", "ot_service.py")
 _DOCS = [
     os.path.join(_ROOT, "docs", "profiles", "demo", "ot-demo-cell.md"),
     os.path.join(_ROOT, "docs", "profiles", "demo", "ot-protocol-clients.md"),
@@ -49,12 +50,17 @@ def _read(path):
     return open(path, encoding="utf-8").read()
 
 
-def _verify_module():
-    """Import the standalone script by path -- scripts/ has no package."""
-    spec = importlib.util.spec_from_file_location("ot_verify_tunnels", _VERIFY)
+def _by_path(name, path):
+    """Import by file path -- scripts/ has no package, and ot_service is loaded this
+    way so the check needs no app dependency."""
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _verify_module():
+    return _by_path("ot_verify_tunnels", _VERIFY)
 
 
 _SRC = _read(_SIM)
@@ -180,6 +186,26 @@ def test_dnp3_is_not_offered_as_a_cell_protocol():
     assert "DNP3" in _VT.__doc__, (
         "verify_tunnels must say why DNP3 is absent -- the deploy form still "
         "offers the preset, so its absence looks like an oversight")
+
+
+def test_every_cell_endpoint_is_either_checked_here_or_explained():
+    """An SE runs this before sharing their screen and reads a clean pass as "the
+    cell is ready". Anything the cell serves that this script does not check has to
+    say so out loud, or the pass claims more than it proved -- which is the same
+    trap the DNP3 note above exists to close."""
+    ot = _by_path("ot_service_under_test", _SVC)
+    # Matched on port, not on key: this script calls EtherNet/IP "enip" and the
+    # preset table calls it "ethernet-ip", and the port is what both actually mean.
+    checked = set(_VT.DEFAULT_PORTS.values())
+    for key in ot.cell_protocols():
+        info = ot.OT_PORT_PRESETS[key]
+        if info["port"] in checked:
+            continue
+        label = info["label"].split(" (")[0]
+        assert label in _VT.__doc__, (
+            f"the cell serves {info['label']} on :{info['port']} but verify_tunnels "
+            f"neither checks it nor mentions why not -- a clean run would imply it "
+            f"was verified")
 
 
 if __name__ == "__main__":

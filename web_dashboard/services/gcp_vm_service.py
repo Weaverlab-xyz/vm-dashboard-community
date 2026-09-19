@@ -445,9 +445,17 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         # Entitle — register as SSH ephemeral-accounts integration (per-build opt-in).
         from ..services import entitle_vm_hook
         if getattr(payload, "register_in_entitle", False) and entitle_vm_hook.registration_enabled():
+            # An OT cell is brokered by the agent running in its own plant (on the
+            # cell's DMZ broker), whose token name the cell orchestrator stamped on
+            # this job before it ran. Blank everywhere else = the install-wide agent,
+            # exactly as before.
+            _row = job_service.get_job(db, job_id)
+            _agent_name = ((_row.metadata_dict if _row else None) or {}).get(
+                "ot_agent_token_name") or ""
             await entitle_vm_hook.register(db, job_id, payload.instance_name, hostname,
                                            private=not payload.create_external_ip,
                                            result=final_meta, tag="GCP",
+                                           agent_token_name=_agent_name,
                                            # Use the RESOLVED login user (gcp_ssh_username →
                                            # gcp-user default), the same account the VM's launch
                                            # key was injected for — not the raw (often-blank)
@@ -682,6 +690,20 @@ async def _run_destroy(
         if deploy_meta.get("entitle_registration_tf_state"):
             from ..services import entitle_vm_hook
             await entitle_vm_hook.deregister(deploy_meta, result)
+
+        # An OT cell that brokered its own identity minted an agent token of its own.
+        # It dies with the cell: a token left in the tenant outlives the plant it was
+        # issued for, and nothing else will ever clean it up. Reported, never raised —
+        # teardown of a demo must not be blockable by the identity provider.
+        if deploy_meta.get("ot_agent_token_key") or deploy_meta.get("ot_agent_token_name"):
+            job_service.update_progress(db, job_id, 39,
+                                        "Destroying the plant's Entitle agent token…")
+            from ..services import ot_service as _ot_tok
+            note = await _ot_tok.destroy_agent_token(deploy_job_id)
+            if note:
+                result["ot_agent_token_error"] = note
+            else:
+                result["ot_agent_token_destroyed"] = deploy_meta.get("ot_agent_token_name")
 
         # Off-board the Password Safe managed system if this deploy registered one.
         if deploy_meta.get("ps_registration_tf_state"):

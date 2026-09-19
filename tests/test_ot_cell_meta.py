@@ -70,14 +70,37 @@ _CLOUD_ENDPOINTS = {
 def test_the_child_is_queued_and_carries_the_ot_keys():
     for cloud, (fn_name, child_type, needed_keys) in _CLOUD_ENDPOINTS.items():
         calls = list(_create_job_calls(_fn(fn_name)))
-        child = [c for c in calls if c[0] == child_type]
-        assert len(child) == 1, f"{cloud}: expected exactly one {child_type} create, got {calls}"
+        # Matched on `ot_cell`, not on the job type: a GCP cell that brokers its own
+        # identity also creates the DMZ broker, which is the same job type and
+        # deliberately NOT an ot_cell (see the next test).
+        child = [c for c in calls if c[0] == child_type and "ot_cell" in c[2]]
+        assert len(child) == 1, f"{cloud}: expected exactly one {child_type} cell create, got {calls}"
         _, status, keys = child[0]
         assert status == "queued", (
             f"{cloud}: the cell's {child_type} child must be created status='queued' — "
             "pending would be claimed by the runner and deployed twice")
         for needed in needed_keys:
             assert needed in keys, f"{cloud}: child metadata lost the {needed!r} key"
+
+
+def test_the_broker_is_a_second_child_that_is_not_a_cell():
+    """The plant's DMZ broker is a VM of its own, and it must never be counted as a
+    cell: GET /api/ot/cells and the home tile both key on `ot_cell`, so a broker
+    carrying that flag would double every number an operator reads — and Destroy would
+    offer to tear the plant floor down twice."""
+    calls = list(_create_job_calls(_fn("deploy_cell")))
+    brokers = [c for c in calls if "ot_broker" in c[2]]
+    assert len(brokers) == 1, f"gcp: expected exactly one DMZ broker create, got {calls}"
+    job_type, status, keys = brokers[0]
+    assert job_type == "gce_deploy"
+    assert status == "queued", (
+        "the broker child must be created status='queued' too, or the runner claims it "
+        "and deploys it a second time alongside the orchestrator")
+    assert "ot_cell" not in keys, "the broker must not be flagged as a cell"
+    assert "ot_cell_job_id" in keys, (
+        "the broker must name the cell it brokers for — teardown and the card both "
+        "walk that link")
+    assert "req" in keys, "the GCE runner rebuilds the deploy from `req`"
 
 
 def test_the_parent_declares_its_children_and_cloud():

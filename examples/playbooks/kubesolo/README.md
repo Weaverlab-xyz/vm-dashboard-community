@@ -8,6 +8,25 @@ The operator-facing write-up — egress, trust stores, sizing, and the limitatio
 raising before a customer finds it — is [docs/kubesolo.md](../../../docs/kubesolo.md).
 This file is the quick reference.
 
+**On the demo cell, KubeSolo is already there.** The
+[OT demo cell](../../../docs/profiles/demo/ot-demo-cell.md) bakes it in and runs its
+plant simulators on it, with kubectl and helm on the host — so `kubesolo-install.yml`
+has nothing to do on a cell, and it is for the on-prem hosts the cell stands in for.
+
+`entitle-agent-install.yml`, though, is what the cell's deploy runs **for you**, against
+the plant's DMZ broker — the same play, the same variables, queued as an ordinary
+Config-Management run. Two things in it exist because of that host, and both help a real
+air-gapped site too:
+
+- `entitle_agent_chart` accepts an **absolute path** to a chart archive already on the
+  host (the broker bakes one), so the install needs no Helm repo — `--repo` is omitted
+  when the chart is a path;
+- `entitle_probe_endpoint` / `entitle_probe_ssh_target` run a **pre-flight egress probe
+  from a pod** before helm: DNS, 443, 8080, then the target host's 22. The agent is a
+  pod, so proving the path from the host would answer a different question — and a
+  closed path becomes one legible failure instead of a `CrashLoopBackOff` three layers
+  down. Set `entitle_probe: false` to skip it.
+
 | File | Purpose |
 |---|---|
 | `kubesolo-install.yml` | Install KubeSolo, helm and kubectl; optionally trust a corporate root CA first |
