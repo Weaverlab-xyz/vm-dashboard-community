@@ -1668,6 +1668,41 @@
                  class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
           Register the VM in Entitle for just-in-time SSH access
         </label>
+        <div x-show="otForm.register_in_entitle" x-cloak
+             class="ml-6 space-y-2 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <p class="text-xs text-gray-600">
+            The agent that brokers this access runs <strong>in the plant</strong>, on its own
+            industrial-DMZ host deployed beside the cell — not in a cluster somewhere else.
+            On AWS the two zones are security groups, and the cell's <em>replaces</em> the
+            ones you picked above: groups union their allows, so a zone that merely joined
+            them would restrict nothing. Needs the Purdue zoning on
+            (<span class="font-mono">ot_purdue_firewall_enabled</span>) and the Gateway
+            host's group in <span class="font-mono">bt_ecs_jumpoint_security_group_id</span>;
+            the deploy refuses with the remedy if anything is missing.
+          </p>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">DMZ broker AMI <span class="text-red-500">*</span></label>
+            <select x-model="otForm.broker_ami_id"
+                    class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+              <option value="">— pick the ot-broker AMI —</option>
+              <template x-for="img in otBrokerImages()" :key="img.ami_id">
+                <option :value="img.ami_id" x-text="img.name"></option>
+              </template>
+            </select>
+            <p class="text-xs text-gray-400 mt-1" x-show="otBrokerImages().length === 0">
+              No <span class="font-mono">ot-broker</span> AMI yet — bake one with
+              <span class="font-mono">OT_ROLE=broker</span> (see provisioners/ot/README.md),
+              or tick "show all".
+            </p>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">DMZ broker instance type</label>
+            <input type="text" x-model="otForm.broker_instance_type"
+                   class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm font-mono"
+                   placeholder="t3.large">
+            <p class="text-xs text-gray-400 mt-1">8 GB or more: the agent requests 1Gi on its own.</p>
+          </div>
+        </div>
         {% endif %}
 
         <div x-show="otError" x-cloak
@@ -1725,6 +1760,13 @@
                     <span class="font-mono" x-text="c.vault_account_name"></span>
                     <span :class="c.ps_checkout_synced ? 'text-green-600' : 'text-amber-600'"
                           x-text="c.ps_checkout_synced ? 'synced' : 'not synced'"></span></div>
+                  <div x-show="c.broker_instance_name"><span class="text-gray-400">Plant DMZ broker:</span>
+                    <span class="font-mono" x-text="c.broker_instance_name + (c.broker_private_ip ? ' (' + c.broker_private_ip + ')' : '')"></span>
+                    <span :class="c.agent_installed ? 'text-green-600' : 'text-amber-600'"
+                          x-text="c.agent_installed ? 'agent installed' : 'agent installing'"></span></div>
+                  <div x-show="c.agent_token_name"><span class="text-gray-400">Entitle agent:</span>
+                    <span class="font-mono" x-text="c.agent_token_name"></span>
+                    <span class="text-gray-400">— this plant's own</span></div>
                   <div x-show="c.expires_at"><span class="text-gray-400">Expires:</span>
                     <span x-text="(c.expires_at || '').replace('T', ' ').slice(0, 16) + ' UTC'"></span></div>
                 </div>
@@ -1993,6 +2035,10 @@
         protocols: ['modbus'], plc_port: null, hmi_port: 1881,
         jump_group: '', jumpoint_name: '',
         register_in_passwordsafe: true, register_in_entitle: false,
+        // The plant's DMZ broker, deployed alongside the cell when Entitle is ticked.
+        // A second bake (OT_ROLE=broker), because the deploy paths have no user-data
+        // hook and the role cannot be chosen at launch.
+        broker_ami_id: '', broker_ami_name: '', broker_instance_type: 't3.large',
       },
       otTunnelForm: {
         name: '', hostname: '', protocol: 'modbus', remote_port: null,
@@ -2302,6 +2348,14 @@
         return this.otShowAllImages ? imgs : imgs.filter(i => (i.name || '').includes('ot-sim'));
       },
 
+      // The DMZ broker is a different bake: KubeSolo and the Entitle agent's chart,
+      // and no simulators — a DMZ host that answers Modbus is a lie about where it
+      // sits. Filtered apart so the two are never confused in the picker.
+      otBrokerImages() {
+        const imgs = this.amis || [];
+        return this.otShowAllImages ? imgs : imgs.filter(i => (i.name || '').includes('ot-broker'));
+      },
+
       // Subnets, SGs and AMIs are region-scoped — refetch on change, then default
       // to the sandbox private subnet + VM SG (the same preselects the deploy
       // modal gets), which is exactly where an air-gapped cell belongs.
@@ -2389,6 +2443,10 @@
             jumpoint_name: f.jumpoint_name || null,
             register_in_passwordsafe: f.register_in_passwordsafe,
             register_in_entitle: f.register_in_entitle,
+            broker_ami_id: f.broker_ami_id,
+            broker_ami_name: (this.amis || []).reduce(
+              (n, i) => (i.ami_id === f.broker_ami_id ? (i.name || '') : n), ''),
+            broker_instance_type: f.broker_instance_type,
           });
           window.location.href = '/jobs/' + res.job_id;
         } catch (e) {
@@ -2408,9 +2466,18 @@
       },
 
       async destroyOTCell(c) {
-        if (!confirm(`Destroy OT cell ${c.instance_name}? This removes the VM, its PRA jump items (Web Jump, tunnel, Shell Jump), the PRA Vault checkout account and any Password Safe registration.`)) return;
+        const withBroker = c.broker_instance_name
+          ? ` Its DMZ broker ${c.broker_instance_name} goes too, along with the plant's own Entitle agent token.` : '';
+        if (!confirm(`Destroy OT cell ${c.instance_name}? This removes the VM, its PRA jump items (Web Jump, tunnel, Shell Jump), the PRA Vault checkout account and any Password Safe registration.${withBroker}`)) return;
         try {
           await API.delete(`/api/aws/instances/${encodeURIComponent(c.instance_id)}`);
+          // The broker is a VM of its own, so it needs its own destroy — and it goes
+          // SECOND: its teardown drops the agent token the cell registered against, and
+          // the broker deleted first would leave an agent pointing at nothing while that
+          // ran. Its zone security group is removed by that destroy, not here.
+          if (c.broker_instance_id) {
+            await API.delete(`/api/aws/instances/${encodeURIComponent(c.broker_instance_id)}`);
+          }
           toast('Destroy started — the cell disappears once the job completes.', 'success');
         } catch (e) {
           toast(e.message || 'Destroy failed', 'error');

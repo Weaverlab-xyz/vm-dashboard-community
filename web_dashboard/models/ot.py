@@ -205,6 +205,9 @@ class OTCellInfo(BaseModel):
     # cell deployed without it (and on every AWS/Azure cell until those phases land).
     broker_job_id: str = ""
     broker_instance_name: str = ""
+    # AWS deletes an instance by id, not by name, so the card needs the broker's --
+    # GCP and Azure key on the name and leave this empty.
+    broker_instance_id: str = ""
     broker_private_ip: str = ""
     agent_token_name: str = ""
     agent_installed: bool = False

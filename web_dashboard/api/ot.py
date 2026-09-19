@@ -992,6 +992,7 @@ def list_cells(
             shell_jump_id=str(meta.get("bt_shell_jump_id") or ""),
             broker_job_id=broker_job_id,
             broker_instance_name=broker_meta.get("instance_name") or "",
+            broker_instance_id=str(broker_meta.get("instance_id") or ""),
             broker_private_ip=broker_meta.get("private_ip") or "",
             agent_token_name=meta.get("ot_agent_token_name") or "",
             agent_installed=agent_installed,
