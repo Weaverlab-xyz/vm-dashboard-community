@@ -39,7 +39,10 @@ that the air-gapped subnet *is* the plant network, and every path in is PRA-brok
   start — see
   [PRA checkout of the cell's admin credential](#pra-checkout-of-the-cells-admin-credential).
 - **Layer 3 — Entitle** *(grant time-boxed access)* — *optional.* SSH ephemeral
-  accounts, inherited from the VM deploy path.
+  accounts — brokered by an agent running **in the plant**, on a DMZ host deployed
+  beside the cell, because that is the only arrangement in which "Entitle manages
+  access to plant resources" is true as stated. See
+  [Who brokers identity in the plant](#who-brokers-identity-in-the-plant).
 
 Runs on **GCP, AWS and Azure** — each cloud page has its own *OT Demo Cell* tab, and
 the cell's VM is that cloud's plain deploy child (`gce_deploy` / `ec2_deploy` /
@@ -121,16 +124,101 @@ and `docker logs ot-plc` is `kubectl -n ot-sim logs deploy/ot-plc`. `kubectl` an
 expect both). Baking with **`OT_RUNTIME=docker`** brings the old compose stack back
 unchanged if a KubeSolo bake ever fails on a platform the script has not met.
 
-**What the cell cannot show: the Entitle agent.** The agent needs a path to
-`agent.<region>.entitle.io` and fails closed without one, and this cell's whole claim
-is that no such path exists — so the agent belongs on an on-prem host reached by a
-[remote agent](../../remote-agents.md), which is what
-[`kubesolo/entitle-agent-install.yml`](https://github.com/Weaverlab-xyz/vm-dashboard-community/tree/main/examples/playbooks/kubesolo)
-is written for. If you want it on a cell anyway, it costs the air gap (egress on for
-that subnet — see [Air-gap](#lifecycle)) and a bigger shape: the agent requests 1Gi on
-its own, so deploy that cell at 8 GB (`e2-standard-2` / `t3.large` / `Standard_B2ms`)
-rather than the 4 GB default. Demo the cluster on the cell, and the agent where it can
-actually reach its tenant.
+**The agent does not run here** — it runs on the plant's DMZ broker, one zone over, and
+that is the whole point of [Who brokers identity in the plant](#who-brokers-identity-in-the-plant).
+The plant floor keeps a true air gap; the machine with a way out is a different machine.
+
+## Who brokers identity in the plant
+
+Tick **Register the VM in Entitle** on the cell form and the deploy stands up a second
+machine: the plant's **industrial-DMZ broker**, `<cell>-dmz`. It runs the same KubeSolo
+the cell does and carries the BeyondTrust Entitle agent and nothing else — no
+simulators, because a DMZ host that answers Modbus is a lie about where it sits.
+
+The reason it is a separate host is the reason a real plant has one: the thing with a
+way out does not sit on the plant floor. With `ot_purdue_firewall_enabled` on, the two
+zones are firewall rules you can read out loud:
+
+| Zone | Rule | Effect |
+|---|---|---|
+| cell (`ot-sim`) | `<cell>-ot-egress-deny` | **no route out, ever** — the plant floor gets no allow at all |
+| | `<cell>-ot-ingress-allow` | the PRA Gateway, on the cell's own ports |
+| | `<cell>-ot-ingress-agent` | **tcp 22 from the DMZ zone** — the agent's only reach into the plant floor |
+| | `<cell>-ot-ingress-deny` | everything else stops at the boundary |
+| broker (`ot-dmz`) | `<broker>-dmz-egress-entitle-<hash>` | **tcp 443 + 8080 to the Entitle channel**, and nothing else |
+| | `<broker>-dmz-egress-dns-udp` / `-tcp` | DNS to the metadata resolver |
+| | `<broker>-dmz-egress-deny` | the rest of the internet |
+| | `<broker>-dmz-ingress-allow` | tcp 22 from the PRA Gateway and the Config-Management runner |
+| | `<broker>-dmz-ingress-deny` | everything else |
+
+So the sentences the demo can now make, and prove in the console:
+
+- nothing on the plant floor has a route out — not the HMI, not the PLCs, nothing;
+- exactly one machine in the plant has one, and it is two ports to one destination;
+- the agent that grants a vendor time-boxed access to the cell **runs inside the
+  plant**, and reaches the cell on port 22 and no other port;
+- stop the broker and the grants stop working, because there is no second path.
+
+### The address problem, stated plainly
+
+A firewall rule takes addresses; `agent.<region>.entitle.io` is a name, and BeyondTrust
+publishes no range for it. So:
+
+1. **`ot_entitle_egress_cidrs`** is the supported answer — the firewall ticket a real
+   plant would have. Set it and the rule is built from it.
+2. Left blank, the wiring **resolves the hostname once, at wiring time**, and records
+   that it did. Honest, and not a contract: if BeyondTrust rotates those addresses the
+   agent loses its channel until you **Re-wire**, which re-resolves. The rule's name
+   carries a digest of the address set, so a changed set arrives as a new rule rather
+   than being silently ignored.
+3. Neither → the deploy **refuses**, naming the key. It never quietly widens to
+   `0.0.0.0/0`. If you genuinely cannot get a list, `ot_dmz_egress_open_ports` allows
+   the broker 443/8080 to anywhere — a weaker claim, opted into deliberately, and the
+   plant floor is unaffected either way.
+
+What a production site does instead is FQDN egress (Cloud NGFW, AWS Network Firewall
+domain lists, Azure Firewall application rules) or an L3.5 forward proxy. All three
+cost real per-hour infrastructure, which is why the demo pins addresses — and saying
+so is part of the conversation, not an apology for it.
+
+### The probe, and why it exists
+
+The agent runs as a **pod**, so whether its traffic leaves with the node's address is a
+property of the CNI — and KubeSolo documents nothing about masquerade. Before helm runs,
+the install play starts a one-shot pod that checks, in order: DNS resolves the endpoint →
+tcp 443 opens → tcp 8080 opens → the cell's :22 opens. A failure names the three
+candidates (pod SNAT, the DNS hole, the destination set) and stops. It is also the thing
+to run in front of a customer who asks "so what else can this host reach?"
+
+### What it needs, and what it costs
+
+Each of these is refused **before any VM is launched**, with the remedy in the job error:
+
+- a **broker image** baked with `OT_ROLE=broker` (see `provisioners/ot/README.md`);
+- **`ot_purdue_firewall_enabled` on** — the agent's way out is a hole in the plant
+  boundary, and without the boundary there is nothing to make a hole in;
+- a **destination set**, per above;
+- an **in-cloud Config-Management runner** (`ansible_runner_gcp`, plus
+  `gcp_run_subnetwork` or `gcp_ansible_vpc_connector`) and
+  **`ot_config_runner_source_cidr`** — the dashboard host has no route to a private
+  broker, so the agent is installed from inside the VPC, and the broker's firewall has
+  to admit that runner;
+- **`entitle_registration_enabled`** and a configured tenant;
+- the **8 GB broker shape** (`e2-standard-2`): the agent requests 1Gi on its own;
+- **GCP** — AWS and Azure cells have no Purdue zoning yet, so they have no plant
+  boundary to hang this on, and the deploy says so rather than half-doing it.
+
+The cost is a second VM per cell, and the `gcp_vm_nat_enabled` guidance **inverts**: the
+subnet needs a NAT path for the broker's one hole to lead anywhere, and the plant's own
+priority-800 deny outranks the NAT's priority-900 allow, so the cell stays closed with
+the toggle on. That inversion only holds *with the Purdue zoning enabled* — which is
+why the feature refuses without it.
+
+The agent install runs the **same play an on-prem site runs**
+([`kubesolo/entitle-agent-install.yml`](https://github.com/Weaverlab-xyz/vm-dashboard-community/tree/main/examples/playbooks/kubesolo)),
+against the broker, with the token bound by reference through the run form's secret
+channel. Its output is on its own job page, and the cell card shows *agent installing* /
+*agent installed*.
 
 ## Deploying a cell
 
@@ -246,6 +334,12 @@ Two deliberate properties:
   the allow fails, the wiring stops there and says so: a cell fenced away from the
   Gateway brokering the session you would use to fix it is the one failure worth
   designing against.
+
+A cell that brokers its own identity gets a fourth rule, `<cell>-ot-ingress-agent`:
+**tcp 22 from the `ot-dmz` zone**, so the plant's own Entitle agent can mint ephemeral
+accounts and do nothing else. Its own line rather than another source on the Gateway's,
+so the audit reads as the sentence it is — and the DMZ host gets a zone of its own,
+described in [Who brokers identity in the plant](#who-brokers-identity-in-the-plant).
 
 The rules are recorded on the child job as they are created, so a destroy removes
 exactly what exists and **Re-wire** adds them to a cell deployed before you turned the
@@ -531,6 +625,16 @@ the bake fails on a platform the script has not met.
    console / `/login`, and is **offered for injection** when starting the cell's Shell
    Jump; after the rotation in step 5, checkout returns the NEW credential and SSH with
    it succeeds.
+6a. **The plant's own agent (GCP).** Deploy a cell with **Register in Entitle** ticked
+   and a broker image picked. The parent job shows: token minted → broker deployed →
+   cell deployed → PRA wiring → both zones applied → agent install queued.
+   `gcloud compute firewall-rules list` shows the two zones from
+   [Who brokers identity in the plant](#who-brokers-identity-in-the-plant). From the
+   broker (Shell Jump): `kubectl -n entitle get pods` is Running and the install job's
+   probe passed. From the cell: every `curl` fails. Then request access in Entitle and
+   confirm the ephemeral account appears **on the cell** — that is the agent reaching it
+   from inside the plant — and that SSH with it through the Shell Jump works and expires
+   on its own. Destroy: both VMs, both rule sets, the agent token and the integration go.
 7. Negative test: set the gateway to `e2-micro` → a new cell fails fast with the sizing
    remedy in the job error (not a mid-session OOM). With a Gateway override picked, the
    same deploy proceeds (guard skipped, noted in progress).
@@ -571,6 +675,10 @@ the bake fails on a platform the script has not met.
 | `kubectl` through the tunnel fails on a certificate error | The kubeconfig is not the one the cell wrote: the API certificate names the cell, not your loopback. Use `/var/lib/ot-sim/kubeconfig-via-tunnel.yaml`, which carries `tls-server-name` |
 | A pod is `ErrImageNeverPull` | Its image is not in the node's containerd. The cell pulls nothing by design — re-run `/opt/ot-sim/kubesolo/apply.sh`, which re-imports from `/var/lib/ot-sim/images` |
 | The KubeSolo tunnel connects but nothing answers on :6443 | The image was baked with `OT_RUNTIME=docker`, so the cell runs no cluster. Rebake with the default runtime, or untick that entry |
+| The Entitle grant approves but the vendor's login is refused | The agent cannot reach the cell on :22. On a cell with its own broker, check `<cell>-ot-ingress-agent` exists; on one without, that is the old shared-agent arrangement, which the Purdue zoning blocks by design — redeploy with Entitle ticked |
+| The agent install job fails at "Prove the agent's network path" | Working as designed, and it names which leg failed: DNS, 443/8080, or the cell's :22. Pod SNAT, the DNS hole and the destination set are the three candidates, in that order |
+| The agent was fine and now is not | The Entitle endpoint's addresses moved. They are pinned at wiring time unless `ot_entitle_egress_cidrs` is set — **Re-wire** re-resolves and replaces the rule |
+| Deploying with Entitle refuses, naming a setting | Working as designed: the in-plant agent needs the Purdue zoning, a broker image, a destination set, an in-cloud runner and an 8 GB broker. The error names the one that is missing |
 | The bake fails saying Docker is installed | KubeSolo's installer refuses a host with Docker on it and the purge did not complete — read the lines above it in the bake log; `OT_RUNTIME=docker` skips the whole step |
 | FUXA opens with no PLC connection | The bake's project seed was skipped — search the bake log for `FUXA project NOT seeded`, and wire it by hand (`provisioners/ot/README.md`) |
 | AWS cell deploy fails immediately naming the subnet | Working as designed — that subnet auto-assigns public IPs; use the private sandbox subnet or clear `ot_aws_require_private_subnet` |

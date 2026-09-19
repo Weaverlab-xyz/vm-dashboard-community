@@ -30,11 +30,14 @@ What the cell shows: the footprint on a 4 GB machine, that stock manifests and H
 charts apply unchanged, that a single-node cluster survives with no registry to pull
 from, and what brokered `kubectl` into a plant looks like in a recorded session.
 
-What it cannot show is the agent. Everything below about egress applies: the agent's
-validators fail closed without a path to `agent.<region>.entitle.io`, and the cell
-deliberately has none. For the agent, use an on-prem host through a remote agent —
-which is what the plays below are written for — or accept that giving a cell egress
-ends the air-gapped part of that demo.
+**The agent runs there too — on a host of its own.** Ticking Entitle on a cell deploys a
+second KubeSolo machine beside it, the plant's industrial-DMZ broker, and installs the
+agent there with the same play below. Everything this page says about egress still
+applies, which is exactly why it is a separate host: the broker gets a narrow,
+allow-listed path to `agent.<region>.entitle.io` on 443 and 8080, and the plant floor
+keeps a true air gap. See
+[Who brokers identity in the plant](profiles/demo/ot-demo-cell.md#who-brokers-identity-in-the-plant)
+for the rules that make that claim checkable.
 
 ## What KubeSolo brings, and what it does not
 
@@ -58,7 +61,7 @@ kubeconfig is at `/var/lib/kubesolo/pki/admin/admin.kubeconfig`.
 | Architectures | ARM, ARM64, x86_64, RISC-V 64 |
 | Kubernetes line | 1.34 as of KubeSolo v1.1.0 |
 | Idle control plane | ~200 MB; 512 MB is the documented floor |
-| Practical minimum here | **2 vCPU / 4 GB** — set by the *agent's* 1Gi request, not by KubeSolo |
+| Practical minimum here | **2 vCPU / 4 GB** — set by the *agent's* 1Gi request, not by KubeSolo (the OT demo's broker uses 8 GB, since it also carries the cluster it installs into) |
 
 ## Egress: one hostname, two ports, and one of them is not TLS
 

@@ -11,6 +11,28 @@ on it, rather than a Docker host pretending to be one. `OT_RUNTIME=docker` bakes
 previous compose stack instead — same images, same ports, no cluster — and is the
 fallback if a KubeSolo bake fails on a platform this script has not met.
 
+**Two roles, two images.** `OT_ROLE=cell` (the default) is the plant floor, described
+below. `OT_ROLE=broker` is the plant's **industrial-DMZ host**: the same KubeSolo, the
+same clients, the BeyondTrust Entitle agent's Helm chart baked in, and *no simulators* —
+a DMZ host that answers Modbus is a lie about where it sits. A cell deployed with
+Entitle gets one of each, and only the broker is given a way out. The role cannot be
+chosen at deploy time (the VM deploy paths have no user-data hook), so bake both.
+
+| | `OT_ROLE=cell` | `OT_ROLE=broker` |
+|---|---|---|
+| Simulators + FUXA | yes | no |
+| KubeSolo + kubectl + helm | yes | yes |
+| Docker during the bake | yes, then purged | never installed |
+| Entitle agent chart | no | `/opt/entitle/charts/entitle-agent.tgz` (+ `CHART.txt`) |
+| Egress probe image | no | `busybox:1.36`, pre-pulled into containerd |
+| Bake time | ~10–15 min | ~5 min |
+
+The chart is baked because the agent install's *other* egress dependency is the Helm
+repo, which is a CDN — and a CDN cannot be named in the narrow allow-list a plant
+boundary is built from. The agent's images still come from Entitle at run time; that is
+what the 443 hole is for. See
+[Who brokers identity in the plant](../../docs/profiles/demo/ot-demo-cell.md#who-brokers-identity-in-the-plant).
+
 ## Image contract
 
 | What | Where | Notes |
@@ -85,7 +107,9 @@ where the pulls happen. Build-time overrides (Packer env vars): `OT_RUNTIME`,
 
 `OT_SKIP_CLEANUP=1` also skips the cluster-identity reset described above — an
 iteration aid, never an image to hand out: cells baked that way all carry the build
-VM's cluster.
+VM's cluster. A broker bake takes the same treatment, and the same overrides:
+`OT_ROLE=broker`, plus `OT_ENTITLE_CHART_VERSION` / `OT_ENTITLE_CHART_REPO` /
+`OT_ENTITLE_CHART` and `OT_PROBE_IMAGE`.
 
 ## Pins
 

@@ -65,8 +65,9 @@ the plant floor" is a running cell rather than a slide. Its API gets a tunnel of
 which is what makes "this vendor may read the PLC but not the cluster" a policy decision
 instead of a network one.
 
-The agent half of that story does not belong here: the Entitle agent needs a path to its
-tenant and this cell deliberately has none, so run it against an on-prem host instead.
+The agent half of that story runs next door, on the cell's DMZ broker — same KubeSolo,
+same chart, inside the plant. See
+[Who brokers identity in the plant](../ot-demo-cell.md#who-brokers-identity-in-the-plant).
 
 **Guide:** [KubeSolo](../../../kubesolo.md) · [OT Demo Cell](../ot-demo-cell.md)
 
@@ -75,7 +76,14 @@ tenant and this cell deliberately has none, so run it against an on-prem host in
 Grant the integrator two hours on a single cell, then watch the grant expire and the tunnel
 close by itself. The point to land is that nobody had to remember to revoke it.
 
-**Guide:** [Entitle user JIT](../../../design/entitle-user-jit.md)
+What makes it land in an OT room is *where the broker sits*: the Entitle agent runs on a
+DMZ host inside the plant, not in a cluster somewhere else reaching in. The plant floor has
+no route out at all; the DMZ host has two ports to one destination; and the rules that say
+so are readable in the cloud console. If the customer's first question is "so what did you
+open in my plant?", that list is the answer.
+
+**Guide:** [Who brokers identity in the plant](../ot-demo-cell.md#who-brokers-identity-in-the-plant)
+· [Entitle user JIT](../../../design/entitle-user-jit.md)
 
 ### Check out the cell's admin credential in PRA
 
