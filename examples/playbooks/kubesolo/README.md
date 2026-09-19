@@ -26,6 +26,11 @@ air-gapped site too:
   pod, so proving the path from the host would answer a different question — and a
   closed path becomes one legible failure instead of a `CrashLoopBackOff` three layers
   down. Set `entitle_probe: false` to skip it.
+- `entitle_probe_only: true` runs **only** that probe and ends the play — no token, no
+  chart, no change to the cluster. It is the answer to "can this host reach anything
+  else?" on demand, and because it installs nothing it is safe to run against a broker
+  whose agent is healthy, and possible on one whose agent never installed at all. The
+  OT demo cell's card exposes it as *Probe egress*.
 
 | File | Purpose |
 |---|---|

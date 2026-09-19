@@ -185,6 +185,47 @@ publishes no range for it. So:
    the broker 443/8080 to anywhere — a weaker claim, opted into deliberately, and the
    plant floor is unaffected either way.
 
+#### The card says which of the three you have
+
+Those are three different sentences, and only one of them is "pinned to a list
+BeyondTrust gave us". The cell card carries the answer so nobody has to go and check a
+setting to find out which sentence they are allowed to say in front of a customer:
+
+| Card | What it means |
+|---|---|
+| **pinned** | Built from `ot_entitle_egress_cidrs`. The strongest claim, and the one a real plant's firewall ticket produces. |
+| **resolved once** | Built from a DNS answer at wiring time, with the timestamp. Honest, and not a contract. |
+| **not pinned** (amber) | `ot_dmz_egress_open_ports` is on: 443/8080 to `0.0.0.0/0`. The plant floor is still closed and the broker still has no other port — but its destination is unbounded. |
+
+A cell deployed before this existed shows nothing rather than the flattering guess.
+
+#### And when it stops being true
+
+The card also watches for **drift**: the rule still says what it said on wiring day,
+but what it would be drawn from *now* has changed — the addresses moved, or the
+`ot_dmz_egress_open_ports` toggle was flipped since. The remedy is always **Re-wire**,
+which re-resolves and re-applies on all three clouds. Before this, the first symptom of
+a rotation was an agent that had quietly lost its channel while the card still read
+*agent installed*.
+
+The check never claims drift it cannot prove: an unrecorded broker, or a DNS lookup
+that fails, says nothing rather than raising a false alarm at a demo. It is cached for
+five minutes because the cells list asks on every request; the wiring path deliberately
+does not use that cache, because a rule must be drawn from a fresh answer.
+
+#### Proving it, on demand
+
+**Probe egress** on the cell card runs the agent play's own probe and nothing else: a
+throwaway pod on the broker that checks DNS, 443, 8080 and the cell's :22, from where
+the agent actually sits. A host-level `curl` is a different source address and a
+different answer, which is why it runs as a pod.
+
+It installs nothing — the play ends after the probe — so it is safe against a broker
+with a healthy agent on it, and it needs neither the token nor the chart, so it also
+works on a broker whose agent never installed. That is the case where the answer
+matters most, and it is the thing to run when someone asks whether the boundary is
+real.
+
 What a production site does instead is FQDN egress (Cloud NGFW, AWS Network Firewall
 domain lists, Azure Firewall application rules) or an L3.5 forward proxy. All three
 cost real per-hour infrastructure, which is why the demo pins addresses — and saying
@@ -794,6 +835,9 @@ the bake fails on a platform the script has not met.
 | The KubeSolo tunnel connects but nothing answers on :6443 | The image was baked with `OT_RUNTIME=docker`, so the cell runs no cluster. A new deploy refuses this — set *Image runtime* to match what you baked — so a cell in this state predates that guard, or was deployed through the API with the wrong `runtime`. Rebake with the default runtime, or untick that entry and Re-wire |
 | The deploy refuses, naming `routing` | The tenant is on `routing: v0`, whose agent pulls its image from `ghcr.io` / `gcr.io/datadoghq`. No narrow allow-list can name a CDN, so the agent could not start inside the plant. Ask BeyondTrust to migrate the tenant, or deploy the cell without Entitle |
 | The deploy refuses, saying the token's region is not the one the hole was drawn for | `entitle_api_url` is a proxy or a bare host, so the region fell back to the default while the tenant is somewhere else. Set it to the regional URL and redeploy — otherwise the agent would dial a host the plant denies, with nothing saying why |
+| The card says "not pinned" in amber | `ot_dmz_egress_open_ports` is on, so the broker's rule is 443/8080 to anywhere. That is a weaker claim than an address list — set `ot_entitle_egress_cidrs` and **Re-wire** if you meant to have the narrow one |
+| The card reports egress drift | What the rule would be drawn from now differs from what it was drawn from. **Re-wire** re-resolves and re-applies; until then the agent may have lost its channel |
+| "Can it really not reach anything?" | **Probe egress** on the card. It runs a throwaway pod on the broker and reports DNS, 443, 8080 and the cell's :22 — from inside the plant, and it changes nothing |
 | Clear refuses, naming the DMZ broker | The broker outlived its failed cell — it deploys first, so this is the common shape. Destroy it from the cloud's VMs tab, then clear the cell |
 | The Entitle grant approves but the vendor's login is refused | The agent cannot reach the cell on :22. On a cell with its own broker, check `<cell>-ot-ingress-agent` exists; on one without, that is the old shared-agent arrangement, which the Purdue zoning blocks by design — redeploy with Entitle ticked |
 | The agent install job fails at "Prove the agent's network path" | Working as designed, and it names which leg failed: DNS, 443/8080, or the cell's :22. Pod SNAT, the DNS hole and the destination set are the three candidates, in that order |

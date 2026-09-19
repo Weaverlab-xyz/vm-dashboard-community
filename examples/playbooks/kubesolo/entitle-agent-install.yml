@@ -73,6 +73,11 @@
     entitle_probe_image: busybox:1.36
     entitle_probe_endpoint: ""      # e.g. agent.us.entitle.io — blank skips the probe
     entitle_probe_ssh_target: ""    # optional: a host the agent must reach on :22
+    # Run ONLY the probe and stop: no chart, no token, no change to a running agent.
+    # This is "can this host reach anything else?", asked from the pod where the agent
+    # actually sits rather than from the host or from a slide — the diagnostic when an
+    # agent stops connecting, and the demo moment when someone doubts the boundary.
+    entitle_probe_only: false
     entitle_agent_version: "default"
     entitle_agent_replicas: 1
     entitle_agent_cpu_request: 250m
@@ -110,9 +115,14 @@
     - name: Validate required vars
       ansible.builtin.assert:
         that:
-          - _entitle_agent_token | length > 0
+          # Both are install requirements, and a probe-only run installs nothing — so it
+          # can prove the path on a broker whose agent is not deployed yet, or on one
+          # whose token you would rather not hand out again just to run a check.
+          - (_entitle_agent_token | length > 0) or (entitle_probe_only | bool)
           - entitle_agent_replicas | int >= 1
-          - (entitle_agent_chart_repo | length > 0) or (entitle_agent_chart is match('^/'))
+          - ((entitle_agent_chart_repo | length > 0)
+             or (entitle_agent_chart is match('^/'))
+             or (entitle_probe_only | bool))
         fail_msg: >-
           An agent token is required. Bind one to entitle_agent_token with the run
           form's "Use a secret", or set entitle_agent_token_secret to a Password Safe
@@ -185,6 +195,13 @@
         - entitle_probe | bool
         - entitle_probe_endpoint | length > 0
         - "'PROBE-OK' not in (egress_probe.stdout | default(''))"
+
+    # Everything below this line touches the cluster; a probe-only run must not, so it
+    # ends here. That is what makes it safe to run against a broker with a HEALTHY
+    # agent on it — the check costs one throwaway pod and changes nothing.
+    - name: Stop here when this is a probe-only run
+      ansible.builtin.meta: end_play
+      when: entitle_probe_only | bool
 
     # Written OUTSIDE the block on purpose. A task nested in a block is invisible to
     # the repo's no_log sweep (tests/test_playbook_ps_lookup.py walks top-level tasks

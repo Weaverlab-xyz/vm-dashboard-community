@@ -1781,6 +1781,24 @@
                   <div x-show="c.agent_token_name"><span class="text-gray-400">Entitle agent:</span>
                     <span class="font-mono" x-text="c.agent_token_name"></span>
                     <span class="text-gray-400">— this plant's own</span></div>
+                  <!-- The plant's one way out, in the words it is entitled to. An
+                       open-ports broker is called out in amber rather than described
+                       the same way as a pinned one: the demo's central sentence is
+                       different in that case, and nobody should have to check a
+                       setting to find out which sentence they are allowed to say. -->
+                  <div x-show="c.egress_kind">
+                    <span class="text-gray-400">Plant egress:</span>
+                    <span class="font-mono"
+                          :class="c.egress_kind === 'open' ? 'text-amber-600 font-semibold'
+                                  : (c.egress_kind === 'pinned' ? 'text-green-700' : 'text-gray-700')"
+                          x-text="c.egress_kind === 'open' ? 'not pinned'
+                                  : (c.egress_kind === 'pinned' ? 'pinned' : 'resolved once')"></span>
+                    <span class="text-gray-500" x-text="c.egress_text"></span>
+                  </div>
+                  <div x-show="c.egress_drift" class="text-amber-700">
+                    <span class="font-semibold">Egress drift:</span>
+                    <span x-text="c.egress_drift"></span>
+                  </div>
                   <div x-show="c.expires_at"><span class="text-gray-400">Expires:</span>
                     <span x-text="(c.expires_at || '').replace('T', ' ').slice(0, 16) + ' UTC'"></span></div>
                 </div>
@@ -1789,6 +1807,14 @@
                           @click="rewireOTCell(c)"
                           class="text-xs px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-md transition">
                     Re-wire
+                  </button>
+                  <button x-show="c.status === 'completed' && c.broker_instance_name" x-cloak
+                          @click="probeOTEgress(c)"
+                          :disabled="c.probing"
+                          class="text-xs px-2.5 py-1 bg-slate-600 hover:bg-slate-700 disabled:opacity-50 text-white rounded-md transition"
+                          title="Run the agent's own egress probe from a pod on the DMZ broker — changes nothing">
+                    <span x-show="!c.probing">Probe egress</span>
+                    <span x-show="c.probing" x-cloak>Queuing…</span>
                   </button>
                   <button x-show="c.status === 'completed' && c.instance_id" x-cloak
                           @click="destroyOTCell(c)"
@@ -2482,6 +2508,21 @@
           this.otError = e.message || 'Deploy failed';
         } finally {
           this.otSubmitting = false;
+        }
+      },
+
+      // The probe already exists inside the agent install and is thrown away after
+      // one run. This is the same check on demand — the answer to "can this host
+      // reach anything else?", asked from the pod where the agent actually sits.
+      // It installs nothing, so it is safe against a healthy agent.
+      async probeOTEgress(c) {
+        c.probing = true;
+        try {
+          const r = await API.post(`/api/ot/cell/${encodeURIComponent(c.vm_job_id)}/probe`, {});
+          window.location.href = '/jobs/' + r.job_id;
+        } catch (e) {
+          c.probing = false;
+          toast(e.message || 'Could not queue the egress probe', 'error');
         }
       },
 
