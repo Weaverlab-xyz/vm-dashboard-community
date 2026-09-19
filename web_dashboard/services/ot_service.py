@@ -1086,6 +1086,103 @@ def entitle_destination_digest(cidrs: list) -> str:
     return hashlib.sha256(",".join(sorted(cidrs)).encode()).hexdigest()[:8]
 
 
+# ── What kind of way out does this plant actually have? ──────────────────────
+# The feature's whole claim is "one narrow hole". Three different rules can satisfy the
+# deploy, and they are NOT the same sentence:
+#
+#   pinned    443/8080 to an address list an operator got from BeyondTrust. The
+#             supported answer, and the one a real plant's firewall ticket produces.
+#   resolved  443/8080 to whatever the endpoint resolved to at wiring time. Honest, but
+#             a snapshot — BeyondTrust publishes no contractual range.
+#   open      443/8080 to 0.0.0.0/0, via `ot_dmz_egress_open_ports`. Materially weaker,
+#             deliberately opt-in, and the one that must never be mistaken for the others.
+#
+# Until this existed the answer lived in a job summary that scrolls away and a firewall
+# rule description nobody reads, so a demo could say the narrow sentence over the wide
+# rule without anyone noticing. Recorded on the broker's row at wiring time and read
+# back here, so the card can say which of the three is true right now.
+EGRESS_KIND_PINNED = "pinned"
+EGRESS_KIND_RESOLVED = "resolved"
+EGRESS_KIND_OPEN = "open"
+
+
+def egress_claim(bmeta: dict) -> dict:
+    """``{"kind", "text", "destinations"}`` — the sentence this plant may honestly say.
+
+    ``{"kind": ""}`` for a broker wired before this was recorded: absent evidence, the
+    card says nothing rather than guessing the flattering answer.
+    """
+    source = ((bmeta or {}).get("ot_entitle_destination_source") or "").strip()
+    dests = list((bmeta or {}).get("ot_entitle_destinations") or [])
+    if not source:
+        return {"kind": "", "text": "", "destinations": []}
+    ports = "/".join(ENTITLE_AGENT_PORTS)
+    if source == "ot_dmz_egress_open_ports":
+        return {"kind": EGRESS_KIND_OPEN, "destinations": dests,
+                "text": (f"{ports} to ANYWHERE (ot_dmz_egress_open_ports). The plant "
+                         f"floor is still closed and the broker still has no other "
+                         f"port — but its destination is not pinned, so this is a "
+                         f"weaker claim than an address list.")}
+    if source == "ot_entitle_egress_cidrs":
+        return {"kind": EGRESS_KIND_PINNED, "destinations": dests,
+                "text": f"{ports} to {len(dests)} configured address(es)."}
+    return {"kind": EGRESS_KIND_RESOLVED, "destinations": dests,
+            "text": (f"{ports} to {len(dests)} address(es) — {source}. Resolved once, "
+                     f"not a published contract: set ot_entitle_egress_cidrs to the "
+                     f"ranges BeyondTrust gave you if you need it to be one.")}
+
+
+# A short TTL, because the cells list calls this once per request and the answer is a
+# DNS lookup. The WIRING path deliberately does not use it: a rule must be drawn from a
+# fresh answer, never one up to five minutes old.
+_DRIFT_TTL_SECONDS = 300
+_drift_cache: dict = {}
+
+
+def _current_destinations_cached() -> Tuple[list, str]:
+    import time
+    now = time.monotonic()
+    hit = _drift_cache.get("value")
+    if hit is not None and now - _drift_cache.get("at", 0.0) < _DRIFT_TTL_SECONDS:
+        return hit
+    value = resolve_entitle_destinations()
+    _drift_cache["value"], _drift_cache["at"] = value, now
+    return value
+
+
+def entitle_destination_drift(bmeta: dict) -> str:
+    """"" when the broker's rule still matches what it would be drawn from now.
+
+    The addresses are not contractual — that is why the GCP rule name carries a hash of
+    the set and the other two clouds reconcile. Re-wire repairs drift correctly on all
+    three; nothing TOLD anyone to run it, so the first symptom was an agent that had
+    quietly lost its channel and a card still reading "agent installed".
+
+    Never claims drift it cannot prove: an unrecorded broker, or a lookup that fails,
+    returns "" rather than crying wolf at a demo.
+    """
+    recorded = sorted(set((bmeta or {}).get("ot_entitle_destinations") or []))
+    source = ((bmeta or {}).get("ot_entitle_destination_source") or "").strip()
+    if not recorded or not source:
+        return ""
+    open_now = dmz_egress_open_ports()
+    if source == "ot_dmz_egress_open_ports":
+        if open_now:
+            return ""
+        return ("this broker's rule still allows the agent's ports to anywhere, but "
+                "ot_dmz_egress_open_ports has since been turned off — Re-wire to narrow it")
+    if open_now:
+        return ("ot_dmz_egress_open_ports has since been turned on, but this broker's "
+                "rule is still the narrow one — Re-wire if you meant it to widen")
+    current, _ = _current_destinations_cached()
+    current = sorted(set(current))
+    if not current or current == recorded:
+        return ""
+    return (f"the addresses this rule was drawn from have changed "
+            f"({len(recorded)} → {len(current)}) — the agent may have lost its channel; "
+            f"Re-wire re-resolves and re-applies")
+
+
 def dmz_egress_open_ports() -> bool:
     from . import config_service
     return config_service.get_bool("ot_dmz_egress_open_ports", False)
@@ -1305,6 +1402,79 @@ async def _install_plant_agent(db, parent_id: str, child_id: str, cmeta: dict,
                                 "Installing the Entitle agent on the plant's broker…")
     return (f"agent install queued as job {job.id} — it runs the same "
             f"{ENTITLE_AGENT_PLAYBOOK} an on-prem site would")
+
+
+async def queue_egress_probe(db, child_id: str, cmeta: dict, created_by: str) -> str:
+    """Queue a probe-only run of the agent play against this cell's DMZ broker.
+
+    The same probe the install does, on demand, and it is the one question the plant
+    boundary exists to answer: *can this host reach anything else?* Asked from a pod on
+    the broker, because that is where the agent sits and a host-level curl is a
+    different source address and a different answer.
+
+    Safe against a broker with a healthy agent: the play ends after the probe, so this
+    costs one throwaway pod and changes nothing. It also needs no token and no chart,
+    which is what lets it run on a broker whose agent never installed — the case where
+    the answer matters most.
+
+    Returns the queued job id. Raises ``OTError`` with the remedy when it cannot run.
+    """
+    from . import ansible_run_meta, job_service, storage_service
+    from types import SimpleNamespace
+
+    broker_id = (cmeta.get("ot_broker_job_id") or "").strip()
+    if not broker_id:
+        raise OTError("This cell has no DMZ broker, so there is no plant boundary to "
+                      "probe. Deploy a cell with Entitle to get one.")
+    broker_row = job_service.get_job(db, broker_id)
+    bmeta = (broker_row.metadata_dict if broker_row else None) or {}
+    broker_ip = (bmeta.get("private_ip") or "").strip()
+    if not broker_ip:
+        raise OTError("The DMZ broker has no private address recorded, so the runner "
+                      "has nothing to reach. Re-wire the cell once the broker is up.")
+    cloud = cell_cloud_for_job_type(
+        (job_service.get_job(db, child_id).job_type if job_service.get_job(db, child_id)
+         else "")) or "gcp"
+    problem = config_runner_problem(cloud)
+    if problem:
+        raise OTError(problem.replace("No VM was launched.", "").strip())
+
+    payload = SimpleNamespace(
+        asset=ENTITLE_AGENT_PLAYBOOK,
+        target=broker_ip,
+        cloud=cloud,
+        ansible_user="",
+        extra_vars={
+            "entitle_probe_only": True,
+            "entitle_probe_endpoint": entitle_agent_endpoint(),
+            "entitle_probe_ssh_target": (cmeta.get("private_ip") or ""),
+            # Not used by a probe-only run, but the play's defaults expect the keys to
+            # exist rather than be undefined.
+            "entitle_agent_chart": BROKER_CHART_PATH,
+            "entitle_agent_chart_repo": "",
+        },
+        # Deliberately none: a probe needs no credential, and not asking for one is the
+        # difference between a check you can run freely and one you think twice about.
+        secret_vars={},
+        secret_become_source="",
+        secret_ssh_key_source="",
+        managed_account=None,
+        managed_become=None,
+        epml_token_var="",
+    )
+    job = job_service.create_job(
+        db,
+        job_type="ansible_local",
+        created_by=created_by or "system",
+        workgroup="ansible",
+        metadata=ansible_run_meta.run_meta(
+            payload,
+            description=f"Egress probe → {bmeta.get('instance_name') or broker_ip} "
+                        f"(can the plant reach anything else?)",
+            asset_backend=storage_service.active_backend()),
+    )
+    job_service.update_metadata(db, child_id, {"ot_last_probe_job_id": job.id})
+    return job.id
 
 
 async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
@@ -1789,6 +1959,15 @@ async def _wire_dmz_firewall(db, parent_id: str, broker_id: str, bmeta: dict) ->
                 "(ot_entitle_egress_cidrs) and the open-ports escape hatch is off")
     if not cidrs:
         cidrs, provenance = ["0.0.0.0/0"], "ot_dmz_egress_open_ports"
+
+    # Recorded before the rules are made, and on the broker's own row: it is what the
+    # card reads to say which of the three claims this plant is entitled to, and what
+    # the drift check compares against later. AWS and Azure write the same two keys.
+    job_service.update_metadata(db, broker_id, {
+        "ot_entitle_destinations": cidrs,
+        "ot_entitle_destination_source": provenance})
+    bmeta["ot_entitle_destinations"] = cidrs
+    bmeta["ot_entitle_destination_source"] = provenance
 
     names = _dmz_rule_names(vm, entitle_destination_digest(cidrs))
     created = list(bmeta.get("ot_firewall_rules") or [])

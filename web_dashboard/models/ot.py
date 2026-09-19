@@ -226,6 +226,15 @@ class OTCellInfo(BaseModel):
     broker_private_ip: str = ""
     agent_token_name: str = ""
     agent_installed: bool = False
+    # Which of the three egress claims this plant may honestly make, and the sentence
+    # for it (ot_service.egress_claim). Empty for a cell with no broker, or one wired
+    # before this was recorded — the card then says nothing rather than guessing the
+    # flattering answer.
+    egress_kind: str = ""
+    egress_text: str = ""
+    # Non-empty when the rule no longer matches what it would be drawn from now
+    # (ot_service.entitle_destination_drift). The remedy is always Re-wire.
+    egress_drift: str = ""
     # PRA checkout of the cell's admin credential: the Vault account PRA users
     # check out / inject, kept current by a Password Safe SyncedAccounts link.
     vault_account_id: str = ""

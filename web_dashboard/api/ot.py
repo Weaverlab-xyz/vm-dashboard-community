@@ -819,6 +819,49 @@ async def deploy_cell_azure(
     )
 
 
+@router.post("/cell/{vm_job_id}/probe")
+async def probe_cell_egress(
+    vm_job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("ot", "write")),
+):
+    """Run the agent play's egress probe against this cell's DMZ broker, and nothing else.
+
+    The probe already existed — it runs once, inside the agent install, and is then
+    thrown away. This is the same check on demand, which is the one question the plant
+    boundary exists to answer: *can this host reach anything else?* It is asked from a
+    pod on the broker rather than from the host, because that is where the agent sits
+    and a host-level curl is a different source address and a different answer.
+
+    Write permission rather than read: it queues a Config-Management run. It changes
+    nothing on the broker — the play ends after the probe — so it is safe against a
+    healthy agent, and it needs no token, so it also works on a broker whose agent
+    never installed, which is when the answer matters most.
+    """
+    child = job_service.get_job(db, vm_job_id)
+    cloud = ot_service.cell_cloud_for_job_type(child.job_type) if child else ""
+    if child is None or not cloud or not child.metadata_dict.get("ot_cell"):
+        raise HTTPException(status_code=404, detail=f"{vm_job_id} is not an OT cell VM job")
+    _require_cloud(current_user, cloud, "write")
+    if child.metadata_dict.get("destroyed"):
+        raise HTTPException(status_code=400, detail="This cell has been destroyed.")
+    if child.status != "completed":
+        raise HTTPException(status_code=400,
+                            detail=f"The cell's VM job is {child.status} — the probe "
+                                   "applies only to a deployed cell.")
+    try:
+        job_id = await ot_service.queue_egress_probe(
+            db, vm_job_id, child.metadata_dict, current_user.username)
+    except ot_service.OTError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    job_service.log_audit(db, current_user.username, "ot_cell_egress_probe",
+                          details={"vm_job_id": vm_job_id, "cloud": cloud,
+                                   "probe_job_id": job_id})
+    return {"job_id": job_id,
+            "message": "Egress probe queued — its output is the plant boundary, "
+                       "proved from inside."}
+
+
 @router.post("/cell/{vm_job_id}/rewire")
 def rewire_cell(
     vm_job_id: str,
@@ -1046,6 +1089,7 @@ def list_cells(
         if broker_job_id:
             broker_row = db.query(Job).filter(Job.id == broker_job_id).first()
             broker_meta = (broker_row.metadata_dict if broker_row else None) or {}
+        _egress = ot_service.egress_claim(broker_meta)
         install_job_id = meta.get("ot_agent_install_job_id") or ""
         agent_installed = False
         if install_job_id:
@@ -1074,6 +1118,11 @@ def list_cells(
             tunnel_remote_port=int(primary.get("remote_port") or 0),
             shell_jump_id=str(meta.get("bt_shell_jump_id") or ""),
             broker_job_id=broker_job_id,
+            # Read off the BROKER's row: it is the machine the rule belongs to, and the
+            # cell's own row never carried the destination set.
+            egress_kind=_egress["kind"],
+            egress_text=_egress["text"],
+            egress_drift=ot_service.entitle_destination_drift(broker_meta),
             broker_instance_name=broker_meta.get("instance_name") or "",
             broker_instance_id=str(broker_meta.get("instance_id") or ""),
             broker_private_ip=broker_meta.get("private_ip") or "",
