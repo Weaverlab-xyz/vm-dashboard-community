@@ -7,6 +7,11 @@
 # images, same ports, same PRA wiring as when they ran on docker compose, which is
 # still available as OT_RUNTIME=docker.
 #
+# The same script also bakes the plant's DMZ broker (OT_ROLE=broker): KubeSolo and the
+# Entitle agent's chart, no simulators. That host is what makes the identity half of
+# the demo honest — the agent runs inside the plant, and it is the only machine there
+# with a way out.
+#
 # What the built image runs at boot (systemd unit `ot-sim`):
 #   plc   — a Modbus TCP "PLC" simulator on :502 (pymodbus, BUILT at bake time from
 #           python:3.12-slim) whose holding registers tick every second: a counter,
@@ -31,6 +36,19 @@
 # cloud-default user). POSIX sh only — no [[ ]], no arrays, no <<<.
 #
 # Operator-overridable via Packer build env:
+#   OT_ROLE          which machine this image is: cell (default) or broker. `cell` is
+#                    the plant floor — the simulators and the HMI. `broker` is the
+#                    plant's industrial DMZ host: the same KubeSolo carrying the
+#                    BeyondTrust Entitle agent and nothing else, so the thing that
+#                    brokers access to plant resources sits IN the plant. Bake one of
+#                    each; the role cannot be chosen at deploy time, because the VM
+#                    deploy paths have no user-data hook.
+#   OT_ENTITLE_CHART_VERSION  broker only: the Entitle agent chart version to bake
+#                    (default: whatever the repo calls latest at bake time — the
+#                    resolved version is written to /opt/entitle/charts/CHART.txt).
+#                    Also OT_ENTITLE_CHART_REPO / OT_ENTITLE_CHART.
+#   OT_PROBE_IMAGE   broker only: the image the agent install's egress probe runs as a
+#                    pod (default busybox:1.36, pulled at bake time)
 #   OT_RUNTIME       what runs the workloads: kubesolo (default) or docker. KubeSolo
 #                    makes the cell a single-node Kubernetes host — Docker is then a
 #                    BUILD-time dependency only and is purged before KubeSolo goes on
@@ -77,6 +95,88 @@ case "$OT_RUNTIME" in
   *) die "OT_RUNTIME must be 'kubesolo' or 'docker' (got '$OT_RUNTIME')" ;;
 esac
 
+# Which machine this image is. `cell` is the plant floor: the simulators and the HMI.
+# `broker` is the plant's industrial DMZ host — the same KubeSolo, carrying the
+# BeyondTrust Entitle agent and nothing else, because a DMZ host that answers Modbus
+# is a lie about where it sits. The two are separate images because there is no
+# user-data hook on the deploy paths, so the role cannot be chosen at launch.
+OT_ROLE="$(echo "${OT_ROLE:-cell}" | tr '[:upper:]' '[:lower:]')"
+case "$OT_ROLE" in
+  cell) ;;
+  broker)
+    if [ "$OT_RUNTIME" = "docker" ]; then
+      die "OT_ROLE=broker has no docker runtime — the broker exists to run the Entitle \
+agent's Helm chart, which needs Kubernetes"
+    fi ;;
+  *) die "OT_ROLE must be 'cell' or 'broker' (got '$OT_ROLE')" ;;
+esac
+
+# ── KubeSolo, its clients, and the Entitle chart (both roles) ────────────────
+OT_KUBESOLO_VERSION="${OT_KUBESOLO_VERSION:-v1.2.0}"
+OT_HELM_VERSION="${OT_HELM_VERSION:-v3.16.3}"
+OT_KUBECTL_VERSION="${OT_KUBECTL_VERSION:-}"
+KUBESOLO_PATH=/var/lib/kubesolo
+KUBESOLO_KUBECONFIG=$KUBESOLO_PATH/pki/admin/admin.kubeconfig
+KUBESOLO_SOCK=$KUBESOLO_PATH/containerd/containerd.sock
+OT_ARCH="$(dpkg --print-architecture)"
+# Broker only: the Entitle agent chart and the probe image, baked so neither the
+# Helm repo nor Docker Hub has to be reachable from a plant DMZ at run time.
+OT_ENTITLE_CHART_REPO="${OT_ENTITLE_CHART_REPO:-https://anycred.github.io/entitle-charts/}"
+OT_ENTITLE_CHART="${OT_ENTITLE_CHART:-entitle-agent}"
+OT_ENTITLE_CHART_VERSION="${OT_ENTITLE_CHART_VERSION:-}"
+OT_ENTITLE_CHART_DIR=/opt/entitle/charts
+# busybox, pinned: nc and nslookup are all the egress probe needs, and the probe has
+# to run as a POD — proving the plant boundary from where the agent will sit, not
+# from the host, which is a different source address and a different answer.
+OT_PROBE_IMAGE="${OT_PROBE_IMAGE:-busybox:1.36}"
+
+install_k8s_clients() {
+  log "installing kubectl and helm — KubeSolo ships neither, and the plays expect both"
+  if [ -z "$OT_KUBECTL_VERSION" ]; then
+    OT_KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
+  fi
+  curl -fsSLo /usr/local/bin/kubectl \
+    "https://dl.k8s.io/release/$OT_KUBECTL_VERSION/bin/linux/$OT_ARCH/kubectl"
+  chmod 0755 /usr/local/bin/kubectl
+  curl -fsSL "https://get.helm.sh/helm-$OT_HELM_VERSION-linux-$OT_ARCH.tar.gz" -o /tmp/helm.tar.gz
+  tar -xzf /tmp/helm.tar.gz -C /tmp
+  install -m 0755 "/tmp/linux-$OT_ARCH/helm" /usr/local/bin/helm
+  rm -rf /tmp/helm.tar.gz "/tmp/linux-$OT_ARCH"
+}
+
+install_kubesolo() {
+  # The -offline build, not the default one: it carries CoreDNS, the CNI plugins and
+  # the rest of what KubeSolo starts INSIDE the binary. The default build pulls them
+  # from a registry at first start, which in an egress-less subnet means a cluster
+  # that never comes up — and the bake would not notice, because the BUILD VM has
+  # egress.
+  log "installing KubeSolo $OT_KUBESOLO_VERSION (-offline build: its images ride in the binary)"
+  # Downloaded, then run — not piped: sh in a pipeline reports ITS status, so a failed
+  # download would silently install nothing and only surface five minutes later as
+  # "KubeSolo never wrote its kubeconfig".
+  curl -sfL https://get.kubesolo.io -o /tmp/kubesolo-install.sh \
+    || die "could not download the KubeSolo installer from get.kubesolo.io"
+  KUBESOLO_VERSION="$OT_KUBESOLO_VERSION" KUBESOLO_OFFLINE=true \
+    KUBESOLO_PATH="$KUBESOLO_PATH" sh /tmp/kubesolo-install.sh \
+    || die "the KubeSolo installer failed — its own output is above; \
+a release with no -offline build is the usual cause"
+  rm -f /tmp/kubesolo-install.sh
+
+  export KUBECONFIG="$KUBESOLO_KUBECONFIG"
+  log "waiting for the KubeSolo API and a Ready node"
+  _waited=0
+  while [ ! -f "$KUBECONFIG" ]; do
+    _waited=$((_waited + 1))
+    if [ "$_waited" -gt 60 ]; then
+      journalctl -u kubesolo --no-pager -n 40 2>/dev/null || true
+      die "KubeSolo never wrote $KUBECONFIG"
+    fi
+    sleep 5
+  done
+  kubectl wait --for=condition=Ready node --all --timeout=300s \
+    || die "the KubeSolo node never became Ready (journalctl -u kubesolo)"
+}
+
 # ── 1. OS-family gate ────────────────────────────────────────────────────────
 [ -f /etc/debian_version ] || die "not a Debian-family system (no /etc/debian_version)"
 log "starting ot-sim bake on $(cat /etc/debian_version 2>/dev/null || echo unknown) ($(uname -m))"
@@ -115,15 +215,18 @@ if ! visudo -c -f "$SUDOERS" >/dev/null; then
   die "visudo rejected 90-ot-sim — sudoers not installed"
 fi
 
-# ── 4. Docker Engine + compose plugin (from download.docker.com, not Docker Hub) ─
-# On the KubeSolo runtime this is a BUILD-time dependency only: it builds the sim
-# image and pulls FUXA, then section 5b purges it, because KubeSolo's installer
-# refuses a host that still has Docker on it.
-#
-# python3 goes on with it: the FUXA project seed and the bake's port probes both run
-# on the host now, in either runtime, so they cannot depend on a container being up.
-log "installing Docker Engine + compose plugin"
+# ── 4. Base packages, and — for the cell only — Docker ──────────────────────
+# python3 is for both roles: the FUXA project seed and the bake's port probes run on
+# the host now, so they cannot depend on a container being up.
+log "installing base packages"
 apt-get -y -q install ca-certificates curl gnupg python3
+
+# Docker builds the simulators and pulls FUXA, and on the KubeSolo runtime section 5b
+# then purges it, because KubeSolo's installer refuses a host that still has Docker on
+# it. The broker builds nothing, so it never installs Docker in the first place — and
+# therefore has nothing to purge before that check runs.
+if [ "$OT_ROLE" = "cell" ]; then
+log "installing Docker Engine + compose plugin"
 . /etc/os-release
 case "${ID:-}" in
   debian|ubuntu) ;;
@@ -148,6 +251,9 @@ EOF
 systemctl enable docker >/dev/null 2>&1 || true
 systemctl restart docker
 docker version >/dev/null || die "docker did not come up after install"
+fi
+
+if [ "$OT_ROLE" = "cell" ]; then
 
 # ── 5. The OT sim stack (built + pre-pulled NOW, so runtime needs no egress) ──
 OT_FUXA_IMAGE="${OT_FUXA_IMAGE:-frangoteam/fuxa:1.3.4}"
@@ -573,14 +679,7 @@ else
 # two of those arguing over iptables is precisely the failure that only shows up in
 # front of a customer. So the order is: build with Docker, export, purge Docker,
 # install KubeSolo, import into ITS containerd.
-OT_KUBESOLO_VERSION="${OT_KUBESOLO_VERSION:-v1.2.0}"
-OT_HELM_VERSION="${OT_HELM_VERSION:-v3.16.3}"
-OT_KUBECTL_VERSION="${OT_KUBECTL_VERSION:-}"
-KUBESOLO_PATH=/var/lib/kubesolo
-KUBESOLO_KUBECONFIG=$KUBESOLO_PATH/pki/admin/admin.kubeconfig
-KUBESOLO_SOCK=$KUBESOLO_PATH/containerd/containerd.sock
 OT_IMAGE_DIR=/var/lib/ot-sim/images
-OT_ARCH="$(dpkg --print-architecture)"
 
 # The pods run with hostNetwork (see the manifest), so FUXA reaches the PLC on the
 # node's own loopback rather than by a compose service name.
@@ -638,47 +737,8 @@ for _table in filter nat mangle; do
   iptables -t "$_table" -X >/dev/null 2>&1 || true
 done
 
-log "installing kubectl and helm — KubeSolo ships neither, and the plays expect both"
-if [ -z "$OT_KUBECTL_VERSION" ]; then
-  OT_KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
-fi
-curl -fsSLo /usr/local/bin/kubectl \
-  "https://dl.k8s.io/release/$OT_KUBECTL_VERSION/bin/linux/$OT_ARCH/kubectl"
-chmod 0755 /usr/local/bin/kubectl
-curl -fsSL "https://get.helm.sh/helm-$OT_HELM_VERSION-linux-$OT_ARCH.tar.gz" -o /tmp/helm.tar.gz
-tar -xzf /tmp/helm.tar.gz -C /tmp
-install -m 0755 "/tmp/linux-$OT_ARCH/helm" /usr/local/bin/helm
-rm -rf /tmp/helm.tar.gz "/tmp/linux-$OT_ARCH"
-
-# The -offline build, not the default one: it carries CoreDNS, the CNI plugins and the
-# rest of what KubeSolo starts INSIDE the binary. The default build pulls them from a
-# registry at first start, which in the cell's egress-less subnet means a cluster that
-# never comes up — and the bake would not notice, because the BUILD VM has egress.
-log "installing KubeSolo $OT_KUBESOLO_VERSION (-offline build: its images ride in the binary)"
-# Downloaded, then run — not piped: sh in a pipeline reports ITS status, so a failed
-# download would silently install nothing and only surface five minutes later as
-# "KubeSolo never wrote its kubeconfig".
-curl -sfL https://get.kubesolo.io -o /tmp/kubesolo-install.sh \
-  || die "could not download the KubeSolo installer from get.kubesolo.io"
-KUBESOLO_VERSION="$OT_KUBESOLO_VERSION" KUBESOLO_OFFLINE=true \
-  KUBESOLO_PATH="$KUBESOLO_PATH" sh /tmp/kubesolo-install.sh \
-  || die "the KubeSolo installer failed — its own output is above; \
-a release with no -offline build is the usual cause"
-rm -f /tmp/kubesolo-install.sh
-
-export KUBECONFIG="$KUBESOLO_KUBECONFIG"
-log "waiting for the KubeSolo API and a Ready node"
-_waited=0
-while [ ! -f "$KUBECONFIG" ]; do
-  _waited=$((_waited + 1))
-  if [ "$_waited" -gt 60 ]; then
-    journalctl -u kubesolo --no-pager -n 40 2>/dev/null || true
-    die "KubeSolo never wrote $KUBECONFIG"
-  fi
-  sleep 5
-done
-kubectl wait --for=condition=Ready node --all --timeout=300s \
-  || die "the KubeSolo node never became Ready (journalctl -u kubesolo)"
+install_k8s_clients
+install_kubesolo
 
 # containerd normalises a bare image name to docker.io/library/<name> and a
 # single-slash name to docker.io/<name>; a name that already carries a registry host
@@ -1193,6 +1253,77 @@ fi
 systemctl daemon-reload
 systemctl enable ot-sim.service
 
+else
+
+# ── 5D. Role: the plant's DMZ broker ─────────────────────────────────────────
+# One machine, one job: run the BeyondTrust Entitle agent inside the plant, so the
+# thing that brokers access to plant resources sits in the plant rather than reaching
+# in from a cluster somewhere else. It is the only host in the demo with a way out,
+# and that way out is two ports to one destination — see the zoning rules the cell
+# deploy applies (services/ot_service.py) and docs/profiles/demo/ot-demo-cell.md.
+#
+# Same KubeSolo as the cell, on purpose: what a customer would put on a plant IPC.
+# No simulators, also on purpose.
+log "baking the plant's DMZ broker (KubeSolo + the Entitle agent's chart)"
+install_k8s_clients
+install_kubesolo
+
+# The chart is baked because the agent install must not need the Helm repo at run
+# time: anycred.github.io is a CDN, and a CDN cannot be named honestly in the narrow
+# egress allow-list a plant boundary is built from. The agent's IMAGES still come from
+# Entitle at run time — that is what the 443 hole is for, and on a v1-routing tenant
+# that same host proxies the registry.
+log "pulling the Entitle agent chart from $OT_ENTITLE_CHART_REPO"
+mkdir -p "$OT_ENTITLE_CHART_DIR"
+if [ -n "$OT_ENTITLE_CHART_VERSION" ]; then
+  helm pull "$OT_ENTITLE_CHART" --repo "$OT_ENTITLE_CHART_REPO" \
+    --version "$OT_ENTITLE_CHART_VERSION" --destination "$OT_ENTITLE_CHART_DIR" \
+    || die "could not pull $OT_ENTITLE_CHART $OT_ENTITLE_CHART_VERSION from $OT_ENTITLE_CHART_REPO"
+else
+  helm pull "$OT_ENTITLE_CHART" --repo "$OT_ENTITLE_CHART_REPO" \
+    --destination "$OT_ENTITLE_CHART_DIR" \
+    || die "could not pull $OT_ENTITLE_CHART from $OT_ENTITLE_CHART_REPO"
+fi
+_chart_tgz="$(ls -1 "$OT_ENTITLE_CHART_DIR"/*.tgz 2>/dev/null | head -n 1)"
+if [ -z "$_chart_tgz" ]; then
+  die "helm pull left no chart archive in $OT_ENTITLE_CHART_DIR"
+fi
+# A stable filename the play can name without knowing the version, beside the
+# versioned archive helm wrote — which stays, because "which version is on this
+# broker" must be answerable from the host.
+cp -f "$_chart_tgz" "$OT_ENTITLE_CHART_DIR/entitle-agent.tgz"
+helm show chart "$OT_ENTITLE_CHART_DIR/entitle-agent.tgz" > "$OT_ENTITLE_CHART_DIR/CHART.txt" \
+  || die "helm cannot read the chart it just pulled — refusing to bake a broker that \
+cannot install the agent"
+log "baked chart: $(basename "$_chart_tgz")"
+
+# The egress probe's image, pulled through the cluster so it lands in the same
+# containerd the probe pod will run from. The probe exists because the agent runs as a
+# POD: whether its traffic leaves with the node's address is a property of the CNI, not
+# an assumption to discover in front of a customer — and a pod is the only place that
+# question can be asked honestly.
+log "pre-pulling the egress probe image ($OT_PROBE_IMAGE)"
+kubectl run ot-probe-warm --image="$OT_PROBE_IMAGE" --restart=Never \
+  --command -- /bin/true >/dev/null 2>&1 || true
+_waited=0
+while [ "$_waited" -lt 36 ]; do
+  case "$(kubectl get pod ot-probe-warm -o jsonpath='{.status.phase}' 2>/dev/null)" in
+    Succeeded|Failed) break ;;
+  esac
+  _waited=$((_waited + 1))
+  sleep 5
+done
+kubectl delete pod ot-probe-warm --ignore-not-found >/dev/null 2>&1 || true
+if [ "$_waited" -ge 36 ]; then
+  log "WARNING: the probe image did not pull in time. The agent install will still"
+  log "         run, but its pre-flight egress probe will report the image missing"
+  log "         rather than proving the plant boundary — see ot-demo-cell.md."
+fi
+
+log "the broker is ready: KubeSolo up, chart at $OT_ENTITLE_CHART_DIR/entitle-agent.tgz"
+
+fi
+
 # ── 6. Image cleanup for re-launch ───────────────────────────────────────────
 if [ "${OT_SKIP_CLEANUP:-0}" = "1" ]; then
   log "OT_SKIP_CLEANUP=1 — leaving host keys, machine-id, and logs in place"
@@ -1207,7 +1338,7 @@ else
   rm -rf /var/lib/cloud/instances /var/lib/cloud/instance
   find /var/log -type f -name 'cloud-init*.log' -exec truncate -s 0 {} + 2>/dev/null || true
   apt-get -y -q clean
-  if [ "$OT_RUNTIME" = "kubesolo" ]; then
+  if [ "$OT_ROLE" = "broker" ] || [ "$OT_RUNTIME" = "kubesolo" ]; then
     # Same reasoning as the ssh host keys above, one layer up: a baked cluster would
     # hand every cell the same CA and admin credential, and its Node object still
     # carries the BAKE VM's hostname — which no cell will ever have, so the pods bound
@@ -1229,7 +1360,10 @@ else
   fi
 fi
 
-if [ "$OT_RUNTIME" = "kubesolo" ]; then
+if [ "$OT_ROLE" = "broker" ]; then
+  log "ot-broker bake complete — KubeSolo on :6443, Entitle agent chart baked, \
+no simulators, PS account '$OT_ADMIN_USER'"
+elif [ "$OT_RUNTIME" = "kubesolo" ]; then
   log "ot-sim bake complete — KubeSolo runtime, sims [$OT_SIMS], FUXA HMI on :1881, \
 Kubernetes API on :6443, PS account '$OT_ADMIN_USER'"
 else

@@ -952,6 +952,24 @@ class Settings(BaseSettings):
     # and inbound only from the PRA Gateway's `bt-jumpoint` tag. Default OFF: it changes
     # the network posture of a running demo, so it is a deliberate choice, not a surprise.
     ot_purdue_firewall_enabled: bool = False
+    # ── The plant's one way out, for the OT cell's DMZ broker ────────────────
+    # The broker is the only host in an OT demo with any egress at all, and it gets
+    # exactly two ports to one destination: the Entitle agent's channel. A GCP
+    # firewall rule takes CIDRs, not names, and BeyondTrust publishes no range for
+    # agent.<region>.entitle.io — so this is the operator's list, the way a real plant
+    # gets one (a firewall ticket). Blank means the wiring resolves the hostname at
+    # wiring time instead and records that it did, which is honest but not a contract:
+    # a rotation costs the agent its channel until the cell is re-wired.
+    ot_entitle_egress_cidrs: str = ""
+    # Escape hatch when no destination list can be had: allow the broker tcp 443/8080
+    # to anywhere, instead of refusing to deploy. Weaker claim, deliberately opted
+    # into — the plant floor stays fully closed either way.
+    ot_dmz_egress_open_ports: bool = False
+    # Source range of the in-cloud Config-Management runner (Cloud Run connector /
+    # ECS subnet / ACI subnet), allowed to the broker on :22 so the agent can be
+    # installed and repaired. The dashboard itself has no route to a private cell, so
+    # without this there is no way in to the DMZ host but the PRA Gateway.
+    ot_config_runner_source_cidr: str = ""
     bt_ecs_host_instance_profile: str = "ecsInstanceRole"
     bt_ecs_host_name: str = "dashboard-sandbox-jumpoint-host"  # EC2 Name tag (find-or-create key)
     bt_ecs_execution_role_arn: str = ""  # Set to your ecsTaskExecutionRole ARN if required

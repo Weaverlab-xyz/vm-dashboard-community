@@ -27,6 +27,7 @@ Two surfaces share this module:
   whatever of the wiring is present, so the Destroy button and the expiry reaper
   both clean the whole cell with no extra teardown path.
 """
+import hashlib
 import json
 import logging
 import re
@@ -635,7 +636,13 @@ async def run_cell_deploy(job_id: str, meta: dict) -> None:
             job_service.set_failed(db, job_id, f"unknown OT cell cloud {cloud!r}")
             return
         children = meta.get("children") or []
-        child_id = (children[0].get("job_id") if children else "") or ""
+        # Role-tagged since the DMZ broker arrived. A cell deployed before that has one
+        # untagged child, and that child is the cell — so the default keeps every
+        # existing parent replayable.
+        child_id = next((c.get("job_id") for c in children
+                         if (c.get("role") or "cell") == "cell"), "") or ""
+        broker_id = next((c.get("job_id") for c in children
+                          if c.get("role") == "broker"), "") or ""
         if not child_id:
             job_service.set_failed(db, job_id, "OT cell parent has no child VM job — "
                                                "deploy the cell again from the OT tab.")
@@ -682,6 +689,75 @@ async def run_cell_deploy(job_id: str, meta: dict) -> None:
                 return
 
         vm_label = child_meta.get("instance_name") or child_meta.get("vm_name")
+        vm_service = importlib.import_module(
+            f".{_CELL_VM_SERVICE[cloud]}", package=__package__)
+
+        # ── The plant's own identity broker, before the plant floor ──────────────
+        # Order matters twice over. The token has to exist before the CELL deploys,
+        # because the cell's Entitle registration runs inside that deploy and names the
+        # agent that will broker it. And the broker has to be up before the cell is
+        # wired, because a cell registered against an agent whose host does not exist
+        # is a demo that half-works in the direction nobody checks.
+        if broker_id:
+            problem = in_plant_agent_problem(
+                (job_service.get_job(db, broker_id).metadata_dict or {}).get(
+                    "image_self_link", ""),
+                (job_service.get_job(db, broker_id).metadata_dict or {}).get(
+                    "machine_type", ""), cloud)
+            if problem:
+                job_service.set_cancelled(db, child_id)
+                job_service.set_cancelled(db, broker_id)
+                job_service.set_failed(db, job_id, problem)
+                return
+
+            job_service.update_progress(db, job_id, 9,
+                                        "Minting this plant's own Entitle agent token…")
+            token_name = agent_token_name(vm_label or "")
+            try:
+                await ensure_agent_token(child_id, vm_label or "")
+            except Exception as exc:  # noqa: BLE001
+                job_service.set_cancelled(db, child_id)
+                job_service.set_cancelled(db, broker_id)
+                job_service.set_failed(db, job_id, (
+                    f"The plant's Entitle agent token could not be minted: {exc}. The "
+                    f"cell registers against its OWN agent, so there is nothing to "
+                    f"register into until this works. Check the Entitle API key and "
+                    f"that no agent named {token_name} already exists. No VM was launched."))
+                return
+            # Both rows carry the name: the cell's deploy reads it to register against
+            # this agent, and the broker's is where an operator looks to find out which
+            # agent this host runs.
+            job_service.update_metadata(db, child_id, {
+                "ot_agent_token_name": token_name,
+                "ot_agent_token_key": agent_token_config_key(child_id),
+                "ot_broker_job_id": broker_id})
+            job_service.update_metadata(db, broker_id, {
+                "ot_agent_token_name": token_name, "ot_cell_job_id": child_id})
+            child_meta = (job_service.get_job(db, child_id).metadata_dict or child_meta)
+
+            broker_row = job_service.get_job(db, broker_id)
+            broker_label = (broker_row.metadata_dict or {}).get("instance_name") or "broker"
+            job_service.update_progress(db, job_id, 11,
+                                        f"Deploying the plant's DMZ broker ({broker_label})…")
+            try:
+                await vm_service.run(broker_id, child_job_type, broker_row.metadata_dict)
+            except Exception as exc:  # noqa: BLE001
+                job_service.set_cancelled(db, broker_id)
+                job_service.set_cancelled(db, child_id)
+                raise OTCellError(
+                    f"The DMZ broker deploy could not start: {exc} — both VM jobs were "
+                    f"cancelled and nothing was created. Deploy a new cell.")
+            db.expire_all()
+            broker_row = job_service.get_job(db, broker_id)
+            if broker_row is None or broker_row.status != "completed":
+                err = (broker_row.error_message if broker_row else "") or f"see job {broker_id}"
+                job_service.set_cancelled(db, child_id)
+                job_service.set_failed(db, job_id, (
+                    f"The DMZ broker deploy failed: {err} — the cell was not launched, "
+                    f"because a cell whose Entitle agent has nowhere to run would "
+                    f"register access nobody can use (job {broker_id} has the detail)."))
+                return
+
         job_service.update_progress(db, job_id, 12,
                                     f"Deploying the OT cell VM ({vm_label})…")
         # The child gets everything a normal VM deploy on its cloud gets — Shell
@@ -691,8 +767,6 @@ async def run_cell_deploy(job_id: str, meta: dict) -> None:
         # can RAISE is before the child ever leaves `queued` (e.g. a malformed
         # stored request), and a queued row nothing will drive again must be
         # cancelled, not abandoned — the reconciler skips queued by design.
-        vm_service = importlib.import_module(
-            f".{_CELL_VM_SERVICE[cloud]}", package=__package__)
         try:
             await vm_service.run(child_id, child_job_type, child_meta)
         except Exception as exc:  # noqa: BLE001
@@ -710,7 +784,8 @@ async def run_cell_deploy(job_id: str, meta: dict) -> None:
                 f"and deploy a new cell (job {child_id} holds the VM detail).")
             return
 
-        summary = await _wire_cell(db, job_id, child_id, child_row.metadata_dict, cloud)
+        summary = await _wire_cell(db, job_id, child_id, child_row.metadata_dict, cloud,
+                                   broker_id=broker_id)
         job_service.set_completed(db, job_id, summary)
     except OTCellError as exc:
         job_service.set_failed(db, job_id, str(exc))
@@ -867,7 +942,113 @@ def purdue_firewall_enabled() -> bool:
 def _purdue_rule_names(vm: str) -> dict:
     return {"egress_deny":   f"{vm}-ot-egress-deny",
             "ingress_allow": f"{vm}-ot-ingress-allow",
+            "ingress_agent": f"{vm}-ot-ingress-agent",
             "ingress_deny":  f"{vm}-ot-ingress-deny"}
+
+
+# ── The DMZ broker's zone ─────────────────────────────────────────────────────
+# The broker is the plant's industrial DMZ host: it runs the BeyondTrust Entitle agent
+# INSIDE the plant, which is the only arrangement in which "Entitle manages access to
+# plant resources" is true as stated. It is also the only machine in the demo with any
+# way out, and that way out is two ports to one destination.
+#
+#   <broker>-dmz-egress-entitle-<hash>  790  EGRESS  ALLOW tcp 443,8080 → the Entitle set
+#   <broker>-dmz-egress-dns-udp / -tcp  790  EGRESS  ALLOW 53 → the metadata resolver
+#   <broker>-dmz-egress-deny            800  EGRESS  DENY  all
+#   <broker>-dmz-ingress-allow          800  INGRESS ALLOW tcp 22 ← Gateway + runner
+#   <broker>-dmz-ingress-deny           810  INGRESS DENY  all
+#
+# 790 outranks the 800 deny for those destinations and for nothing else. The cell's own
+# rules are untouched apart from one new line admitting the broker on :22 — so the two
+# rule sets together ARE the Purdue diagram, which is the point: in a demo you can read
+# them out of `gcloud compute firewall-rules list` instead of drawing them on a slide.
+OT_DMZ_NETWORK_TAG = "ot-dmz"
+_DMZ_EGRESS_ALLOW_PRIORITY = 790
+# The agent's channel. 8080 is not telemetry and not optional — it carries
+# ENTITLE_PROXY_URL, the agent's primary channel, in plain HTTP (docs/kubesolo.md).
+ENTITLE_AGENT_PORTS = ("443", "8080")
+# A cloud VM resolves through the link-local metadata server, and the 800 deny covers
+# it like everything else. One rule carries one protocol, so DNS costs two.
+_METADATA_RESOLVER_CIDR = "169.254.169.254/32"
+
+
+def _dmz_rule_names(vm: str, digest: str = "") -> dict:
+    return {"egress_entitle": f"{vm}-dmz-egress-entitle-{digest or 'none'}",
+            "egress_dns_udp": f"{vm}-dmz-egress-dns-udp",
+            "egress_dns_tcp": f"{vm}-dmz-egress-dns-tcp",
+            "egress_deny":    f"{vm}-dmz-egress-deny",
+            "ingress_allow":  f"{vm}-dmz-ingress-allow",
+            "ingress_deny":   f"{vm}-dmz-ingress-deny"}
+
+
+def entitle_agent_endpoint() -> str:
+    """The hostname the agent dials home on, for the configured tenant's region."""
+    from . import entitle_egress
+    return f"agent.{entitle_egress.region()}.entitle.io"
+
+
+def resolve_entitle_destinations() -> Tuple[list, str]:
+    """``(cidrs, provenance)`` for the plant's one outbound hole.
+
+    The operator's list wins, because that is what a real plant has: a firewall ticket
+    naming addresses. Failing that, the endpoint is resolved here and the provenance
+    says exactly that — an honest answer, not a contract, and the difference is
+    recorded on the job so nobody quotes it as one.
+
+    ``entitle_egress.cidrs()`` is deliberately NOT reused: it holds the addresses
+    Entitle connects FROM, for an ingress allow-list. Pointing an egress rule at them
+    would be a guess in the wrong direction.
+
+    ``([], "")`` means neither source could answer, which upstream turns into a
+    refusal — never a silent widening to 0.0.0.0/0.
+    """
+    raw = _cfg("ot_entitle_egress_cidrs")
+    listed = [c.strip() for c in raw.replace(";", ",").split(",") if c.strip()]
+    if listed:
+        return sorted(set(listed)), "ot_entitle_egress_cidrs"
+    host = entitle_agent_endpoint()
+    try:
+        import socket
+        addrs = {info[4][0] for info in socket.getaddrinfo(
+            host, 443, socket.AF_INET, socket.SOCK_STREAM)}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OT DMZ: %s did not resolve (%s)", host, exc)
+        addrs = set()
+    if not addrs:
+        return [], ""
+    stamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    return sorted(f"{a}/32" for a in addrs), f"resolved {host} at {stamp}"
+
+
+def entitle_destination_digest(cidrs: list) -> str:
+    """Eight hex characters of the destination set, for the rule's name.
+
+    ``gcp_service.ensure_segmentation_rule`` is create-only — a rule that already
+    exists is left alone, never reconciled — so the SET has to be part of the name.
+    Without that, a changed address list would leave the old rule in place and report
+    success, which is the failure mode this whole feature exists to avoid."""
+    return hashlib.sha256(",".join(sorted(cidrs)).encode()).hexdigest()[:8]
+
+
+def dmz_egress_open_ports() -> bool:
+    from . import config_service
+    return config_service.get_bool("ot_dmz_egress_open_ports", False)
+
+
+def dmz_egress_problem() -> str:
+    """"" when the plant's one hole can be drawn, else the remedy for the job page."""
+    if dmz_egress_open_ports():
+        return ""
+    cidrs, _ = resolve_entitle_destinations()
+    if cidrs:
+        return ""
+    return (
+        f"The plant's outbound path to Entitle cannot be drawn: {entitle_agent_endpoint()} "
+        f"did not resolve and no addresses are configured. A firewall rule takes "
+        f"addresses, not names, so set ot_entitle_egress_cidrs (Settings → Integrations "
+        f"→ Privileged Remote Access) to the ranges BeyondTrust gave you. If you cannot "
+        f"get a list, ot_dmz_egress_open_ports allows the broker 443/8080 to anywhere "
+        f"instead — a weaker claim the demo then has to own. No VM was launched.")
 
 
 def purdue_cell_ports(cmeta: dict) -> list:
@@ -951,6 +1132,27 @@ async def _wire_purdue_firewall(db, parent_id: str, child_id: str, cmeta: dict) 
         return ("Purdue rules partial: no path out of the cell, but the "
                 f"Gateway allow-list was not applied ({exc}) — ingress is unchanged")
 
+    # The plant's own identity broker, and the only other thing allowed to speak to
+    # the cell at all: one port, from one zone. Its own rule rather than another
+    # source on the Gateway's, so the audit line reads as the sentence it is — "the
+    # DMZ host may SSH here" — and so a cell with no broker has no such line.
+    if cmeta.get("ot_broker_job_id"):
+        try:
+            if names["ingress_agent"] not in created:
+                await gcp_service.ensure_segmentation_rule(
+                    project=project, name=names["ingress_agent"], network=network,
+                    direction="INGRESS", action="allow",
+                    priority=_PURDUE_INGRESS_ALLOW_PRIORITY,
+                    source_tags=[OT_DMZ_NETWORK_TAG],
+                    target_tags=[OT_CELL_NETWORK_TAG], protocol="tcp", ports=[22],
+                    description="vm-dashboard OT cell: the plant's own Entitle agent, "
+                                "on the DMZ host, may mint ephemeral accounts here")
+                _record(names["ingress_agent"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OT cell %s: DMZ ingress-allow rule failed: %s", vm, exc)
+            return ("Purdue rules partial: the Gateway is allowed in, but the plant's "
+                    f"Entitle agent is not ({exc}) — its grants would not log in")
+
     try:
         if names["ingress_deny"] not in created:
             await gcp_service.ensure_segmentation_rule(
@@ -970,8 +1172,87 @@ async def _wire_purdue_firewall(db, parent_id: str, child_id: str, cmeta: dict) 
     return f"Purdue rules applied ({len(created)} firewall rules)"
 
 
+# The play that puts the agent on the broker. A repo sample has to be uploaded to a
+# storage backend before a run can resolve it by bare filename, which is the same
+# contract every other Config-Management run has.
+ENTITLE_AGENT_PLAYBOOK = "entitle-agent-install.yml"
+# Baked by provisioners/ot/ot-sim-debian.sh (OT_ROLE=broker). Naming the archive rather
+# than the repo is what keeps the plant's egress allow-list down to one destination.
+BROKER_CHART_PATH = "/opt/entitle/charts/entitle-agent.tgz"
+
+
+async def _install_plant_agent(db, parent_id: str, child_id: str, cmeta: dict,
+                               broker_id: str, bmeta: dict) -> str:
+    """Queue the Config-Management run that installs the Entitle agent on the broker.
+
+    Queued rather than run inline, and as an ordinary ``ansible_local`` job: it then
+    gets the durable runner, the job page its output belongs on, and the secret
+    handling that binds the token BY REFERENCE — the job row carries the config key,
+    never the token. The run reaches a private broker only from an in-cloud runner,
+    which ``config_runner_problem`` refused the whole deploy without.
+    """
+    from . import ansible_run_meta, job_service, storage_service
+    from types import SimpleNamespace
+
+    if cmeta.get("ot_agent_install_job_id"):
+        return f"agent install already queued (job {cmeta['ot_agent_install_job_id']})"
+    broker_ip = (bmeta.get("private_ip") or "").strip()
+    if not broker_ip:
+        return ("agent install skipped: the DMZ broker reported no private address, so "
+                "there is nothing for the runner to reach")
+
+    parent = job_service.get_job(db, parent_id)
+    payload = SimpleNamespace(
+        asset=ENTITLE_AGENT_PLAYBOOK,
+        target=broker_ip,
+        cloud="gcp",
+        ansible_user="",
+        extra_vars={
+            # A baked chart, not the repo: anycred.github.io is a CDN and no honest
+            # allow-list can name it, so the plant carries the chart instead.
+            "entitle_agent_chart": BROKER_CHART_PATH,
+            "entitle_agent_chart_repo": "",
+            "entitle_agent_replicas": 1,
+            # Prove the path from a POD before helm runs. The endpoint is what the
+            # firewall was opened to; the cell is what the agent must reach to mint an
+            # ephemeral account. Both failures are cheap here and expensive later.
+            "entitle_probe_endpoint": entitle_agent_endpoint(),
+            "entitle_probe_ssh_target": (cmeta.get("private_ip") or ""),
+        },
+        secret_vars={"entitle_agent_token": agent_token_config_key(child_id)},
+        secret_become_source="",
+        secret_ssh_key_source="",
+        managed_account=None,
+        managed_become=None,
+        epml_token_var="",
+    )
+    try:
+        job = job_service.create_job(
+            db,
+            job_type="ansible_local",
+            created_by=(parent.created_by if parent else "system"),
+            workgroup="ansible",
+            metadata=ansible_run_meta.run_meta(
+                payload,
+                description=f"Entitle agent → {bmeta.get('instance_name') or broker_ip} "
+                            f"(the plant's own broker)",
+                asset_backend=storage_service.active_backend()),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OT cell: agent install could not be queued: %s", exc)
+        return f"agent install could not be queued ({exc})"
+
+    job_service.update_metadata(db, child_id, {"ot_agent_install_job_id": job.id})
+    job_service.update_metadata(db, broker_id, {"ot_agent_install_job_id": job.id})
+    cmeta["ot_agent_install_job_id"] = job.id
+    job_service.update_progress(db, parent_id, 96,
+                                "Installing the Entitle agent on the plant's broker…")
+    return (f"agent install queued as job {job.id} — it runs the same "
+            f"{ENTITLE_AGENT_PLAYBOOK} an on-prem site would")
+
+
 async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
-                     cloud: str = "gcp") -> dict:
+                     cloud: str = "gcp", broker_id: str = "") -> dict:
     """Provision the OT access layer for a deployed cell VM, skipping any step whose
     Terraform state already exists (which is what makes the rewire path idempotent).
     Every artifact is persisted onto the CHILD's metadata before the next step runs,
@@ -1113,6 +1394,19 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
     if cloud == "gcp" and purdue_firewall_enabled():
         firewall_note = await _wire_purdue_firewall(db, parent_id, child_id, cmeta)
 
+    # The DMZ zone, then the agent — in that order, so what the probe proves is the
+    # narrow path itself rather than a hole that is about to close behind it.
+    dmz_note = ""
+    agent_note = ""
+    broker_id = broker_id or (cmeta.get("ot_broker_job_id") or "")
+    if broker_id and cloud == "gcp":
+        broker_row = job_service.get_job(db, broker_id)
+        bmeta = (broker_row.metadata_dict if broker_row else None) or {}
+        if purdue_firewall_enabled():
+            dmz_note = await _wire_dmz_firewall(db, parent_id, broker_id, bmeta)
+        agent_note = await _install_plant_agent(db, parent_id, child_id, cmeta,
+                                                broker_id, bmeta)
+
     return {
         "vm_job_id": child_id,
         "instance_name": vm,
@@ -1136,7 +1430,302 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
         "vault_account_name": cmeta.get("ot_vault_account_name") or "",
         "ps_checkout": ps_note,
         "purdue_firewall": firewall_note,
+        "dmz_zone": dmz_note,
+        "plant_agent": agent_note,
+        "broker_job_id": broker_id,
     }
+
+
+# ── Can this cell carry its own Entitle agent? ────────────────────────────────
+# Every one of these is a refusal BEFORE anything is launched, with the remedy in the
+# message, because the alternative is a demo that deploys green and fails at the only
+# moment that matters — the vendor's login. Same posture as pra_preflight_problem and
+# the gateway sizing guard.
+#
+# 8 GB, not 4: the agent alone requests 1Gi and KubeSolo idles at ~200 MB. The estimate
+# comes from gateway_mem_mb, which is deliberately pessimistic for families it has not
+# met, so the floor is set below e2-standard-2's true 8192 MB rather than at it.
+MIN_BROKER_MEM_MB = 7000
+
+
+def broker_instance_name(cell_name: str) -> str:
+    """The DMZ broker's VM name for a cell. `-dmz`, because that is what it is."""
+    return f"{(cell_name or 'ot-cell').strip()}-dmz"[:62]
+
+
+def config_runner_problem(cloud: str = "gcp") -> str:
+    """"" when the agent can be installed on a private broker, else the remedy.
+
+    The dashboard has no route to a private cell — the worker reaches managed nodes
+    over public addresses (rancher_node_service._dashboard_cidr) — so the install has
+    to run from a runner inside the cloud, and the broker's firewall has to admit it.
+    """
+    mode = (_cfg(f"ansible_runner_{cloud}") or _cfg("ansible_runner") or "local").strip().lower()
+    if mode in ("", "local"):
+        return (f"The Entitle agent is installed by a Config-Management run against the "
+                f"broker's PRIVATE address, and the dashboard host has no route to it. "
+                f"Set ansible_runner_{cloud} to this cloud's in-cloud runner (Settings → "
+                f"Integrations → Config Management) so the run executes inside the VPC. "
+                f"No VM was launched.")
+    if cloud == "gcp" and not (_cfg("gcp_run_subnetwork") or _cfg("gcp_ansible_vpc_connector")):
+        return ("The Cloud Run Ansible runner has no VPC egress configured, so it cannot "
+                "reach the broker's private address: set gcp_run_subnetwork (direct VPC "
+                "egress) or gcp_ansible_vpc_connector. No VM was launched.")
+    if not _cfg("ot_config_runner_source_cidr").strip():
+        return ("The DMZ broker admits only the PRA Gateway and the Config-Management "
+                "runner, and the runner's source range is not configured: set "
+                "ot_config_runner_source_cidr to the runner's subnet/connector range, or "
+                "the agent could never be installed or repaired. No VM was launched.")
+    return ""
+
+
+def broker_shape_problem(machine_type: str) -> str:
+    """"" when the broker can hold the agent, else the remedy."""
+    mem = gateway_mem_mb(machine_type)
+    if mem is None or mem >= MIN_BROKER_MEM_MB:
+        return ""
+    return (f"The DMZ broker is {machine_type} (~{mem} MB). The Entitle agent requests "
+            f"1Gi on its own and KubeSolo idles at ~200 MB on top, so the pod would sit "
+            f"Pending with no other symptom. Pick e2-standard-2 (8 GB) or larger for the "
+            f"broker. No VM was launched.")
+
+
+def in_plant_agent_problem(broker_image: str = "", broker_machine_type: str = "",
+                           cloud: str = "gcp") -> str:
+    """"" when this cell can broker its own identity, else the remedy.
+
+    Registering an OT cell in Entitle means the agent runs IN the plant, on the cell's
+    DMZ broker. The alternative — an agent in some cluster outside it — is both a
+    false claim for the demo and, once the Purdue zoning is on, silently broken: the
+    cell admits the PRA Gateway and nothing else, so that agent's SSH is dropped while
+    the registration and the grant both still report success.
+    """
+    from . import config_service
+    if cloud != "gcp":
+        return (f"The in-plant Entitle agent is GCP-only so far — {cloud.upper()} cells "
+                f"have no Purdue zoning to hang the plant boundary on. Deploy this cell "
+                f"without Entitle, or use GCP.")
+    if not config_service.get_bool("entitle_registration_enabled", False):
+        return ("Entitle resource registration is off (entitle_registration_enabled), so "
+                "there is nothing for the plant's agent to register into. Enable it in "
+                "Settings → Integrations → Entitle, or deploy the cell without Entitle.")
+    if not (broker_image or "").strip():
+        return ("The cell's Entitle agent runs on a DMZ broker, which needs its own "
+                "image: bake one with OT_ROLE=broker (provisioners/ot/README.md) and "
+                "pick it in the form's 'DMZ broker image'. No VM was launched.")
+    if not purdue_firewall_enabled():
+        return ("The in-plant Entitle agent needs the Purdue zoning turned on "
+                "(ot_purdue_firewall_enabled): the agent's one way out is a hole in the "
+                "plant boundary, and without the boundary there is nothing to make a "
+                "hole in — the cell would simply have whatever egress the subnet does. "
+                "No VM was launched.")
+    problem = dmz_egress_problem()
+    if problem:
+        return problem
+    problem = config_runner_problem(cloud)
+    if problem:
+        return problem
+    return broker_shape_problem(broker_machine_type)
+
+
+# ── The plant's own Entitle agent token ──────────────────────────────────────
+# One token per cell, minted in the install's own tenant and destroyed with the cell.
+# Not `ensure_agent_token()`: that one is the install-wide singleton, written into the
+# global config keys, and every cell sharing it would mean every cell's agent could
+# broker every other cell's resources. The POV path (pov_entitle_agent) draws the same
+# line for the same reason, with the same key shape.
+def agent_token_config_key(vm_job_id: str) -> str:
+    return f"ot/{vm_job_id}/entitle_agent_token"
+
+
+def agent_token_state_key(vm_job_id: str) -> str:
+    return f"ot/{vm_job_id}/entitle_agent_tf_state"
+
+
+def agent_token_name(cell_name: str) -> str:
+    """The Entitle-side name of this cell's agent token.
+
+    Derived from the cell, so an operator reading the agent list in Entitle can tell
+    which plant a token belongs to — and so a leftover from a destroyed cell is
+    recognisable rather than anonymous."""
+    slug = re.sub(r"[^a-z0-9-]+", "-", (cell_name or "cell").strip().lower()).strip("-")
+    slug = slug or "cell"
+    # Most cells are already named ot-something; "ot-ot-cell-01" reads like a bug.
+    return (slug if slug.startswith("ot-") else f"ot-{slug}")[:60]
+
+
+async def ensure_agent_token(vm_job_id: str, cell_name: str) -> str:
+    """Mint this cell's agent token once and remember it; return the value.
+
+    Stored through config_service (encrypted at rest, resolvable from an external
+    vault) and never written into job metadata — the job carries the KEY, which is
+    what every run and every teardown needs."""
+    from . import config_service, entitle_registration_service as ent
+    existing = (config_service.get(agent_token_config_key(vm_job_id)) or "").strip()
+    if existing:
+        return existing
+    minted = await ent.mint_agent_token(agent_token_name(cell_name))
+    config_service.set(agent_token_config_key(vm_job_id), minted["token"])
+    if minted.get("tf_state_json"):
+        # The state is the only way to destroy the token later, and minting is
+        # create-only in Entitle — losing it strands the token in the tenant.
+        config_service.set(agent_token_state_key(vm_job_id), minted["tf_state_json"])
+    return minted["token"]
+
+
+async def destroy_agent_token(vm_job_id: str) -> str:
+    """Destroy this cell's agent token. Returns a one-line note; never raises.
+
+    Teardown of a demo must not be blockable by the identity provider, so a failure
+    here is reported and the stash is KEPT — a token we could not destroy is one an
+    operator still needs to be able to find."""
+    from . import config_service, entitle_registration_service as ent
+    state = (config_service.get(agent_token_state_key(vm_job_id)) or "").strip()
+    if not state:
+        config_service.delete(agent_token_config_key(vm_job_id))
+        return ""
+    try:
+        await ent.deregister(state)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OT cell %s: agent token not destroyed: %s", vm_job_id, exc)
+        return (f"the plant's Entitle agent token was not destroyed ({exc}) — remove it "
+                f"in Entitle → Org Settings → Agents")
+    config_service.delete(agent_token_config_key(vm_job_id))
+    config_service.delete(agent_token_state_key(vm_job_id))
+    return ""
+
+
+async def _wire_dmz_firewall(db, parent_id: str, broker_id: str, bmeta: dict) -> str:
+    """Fence the DMZ broker: one destination out, the Gateway and the runner in.
+
+    Mirrors ``_wire_purdue_firewall`` deliberately — same recording discipline (each
+    rule lands in the row's ``ot_firewall_rules`` the moment it exists, so the cloud's
+    own destroy path cleans it), same best-effort posture, same ordering rule that an
+    allow is never left behind a deny that outranks it.
+
+    The one asymmetry is the egress ALLOW, which carries a digest of its destination
+    set in its name: ``ensure_segmentation_rule`` never reconciles an existing rule,
+    so a changed address list has to arrive as a differently-named rule or it would
+    not arrive at all.
+    """
+    from . import config_service, gcp_service, job_service
+
+    vm = bmeta.get("instance_name") or ""
+    project = bmeta.get("project_id") or _cfg("gcp_project_id")
+    network = (bmeta.get("network") or config_service.get("gcp_network") or "default")
+    if not vm or not project:
+        return "DMZ rules skipped (no broker name or project)"
+
+    cidrs, provenance = resolve_entitle_destinations()
+    open_ports = dmz_egress_open_ports()
+    if not cidrs and not open_ports:
+        return ("DMZ rules skipped: no Entitle destination addresses "
+                "(ot_entitle_egress_cidrs) and the open-ports escape hatch is off")
+    if not cidrs:
+        cidrs, provenance = ["0.0.0.0/0"], "ot_dmz_egress_open_ports"
+
+    names = _dmz_rule_names(vm, entitle_destination_digest(cidrs))
+    created = list(bmeta.get("ot_firewall_rules") or [])
+
+    def _record(rule_name):
+        if rule_name not in created:
+            created.append(rule_name)
+        job_service.update_metadata(db, broker_id, {"ot_firewall_rules": created})
+        bmeta["ot_firewall_rules"] = created
+
+    job_service.update_progress(db, parent_id, 93,
+                                "Opening the plant's one outbound path (Entitle only)…")
+    # Every stale sibling goes first: a re-wire after the address set changed must not
+    # leave the previous allow in place beside the new one, or the hole is the union of
+    # both and nobody can tell from the rule list which one is live.
+    for stale in list(created):
+        if stale.startswith(f"{vm}-dmz-egress-entitle-") and stale != names["egress_entitle"]:
+            try:
+                await gcp_service.delete_firewall_rule(project, stale)
+                created.remove(stale)
+                job_service.update_metadata(db, broker_id, {"ot_firewall_rules": created})
+                bmeta["ot_firewall_rules"] = created
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("OT DMZ %s: stale rule %s not removed: %s", vm, stale, exc)
+
+    try:
+        if names["egress_entitle"] not in created:
+            await gcp_service.ensure_segmentation_rule(
+                project=project, name=names["egress_entitle"], network=network,
+                direction="EGRESS", action="allow", priority=_DMZ_EGRESS_ALLOW_PRIORITY,
+                destination_ranges=cidrs, target_tags=[OT_DMZ_NETWORK_TAG],
+                protocol="tcp", ports=list(ENTITLE_AGENT_PORTS),
+                description=f"vm-dashboard OT broker: the Entitle agent's channel "
+                            f"({provenance}) — the plant's only way out")
+            _record(names["egress_entitle"])
+        for key, proto in (("egress_dns_udp", "udp"), ("egress_dns_tcp", "tcp")):
+            if names[key] not in created:
+                await gcp_service.ensure_segmentation_rule(
+                    project=project, name=names[key], network=network,
+                    direction="EGRESS", action="allow",
+                    priority=_DMZ_EGRESS_ALLOW_PRIORITY,
+                    destination_ranges=[_METADATA_RESOLVER_CIDR],
+                    target_tags=[OT_DMZ_NETWORK_TAG], protocol=proto, ports=[53],
+                    description="vm-dashboard OT broker: DNS, without which the "
+                                "channel above is a name that resolves to nothing")
+                _record(names[key])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OT DMZ %s: egress allow failed: %s", vm, exc)
+        return f"DMZ rules incomplete: the Entitle path was not opened ({exc})"
+
+    # Only now the deny: the allows above outrank it, but a deny created first would
+    # strand the agent for however long the next call takes.
+    try:
+        if names["egress_deny"] not in created:
+            await gcp_service.ensure_segmentation_rule(
+                project=project, name=names["egress_deny"], network=network,
+                direction="EGRESS", action="deny", priority=_PURDUE_EGRESS_PRIORITY,
+                destination_ranges=["0.0.0.0/0"], target_tags=[OT_DMZ_NETWORK_TAG],
+                protocol="all",
+                description="vm-dashboard OT broker: everything except the Entitle "
+                            "channel stops at the plant boundary")
+            _record(names["egress_deny"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OT DMZ %s: egress deny failed: %s", vm, exc)
+        return (f"DMZ rules partial: the Entitle path is open but the catch-all egress "
+                f"deny failed ({exc}) — the broker can still reach the internet")
+
+    sources = [GATEWAY_NETWORK_TAG]
+    runner_cidr = _cfg("ot_config_runner_source_cidr").strip()
+    try:
+        if names["ingress_allow"] not in created:
+            await gcp_service.ensure_segmentation_rule(
+                project=project, name=names["ingress_allow"], network=network,
+                direction="INGRESS", action="allow",
+                priority=_PURDUE_INGRESS_ALLOW_PRIORITY,
+                source_tags=sources,
+                source_ranges=[runner_cidr] if runner_cidr else None,
+                target_tags=[OT_DMZ_NETWORK_TAG], protocol="tcp", ports=[22],
+                description="vm-dashboard OT broker: the PRA Gateway and the "
+                            "Config-Management runner may reach the DMZ host")
+            _record(names["ingress_allow"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OT DMZ %s: ingress allow failed: %s", vm, exc)
+        return (f"DMZ rules partial: the broker has its outbound path but nothing may "
+                f"reach it ({exc}) — the agent cannot be installed or repaired")
+
+    try:
+        if names["ingress_deny"] not in created:
+            await gcp_service.ensure_segmentation_rule(
+                project=project, name=names["ingress_deny"], network=network,
+                direction="INGRESS", action="deny", priority=_PURDUE_INGRESS_DENY_PRIORITY,
+                source_ranges=["0.0.0.0/0"], target_tags=[OT_DMZ_NETWORK_TAG],
+                protocol="all",
+                description="vm-dashboard OT broker: nothing else reaches the DMZ host")
+            _record(names["ingress_deny"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OT DMZ %s: ingress deny failed: %s", vm, exc)
+        return ("DMZ rules partial: the Gateway is allowed in, but the catch-all "
+                f"ingress deny failed ({exc})")
+
+    where = "anywhere on 443/8080" if provenance == "ot_dmz_egress_open_ports" else \
+            f"{len(cidrs)} destination(s) from {provenance}"
+    return f"DMZ zone applied ({len(created)} rules; the agent may reach {where})"
 
 
 def _cell_tunnels(cmeta: dict) -> list:

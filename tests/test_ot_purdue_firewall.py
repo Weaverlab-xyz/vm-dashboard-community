@@ -94,13 +94,17 @@ def test_the_gateway_tag_matches_what_the_gateway_vm_actually_carries():
 
 
 def test_every_rule_that_exists_is_recorded_on_the_child():
-    src = _fn_src(_OT, "_wire_purdue_firewall")
-    # One _record per ensure call, so destroy removes exactly what is there and a
-    # rewire creates only what is missing — the Web Jump / tunnel contract.
-    assert src.count("ensure_segmentation_rule") == 3
-    assert src.count("_record(names[") == 3, (
-        "each rule must be recorded onto the child the moment it exists")
-    assert "update_metadata" in _fn_src(_OT, "_wire_purdue_firewall")
+    # One _record per ensure call, in BOTH zones, so destroy removes exactly what is
+    # there and a rewire creates only what is missing — the Web Jump / tunnel
+    # contract. Counted against each other rather than against a number, so adding a
+    # rule to a zone cannot pass by updating a constant.
+    for fn in ("_wire_purdue_firewall", "_wire_dmz_firewall"):
+        src = _fn_src(_OT, fn)
+        ensures = src.count("ensure_segmentation_rule(")
+        assert ensures >= 3, f"{fn}: only {ensures} rules — a zone is missing"
+        assert src.count("_record(names[") == ensures, (
+            f"{fn}: each rule must be recorded onto its row the moment it exists")
+        assert "update_metadata" in src
 
 
 def test_the_destroy_path_removes_the_recorded_rules():

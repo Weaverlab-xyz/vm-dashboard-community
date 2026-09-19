@@ -1127,6 +1127,12 @@ class PRAFeatureConfig(BaseModel):
     ot_aws_require_private_subnet: bool = True
     # OT demo cell on GCP: Purdue-zone firewall rules on the cell's tag (see config.py).
     ot_purdue_firewall_enabled: bool = False
+    # The DMZ broker's one way out: CIDRs for agent.<region>.entitle.io (blank =
+    # resolve at wiring time), the open-ports escape hatch, and the Config-Management
+    # runner's source range that may reach the broker on :22. See config.py.
+    ot_entitle_egress_cidrs: str = ""
+    ot_dmz_egress_open_ports: bool = False
+    ot_config_runner_source_cidr: str = ""
     # GCP-specific overrides (leave blank to fall back to the AWS values above)
     gcp_bt_jump_group_name: str = ""
     gcp_jumpoint_name: str = ""

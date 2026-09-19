@@ -330,10 +330,85 @@ def deploy_cell(
         },
     )
     job_service.set_cloud_resource_id(db, child.id, payload.instance_name)
+
+    # The plant's own identity broker. A second VM, in its own zone, carrying KubeSolo
+    # and the Entitle agent and nothing else — because an agent that manages access to
+    # plant resources belongs in the plant. Created here, not in the worker, so it
+    # meets the same name validation and admission policy as any other VM.
+    children = [{"job_id": child.id, "instance_name": payload.instance_name,
+                 "role": "cell"}]
+    if payload.register_in_entitle:
+        problem = ot_service.in_plant_agent_problem(
+            payload.broker_image_self_link, payload.broker_machine_type, "gcp")
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+        broker_name = ot_service.broker_instance_name(payload.instance_name)
+        deploy_batch.validate_name(broker_name, "gcp")
+        deploy_batch.reject_name_collisions(db, "gce_deploy", [broker_name])
+        admission_service.enforce(
+            "gcp:gce:deploy",
+            request={"region": region, "zone": zone,
+                     "instance_type": payload.broker_machine_type,
+                     "image": payload.broker_image_self_link,
+                     "name": broker_name, "count": 1, "batch": False},
+            actor=current_user, db=db,
+        )
+        broker_req = GCPDeployRequest(
+            image_self_link=payload.broker_image_self_link,
+            image_name=payload.broker_image_name,
+            instance_name=broker_name,
+            machine_type=payload.broker_machine_type,
+            zone=zone,
+            subnetwork=payload.subnetwork,
+            create_external_ip=False,
+            disk_size_gb=payload.disk_size_gb,
+            # The DMZ tag, never the cell's: the two zones differ by exactly this, and
+            # a broker carrying ot-sim would inherit the plant floor's no-egress rule
+            # and never reach Entitle.
+            network_tags=[ot_service.OT_DMZ_NETWORK_TAG],
+            workgroup=workgroup,
+            # The broker is the manager, not the managed: it registers nothing in
+            # Entitle. Password Safe follows the cell's choice, so the one account an
+            # operator might need to Shell Jump with is handled the same way.
+            register_in_entitle=False,
+            register_in_passwordsafe=payload.register_in_passwordsafe,
+            jump_group=payload.jump_group,
+            jumpoint_name=payload.jumpoint_name,
+            count=1,
+        )
+        broker = job_service.create_job(
+            db,
+            job_type="gce_deploy",
+            created_by=current_user.username,
+            workgroup=workgroup,
+            status="queued",
+            metadata={
+                "project_id":      project_id,
+                "zone":            zone,
+                "region":          region,
+                "instance_name":   broker_name,
+                "machine_type":    payload.broker_machine_type,
+                "image_self_link": payload.broker_image_self_link,
+                "image_name":      payload.broker_image_name,
+                "workgroup":       workgroup,
+                # `ot_broker`, deliberately NOT `ot_cell`: the cells list and the home
+                # tile both key on ot_cell, and a broker counted as a cell would double
+                # every number an operator reads.
+                "ot_broker":       True,
+                "ot_cell_job_id":  child.id,
+                "req": broker_req.model_dump(),
+            },
+        )
+        job_service.set_cloud_resource_id(db, broker.id, broker_name)
+        job_service.update_metadata(db, child.id, {"ot_broker_job_id": broker.id})
+        children.append({"job_id": broker.id, "instance_name": broker_name,
+                         "role": "broker"})
+
     job_service.log_audit(
         db, current_user.username, "ot_cell_deploy",
         details={"instance_name": payload.instance_name, "zone": zone, "cloud": "gcp",
-                 "protocols": protocols, "workgroup": workgroup},
+                 "protocols": protocols, "workgroup": workgroup,
+                 "in_plant_agent": bool(payload.register_in_entitle)},
     )
 
     parent = job_service.create_job(
@@ -347,13 +422,14 @@ def deploy_cell(
             "zone":       zone,
             "region":     region,
             "workgroup":  workgroup,
-            "children":   [{"job_id": child.id,
-                            "instance_name": payload.instance_name}],
+            "children":   children,
         },
     )
     return OTCellDeployResponse(
         job_id=parent.id, vm_job_id=child.id, status="pending",
-        message=f"Deploying OT cell {payload.instance_name}…",
+        message=(f"Deploying OT cell {payload.instance_name} and its DMZ broker…"
+                 if len(children) > 1 else
+                 f"Deploying OT cell {payload.instance_name}…"),
     )
 
 
@@ -751,6 +827,20 @@ def list_cells(
         # cell shows "wiring incomplete" and Re-wire retrofits exactly what's missing.
         tunnels = ot_service.cell_tunnels(meta)
         primary = tunnels[0] if tunnels else {}
+        # The plant's own broker, when this cell has one. Read off the broker's own
+        # row so the card can show its address and destroy it alongside the cell —
+        # the row is excluded from this listing itself (it carries ot_broker, not
+        # ot_cell), which is what keeps the counts honest.
+        broker_meta = {}
+        broker_job_id = meta.get("ot_broker_job_id") or ""
+        if broker_job_id:
+            broker_row = db.query(Job).filter(Job.id == broker_job_id).first()
+            broker_meta = (broker_row.metadata_dict if broker_row else None) or {}
+        install_job_id = meta.get("ot_agent_install_job_id") or ""
+        agent_installed = False
+        if install_job_id:
+            install_row = db.query(Job).filter(Job.id == install_job_id).first()
+            agent_installed = bool(install_row and install_row.status == "completed")
         cells.append(OTCellInfo(
             vm_job_id=row.id,
             cloud=cloud,
@@ -773,6 +863,11 @@ def list_cells(
             tunnel_local_port=int(primary.get("local_port") or 0),
             tunnel_remote_port=int(primary.get("remote_port") or 0),
             shell_jump_id=str(meta.get("bt_shell_jump_id") or ""),
+            broker_job_id=broker_job_id,
+            broker_instance_name=broker_meta.get("instance_name") or "",
+            broker_private_ip=broker_meta.get("private_ip") or "",
+            agent_token_name=meta.get("ot_agent_token_name") or "",
+            agent_installed=agent_installed,
             vault_account_id=str(meta.get("ot_vault_account_id") or ""),
             vault_account_name=meta.get("ot_vault_account_name") or "",
             ps_checkout_synced=bool(meta.get("ot_ps_synced")),

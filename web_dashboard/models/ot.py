@@ -87,7 +87,15 @@ class OTCellDeployRequest(BaseModel):
     tunnel_local_port: Optional[int] = Field(default=None, ge=1, le=65535)  # rep-side listen port
     hmi_port: int = Field(default=1881, ge=1, le=65535)
     register_in_passwordsafe: bool = True
+    # Ticking this deploys the plant's own industrial-DMZ broker beside the cell and
+    # runs the Entitle agent on it: an agent that manages access to plant resources
+    # belongs in the plant. It needs the broker image (baked with OT_ROLE=broker) and
+    # the Purdue zoning, which is what makes "one way out, and here it is" true.
     register_in_entitle: bool = False
+    broker_image_self_link: str = ""
+    broker_image_name: str = ""
+    # 8 GB: the agent alone requests 1Gi, on top of KubeSolo's own ~200 MB.
+    broker_machine_type: str = "e2-standard-2"
     jump_group: Optional[str] = None
     jumpoint_name: Optional[str] = None
 
@@ -179,6 +187,14 @@ class OTCellInfo(BaseModel):
     tunnel_local_port: int = 0
     tunnel_remote_port: int = 0
     shell_jump_id: str = ""
+    # The plant's own Entitle agent, when this cell has one: the DMZ broker's VM job
+    # and instance, and whether the agent install has reported success. Empty on a
+    # cell deployed without it (and on every AWS/Azure cell until those phases land).
+    broker_job_id: str = ""
+    broker_instance_name: str = ""
+    broker_private_ip: str = ""
+    agent_token_name: str = ""
+    agent_installed: bool = False
     # PRA checkout of the cell's admin credential: the Vault account PRA users
     # check out / inject, kept current by a Password Safe SyncedAccounts link.
     vault_account_id: str = ""

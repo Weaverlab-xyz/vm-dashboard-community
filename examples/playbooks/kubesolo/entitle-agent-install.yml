@@ -21,7 +21,9 @@
 # With the values here you get ONE pod of TWO containers: the healthcheck init
 # container and the agent.
 #
-# NEEDS EGRESS to the chart repo and to agent.<region>.entitle.io on 443 AND 8080.
+# NEEDS EGRESS to agent.<region>.entitle.io on 443 AND 8080 — and to the chart repo,
+# unless entitle_agent_chart is an absolute path to an archive already on the host
+# (which is how an air-gapped site, and the OT demo's DMZ broker, does it).
 # 8080 is not telemetry and not optional — it is the agent's primary channel, and it
 # is plain HTTP. A current tenant needs that one hostname and nothing else; a tenant
 # onboarded before 2026-07-07 also needs ghcr.io and gcr.io/datadoghq.
@@ -54,9 +56,23 @@
     kubesolo_path: /var/lib/kubesolo
     entitle_agent_namespace: entitle
     entitle_agent_release: entitle-agent
+    # Either a chart NAME resolved from entitle_agent_chart_repo, or an absolute path
+    # to a chart archive already on the host. The second form is what an air-gapped
+    # site uses: a plant that cannot reach a Helm repo (anycred.github.io is a CDN, so
+    # no honest firewall allow-list can name it) carries the chart instead. The OT
+    # demo's DMZ broker is baked that way — /opt/entitle/charts/entitle-agent.tgz.
     entitle_agent_chart: entitle-agent
     entitle_agent_chart_repo: "https://anycred.github.io/entitle-charts/"
     entitle_agent_chart_version: ""
+    # Pre-flight egress probe. The agent runs as a POD, so whether its traffic leaves
+    # with the node's address is a property of the CNI — and on a plant network it is
+    # the difference between "the agent is installed" and "the agent works". Proving it
+    # from a pod, before helm runs, turns three different later failures (no SNAT, no
+    # DNS hole, wrong firewall destinations) into one legible one.
+    entitle_probe: true
+    entitle_probe_image: busybox:1.36
+    entitle_probe_endpoint: ""      # e.g. agent.us.entitle.io — blank skips the probe
+    entitle_probe_ssh_target: ""    # optional: a host the agent must reach on :22
     entitle_agent_version: "default"
     entitle_agent_replicas: 1
     entitle_agent_cpu_request: 250m
@@ -96,11 +112,13 @@
         that:
           - _entitle_agent_token | length > 0
           - entitle_agent_replicas | int >= 1
-          - entitle_agent_chart_repo | length > 0
+          - (entitle_agent_chart_repo | length > 0) or (entitle_agent_chart is match('^/'))
         fail_msg: >-
           An agent token is required. Bind one to entitle_agent_token with the run
           form's "Use a secret", or set entitle_agent_token_secret to a Password Safe
           SECRET path (folder/title). Issue the token in Entitle → Org Settings.
+          A chart is required too: either entitle_agent_chart_repo, or an absolute
+          path in entitle_agent_chart to an archive already on this host.
 
     - name: Confirm KubeSolo is here
       ansible.builtin.stat:
@@ -113,6 +131,60 @@
         fail_msg: >-
           No kubeconfig at {{ kubesolo_path }}/pki/admin/admin.kubeconfig — run
           kubesolo-install.yml against this host first.
+
+    # ── Pre-flight: prove the path the agent will need, from where it will need it ──
+    # A pod, not the host: the agent is a pod, and whether pod traffic leaves with the
+    # NODE's address is a property of the CNI. Asking from the host answers a different
+    # question. Runs before the values file exists, so a closed path costs nothing and
+    # leaks nothing.
+    - name: Prove the agent's network path from inside the cluster
+      ansible.builtin.shell:
+        cmd: |
+          export KUBECONFIG={{ kubesolo_path }}/pki/admin/admin.kubeconfig
+          /usr/local/bin/kubectl delete pod entitle-egress-probe \
+            --ignore-not-found >/dev/null 2>&1 || true
+          /usr/local/bin/kubectl run entitle-egress-probe --restart=Never --attach --rm \
+            --quiet --image={{ entitle_probe_image }} --image-pull-policy=IfNotPresent \
+            --command -- sh -c '
+              h="{{ entitle_probe_endpoint }}"; s="{{ entitle_probe_ssh_target }}"
+              nslookup "$h" >/dev/null 2>&1 || { echo PROBE-FAIL-DNS; exit 10; }
+              nc -w 5 "$h" 443 </dev/null >/dev/null 2>&1 || { echo PROBE-FAIL-443; exit 11; }
+              nc -w 5 "$h" 8080 </dev/null >/dev/null 2>&1 || { echo PROBE-FAIL-8080; exit 12; }
+              if [ -n "$s" ]; then
+                nc -w 5 "$s" 22 </dev/null >/dev/null 2>&1 || { echo PROBE-FAIL-SSH; exit 13; }
+              fi
+              echo PROBE-OK'
+      register: egress_probe
+      changed_when: false
+      failed_when: false
+      when:
+        - entitle_probe | bool
+        - entitle_probe_endpoint | length > 0
+
+    - name: Explain a closed path
+      ansible.builtin.fail:
+        msg:
+          - "The agent's network path is not open, and installing it now would only"
+          - "turn that into a CrashLoopBackOff with a worse message. The probe said:"
+          - "{{ egress_probe.stdout_lines | default([]) }}"
+          - "{{ egress_probe.stderr_lines | default([]) }}"
+          - "What each answer means:"
+          - "  PROBE-FAIL-DNS   this pod cannot resolve {{ entitle_probe_endpoint }} —"
+          - "                   either DNS egress (udp/tcp 53) is closed, or CoreDNS"
+          - "                   cannot reach the resolver."
+          - "  PROBE-FAIL-443   resolved, but the port will not open. In order of"
+          - "  PROBE-FAIL-8080  likelihood: pod traffic is not SNAT'd to the node's"
+          - "                   address, so the network never sees the source the"
+          - "                   firewall allows; or the firewall's destination set does"
+          - "                   not hold the address DNS just returned."
+          - "  PROBE-FAIL-SSH   the agent cannot reach {{ entitle_probe_ssh_target }}:22,"
+          - "                   so it would have nowhere to mint an ephemeral account."
+          - "  ErrImageNeverPull / ImagePullBackOff — {{ entitle_probe_image }} is not on"
+          - "                   this node. Bake it, or run with entitle_probe: false."
+      when:
+        - entitle_probe | bool
+        - entitle_probe_endpoint | length > 0
+        - "'PROBE-OK' not in (egress_probe.stdout | default(''))"
 
     # Written OUTSIDE the block on purpose. A task nested in a block is invisible to
     # the repo's no_log sweep (tests/test_playbook_ps_lookup.py walks top-level tasks
@@ -184,8 +256,9 @@
           ansible.builtin.command:
             cmd: >-
               /usr/local/bin/helm upgrade --install {{ entitle_agent_release }}
-              {{ entitle_agent_chart }} --repo {{ entitle_agent_chart_repo }}
-              {% if entitle_agent_chart_version | length > 0 %}--version {{ entitle_agent_chart_version }}{% endif %}
+              {{ entitle_agent_chart }}
+              {% if entitle_agent_chart_repo | length > 0 and not (entitle_agent_chart is match('^/')) %}--repo {{ entitle_agent_chart_repo }}{% endif %}
+              {% if entitle_agent_chart_version | length > 0 and not (entitle_agent_chart is match('^/')) %}--version {{ entitle_agent_chart_version }}{% endif %}
               --namespace {{ entitle_agent_namespace }} --create-namespace
               --values {{ _values_file }} --wait --timeout 600s
           register: helm_out

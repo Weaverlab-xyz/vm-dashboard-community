@@ -164,6 +164,21 @@ def tenant_ctx(*, api_key: str, endpoint: str = "", owner_id: str = "",
              "agent_token_name": agent_token_name, "ssh_sudo_user": ssh_sudo_user})
 
 
+def local_tenant_ctx(*, agent_token_name: str = "",
+                     ssh_sudo_user: str = "") -> EntitleTenantCtx:
+    """A context for THIS install's own tenant, carrying only an override or two.
+
+    :func:`tenant_ctx` is for a CUSTOMER's tenant, and :func:`_api_key_of` refuses one
+    with no API key, because registering someone's host into our own tenant is the
+    silent mistake this module exists to prevent. Overriding a single HCL field while
+    staying in our own tenant is a different intent, and giving it its own spelling is
+    what keeps that refusal meaningful. Every field left blank still falls back to the
+    configured value, generator by generator.
+    """
+    return tenant_ctx(api_key=_api_key(), agent_token_name=agent_token_name,
+                      ssh_sudo_user=ssh_sudo_user)
+
+
 def _hcl_fields(ctx: Optional[EntitleTenantCtx]) -> dict:
     """The tenant fields the HCL generators need.
 

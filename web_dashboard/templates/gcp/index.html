@@ -1141,6 +1141,42 @@
                  class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
           Register the VM in Entitle for just-in-time SSH access
         </label>
+        <div x-show="otForm.register_in_entitle" x-cloak
+             class="ml-6 space-y-2 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <p class="text-xs text-gray-600">
+            The agent that brokers this access runs <strong>in the plant</strong>, on its own
+            industrial-DMZ host deployed beside the cell — not in a cluster somewhere else.
+            That host is the only machine here with a way out, and it gets two ports to one
+            destination. Needs the Purdue zoning on
+            (<span class="font-mono">ot_purdue_firewall_enabled</span>); the deploy refuses
+            with the remedy if anything it depends on is missing.
+          </p>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">DMZ broker image <span class="text-red-500">*</span></label>
+            <select x-model="otForm.broker_image_self_link"
+                    class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+              <option value="">— pick the ot-broker image —</option>
+              <template x-for="img in otBrokerImages()" :key="img.self_link">
+                <option :value="img.self_link" x-text="img.name"></option>
+              </template>
+            </select>
+            <p class="text-xs text-gray-400 mt-1" x-show="otBrokerImages().length === 0">
+              No <span class="font-mono">ot-broker</span> image yet — bake one with
+              <span class="font-mono">OT_ROLE=broker</span> (see provisioners/ot/README.md),
+              or tick "show all".
+            </p>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">DMZ broker machine type</label>
+            <select x-model="otForm.broker_machine_type"
+                    class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+              <template x-for="m in (networkOpts.machine_types && networkOpts.machine_types.length ? networkOpts.machine_types : ['e2-standard-2'])" :key="m">
+                <option :value="m" x-text="m"></option>
+              </template>
+            </select>
+            <p class="text-xs text-gray-400 mt-1">8 GB or more: the agent requests 1Gi on its own.</p>
+          </div>
+        </div>
         {% endif %}
 
         <div x-show="otError" x-cloak
@@ -1198,6 +1234,13 @@
                     <span class="font-mono" x-text="c.vault_account_name"></span>
                     <span :class="c.ps_checkout_synced ? 'text-green-600' : 'text-amber-600'"
                           x-text="c.ps_checkout_synced ? 'synced' : 'not synced'"></span></div>
+                  <div x-show="c.broker_instance_name"><span class="text-gray-400">Plant DMZ broker:</span>
+                    <span class="font-mono" x-text="c.broker_instance_name + (c.broker_private_ip ? ' (' + c.broker_private_ip + ')' : '')"></span>
+                    <span :class="c.agent_installed ? 'text-green-600' : 'text-amber-600'"
+                          x-text="c.agent_installed ? 'agent installed' : 'agent installing'"></span></div>
+                  <div x-show="c.agent_token_name"><span class="text-gray-400">Entitle agent:</span>
+                    <span class="font-mono" x-text="c.agent_token_name"></span>
+                    <span class="text-gray-400">— this plant's own</span></div>
                   <div x-show="c.expires_at"><span class="text-gray-400">Expires:</span>
                     <span x-text="(c.expires_at || '').replace('T', ' ').slice(0, 16) + ' UTC'"></span></div>
                 </div>
@@ -1442,6 +1485,10 @@ function gcpDashboard() {
       protocols: ['modbus'], plc_port: null, hmi_port: 1881,
       jump_group: '', jumpoint_name: '',
       register_in_passwordsafe: true, register_in_entitle: false,
+      // The plant's DMZ broker, deployed alongside the cell when Entitle is ticked.
+      // 8 GB because the agent alone requests 1Gi on top of KubeSolo.
+      broker_image_self_link: '', broker_image_name: '',
+      broker_machine_type: 'e2-standard-2',
     },
     otTunnelForm: {
       name: '', hostname: '', protocol: 'modbus', remote_port: null,
@@ -1509,6 +1556,14 @@ function gcpDashboard() {
     otImages() {
       const imgs = this.customImages || [];
       return this.otShowAllImages ? imgs : imgs.filter(i => (i.name || '').includes('ot-sim'));
+    },
+
+    // The DMZ broker is a different bake (OT_ROLE=broker): KubeSolo and the Entitle
+    // agent's chart, no simulators. Filtered on its own name so it cannot be confused
+    // with the cell's image, which would put PLCs on the plant's DMZ host.
+    otBrokerImages() {
+      const imgs = this.customImages || [];
+      return this.otShowAllImages ? imgs : imgs.filter(i => (i.name || '').includes('ot-broker'));
     },
 
     // Only the endpoints the baked image actually serves. The standalone
@@ -1593,9 +1648,17 @@ function gcpDashboard() {
     },
 
     async destroyOTCell(c) {
-      if (!confirm(`Destroy OT cell ${c.instance_name}? This removes the VM, its PRA jump items (Web Jump, tunnel, Shell Jump), the PRA Vault checkout account and any Password Safe registration.`)) return;
+      const withBroker = c.broker_instance_name
+        ? ` Its DMZ broker ${c.broker_instance_name} goes too, along with the plant's own Entitle agent token.` : '';
+      if (!confirm(`Destroy OT cell ${c.instance_name}? This removes the VM, its PRA jump items (Web Jump, tunnel, Shell Jump), the PRA Vault checkout account and any Password Safe registration.${withBroker}`)) return;
       try {
         await API.delete(`/api/gcp/instances/${encodeURIComponent(c.instance_name)}?zone=${encodeURIComponent(c.zone)}`);
+        // The broker is a VM of its own, so it needs its own destroy — and it goes
+        // second: the cell's teardown is the one that destroys the agent token, and a
+        // broker deleted first would leave an agent pointing at nothing while that ran.
+        if (c.broker_instance_name) {
+          await API.delete(`/api/gcp/instances/${encodeURIComponent(c.broker_instance_name)}?zone=${encodeURIComponent(c.zone)}`);
+        }
         this.showToast('Destroy started — the cell disappears once the job completes.');
       } catch (e) {
         this.showToast(e.message || 'Destroy failed', 'error');

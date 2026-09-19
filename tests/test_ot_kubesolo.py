@@ -63,12 +63,27 @@ def test_kubesolo_is_the_default_runtime():
 
 def test_docker_is_purged_before_kubesolo_is_installed():
     """KubeSolo's installer aborts on a host with docker on PATH, a docker.sock or an
-    active docker service. Building the images needs Docker; keeping it does not."""
+    active docker service. Building the images needs Docker; keeping it does not.
+
+    Checked against the CALL, not the definition: the installer is a function both
+    roles share, so where its body sits in the file says nothing about ordering."""
     purge = _SRC.index("apt-get -y -q purge docker-ce")
-    install = _SRC.index("curl -sfL https://get.kubesolo.io")
-    assert purge < install, (
+    call = re.search(r"^install_kubesolo$", _SRC, re.M)
+    assert call, "nothing calls install_kubesolo"
+    assert purge < call.start(), (
         "Docker is purged after KubeSolo is installed — the installer would refuse "
         "the host and every bake would fail")
+
+
+def test_the_broker_never_installs_docker_at_all():
+    """The DMZ broker builds nothing, so the cleanest way to satisfy KubeSolo's
+    prerequisite is to never create it: no Docker, nothing to purge, no window where
+    the two container runtimes are both present."""
+    docker_block = re.search(r'if \[ "\$OT_ROLE" = "cell" \]; then\n'
+                             r'log "installing Docker Engine', _SRC)
+    assert docker_block, (
+        "the Docker install is not gated on the cell role — a broker bake would put "
+        "Docker on a host whose whole job is to run KubeSolo")
     assert re.search(r"if command -v docker >/dev/null 2>&1; then\n\s*die ", _SRC), (
         "nothing checks the purge actually worked — a leftover docker binary fails "
         "the KubeSolo install with a message about the wrong thing")
