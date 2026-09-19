@@ -947,10 +947,16 @@ class Settings(BaseSettings):
     # them off there) — MapPublicIpOnLaunch decides — so this is the only place the
     # cell's air gap can be enforced rather than merely documented. Off = deploy anyway.
     ot_aws_require_private_subnet: bool = True
-    # OT demo cell on GCP: fence the cell into its own Purdue zone with firewall rules
-    # on its `ot-sim` network tag — no route out (outranking the on-demand NAT allow),
-    # and inbound only from the PRA Gateway's `bt-jumpoint` tag. Default OFF: it changes
-    # the network posture of a running demo, so it is a deliberate choice, not a surprise.
+    # OT demo cell: fence the cell into its own Purdue zone. On GCP that is firewall
+    # rules on its `ot-sim` network tag — no route out (outranking the on-demand NAT
+    # allow), and inbound only from the PRA Gateway's `bt-jumpoint` tag. On AWS it is a
+    # security group that replaces the instance's, and on Azure an NSG on its NIC whose
+    # outbound Deny is what actually closes Azure's default outbound access. Because
+    # those two REPLACE something rather than adding a separate rule, they apply only to
+    # a cell that also has a DMZ broker — i.e. one deployed with Entitle — so an
+    # existing AWS or Azure cell's posture never changes underneath it.
+    # Default OFF: it changes the network posture of a running demo, so it is a
+    # deliberate choice, not a surprise.
     ot_purdue_firewall_enabled: bool = False
     # ── The plant's one way out, for the OT cell's DMZ broker ────────────────
     # The broker is the only host in an OT demo with any egress at all, and it gets
