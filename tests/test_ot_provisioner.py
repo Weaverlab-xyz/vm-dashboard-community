@@ -21,6 +21,14 @@ import sys
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SCRIPTS = sorted(glob.glob(os.path.join(_ROOT, "provisioners", "ot", "*.sh")))
 
+# "Does this provisioner install KubeSolo?", matched on the installer's own download
+# line rather than on the bare hostname — the script also NAMES the host in its failure
+# message, and only the download makes it a KubeSolo bake. Keeping the scheme in the
+# pattern is also what stops it reading as incomplete URL sanitization
+# (py/incomplete-url-substring-sanitization); the dots are escaped for the sibling
+# hostname-regexp rule.
+_INSTALLS_KUBESOLO = re.compile(r"https://get\.kubesolo\.io\b")
+
 
 def _read(path):
     return open(path, encoding="utf-8").read()
@@ -76,7 +84,7 @@ def test_the_zero_runtime_egress_contract_holds():
         assert "compose" in src and "up -d" in src, (
             f"{os.path.basename(path)}: the bake-time smoke test is gone — a dead "
             "stack would only be discovered inside an air-gapped subnet")
-        if "get.kubesolo.io" not in src:
+        if not _INSTALLS_KUBESOLO.search(src):
             continue
         # Same contract one layer down for the KubeSolo runtime: a cluster whose
         # images live in a registry, or whose workloads were never started here,

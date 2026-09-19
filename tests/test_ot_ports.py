@@ -15,6 +15,14 @@ import sys
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SVC = os.path.join(_ROOT, "web_dashboard", "services", "ot_service.py")
 
+# "Does this provisioner install KubeSolo?", matched on the installer's own download
+# line rather than on the bare hostname. The scheme has to be part of the pattern: a
+# comment or a die message that merely NAMES the host would otherwise read as a
+# KubeSolo bake, and a bare `"get.kubesolo.io" in script` is the substring check
+# CodeQL flags as incomplete URL sanitization (py/incomplete-url-substring-sanitization).
+# The dots are escaped for the same reason py/incomplete-hostname-regexp exists.
+_INSTALLS_KUBESOLO = re.compile(r"https://get\.kubesolo\.io\b")
+
 
 def _load():
     spec = importlib.util.spec_from_file_location("ot_service_under_test", _SVC)
@@ -83,7 +91,7 @@ def _baked_listeners(script):
              if m.group(1) == m.group(2)}
     ports |= {int(p) for p in re.findall(r"hostPort:\s*(\d+)", script)}
     api = re.search(r"server: https://127\.0\.0\.1:(\d+)", script)
-    if api and "get.kubesolo.io" in script:
+    if api and _INSTALLS_KUBESOLO.search(script):
         ports.add(int(api.group(1)))
     return ports
 
