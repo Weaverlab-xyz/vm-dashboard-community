@@ -93,6 +93,49 @@ def plc_protocols() -> list:
     return [k for k, v in OT_PORT_PRESETS.items() if v.get("plc")]
 
 
+# What the baked image actually runs. The dashboard cannot see this — an image is
+# picked by name, and both runtimes produce an `ot-sim` image — so it is the operator's
+# assertion, made in the form and recorded on the cell. It matters for exactly one
+# thing today, and that thing is expensive to get wrong: the KubeSolo preset brokers
+# :6443, which only the kubesolo runtime serves. Ticking it on a docker-baked cell
+# provisions a tunnel to a port with no listener, and a session that fails against a
+# dead port is indistinguishable from one blocked by a firewall — which this feature's
+# own docs call the most expensive kind of demo failure.
+CELL_RUNTIMES = ("kubesolo", "docker")
+# Presets the docker runtime does NOT serve. Derived from the preset table rather than
+# hardcoded, so a platform endpoint added later is covered the day it is added.
+def runtime_only_presets() -> list:
+    """Preset keys that exist because the cell runs a cluster, not a PLC."""
+    return [k for k, v in OT_PORT_PRESETS.items()
+            if v.get("cell") and not v.get("plc")]
+
+
+def cell_runtime(ot_params: dict) -> str:
+    """The runtime a cell was baked with. Defaults to the bake's own default."""
+    raw = ((ot_params or {}).get("runtime") or "").strip().lower()
+    return raw if raw in CELL_RUNTIMES else "kubesolo"
+
+
+def cell_runtime_problem(protocols: list, runtime: str) -> str:
+    """"" when every requested tunnel has a listener on this runtime, else the remedy."""
+    runtime = (runtime or "").strip().lower()
+    if runtime not in CELL_RUNTIMES:
+        return (f"Unknown cell runtime '{runtime}' — it must be one of "
+                f"{', '.join(CELL_RUNTIMES)}. No VM was launched.")
+    if runtime != "docker":
+        return ""
+    unserved = [p for p in (protocols or []) if p in runtime_only_presets()]
+    if not unserved:
+        return ""
+    labels = ", ".join(OT_PORT_PRESETS[p]["label"] for p in unserved)
+    ports = ", ".join(str(OT_PORT_PRESETS[p]["port"]) for p in unserved)
+    return (f"This cell is baked with OT_RUNTIME=docker, which runs the simulators under "
+            f"docker compose and no cluster — so nothing listens on {ports}. Brokering "
+            f"{labels} would build a tunnel to a dead port, and that session failure looks "
+            f"exactly like a blocked firewall. Either untick it, or deploy from an image "
+            f"baked with the default KubeSolo runtime. No VM was launched.")
+
+
 def resolve_cell_protocols(ot_params: dict) -> list:
     """The protocols a cell should have tunnels for, de-duplicated and ordered.
 
@@ -714,7 +757,7 @@ async def run_cell_deploy(job_id: str, meta: dict) -> None:
                                         "Minting this plant's own Entitle agent token…")
             token_name = agent_token_name(vm_label or "")
             try:
-                await ensure_agent_token(child_id, vm_label or "")
+                minted = await ensure_agent_token(child_id, vm_label or "")
             except Exception as exc:  # noqa: BLE001
                 job_service.set_cancelled(db, child_id)
                 job_service.set_cancelled(db, broker_id)
@@ -723,6 +766,19 @@ async def run_cell_deploy(job_id: str, meta: dict) -> None:
                     f"cell registers against its OWN agent, so there is nothing to "
                     f"register into until this works. Check the Entitle API key and "
                     f"that no agent named {token_name} already exists. No VM was launched."))
+                return
+            # The token is the only authority on what its agent actually needs to reach.
+            # Checked HERE, between the mint and the first launch, because it is the last
+            # moment the answer is free: afterwards it costs two VMs and surfaces as a
+            # CrashLoopBackOff in a subnet with no egress to debug from.
+            problem = agent_token_egress_problem(minted)
+            if problem:
+                note = await destroy_agent_token(child_id)
+                job_service.set_cancelled(db, child_id)
+                job_service.set_cancelled(db, broker_id)
+                job_service.set_failed(db, job_id, problem + (
+                    f" (the token minted a moment ago was not destroyed: {note})"
+                    if note else ""))
                 return
             # Both rows carry the name: the cell's deploy reads it to register against
             # this agent, and the broker's is where an operator looks to find out which
@@ -1611,6 +1667,76 @@ async def ensure_agent_token(vm_job_id: str, cell_name: str) -> str:
         # create-only in Entitle — losing it strands the token in the tenant.
         config_service.set(agent_token_state_key(vm_job_id), minted["tf_state_json"])
     return minted["token"]
+
+
+def agent_token_profile(token: str) -> dict:
+    """What the token says about itself: ``{"routing": ..., "region": ...}``.
+
+    The Entitle agent token is a base64 JSON blob, and it is the only authority on two
+    things the plant boundary depends on — see docs/kubesolo.md. Unparseable returns
+    ``{}`` rather than raising: an unreadable token is a question for the caller, not a
+    crash inside a deploy.
+    """
+    import base64
+    import json
+    raw = (token or "").strip()
+    if not raw:
+        return {}
+    try:
+        # The blob is standard base64; pad it rather than requiring the caller to.
+        decoded = base64.b64decode(raw + "=" * (-len(raw) % 4))
+        blob = json.loads(decoded.decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 — an unreadable token is data, not an error here
+        return {}
+    if not isinstance(blob, dict):
+        return {}
+    return {"routing": str(blob.get("routing") or ""),
+            "region": str(blob.get("platform") or "")}
+
+
+def agent_token_egress_problem(token: str) -> str:
+    """"" when this token's agent can live behind the plant's one hole, else why not.
+
+    Two failures, both of which the deploy would otherwise carry all the way to a
+    CrashLoopBackOff inside an air-gapped subnet with no egress to debug from:
+
+    * **``routing: v0``** (tenants onboarded before 2026-07-07). Those agents pull
+      directly from ``ghcr.io`` and ``gcr.io/datadoghq``, which are CDN-backed and
+      cannot be named honestly in a narrow allow-list. A v1 tenant's endpoint proxies
+      the registry, which is the whole reason one hole is enough.
+    * **A region the firewall hole was not drawn for.** ``entitle_egress.region()``
+      derives the region from ``entitle_api_url`` and falls back to a default when that
+      URL is a proxy or a bare host — so a tenant can quietly be on ``eu`` while the
+      egress rule points at ``agent.us.entitle.io``. The token's ``platform`` field is
+      the authority, and a mismatch means the agent dials a host the plant denies.
+
+    An unreadable token passes: refusing on a parse failure would make a format change
+    at Entitle's end break every deploy, and the probe still catches a dead path.
+    """
+    profile = agent_token_profile(token)
+    if not profile:
+        return ""
+    routing = (profile.get("routing") or "").lower()
+    if routing and routing != "v1":
+        return (f"This tenant's agent token is routing {routing}, whose agent pulls its "
+                f"image straight from ghcr.io and gcr.io/datadoghq. Those are CDN-backed "
+                f"and cannot be named in the plant's allow-list, so the agent would come "
+                f"up in CrashLoopBackOff inside a subnet with no egress to fix it from. "
+                f"A v1 tenant's endpoint proxies the registry, which is what makes one "
+                f"hole enough. Deploy this cell without Entitle, or ask BeyondTrust to "
+                f"migrate the tenant. No VM was launched.")
+    from . import entitle_egress
+    token_region = (profile.get("region") or "").lower()
+    drawn_for = (entitle_egress.region() or "").lower()
+    if token_region and drawn_for and token_region != drawn_for:
+        return (f"The plant's outbound hole is drawn for {entitle_agent_endpoint()}, but "
+                f"this token says its tenant is in '{token_region}'. The region comes "
+                f"from entitle_api_url, which falls back to a default when it is a proxy "
+                f"or a bare host — so the agent would dial agent.{token_region}."
+                f"entitle.io and the plant would deny it, with nothing in the deploy "
+                f"saying why. Set entitle_api_url to the regional URL for this tenant. "
+                f"No VM was launched.")
+    return ""
 
 
 async def destroy_agent_token(vm_job_id: str) -> str:

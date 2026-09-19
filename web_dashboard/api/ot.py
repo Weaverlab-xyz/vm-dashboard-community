@@ -257,6 +257,9 @@ def deploy_cell(
                             detail="GCP project ID not configured — run the setup wizard.")
     try:
         protocols = _validate_cell_protocols(payload)
+        runtime_problem = ot_service.cell_runtime_problem(protocols, payload.runtime)
+        if runtime_problem:
+            raise HTTPException(status_code=400, detail=runtime_problem)
     except OTError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -318,6 +321,9 @@ def deploy_cell(
             "workgroup":       workgroup,
             "ot_cell":         True,
             "ot_params": {
+                # What the image was baked with, asserted by the operator: it gates the
+                # platform presets, which only the KubeSolo runtime serves.
+                "runtime":           payload.runtime,
                 "protocols":         protocols,
                 "protocol":          protocols[0],
                 "plc_port":          payload.plc_port,
@@ -382,6 +388,13 @@ def deploy_cell(
             created_by=current_user.username,
             workgroup=workgroup,
             status="queued",
+            # The broker reaps WITH its cell, never on its own clock. Both rows
+            # would otherwise take the same policy default independently, which is
+            # nearly the same instant today and diverges the moment anyone extends
+            # one of them -- and whichever reaped first would leave the other
+            # useless: an agent brokering access to a plant that is gone, or a cell
+            # whose Entitle grants quietly stop working.
+            expires_at=child.expires_at,
             metadata={
                 "project_id":      project_id,
                 "zone":            zone,
@@ -447,6 +460,9 @@ def deploy_cell_aws(
                       _validate_workgroup as _aws_validate_workgroup)
     try:
         protocols = _validate_cell_protocols(payload)
+        runtime_problem = ot_service.cell_runtime_problem(protocols, payload.runtime)
+        if runtime_problem:
+            raise HTTPException(status_code=400, detail=runtime_problem)
     except OTError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -488,6 +504,9 @@ def deploy_cell_aws(
             "jumpoint_name":            payload.jumpoint_name,
             "ot_cell":                  True,
             "ot_params": {
+                # What the image was baked with, asserted by the operator: it gates the
+                # platform presets, which only the KubeSolo runtime serves.
+                "runtime":           payload.runtime,
                 "protocols":         protocols,
                 "protocol":          protocols[0],
                 "plc_port":          payload.plc_port,
@@ -524,6 +543,13 @@ def deploy_cell_aws(
             created_by=current_user.username,
             workgroup=workgroup,
             status="queued",
+            # The broker reaps WITH its cell, never on its own clock. Both rows
+            # would otherwise take the same policy default independently, which is
+            # nearly the same instant today and diverges the moment anyone extends
+            # one of them -- and whichever reaped first would leave the other
+            # useless: an agent brokering access to a plant that is gone, or a cell
+            # whose Entitle grants quietly stop working.
+            expires_at=child.expires_at,
             metadata={
                 "ami_id":                   payload.broker_ami_id,
                 "image_name":               payload.broker_ami_name,
@@ -596,6 +622,9 @@ async def deploy_cell_azure(
     from ..services import azure_service
     try:
         protocols = _validate_cell_protocols(payload)
+        runtime_problem = ot_service.cell_runtime_problem(protocols, payload.runtime)
+        if runtime_problem:
+            raise HTTPException(status_code=400, detail=runtime_problem)
     except OTError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -672,6 +701,9 @@ async def deploy_cell_azure(
             "workgroup":      workgroup,
             "ot_cell":        True,
             "ot_params": {
+                # What the image was baked with, asserted by the operator: it gates the
+                # platform presets, which only the KubeSolo runtime serves.
+                "runtime":           payload.runtime,
                 "protocols":         protocols,
                 "protocol":          protocols[0],
                 "plc_port":          payload.plc_port,
@@ -729,6 +761,13 @@ async def deploy_cell_azure(
             created_by=current_user.username,
             workgroup=workgroup,
             status="queued",
+            # The broker reaps WITH its cell, never on its own clock. Both rows
+            # would otherwise take the same policy default independently, which is
+            # nearly the same instant today and diverges the moment anyone extends
+            # one of them -- and whichever reaped first would leave the other
+            # useless: an agent brokering access to a plant that is gone, or a cell
+            # whose Entitle grants quietly stop working.
+            expires_at=child.expires_at,
             metadata={
                 "image_id":         payload.broker_image_id,
                 "image_name":       payload.broker_image_name,
@@ -882,6 +921,33 @@ async def clear_cell(
                    "registration. Clear only retires the record of a failed deploy.")
 
     name = meta.get("instance_name") or meta.get("vm_name") or vm_job_id
+
+    # The plant's DMZ broker is a second VM and a second job row, and neither the
+    # cards nor this endpoint used to see it. A cell whose deploy failed can easily
+    # have left a LIVE broker — it is deployed first, so the common failure is
+    # "broker up, cell failed" — and clearing only the cell would retire the card
+    # while a VM carrying a working Entitle agent kept running and kept billing.
+    broker_id = meta.get("ot_broker_job_id") or ""
+    broker_row = job_service.get_job(db, broker_id) if broker_id else None
+    broker_meta = (broker_row.metadata_dict if broker_row else None) or {}
+    broker_name = broker_meta.get("instance_name") or broker_meta.get("vm_name") or ""
+    if broker_row is not None and not broker_meta.get("destroyed"):
+        broker_alive = await ot_service.cell_resource_alive(cloud, broker_meta)
+        if broker_alive is True:
+            raise HTTPException(
+                status_code=409,
+                detail=f"This cell's DMZ broker '{broker_name}' still exists in {cloud} "
+                       f"— it runs the plant's Entitle agent, so clearing the record now "
+                       f"would leave both a VM nobody stops paying for and an agent "
+                       f"brokering access to a plant that is gone. Destroy it from the "
+                       f"{cloud.upper()} VMs tab first, then clear this.")
+        if broker_alive is None and not force:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Could not confirm whether this cell's DMZ broker "
+                       f"'{broker_name}' still exists in {cloud}. Check the cloud "
+                       f"console, then re-send with force=true to clear both records.")
+
     alive = await ot_service.cell_resource_alive(cloud, meta)
     if alive is True:
         raise HTTPException(
@@ -898,6 +964,16 @@ async def clear_cell(
                    f"then re-send with force=true to clear the record anyway.")
 
     job_service.update_metadata(db, vm_job_id, {"destroyed": True})
+    if broker_row is not None:
+        job_service.update_metadata(db, broker_id, {"destroyed": True})
+
+    # The agent token is minted BEFORE either VM launches, so a failed deploy leaves one
+    # live in the tenant with nothing pointing at it — and the destroy runner that would
+    # have collected it only ever runs for a deploy that completed. Clear is the only
+    # exit a failed cell has, so it is the only place this can happen.
+    token_note = ""
+    if meta.get("ot_agent_token_key") or meta.get("ot_agent_token_name"):
+        token_note = await ot_service.destroy_agent_token(vm_job_id)
 
     # Release the shared Gateway host this deploy borrowed. `teardown_jumpoint_host_if_idle`
     # counts live rows and takes no "exclude me" argument, so this must come AFTER the
@@ -918,9 +994,16 @@ async def clear_cell(
     job_service.log_audit(db, current_user.username, "ot_cell_clear",
                           details={"vm_job_id": vm_job_id, "cloud": cloud,
                                    "instance_name": name, "status": child.status,
+                                   "broker_job_id": broker_id,
+                                   "agent_token_destroyed": bool(
+                                       (meta.get("ot_agent_token_name") or "") and not token_note),
                                    "forced": bool(force and alive is None)})
+    extra = f" Its DMZ broker '{broker_name}' was cleared too." if broker_row is not None else ""
+    if token_note:
+        extra += f" The plant's Entitle agent token was NOT destroyed: {token_note}"
     return {"vm_job_id": vm_job_id, "cleared": True, "gateway_released": released,
-            "message": f"Cleared the record of failed cell '{name}'."}
+            "broker_job_id": broker_id, "agent_token_error": token_note,
+            "message": f"Cleared the record of failed cell '{name}'.{extra}"}
 
 
 @router.get("/cells", response_model=OTCellListResponse)
