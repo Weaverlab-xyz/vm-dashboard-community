@@ -1366,6 +1366,30 @@ async def subnet_auto_assigns_public_ips(region: str, subnet_id: str) -> Optiona
         return None
 
 
+def _subnet_vpc_id_sync(region: str, subnet_id: str) -> str:
+    ec2 = _get_ec2(region)
+    subnets = ec2.describe_subnets(SubnetIds=[subnet_id]).get("Subnets") or []
+    return subnets[0].get("VpcId", "") if subnets else ""
+
+
+async def subnet_vpc_id(region: str, subnet_id: str) -> str:
+    """The VPC a subnet belongs to, or ``""``.
+
+    A security group is created IN a VPC, and nothing on an EC2 deploy's job row
+    records which one -- only the subnet. Rather than add a field to every deploy, the
+    one caller that needs it (the OT zone) resolves it here and records the answer on
+    its own row so teardown does not have to ask again.
+    """
+    if not subnet_id:
+        return ""
+    try:
+        return await _to_thread(_subnet_vpc_id_sync, region, subnet_id)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to resolve the VPC for {subnet_id}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
 def _subnet_availability_zone_sync(region: str, subnet_id: str) -> str:
     ec2 = _get_ec2(region)
     subnets = ec2.describe_subnets(SubnetIds=[subnet_id]).get("Subnets") or []

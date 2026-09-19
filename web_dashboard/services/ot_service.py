@@ -1864,10 +1864,22 @@ async def _wire_zones_aws(db, parent_id: str, child_id: str, cmeta: dict,
     from . import aws_service, job_service
 
     region = (cmeta.get("region") or _cfg("aws_region") or "").strip()
-    vpc_id = (cmeta.get("vpc_id") or "").strip()
     vm = cmeta.get("instance_name") or cmeta.get("vm_name") or ""
+    # Nothing on an ec2_deploy records the VPC — only the subnet — so resolve it once
+    # and write it down, because teardown needs it to find the group again.
+    vpc_id = (cmeta.get("vpc_id") or cmeta.get("ot_zone_vpc_id") or "").strip()
+    if not vpc_id and cmeta.get("subnet_id"):
+        try:
+            vpc_id = await aws_service.subnet_vpc_id(region, cmeta["subnet_id"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OT cell %s: could not resolve the VPC (%s)", vm, exc)
+            vpc_id = ""
     if not (region and vpc_id and vm):
         return "OT zones skipped (no region, VPC or instance name on the cell)"
+    job_service.update_metadata(db, child_id, {"ot_zone_vpc_id": vpc_id})
+    cmeta["ot_zone_vpc_id"] = vpc_id
+    if broker_id:
+        job_service.update_metadata(db, broker_id, {"ot_zone_vpc_id": vpc_id})
 
     gateway_groups = aws_gateway_source_groups()
     if not gateway_groups:
