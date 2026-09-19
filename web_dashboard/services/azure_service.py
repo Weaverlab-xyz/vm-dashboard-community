@@ -2720,6 +2720,151 @@ async def ensure_node_nsg(rg: str, location: str, *, name: str, ports: list,
         raise AzureError(f"Failed to apply ingress for {name}: {e}") from e
 
 
+# ── OT demo cell: Purdue zoning, expressed as NSG rules ──────────────────────
+# Azure is the closest of the three to the GCP shape: NSGs have priorities and real
+# Deny rules, so the zone reads as the same table. What it does NOT share is GCP's
+# starting posture. Azure gives every VM "default outbound access" — a platform SNAT
+# that works with no public IP and no NAT gateway at all — and the cell's NSG list is
+# operator-supplied (`nsg_ids`) with nothing creating one. So until this runs, an Azure
+# cell with no public IP can still reach the internet, and the air gap the demo claims
+# is not enforced anywhere. The AllowInternetOutBound default sits at 65001, so a Deny
+# at any priority below it is what actually closes the plant.
+#
+# Rules this helper writes are named with a common prefix and reconciled as a set: one
+# whose name starts with the prefix and is not in the desired list is drift from an
+# earlier destination set, and is deleted. Rules an operator added by hand under their
+# own names are left alone.
+_OT_ZONE_RULE_PREFIX = "ot-zone-"
+
+
+def _ot_zone_rule_body(rule: dict) -> dict:
+    """One NSG security rule from the zone table's shorthand.
+
+    ``sources``/``destinations`` accept CIDRs and Azure service tags alike
+    (``AzurePlatformDNS``, ``VirtualNetwork``, ``Internet``), because the honest
+    destination for a cloud VM's DNS is the platform resolver, not a /32 someone
+    copied out of resolv.conf.
+    """
+    body = {
+        "protocol": rule.get("protocol") or "Tcp",
+        "access": rule.get("access") or "Allow",
+        "direction": rule.get("direction") or "Inbound",
+        "priority": int(rule["priority"]),
+        "source_port_range": "*",
+        "description": rule.get("description") or "vm-dashboard OT demo cell: Purdue zone",
+    }
+    sources = [s for s in (rule.get("sources") or []) if s]
+    dests = [d for d in (rule.get("destinations") or []) if d]
+    ports = [str(p) for p in (rule.get("ports") or []) if str(p)]
+    # The SDK rejects the plural form when it holds one entry on some API versions, so
+    # a single value goes in the singular field -- the same shape the node NSG uses.
+    if len(sources) == 1:
+        body["source_address_prefix"] = sources[0]
+    else:
+        body["source_address_prefixes"] = sources or ["*"]
+    if len(dests) == 1:
+        body["destination_address_prefix"] = dests[0]
+    else:
+        body["destination_address_prefixes"] = dests or ["*"]
+    if not ports:
+        body["destination_port_range"] = "*"
+    elif len(ports) == 1:
+        body["destination_port_range"] = ports[0]
+    else:
+        body["destination_port_ranges"] = ports
+    return body
+
+
+def _ensure_ot_zone_nsg_sync(cred, sub_id: str, rg: str, location: str, name: str,
+                             rules: list) -> dict:
+    """Create or converge one OT zone's NSG on exactly ``rules``."""
+    network = _get_network(cred, sub_id)
+    tags = {"managed-by": _NODE_MANAGED_TAG}
+    created = False
+    try:
+        network.network_security_groups.get(rg, name)
+    except Exception:
+        network.network_security_groups.begin_create_or_update(
+            rg, name, {"location": location, "tags": tags}).result()
+        created = True
+
+    wanted = {}
+    for rule in rules:
+        rule_name = f"{_OT_ZONE_RULE_PREFIX}{rule['name']}"
+        wanted[rule_name] = _ot_zone_rule_body(rule)
+
+    for rule_name, body in sorted(wanted.items()):
+        network.security_rules.begin_create_or_update(rg, name, rule_name, body).result()
+
+    nsg = network.network_security_groups.get(rg, name)
+    for existing in list(nsg.security_rules or []):
+        rule_name = existing.name or ""
+        if rule_name.startswith(_OT_ZONE_RULE_PREFIX) and rule_name not in wanted:
+            try:
+                network.security_rules.begin_delete(rg, name, rule_name).result()
+            except Exception as exc:  # noqa: BLE001 — drift removal is best-effort
+                logger.warning("OT zone NSG %s: could not remove stale rule %s (%s)",
+                               name, rule_name, exc)
+
+    nsg = network.network_security_groups.get(rg, name)
+    return {"name": name, "id": nsg.id or "", "created": created, "rules": len(wanted)}
+
+
+def _attach_nsg_to_vm_nics_sync(cred, sub_id: str, rg: str, vm_name: str,
+                                nsg_id: str) -> list:
+    """Point every NIC on ``vm_name`` at ``nsg_id``. Returns the NIC names touched."""
+    compute = _get_compute(cred, sub_id)
+    network = _get_network(cred, sub_id)
+    vm = compute.virtual_machines.get(rg, vm_name)
+    touched = []
+    for ref in (vm.network_profile.network_interfaces if vm.network_profile else []) or []:
+        nic_id = ref.id or ""
+        if not nic_id:
+            continue
+        nic_rg = nic_id.split("/resourceGroups/", 1)[1].split("/", 1)[0]
+        nic_name = nic_id.rsplit("/", 1)[-1]
+        nic = network.network_interfaces.get(nic_rg, nic_name)
+        if (nic.network_security_group and nic.network_security_group.id == nsg_id):
+            touched.append(nic_name)
+            continue
+        nic.network_security_group = {"id": nsg_id}
+        network.network_interfaces.begin_create_or_update(nic_rg, nic_name, nic).result()
+        touched.append(nic_name)
+    return touched
+
+
+async def attach_nsg_to_vm(rg: str, vm_name: str, *, nsg_id: str) -> list:
+    """Make ``nsg_id`` the network security group on every NIC of ``vm_name``.
+
+    A NIC carries at most ONE NSG, so this replaces whatever was there -- which is what
+    fencing a cell into a zone has to mean. Unlike AWS security groups, Azure NSG rules
+    are evaluated by priority with explicit Deny, so the zone can express "deny the rest"
+    directly rather than by omission.
+    """
+    if not nsg_id:
+        raise AzureError("refusing to attach an empty NSG id")
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(_attach_nsg_to_vm_nics_sync, cred, sub_id, rg,
+                                vm_name, nsg_id)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to attach the NSG to {vm_name}: {e}") from e
+
+
+async def ensure_ot_zone_nsg(rg: str, location: str, *, name: str, rules: list) -> dict:
+    """Converge one OT zone's NSG on exactly ``rules``, removing this feature's drift."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(_ensure_ot_zone_nsg_sync, cred, sub_id, rg, location,
+                                name, list(rules))
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to apply the OT zone {name}: {e}") from e
+
+
 def _find_node_nsg_id_sync(cred, sub_id: str, rg: str, name: str) -> str:
     network = _get_network(cred, sub_id)
     try:

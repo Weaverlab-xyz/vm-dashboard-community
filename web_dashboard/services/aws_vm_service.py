@@ -685,6 +685,39 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
             # the Destroy button AND the expiry reaper — cleans whatever subset exists.
             # Best-effort like the Shell Jump above: a PRA-side failure must not stop
             # the destroy. Mirrors gcp_vm_service._run_destroy key for key.
+            # The cell's (or broker's) zone group. Removed BEFORE the instance would
+            # fail with DependencyViolation, so the helper retries while the ENI is
+            # released -- and it must be removed at all, because an unreferenced
+            # security group blocks a later VPC delete with an opaque error and
+            # nothing else in the sandbox rollback claims it.
+            if meta.get("ot_zone_group"):
+                job_service.update_progress(db, destroy_job_id, 85,
+                                            "Removing the cell's Purdue-zone security group…")
+                try:
+                    from ..services import aws_service as _ot_sg
+                    await _ot_sg.delete_ot_zone_security_group(
+                        meta.get("region") or region,
+                        vpc_id=meta.get("ot_zone_vpc_id") or meta.get("vpc_id") or "",
+                        name=meta["ot_zone_group"])
+                    result["ot_zone_group_removed"] = meta["ot_zone_group"]
+                except Exception as e:  # noqa: BLE001
+                    logger.error("OT zone group %s removal failed: %s",
+                                 meta["ot_zone_group"], e)
+                    result["ot_error"] = f"Zone group {meta['ot_zone_group']} removal failed: {e}"
+
+            # An OT cell that brokered its own identity minted an agent token of its
+            # own. It dies with the cell: a token left in the tenant outlives the plant
+            # it was issued for, and nothing else will ever clean it up.
+            if meta.get("ot_agent_token_key") or meta.get("ot_agent_token_name"):
+                job_service.update_progress(db, destroy_job_id, 85,
+                                            "Destroying the plant's Entitle agent token…")
+                from ..services import ot_service as _ot_tok
+                note = await _ot_tok.destroy_agent_token(deploy_job_id)
+                if note:
+                    result["ot_agent_token_error"] = note
+                else:
+                    result["ot_agent_token_destroyed"] = meta.get("ot_agent_token_name")
+
             if meta.get("ot_web_jump_tf_state"):
                 job_service.update_progress(db, destroy_job_id, 86, "Removing the OT HMI Web Jump…")
                 try:

@@ -564,10 +564,11 @@ log "building the simulators and pre-pulling FUXA ($OT_FUXA_IMAGE)"
 docker build -t ot-plc-sim:baked /opt/ot-sim/plc-sim
 docker pull "$OT_FUXA_IMAGE"
 
-# What has to answer once the stack is up, whichever runtime carries it. The docker
-# runtime additionally asserts every container is running; the KubeSolo one waits on
-# the rollouts. Both then prove the listener, because "the container is up" has never
-# been the same claim as "the PLC answers".
+# What has to answer once the stack is up. Only the KubeSolo runtime consumes this:
+# it waits on the rollouts and THEN proves each listener, because "the pod is Ready"
+# has never been the same claim as "the PLC answers". The docker runtime keeps the
+# container-state check it has always had, deliberately — it is the tested path, and
+# a new assertion there could only ever fail a bake that used to pass.
 OT_SMOKE_PORTS="502 1881"
 if sim_enabled opcua; then OT_SMOKE_PORTS="$OT_SMOKE_PORTS 4840"; fi
 if sim_enabled enip; then OT_SMOKE_PORTS="$OT_SMOKE_PORTS 44818"; fi

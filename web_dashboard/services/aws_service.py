@@ -1366,6 +1366,30 @@ async def subnet_auto_assigns_public_ips(region: str, subnet_id: str) -> Optiona
         return None
 
 
+def _subnet_vpc_id_sync(region: str, subnet_id: str) -> str:
+    ec2 = _get_ec2(region)
+    subnets = ec2.describe_subnets(SubnetIds=[subnet_id]).get("Subnets") or []
+    return subnets[0].get("VpcId", "") if subnets else ""
+
+
+async def subnet_vpc_id(region: str, subnet_id: str) -> str:
+    """The VPC a subnet belongs to, or ``""``.
+
+    A security group is created IN a VPC, and nothing on an EC2 deploy's job row
+    records which one -- only the subnet. Rather than add a field to every deploy, the
+    one caller that needs it (the OT zone) resolves it here and records the answer on
+    its own row so teardown does not have to ask again.
+    """
+    if not subnet_id:
+        return ""
+    try:
+        return await _to_thread(_subnet_vpc_id_sync, region, subnet_id)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to resolve the VPC for {subnet_id}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
 def _subnet_availability_zone_sync(region: str, subnet_id: str) -> str:
     ec2 = _get_ec2(region)
     subnets = ec2.describe_subnets(SubnetIds=[subnet_id]).get("Subnets") or []
@@ -1720,6 +1744,221 @@ async def release_node_security_group(region: str, *, vpc_id: str, name: str) ->
         return False
     except NoCredentialsError:
         raise AWSError("AWS credentials not configured.")
+
+
+# ── OT demo cell: Purdue zoning, expressed as security groups ────────────────
+# The GCP zoning is VPC firewall rules on network tags, ordered by priority: an 800
+# EGRESS DENY that outranks the sandbox's on-demand 900 ALLOW. AWS has no priorities
+# and no deny rules -- a security group is a pure allow-list -- so the same intent is
+# expressed by what the group does NOT contain. That is simpler to read in a demo
+# (`aws ec2 describe-security-groups` shows the whole boundary) and it removes the
+# ordering caveat the GCP docs have to carry.
+#
+# The one thing it does NOT give for free is the plant's air gap. A security group is
+# created with a default egress rule allowing everything to 0.0.0.0/0, so "no way out"
+# has to be made true by revoking that rule -- which is why this helper manages the
+# whole egress set rather than diffing a subset of it the way the node-ingress helper
+# does for ports it was asked about.
+#
+# Ingress sources may be security GROUPS as well as CIDRs, which is the AWS analogue of
+# GCP's source_tags: the PRA Gateway's group and the broker's group keep matching when
+# either is replaced, where a pinned private address would not.
+_OT_ZONE_DESCRIPTION = "vm-dashboard OT demo cell: Purdue zone"
+
+
+def _ot_ingress_permissions(cidr_pairs, group_pairs) -> list:
+    """``{(port, cidr)}`` and ``{(port, sg-id)}`` as one IpPermissions list, one entry
+    per port. Authorize and revoke both take this shape, so building it once is what
+    keeps the two halves of the diff from disagreeing."""
+    by_port: dict = {}
+    for port, cidr in cidr_pairs:
+        by_port.setdefault(int(port), {"cidrs": [], "groups": []})["cidrs"].append(cidr)
+    for port, gid in group_pairs:
+        by_port.setdefault(int(port), {"cidrs": [], "groups": []})["groups"].append(gid)
+    perms = []
+    for port, sources in sorted(by_port.items()):
+        perm = {"IpProtocol": "tcp", "FromPort": port, "ToPort": port}
+        if sources["cidrs"]:
+            perm["IpRanges"] = [{"CidrIp": c} for c in sorted(sources["cidrs"])]
+        if sources["groups"]:
+            perm["UserIdGroupPairs"] = [{"GroupId": g} for g in sorted(sources["groups"])]
+        perms.append(perm)
+    return perms
+
+
+def _current_ot_ingress(sg: dict) -> tuple:
+    """Every tcp ingress the group holds, as ``({(port, cidr)}, {(port, sg-id)})``.
+
+    Unscoped, unlike ``_current_node_ingress``: this group exists only to BE the zone,
+    so a rule on a port the zone does not name is drift to remove, not someone else's
+    rule to leave alone.
+    """
+    cidrs, groups = set(), set()
+    for perm in sg.get("IpPermissions") or []:
+        if (perm.get("IpProtocol") or "").lower() != "tcp":
+            continue
+        frm, to = perm.get("FromPort"), perm.get("ToPort")
+        if frm is None or frm != to:
+            continue
+        for r in perm.get("IpRanges") or []:
+            if r.get("CidrIp"):
+                cidrs.add((int(frm), r["CidrIp"]))
+        for g in perm.get("UserIdGroupPairs") or []:
+            if g.get("GroupId"):
+                groups.add((int(frm), g["GroupId"]))
+    return cidrs, groups
+
+
+def _current_ot_egress(sg: dict) -> set:
+    """Every egress rule the group holds, as ``{(protocol, port, cidr)}``.
+
+    ``protocol`` is the literal AWS spelling, so the default allow-all arrives here as
+    ``("-1", 0, "0.0.0.0/0")`` and is revoked like any other rule that is not wanted.
+    Port 0 stands for "this protocol carries no port range", which is how ``-1`` and
+    only ``-1`` is expressed.
+    """
+    have = set()
+    for perm in sg.get("IpPermissionsEgress") or []:
+        proto = (perm.get("IpProtocol") or "").lower()
+        frm = perm.get("FromPort")
+        port = 0 if frm is None else int(frm)
+        for r in perm.get("IpRanges") or []:
+            if r.get("CidrIp"):
+                have.add((proto, port, r["CidrIp"]))
+    return have
+
+
+def _ot_egress_permissions(triples) -> list:
+    """``{(protocol, port, cidr)}`` as an IpPermissions list."""
+    by_key: dict = {}
+    for proto, port, cidr in triples:
+        by_key.setdefault((proto, int(port)), []).append(cidr)
+    perms = []
+    for (proto, port), cidrs in sorted(by_key.items()):
+        perm = {"IpProtocol": proto,
+                "IpRanges": [{"CidrIp": c} for c in sorted(cidrs)]}
+        if proto != "-1":
+            perm["FromPort"] = port
+            perm["ToPort"] = port
+        perms.append(perm)
+    return perms
+
+
+def _ensure_ot_zone_security_group_sync(
+    region: str, vpc_id: str, name: str, ingress: list, egress: list,
+) -> dict:
+    """Create or converge one OT zone's security group.
+
+    ``ingress`` is ``[{"port": int, "cidrs": [...], "group_ids": [...]}]`` and
+    ``egress`` is ``[{"protocol": "tcp"|"udp", "port": int, "cidrs": [...]}]``. An
+    EMPTY ``egress`` is the plant floor's air gap and is honoured exactly: every
+    egress rule is revoked, including the allow-all AWS creates the group with.
+    """
+    ec2 = _get_ec2(region)
+    created = False
+    sg_id = _find_security_group_id_sync(region, vpc_id, name)
+    if not sg_id:
+        sg_id = ec2.create_security_group(
+            GroupName=name, VpcId=vpc_id, Description=_OT_ZONE_DESCRIPTION,
+        )["GroupId"]
+        created = True
+        try:
+            ec2.create_tags(Resources=[sg_id], Tags=[
+                {"Key": "Name", "Value": name},
+                {"Key": "managed-by", "Value": _NODE_MANAGED_TAG},
+            ])
+        except (ClientError, BotoCoreError) as e:  # tags are cosmetic
+            logger.warning("OT zone SG %s: tagging failed (continuing): %s", name, e)
+
+    want_cidrs = {(int(r["port"]), c) for r in ingress for c in (r.get("cidrs") or [])}
+    want_groups = {(int(r["port"]), g) for r in ingress for g in (r.get("group_ids") or [])}
+    want_egress = {((r.get("protocol") or "tcp"), int(r["port"]), c)
+                   for r in egress for c in (r.get("cidrs") or [])}
+
+    sg = ec2.describe_security_groups(GroupIds=[sg_id])["SecurityGroups"][0]
+    have_cidrs, have_groups = _current_ot_ingress(sg)
+    have_egress = _current_ot_egress(sg)
+
+    add = _ot_ingress_permissions(want_cidrs - have_cidrs, want_groups - have_groups)
+    if add:
+        ec2.authorize_security_group_ingress(GroupId=sg_id, IpPermissions=add)
+    drop = _ot_ingress_permissions(have_cidrs - want_cidrs, have_groups - want_groups)
+    if drop:
+        ec2.revoke_security_group_ingress(GroupId=sg_id, IpPermissions=drop)
+
+    add_e = _ot_egress_permissions(want_egress - have_egress)
+    if add_e:
+        ec2.authorize_security_group_egress(GroupId=sg_id, IpPermissions=add_e)
+    # Last, and never skipped: until this runs a freshly created group still carries
+    # the allow-all AWS gave it, which is the opposite of what a plant cell claims.
+    drop_e = _ot_egress_permissions(have_egress - want_egress)
+    if drop_e:
+        ec2.revoke_security_group_egress(GroupId=sg_id, IpPermissions=drop_e)
+
+    return {"name": name, "id": sg_id, "created": created,
+            "ingress": len(want_cidrs) + len(want_groups), "egress": len(want_egress)}
+
+
+async def ensure_ot_zone_security_group(
+    region: str, *, vpc_id: str, name: str, ingress: list, egress: list,
+) -> dict:
+    """Converge one OT zone's security group on exactly ``ingress`` and ``egress``.
+
+    Unlike :func:`ensure_node_security_group` this reconciles rather than creating and
+    walking away, because the Entitle destination set can change under a running cell
+    and a stale allow-list is the failure this whole feature exists to avoid. The GCP
+    side cannot do that (``ensure_segmentation_rule`` is create-only) and carries a
+    hash in the rule name instead; here the group's name can stay stable.
+    """
+    try:
+        return await _to_thread(_ensure_ot_zone_security_group_sync, region, vpc_id,
+                                name, list(ingress), list(egress))
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to apply the OT zone {name}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _set_instance_security_groups_sync(region: str, instance_id: str,
+                                       group_ids: list) -> list:
+    # `_instance_security_groups_sync` is the SPIRE lab's reader, defined further down
+    # and reused rather than copied: it already raises rather than returning an empty
+    # list for a missing instance, which is what we want before replacing anything.
+    previous = _instance_security_groups_sync(region, instance_id)
+    ec2 = _get_ec2(region)
+    ec2.modify_instance_attribute(InstanceId=instance_id, Groups=list(group_ids))
+    return previous
+
+
+async def set_instance_security_groups(region: str, *, instance_id: str,
+                                       group_ids: list) -> list:
+    """REPLACE an instance's security groups, returning the set it had before.
+
+    Replace, not add, and that is the whole point. Security groups union their allows,
+    so attaching a restrictive group to an instance that still carries a permissive one
+    restricts precisely nothing -- the zone would read correctly in the console and
+    enforce nothing at all. Fencing a cell into a Purdue zone therefore means its
+    groups BECOME the zone, and the previous set is returned so the job row can record
+    what was displaced.
+    """
+    if not group_ids:
+        raise AWSError("refusing to leave an instance with no security group at all")
+    try:
+        return await _to_thread(_set_instance_security_groups_sync, region,
+                                instance_id, list(group_ids))
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to set security groups on {instance_id}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+async def delete_ot_zone_security_group(region: str, *, vpc_id: str, name: str) -> bool:
+    """Best-effort removal of one OT zone's group once its instance is gone.
+
+    Same retry-on-DependencyViolation shape as :func:`release_node_security_group`: the
+    blocker is the terminating instance's ENI, which has no waiter.
+    """
+    return await release_node_security_group(region, vpc_id=vpc_id, name=name)
 
 
 # ── Durable data volume for a managed node (Portainer /data) ─────────────────

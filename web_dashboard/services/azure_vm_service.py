@@ -781,6 +781,33 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg
             # the Destroy button AND the expiry reaper — cleans whatever subset exists.
             # Best-effort like the Shell Jump above: a PRA-side failure must not stop
             # the destroy. Mirrors gcp_vm_service._run_destroy key for key.
+            # The cell's (or broker's) zone NSG. Unlike AWS this one is not blocking
+            # anything by existing -- but a group left behind would attach itself to
+            # nothing and quietly stop being the boundary anyone reads, so it goes.
+            if meta.get("ot_zone_nsg"):
+                job_service.update_progress(db, destroy_job_id, 85,
+                                            "Removing the cell's Purdue-zone NSG…")
+                try:
+                    from ..services import azure_service as _ot_nsg
+                    await _ot_nsg.delete_node_nsg(
+                        meta.get("resource_group") or rg, meta["ot_zone_nsg"])
+                    result["ot_zone_nsg_removed"] = meta["ot_zone_nsg"]
+                except Exception as e:  # noqa: BLE001
+                    logger.error("OT zone NSG %s removal failed: %s",
+                                 meta["ot_zone_nsg"], e)
+                    result["ot_error"] = f"Zone NSG {meta['ot_zone_nsg']} removal failed: {e}"
+
+            # See gcp_vm_service: the plant's own agent token dies with the plant.
+            if meta.get("ot_agent_token_key") or meta.get("ot_agent_token_name"):
+                job_service.update_progress(db, destroy_job_id, 85,
+                                            "Destroying the plant's Entitle agent token…")
+                from ..services import ot_service as _ot_tok
+                note = await _ot_tok.destroy_agent_token(deploy_job_id)
+                if note:
+                    result["ot_agent_token_error"] = note
+                else:
+                    result["ot_agent_token_destroyed"] = meta.get("ot_agent_token_name")
+
             if meta.get("ot_web_jump_tf_state"):
                 job_service.update_progress(db, destroy_job_id, 86, "Removing the OT HMI Web Jump…")
                 try:

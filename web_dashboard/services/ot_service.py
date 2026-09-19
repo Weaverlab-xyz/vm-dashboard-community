@@ -1182,7 +1182,7 @@ BROKER_CHART_PATH = "/opt/entitle/charts/entitle-agent.tgz"
 
 
 async def _install_plant_agent(db, parent_id: str, child_id: str, cmeta: dict,
-                               broker_id: str, bmeta: dict) -> str:
+                               broker_id: str, bmeta: dict, cloud: str = "gcp") -> str:
     """Queue the Config-Management run that installs the Entitle agent on the broker.
 
     Queued rather than run inline, and as an ordinary ``ansible_local`` job: it then
@@ -1205,7 +1205,7 @@ async def _install_plant_agent(db, parent_id: str, child_id: str, cmeta: dict,
     payload = SimpleNamespace(
         asset=ENTITLE_AGENT_PLAYBOOK,
         target=broker_ip,
-        cloud="gcp",
+        cloud=cloud,
         ansible_user="",
         extra_vars={
             # A baked chart, not the repo: anycred.github.io is a CDN and no honest
@@ -1386,26 +1386,45 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
                                           rewire_hint=rewire_hint,
                                           cloud=cloud)
 
-    # GCP only: AWS security groups and Azure NSGs would each need their own shape of
-    # this, and both clouds' cells are still awaiting their first live E2E — adding an
-    # untested network restriction to an untested deploy would make any failure
-    # tomorrow ambiguous. The tag hook and the rules are GCP's today.
-    firewall_note = ""
-    if cloud == "gcp" and purdue_firewall_enabled():
-        firewall_note = await _wire_purdue_firewall(db, parent_id, child_id, cmeta)
-
-    # The DMZ zone, then the agent — in that order, so what the probe proves is the
-    # narrow path itself rather than a hole that is about to close behind it.
-    dmz_note = ""
-    agent_note = ""
+    # All three clouds now, each through its own primitive (see "The same two zones"
+    # below). AWS and Azure converge the cell's and the broker's zones in ONE call
+    # because the cell's rule names the broker's group/address as a source, so the two
+    # cannot be written independently the way GCP's tag-based rules can.
     broker_id = broker_id or (cmeta.get("ot_broker_job_id") or "")
-    if broker_id and cloud == "gcp":
+    bmeta: dict = {}
+    if broker_id:
         broker_row = job_service.get_job(db, broker_id)
         bmeta = (broker_row.metadata_dict if broker_row else None) or {}
-        if purdue_firewall_enabled():
+
+    # On AWS and Azure the zone also requires a BROKER, which GCP's does not. That is
+    # deliberate rather than incidental: those two clouds' cells have live miles on
+    # them, and zoning them means replacing an instance's security groups or a NIC's
+    # NSG — not adding an independent rule the way GCP does. Arriving only with the
+    # in-plant agent keeps that out of every deploy that did not ask for it, and the
+    # agent path refuses loudly without its prerequisites. An operator who wants the
+    # zoning alone on those clouds deploys a cell with Entitle.
+    firewall_note = ""
+    dmz_note = ""
+    if purdue_firewall_enabled():
+        if cloud == "gcp":
+            firewall_note = await _wire_purdue_firewall(db, parent_id, child_id, cmeta)
+        elif cloud == "aws" and broker_id:
+            firewall_note = await _wire_zones_aws(db, parent_id, child_id, cmeta,
+                                                  broker_id, bmeta)
+        elif cloud == "azure" and broker_id:
+            firewall_note = await _wire_zones_azure(db, parent_id, child_id, cmeta,
+                                                    broker_id, bmeta)
+
+    # The DMZ zone, then the agent — in that order, so what the probe proves is the
+    # narrow path itself rather than a hole that is about to close behind it. On GCP
+    # the DMZ zone is its own call; on the other two it was written above, with the
+    # cell's, for the source-ordering reason in the comment there.
+    agent_note = ""
+    if broker_id:
+        if cloud == "gcp" and purdue_firewall_enabled():
             dmz_note = await _wire_dmz_firewall(db, parent_id, broker_id, bmeta)
         agent_note = await _install_plant_agent(db, parent_id, child_id, cmeta,
-                                                broker_id, bmeta)
+                                                broker_id, bmeta, cloud=cloud)
 
     return {
         "vm_job_id": child_id,
@@ -1479,14 +1498,22 @@ def config_runner_problem(cloud: str = "gcp") -> str:
     return ""
 
 
-def broker_shape_problem(machine_type: str) -> str:
-    """"" when the broker can hold the agent, else the remedy."""
-    mem = gateway_mem_mb(machine_type)
+def broker_shape_problem(machine_type: str, cloud: str = "gcp") -> str:
+    """"" when the broker can hold the agent, else the remedy.
+
+    The estimate comes from the same per-cloud tables the Gateway sizing guard uses, so
+    a family none of them has met returns None and is allowed through rather than
+    refused on a guess.
+    """
+    sizer = {"aws": aws_gateway_mem_mb, "azure": azure_gateway_mem_mb}.get(
+        cloud, gateway_mem_mb)
+    mem = sizer(machine_type)
     if mem is None or mem >= MIN_BROKER_MEM_MB:
         return ""
+    bigger = {"aws": "t3.large", "azure": "Standard_D2s_v3"}.get(cloud, "e2-standard-2")
     return (f"The DMZ broker is {machine_type} (~{mem} MB). The Entitle agent requests "
             f"1Gi on its own and KubeSolo idles at ~200 MB on top, so the pod would sit "
-            f"Pending with no other symptom. Pick e2-standard-2 (8 GB) or larger for the "
+            f"Pending with no other symptom. Pick {bigger} (8 GB) or larger for the "
             f"broker. No VM was launched.")
 
 
@@ -1501,10 +1528,9 @@ def in_plant_agent_problem(broker_image: str = "", broker_machine_type: str = ""
     the registration and the grant both still report success.
     """
     from . import config_service
-    if cloud != "gcp":
-        return (f"The in-plant Entitle agent is GCP-only so far — {cloud.upper()} cells "
-                f"have no Purdue zoning to hang the plant boundary on. Deploy this cell "
-                f"without Entitle, or use GCP.")
+    if cloud not in ("gcp", "aws", "azure"):
+        return (f"The in-plant Entitle agent has no zoning for {cloud.upper()}. Deploy "
+                f"this cell without Entitle.")
     if not config_service.get_bool("entitle_registration_enabled", False):
         return ("Entitle resource registration is off (entitle_registration_enabled), so "
                 "there is nothing for the plant's agent to register into. Enable it in "
@@ -1525,7 +1551,21 @@ def in_plant_agent_problem(broker_image: str = "", broker_machine_type: str = ""
     problem = config_runner_problem(cloud)
     if problem:
         return problem
-    return broker_shape_problem(broker_machine_type)
+    # Each zone has to be able to name the PRA Gateway as a source, or applying it
+    # would fence the cell away from the one thing brokering access to it. GCP names a
+    # network tag, which always exists; the other two name a group or an address that
+    # an operator has to have configured.
+    if cloud == "aws" and not aws_gateway_source_groups():
+        return ("The cell's zone allows the PRA Gateway in by SECURITY GROUP, and "
+                "bt_ecs_jumpoint_security_group_id is unset — so the zone would deny "
+                "the Gateway along with everything else and the demo would have no way "
+                "in. Set it to the Gateway host's security group. No VM was launched.")
+    if cloud == "azure" and not (_cfg("azure_jumpoint_name") and _cfg("azure_resource_group")):
+        return ("The cell's NSG allows the PRA Gateway in by address, resolved from "
+                "azure_jumpoint_name in azure_resource_group, and one of those is unset "
+                "— so the zone would deny the Gateway along with everything else. No VM "
+                "was launched.")
+    return broker_shape_problem(broker_machine_type, cloud)
 
 
 # ── The plant's own Entitle agent token ──────────────────────────────────────
@@ -1726,6 +1766,301 @@ async def _wire_dmz_firewall(db, parent_id: str, broker_id: str, bmeta: dict) ->
     where = "anywhere on 443/8080" if provenance == "ot_dmz_egress_open_ports" else \
             f"{len(cidrs)} destination(s) from {provenance}"
     return f"DMZ zone applied ({len(created)} rules; the agent may reach {where})"
+
+
+# ── The same two zones, in each cloud's own vocabulary ───────────────────────
+# The GCP rules above are the reference shape, not a template to translate. Each cloud
+# says the same thing with a different primitive, and glossing over the differences is
+# how a demo ends up claiming a boundary it does not actually have:
+#
+#   GCP    VPC firewall rules on network tags. Priorities, explicit DENY, and rules
+#          that exist independently of the instance.
+#   AWS    Security groups: pure allow-lists. No priorities and no deny — "denied" is
+#          expressed by absence, which reads BETTER in a demo (`describe-security-
+#          groups` is the whole boundary) but has two traps. Groups UNION their allows,
+#          so a zone binds only when it REPLACES the instance's groups; and a new group
+#          is created allowing ALL egress, so the plant's air gap has to be made true
+#          by revoking that rule rather than by not adding one.
+#   Azure  NSG rules: priorities and real Deny, the closest of the three to GCP. The
+#          difference is the starting posture — Azure's default outbound access lets a
+#          VM with no public IP reach the internet anyway — so here the outbound Deny
+#          is not hardening ON TOP of an air gap, it IS the air gap. Until this runs,
+#          an Azure cell's isolation was a claim in the docs and nothing else.
+#
+# The DNS hole is each platform's own resolver, never a public one: link-local on AWS,
+# the AzurePlatformDNS service tag on Azure, the metadata address on GCP.
+_AWS_RESOLVER_CIDR = "169.254.169.253/32"
+_AZURE_RESOLVER_TAG = "AzurePlatformDNS"
+# Azure NSG priorities. Unique per direction, and the outbound allows have to outrank
+# the outbound deny the same way the GCP 790s outrank the 800.
+_AZ_PRIO = {"egress_entitle": 790, "egress_dns_udp": 791, "egress_dns_tcp": 792,
+            "egress_deny": 800, "ingress_allow": 800, "ingress_agent": 810,
+            "ingress_deny": 900}
+
+
+def _aws_zone_names(vm: str) -> dict:
+    """The cell's and broker's security-group names. Same words as the GCP rules."""
+    return {"cell": f"{vm}-ot-zone"[:255], "dmz": f"{vm}-dmz-zone"[:255]}
+
+
+def _azure_zone_names(vm: str) -> dict:
+    return {"cell": f"{vm}-ot-zone"[:80], "dmz": f"{vm}-dmz-zone"[:80]}
+
+
+def aws_gateway_source_groups() -> list:
+    """The PRA Gateway host's security groups — the AWS analogue of `bt-jumpoint`.
+
+    A group id rather than an address, for the reason the GCP rules use a tag: the
+    shared Gateway host is ref-counted and recreated on demand, and a pinned /32 would
+    stop matching the day it comes back.
+    """
+    raw = _cfg("bt_ecs_jumpoint_security_group_id")
+    return [g.strip() for g in raw.replace(";", ",").split(",") if g.strip()]
+
+
+async def azure_gateway_source_cidrs() -> list:
+    """The Azure Gateway VM's private address, as a one-entry /32 list.
+
+    Azure's honest analogue of a network tag is an Application Security Group, which
+    would have to be attached to the Gateway VM's own NIC — a change to the one Azure
+    path that has live miles on it. So the address is resolved here instead and the
+    zone is repaired by *Re-wire* if the Gateway is ever rebuilt, which the
+    troubleshooting table says in as many words.
+    """
+    from . import azure_service
+    name = _cfg("azure_jumpoint_name")
+    rg = _cfg("azure_resource_group")
+    if not name or not rg:
+        return []
+    try:
+        vm = await azure_service.get_vm(rg, name)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OT zone: could not resolve the Azure Gateway %s (%s)", name, exc)
+        return []
+    ip = ((vm or {}).get("internal_ip") or (vm or {}).get("private_ip") or "").strip()
+    return [f"{ip}/32"] if ip else []
+
+
+def _entitle_egress_targets() -> Tuple[list, str]:
+    """``(cidrs, provenance)`` for the broker's one hole, escape hatch included."""
+    if dmz_egress_open_ports():
+        return ["0.0.0.0/0"], "ot_dmz_egress_open_ports"
+    return resolve_entitle_destinations()
+
+
+# ── AWS ───────────────────────────────────────────────────────────────────────
+
+async def _wire_zones_aws(db, parent_id: str, child_id: str, cmeta: dict,
+                          broker_id: str = "", bmeta: Optional[dict] = None) -> str:
+    """Fence an AWS cell — and its broker, when it has one — into their zones.
+
+    Best-effort like the GCP one, and recorded the same way: every group that exists is
+    written onto its own job row the moment it does, so teardown removes exactly what is
+    there and a Re-wire converges only what is missing.
+
+    The broker's group is converged FIRST, because it is the ingress source the cell's
+    group names — the AWS spelling of "tcp 22 from the ot-dmz tag".
+    """
+    from . import aws_service, job_service
+
+    region = (cmeta.get("region") or _cfg("aws_region") or "").strip()
+    vm = cmeta.get("instance_name") or cmeta.get("vm_name") or ""
+    # Nothing on an ec2_deploy records the VPC — only the subnet — so resolve it once
+    # and write it down, because teardown needs it to find the group again.
+    vpc_id = (cmeta.get("vpc_id") or cmeta.get("ot_zone_vpc_id") or "").strip()
+    if not vpc_id and cmeta.get("subnet_id"):
+        try:
+            vpc_id = await aws_service.subnet_vpc_id(region, cmeta["subnet_id"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OT cell %s: could not resolve the VPC (%s)", vm, exc)
+            vpc_id = ""
+    if not (region and vpc_id and vm):
+        return "OT zones skipped (no region, VPC or instance name on the cell)"
+    job_service.update_metadata(db, child_id, {"ot_zone_vpc_id": vpc_id})
+    cmeta["ot_zone_vpc_id"] = vpc_id
+    if broker_id:
+        job_service.update_metadata(db, broker_id, {"ot_zone_vpc_id": vpc_id})
+
+    gateway_groups = aws_gateway_source_groups()
+    if not gateway_groups:
+        return ("OT zones skipped: bt_ecs_jumpoint_security_group_id is unset, so the "
+                "Gateway has no group to allow in and the zone would lock the cell away "
+                "from the thing brokering access to it")
+
+    names = _aws_zone_names(vm)
+    dmz_group_id = ""
+    notes = []
+
+    if broker_id and bmeta:
+        cidrs, provenance = _entitle_egress_targets()
+        runner_cidr = _cfg("ot_config_runner_source_cidr").strip()
+        try:
+            zone = await aws_service.ensure_ot_zone_security_group(
+                region, vpc_id=vpc_id, name=names["dmz"],
+                ingress=[{"port": 22,
+                          "group_ids": gateway_groups,
+                          "cidrs": [runner_cidr] if runner_cidr else []}],
+                egress=(
+                    [{"protocol": "tcp", "port": int(p), "cidrs": cidrs}
+                     for p in ENTITLE_AGENT_PORTS if cidrs]
+                    + [{"protocol": "udp", "port": 53, "cidrs": [_AWS_RESOLVER_CIDR]},
+                       {"protocol": "tcp", "port": 53, "cidrs": [_AWS_RESOLVER_CIDR]}]),
+            )
+            dmz_group_id = zone["id"]
+            job_service.update_metadata(db, broker_id, {
+                "ot_zone_group": names["dmz"], "ot_zone_group_id": dmz_group_id,
+                "ot_entitle_destinations": cidrs,
+                "ot_entitle_destination_source": provenance})
+            instance_id = (bmeta.get("instance_id") or "").strip()
+            if instance_id:
+                previous = await aws_service.set_instance_security_groups(
+                    region, instance_id=instance_id, group_ids=[dmz_group_id])
+                job_service.update_metadata(db, broker_id,
+                                            {"ot_zone_groups_replaced": previous})
+            where = ("anywhere on 443/8080" if provenance == "ot_dmz_egress_open_ports"
+                     else f"{len(cidrs)} destination(s) from {provenance}")
+            notes.append(f"DMZ zone applied (the agent may reach {where})")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OT cell %s: DMZ security group failed: %s", vm, exc)
+            notes.append(f"DMZ zone failed ({exc}) — the agent has no way out")
+
+    try:
+        ingress = [{"port": int(p), "group_ids": gateway_groups}
+                   for p in purdue_cell_ports(cmeta)]
+        if dmz_group_id:
+            ingress.append({"port": 22, "group_ids": [dmz_group_id]})
+        zone = await aws_service.ensure_ot_zone_security_group(
+            region, vpc_id=vpc_id, name=names["cell"], ingress=ingress, egress=[])
+        job_service.update_metadata(db, child_id, {
+            "ot_zone_group": names["cell"], "ot_zone_group_id": zone["id"]})
+        cmeta["ot_zone_group"] = names["cell"]
+        instance_id = (cmeta.get("instance_id") or "").strip()
+        if instance_id:
+            previous = await aws_service.set_instance_security_groups(
+                region, instance_id=instance_id, group_ids=[zone["id"]])
+            job_service.update_metadata(db, child_id,
+                                        {"ot_zone_groups_replaced": previous})
+        notes.append("plant zone applied (no egress at all; inbound only from the "
+                     "Gateway" + (" and the plant's broker" if dmz_group_id else "") + ")")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OT cell %s: cell security group failed: %s", vm, exc)
+        notes.append(f"plant zone failed ({exc})")
+
+    return "; ".join(notes)
+
+
+# ── Azure ─────────────────────────────────────────────────────────────────────
+
+async def _wire_zones_azure(db, parent_id: str, child_id: str, cmeta: dict,
+                            broker_id: str = "", bmeta: Optional[dict] = None) -> str:
+    """Fence an Azure cell — and its broker — into their zones.
+
+    Note what the cell's rule list contains that no Azure cell had before: an outbound
+    Deny. Without it the cell reaches the internet through Azure's default outbound
+    access despite having no public IP, so this is the first code that makes the demo's
+    air-gap claim true on Azure rather than merely documented.
+    """
+    from . import azure_service, job_service
+
+    rg = (cmeta.get("resource_group") or _cfg("azure_resource_group") or "").strip()
+    location = (cmeta.get("region") or cmeta.get("location") or "").strip()
+    vm = cmeta.get("instance_name") or cmeta.get("vm_name") or ""
+    if not (rg and location and vm):
+        return "OT zones skipped (no resource group, location or VM name on the cell)"
+
+    gateway_cidrs = await azure_gateway_source_cidrs()
+    if not gateway_cidrs:
+        return ("OT zones skipped: the Azure Gateway's address could not be resolved "
+                "(azure_jumpoint_name), and a zone written without it would lock the "
+                "cell away from the thing brokering access to it")
+
+    names = _azure_zone_names(vm)
+    broker_ip = ((bmeta or {}).get("private_ip") or "").strip()
+    notes = []
+
+    if broker_id and bmeta:
+        cidrs, provenance = _entitle_egress_targets()
+        runner_cidr = _cfg("ot_config_runner_source_cidr").strip()
+        rules = [
+            {"name": "ingress-allow", "priority": _AZ_PRIO["ingress_allow"],
+             "direction": "Inbound", "access": "Allow", "protocol": "Tcp",
+             "sources": gateway_cidrs + ([runner_cidr] if runner_cidr else []),
+             "ports": [22],
+             "description": "OT DMZ broker: the PRA Gateway and the Config-Management "
+                            "runner, and nothing else"},
+            {"name": "ingress-deny", "priority": _AZ_PRIO["ingress_deny"],
+             "direction": "Inbound", "access": "Deny", "protocol": "*",
+             "description": "OT DMZ broker: everything else is denied at the boundary"},
+            {"name": "egress-dns-udp", "priority": _AZ_PRIO["egress_dns_udp"],
+             "direction": "Outbound", "access": "Allow", "protocol": "Udp",
+             "destinations": [_AZURE_RESOLVER_TAG], "ports": [53]},
+            {"name": "egress-dns-tcp", "priority": _AZ_PRIO["egress_dns_tcp"],
+             "direction": "Outbound", "access": "Allow", "protocol": "Tcp",
+             "destinations": [_AZURE_RESOLVER_TAG], "ports": [53]},
+            {"name": "egress-deny", "priority": _AZ_PRIO["egress_deny"],
+             "direction": "Outbound", "access": "Deny", "protocol": "*",
+             "description": "OT DMZ broker: no way out but the Entitle allow above"},
+        ]
+        if cidrs:
+            rules.insert(0, {
+                "name": "egress-entitle", "priority": _AZ_PRIO["egress_entitle"],
+                "direction": "Outbound", "access": "Allow", "protocol": "Tcp",
+                "destinations": cidrs, "ports": list(ENTITLE_AGENT_PORTS),
+                "description": f"OT DMZ broker: the Entitle agent's channel "
+                               f"({provenance})"})
+        try:
+            zone = await azure_service.ensure_ot_zone_nsg(
+                rg, location, name=names["dmz"], rules=rules)
+            job_service.update_metadata(db, broker_id, {
+                "ot_zone_nsg": names["dmz"], "ot_zone_nsg_id": zone["id"],
+                "ot_entitle_destinations": cidrs,
+                "ot_entitle_destination_source": provenance})
+            broker_vm = (bmeta or {}).get("instance_name") or ""
+            if broker_vm and zone.get("id"):
+                await azure_service.attach_nsg_to_vm(rg, broker_vm, nsg_id=zone["id"])
+            where = ("anywhere on 443/8080" if provenance == "ot_dmz_egress_open_ports"
+                     else f"{len(cidrs)} destination(s) from {provenance}")
+            notes.append(f"DMZ zone applied (the agent may reach {where})")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OT cell %s: DMZ NSG failed: %s", vm, exc)
+            notes.append(f"DMZ zone failed ({exc}) — the agent has no way out")
+
+    rules = [
+        {"name": "ingress-allow", "priority": _AZ_PRIO["ingress_allow"],
+         "direction": "Inbound", "access": "Allow", "protocol": "Tcp",
+         "sources": gateway_cidrs, "ports": purdue_cell_ports(cmeta),
+         "description": "OT cell: only the PRA Gateway may reach the plant"},
+        {"name": "ingress-deny", "priority": _AZ_PRIO["ingress_deny"],
+         "direction": "Inbound", "access": "Deny", "protocol": "*",
+         "description": "OT cell: everything except the Gateway is denied"},
+        {"name": "egress-deny", "priority": _AZ_PRIO["egress_deny"],
+         "direction": "Outbound", "access": "Deny", "protocol": "*",
+         "description": "OT cell: the plant network has no route out — this rule is "
+                        "what makes that true, because Azure's default outbound access "
+                        "gives a VM with no public IP one anyway"},
+    ]
+    if broker_ip:
+        rules.insert(1, {
+            "name": "ingress-agent", "priority": _AZ_PRIO["ingress_agent"],
+            "direction": "Inbound", "access": "Allow", "protocol": "Tcp",
+            "sources": [f"{broker_ip}/32"], "ports": [22],
+            "description": "OT cell: the plant's own Entitle agent, on the DMZ host, "
+                           "may mint ephemeral accounts here"})
+    try:
+        zone = await azure_service.ensure_ot_zone_nsg(
+            rg, location, name=names["cell"], rules=rules)
+        job_service.update_metadata(db, child_id, {
+            "ot_zone_nsg": names["cell"], "ot_zone_nsg_id": zone["id"]})
+        cmeta["ot_zone_nsg"] = names["cell"]
+        if zone.get("id"):
+            await azure_service.attach_nsg_to_vm(rg, vm, nsg_id=zone["id"])
+        notes.append("plant zone applied (outbound denied outright; inbound only from "
+                     "the Gateway" + (" and the plant's broker" if broker_ip else "") + ")")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OT cell %s: cell NSG failed: %s", vm, exc)
+        notes.append(f"plant zone failed ({exc})")
+
+    return "; ".join(notes)
 
 
 def _cell_tunnels(cmeta: dict) -> list:

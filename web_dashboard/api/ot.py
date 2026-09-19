@@ -498,10 +498,66 @@ def deploy_cell_aws(
             },
         },
     )
+    # The plant's own identity broker — see the GCP endpoint above for why it exists
+    # at all. On AWS its zone is a security group that REPLACES the instance's, which
+    # is why the broker is a separate VM rather than a role on the cell.
+    children = [{"job_id": child.id, "instance_name": payload.instance_name,
+                 "role": "cell"}]
+    if payload.register_in_entitle:
+        problem = ot_service.in_plant_agent_problem(
+            payload.broker_ami_id, payload.broker_instance_type, "aws")
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+        broker_name = ot_service.broker_instance_name(payload.instance_name)
+        deploy_batch.validate_name(broker_name, "aws")
+        deploy_batch.reject_name_collisions(db, "ec2_deploy", [broker_name])
+        admission_service.enforce(
+            "aws:ec2:deploy",
+            request={"region": region, "instance_type": payload.broker_instance_type,
+                     "image": payload.broker_ami_id, "name": broker_name,
+                     "count": 1, "batch": False},
+            actor=current_user, db=db,
+        )
+        broker = job_service.create_job(
+            db,
+            job_type="ec2_deploy",
+            created_by=current_user.username,
+            workgroup=workgroup,
+            status="queued",
+            metadata={
+                "ami_id":                   payload.broker_ami_id,
+                "image_name":               payload.broker_ami_name,
+                "instance_name":            broker_name,
+                "instance_type":            payload.broker_instance_type,
+                "region":                   region,
+                "subnet_id":                payload.subnet_id,
+                # The zone replaces these once the broker is up; until then it carries
+                # the same groups the cell was given, so the deploy itself behaves
+                # exactly like any other EC2 launch.
+                "security_group_ids":       payload.security_group_ids,
+                "workgroup":                workgroup,
+                # The broker is the manager, not the managed: it registers nothing.
+                "register_in_entitle":      False,
+                "register_in_passwordsafe": payload.register_in_passwordsafe,
+                "jump_group":               payload.jump_group,
+                "jumpoint_name":            payload.jumpoint_name,
+                # `ot_broker`, deliberately NOT `ot_cell`: the cells list and the home
+                # tile both key on ot_cell, and a broker counted as a cell would double
+                # every number an operator reads.
+                "ot_broker":                True,
+                "ot_cell_job_id":           child.id,
+            },
+        )
+        job_service.set_cloud_resource_id(db, broker.id, broker_name)
+        job_service.update_metadata(db, child.id, {"ot_broker_job_id": broker.id})
+        children.append({"job_id": broker.id, "instance_name": broker_name,
+                         "role": "broker"})
+
     job_service.log_audit(
         db, current_user.username, "ot_cell_deploy",
         details={"instance_name": payload.instance_name, "region": region,
-                 "cloud": "aws", "protocols": protocols, "workgroup": workgroup},
+                 "cloud": "aws", "protocols": protocols, "workgroup": workgroup,
+                 "in_plant_agent": bool(payload.register_in_entitle)},
     )
 
     parent = job_service.create_job(
@@ -513,13 +569,14 @@ def deploy_cell_aws(
             "cloud":     "aws",
             "region":    region,
             "workgroup": workgroup,
-            "children":  [{"job_id": child.id,
-                           "instance_name": payload.instance_name}],
+            "children":  children,
         },
     )
     return OTCellDeployResponse(
         job_id=parent.id, vm_job_id=child.id, status="pending",
-        message=f"Deploying OT cell {payload.instance_name}…",
+        message=(f"Deploying OT cell {payload.instance_name} and its DMZ broker…"
+                 if len(children) > 1 else
+                 f"Deploying OT cell {payload.instance_name}…"),
     )
 
 
@@ -627,10 +684,79 @@ async def deploy_cell_azure(
         },
     )
     job_service.set_cloud_resource_id(db, child.id, payload.vm_name)
+
+    # The plant's own identity broker — see the GCP endpoint above. On Azure its zone
+    # is an NSG on the NIC, and the cell's carries the outbound Deny that makes the
+    # air gap real: Azure's default outbound access gives a VM with no public IP a
+    # route to the internet until something says otherwise.
+    children = [{"job_id": child.id, "instance_name": payload.vm_name, "role": "cell"}]
+    if payload.register_in_entitle:
+        problem = ot_service.in_plant_agent_problem(
+            payload.broker_image_id, payload.broker_vm_size, "azure")
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+        broker_name = ot_service.broker_instance_name(payload.vm_name)
+        deploy_batch.validate_name(broker_name, "azure")
+        deploy_batch.reject_name_collisions(db, "azure_deploy", [broker_name])
+        admission_service.enforce(
+            "azure:vm:deploy",
+            request={"region": loc, "instance_type": payload.broker_vm_size,
+                     "image": payload.broker_image_id, "name": broker_name,
+                     "count": 1, "batch": False},
+            actor=current_user, db=db,
+        )
+        broker_req = AzureDeployRequest(
+            image_id=payload.broker_image_id,
+            vm_name=broker_name,
+            vm_size=payload.broker_vm_size,
+            location=loc,
+            resource_group=rg,
+            subnet_id=payload.subnet_id,
+            nsg_ids=payload.nsg_ids,
+            create_public_ip=False,
+            os_type="Linux",
+            ssh_public_key=ssh_public_key,
+            workgroup=workgroup,
+            register_in_entitle=False,
+            register_in_passwordsafe=payload.register_in_passwordsafe,
+            jump_group=payload.jump_group,
+            jumpoint_name=payload.jumpoint_name,
+            count=1,
+        )
+        broker = job_service.create_job(
+            db,
+            job_type="azure_deploy",
+            created_by=current_user.username,
+            workgroup=workgroup,
+            status="queued",
+            metadata={
+                "image_id":         payload.broker_image_id,
+                "image_name":       payload.broker_image_name,
+                "vm_name":          broker_name,
+                "vm_size":          payload.broker_vm_size,
+                "location":         loc,
+                "resource_group":   rg,
+                "subnet_id":        payload.subnet_id,
+                "nsg_ids":          payload.nsg_ids,
+                "create_public_ip": False,
+                "os_type":          "Linux",
+                "ssh_username":     broker_req.ssh_username,
+                "workgroup":        workgroup,
+                "ot_broker":        True,
+                "ot_cell_job_id":   child.id,
+                "req":              broker_req.model_dump(),
+            },
+        )
+        job_service.set_cloud_resource_id(db, broker.id, broker_name)
+        job_service.update_metadata(db, child.id, {"ot_broker_job_id": broker.id})
+        children.append({"job_id": broker.id, "instance_name": broker_name,
+                         "role": "broker"})
+
     job_service.log_audit(
         db, current_user.username, "ot_cell_deploy",
         details={"instance_name": payload.vm_name, "location": loc, "cloud": "azure",
-                 "protocols": protocols, "workgroup": workgroup},
+                 "protocols": protocols, "workgroup": workgroup,
+                 "in_plant_agent": bool(payload.register_in_entitle)},
     )
 
     parent = job_service.create_job(
@@ -643,13 +769,14 @@ async def deploy_cell_azure(
             "location":       loc,
             "resource_group": rg,
             "workgroup":      workgroup,
-            "children":       [{"job_id": child.id,
-                                "instance_name": payload.vm_name}],
+            "children":       children,
         },
     )
     return OTCellDeployResponse(
         job_id=parent.id, vm_job_id=child.id, status="pending",
-        message=f"Deploying OT cell {payload.vm_name}…",
+        message=(f"Deploying OT cell {payload.vm_name} and its DMZ broker…"
+                 if len(children) > 1 else
+                 f"Deploying OT cell {payload.vm_name}…"),
     )
 
 
@@ -865,6 +992,7 @@ def list_cells(
             shell_jump_id=str(meta.get("bt_shell_jump_id") or ""),
             broker_job_id=broker_job_id,
             broker_instance_name=broker_meta.get("instance_name") or "",
+            broker_instance_id=str(broker_meta.get("instance_id") or ""),
             broker_private_ip=broker_meta.get("private_ip") or "",
             agent_token_name=meta.get("ot_agent_token_name") or "",
             agent_installed=agent_installed,

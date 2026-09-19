@@ -289,9 +289,20 @@ def test_the_in_plant_agent_is_refused_where_it_cannot_work():
                    "dmz_egress_problem", "config_runner_problem",
                    "broker_shape_problem", "OT_ROLE=broker"):
         assert needed in src, f"the preflight does not check {needed}"
-    assert 'cloud != "gcp"' in src, (
-        "AWS and Azure cells have no Purdue zoning yet, so they have no plant boundary "
-        "to hang this on — say so rather than half-doing it")
+    # All three clouds carry zoning now, so the refusal is no longer "not GCP" — it is
+    # the per-cloud thing each zone needs in order to name the PRA Gateway as a source.
+    # Getting that wrong is the expensive direction: a zone applied without it denies
+    # the Gateway along with everything else, and the cell is unreachable by the one
+    # path the demo has.
+    assert 'cloud not in ("gcp", "aws", "azure")' in src, (
+        "the cloud allow-list is gone — a cloud with no zoning implementation must "
+        "still be refused rather than deploying a broker nothing fences")
+    assert "bt_ecs_jumpoint_security_group_id" in src, (
+        "the AWS zone allows the Gateway in by security group; unset, it would lock "
+        "the cell away from the Gateway")
+    assert "azure_jumpoint_name" in src, (
+        "the Azure zone allows the Gateway in by resolved address; unset, it would "
+        "lock the cell away from the Gateway")
 
 
 def test_the_install_channel_is_refused_when_it_could_not_reach_the_broker():

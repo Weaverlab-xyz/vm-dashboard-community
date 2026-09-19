@@ -1321,6 +1321,42 @@
                  class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
           Register the VM in Entitle for just-in-time SSH access
         </label>
+        <div x-show="otForm.register_in_entitle" x-cloak
+             class="ml-6 space-y-2 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <p class="text-xs text-gray-600">
+            The agent that brokers this access runs <strong>in the plant</strong>, on its own
+            industrial-DMZ host deployed beside the cell — not in a cluster somewhere else.
+            On Azure the two zones are NSGs on the VMs' NICs, and the cell's carries an
+            <em>outbound Deny</em>: Azure's default outbound access gives a VM with no
+            public IP a route to the internet, so that rule is what makes the air gap real
+            rather than documented. Needs the Purdue zoning on
+            (<span class="font-mono">ot_purdue_firewall_enabled</span>) and
+            <span class="font-mono">azure_jumpoint_name</span> set, so the zone can name the
+            Gateway; the deploy refuses with the remedy if anything is missing.
+          </p>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">DMZ broker image <span class="text-red-500">*</span></label>
+            <select x-model="otForm.broker_image_id"
+                    class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+              <option value="">— pick the ot-broker image —</option>
+              <template x-for="img in otBrokerImages()" :key="img.resource_id">
+                <option :value="img.resource_id" x-text="img.name"></option>
+              </template>
+            </select>
+            <p class="text-xs text-gray-400 mt-1" x-show="otBrokerImages().length === 0">
+              No <span class="font-mono">ot-broker</span> image yet — bake one with
+              <span class="font-mono">OT_ROLE=broker</span> (see provisioners/ot/README.md),
+              or tick "show all".
+            </p>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">DMZ broker VM size</label>
+            <input type="text" x-model="otForm.broker_vm_size"
+                   class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm font-mono"
+                   placeholder="Standard_D2s_v3">
+            <p class="text-xs text-gray-400 mt-1">8 GB or more: the agent requests 1Gi on its own.</p>
+          </div>
+        </div>
         {% endif %}
 
         <div x-show="otError" x-cloak
@@ -1378,6 +1414,13 @@
                     <span class="font-mono" x-text="c.vault_account_name"></span>
                     <span :class="c.ps_checkout_synced ? 'text-green-600' : 'text-amber-600'"
                           x-text="c.ps_checkout_synced ? 'synced' : 'not synced'"></span></div>
+                  <div x-show="c.broker_instance_name"><span class="text-gray-400">Plant DMZ broker:</span>
+                    <span class="font-mono" x-text="c.broker_instance_name + (c.broker_private_ip ? ' (' + c.broker_private_ip + ')' : '')"></span>
+                    <span :class="c.agent_installed ? 'text-green-600' : 'text-amber-600'"
+                          x-text="c.agent_installed ? 'agent installed' : 'agent installing'"></span></div>
+                  <div x-show="c.agent_token_name"><span class="text-gray-400">Entitle agent:</span>
+                    <span class="font-mono" x-text="c.agent_token_name"></span>
+                    <span class="text-gray-400">— this plant's own</span></div>
                   <div x-show="c.expires_at"><span class="text-gray-400">Expires:</span>
                     <span x-text="(c.expires_at || '').replace('T', ' ').slice(0, 16) + ' UTC'"></span></div>
                 </div>
@@ -1540,6 +1583,10 @@ function azureDashboard() {
       protocols: ['modbus'], plc_port: null, hmi_port: 1881,
       jump_group: '', jumpoint_name: '',
       register_in_passwordsafe: true, register_in_entitle: false,
+      // The plant's DMZ broker, deployed alongside the cell when Entitle is ticked.
+      // A second bake (OT_ROLE=broker): the deploy paths have no user-data hook, so
+      // the role cannot be chosen at launch.
+      broker_image_id: '', broker_image_name: '', broker_vm_size: 'Standard_D2s_v3',
     },
     otTunnelForm: {
       name: '', hostname: '', protocol: 'modbus', remote_port: null,
@@ -1865,6 +1912,13 @@ function azureDashboard() {
       return this.otShowAllImages ? imgs : imgs.filter(i => (i.name || '').includes('ot-sim'));
     },
 
+    // The DMZ broker is a different bake: KubeSolo and the Entitle agent's chart, and
+    // no simulators — a DMZ host that answers Modbus is a lie about where it sits.
+    otBrokerImages() {
+      const imgs = this.privateImages || [];
+      return this.otShowAllImages ? imgs : imgs.filter(i => (i.name || '').includes('ot-broker'));
+    },
+
     // Subnets, NSGs and the gallery image list are region-scoped. This page runs a
     // single-location model — the header picker drives networkOpts + privateImages
     // for every tab — so the cell's picker moves the page location rather than
@@ -1948,6 +2002,10 @@ function azureDashboard() {
           jumpoint_name: f.jumpoint_name || null,
           register_in_passwordsafe: f.register_in_passwordsafe,
           register_in_entitle: f.register_in_entitle,
+          broker_image_id: f.broker_image_id,
+          broker_image_name: (this.privateImages || []).reduce(
+            (n, i) => (i.resource_id === f.broker_image_id ? (i.name || '') : n), ''),
+          broker_vm_size: f.broker_vm_size,
         });
         window.location.href = '/jobs/' + res.job_id;
       } catch (e) {
@@ -1967,9 +2025,18 @@ function azureDashboard() {
     },
 
     async destroyOTCell(c) {
-      if (!confirm(`Destroy OT cell ${c.instance_name}? This removes the VM, its PRA jump items (Web Jump, tunnel, Shell Jump), the PRA Vault checkout account and any Password Safe registration.`)) return;
+      const withBroker = c.broker_instance_name
+        ? ` Its DMZ broker ${c.broker_instance_name} goes too, along with the plant's own Entitle agent token.` : '';
+      if (!confirm(`Destroy OT cell ${c.instance_name}? This removes the VM, its PRA jump items (Web Jump, tunnel, Shell Jump), the PRA Vault checkout account and any Password Safe registration.${withBroker}`)) return;
       try {
         await API.delete(`/api/azure/vms/${encodeURIComponent(c.instance_name)}`);
+        // The broker is a VM of its own, so it needs its own destroy — and it goes
+        // SECOND: its teardown drops the agent token the cell registered against, and
+        // the broker deleted first would leave an agent pointing at nothing while that
+        // ran. Its zone NSG is removed by that destroy, not here.
+        if (c.broker_instance_name) {
+          await API.delete(`/api/azure/vms/${encodeURIComponent(c.broker_instance_name)}`);
+        }
         toast('Destroy started — the cell disappears once the job completes.', 'success');
       } catch (e) {
         toast(e.message || 'Destroy failed', 'error');

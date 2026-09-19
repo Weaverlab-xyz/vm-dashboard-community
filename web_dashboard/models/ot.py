@@ -122,6 +122,14 @@ class OTCellDeployRequestAWS(BaseModel):
     hmi_port: int = Field(default=1881, ge=1, le=65535)
     register_in_passwordsafe: bool = True
     register_in_entitle: bool = False
+    # The plant's DMZ broker, from a second image baked with OT_ROLE=broker. Only read
+    # when register_in_entitle is set: ticking Entitle on a cell MEANS the agent runs
+    # in the plant, so there is no shared-agent path to fall back to.
+    broker_ami_id: str = ""
+    broker_ami_name: str = ""
+    # t3.large (8 GB): the agent alone requests 1Gi and KubeSolo idles at ~200 MB, so
+    # the cell's own t3.medium would leave the pod Pending with no other symptom.
+    broker_instance_type: str = "t3.large"
     jump_group: Optional[str] = None
     jumpoint_name: Optional[str] = None
 
@@ -146,6 +154,11 @@ class OTCellDeployRequestAzure(BaseModel):
     hmi_port: int = Field(default=1881, ge=1, le=65535)
     register_in_passwordsafe: bool = True
     register_in_entitle: bool = False
+    # The plant's DMZ broker — see OTCellDeployRequestAWS above.
+    broker_image_id: str = ""
+    broker_image_name: str = ""
+    # Standard_D2s_v3 (8 GB), for the same reason t3.large is the AWS default.
+    broker_vm_size: str = "Standard_D2s_v3"
     jump_group: Optional[str] = None
     jumpoint_name: Optional[str] = None
 
@@ -192,6 +205,9 @@ class OTCellInfo(BaseModel):
     # cell deployed without it (and on every AWS/Azure cell until those phases land).
     broker_job_id: str = ""
     broker_instance_name: str = ""
+    # AWS deletes an instance by id, not by name, so the card needs the broker's --
+    # GCP and Azure key on the name and leave this empty.
+    broker_instance_id: str = ""
     broker_private_ip: str = ""
     agent_token_name: str = ""
     agent_installed: bool = False
