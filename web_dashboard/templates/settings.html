@@ -2795,7 +2795,7 @@
             <div class="mb-3">
               <label class="flex items-center gap-2 text-sm text-gray-700">
                 <input type="checkbox" x-model="panelCfg.ot_purdue_firewall_enabled" class="rounded text-blue-600">
-                OT demo cell (GCP): fence each cell into its own Purdue zone
+                OT demo cell: fence each cell into its own Purdue zone
               </label>
               <p class="text-xs text-gray-400 mt-1">
                 Adds three firewall rules per cell, on its
@@ -2805,7 +2805,12 @@
                 with <span class="font-mono">gcp_vm_nat_enabled</span> on — without them, turning
                 on egress for one ordinary VM quietly gives every plant cell a route to the
                 internet. Removed with the cell; existing cells pick them up on
-                <em>Re-wire</em>. AWS and Azure cells are unaffected.
+                <em>Re-wire</em>. On AWS the same zone is a security group that
+                <em>replaces</em> the instance's, and on Azure an NSG whose outbound Deny
+                is what actually closes the cell — Azure's default outbound access gives
+                a VM with no public IP a route out otherwise. Those two apply only to a
+                cell that also has a DMZ broker, so an existing cell's posture never
+                changes underneath it.
               </p>
             </div>
             <div class="mb-3">

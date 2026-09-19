@@ -205,10 +205,18 @@ Each of these is refused **before any VM is launched**, with the remedy in the j
   to admit that runner;
 - **`entitle_registration_enabled`** and a configured tenant;
 - the **8 GB broker shape** (`e2-standard-2`): the agent requests 1Gi on its own;
-- **GCP** — AWS and Azure cells have no Purdue zoning yet, so they have no plant
-  boundary to hang this on, and the deploy says so rather than half-doing it.
+- the thing each cloud's zone needs in order to **name the PRA Gateway** as a source:
+  nothing on GCP (a network tag always exists), **`bt_ecs_jumpoint_security_group_id`**
+  on AWS, and **`azure_jumpoint_name`** on Azure. This is the expensive one to get
+  wrong — a zone written without it denies the Gateway along with everything else, and
+  the cell is unreachable by the only path the demo has, including the session you
+  would use to undo it. So the deploy refuses instead.
 
-The cost is a second VM per cell, and the `gcp_vm_nat_enabled` guidance **inverts**: the
+All three clouds now, each through its own primitive — see *[Purdue-zone
+firewalling](#purdue-zone-firewalling)* below for what that means where.
+
+The cost is a second VM per cell, and on GCP the `gcp_vm_nat_enabled` guidance
+**inverts**: the
 subnet needs a NAT path for the broker's one hole to lead anywhere, and the plant's own
 priority-800 deny outranks the NAT's priority-900 allow, so the cell stays closed with
 the toggle on. That inversion only holds *with the Purdue zoning enabled* — which is
@@ -244,7 +252,7 @@ channel. Its output is on its own job page, and the cell card shows *agent insta
    plane idles at ~200 MB on top of them. On GCP and Azure
    the cell never gets a public IP (the form pins it); the GCP cell also carries the
    **`ot-sim`** network tag, which
-   [Purdue-zone firewalling](#purdue-zone-firewalling-gcp) keys off. **On AWS there is no
+   [Purdue-zone firewalling](#purdue-zone-firewalling) keys off. **On AWS there is no
    per-instance public-IP switch — the subnet decides — so keep the form's default
    private sandbox subnet**: the deploy now *refuses* a subnet that auto-assigns public
    IPs (see [the air-gap guard](#the-aws-air-gap-guard)).
@@ -304,9 +312,33 @@ AWS blip must not look like a misconfigured subnet. Turn the check off with
 **`ot_aws_require_private_subnet`** (Settings → Integrations → Privileged Remote Access)
 if a public subnet is genuinely what you want.
 
-### Purdue-zone firewalling (GCP)
+### Purdue-zone firewalling
 
-*Optional, default off:* **`ot_purdue_firewall_enabled`**. The GCP cell has always carried
+*Optional, default off:* **`ot_purdue_firewall_enabled`**. One toggle, three
+implementations — and the differences between them are the point, not an
+implementation detail, because each cloud's primitive can be made to *look* like a
+boundary while enforcing nothing:
+
+| | What a zone is | The trap | Applies to |
+|---|---|---|---|
+| **GCP** | VPC firewall rules on network tags, with priorities and explicit DENY | none — rules exist independently of the instance | every cell, with or without a broker |
+| **AWS** | Security groups: pure allow-lists, no priority, no deny. "Denied" is what the group does not contain | Groups **union** their allows, so a zone must *replace* an instance's groups, not join them — and a new group is created allowing **all egress**, so the air gap is made by revoking that rule | cells with a DMZ broker |
+| **Azure** | NSG rules on the NIC: priorities and real Deny, closest to GCP | Azure's **default outbound access** gives a VM with no public IP a route to the internet, and nothing created an NSG for a cell at all — so the outbound Deny *is* the air gap here, not hardening on top of one | cells with a DMZ broker |
+
+On AWS and Azure the zoning applies only to a cell that also has a broker — i.e. one
+deployed with Entitle. Those two clouds' cells have live miles on them and their zoning
+*replaces* something, so it arrives with the feature that needs it rather than changing
+an existing cell's posture underneath it. GCP's rules are additive and unchanged.
+
+**A finding worth stating plainly:** before this, an Azure cell's air gap was a claim in
+this document and nothing else. The form pins the public IP off, but default outbound
+access means the VM still reaches the internet, and the cell's `nsg_ids` are
+operator-supplied with nothing creating one. The outbound Deny above is the first code
+that makes the claim true on Azure.
+
+#### On GCP
+
+The GCP cell has always carried
 the `ot-sim` network tag, but nothing consumed it — the cell's isolation was really the
 sandbox's posture (no NAT on the VM subnet, no public IP). That posture is one toggle
 away from evaporating: `gcp_vm_nat_enabled` adds a priority-900 EGRESS ALLOW on the VM
@@ -343,8 +375,53 @@ described in [Who brokers identity in the plant](#who-brokers-identity-in-the-pl
 
 The rules are recorded on the child job as they are created, so a destroy removes
 exactly what exists and **Re-wire** adds them to a cell deployed before you turned the
-flag on. AWS security groups and Azure NSGs would each need their own shape of this and
-do not have it yet.
+flag on.
+
+#### On AWS
+
+Two security groups, and the instance's group set *becomes* the zone:
+
+| Group | Ingress | Egress |
+|---|---|---|
+| `<cell>-ot-zone` | tcp from the Gateway host's group (`bt_ecs_jumpoint_security_group_id`) on 22, the HMI port and every preset protocol port; tcp 22 from the broker's group | **none** — every rule revoked, including the allow-all AWS creates the group with |
+| `<broker>-dmz-zone` | tcp 22 from the Gateway's group and `ot_config_runner_source_cidr` | tcp 443 + 8080 to the Entitle set; udp/tcp 53 to `169.254.169.253` |
+
+There is no priority and no deny rule, because a security group does not have them —
+which reads *better* in a demo (`aws ec2 describe-security-groups` is the whole
+boundary, with no ordering caveat) but sets two traps this implementation has to avoid.
+Groups union their allows, so the zone **replaces** the groups you picked in the form
+rather than joining them; and the egress set is managed whole, so the plant's air gap
+is made by revoking AWS's default allow-all rather than by declining to add one.
+
+The group is looked up by `(name, VPC)`, and nothing on an EC2 deploy records the VPC —
+only the subnet — so the wiring resolves it once and writes it onto both job rows.
+
+#### On Azure
+
+Two NSGs, attached to the VMs' NICs (a NIC carries at most one, so this replaces
+whatever was there):
+
+| NSG | Direction | Priority | Rule |
+|---|---|---|---|
+| `<cell>-ot-zone` | Inbound | 800 | ALLOW tcp from the Gateway's address on 22, the HMI port and every preset port |
+| | Inbound | 810 | ALLOW tcp 22 from the broker's address |
+| | Inbound | 900 | DENY all |
+| | **Outbound** | **800** | **DENY all** — the rule that makes the air gap real |
+| `<broker>-dmz-zone` | Outbound | 790 | ALLOW tcp 443 + 8080 to the Entitle set |
+| | Outbound | 791/792 | ALLOW udp/tcp 53 to the `AzurePlatformDNS` service tag |
+| | Outbound | 800 | DENY all |
+| | Inbound | 800 | ALLOW tcp 22 from the Gateway and `ot_config_runner_source_cidr` |
+| | Inbound | 900 | DENY all |
+
+The outbound allows sit at 790–792 so they outrank the 800 deny, the same way GCP's do.
+`AllowInternetOutBound` is a platform default at 65001, so any deny below that closes
+the cell.
+
+**The Gateway is matched by address here, not by a tag.** Azure's honest analogue of a
+network tag is an Application Security Group, which would have to be attached to the
+Gateway VM's own NIC — a change to the one Azure path with live miles on it. So the
+address is resolved from `azure_jumpoint_name` at wiring time, and **Re-wire** repairs
+the zone if the Gateway is ever rebuilt.
 
 ### Partial failures and re-wiring
 
@@ -506,7 +583,7 @@ Notes that save demo time:
   (`gcp_vm_nat_enabled` / `aws_nat_instance_enabled`; Azure VMs have no dashboard
   NAT toggle). Turning one on gives cell subnets egress and silently deflates the
   "no path out of the plant" story. On GCP,
-  [Purdue-zone firewalling](#purdue-zone-firewalling-gcp) removes that coupling
+  [Purdue-zone firewalling](#purdue-zone-firewalling) removes that coupling
   entirely — the cell's own egress deny outranks the NAT allow. One deliberate AWS exception:
   `aws_ssm_endpoints_enabled` adds **interface endpoints inside the VPC** for the
   Password Safe SSM onboarding — private AWS API access, not internet egress, so it
@@ -625,9 +702,16 @@ the bake fails on a platform the script has not met.
    console / `/login`, and is **offered for injection** when starting the cell's Shell
    Jump; after the rotation in step 5, checkout returns the NEW credential and SSH with
    it succeeds.
-6a. **The plant's own agent (GCP).** Deploy a cell with **Register in Entitle** ticked
+6a. **The plant's own agent.** Deploy a cell with **Register in Entitle** ticked
    and a broker image picked. The parent job shows: token minted → broker deployed →
    cell deployed → PRA wiring → both zones applied → agent install queued.
+   The zones are readable from the cloud's own CLI — `gcloud compute firewall-rules
+   list`, `aws ec2 describe-security-groups --group-names <cell>-ot-zone
+   <broker>-dmz-zone`, or `az network nsg rule list -g <rg> --nsg-name <cell>-ot-zone`
+   — and on AWS confirm the cell's *instance* carries `<cell>-ot-zone` and nothing
+   else, since a zone beside a permissive group restricts nothing. On Azure the row
+   to look for is the **outbound Deny**: without it the cell reaches the internet
+   despite having no public IP.
    `gcloud compute firewall-rules list` shows the two zones from
    [Who brokers identity in the plant](#who-brokers-identity-in-the-plant). From the
    broker (Shell Jump): `kubectl -n entitle get pods` is Running and the install job's
