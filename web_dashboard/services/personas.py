@@ -104,6 +104,7 @@ _FLAG_LABELS = {
     "cloud_functions_enabled": "Cloud functions",
     "cert_lab_enabled": "Certificate Lab",
     "spire_lab_enabled": "SPIRE Lab",
+    "netcell_enabled": "Network Demo Cell",
     "k8s_management_enabled": "Kubernetes",
     "portainer_enabled": "Portainer",
     "cost_explorer_enabled": "Cost reporting",
@@ -886,7 +887,7 @@ _NETADMIN = Persona(
             target="/gcp#net",
             minutes=15,
             docs="profiles/demo/net-demo-cell",
-            requires_flags=("pra_enabled",),
+            requires_flags=("pra_enabled", "netcell_enabled"),
             requires_clouds=("gcp",),
         ),
         UseCase(
@@ -898,7 +899,7 @@ _NETADMIN = Persona(
             target="/gcp#net",
             minutes=10,
             docs="profiles/demo/net-demo-cell",
-            requires_flags=("pra_enabled", "password_safe_enabled"),
+            requires_flags=("pra_enabled", "password_safe_enabled", "netcell_enabled"),
             requires_clouds=("gcp",),
         ),
         UseCase(
@@ -925,7 +926,7 @@ _NETADMIN = Persona(
             target="/gcp#net",
             minutes=10,
             docs="profiles/demo/net-demo-cell",
-            requires_flags=("password_safe_enabled",),
+            requires_flags=("password_safe_enabled", "netcell_enabled"),
             requires_clouds=("gcp",),
         ),
         UseCase(

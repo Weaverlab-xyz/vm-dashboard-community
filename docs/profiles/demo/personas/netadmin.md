@@ -31,7 +31,7 @@ What a demo has to show, concretely:
 
 | layer | what it does here |
 |---|---|
-| **Provisioning** | Stands up a [network cell](../net-demo-cell.md) — a VyOS router/firewall from a baked image, with no external IP, in the sandbox's private subnet. It is a real network OS: `configure`, `set firewall`, `commit`, `save`. |
+| **Provisioning** | Stands up a [network cell](../net-demo-cell.md) (**preview**) — a VyOS router/firewall from a baked image, with no external IP, in the sandbox's private subnet. It is a real network OS: `configure`, `set firewall`, `commit`, `save`. |
 | **PRA** | The only way in, and the whole of the access layer. A Shell Jump over SSH, recorded. No Web Jump and no protocol tunnel — a firewall needs a shell and nothing else, which is exactly why this cell is so much smaller than the OT one. |
 | **Password Safe** | Vaults the device's administrator credential and injects it, so the admin never sees it. Read [what this does and does not do](../net-demo-cell.md#what-password-safe-does-here) before you promise rotation. |
 | **Entitle** | **Not part of this cell.** Its SSH integration creates ephemeral accounts with `useradd`, which is not how VyOS manages users. The expiring-window beat is told with Password Safe's checkout instead. |
@@ -81,6 +81,7 @@ the change that made it, the session it happened in, and the person who was ther
 
 | | Why |
 |---|---|
+| **`netcell_enabled`** | Required, and a **preview** toggle — off by default. Settings → Preview features → *Network Demo Cell*. The bake has not been run against a live VyOS image; read [the page](../net-demo-cell.md) before you demo it. |
 | **`pra_enabled`** | Required. The cell is reached only through a Shell Jump; with PRA off it is a device nobody can log into. |
 | **`password_safe_enabled`** | For the credential half of the story. Without it the cell still deploys and is still reachable, but "nobody is handed the password" has nothing behind it. |
 | **A VyOS Password Safe platform** | For the rotation half. A stock Linux platform is reverted by the next commit of `system login`; the change command has to run in vbash. You build it — see [the network cell page](../net-demo-cell.md#what-password-safe-does-here). |

@@ -2001,6 +2001,17 @@ class Settings(BaseSettings):
     # submission paths has been proven against a live CA yet. Off means the dashboard
     # behaves exactly as before, and no CA pool can be created to bill for.
     cert_lab_enabled: bool = False                   # master gate: page, nav, router
+    # PREVIEW flag, alongside cert_lab_enabled / spire_lab_enabled in
+    # setup._PREVIEW_FLAGS. Preview because the load-bearing question is unobserved: the
+    # cell's image is produced by a Packer SHELL provisioner run against a VyOS builder,
+    # and VyOS is not a general-purpose Linux guest -- it boots a squashfs union, keeps
+    # its configuration in /config/config.boot, and is driven by a config-mode CLI. That
+    # the provisioner runs at all, and that the baked account is reachable as deployed,
+    # have not been seen once. Off means the dashboard behaves exactly as before and no
+    # cell can be deployed. Deliberately NOT gated on pra_enabled here: that is a
+    # deploy-time refusal (netcell_service.pra_preflight_problem), which can name the
+    # remedy, where a hidden tab cannot.
+    netcell_enabled: bool = False                    # master gate: tab, tile, router
     # TWO platforms, because the plugin ships as two .psplugin packages over a shared
     # core with different plugin ids: "Certificate" issues an end-entity certificate on
     # any of its nine backends, "Subordinate CA" issues an issuing authority on the four

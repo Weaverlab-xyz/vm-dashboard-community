@@ -327,6 +327,11 @@ def _db_tiles(db: Session, user: User) -> dict:
         from ..services import feature_flags
         if not feature_flags.profile_page_allowed("cloud_pages"):
             return _unavailable("the cloud consoles are not served on this instance")
+        # Preview feature, off by default. Reported as unavailable rather than as a zero:
+        # a zero says "no cells yet" and invites the operator to go make one, on a page
+        # whose tab is not rendered and whose router 404s.
+        if not feature_flags.enabled("netcell_enabled"):
+            return _unavailable("the Network Demo Cell preview is off")
         # Network cells, GCP only. A cell IS its gce_deploy row (metadata netcell=True)
         # -- there is no parent job and no separate record -- so this is a Job-table
         # read, never a cloud call, which is the whole contract of this endpoint.

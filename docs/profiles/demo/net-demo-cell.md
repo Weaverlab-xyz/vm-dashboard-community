@@ -2,6 +2,13 @@
 
 > **Audience:** presenter · **Profile:** `demo` · **Read this when:** you are showing an emergency firewall change that nobody had to be handed a password for.
 
+> **Preview.** The bake has never been run against a live VyOS image: that a Packer
+> shell provisioner configures one at all, and that the baked account is reachable once
+> deployed, are both unobserved. Off by default; turn it on with the **Network Demo
+> Cell** preview toggle in Settings. Work through the
+> [E2E verification checklist](#e2e-verification-checklist) on your own image before you
+> put this in front of anyone.
+
 The dashboard can stand up a **VyOS router/firewall** — a real network OS, with a real
 `configure` mode — in a cloud sandbox's private subnet, with **no external IP and no
 inbound rule**, and layer the BeyondTrust stack on top. Same **provisioning + three
@@ -56,6 +63,7 @@ cell-specific to keep correct.
 
 ## Before you deploy
 
+- [ ] The **Network Demo Cell preview** switched on in Settings.
 - [ ] A **VyOS image in your project.** You supply it — VyOS rolling builds are free,
       LTS and the marketplace listings are not, and that is not the dashboard's call to
       make. Import it, then bake `vyos-cell.sh` onto it from the **Build Image** tab.
