@@ -88,6 +88,13 @@
         <span x-show="otCells.length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
               x-text="otCells.length"></span>
       </button>
+      <button @click="switchToNet()"
+              :class="activeTab === 'net' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+              class="py-3 border-b-2 text-sm font-medium transition-colors whitespace-nowrap shrink-0">
+        Network Cell
+        <span x-show="netCells.length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
+              x-text="netCells.length"></span>
+      </button>
       {% endif %}
     </nav>
   </div>
@@ -1375,6 +1382,148 @@
       </div>
     </div>
   </div>
+
+  <!-- ── Network Cell ─────────────────────────────────────── -->
+  <div x-show="activeTab === 'net'" x-cloak>
+    <div class="mb-4">
+      <h2 class="text-lg font-semibold text-gray-800">Network Cell</h2>
+      <p class="text-xs text-gray-400 mt-0.5 max-w-3xl">
+        Deploy a VyOS router/firewall from the Packer-baked <span class="font-mono">vyos-cell</span> image,
+        with no external IP and no inbound rule — reached only through a Shell Jump on the Gateway.
+        A firewall needs SSH and nothing else, so unlike the OT cell this provisions no Web Jump and no
+        protocol tunnel. Bake the image first on the <em>Build Image</em> tab with
+        <span class="font-mono">provisioners/net/vyos-cell.sh</span>.
+      </p>
+    </div>
+
+    <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+      <!-- Deploy form -->
+      <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-4 self-start">
+        <h3 class="text-sm font-semibold text-gray-700">Deploy a cell</h3>
+
+        <div>
+          <div class="flex flex-wrap items-center justify-between mb-1">
+            <label class="block text-sm font-medium text-gray-700">Image <span class="text-red-500">*</span></label>
+            <label class="flex items-center gap-1.5 text-xs text-gray-500">
+              <input type="checkbox" x-model="netShowAllImages" class="rounded border-gray-300 h-3.5 w-3.5">
+              show all custom images
+            </label>
+          </div>
+          <select x-model="netForm.image_self_link"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">— pick the vyos-cell image —</option>
+            <template x-for="img in netImages()" :key="img.self_link">
+              <option :value="img.self_link" x-text="img.name"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1" x-show="!imagesLoading && netImages().length === 0">
+            No <span class="font-mono">vyos</span> image yet — import one into this project, then bake it
+            on the <em>Build Image</em> tab, or tick "show all".
+          </p>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Instance name <span class="text-red-500">*</span></label>
+          <input type="text" x-model="netForm.instance_name" placeholder="vyos-cell-01"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Machine type</label>
+            <input type="text" x-model="netForm.machine_type"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Zone</label>
+            <input type="text" x-model="netForm.zone" :placeholder="defaultZone || 'default'"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">VyOS release</label>
+            <select x-model="netForm.vyos_release"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="1.4">1.4 and later — <span class="font-mono">set firewall ipv4 name</span></option>
+              <option value="1.3">1.3 — <span class="font-mono">set firewall name</span></option>
+            </select>
+            <p class="text-xs text-gray-400 mt-1">
+              Your assertion about the image, not something the dashboard can read off it. The firewall
+              tree moved in 1.4, so the commands you are about to type differ by train.
+            </p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Baseline ruleset</label>
+            <input type="text" x-model="netForm.ruleset"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <p class="text-xs text-gray-400 mt-1">Where the demo's DROP rule lands. Must match the bake's <span class="font-mono">VYOS_RULESET</span>.</p>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-red-500">*</span></label>
+          <select x-model="netForm.workgroup"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">— select —</option>
+            <template x-for="wg in availableWorkgroups" :key="wg">
+              <option :value="wg" x-text="wg"></option>
+            </template>
+          </select>
+        </div>
+
+        <label class="flex items-start gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="netForm.register_in_passwordsafe" class="rounded border-gray-300 mt-0.5">
+          <span>
+            Onboard into Password Safe
+            <span class="block text-xs text-gray-400">
+              Forced to the SSH method — the cloud-native plugins manage a guest through an agent
+              VyOS does not run. Storage and checkout, not rotation: see
+              <span class="font-mono">provisioners/net/README.md</span>.
+            </span>
+          </span>
+        </label>
+
+        <div class="text-xs text-red-600" x-show="netError" x-text="netError" x-cloak></div>
+
+        <button @click="deployNetCell()" :disabled="netSubmitting"
+                class="w-full bg-blue-600 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
+          <span x-show="!netSubmitting">Deploy cell</span>
+          <span x-show="netSubmitting" x-cloak>Deploying…</span>
+        </button>
+      </div>
+
+      <!-- Cells -->
+      <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 self-start">
+        <h3 class="text-sm font-semibold text-gray-700 mb-3">Cells</h3>
+        <p class="text-sm text-gray-400" x-show="!netCells.length">No network cells yet.</p>
+        <div class="space-y-2">
+          <template x-for="c in netCells" :key="c.job_id">
+            <div class="border border-gray-200 rounded-lg px-3 py-2">
+              <div class="flex items-center justify-between">
+                <span class="font-mono text-sm text-gray-800" x-text="c.instance_name"></span>
+                <span class="text-xs text-gray-500" x-text="c.status"></span>
+              </div>
+              <div class="text-xs text-gray-400 mt-1">
+                <span x-text="c.zone"></span>
+                <span class="ml-2" x-show="c.private_ip" x-text="c.private_ip"></span>
+                <span class="ml-2" x-show="c.vyos_release" x-text="'VyOS ' + c.vyos_release"></span>
+                <span class="ml-2" x-show="c.ruleset" x-text="c.ruleset"></span>
+              </div>
+              <div class="text-xs text-gray-400 mt-1" x-show="c.shell_jump_id">
+                Shell Jump <span class="font-mono" x-text="c.shell_jump_id"></span>
+              </div>
+            </div>
+          </template>
+        </div>
+        <p class="text-xs text-gray-400 mt-3">
+          A cell is an ordinary GCE deploy row, so Destroy and the auto-delete timer on the
+          <em>Instances</em> tab reap the whole thing — VM, Shell Jump and Password Safe registration.
+        </p>
+      </div>
+    </div>
+  </div>
   {% endif %}
 
 </div><!-- /max-w-7xl -->
@@ -1537,6 +1686,23 @@ function gcpDashboard() {
       submitting: false, error: '', message: '',
     },
 
+    // ── Network cell ─────────────────────────────────────────────
+    netLoaded:        false,
+    netCells:         [],
+    netError:         '',
+    netSubmitting:    false,
+    netShowAllImages: false,
+    netForm: {
+      image_self_link: '', image_name: '', instance_name: '',
+      // e2-small, not the cell's e2-medium: VyOS routes and filters, it does not run
+      // a Kubernetes control plane and four simulators.
+      machine_type: 'e2-small',
+      zone: '', subnetwork: '', workgroup: '',
+      vyos_release: '1.4', ruleset: 'BLOCKLIST',
+      register_in_passwordsafe: true,
+      jump_group: '', jumpoint_name: '',
+    },
+
     async init() {
       this.loadSecretBackends();
       // Deep links (the home page's OT tile lands on /gcp#ot). switchToOT, not a
@@ -1547,6 +1713,8 @@ function gcpDashboard() {
       {% if pra_enabled %}
       if (hash === 'ot') {
         this.switchToOT();
+      } else if (hash === 'net') {
+        this.switchToNet();
       } else
       {% endif %}
       if (['public', 'custom', 'instances', 'build'].includes(hash)) {
@@ -1597,6 +1765,59 @@ function gcpDashboard() {
     otImages() {
       const imgs = this.customImages || [];
       return this.otShowAllImages ? imgs : imgs.filter(i => (i.name || '').includes('ot-sim'));
+    },
+
+    // ── Network cell ─────────────────────────────────────────────
+    switchToNet() {
+      this.activeTab = 'net';
+      if (!this.netLoaded) this.loadNetData();
+    },
+
+    async loadNetData() {
+      this.netLoaded = true;
+      if (this.customImages.length === 0 && !this.imagesLoading) this.loadCustomImages();
+      this.loadPraPickers();
+      this.loadNetCells();
+    },
+
+    netImages() {
+      const imgs = this.customImages || [];
+      // Matched on 'vyos' rather than the exact bake name: the operator imports the
+      // source image under a name of their own, and the bake's output name is only a
+      // convention. The API refuses a non-VyOS image anyway.
+      return this.netShowAllImages ? imgs : imgs.filter(i => (i.name || '').toLowerCase().includes('vyos'));
+    },
+
+    async loadNetCells() {
+      try {
+        const r = await API.get('/api/netcell/cells');
+        this.netCells = r.cells || [];
+      } catch (e) {
+        this.netError = e.message || 'Failed to load cells';
+      }
+    },
+
+    async deployNetCell() {
+      this.netError = '';
+      this.netSubmitting = true;
+      try {
+        const img = (this.customImages || []).find(i => i.self_link === this.netForm.image_self_link);
+        const r = await API.post('/api/netcell/cell', {
+          ...this.netForm,
+          image_name: img ? img.name : '',
+        });
+        // The notes carry the caveats the form cannot: which onboarding method was
+        // forced, and that this is checkout rather than rotation. Shown rather than
+        // swallowed, so they are read before the demo instead of during it.
+        showToast((r.notes || []).length ? r.notes.join(' ') : (r.message || 'Deploying…'), 'success');
+        this.netForm.instance_name = '';
+        this.loadNetCells();
+        this.loadJobs && this.loadJobs();
+      } catch (e) {
+        this.netError = e.message || 'Deploy failed';
+      } finally {
+        this.netSubmitting = false;
+      }
     },
 
     // The DMZ broker is a different bake (OT_ROLE=broker): KubeSolo and the Entitle
