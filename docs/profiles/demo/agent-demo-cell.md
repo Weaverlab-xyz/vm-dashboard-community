@@ -45,11 +45,15 @@ it.
 Every loop leaves one line carrying both:
 
 ```
-[agent] spiffe://weaverlab.test/agent/mcp-reader · token vmcli_9f3c… · 14 active jobs, 2 failed today · 14:02:11
+[agent] spiffe://weaverlab.test/agent/mcp-reader · token "mcp-reader-pat" · 14 active jobs, 2 failed today · 14:02:11
 ```
 
-Who it is, what it spent, what it saw. The token hint is enough to find the row in
-**Settings → API Tokens** and not enough to use — the full value never reaches a log.
+Who it is, what it spent, what it saw.
+
+**The token is named, not shown.** That is the PAT's *name* in the line — the one
+**Settings → API Tokens** lists, and the one you are about to revoke. No part of the
+credential reaches a log, and an error from the MCP client is scrubbed of anything
+token-shaped on its way to one.
 
 ## What is not built
 
@@ -233,7 +237,7 @@ About twelve minutes, and step 5 is the whole thing.
 5. **Revoke the token** from Settings → API Tokens, with the log still on screen:
 
    ```
-   [agent] spiffe://weaverlab.test/agent/mcp-reader · token vmcli_9f3c… · REFUSED — the token is revoked or expired · 14:06:41
+   [agent] spiffe://weaverlab.test/agent/mcp-reader · token "mcp-reader-pat" · REFUSED — the token is revoked or expired · 14:06:41
    [agent] stopping: the identity is still valid, the authorization is not.
    ```
 
@@ -260,7 +264,8 @@ teardown of its own beyond revoking what it issued.
 - [ ] `spire-agent api fetch x509` returns a SPIFFE ID the worker can parse. *(Unproven —
       see the preview note.)*
 - [ ] The MCP SSE client connects through your ingress. *(Unproven.)*
-- [ ] The log line carries **both** the SPIFFE ID and the token hint.
+- [ ] The log line carries **both** the SPIFFE ID and the token's name, and no part of
+      the token's value.
 - [ ] Revoking the token stops the unit, and `systemctl status mcp-agent` shows it stopped
       rather than restarting in a loop.
 - [ ] Deleting the SPIFFE registration entry makes the next line say `unattested`, without

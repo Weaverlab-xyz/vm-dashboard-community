@@ -76,38 +76,85 @@ def test_the_worker_refuses_to_start_without_a_url():
 
 # -- the log line is the demo --------------------------------------------------
 
-def test_the_log_line_carries_both_the_identity_and_the_token():
-    code = _code(_WORKER)
-    line = [ln for ln in code.splitlines() if "spiffe_id" in ln and "hint" in ln]
-    assert line, (
-        "no log statement carries both the SPIFFE ID and the token hint. Splitting them "
-        "across lines hides that identity and authorization are two different things, "
-        "which is the whole argument of the cell")
-
-
-def test_the_token_is_never_logged_in_full():
-    # Scoped to PRINT statements. The worker legitimately interpolates the token into an
-    # Authorization header; what must never happen is it reaching stdout.
-    prints = [ln for ln in _code(_WORKER).splitlines() if "print(" in ln]
-    assert prints, "the worker prints nothing at all"
-    for ln in prints:
-        assert "{token}" not in ln and "token)" not in ln.replace("token_file)", ""), \
-            f"a print statement carries the raw token: {ln.strip()}"
-    assert "def token_hint" in _code(_WORKER), \
-        "the worker no longer truncates the token for logs"
-
-
-def test_the_hint_is_too_short_to_use():
-    sys.path.insert(0, os.path.dirname(_WORKER))
+def _worker_module():
     import importlib.util
     spec = importlib.util.spec_from_file_location("mcp_agent", _WORKER)
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
+    return m
+
+
+def test_the_log_line_carries_both_the_identity_and_the_token():
+    code = _code(_WORKER)
+    line = [ln for ln in code.splitlines() if "spiffe_id" in ln and "named" in ln]
+    assert line, (
+        "no log statement carries both the SPIFFE ID and the token's name. Splitting "
+        "them across lines hides that identity and authorization are two different "
+        "things, which is the whole argument of the cell")
+
+
+def test_no_part_of_the_token_is_ever_logged():
+    """Stronger than the rule this replaces, and for a reason CodeQL found first.
+
+    The worker used to print the token's first eleven characters, on the theory that
+    they located the row in Settings -> API Tokens. `api/tokens.list_tokens` returns id,
+    name, created_at, expires_at, last_used_at and is_active -- no prefix -- so those
+    five hex characters correlated with nothing while being five real characters of a
+    live credential. Now the NAME is logged and the value never is.
+
+    Scoped to PRINT statements: the worker legitimately puts the token in an
+    Authorization header; what must never happen is it reaching stdout.
+    """
+    code = _code(_WORKER)
+    prints = [ln for ln in code.splitlines() if "print(" in ln]
+    assert prints, "the worker prints nothing at all"
+    for ln in prints:
+        assert "{token}" not in ln, f"a print statement carries the raw token: {ln.strip()}"
+        assert "{hint}" not in ln, (
+            "a print statement carries a slice of the token. The PAT's name is the "
+            "non-secret handle; no part of the value is")
+    assert "def token_label" in code, "nothing names the token without showing it"
+    assert "def token_hint" not in code, \
+        "the truncating hint is back — it correlates with nothing the UI shows"
+
+    # The property the two checks above miss: a slice taken at the ASSIGNMENT still
+    # reaches a print through an innocent-looking name. So inside `run`, the token may
+    # appear in exactly one place — the call that spends it.
+    run_body = code.split("def run(", 1)[1].split("\ndef ")[0]
+    # Past the signature (which names the parameter), and with string literals emptied so
+    # the word "token" inside a log message is not mistaken for a use of the value.
+    run_body = run_body.split("\n", 2)[2]
+    run_body = re.sub(r'"[^"]*"|\'[^\']*\'', '""', run_body)
+    uses = [ln.strip() for ln in run_body.splitlines()
+            if re.search(r"\btoken\b", ln)]
+    assert uses == ["payload = asyncio.run(call_once(url, token, tool))"], (
+        "the token is used inside run() somewhere other than the call that spends it: "
+        f"{uses}. It is spent, never displayed")
+
+
+def test_the_label_is_the_pats_name_not_its_value():
+    m = _worker_module()
     raw = "vmcli_" + ("a" * 64)
-    hint = m.token_hint(raw)
-    assert raw not in hint, "the hint contains the whole token"
-    assert len(hint) < 20, f"the hint is long enough to be worth guessing from: {hint}"
-    assert hint.startswith("vmcli_"), "the hint does not identify the token's kind"
+    assert m.token_label("mcp-reader-pat") == "mcp-reader-pat"
+    assert raw not in m.token_label(""), "the empty label falls back to the token"
+    assert m.token_label("") == "(unnamed)", \
+        "an unlabelled worker should say so rather than inventing a handle"
+
+
+def test_an_error_is_scrubbed_before_it_is_logged():
+    """`call_once` hands the token to a third-party HTTP client as an Authorization
+    header, and what that client puts in its error repr is not this worker's decision.
+    On the one cell whose whole argument is about not leaking a credential, the value is
+    removed on the way out."""
+    m = _worker_module()
+    raw = "vmcli_" + ("9f3c" * 16)
+    leaked = f"Connection failed: headers={{'Authorization': 'Bearer {raw}'}}"
+    out = m.scrub(leaked)
+    assert raw not in out, "an error carrying the token reaches the log intact"
+    assert "redacted" in out, "the scrub leaves no sign that something was removed"
+    code = _code(_WORKER)
+    run_body = code.split("def run(", 1)[1]
+    assert "scrub(str(exc))" in run_body, "the error text is logged unscrubbed"
 
 
 # -- identity is re-proved, never cached --------------------------------------
@@ -346,10 +393,7 @@ def test_auto_refuses_rather_than_guessing():
     """No marker distinguishes a bare Azure VM from a bare GCE one, and 169.254.169.254 is
     both their metadata addresses. A guess means a request that has to time out to say no,
     on the host most likely to be neither."""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("mcp_agent", _WORKER)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
+    m = _worker_module()
     assert m.detect_platform(env={}, exists=lambda p: False) == "", \
         "auto guesses a platform on a host that declares none"
     assert m.detect_platform(env={"IDENTITY_ENDPOINT": "http://x", "IDENTITY_HEADER": "h"},
@@ -399,14 +443,34 @@ def test_the_exec_start_survives_every_mode():
     assert not exec_line[0].rstrip().endswith("\\"), \
         "ExecStart ends in a continuation, which is how the arguments were lost before"
     assert "{{ agent_args }}" in exec_line[0]
-    args = play["vars"]["agent_args"]
+
+    # Render the real thing for every mode, rather than reading the template. This is the
+    # check that would have caught the truncation: the arguments have to SURVIVE, and
+    # whether they do depends on the branch taken.
+    from jinja2 import Template
+    import re as _re
+    ctx = dict(play["vars"], agent_mcp_url="https://dash/mcp",
+               agent_identity_platform="gcp", agent_wlc_base_url="https://api.bt",
+               agent_wlc_site_id="s1", agent_wlc_service_name="svc",
+               agent_wlc_resource="aud", agent_wlc_secret_name="pat",
+               agent_ps_client_id_secret="ps-id", agent_ps_client_secret_secret="ps-sec",
+               agent_ps_api_url="https://ps/api/public/v3", agent_ps_account_id=42,
+               agent_token_label="mcp-reader-pat")
+    template = ctx.pop("agent_args")
     for mode in ("file", "wlc", "ps"):
-        branch = args.split(f"agent_token_source == '{mode}'", 1)
-        assert len(branch) == 2 or mode == "file", f"no branch for {mode}"
-    # Every mode keeps the tail that the continuation bug ate.
-    head = args.split("{% if", 1)[0]
-    assert "--spiffe-socket" in head and "--interval" in head, \
-        "the arguments every mode needs are inside a conditional again"
+        rendered = _re.sub(r"\s+", " ",
+                           Template(template).render(dict(ctx, agent_token_source=mode))
+                           ).strip()
+        for flag in ("--url", "--token-source", "--spiffe-socket", "--interval",
+                     "--token-label"):
+            assert flag in rendered, f"{mode} mode lost {flag}"
+        assert f"--token-source {mode}" in rendered
+    # And each mode reaches only its own arguments.
+    def _r(mode):
+        return Template(template).render(dict(ctx, agent_token_source=mode))
+    assert "--token-file" in _r("file") and "--ps-api-url" not in _r("file")
+    assert "--wlc-secret-name" in _r("wlc") and "--ps-api-url" not in _r("wlc")
+    assert "--ps-api-url" in _r("ps") and "--wlc-secret-name" not in _r("ps")
 
 
 def test_the_play_removes_a_token_when_moving_to_wlc():

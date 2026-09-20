@@ -5,7 +5,7 @@ The worker the agent demo cell installs. It does one small thing on a loop, and 
 point is not the thing: it is that every loop leaves a line naming **who it is** and
 **what it spent**, and that revoking the token ends it while somebody watches.
 
-    spiffe://weaverlab.test/agent/mcp-reader · token vmcli_9f3c… · 14 jobs, 2 failures · 14:02:11
+    spiffe://weaverlab.test/agent/mcp-reader · token "mcp-reader-pat" · 14 jobs, 2 failures · 14:02:11
 
 TWO CREDENTIALS, AND THEY ARE NOT THE SAME ONE. This is the honest shape of the demo
 and the code is arranged so nobody can miss it:
@@ -15,7 +15,8 @@ and the code is arranged so nobody can miss it:
     than cached — a workload that attests itself has nothing to store.
   * the **PAT** is the worker's AUTHORIZATION to this dashboard. It is what /mcp accepts,
     it is scoped to a user whose RBAC bounds every tool, it expires, and it can be
-    revoked from Settings -> API Tokens while the loop is running.
+    revoked from Settings -> API Tokens while the loop is running. The log line carries
+    its NAME and no part of its value -- see ``token_label``.
 
 THE SVID DOES NOT AUTHENTICATE TO /mcp, AND NOTHING HERE PRETENDS IT DOES. The MCP
 server takes a Bearer PAT (api/mcp_server.py) and has no mTLS path. Bridging the two --
@@ -128,10 +129,38 @@ def read_token(path: str) -> str:
     return token
 
 
-def token_hint(token: str) -> str:
-    """Enough of the token to correlate a log line with a row in Settings -> API Tokens,
-    and not enough to use. The full value never reaches a log."""
-    return token[:11] + "…"
+# Anything token-shaped, for scrubbing error text. A client library that puts its request
+# headers in an exception repr would otherwise hand the Authorization header to the log --
+# on the one cell whose entire argument is about not leaking a credential.
+TOKEN_RE = re.compile(r"vmcli_[0-9a-fA-F]{8,}")
+
+
+def scrub(text: str) -> str:
+    """An exception's text with anything PAT-shaped removed.
+
+    `call_once` hands the token to an HTTP client as an Authorization header, and what a
+    third-party client puts in its error repr is not this worker's decision. So the value
+    is removed on the way OUT, at the one place error text becomes a log line.
+    """
+    return TOKEN_RE.sub("vmcli_<redacted>", text or "")
+
+
+def token_label(label: str) -> str:
+    """What the log line calls this worker's authorization.
+
+    THE PAT'S NAME, NOT ANY PART OF ITS VALUE. An earlier version logged the token's first
+    eleven characters, on the theory that it located the row in Settings -> API Tokens.
+    It does not: `api/tokens.list_tokens` returns id, name, created_at, expires_at,
+    last_used_at and is_active, and no prefix -- so those five hex characters correlated
+    with nothing an operator can see, while being five real characters of a live
+    credential. The name is what the UI lists, what `agentcell_service.pat_name_for`
+    generates, and what the create response hands back beside the once-only token.
+
+    It also keeps the credential away from every logging call in `run`, which is the
+    shape CodeQL's clear-text-logging query is right to be suspicious of -- see
+    `services/cloud_function_service._record_provenance` for the same reasoning.
+    """
+    return (label or "").strip() or "(unnamed)"
 
 
 def _request(url: str, headers: dict, data=None, timeout: int = 15,
@@ -570,29 +599,30 @@ SOURCE_HOLDS = {
 
 
 def run(url: str, token: str, tool: str, socket_path: str, interval: int,
-        token_source: str = "file") -> int:
-    hint = token_hint(token)
+        token_source: str = "file", label: str = "") -> int:
+    """The loop. `token` is spent here and never printed -- see `token_label`."""
+    named = token_label(label)
     held = SOURCE_HOLDS.get(token_source, "a static secret on this host")
-    print(f"[agent] polling {url} every {interval}s as {hint} "
+    print(f"[agent] polling {url} every {interval}s as {named} "
           f"(token from {token_source}: {held})", flush=True)
     while True:
         spiffe_id = fetch_spiffe_id(socket_path)
         try:
             payload = asyncio.run(call_once(url, token, tool))
         except Exception as exc:  # noqa: BLE001
-            text = str(exc)
+            text = scrub(str(exc))
             # 401 is the demo's closing beat, not an error to ride out.
             if "401" in text or "Unauthorized" in text or "unauthorized" in text:
-                print(f"[agent] {spiffe_id} · token {hint} · REFUSED — the token "
+                print(f"[agent] {spiffe_id} · token {named} · REFUSED — the token "
                       f"is revoked or expired · {_now()}", flush=True)
                 print("[agent] stopping: the identity is still valid, the authorization "
                       "is not.", flush=True)
                 return 2
-            print(f"[agent] {spiffe_id} · token {hint} · call failed: {text} · "
+            print(f"[agent] {spiffe_id} · token {named} · call failed: {text} · "
                   f"{_now()}", flush=True)
             time.sleep(interval)
             continue
-        print(f"[agent] {spiffe_id} · token {hint} · {summarise(payload)} · "
+        print(f"[agent] {spiffe_id} · token {named} · {summarise(payload)} · "
               f"{_now()}", flush=True)
         time.sleep(interval)
 
@@ -603,6 +633,10 @@ def main(argv=None) -> int:
                     help="the dashboard's MCP endpoint, e.g. https://host/mcp")
     ap.add_argument("--token-file", default=os.environ.get("AGENT_TOKEN_FILE",
                                                            "/etc/mcp-agent/token"))
+    ap.add_argument("--token-label", default=os.environ.get("AGENT_TOKEN_LABEL", ""),
+                    help="the PAT's NAME, as Settings -> API Tokens lists it and as the "
+                         "agent cell's create response returns it. Non-secret, and the "
+                         "only thing about the token this worker ever logs.")
     ap.add_argument("--token-source", choices=("file", "wlc", "ps"),
                     default=os.environ.get("AGENT_TOKEN_SOURCE", "file"),
                     help="where the dashboard PAT comes from. 'wlc' reads it out of "
@@ -661,6 +695,7 @@ def main(argv=None) -> int:
               json.dumps({"tool": args.tool, "interval": args.interval,
                           "spiffe_socket": args.spiffe_socket,
                           "token_source": args.token_source,
+                          "token_label": token_label(args.token_label),
                           "identity_platform": args.identity_platform,
                           "detected_platform": detect_platform() or "none"}))
         return 0
@@ -705,7 +740,7 @@ def main(argv=None) -> int:
         token = read_token(args.token_file)
 
     return run(args.url, token, args.tool, args.spiffe_socket, args.interval,
-               token_source=args.token_source)
+               token_source=args.token_source, label=args.token_label)
 
 
 if __name__ == "__main__":

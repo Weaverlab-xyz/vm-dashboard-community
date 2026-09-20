@@ -108,17 +108,22 @@ behind. "Nothing is stored on this host" must not be contradicted by a file in `
 ## The log line is the demo
 
 ```
-[agent] spiffe://weaverlab.test/agent/mcp-reader · token vmcli_9f3c… · 14 active jobs, 2 failed today · 14:02:11
+[agent] spiffe://weaverlab.test/agent/mcp-reader · token "mcp-reader-pat" · 14 active jobs, 2 failed today · 14:02:11
 ```
 
-Three things in one line: who it is, what it spent, what it saw. The token hint is enough
-to find the row in **Settings → API Tokens** and not enough to use — the full value never
-reaches a log.
+Three things in one line: who it is, what it spent, what it saw.
+
+**The token is named, not shown.** The line carries the PAT's *name* — what
+**Settings → API Tokens** lists and what the agent cell's create response returns beside
+the once-only value. No part of the credential reaches a log. An earlier version printed
+the token's first eleven characters on the theory that they located the row; they did not
+(`api/tokens.list_tokens` returns no prefix), so they were five real characters of a live
+credential correlating with nothing. Pass it as `agent_token_label`.
 
 When the token is revoked:
 
 ```
-[agent] spiffe://weaverlab.test/agent/mcp-reader · token vmcli_9f3c… · REFUSED — the token is revoked or expired · 14:06:41
+[agent] spiffe://weaverlab.test/agent/mcp-reader · token "mcp-reader-pat" · REFUSED — the token is revoked or expired · 14:06:41
 [agent] stopping: the identity is still valid, the authorization is not.
 ```
 

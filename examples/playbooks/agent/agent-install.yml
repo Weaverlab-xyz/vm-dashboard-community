@@ -27,6 +27,11 @@
 #   agent_mcp_url:      https://dashboard.example/mcp   # REQUIRED
 #   agent_token_source: file | wlc | ps                 # default file
 #   agent_token:        vmcli_<64hex>                   # REQUIRED when source is `file`
+#   agent_token_label:  mcp-reader-pat                  # the PAT's NAME, as the cell's
+#                                                       # create response returns it and
+#                                                       # Settings -> API Tokens lists it.
+#                                                       # Non-secret, and the only thing
+#                                                       # about the token that is logged.
 #
 #   # `wlc` and `ps` put NO SECRET ON THE HOST. Every value below is non-secret: the
 #   # worker asks the platform for its own identity token and presents that to Workload
@@ -63,6 +68,7 @@
   become: true
   vars:
     agent_token_source: file
+    agent_token_label: ""
     agent_wlc_base_url: ""
     agent_wlc_site_id: ""
     agent_wlc_service_name: ""
@@ -97,6 +103,7 @@
       --token-source {{ agent_token_source }}
       --spiffe-socket {{ agent_spiffe_socket }}
       --interval {{ agent_interval }}
+      {% if agent_token_label %}--token-label "{{ agent_token_label }}"{% endif %}
       {% if agent_token_source == 'file' %}
       --token-file {{ agent_conf }}/token
       {% else %}
