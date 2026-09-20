@@ -5,6 +5,9 @@
 > **Status:** Design note, v1. **Nothing here is built.** It records a measurement, a
 > definition, and three candidates in the order they are worth doing — so the next person
 > to ask "what else could we demo?" starts from evidence rather than from a brainstorm.
+> **Corrected after review:** an earlier draft called the Windows endpoint story blocked.
+> It is not. EPM for Windows is a shipping product; what is missing is the dashboard
+> integration, and §5 now says so.
 > **Depends on:** the two cells that exist —
 > [OT Demo Cell](../profiles/demo/ot-demo-cell.md) and
 > [Network Demo Cell](../profiles/demo/net-demo-cell.md) — whose shared shape §2 extracts.
@@ -91,6 +94,13 @@ estate; it is not an agent with privileged access to infrastructure, and a card 
 otherwise would be overclaiming. The cell is new work that can *reuse* the MCP server as
 one surface, not a wiring exercise over it.
 
+**The worker is baked into the image**, the same way §5's EPM agent and the OT cell's
+DMZ broker are. The deploy paths have no user-data hook, so anything that must be running
+at first boot is baked at Packer time; anything needing a fresh secret — a registration
+token, a workload identity — is a post-deploy job, because a token baked into an image
+has expired before the image is used. That is not a constraint peculiar to this cell: it
+is the rule both shipped cells follow, and it is why `provisioners/` exists.
+
 **Open question to answer before building:** what the agent actually does. A worker that
 only fetches a credential proves the plumbing; one that performs a recognisable task —
 remediating a finding, rotating something, running a change — proves the story. The
@@ -119,33 +129,61 @@ nobody onboarded" is oversight, and `security` already owns oversight. If the Fi
 persona is not built, **add that card to `security` rather than leaving the flag
 orphaned.**
 
-## 5. Candidate C — a Windows endpoint cell, and the two things blocking it
+## 5. Candidate C — a Windows endpoint cell
 
-**Role:** `itops` already exists. This is a cell for an existing persona, which is why it
-is third.
+**Role:** `itops` already exists. This is a cell for an existing persona.
 
 The gap is sharper than "no cloud VDI" — cloud VDI is built and reasonably mature
-([Virtual Desktops](../virtual-desktops.md), preview). The gap is that **the Windows
-endpoint story is nearly untellable on a cloud-only instance**, for two independent
-reasons:
+([Virtual Desktops](../virtual-desktops.md), preview). The gap is that
+**"remove local admin from a Windows endpoint and elevate per-application" — among the
+most recognisable demos BeyondTrust has — has no home in this dashboard**, because
+`epml_enabled` is the only EPM flag in the registry and
+[`integrations/epml.md`](../integrations/epml.md) is EPM **for Linux**.
 
-| Blocker | Detail |
+**To be clear about what that is and is not.** EPM for Windows is a shipping BeyondTrust
+product and there is nothing preventing its use — what is missing is the *dashboard
+integration*, not the capability. This is a build, not a wall, and it is a smaller build
+than it looks, because **every surrounding piece is already here**:
+
+| Piece | Already exists |
 |---|---|
-| **Windows seats are Azure-only** | AWS and GCP provision Linux seats only, and credential injection is Windows-only. The per-cloud table in `virtual-desktops.md` explains why: Azure vaults a generated password before the VM exists; EC2 returns password data encrypted to the launch key pair; GCE delivers through `windows-keys`. Only the first is wired. |
-| **EPM is Linux-only** | `epml_enabled` is the only EPM flag in the registry, and `integrations/epml.md` is EPM **for Linux**. There is no Windows EPM integration at all. |
+| Windows image preparation | `provisioners/beyondtrust/bt-ready-windows11-vdi.ps1` (multi-session AVD) and `bt-ready-windows.ps1` (Server Core), both run as Packer PowerShell provisioners. |
+| Windows post-deploy configuration | `runners/ansible-winrm` is the dashboard's **default** runner image, carrying `pywinrm` + the NTLM backend precisely so a WinRM target works out of the box on every runner. |
+| The agent-activation pattern | EPM-L already does exactly this — see below. |
+| Windows seats with credential injection | Azure, today. |
 
-The second is the bigger one. **"Remove local admin from a Windows endpoint and elevate
-per-application" is among the most recognisable demos BeyondTrust has, and this repo
-cannot tell it.** That is worth knowing before anyone plans a Windows-centric demo
-around this dashboard.
+### Bake the agent, activate it after
 
-`itops` feels the consequence today: three of its five cards require `vmware_enabled`, so
-on a cloud-only estate instance most of the IT-engineer catalog reads as not-ready.
+The agent goes **into the image**, and this is a settled pattern rather than a new idea.
+EPM-L states the constraint and the resolution in one sentence
+([`integrations/epml.md`](../integrations/epml.md#getting-an-installation-token)):
 
-**Therefore:** a Windows endpoint cell is worth building *after* a Windows EPM
-integration exists, not before. Until then the cheaper fix is to give `itops` one or two
-cloud-reachable cards against the existing Azure VDI path, so the persona is not mostly
-unavailable on the instance most demos run on.
+> Because the package is installed at build time but activation can't be — a token
+> expires hours after issue, so one baked into an image is already dead — activation is a
+> post-deploy step.
+
+So: the EPM agent is baked by the Packer provisioner, and a **short-lived installation
+token is minted server-side at execution time**, bound to a run variable and scrubbed
+from the job output. Nothing expired or sensitive is left in the image or the job record.
+The OT cell's DMZ broker bakes the Entitle agent's chart on the same principle and
+installs it afterwards with its own job (`ot_agent_install_job_id`).
+
+That matters here for the reason it mattered to the network cell: **the deploy paths have
+no user-data hook**, so anything that must be present at first boot is baked, and
+anything needing a fresh secret is a post-deploy job. Both halves already have a
+precedent to copy.
+
+### What a Windows EPM integration would need
+
+Roughly the EPM-L integration's shape (`services/epml_sync_service.py`, `api/epml.py`,
+`epml_sync` job): list and build agent packages, sync them to the asset backend, issue
+installation tokens. A second product on the same Pathfinder gateway rather than a new
+subsystem.
+
+`itops` feels the absence today: three of its five cards require `vmware_enabled`, so on
+a cloud-only estate instance most of the IT-engineer catalog reads as not-ready. That is
+worth fixing with one or two cloud-reachable cards against the existing Azure VDI path
+**whether or not** the EPM-W work happens — it is a much smaller change than the cell.
 
 ## 6. What is deliberately not proposed
 
@@ -160,9 +198,19 @@ unavailable on the instance most demos run on.
 ## 7. Suggested order
 
 1. **Cloud governance persona** — cheapest, closes four orphan flags, no new subsystem.
-2. **The agent cell** — highest value, most new work; scope §3's open question first.
-3. **`itops` cloud cards** — small, fixes the weakest persona on a cloud-only instance.
-4. **A Windows endpoint cell** — blocked on a Windows EPM integration that does not exist.
+2. **`itops` cloud cards** — small, fixes the weakest persona on the instance most demos
+   run on. Worth doing whether or not anything below happens.
+3. **Windows EPM integration, then the Windows endpoint cell** — the biggest demo payoff
+   per unit of new thinking. EPM-L is a working template to copy rather than a design to
+   invent, and the image prep, the WinRM runner and the bake-then-activate pattern are
+   all already here.
+4. **The agent cell** — the more differentiated story, and the most greenfield. Nothing
+   blocks it; it simply has less to copy, and §3's open question should be settled before
+   anyone starts.
+
+The 3-before-4 call is about risk, not importance. The agent cell is the story fewer
+vendors can tell; the Windows cell is the story more buyers already recognise, and it is
+the one where being wrong costs less because the shape is known.
 
 ## Verification
 
