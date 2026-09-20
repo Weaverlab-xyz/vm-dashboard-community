@@ -19,10 +19,13 @@ at both. Timeouts stay short because that thread pool is small and one slow
 external call has wedged this app before.
 
 **Two auth modes, and the second one stores nothing.** ``wlc_auth_mode`` is
-either ``pat`` (a stored Personal Access Token) or ``entra`` (this container's
-own Azure managed identity, trusted by a **Workload Identity** registered in
+either ``pat`` (a stored Personal Access Token) or ``workload`` (this container's
+own cloud identity, trusted by a **Workload Identity** registered in
 Pathfinder). The second removes the last standing credential this feature
-needed. See the Auth section below.
+needed, and it is **not Azure-only** — ``wlc_identity_platform`` selects which
+of Azure, GCP or AWS vouches for the container, because
+``docs/cloud-hosting.md`` documents the dashboard running on all three. See the
+Auth section below.
 
 **The API version is a header, not a path.** ``bt-secrets-api-version`` is
 mandatory; omit it and requests fail in a way that reads like an auth problem.
@@ -149,11 +152,17 @@ def _missing() -> list:
     out = []
     if not _cfg("wlc_site_id"):
         out.append("wlc_site_id")
-    if auth_mode() == AUTH_MODE_ENTRA:
+    if auth_mode() == AUTH_MODE_WORKLOAD:
         if not _cfg("wlc_service_name"):
             out.append("wlc_service_name")
-        if not _cfg("wlc_entra_resource"):
-            out.append("wlc_entra_resource")
+        if identity_platform() in FILE_PLATFORMS:
+            # The audience is not this container's to choose on these platforms —
+            # it is baked into the projected token by whoever configured the
+            # service account. What CAN be missing is the token itself.
+            if not identity_token_path():
+                out.append("wlc_identity_token_file")
+        elif not identity_audience():
+            out.append("wlc_identity_audience")
     elif not (_raw_cfg("wlc_pat") or _cfg("wlc_pat")):
         # Raw first, and not only to avoid the resolve: a self-referential PAT IS
         # set, and reporting it as missing would send the operator to paste in a
@@ -183,12 +192,14 @@ def missing_settings() -> list:
 #            feature never removed: WC collapsed three cloud keys into one
 #            platform token rather than into nothing.
 #
-# ``entra``  **Nothing stored at all.** The container's own Azure managed
-#            identity produces a short-lived Entra token at call time, and
-#            Pathfinder accepts it because a **Workload Identity** registered
-#            there names that identity's issuer and service-principal object id.
-#            There is no secret in ``app_config``, none in the deployment
-#            template, and nothing to rotate.
+# ``workload``
+#            **Nothing stored at all.** The container's own cloud identity
+#            produces a short-lived OIDC token at call time, and Pathfinder
+#            accepts it because a **Workload Identity** registered there names
+#            that identity's issuer and a constraint on its claims. There is no
+#            secret in ``app_config``, none in the deployment template, and
+#            nothing to rotate. Which cloud issues the token is
+#            ``wlc_identity_platform``; see the platform block below.
 #
 # **Registering the trust is a GUI action in Pathfinder and has no client here,
 # on purpose.** Administration → Workload Identities takes the issuer, the
@@ -200,14 +211,56 @@ def missing_settings() -> list:
 # token against.
 #
 # Pathfinder registers three issuer categories — GitHub Actions, Azure Entra ID
-# and a Custom IDP with explicit claim conditions. Only the Azure one is wired
-# here, because the thing being authenticated is an Azure-hosted container. The
-# other two describe workloads that are not this process (a CI job, a third-party
-# IdP) and would need a token source this code has no business owning.
+# and a **Custom IDP** with explicit claim conditions. An earlier version of this
+# module wired only the Azure one, on the reasoning that "the thing being
+# authenticated is an Azure-hosted container".
+#
+# **That reasoning was too narrow, and `docs/cloud-hosting.md` is the refutation:**
+# this dashboard is documented to run as a managed container on Azure Container
+# Apps, GCP Cloud Run **or** AWS ECS. Wiring only Azure left two of the three
+# documented hosting options unable to use the mode that stores nothing — not
+# because the mechanism is Azure's, but because nothing here asked the other
+# platforms for a token. Every major cloud issues OIDC tokens to a workload
+# identity; the Custom IDP registration type is what accepts them.
+#
+# So the mode is ``workload`` now rather than ``entra``, and it takes a platform.
+# ``entra`` is still accepted as a stored value — see :func:`normalise_auth_mode`.
 
 AUTH_MODE_PAT = "pat"
+AUTH_MODE_WORKLOAD = "workload"
+# Deprecated spelling of AUTH_MODE_WORKLOAD, kept because installs have it stored
+# in app_config. Never written any more; always normalised away on read.
 AUTH_MODE_ENTRA = "entra"
-VALID_AUTH_MODES = (AUTH_MODE_PAT, AUTH_MODE_ENTRA)
+VALID_AUTH_MODES = (AUTH_MODE_PAT, AUTH_MODE_WORKLOAD)
+
+# ── Identity platforms ───────────────────────────────────────────────────────
+#
+# What differs per platform is only WHERE the token comes from and HOW its expiry
+# is read. What it IS — an OIDC JWT this container did not have to be given — is
+# the same everywhere, which is why one mode covers all of them.
+#
+#   azure  IDENTITY_ENDPOINT/IDENTITY_HEADER (Container Apps, App Service) else
+#          IMDS. Returns a JSON envelope carrying access_token and expires_on.
+#   gcp    The metadata server's instance identity endpoint. Cloud Run, GCE and
+#          GKE all serve it. Returns the JWT as PLAIN TEXT, so the expiry has to
+#          come out of the token itself.
+#   aws    A projected web-identity token FILE. There is no OIDC endpoint on
+#          IMDS: EC2 and ECS hand out SigV4 credentials and a signed instance
+#          identity document, neither of which is a JWT. EKS is what projects a
+#          real one (IRSA, or Pod Identity) — so on plain ECS this platform has
+#          nothing to read and `pat` remains the only mode. `_missing` says so.
+#   file   Any other projected token on disk, the Kubernetes ServiceAccount
+#          token being the one every cluster already mounts.
+PLATFORM_AZURE = "azure"
+PLATFORM_GCP = "gcp"
+PLATFORM_AWS = "aws"
+PLATFORM_FILE = "file"
+VALID_IDENTITY_PLATFORMS = (PLATFORM_AZURE, PLATFORM_GCP, PLATFORM_AWS,
+                            PLATFORM_FILE)
+# The platforms whose token is a file rather than an HTTP call. Re-read every
+# time rather than memoised: the platform rotates these in place, the read is
+# local, and a memo would be the only thing capable of serving a stale one.
+FILE_PLATFORMS = (PLATFORM_AWS, PLATFORM_FILE)
 
 # Azure's link-local instance-metadata endpoint. The FALLBACK, not the default:
 # Container Apps and App Service inject a per-replica ``IDENTITY_ENDPOINT`` plus
@@ -216,6 +269,19 @@ VALID_AUTH_MODES = (AUTH_MODE_PAT, AUTH_MODE_ENTRA)
 # work on the runtime the reference install actually uses.
 _IMDS_TOKEN_URL = "http://169.254.169.254/metadata/identity/oauth2/token"
 _IDENTITY_API_VERSION = "2019-08-01"
+
+# GCP's metadata server. `format=full` includes the instance details a Custom IDP
+# claim condition can assert on, so the registration can be about THIS revision
+# rather than merely the project.
+_GCP_IDENTITY_URL = ("http://metadata.google.internal/computeMetadata/v1/instance/"
+                     "service-accounts/default/identity")
+# IRSA sets the first; EKS Pod Identity the second. Both are the mechanism
+# sts:AssumeRoleWithWebIdentity already consumes, so a cluster configured for
+# either is configured for this.
+_AWS_TOKEN_FILE_VARS = ("AWS_WEB_IDENTITY_TOKEN_FILE",
+                        "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE")
+# The projected ServiceAccount token every Kubernetes cluster mounts.
+_K8S_TOKEN_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/token"  # noqa: S105
 
 # Re-fetch this long before the platform's stated expiry. Entra tokens run about
 # an hour; five minutes of margin covers a slow call that starts just under the
@@ -231,16 +297,78 @@ _TOKEN_MARGIN_SECONDS = 300
 _token_cache: dict = {"key": "", "token": "", "expires_at": 0.0}
 
 
-def auth_mode() -> str:
-    """``pat`` or ``entra``; anything unrecognised reads as ``pat``.
+def normalise_auth_mode(raw: str) -> str:
+    """``pat`` or ``workload``, from whatever is stored or submitted. Pure.
 
-    Falling back to the stored-token path rather than to the identity path is
-    deliberate: a typo should degrade to the mode whose failure is a plain 401,
-    not to one that goes looking for a metadata endpoint and reports something
-    about Azure on an install that never mentioned Azure.
+    **``entra`` normalises to ``workload``.** Installs configured before this mode
+    covered more than Azure have that value in ``app_config``, and a rename that
+    silently demoted them to stored-token auth would break the one mode that has
+    no stored token to fall back on. Accepted on read, never written.
+
+    Anything unrecognised reads as ``pat``. Falling back to the stored-token path
+    rather than to the identity path is deliberate: a typo should degrade to the
+    mode whose failure is a plain 401, not to one that goes looking for a metadata
+    endpoint and reports something about a cloud on an install that never
+    mentioned one.
     """
-    mode = (_cfg("wlc_auth_mode") or AUTH_MODE_PAT).strip().lower()
+    mode = (raw or AUTH_MODE_PAT).strip().lower()
+    if mode == AUTH_MODE_ENTRA:
+        return AUTH_MODE_WORKLOAD
     return mode if mode in VALID_AUTH_MODES else AUTH_MODE_PAT
+
+
+def auth_mode() -> str:
+    """This install's auth mode, normalised. See :func:`normalise_auth_mode`."""
+    return normalise_auth_mode(_cfg("wlc_auth_mode"))
+
+
+def identity_platform() -> str:
+    """Which platform vouches for this container; ``azure`` when unset.
+
+    Defaulting to Azure rather than refusing is right HERE and wrong in the agent
+    worker, which refuses. The difference is that the worker runs on somebody
+    else's host and cannot know what it is, while this value is a setting an
+    operator chose on a panel — an unset one means an install that predates the
+    setting, and every one of those is the Azure install this mode used to be.
+    """
+    platform = (_cfg("wlc_identity_platform") or PLATFORM_AZURE).strip().lower()
+    return platform if platform in VALID_IDENTITY_PLATFORMS else PLATFORM_AZURE
+
+
+def identity_audience() -> str:
+    """What the token is minted FOR — its ``aud`` claim.
+
+    ``wlc_identity_audience`` with ``wlc_entra_resource`` behind it, because the
+    older key holds exactly this value on every install that set it. The Azure
+    panel calls it an App ID URI and GCP calls it an audience string; it is the
+    same field, so it is read from one place rather than branched on.
+    """
+    return _cfg("wlc_identity_audience") or _cfg("wlc_entra_resource")
+
+
+def identity_token_path(platform: str = "", env: Optional[dict] = None) -> str:
+    """The projected-token file for a file-based platform, or ``""``. Pure.
+
+    An explicit ``wlc_identity_token_file`` wins; otherwise the variables the
+    platform itself sets. Empty means this container has no projected token —
+    which on AWS is the ordinary state of an ECS task and is why ``_missing``
+    treats it as a configuration problem rather than letting the read fail later.
+    """
+    import os
+    env = os.environ if env is None else env
+    platform = platform or identity_platform()
+    explicit = _cfg("wlc_identity_token_file")
+    if explicit:
+        return explicit
+    if platform == PLATFORM_AWS:
+        for var in _AWS_TOKEN_FILE_VARS:
+            path = (env.get(var) or "").strip()
+            if path:
+                return path
+        return ""
+    if platform == PLATFORM_FILE:
+        return _K8S_TOKEN_FILE
+    return ""
 
 
 def clear_token_cache() -> None:
@@ -255,17 +383,37 @@ def clear_token_cache() -> None:
 
 
 def build_identity_request(resource: str, client_id: str = "",
-                           env: Optional[dict] = None) -> tuple:
+                           env: Optional[dict] = None,
+                           platform: str = PLATFORM_AZURE) -> tuple:
     """``(url, headers, params)`` for the platform's token endpoint. Pure.
 
-    ``IDENTITY_ENDPOINT`` + ``IDENTITY_HEADER`` when the runtime injects them
-    (Container Apps, App Service), otherwise IMDS. ``client_id`` selects a
-    **user-assigned** identity and is omitted for a system-assigned one — sending
-    it blank is not the same thing, it asks for an identity with no client id and
-    fails.
+    Only the two HTTP platforms reach here. The file-based ones have no request
+    to build, and calling this for them is a programming error rather than a
+    configuration one — hence the raise rather than a quiet empty tuple.
+
+    **Azure:** ``IDENTITY_ENDPOINT`` + ``IDENTITY_HEADER`` when the runtime
+    injects them (Container Apps, App Service), otherwise IMDS. ``client_id``
+    selects a **user-assigned** identity and is omitted for a system-assigned one
+    — sending it blank is not the same thing, it asks for an identity with no
+    client id and fails.
+
+    **GCP:** one endpoint on the metadata server, on Cloud Run and GCE and GKE
+    alike. There is no client-id equivalent: the service account is attached to
+    the revision, so which identity answers is a deployment fact rather than a
+    parameter.
     """
     import os
     env = os.environ if env is None else env
+    platform = (platform or PLATFORM_AZURE).strip().lower()
+
+    if platform == PLATFORM_GCP:
+        return (_GCP_IDENTITY_URL, {"Metadata-Flavor": "Google"},
+                {"audience": resource, "format": "full"})
+    if platform != PLATFORM_AZURE:
+        raise WorkloadCredentialsError(
+            f"identity platform {platform!r} reads a projected token file and "
+            "has no token endpoint to call")
+
     params = {"api-version": _IDENTITY_API_VERSION, "resource": resource}
     if client_id:
         params["client_id"] = client_id
@@ -274,6 +422,34 @@ def build_identity_request(resource: str, client_id: str = "",
     if endpoint and header:
         return endpoint, {"X-IDENTITY-HEADER": header}, params
     return _IMDS_TOKEN_URL, {"Metadata": "true"}, params
+
+
+def parse_jwt_expiry(token: str, now_epoch: float) -> float:
+    """The ``exp`` claim of a JWT, as an epoch. Pure.
+
+    **This does not verify anything, and must not be read as doing so.** The
+    signature is not checked and no claim is trusted: the only consumer is the
+    re-fetch memo, and the worst a forged ``exp`` can do is make this container
+    ask its own metadata server for another token. The party that verifies this
+    token is Pathfinder, which has the issuer's keys; this process never does.
+
+    Anything unreadable becomes ``now``, for the same reason
+    :func:`parse_identity_token` does it — the memo is an optimisation and must
+    never be the reason a request fails.
+    """
+    import base64
+    import json as _json
+
+    parts = (token or "").split(".")
+    if len(parts) < 2:
+        return now_epoch
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)          # base64url needs its padding back
+    try:
+        claims = _json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+        return float(claims["exp"])
+    except Exception:                              # noqa: BLE001 — see the docstring
+        return now_epoch
 
 
 def parse_identity_token(payload: Any, now_epoch: float) -> tuple:
@@ -309,13 +485,32 @@ def parse_identity_token(payload: Any, now_epoch: float) -> tuple:
     return str(token), expires_at
 
 
-def identity_error_message(status_code: int, body: Any) -> str:
+# Per-platform advice for a token fetch that failed. The platforms' own wording
+# is thin (`identity_not_found`), and the cause is nearly always a deployment
+# fact rather than anything in this app — so each line names the fact.
+_IDENTITY_HINTS = {
+    PLATFORM_AZURE: (" — check that a managed identity is assigned to this "
+                     "container and that the audience is an App ID URI the "
+                     "tenant will issue for"),
+    PLATFORM_GCP: (" — check that a service account is attached to this Cloud "
+                   "Run revision or instance, and that the audience matches the "
+                   "one the Custom IDP registration in Pathfinder expects"),
+    PLATFORM_AWS: (" — AWS serves a workload identity token as a projected FILE, "
+                   "and only EKS projects one (IRSA, or Pod Identity). ECS and "
+                   "plain EC2 get SigV4 credentials and an instance identity "
+                   "document, neither of which is an OIDC token, so a dashboard "
+                   "on ECS has to stay on a stored Personal Access Token"),
+    PLATFORM_FILE: (" — no projected token was found. Set wlc_identity_token_file "
+                    "to the path your platform mounts it at"),
+}
+
+
+def identity_error_message(status_code: int, body: Any,
+                           platform: str = PLATFORM_AZURE) -> str:
     """A message for a failed token fetch that names the likely cause.
 
-    The platform's own wording here is thin (``identity_not_found``), and the
-    cause is nearly always one of two deployment facts rather than anything in
-    this app: no identity assigned to the container, or a resource the tenant
-    will not issue a token for. Saying so beats echoing the body.
+    ``status_code`` 0 means the fetch never got as far as a request — the
+    file-based platforms' way of failing, where there is no HTTP to report.
     """
     detail = ""
     if isinstance(body, dict):
@@ -323,45 +518,82 @@ def identity_error_message(status_code: int, body: Any) -> str:
                             "error") or "")
     elif isinstance(body, str):
         detail = body[:200]
+    platform = (platform or PLATFORM_AZURE).strip().lower()
     hint = ""
-    if status_code in (400, 404):
-        hint = (" — check that a managed identity is assigned to this container "
-                "and that wlc_entra_resource is an App ID URI the tenant will "
-                "issue for")
+    if status_code in (0, 400, 404):
+        hint = _IDENTITY_HINTS.get(platform, "")
     suffix = f": {detail}" if detail else ""
-    return (f"could not get a managed identity token (HTTP {status_code})"
+    where = f" (HTTP {status_code})" if status_code else ""
+    return (f"could not get a workload identity token on {platform}{where}"
             f"{hint}{suffix}")
 
 
-def _entra_token() -> str:
-    """A bearer token for this container's own identity, memoised until expiry."""
+def _projected_token(path: str, platform: str) -> str:
+    """A token the platform wrote to disk for this container.
+
+    Not a stored credential despite being a file: it is audience-bound,
+    minutes-long, and rotated in place by the kubelet or the pod-identity agent.
+    Nothing here put it there and nothing here can renew it — which is the whole
+    property, and the reason it is re-read rather than memoised.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            token = fh.read().strip()
+    except OSError as exc:
+        raise WorkloadCredentialsError(
+            f"no projected identity token at {path} — on {platform} this file is "
+            "written by the platform, so an absent one means the workload "
+            f"identity is not wired up: {exc}") from exc
+    if not token:
+        raise WorkloadCredentialsError(
+            f"the projected identity token at {path} is empty")
+    return token
+
+
+def _workload_token() -> str:
+    """A bearer token for this container's own identity, from whichever platform
+    vouches for it. Memoised until expiry, except where a memo could go stale.
+
+    Every branch ends in an OIDC JWT this process was given rather than holds.
+    What differs is the transport — a JSON envelope, plain text, or a file — and
+    the transport is the only thing this function knows about the platform.
+    """
     import time
 
     import httpx
 
-    resource = _cfg("wlc_entra_resource")
-    if not resource:
-        raise WorkloadCredentialsError(
-            "Workload identity auth needs wlc_entra_resource — the App ID URI "
-            "the token is requested for, which becomes its `aud` claim")
-    client_id = _cfg("wlc_entra_client_id")
+    platform = identity_platform()
+    audience = identity_audience()
+    if platform in FILE_PLATFORMS:
+        path = identity_token_path(platform)
+        if not path:
+            raise WorkloadCredentialsError(identity_error_message(0, "", platform))
+        # No memo: the file is local and the platform rotates it underneath us.
+        return _projected_token(path, platform)
 
-    # Keyed on what the token is FOR. Without this, changing the resource or
-    # switching identities keeps serving a token minted for the old one, and the
-    # failure lands at BeyondTrust as an opaque 401.
-    key = f"{resource}|{client_id}"
+    if not audience:
+        raise WorkloadCredentialsError(
+            "workload identity auth needs wlc_identity_audience — what the token "
+            "is requested for, which becomes its `aud` claim")
+    client_id = _cfg("wlc_entra_client_id") if platform == PLATFORM_AZURE else ""
+
+    # Keyed on what the token is FOR, and now on WHICH platform issued it. Without
+    # this, changing the audience or switching identities keeps serving a token
+    # minted for the old one, and the failure lands at BeyondTrust as an opaque 401.
+    key = f"{platform}|{audience}|{client_id}"
     now = time.time()
     if (_token_cache.get("key") == key and _token_cache.get("token")
             and _token_cache.get("expires_at", 0.0) > now):
         return str(_token_cache["token"])
 
-    url, headers, params = build_identity_request(resource, client_id)
+    url, headers, params = build_identity_request(audience, client_id,
+                                                  platform=platform)
     try:
         with httpx.Client(timeout=_TIMEOUT_SECONDS) as client:
             resp = client.get(url, headers=headers, params=params)
     except httpx.HTTPError as exc:
         raise WorkloadCredentialsError(
-            "no managed identity endpoint reachable — a workload identity needs "
+            "no workload identity endpoint reachable — a workload identity needs "
             f"one assigned to this container: {exc}") from exc
 
     if resp.status_code >= 400:
@@ -370,18 +602,31 @@ def _entra_token() -> str:
         except ValueError:
             parsed = resp.text
         raise WorkloadCredentialsError(
-            identity_error_message(resp.status_code, parsed))
-    try:
-        payload = resp.json()
-    except ValueError as exc:
-        raise WorkloadCredentialsError(
-            "managed identity endpoint returned non-JSON "
-            f"(HTTP {resp.status_code})") from exc
+            identity_error_message(resp.status_code, parsed, platform))
 
-    token, expires_at = parse_identity_token(payload, now)
+    if platform == PLATFORM_GCP:
+        # PLAIN TEXT, not JSON. Parsing this as JSON fails on a perfectly good
+        # token and reads like a broken service account.
+        token = (resp.text or "").strip()
+        if token.count(".") < 2:
+            raise WorkloadCredentialsError(
+                "the GCP metadata server returned something that is not an "
+                "identity token — check that a service account is attached to "
+                "this revision")
+        expires_at = parse_jwt_expiry(token, now)
+    else:
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            raise WorkloadCredentialsError(
+                "workload identity endpoint returned non-JSON "
+                f"(HTTP {resp.status_code})") from exc
+        token, expires_at = parse_identity_token(payload, now)
+
     _token_cache.update({"key": key, "token": token,
                          "expires_at": expires_at - _TOKEN_MARGIN_SECONDS})
     return token
+
 
 
 def _auth_headers() -> dict:
@@ -391,17 +636,17 @@ def _auth_headers() -> dict:
     it the platform holds a valid token and no statement of which registered
     Workload Identity it is supposed to satisfy.
     """
-    if auth_mode() == AUTH_MODE_ENTRA:
+    if auth_mode() == AUTH_MODE_WORKLOAD:
         return {
-            "Authorization": f"Bearer {_entra_token()}",
+            "Authorization": f"Bearer {_workload_token()}",
             "X-BT-Service-Name": _cfg("wlc_service_name"),
         }
     if pat_is_self_referential():
         raise WorkloadCredentialsError(
             "wlc_pat is stored in Workload Credentials itself (wlc://…), which "
             "cannot be read without it. Either set the auth mode back to "
-            "workload identity (entra), where the PAT is not used at all, or "
-            "paste the token back into Settings -> Workload Credentials.")
+            "workload identity, where the PAT is not used at all, or paste the "
+            "token back into Settings -> Workload Credentials.")
     return {"Authorization": f"Bearer {_cfg('wlc_pat')}"}
 
 

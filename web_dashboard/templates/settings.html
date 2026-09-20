@@ -6327,21 +6327,20 @@
               <select x-model="panelCfg.wlc_auth_mode"
                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
                 <option value="pat">Personal Access Token (stored)</option>
-                <option value="entra">Azure workload identity (nothing stored)</option>
+                <option value="workload">Workload identity (nothing stored)</option>
               </select>
               <p class="text-[11px] text-gray-400 mt-1">
-                <strong>Workload identity</strong> is available when the dashboard runs as an
-                Azure container with a managed identity assigned. The container's own identity
-                token is presented to Pathfinder, which trusts it because you registered a
-                <strong>Workload Identity</strong> there — so this install holds
-                <strong>no BeyondTrust credential at all</strong>. Registering the trust is a
-                one-time action in the Pathfinder GUI under
+                <strong>Workload identity</strong> is available when the platform hands this
+                container its own identity token. The token is presented to Pathfinder, which
+                trusts it because you registered a <strong>Workload Identity</strong> there — so
+                this install holds <strong>no BeyondTrust credential at all</strong>. Registering
+                the trust is a one-time action in the Pathfinder GUI under
                 <strong>Administration → Workload Identities</strong>; there is no API for it.
                 See <a href="/docs/cloud-hosting" target="_blank"
                        class="text-blue-600 hover:text-blue-800 underline">Cloud hosting</a>.
               </p>
             </div>
-            <div class="mt-3" x-show="(panelCfg.wlc_auth_mode || 'pat') !== 'entra'" x-cloak>
+            <div class="mt-3" x-show="(panelCfg.wlc_auth_mode || 'pat') !== 'workload'" x-cloak>
               <label class="block text-sm font-medium text-gray-700 mb-1">Personal Access Token</label>
               <input type="password" x-model="panelCfg.wlc_pat" autocomplete="new-password"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
@@ -6357,7 +6356,28 @@
                 The workload-identity mode above removes it.
               </p>
             </div>
-            <div class="mt-3 space-y-3" x-show="panelCfg.wlc_auth_mode === 'entra'" x-cloak>
+            <div class="mt-3 space-y-3" x-show="panelCfg.wlc_auth_mode === 'workload'" x-cloak>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Identity platform</label>
+                <select x-model="panelCfg.wlc_identity_platform"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="azure">Azure — Container Apps, App Service, VM</option>
+                  <option value="gcp">GCP — Cloud Run, GCE, GKE</option>
+                  <option value="aws">AWS — EKS only (IRSA / Pod Identity)</option>
+                  <option value="file">Other — a projected token on disk</option>
+                </select>
+                <p class="text-[11px] text-gray-400 mt-1">
+                  Which platform vouches for this container. Azure and GCP each answer on their
+                  own metadata endpoint; AWS and <strong>Other</strong> read a token the platform
+                  has written to a file.
+                  <strong class="text-amber-700">On AWS this works on EKS only.</strong> ECS and
+                  plain EC2 hand out SigV4 credentials and an instance identity document — neither
+                  is an OIDC token — so a dashboard on ECS stays on a stored token above.
+                  In Pathfinder, Azure registers as <strong>Azure Entra ID</strong>; GCP and AWS
+                  register as a <strong>Custom IDP</strong> with a claim condition on
+                  <code>sub</code>.
+                </p>
+              </div>
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Service name</label>
                 <input type="text" x-model="panelCfg.wlc_service_name"
@@ -6369,20 +6389,49 @@
                   registration to evaluate this container's token against.
                 </p>
               </div>
-              <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Token resource (App ID URI)</label>
-                <input type="text" x-model="panelCfg.wlc_entra_resource"
+              <div x-show="['aws', 'file'].includes(panelCfg.wlc_identity_platform)" x-cloak>
+                <label class="block text-sm font-medium text-gray-700 mb-1">
+                  Projected token file <span class="text-gray-400 font-normal">(optional)</span>
+                </label>
+                <input type="text" x-model="panelCfg.wlc_identity_token_file"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
-                       placeholder="api://vm-dashboard-wlc">
+                       placeholder="(blank = the platform's own path)">
                 <p class="text-[11px] text-gray-400 mt-1">
+                  Where the platform mounts this container's identity token. Leave blank for the
+                  defaults — <code>AWS_WEB_IDENTITY_TOKEN_FILE</code> or
+                  <code>AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE</code> on AWS, the Kubernetes
+                  ServiceAccount token path otherwise. <strong>The file is not a secret you
+                  manage</strong>: the platform writes it, rotates it in place, and this app only
+                  reads it.
+                </p>
+              </div>
+              <div x-show="!['aws', 'file'].includes(panelCfg.wlc_identity_platform)" x-cloak>
+                <label class="block text-sm font-medium text-gray-700 mb-1">
+                  Token audience
+                  <span class="text-gray-400 font-normal"
+                        x-text="panelCfg.wlc_identity_platform === 'gcp' ? '(audience string)' : '(App ID URI)'"></span>
+                </label>
+                <input type="text" x-model="panelCfg.wlc_identity_audience"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       :placeholder="panelCfg.wlc_identity_platform === 'gcp'
+                                     ? 'e.g. beyondtrust-wlc'
+                                     : 'api://vm-dashboard-wlc'">
+                <p class="text-[11px] text-gray-400 mt-1"
+                   x-show="panelCfg.wlc_identity_platform !== 'gcp'">
                   What the managed identity requests a token <em>for</em>; it becomes the
                   token's <code>aud</code>. Use an app registration in your own tenant with
                   <code>accessTokenAcceptedVersion: 2</code> — that is what makes the issuer
                   <code>…/v2.0</code>, which is the issuer the Azure Entra ID registration type
                   expects.
                 </p>
+                <p class="text-[11px] text-gray-400 mt-1"
+                   x-show="panelCfg.wlc_identity_platform === 'gcp'">
+                  Any string, as long as it matches the audience your Custom IDP registration in
+                  Pathfinder expects. The metadata server signs a token with this as its
+                  <code>aud</code>; the issuer is <code>https://accounts.google.com</code>.
+                </p>
               </div>
-              <div>
+              <div x-show="panelCfg.wlc_identity_platform === 'azure'" x-cloak>
                 <label class="block text-sm font-medium text-gray-700 mb-1">
                   User-assigned identity client ID <span class="text-gray-400 font-normal">(optional)</span>
                 </label>
@@ -6394,7 +6443,9 @@
                   <strong>user-assigned</strong> identity is usually the better choice here: the
                   app and the worker are separate container apps, and sharing one identity means
                   <strong>one</strong> registration in Pathfinder instead of two — and the worker
-                  is where credentials are actually minted.
+                  is where credentials are actually minted. Azure only — GCP attaches a
+                  service account to the revision and AWS projects a token for the pod, so
+                  neither has an equivalent.
                 </p>
               </div>
             </div>

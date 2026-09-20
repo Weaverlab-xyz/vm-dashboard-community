@@ -1984,13 +1984,17 @@ class WorkloadCredentialsFeatureConfig(BaseModel):
     wlc_api_base_url: str = "https://api.beyondtrust.io"
     wlc_site_id: str = ""
     wlc_pat: str = ""
-    # "pat" | "entra". The second authenticates with the container's own Azure
+    # "pat" | "workload". The second authenticates with the container's own cloud
     # managed identity against a Workload Identity registered in Pathfinder, and
-    # stores no credential at all. The three fields below are its wiring; all are
+    # stores no credential at all. The fields below are its wiring: the platform
+    # that vouches for the container, the registration's service name, the
+    # audience, and a projected-token path for the file platforms. All are
     # identifiers, none is a secret, which is the whole point of the mode.
     wlc_auth_mode: str = "pat"
+    wlc_identity_platform: str = "azure"
     wlc_service_name: str = ""
-    wlc_entra_resource: str = ""
+    wlc_identity_audience: str = ""
+    wlc_identity_token_file: str = ""
     wlc_entra_client_id: str = ""
     # Mandatory `bt-secrets-api-version` header value. A wrong version fails in a
     # way that reads like an auth error, so it is explicit, not inferred.
@@ -2259,8 +2263,11 @@ def _guard_wlc_auth_mode(filtered: dict, touched: set | None) -> None:
     from ..services import workload_credentials_service as wlc
     if "wlc_auth_mode" not in filtered:
         return
-    mode = str(filtered.get("wlc_auth_mode") or "").strip().lower()
-    if mode == wlc.AUTH_MODE_ENTRA:
+    # Normalised, not compared raw: the panel writes "workload" and older installs
+    # hold "entra", and both mean the mode where wlc_pat is never read. Comparing
+    # the raw string would refuse a save that is perfectly well formed.
+    mode = wlc.normalise_auth_mode(str(filtered.get("wlc_auth_mode") or ""))
+    if mode == wlc.AUTH_MODE_WORKLOAD:
         return
     typed_pat = str(filtered.get("wlc_pat") or "").strip()
     if typed_pat and (touched is None or "wlc_pat" in touched):
@@ -2271,9 +2278,38 @@ def _guard_wlc_auth_mode(filtered: dict, touched: set | None) -> None:
         status_code=400,
         detail="wlc_pat is currently stored in Workload Credentials itself "
                "(wlc://…), so stored-token auth cannot read it. Stay on "
-               "workload-identity (entra) auth, or paste a Personal Access Token "
-               "into this panel in the same save.",
+               "workload-identity auth, or paste a Personal Access Token into "
+               "this panel in the same save.",
     )
+
+
+def _carry_legacy_wlc_identity(data: dict) -> None:
+    """Make a pre-rename install open this panel showing what it actually has.
+
+    Two fields, both for installs configured before the workload-identity mode
+    covered more than Azure:
+
+    **The audience.** ``wlc_entra_resource`` held exactly this value, and
+    ``workload_credentials_service.identity_audience`` still reads it. The panel
+    no longer binds it, though — so without this an install that set it opens the
+    page to a blank audience box, sees nothing wrong, and saves a config whose new
+    key is empty while the old one is silently still in force. Carrying it forward
+    means the first save through this panel writes the value under its new name.
+
+    **The platform.** ``_read_feature`` returns a plain string field as whatever
+    is stored, which for a key that did not exist yet is ``""`` — and a ``<select>``
+    whose model is ``""`` renders blank. The value would still behave as ``azure``
+    (:func:`~...identity_platform` defaults there), so this is cosmetic, but a
+    blank dropdown on a working install reads as a setting nobody chose.
+    """
+    from ..services import config_service
+    if not data.get("wlc_identity_audience"):
+        legacy = config_service.get("wlc_entra_resource") or ""
+        if legacy:
+            data["wlc_identity_audience"] = legacy
+    if not data.get("wlc_identity_platform"):
+        from ..services import workload_credentials_service as wlc
+        data["wlc_identity_platform"] = wlc.PLATFORM_AZURE
 
 
 @router.get("/feature/{feature_name}")
@@ -2283,7 +2319,10 @@ def get_feature_config(feature_name: str, request: Request):
     model_cls = _FEATURE_MODELS.get(feature_name)
     if model_cls is None:
         raise HTTPException(status_code=404, detail=f"Unknown feature: {feature_name}")
-    return _read_feature(feature_name, model_cls)
+    data = _read_feature(feature_name, model_cls)
+    if feature_name == "workload_credentials":
+        _carry_legacy_wlc_identity(data)
+    return data
 
 
 @router.patch("/feature/{feature_name}")

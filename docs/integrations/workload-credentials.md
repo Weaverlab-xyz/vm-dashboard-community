@@ -28,8 +28,8 @@ cares about:
 | Dynamic AWS credentials for the dashboard's own cloud calls | **Implemented** — not yet exercised against a live dynamic secret |
 | Splitting AWS into an everyday and a provisioning lease | **Implemented** — opt-in, not yet exercised live |
 | Dynamic Azure credentials | **Implemented** — not yet exercised against a live dynamic secret |
-| Authenticating to WC with an **Azure workload identity** instead of a stored PAT | **Implemented** — client path unit-tested; the Azure + Pathfinder wiring not yet run live |
-| In-cluster workload identity (a pod federating its ServiceAccount token) | Planned |
+| Authenticating to WC with a **workload identity** instead of a stored PAT | **Implemented** — Azure run end to end 2026-09-15; GCP and AWS client paths unit-tested, not yet pointed at a live registration |
+| In-cluster workload identity (a pod federating its ServiceAccount token) | **Implemented** — the `file` platform reads the projected token; not yet run live |
 
 The static-secret backend was deliberately first: it exercises the site, token
 and API version end to end **without incurring a metered credential issuance**,
@@ -154,7 +154,7 @@ The in-cluster path is the one that can reach genuinely zero standing
 credentials, because a pod federates its own ServiceAccount token rather than
 presenting a stored one.
 
-On the Azure workload-identity path there is no PAT either, and that is what
+On **any** workload-identity platform there is no PAT either, and that is what
 makes it possible to move **every** remaining database secret into WC itself —
 see [Emptying the database](#emptying-the-database-wc-as-the-secrets-backend).
 
@@ -239,11 +239,33 @@ leaves a credential behind.
 | Mode | What it holds | Where it works |
 |---|---|---|
 | **Personal Access Token** (default) | the PAT, encrypted in `app_config` | anywhere |
-| **Azure workload identity** | **nothing** | the dashboard running as an Azure container with a managed identity |
+| **Workload identity** | **nothing** | wherever the platform hands the container an OIDC token — see below |
 
-In the second mode the container asks the Azure platform for a short-lived token
+In the second mode the container asks its own platform for a short-lived token
 for its own identity, and Pathfinder accepts it because a **Workload Identity**
-registered there names that identity's issuer and service-principal object id.
+registered there names that identity's issuer and a constraint on its claims.
+
+**It is not Azure-only.** `wlc_identity_platform` selects which platform is
+asked, because [cloud-hosting.md](../cloud-hosting.md) documents this dashboard
+running as a managed container on Azure Container Apps, GCP Cloud Run or AWS ECS:
+
+| Platform | Token source | Note |
+|---|---|---|
+| `azure` | `IDENTITY_ENDPOINT`/`IDENTITY_HEADER`, else IMDS | a JSON envelope carrying `access_token` |
+| `gcp` | the metadata server's instance identity endpoint | returns the JWT as **plain text** |
+| `aws` | a projected token file — `AWS_WEB_IDENTITY_TOKEN_FILE` (IRSA) or `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` (Pod Identity) | **EKS only**, see below |
+| `file` | any other projected token on disk | the Kubernetes ServiceAccount token every cluster mounts |
+
+> **ECS cannot use this mode.** An ECS task and a plain EC2 instance get SigV4
+> credentials and a signed instance identity document — neither is an OIDC token,
+> and no endpoint there will issue one. Only EKS projects a real one. A dashboard
+> on ECS stays on a stored PAT, and the error says so rather than reporting a
+> missing file.
+
+The older spelling `entra` for this mode still reads as `workload`, so an install
+configured before it covered more than Azure keeps working untouched. The same
+goes for `wlc_entra_resource`, which is read as the audience when
+`wlc_identity_audience` is unset.
 Every request then carries that token plus an `X-BT-Service-Name` header naming
 the registration to evaluate it against. Nothing is stored, and there is nothing
 to rotate.
@@ -285,7 +307,7 @@ Which auth mode you are on decides whether that is *every* secret:
 | Auth mode | What the database keeps afterwards |
 |---|---|
 | **Personal Access Token** | one row: `wlc_pat` itself. The migration refuses to move it, because the token that authenticates to WC cannot be stored inside WC |
-| **Azure workload identity** | nothing. Nothing reads `wlc_pat` on this mode, so it migrates like any other secret |
+| **Workload identity** (any platform) | nothing. Nothing reads `wlc_pat` on this mode, so it migrates like any other secret |
 
 The dry run reports the PAT as a skipped **bootstrap credential** on the first
 mode. That is the only secret held back, and switching auth modes is the way to

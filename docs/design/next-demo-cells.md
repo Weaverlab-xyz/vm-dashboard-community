@@ -291,7 +291,8 @@ that makes the mechanism general rather than clever. Two things the second draft
 
 `services/workload_credentials_service` states its half in its own docstring: *"Two auth
 modes, and the second one stores nothing."* `wlc_auth_mode` is either `pat` — a stored
-token — or **`entra`**, where the platform vouches for the machine and no PAT exists:
+token — or **`workload`** (spelled `entra` before §5c), where the platform vouches for
+the machine and no PAT exists:
 
 1. the workload asks its platform for **its own identity token**;
 2. it presents that to **Workload Credentials** in place of a PAT, with
@@ -377,11 +378,7 @@ is that the worker can hold its own credential without one being left on a disk 
 
 Three named gaps, none of them a property of the design:
 
-* **The dashboard's own WC client is Azure-only.** `AUTH_MODE_ENTRA` reads
-  `wlc_entra_resource` and calls IMDS; there is no AWS or GCP branch in
-  `workload_credentials_service`. The *worker* now has all five, so the gap is a missing
-  implementation on the app side rather than a limit, and it is a contained one — the
-  seam is `build_identity_request`.
+* ~~**The dashboard's own WC client is Azure-only.**~~ **Fixed — see §5c.**
 * **Nothing here has been run live.** No Workload Credentials tenant, no registered
   Workload Identity, no federation trust. The client paths are unit-tested and that is all
   they are.
@@ -392,6 +389,56 @@ Three named gaps, none of them a property of the design:
 
 So `file` stays the default, and every line the worker logs names which mode produced its
 token.
+
+## 5c. The dashboard's own client, and the hosting page that settles it
+
+§5b built five identity platforms into the agent **worker** and recorded, honestly, that
+the **dashboard's own** Workload Credentials client still had one. That asymmetry is now
+closed, and the argument that closed it is worth keeping because it is stronger than the
+one §5b used.
+
+§5b argued from capability — *OIDC federation for non-human identities is available in all
+three clouds*, which is true and is not quite a reason to build anything. The reason is in
+`docs/cloud-hosting.md`, which has said all along that this dashboard runs as a managed
+container on **Azure Container Apps, GCP Cloud Run or AWS ECS**. Wiring only Azure left two
+of the three *documented hosting options* unable to use the mode that stores nothing —
+not because the mechanism belonged to Azure, but because nothing here asked the other
+platforms for a token. A feature the install guide offers and the auth path cannot serve is
+a gap with a date on it, not a preference.
+
+The module's own comment had the reasoning the wrong way round: *"Only the Azure one is
+wired here, because the thing being authenticated is an Azure-hosted container."* The
+container is Azure-hosted **in the reference install**. The page describing the other two
+was already written.
+
+### What changed
+
+| | Before | After |
+|---|---|---|
+| Mode | `entra` | `workload` (`entra` still accepted on read) |
+| Platform | implicit | `wlc_identity_platform` — `azure`, `gcp`, `aws`, `file` |
+| Audience | `wlc_entra_resource` | `wlc_identity_audience` (old key read behind it) |
+| Pathfinder registration | Azure Entra ID | Azure Entra ID, or **Custom IDP** for the rest |
+
+Three details the build turned up:
+
+* **GCP returns the token as plain text**, not a JSON envelope, so the expiry has to come
+  out of the JWT's own `exp` claim. Nothing is verified in doing so and the code says why:
+  the only consumer is the re-fetch memo, and Pathfinder is what holds the issuer's keys.
+* **The file platforms are never memoised.** The platform rotates a projected token in
+  place, the read is local, and a memo would be the only thing capable of serving a stale
+  one.
+* **ECS cannot use this mode at all**, and that is the one real limit. An ECS task — like a
+  plain EC2 instance — gets SigV4 credentials and a signed instance identity document, and
+  no endpoint there issues an OIDC token. Only EKS projects one, via IRSA or Pod Identity.
+  A dashboard on ECS stays on a stored PAT; the panel says so before the choice is made and
+  the error says so after.
+
+### Still unproven
+
+Azure was run end to end on 2026-09-15 and remains the only platform that has been. GCP
+and AWS have unit-tested client paths and no live Pathfinder registration behind them. The
+hosting page and the integration page both say which is which.
 
 ## 6. What is deliberately not proposed
 
