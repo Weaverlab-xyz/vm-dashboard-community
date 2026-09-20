@@ -45,25 +45,160 @@ it.
 Every loop leaves one line carrying both:
 
 ```
-[agent] spiffe://weaverlab.test/agent/mcp-reader · token vmcli_9f3c… · 14 active jobs, 2 failed today · 14:02:11
+[agent] spiffe://weaverlab.test/agent/mcp-reader · token "mcp-reader-pat" · 14 active jobs, 2 failed today · 14:02:11
 ```
 
-Who it is, what it spent, what it saw. The token hint is enough to find the row in
-**Settings → API Tokens** and not enough to use — the full value never reaches a log.
+Who it is, what it spent, what it saw.
+
+**The token is named, not shown.** That is the PAT's *name* in the line — the one
+**Settings → API Tokens** lists, and the one you are about to revoke. No part of the
+credential reaches a log, and an error from the MCP client is scrubbed of anything
+token-shaped on its way to one.
 
 ## What is not built
 
 > **The SVID does not authenticate to `/mcp`, and nothing here pretends it does.** The MCP
-> server takes a Bearer PAT (`api/mcp_server.py`) and has no mTLS path. Bridging the two —
-> having the SVID *mint* the PAT — needs the Password Safe **SPIFFE SVID** plugin, and
-> `services/spire_lab_service.py` records in its own docstring that whether the gateway
-> populates plugin attributes is unresolved, so writing against it "would be betting on
-> the answer". This cell does not bet on it either.
+> server takes a Bearer PAT (`api/mcp_server.py`) and has no mTLS path. Bridging *those
+> two specifically* — having the SVID mint the PAT — would need the Password Safe
+> **SPIFFE SVID** plugin, whose configuration question `spire_lab_service` records as
+> unresolved. This cell does not bet on it.
 >
-> So the two halves are shown side by side, each real, with the gap named. If somebody
-> asks whether the identity could issue the authorization: **not yet, and here is exactly
-> what has to be answered first.** That is a better moment than a hand-wave, and this
-> audience is listening for it.
+> **But the worker still need not hold a static secret**, and that is the part worth
+> demoing — see [No static secret on the host](#no-static-secret-on-the-host). The
+> identity that removes it federates over **OIDC**, which is a different mechanism from
+> the mTLS bridge above. SPIRE can be that issuer — the lab already publishes the trust
+> domain as one — and so can any of the three clouds. What stays unbuilt is specifically
+> the SVID-to-PAT bridge inside Password Safe, not the workload's ability to prove who it
+> is without holding anything.
+
+## No static secret on the host
+
+The worker has three token sources, and two of them store nothing.
+
+| `--token-source` | What sits on the host | Honest name for it |
+|---|---|---|
+| `file` (default) | a 0600 file holding the PAT | a static secret, smaller than an env var but still a static secret |
+| `wlc` | **nothing** | the platform vouches for the machine; Workload Credentials serves the PAT from its own store |
+| `ps` | **nothing** | Workload Credentials hands over the Password Safe API client pair, and the worker *requests* the credential from the vault |
+
+In both of the second two, the worker starts the same way:
+
+1. it asks its platform for **its own identity token**;
+2. it presents that to **Workload Credentials** in place of a PAT, with
+   `X-BT-Service-Name` naming which registered Workload Identity it satisfies.
+
+`wlc` stops there and reads the PAT out of WC. `ps` goes one step further, and that step
+is the argument:
+
+3. WC returns the **Password Safe API client id and secret**;
+4. the worker signs in to Password Safe with that pair and **requests** the credential —
+   `POST Auth/Connect/Token` → `SignAppIn` → `POST Requests` → `GET Credentials/{id}` →
+   `PUT Requests/{id}/Checkin`, the same sequence `services/ps_api_service` uses.
+
+Everything the worker is *configured* with — site id, service name, audience, base URL,
+the two WC secret **names**, the account id — is **non-secret**.
+`services/workload_credentials_service` puts its half plainly: *"Two auth modes, and the
+second one stores nothing."*
+
+### Why `ps` is worth the extra hop
+
+Password Safe authenticates an application with a client-credentials pair, so that pair is
+a standing credential and always was. The question is **where it lives** — and in `ps` mode
+it lives in Workload Credentials, not on this box. WC becomes a *bootstrap for the vault*
+rather than a second vault beside it, which is what lets the worker reach anything Password
+Safe governs rather than only what was copied into WC.
+
+Everything Password Safe already governs then governs this too. Say it in the room while
+the credential is in flight:
+
+- the retrieval is a **recorded request**, with a duration and a reason;
+- it can be made to **require approval** — the worker simply waits, and says so;
+- the credential behind it **rotates** on its own schedule, and the worker re-requests.
+
+A PAT in a file has none of those properties and never will.
+
+**This is the suite answering its own question.** Password Safe (old) holds and governs the
+secret; Workload Credentials (new) brokers the way in against an identity the platform
+vouches for; the workload holds nothing. Neither product does that alone, and the seam
+between them is the thing worth showing — a competitor with one half cannot.
+
+It also removes the asterisk this cell was carrying. "A non-human principal that holds no
+standing credential" is the argument, and a PAT in a file was that argument with a caveat.
+
+### The identity is not Azure-only
+
+Every major cloud federates non-human identities over OIDC. `--identity-platform` picks
+which issuer is asked, and one of them is not a cloud at all:
+
+| Platform | Where the token comes from |
+|---|---|
+| `azure` | IMDS, or `IDENTITY_ENDPOINT`/`IDENTITY_HEADER` where the runtime injects them |
+| `gcp` | the metadata server's `instance/service-accounts/default/identity` endpoint |
+| `aws` | the projected token at `AWS_WEB_IDENTITY_TOKEN_FILE` (IRSA) or `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` (EKS Pod Identity) |
+| `spire` | a JWT-SVID from the SPIRE agent already on this host |
+| `file` | any other projected token on disk, such as a Kubernetes ServiceAccount token |
+| `auto` | whichever of the above this host declares — it refuses rather than guessing |
+
+Two of these rows are worth saying out loud:
+
+- **AWS has no OIDC endpoint on IMDS.** A plain EC2 instance gets SigV4 credentials and a
+  signed identity document, not an OIDC JWT. The projected file is how an AWS non-human
+  identity holds one, and it comes from a cluster. On plain EC2, use `spire`.
+- **`spire` needs no cloud.** The Workload Lab already publishes the trust domain as an
+  OIDC issuer, so a bare-metal host federates on the same mechanism a cloud VM does. That
+  is the row that covers the hardware in a rack — the shape the network and OT cells have.
+
+`auto` detects by marker and **refuses rather than guessing** when the host declares
+nothing. No file tells a bare Azure VM apart from a bare GCE one, and `169.254.169.254` is
+both their metadata addresses; probing would mean a request that has to time out to say no.
+Name the platform — it is one word and never wrong.
+
+> **Unproven, so `file` is still the default.** No Workload Credentials tenant, no
+> registered Workload Identity and no federation trust has been stood up for this. The
+> dashboard's *own* WC client is Azure-only besides (`AUTH_MODE_ENTRA` calls IMDS and
+> nothing else) — the worker has all five platforms, the app has one. The `ps` source
+> additionally needs an API-enabled managed account with the Requestor role and an access
+> policy that auto-releases, the usual out-of-band prerequisites in
+> [password-safe.md](../../integrations/password-safe.md). The worker names its token
+> source on every line it logs, so which mode is in play is never in doubt.
+
+Re-running the install play with `agent_token_source: wlc` or `ps` **removes** any token a
+previous `file` install left behind — "nothing is stored on this host" must not be
+contradicted by a file in `/etc`.
+
+## What this agent is answerable for
+
+An agent can be **linked** to one Workload Lab credential
+(`POST /api/agentcell/agent/{id}/link`, `cloud` only today), so that "what does this
+agent have access to" is one lookup rather than a conversation. The agent's listing then
+reports that credential's lease state beside it.
+
+> **A link is not a consumption, and the distinction is the point.** The worker is given
+> nothing by it. The Cloud tab's credential *"is returned to nobody"*, and the Kubernetes
+> and Certificate tabs vault theirs where a consumer needs a Password Safe client — which
+> is another credential — to reach. So no Workload Lab credential can reach this worker
+> without it already holding one, which is the standing secret this whole cell argues
+> against.
+>
+> The way out would be an independent trust path the worker can prove without holding
+> anything — an SVID — and that is the same bridge
+> [What is not built](#what-is-not-built) already names. See
+> [§5b of the design note](https://github.com/Weaverlab-xyz/vm-dashboard-community/blob/main/docs/design/next-demo-cells.md)
+> for the full reasoning and what would have to be answered first.
+
+What the link is genuinely good for is the thing the Cloud tab cannot currently show:
+
+- **It says the revoke asymmetry out loud at link time.** Azure leases can be released
+  early; **AWS leases cannot be revoked at all**, so the TTL is the only control there is.
+  That is the provider's limit rather than this dashboard's, and hearing it when you link
+  is better than discovering it when you try to revoke in front of a room.
+- **An expired lease reads as the mechanism working**, not as a fault — honouring
+  `workload_cloud_service.lease_state`, which exists to keep those two apart.
+
+**One link at a time.** An agent answerable for a cloud lease *and* a cluster token *and*
+a certificate would be the most over-credentialed principal in the estate, which is the
+arrangement this cell argues against. Unlink before relinking, so widening is a decision
+rather than an accumulation.
 
 ## The refusals, and why each one exists
 
@@ -102,7 +237,7 @@ About twelve minutes, and step 5 is the whole thing.
 5. **Revoke the token** from Settings → API Tokens, with the log still on screen:
 
    ```
-   [agent] spiffe://weaverlab.test/agent/mcp-reader · token vmcli_9f3c… · REFUSED — the token is revoked or expired · 14:06:41
+   [agent] spiffe://weaverlab.test/agent/mcp-reader · token "mcp-reader-pat" · REFUSED — the token is revoked or expired · 14:06:41
    [agent] stopping: the identity is still valid, the authorization is not.
    ```
 
@@ -129,7 +264,8 @@ teardown of its own beyond revoking what it issued.
 - [ ] `spire-agent api fetch x509` returns a SPIFFE ID the worker can parse. *(Unproven —
       see the preview note.)*
 - [ ] The MCP SSE client connects through your ingress. *(Unproven.)*
-- [ ] The log line carries **both** the SPIFFE ID and the token hint.
+- [ ] The log line carries **both** the SPIFFE ID and the token's name, and no part of
+      the token's value.
 - [ ] Revoking the token stops the unit, and `systemctl status mcp-agent` shows it stopped
       rather than restarting in a loop.
 - [ ] Deleting the SPIFFE registration entry makes the next line say `unattested`, without

@@ -163,6 +163,105 @@ def pat_name_for(cell_name: str) -> str:
     return f"agent-cell-{slug or 'agent'}"
 
 
+# ── The Workload Lab link ─────────────────────────────────────────────────────
+# Which tabs an agent can be made ANSWERABLE FOR. Only `cloud` is wired, and the reason
+# the other three are absent is structural rather than unfinished work:
+#
+#   * the **Cloud** tab's credential "is returned to nobody" (workload_cloud_service);
+#   * the **Kubernetes** tab vaults its token where "the consumer is a program with a
+#     Password Safe API client" (workload_k8s_service);
+#   * the **Certificates** tab writes a PKCS#12 into Secrets Safe on the same principle.
+#
+# So a worker cannot SPEND any of them without already holding a credential to fetch the
+# credential -- which is the standing secret this whole cell argues against. Closing that
+# needs an independent trust path, which is the SPIFFE bridge the agent cell already
+# names as unbuilt. See docs/design/next-demo-cells.md section 5b.
+#
+# `cloud` is wired not because the worker can use it, but because its row carries a lease
+# whose STATE is worth reporting beside the agent -- see `link_notes`.
+LINKABLE_MECHANISMS = ("cloud",)
+
+# Named here so the refusal can list them without claiming they are coming.
+_UNWIRED_MECHANISMS = ("kubernetes", "certificates", "spire")
+
+
+def link_problem(mechanism: str) -> str:
+    """Refuse a link to a mechanism this cell cannot report on.
+
+    The refusal distinguishes "not a tab" from "a tab whose credential no worker can
+    reach", because those are different answers and the second one is the interesting
+    one -- an operator who tries it is asking a reasonable question and deserves the
+    structural reason rather than a validation error.
+    """
+    m = (mechanism or "").strip().lower()
+    if m in LINKABLE_MECHANISMS:
+        return ""
+    if m == "spire":
+        return ("The agent is already attested by SPIRE — that link is its SPIFFE ID, "
+                "recorded when the cell was created, and it does not need a second one.")
+    if m in _UNWIRED_MECHANISMS:
+        return (f"The {m} tab vaults its credential where a consumer needs a Password "
+                "Safe client to reach it — another credential — so nothing here could "
+                "report on it honestly. Only 'cloud' can be linked today; see "
+                "docs/design/next-demo-cells.md §5b for what would have to exist first.")
+    return (f"{mechanism!r} is not a Workload Lab mechanism. Linkable today: "
+            f"{', '.join(LINKABLE_MECHANISMS)}.")
+
+
+def already_linked_problem(row) -> str:
+    """One link at a time.
+
+    The constraint §5b records, and the reason it exists: an agent answerable for a
+    cloud lease AND a cluster token AND a certificate would be the most
+    over-credentialed principal in the estate, which is the arrangement this cell exists
+    to argue against. Unlink before relinking, deliberately, so the widening is a
+    decision somebody makes rather than an accumulation.
+    """
+    current = (getattr(row, "linked_mechanism", "") or "").strip()
+    if not current:
+        return ""
+    return (f"This agent is already answerable for its {current} credential. Unlink that "
+            "first — an agent accumulating credentials is the shape this demo argues "
+            "against, so widening one is a decision rather than a default.")
+
+
+def link_notes(cloud: str, revocable: bool) -> list:
+    """What to say back when an agent is linked to a cloud credential.
+
+    Leads with what the link is NOT, because the honest risk here is that a governance
+    record reads as a capability. Then the revoke asymmetry, surfaced at link time rather
+    than discovered when somebody tries to revoke in front of an audience.
+    """
+    notes = [
+        "This records what the agent is answerable for. **It does not give the worker "
+        "the credential** — the Cloud tab's credential is returned to nobody, by design, "
+        "so nothing here can spend it.",
+    ]
+    if revocable:
+        notes.append(
+            f"{cloud} leases can be released early, so revoking one is observable in the "
+            "lab's own record — though not, yet, in the agent's behaviour.")
+    else:
+        notes.append(
+            f"{cloud} leases **cannot be revoked at all** — the TTL is the only control "
+            "there is. That is the provider's limit, not this dashboard's, and it is "
+            "worth saying out loud before somebody promises a revoke.")
+    return notes
+
+
+def link_summary(mechanism: str, lease_state: str) -> str:
+    """One clause for the agent's row. `lease_state` comes from
+    ``workload_cloud_service.lease_state``, whose docstring is worth honouring here:
+    **an expired lease is the mechanism working**, so it must not render as a fault."""
+    if not mechanism:
+        return ""
+    if lease_state == "expired":
+        return f"{mechanism}: credential expired — the mechanism working, not a fault"
+    if lease_state == "live":
+        return f"{mechanism}: credential live"
+    return f"{mechanism}: no credential issued yet"
+
+
 def stages_done(row) -> list:
     return [s for s in ((getattr(row, "stages_done", "") or "").split(",")) if s]
 

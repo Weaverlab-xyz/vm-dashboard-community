@@ -26,6 +26,8 @@ from ..models.agentcell import (
     AgentCellCreateRequest,
     AgentCellCreateResponse,
     AgentCellInfo,
+    AgentCellLinkRequest,
+    AgentCellLinkResponse,
     AgentCellListResponse,
 )
 from ..services import agentcell_service
@@ -168,8 +170,102 @@ def list_agents(
             pat_revoked_at=_iso(row.pat_revoked_at),
             wired=agentcell_service.is_wired(row),
             stages_done=agentcell_service.stages_done(row),
+            linked_mechanism=row.linked_mechanism or "",
+            linked_credential_id=row.linked_credential_id or "",
+            linked_summary=agentcell_service.link_summary(
+                row.linked_mechanism or "", _lease_state(db, row)),
         ))
     return AgentCellListResponse(agents=agents)
+
+
+def _lease_state(db: Session, row) -> str:
+    """The linked credential's lease state, or "" when there is no link.
+
+    Read through ``workload_cloud_service.lease_state`` rather than computed here, so
+    "expired" keeps meaning what that function says it means: **the mechanism working**,
+    not a fault. A second implementation would be a second opinion about that.
+    """
+    if (row.linked_mechanism or "") != "cloud" or not row.linked_credential_id:
+        return ""
+    try:
+        from ..services import workload_cloud_service as wcs
+        wl_row = wcs.get_row(db, row.linked_credential_id)
+        return wcs.lease_state(wl_row) if wl_row else ""
+    except Exception as exc:  # noqa: BLE001
+        logger.info("agentcell: could not read the linked lease state (%s)", exc)
+        return ""
+
+
+@router.post("/agent/{agent_id}/link", response_model=AgentCellLinkResponse)
+def link_agent(
+    agent_id: str,
+    payload: AgentCellLinkRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("config_mgmt", "write")),
+):
+    """Make an agent answerable for one Workload Lab credential.
+
+    **This gives the worker nothing.** None of the lab's credentials can reach it — the
+    Cloud tab's is returned to nobody and the other two are vaulted behind a Password
+    Safe client — so what this records is accountability, not capability. The response
+    leads with that rather than burying it, because a governance record that reads as a
+    capability is the failure mode here.
+    """
+    row = db.query(AgentCell).filter(AgentCell.id == agent_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="No such agent cell.")
+
+    for problem in (agentcell_service.link_problem(payload.mechanism),
+                    agentcell_service.already_linked_problem(row)):
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+
+    from ..services import workload_cloud_service as wcs
+    wl_row = wcs.get_row(db, payload.credential_id)
+    if not wl_row:
+        raise HTTPException(status_code=404,
+                            detail="No such Workload Lab cloud credential.")
+
+    row.linked_mechanism = payload.mechanism.strip().lower()
+    row.linked_credential_id = wl_row.id
+    row.linked_at = datetime.utcnow()
+    db.commit()
+    db.refresh(row)
+
+    logger.info("agent cell %s linked to %s credential %s by %s",
+                row.id, row.linked_mechanism, wl_row.id, current_user.username)
+    return AgentCellLinkResponse(
+        id=row.id,
+        mechanism=row.linked_mechanism,
+        credential_id=row.linked_credential_id,
+        summary=agentcell_service.link_summary(
+            row.linked_mechanism, wcs.lease_state(wl_row)),
+        notes=agentcell_service.link_notes(wl_row.cloud or "",
+                                           wcs.revocable(wl_row.cloud or "")),
+    )
+
+
+@router.delete("/agent/{agent_id}/link")
+def unlink_agent(
+    agent_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("config_mgmt", "write")),
+):
+    """Drop the link. Touches neither the agent nor the credential — the lab's row keeps
+    its own lifecycle, and this only stops claiming a relationship between them."""
+    row = db.query(AgentCell).filter(AgentCell.id == agent_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="No such agent cell.")
+    was = row.linked_mechanism or ""
+    row.linked_mechanism = None
+    row.linked_credential_id = None
+    row.linked_at = None
+    db.commit()
+    logger.info("agent cell %s unlinked from %s by %s", row.id, was or "nothing",
+                current_user.username)
+    return {"id": row.id, "unlinked": was,
+            "message": (f"No longer answerable for its {was} credential."
+                        if was else "Nothing was linked.")}
 
 
 @router.delete("/agent/{agent_id}")

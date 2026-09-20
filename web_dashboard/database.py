@@ -2324,6 +2324,22 @@ class AgentCell(Base):
     pat_expires_at = Column(DateTime, nullable=True)
     pat_revoked_at = Column(DateTime, nullable=True)
 
+    # ── What this agent is answerable for in the Workload Lab ───────────────
+    # A LINK, NOT A CONSUMPTION, and the distinction is the whole honesty of the field.
+    # The worker cannot spend any of the lab's credentials: the Cloud tab returns its
+    # credential to nobody, and the Kubernetes and Certificate tabs vault theirs where a
+    # consumer needs a Password Safe client -- another credential -- to reach. So this
+    # records which lab identity an operator has made this agent ANSWERABLE FOR, so that
+    # "what does this agent have access to" is one lookup rather than a conversation.
+    #
+    # `linked_mechanism` is a Workload Lab tab name ("cloud"); `linked_credential_id` is
+    # that tab's own row. Nothing here is a credential, and nothing here is evidence the
+    # agent used one -- see docs/design/next-demo-cells.md section 5b for what would have
+    # to exist before it could.
+    linked_mechanism = Column(String(32), nullable=True)
+    linked_credential_id = Column(String(36), nullable=True)
+    linked_at = Column(DateTime, nullable=True)
+
     # Progress through the two playbooks, as the names of the ones that finished, and
     # their job ids -- the same arrangement SpireLab uses, and for the same reason: a
     # failed stage's Ansible error exists only in that job's Live Output.

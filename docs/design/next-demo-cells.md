@@ -10,7 +10,10 @@
 > the dashboard integration. (2) It also called `itops` the weakest persona shipped and
 > made "give it cloud cards" a sequenced work item. Measured, that is three of five cards
 > needing a local VMware install and two working on cloud — a single missing card, not a
-> project. §5 carries both corrections and §7 no longer lists the second.
+> project. §5 carries both corrections and §7 no longer lists the second. (3) §5b called
+> the Workload Lab consumer blocked on the SPIFFE bridge. It is not — Workload
+> Credentials authenticates a workload identity with no stored PAT, which is the whole
+> point of the product, and §5b now says so.
 > **Depends on:** the two cells that exist —
 > [OT Demo Cell](../profiles/demo/ot-demo-cell.md) and
 > [Network Demo Cell](../profiles/demo/net-demo-cell.md) — whose shared shape §2 extracts.
@@ -266,63 +269,129 @@ injection into a Remote RDP jump item would add something real.
 That is **one card, not a project**, and it does not belong in the ordering below as a
 peer of the cells. It is worth doing whenever someone is next in `personas.py` anyway.
 
-## 5b. The agent cell as the Workload Lab's consumer
+## 5b. The Workload Lab's consumer, and the static secret it removes
 
-**The Workload Lab issues four credentials and nothing in this repository consumes any of
-them.** Its hub is explicit that there is no human in these workflows — *"the consumer is
-a pipeline, a broker or a cluster"* — and all three of those are hypothetical. Each tab
-ends at a credential handed to an operator to paste somewhere else.
+**Corrected three times.** An earlier draft called this "the cheapest remaining item". A
+second called it *blocked* — reasoning that every unbuilt tab vaults its credential where
+a consumer would need another credential to reach it, and concluding that the only way out
+was the SPIFFE bridge §3 records as unresolved. That conclusion was wrong, and wrong in the
+direction that stops work happening: it reasoned about Password Safe without checking what
+**Workload Credentials** is for.
 
-The agent cell (§3) is that consumer, and it is already governed, recorded and revocable.
-Wiring the two together is the next piece of work on this note, and it is worth doing for
-a reason sharper than tidiness.
+The third correction is smaller and sharper, and it is recorded here because it is the one
+that makes the mechanism general rather than clever. Two things the second draft got wrong:
 
-### What it completes, not just adds
+1. It left vague *what* Workload Credentials serves, waving at "its own static store, a
+   dynamic credential, or a `bt_safe://` reference". The concrete answer is better: WC
+   holds the **Password Safe API client id and secret**, and the workload uses that pair
+   to call Password Safe.
+2. It treated the identity as an Azure application identity. **It is not Azure-only.**
 
-The lab's cross-cutting invariant is **issue / record / remove**
-(`tests/test_workload_lab_governance.py`). Today the *remove* half ends at an API call: the
-lease is revoked, the managed system is deregistered, and nothing observable happens,
-because nothing was using the credential. **A consumer makes removal demonstrable.**
+### The chain that needs no static secret
 
-That matters most on the tab that already documents an asymmetry it cannot show:
+`services/workload_credentials_service` states its half in its own docstring: *"Two auth
+modes, and the second one stores nothing."* `wlc_auth_mode` is either `pat` — a stored
+token — or **`entra`**, where the platform vouches for the machine and no PAT exists:
 
-> on AWS a lease **cannot be revoked** at all, so the TTL is the only control there is.
-> Azure honours the revoke.
+1. the workload asks its platform for **its own identity token**;
+2. it presents that to **Workload Credentials** in place of a PAT, with
+   `X-BT-Service-Name` naming which registered Workload Identity it satisfies;
+3. WC hands back the **Password Safe API client id and secret**;
+4. the workload signs in to Password Safe with that pair
+   (`POST Auth/Connect/Token` + `SignAppIn`, exactly as `services/ps_api_service._sign_in`
+   does) and **requests** the credential it actually needs.
 
-With a consumer, that stops being a footnote and becomes two side-by-side demos — the
-Azure worker stops, the AWS one keeps going until its TTL. That is a far better argument
-for short TTLs than a sentence in a table, and it is the sort of thing a room remembers.
+Everything the workload is *configured* with — site id, service name, audience, base URL,
+the two WC secret **names**, the account id — is non-secret. **Nothing is stored on the
+host.**
 
-### The design constraint that decides the shape
+### Why the fourth step is the point, not an extra hop
 
-**One credential at a time, fetched per task.** An agent holding an SVID *and* a cluster
-token *and* a cloud lease *and* a certificate would be the most over-credentialed
-principal in the estate — the mechanism would argue precisely against the thing the cell
-exists to argue for.
+Password Safe authenticates an application with a client-credentials pair. That pair is a
+standing credential and always was, so the question was never whether one exists — it is
+**where it lives**. Putting it in Workload Credentials makes WC a *bootstrap for the
+vault* rather than a second vault beside it, and that distinction is what makes the shape
+general: the workload can then reach anything Password Safe governs, not merely what
+somebody remembered to copy into WC.
 
-So the mechanism is a *consumption* step, not a provisioning one: the worker asks for the
-credential its next task needs, uses it, and lets it lapse. Which credential it asks for
-is the operator's choice per agent, and the row records which mechanism that agent is
-wired to — the same way it already records its SPIFFE ID and its PAT.
+And what Password Safe governs, it governs here too. The retrieval is a **recorded request**
+with a duration and a reason (`POST Requests` → `GET Credentials/{id}` → `PUT
+Requests/{id}/Checkin`), it can be made to require approval, and the credential behind it
+rotates on its own schedule. A PAT in a file has none of those properties and never will.
 
-### What each tab would need
+This is the suite solving a new problem with a combination of old and new. Password Safe
+(old) holds and governs the secret. Workload Credentials (new) brokers the way in against
+an identity the platform vouches for. The workload holds nothing. Neither product does
+this alone, and the seam between them is exactly what a competitor holding one of the two
+cannot show.
 
-| Tab | What the worker would hold | The honest problem |
+### The identity is not Azure-only
+
+Federating a non-human identity against an OIDC issuer is available in **all three clouds**,
+and from SPIRE besides. The worker takes `--identity-platform`:
+
+| Platform | Where the token comes from | Note |
 |---|---|---|
-| **SPIRE** | an SVID | **Done** — the worker already attests every loop. |
-| **Cloud** | an AWS/Azure lease | Needs a task that touches a cloud API. The revoke asymmetry above is the demo. |
-| **Kubernetes** | a bound ServiceAccount token | Needs a cluster the agent may read. `sre`'s cards already stand one up. |
-| **Certificates** | an X.509 from the private CA | Needs an mTLS endpoint to present to; the certificate plays' subject-DN echo is the closest existing shape. |
+| `azure` | IMDS, or `IDENTITY_ENDPOINT`/`IDENTITY_HEADER` where the runtime injects them | the branch the dashboard's own client uses |
+| `gcp` | the metadata server's `instance/service-accounts/default/identity` | returns the token as plain text, not JSON |
+| `aws` | the projected token at `AWS_WEB_IDENTITY_TOKEN_FILE` (IRSA) or `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` (Pod Identity) | EC2's IMDS issues SigV4 credentials and a signed identity document, **not** an OIDC JWT — plain EC2 needs an issuer, see below |
+| `spire` | a JWT-SVID from the agent already on the host | needs no cloud at all, and the Workload Lab already publishes the trust domain as an OIDC issuer (`spire_lab_service`, `OIDC_PORT`) |
+| `file` | any other projected token on disk | the Kubernetes ServiceAccount token every cluster mounts |
 
-### What this must not become
+The `spire` row is the one that ties this back to the lab. A bare-metal host has no cloud
+metadata service to ask, and the lab's OIDC discovery provider is exactly the issuer that
+answers for it — so the same mechanism covers the estate's clouds *and* the hardware
+sitting in a rack, which is the shape a network or OT cell actually has.
 
-**Not a fifth Workload Lab tab.** `test_workload_lab_governance` blocks one until it names
-an authority that issues, records and removes — and a *consumer* names none, because it
-issues nothing. The relationship is the other way round: the lab issues, the cell
-consumes, and the cell's page links back. §2's definition holds.
+`auto` detects by marker — an injected env var or a projected file — and **refuses rather
+than guessing** when the host declares nothing. No marker distinguishes a bare Azure VM
+from a bare GCE one, and 169.254.169.254 is both their metadata addresses; probing means a
+request that has to time out to say no, on the host most likely to be neither.
 
-**Not a way to widen the agent's standing access.** If this ever ends with a worker that
-holds four credentials because it might need them, it has been built wrong.
+### What was built
+
+The worker gained two more token sources and a platform selector.
+
+| `--token-source` | What it holds | What the vault sees |
+|---|---|---|
+| `file` (default) | a 0600 PAT on disk — a static secret, honestly labelled | nothing |
+| `wlc` | nothing | nothing — WC serves the PAT from its own store |
+| `ps` | nothing | a recorded credential request, with a duration and a check-in |
+
+The install play refuses a `wlc` or `ps` worker missing any of its non-secret
+configuration, naming each value — there is no reason to be vague about something that is
+not a credential — and it **removes** any token left behind by a previous `file`-sourced
+install, because "nothing is stored on this host" must not be contradicted by a file in
+`/etc`.
+
+One bug was fixed along the way: the unit's `ExecStart` was built from backslash
+continuations with `{% if %}` blocks between them, and the `file` branch ended without a
+trailing backslash — silently truncating the command so `--spiffe-socket` and `--interval`
+never reached the worker. It is one folded line now, with no continuations to get wrong.
+
+The link from the earlier draft stays: an agent is still made *answerable for* one Workload
+Lab credential, and that remains a governance record rather than a capability. What changed
+is that the worker can hold its own credential without one being left on a disk for it.
+
+### Still unproven
+
+Three named gaps, none of them a property of the design:
+
+* **The dashboard's own WC client is Azure-only.** `AUTH_MODE_ENTRA` reads
+  `wlc_entra_resource` and calls IMDS; there is no AWS or GCP branch in
+  `workload_credentials_service`. The *worker* now has all five, so the gap is a missing
+  implementation on the app side rather than a limit, and it is a contained one — the
+  seam is `build_identity_request`.
+* **Nothing here has been run live.** No Workload Credentials tenant, no registered
+  Workload Identity, no federation trust. The client paths are unit-tested and that is all
+  they are.
+* **The Password Safe account has to exist and be requestable.** The `ps` source needs an
+  API-enabled managed account, the Requestor role, and an access policy that auto-releases
+  — the same out-of-band prerequisites `docs/integrations/password-safe.md` already
+  records for every other request path.
+
+So `file` stays the default, and every line the worker logs names which mode produced its
+token.
 
 ## 6. What is deliberately not proposed
 
@@ -338,10 +407,7 @@ holds four credentials because it might need them, it has been built wrong.
 
 1. ~~**Cloud governance persona**~~ — **done.** Shipped as `finops`; see §4.
 2. ~~**The agent cell**~~ — **done.** Shipped with the `aiops` persona; see §3.
-3. **Wire the agent cell to the rest of the Workload Lab** (§5b) — the cheapest
-   remaining item with the most leverage: it gives four issuance demos an end, and makes
-   the AWS/Azure revocation asymmetry something a room can watch rather than read.
-4. **Windows EPM integration, then the Windows endpoint cell** — the last item on this
+3. **Windows EPM integration, then the Windows endpoint cell** — the last item on this
    note, and the biggest demo payoff per unit of new thinking. EPM-L is a working template
    to copy rather than a design to invent, and the image prep, the WinRM runner and the
    bake-then-activate pattern are all already here.
@@ -355,8 +421,10 @@ Shipping the one whose risk could be bounded first was the cheaper order.
 **`itops` cloud cards are not on this list**, and an earlier draft was wrong to put them
 there — see §5. The gap is one card, not a piece of work worth sequencing.
 
-**`itops` cloud cards are not on this list**, and an earlier draft was wrong to put them
-there — see §5. The gap is one card, not a piece of work worth sequencing.
+**The Workload Lab consumer is not on this list**, because it is built — see §5b. Note
+that the section had to be corrected twice, the second time reversing the first: it was
+called blocked on the SPIFFE bridge, and it is not. Workload Credentials' `entra` auth
+mode removes the static secret without that bridge, which is what the suite is for.
 
 ## Verification
 
