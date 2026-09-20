@@ -2012,6 +2012,13 @@ class Settings(BaseSettings):
     # deploy-time refusal (netcell_service.pra_preflight_problem), which can name the
     # remedy, where a hidden tab cannot.
     netcell_enabled: bool = False                    # master gate: tab, tile, router
+    # PREVIEW flag, alongside netcell_enabled / spire_lab_enabled in
+    # setup._PREVIEW_FLAGS. Preview because the worker has never run against a live SPIRE
+    # trust domain or a real MCP endpoint: whether `spire-agent api fetch x509` parses as
+    # expected on the target release, and whether the MCP SSE client negotiates cleanly
+    # through the dashboard's ingress, are both unobserved. Off means no agent can be
+    # minted and the dashboard behaves exactly as before.
+    agentcell_enabled: bool = False                  # master gate: router, page, tile
     # TWO platforms, because the plugin ships as two .psplugin packages over a shared
     # core with different plugin ids: "Certificate" issues an end-entity certificate on
     # any of its nine backends, "Subordinate CA" issues an issuing authority on the four

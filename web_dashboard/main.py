@@ -1218,6 +1218,17 @@ except ImportError as exc:
     logger.warning("API router 'netcell' not loaded: %s", exc)
 
 try:
+    # The agent demo cell. Its own PREVIEW flag rather than mcp_server_enabled: the MCP
+    # server is a shipped feature an operator may well want on by itself, and the cell is
+    # the unproven thing. agentcell_service.mcp_problem() refuses the deploy with a remedy
+    # when MCP is off, which a router gate could not say.
+    from .api import agentcell as agentcell_api  # noqa: E402
+    app.include_router(agentcell_api.router,
+                       dependencies=[_feature_gate("agentcell_enabled")])
+except ImportError as exc:
+    logger.warning("API router 'agentcell' not loaded: %s", exc)
+
+try:
     # POV environments on a lab platform. Gated on pov_environments_enabled, which
     # feature_flags._POV_ONLY masks off entirely on a demo instance — so on the demo
     # dashboard these routes 404 naming the profile rather than half-working.

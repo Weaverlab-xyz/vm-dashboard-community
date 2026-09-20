@@ -2263,6 +2263,75 @@ class SpireLab(Base):
     expiry_warned_at = Column(DateTime, nullable=True)
 
 
+class AgentCell(Base):
+    """One non-human principal the agent demo cell installed, and what governs it.
+
+    **The row records an authorization, not a credential.** Same rule as ``SpireLab``,
+    which holds the *titles* of its admin credential and never the PKCS#12: the raw PAT
+    is shown once by ``api/tokens.create_token`` and never again, and this row carries
+    only its id, its name and when it expires. The dashboard is not the vault, and a
+    table that held a working token would make every backup one.
+
+    **Two identifiers, deliberately, because they are two different things.** The SPIFFE
+    ID is who the worker *is* -- attested, re-fetched every loop, stored nowhere on the
+    host. The PAT is what it may *do* here -- scoped to ``pat_user_id``'s RBAC, expiring,
+    revocable. They are not bridged: ``/mcp`` takes a Bearer PAT and has no mTLS path, so
+    nothing mints one from the other. ``docs/profiles/demo/agent-demo-cell.md`` says why
+    that gap is stated rather than closed.
+
+    **Attached, never created** -- the host is a VM this dashboard already deployed, and
+    ``host_deploy_job_id`` is the proof of it. ``spire_lab_service.resolve_host`` is what
+    re-derives it, because a privileged playbook against a host of the caller's choosing
+    is not something this should accept. The consequence is the good one: the host keeps
+    its auto-delete timer, its Password Safe onboarding and its Destroy button, and this
+    row adds no teardown of its own beyond revoking what it issued.
+    """
+    __tablename__ = "agent_cells"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(120), nullable=False)
+    status = Column(String(32), nullable=False, default="provisioning", index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by = Column(String(100), nullable=True)
+    workgroup = Column(String(100), nullable=True)
+
+    # ── The host it attached to ──────────────────────────────────────────────
+    # The deploy job is the proof the host is one this dashboard built. Resolved through
+    # spire_lab_service.resolve_host rather than taken from the request.
+    host_deploy_job_id = Column(String(36), nullable=True)
+    host_name = Column(String(120), nullable=True)
+    cloud = Column(String(20), nullable=True)
+    # What the Ansible runner SSHes to. Blank is legal -- an in-subnet runner uses the
+    # private address -- which is why the two are not collapsed into one column.
+    private_ip = Column(String(64), nullable=True)
+    public_ip = Column(String(64), nullable=True)
+
+    # ── Identity: who the worker is ──────────────────────────────────────────
+    # The SPIRE lab whose trust domain attests it, and the ID it will name in its logs.
+    spire_lab_id = Column(String(36), nullable=True)
+    trust_domain = Column(String(255), nullable=True)
+    spiffe_id = Column(String(500), nullable=True)
+
+    # ── Authorization: what it may do here ───────────────────────────────────
+    # The PAT's ID and NAME only. Never the token. `pat_user_id` is what bounds every MCP
+    # tool the worker can call, so it is the actual scope of the agent's access and the
+    # first thing to look at when asking what this agent could see.
+    pat_id = Column(String(36), nullable=True)
+    pat_name = Column(String(100), nullable=True)
+    pat_user_id = Column(String(36), nullable=True)
+    # Always set by the cell, never None. A non-expiring token for a non-human principal
+    # is the thing this demo argues against, so agentcell_service refuses to mint one.
+    pat_expires_at = Column(DateTime, nullable=True)
+    pat_revoked_at = Column(DateTime, nullable=True)
+
+    # Progress through the two playbooks, as the names of the ones that finished, and
+    # their job ids -- the same arrangement SpireLab uses, and for the same reason: a
+    # failed stage's Ansible error exists only in that job's Live Output.
+    stages_done = Column(Text, nullable=True)
+    stage_job_ids = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+
+
 class WorkloadK8sToken(Base):
     """A Password-Safe-brokered ServiceAccount token for a workload OUTSIDE the cluster.
 
