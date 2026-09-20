@@ -186,8 +186,14 @@ def test_the_default_machine_type_is_e2_medium_everywhere():
         "OTCellDeployRequestAzure.vm_size is no longer Standard_B2s")
     gcp_tmpl = open(os.path.join(_ROOT, "web_dashboard", "templates", "gcp", "index.html"),
                     encoding="utf-8").read()
-    assert "machine_type: 'e2-small'" not in gcp_tmpl, (
-        "a GCP-page form still defaults its machine type to e2-small")
+    # Scoped to otForm rather than swept over the whole page. The absence check was
+    # written when the OT form was the only cell form on /gcp; the network cell added a
+    # second one, and e2-small is the RIGHT default there -- VyOS routes and filters, it
+    # does not run a control plane and four simulators. A page-wide sweep would have
+    # forced an unrelated form to carry the OT cell's memory budget.
+    ot_form = gcp_tmpl.split("otForm: {", 1)[1].split("},", 1)[0]
+    assert "e2-small" not in ot_form, (
+        "the GCP OT form defaults its machine type to e2-small")
     # AWS/Azure: assert the OT form's own default is the 4 GB shape (presence, not
     # absence — the pages legitimately carry smaller types elsewhere, e.g. the
     # Packer BUILD instance).
