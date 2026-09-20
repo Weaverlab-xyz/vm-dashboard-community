@@ -30,6 +30,28 @@ def _read(*parts):
         return fh.read()
 
 
+def _schema():
+    """Create the tables the DB-backed assertion below needs.
+
+    ``feature_flags.flags()`` reads config through the database, and CI runs each test
+    file as its own process against a checkout with no database at all. This file sorts
+    early enough -- ``test_agentcell_*`` lands just after ``test_agent_*`` -- that it can
+    be the first thing to touch config, at which point ``app_config`` does not exist yet
+    and the read raises ``no such table``. It passed locally only because a populated
+    database was already sitting in the working copy.
+
+    Per-test rather than at module level, and for the reason
+    ``test_workload_lab_governance._schema`` gives: almost every assertion here reads
+    SOURCE and needs no app import, so importing the database at module scope would make
+    the whole file unrunnable wherever the app's dependencies are missing -- and the
+    tests that would then be skipped are the ones this file exists for.
+    """
+    import web_dashboard.database as d
+
+    d.Base.metadata.create_all(bind=d.engine)
+    return d
+
+
 # -- declared, and off ---------------------------------------------------------
 
 def test_the_flag_is_declared_and_defaults_off():
@@ -40,6 +62,7 @@ def test_the_flag_is_declared_and_defaults_off():
 
 
 def test_feature_flags_resolves_it():
+    _schema()
     from web_dashboard.services import feature_flags
     assert _FLAG in feature_flags.flags(), \
         f"{_FLAG} is not in feature_flags.flags(), so no reader can see it"
