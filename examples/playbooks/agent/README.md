@@ -12,7 +12,7 @@ is how the VM was created.
 
 | File | Target | What it does |
 |---|---|---|
-| `agent-install.yml` | the worker's host (SSH) | The worker, its 0600 token file and a systemd unit |
+| `agent-install.yml` | the worker's host (SSH) | The worker, a systemd unit, and a 0600 token file only in `file` mode |
 | `agent-spiffe-entry.yml` | the **SPIRE server** (SSH) | One registration entry, so the worker can attest |
 | `files/mcp_agent.py` | — | The worker itself |
 
@@ -33,37 +33,77 @@ missed:
 > worker proves its identity and spends its authorization in the same log line, and the
 > gap between them stays visible rather than papered over.
 
-## Two token sources, and the second stores nothing
+## Three token sources, and two of them store nothing
 
-`agent_token_source: file` (default) writes a 0600 file. That is a static secret —
-smaller than an env var, which is readable from `/proc/<pid>/environ` and shows up in a
-`ps e`, but a static secret nonetheless.
+`agent_token_source: file` (default) writes a 0600 file. That is a static secret — smaller
+than an env var, which is readable from `/proc/<pid>/environ` and shows up in a `ps e`, but
+a static secret nonetheless.
 
-`agent_token_source: wlc` puts **nothing** on the host. The worker asks the platform for
-its own identity token, presents that to **BeyondTrust Workload Credentials** in place of
-a PAT, and reads its dashboard token back out. Everything it is configured with — site
-id, service name, entra resource, base URL — is non-secret:
+The other two put **nothing** on the host. Both start the same way: the worker asks its
+platform for its own identity token and presents that to **BeyondTrust Workload
+Credentials** in place of a PAT.
+
+`agent_token_source: wlc` stops there — WC serves the PAT from its own store:
 
 ```
-agent_token_source:     wlc
-agent_wlc_base_url:     https://…
-agent_wlc_site_id:      …
-agent_wlc_service_name: …        # the registered Workload Identity this token satisfies
-agent_wlc_resource:     …
-agent_wlc_secret_name:  agent-mcp-pat
+agent_token_source:      wlc
+agent_identity_platform: azure      # or gcp | aws | spire | file | auto
+agent_wlc_base_url:      https://…
+agent_wlc_site_id:       …
+agent_wlc_service_name:  …          # the registered Workload Identity this token satisfies
+agent_wlc_resource:      …          # the audience to mint the identity token for
+agent_wlc_secret_name:   agent-mcp-pat
 ```
+
+`agent_token_source: ps` goes one step further, and that step is the argument. WC holds the
+**Password Safe API client id and secret**, and the worker uses that pair to *request* the
+credential from the vault:
+
+```
+agent_token_source:            ps
+agent_identity_platform:       gcp
+agent_wlc_base_url:            https://…
+agent_wlc_site_id:             …
+agent_wlc_service_name:        …
+agent_wlc_resource:            …
+agent_ps_client_id_secret:     ps-client-id      # the WC secret NAME, not the secret
+agent_ps_client_secret_secret: ps-client-secret  # likewise
+agent_ps_api_url:              https://ps.example.com/BeyondTrust/api/public/v3
+agent_ps_account_id:           42                # the account whose password is the PAT
+```
+
+**Why the extra hop.** Password Safe authenticates an application with a client-credentials
+pair, so that pair is a standing credential and always was — the question is where it
+lives. Here it lives in WC, which makes WC a *bootstrap for the vault* rather than a second
+vault beside it, and lets the worker reach anything Password Safe governs. The retrieval is
+then a **recorded request** with a duration and a reason, it can require approval, and it is
+checked back in. A PAT in a file has none of those properties.
 
 This is the suite answering its own question: Password Safe holds and governs the secret,
-Workload Credentials brokers access to it against an identity the platform vouches for,
-and the workload holds nothing. `services/workload_credentials_service` states the
-principle — *"Two auth modes, and the second one stores nothing."*
+Workload Credentials brokers the way in against an identity the platform vouches for, and
+the workload holds nothing. `services/workload_credentials_service` states its half —
+*"Two auth modes, and the second one stores nothing."*
 
-Re-running the play with `wlc` **removes** any token a previous `file` install left
+Re-running the play with `wlc` or `ps` **removes** any token a previous `file` install left
 behind. "Nothing is stored on this host" must not be contradicted by a file in `/etc`.
 
-> **`file` is still the default**, because the identity path is Azure-shaped today (IMDS,
-> `X-IDENTITY-HEADER`), the in-cluster form is *Planned*, and the Azure + Pathfinder
-> wiring has not been run live. The worker names its source on every line it logs.
+### The identity is not Azure-only
+
+`agent_identity_platform` picks which issuer vouches for the machine:
+
+| Value | Token source | Note |
+|---|---|---|
+| `azure` | IMDS, or `IDENTITY_ENDPOINT`/`IDENTITY_HEADER` | |
+| `gcp` | the metadata server's `…/service-accounts/default/identity` | returned as plain text |
+| `aws` | `AWS_WEB_IDENTITY_TOKEN_FILE` (IRSA) or `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` | EC2's IMDS has no OIDC endpoint — on plain EC2 use `spire` |
+| `spire` | a JWT-SVID from the agent already on this host | needs no cloud; the lab publishes the trust domain as an OIDC issuer |
+| `file` | any other projected token on disk | a Kubernetes ServiceAccount token |
+| `auto` | whichever the host declares | refuses rather than guessing — name it |
+
+> **`file` is still the default**, because none of this has been run live: no Workload
+> Credentials tenant, no registered Workload Identity, no federation trust. The dashboard's
+> *own* WC client is Azure-only besides — the worker has five platforms, the app has one.
+> The worker names its source on every line it logs.
 
 ## The log line is the demo
 

@@ -271,70 +271,127 @@ peer of the cells. It is worth doing whenever someone is next in `personas.py` a
 
 ## 5b. The Workload Lab's consumer, and the static secret it removes
 
-**Corrected twice, and the second correction reverses the first.** An earlier draft
-called this "the cheapest remaining item". A later one called it *blocked* — reasoning
-that every unbuilt tab vaults its credential where a consumer would need another
-credential to reach it, and concluding that the only way out was the SPIFFE bridge §3
-records as unresolved.
+**Corrected three times.** An earlier draft called this "the cheapest remaining item". A
+second called it *blocked* — reasoning that every unbuilt tab vaults its credential where
+a consumer would need another credential to reach it, and concluding that the only way out
+was the SPIFFE bridge §3 records as unresolved. That conclusion was wrong, and wrong in the
+direction that stops work happening: it reasoned about Password Safe without checking what
+**Workload Credentials** is for.
 
-**That conclusion was wrong**, and wrong in the direction that stops work happening. It
-reasoned about Password Safe without checking what **Workload Credentials** is for.
+The third correction is smaller and sharper, and it is recorded here because it is the one
+that makes the mechanism general rather than clever. Two things the second draft got wrong:
+
+1. It left vague *what* Workload Credentials serves, waving at "its own static store, a
+   dynamic credential, or a `bt_safe://` reference". The concrete answer is better: WC
+   holds the **Password Safe API client id and secret**, and the workload uses that pair
+   to call Password Safe.
+2. It treated the identity as an Azure application identity. **It is not Azure-only.**
 
 ### The chain that needs no static secret
 
-`services/workload_credentials_service` states it in its own docstring: *"Two auth modes,
-and the second one stores nothing."* `wlc_auth_mode` is either `pat` — a stored token —
-or **`entra`**, where the platform vouches for the machine and no PAT exists at all:
+`services/workload_credentials_service` states its half in its own docstring: *"Two auth
+modes, and the second one stores nothing."* `wlc_auth_mode` is either `pat` — a stored
+token — or **`entra`**, where the platform vouches for the machine and no PAT exists:
 
-1. the workload asks the platform for **its own identity token** (IMDS, or
-   `IDENTITY_ENDPOINT`/`IDENTITY_HEADER` where the runtime injects them);
+1. the workload asks its platform for **its own identity token**;
 2. it presents that to **Workload Credentials** in place of a PAT, with
    `X-BT-Service-Name` naming which registered Workload Identity it satisfies;
-3. Workload Credentials serves the secret — its own static store, a dynamic
-   short-lived cloud credential, or a `bt_safe://` reference into Password Safe.
+3. WC hands back the **Password Safe API client id and secret**;
+4. the workload signs in to Password Safe with that pair
+   (`POST Auth/Connect/Token` + `SignAppIn`, exactly as `services/ps_api_service._sign_in`
+   does) and **requests** the credential it actually needs.
 
-Everything the workload is *configured* with — site id, service name, entra resource,
-base URL — is non-secret. **Nothing is stored on the host.**
+Everything the workload is *configured* with — site id, service name, audience, base URL,
+the two WC secret **names**, the account id — is non-secret. **Nothing is stored on the
+host.**
 
-The repo already records this as implemented: *"Authenticating to WC with an Azure
-workload identity instead of a stored PAT — **Implemented**; client path unit-tested, the
-Azure + Pathfinder wiring not yet run live."*
+### Why the fourth step is the point, not an extra hop
 
-### Why this is the point rather than a workaround
+Password Safe authenticates an application with a client-credentials pair. That pair is a
+standing credential and always was, so the question was never whether one exists — it is
+**where it lives**. Putting it in Workload Credentials makes WC a *bootstrap for the
+vault* rather than a second vault beside it, and that distinction is what makes the shape
+general: the workload can then reach anything Password Safe governs, not merely what
+somebody remembered to copy into WC.
 
-It is the suite solving a new problem with a combination of old and new. Password Safe
-(old) holds the secret and governs it. Workload Credentials (new) brokers access to it
-against an identity the platform vouches for. The workload holds nothing. Neither product
-does this alone, and the interesting demo is the seam between them — which is exactly the
-thing a competitor with one of the two cannot show.
+And what Password Safe governs, it governs here too. The retrieval is a **recorded request**
+with a duration and a reason (`POST Requests` → `GET Credentials/{id}` → `PUT
+Requests/{id}/Checkin`), it can be made to require approval, and the credential behind it
+rotates on its own schedule. A PAT in a file has none of those properties and never will.
+
+This is the suite solving a new problem with a combination of old and new. Password Safe
+(old) holds and governs the secret. Workload Credentials (new) brokers the way in against
+an identity the platform vouches for. The workload holds nothing. Neither product does
+this alone, and the seam between them is exactly what a competitor holding one of the two
+cannot show.
+
+### The identity is not Azure-only
+
+Federating a non-human identity against an OIDC issuer is available in **all three clouds**,
+and from SPIRE besides. The worker takes `--identity-platform`:
+
+| Platform | Where the token comes from | Note |
+|---|---|---|
+| `azure` | IMDS, or `IDENTITY_ENDPOINT`/`IDENTITY_HEADER` where the runtime injects them | the branch the dashboard's own client uses |
+| `gcp` | the metadata server's `instance/service-accounts/default/identity` | returns the token as plain text, not JSON |
+| `aws` | the projected token at `AWS_WEB_IDENTITY_TOKEN_FILE` (IRSA) or `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` (Pod Identity) | EC2's IMDS issues SigV4 credentials and a signed identity document, **not** an OIDC JWT — plain EC2 needs an issuer, see below |
+| `spire` | a JWT-SVID from the agent already on the host | needs no cloud at all, and the Workload Lab already publishes the trust domain as an OIDC issuer (`spire_lab_service`, `OIDC_PORT`) |
+| `file` | any other projected token on disk | the Kubernetes ServiceAccount token every cluster mounts |
+
+The `spire` row is the one that ties this back to the lab. A bare-metal host has no cloud
+metadata service to ask, and the lab's OIDC discovery provider is exactly the issuer that
+answers for it — so the same mechanism covers the estate's clouds *and* the hardware
+sitting in a rack, which is the shape a network or OT cell actually has.
+
+`auto` detects by marker — an injected env var or a projected file — and **refuses rather
+than guessing** when the host declares nothing. No marker distinguishes a bare Azure VM
+from a bare GCE one, and 169.254.169.254 is both their metadata addresses; probing means a
+request that has to time out to say no, on the host most likely to be neither.
 
 ### What was built
 
-The worker gained a second token source. `--token-source file` reads a 0600 file — a
-static secret, honestly labelled. `--token-source wlc` holds nothing: it fetches its own
-identity token and reads its dashboard PAT back out of Workload Credentials.
+The worker gained two more token sources and a platform selector.
 
-That removes the asterisk the cell had been carrying. "A non-human principal that holds
-no standing credential" was the argument, and a PAT in a file was that argument with a
-caveat. Now the caveat is a *mode*, and the default can move once the path has been run
-live.
+| `--token-source` | What it holds | What the vault sees |
+|---|---|---|
+| `file` (default) | a 0600 PAT on disk — a static secret, honestly labelled | nothing |
+| `wlc` | nothing | nothing — WC serves the PAT from its own store |
+| `ps` | nothing | a recorded credential request, with a duration and a check-in |
 
-The install play refuses a `wlc` worker missing any of its non-secret configuration,
-naming each one — there is no reason to be vague about a value that is not a credential
-— and it **removes** any token left behind by a previous `file`-sourced install, because
-"nothing is stored on this host" must not be contradicted by a file in `/etc`.
+The install play refuses a `wlc` or `ps` worker missing any of its non-secret
+configuration, naming each value — there is no reason to be vague about something that is
+not a credential — and it **removes** any token left behind by a previous `file`-sourced
+install, because "nothing is stored on this host" must not be contradicted by a file in
+`/etc`.
 
-The link from the earlier draft stays: an agent is still made *answerable for* one
-Workload Lab credential, and that is still a governance record rather than a capability.
-What changed is that the worker can now hold its own credential without one being left
-on a disk for it.
+One bug was fixed along the way: the unit's `ExecStart` was built from backslash
+continuations with `{% if %}` blocks between them, and the `file` branch ended without a
+trailing backslash — silently truncating the command so `--spiffe-socket` and `--interval`
+never reached the worker. It is one folded line now, with no continuations to get wrong.
+
+The link from the earlier draft stays: an agent is still made *answerable for* one Workload
+Lab credential, and that remains a governance record rather than a capability. What changed
+is that the worker can hold its own credential without one being left on a disk for it.
 
 ### Still unproven
 
-The identity path is **Azure-shaped today** — IMDS and `X-IDENTITY-HEADER` — and the
-in-cluster form (a pod federating its ServiceAccount token) is listed as *Planned*. The
-Azure + Pathfinder wiring has not been run live by anyone. So `file` stays the default
-and the page says which mode was used on every line the worker logs.
+Three named gaps, none of them a property of the design:
+
+* **The dashboard's own WC client is Azure-only.** `AUTH_MODE_ENTRA` reads
+  `wlc_entra_resource` and calls IMDS; there is no AWS or GCP branch in
+  `workload_credentials_service`. The *worker* now has all five, so the gap is a missing
+  implementation on the app side rather than a limit, and it is a contained one — the
+  seam is `build_identity_request`.
+* **Nothing here has been run live.** No Workload Credentials tenant, no registered
+  Workload Identity, no federation trust. The client paths are unit-tested and that is all
+  they are.
+* **The Password Safe account has to exist and be requestable.** The `ps` source needs an
+  API-enabled managed account, the Requestor role, and an access policy that auto-releases
+  — the same out-of-band prerequisites `docs/integrations/password-safe.md` already
+  records for every other request path.
+
+So `file` stays the default, and every line the worker logs names which mode produced its
+token.
 
 ## 6. What is deliberately not proposed
 

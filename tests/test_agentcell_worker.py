@@ -218,6 +218,197 @@ def test_the_worker_takes_no_http_dependency_for_this():
     assert "urllib.request" in code, "no stdlib HTTP path"
 
 
+# -- the third source: Password Safe, bootstrapped by Workload Credentials ------
+
+def test_the_worker_reaches_password_safe_through_wc():
+    """The correction this source exists for. Password Safe authenticates an application
+    with a client-credentials pair, so that pair is a standing credential and always was
+    -- the question is where it lives. In WC it makes WC a bootstrap for the vault rather
+    than a second vault beside it, and the worker reaches anything Password Safe governs
+    rather than only what was copied across."""
+    code = _code(_WORKER)
+    assert "def fetch_token_via_password_safe" in code, \
+        "there is no path from a workload identity to a credential in the vault"
+    assert "def password_safe_credential" in code
+    assert "Auth/Connect/Token" in code and "Auth/SignAppIn" in code, \
+        "the worker does not sign in the way ps_api_service._sign_in does"
+
+
+def test_the_password_safe_pair_is_read_from_wc_not_the_host():
+    """Both halves come out of Workload Credentials. A worker that took either as an
+    argument would be holding the standing credential this source exists to remove."""
+    code = _code(_WORKER)
+    body = code.split("def fetch_token_via_password_safe", 1)[1].split("\ndef ")[0]
+    assert body.count("read_wlc_secret") == 2, \
+        "the Password Safe client id and secret are not both fetched from WC"
+    assert "fetch_identity_token" in body, "nothing vouches for the machine first"
+
+
+def test_one_identity_token_serves_both_secrets():
+    """Two round trips to the metadata service for one machine's identity would be noise
+    in the audit log, not caution."""
+    code = _code(_WORKER)
+    body = code.split("def fetch_token_via_password_safe", 1)[1].split("\ndef ")[0]
+    assert body.count("fetch_identity_token") == 1, \
+        "the identity token is fetched more than once for a single credential fetch"
+    assert "identity_token=identity" in body
+
+
+def test_the_retrieval_is_a_recorded_request():
+    """The reason the extra hop is worth it. A request has a duration and a reason, it can
+    require approval, and it is checked back in -- a PAT in a file has none of those."""
+    code = _code(_WORKER)
+    body = code.split("def password_safe_credential", 1)[1].split("\ndef ")[0]
+    for part in ("Requests", "Credentials/", "Checkin", "DurationMinutes", "Reason"):
+        assert part in body, f"the credential fetch does not {part!r}"
+
+
+def test_the_request_is_checked_in_even_when_the_fetch_fails():
+    """An open request holds the account's concurrent slot for its whole duration, so a
+    worker that died between retrieval and release would make the NEXT fetch fail on the
+    cap and report the wrong cause."""
+    code = _code(_WORKER)
+    body = code.split("def password_safe_credential", 1)[1].split("\ndef ")[0]
+    assert "finally:" in body, "the credential request is not released on a failure path"
+    assert body.index("finally:") < body.index("Checkin"), \
+        "the check-in is not inside the finally"
+
+
+def test_the_check_in_never_rotates_on_release():
+    """ps_api_service._checkin records why: under synced accounts a change on either
+    member re-rotates both, so rotate-on-release would rotate the real credential every
+    time the worker read it, with a dead-credential window each time."""
+    code = _code(_WORKER)
+    assert "CheckinAndRotate" not in code and "checkin_and_rotate" not in code.lower(), \
+        "the worker names the rotate-on-release endpoint"
+    assert 'method="PUT"' in code, \
+        "the check-in is not a PUT; urllib would infer POST from the body"
+
+
+def test_a_soft_failure_string_is_not_spent_as_a_token():
+    """Password Safe can return a soft-failure STRING in the credential position -- the
+    case ps_api_service._looks_like_sa_token guards for the k8s tunnel. A worker that
+    polled with that as its bearer would get a 401 and report the demo's closing beat for
+    entirely the wrong reason."""
+    code = _code(_WORKER)
+    body = code.split("def password_safe_credential", 1)[1].split("\ndef ")[0]
+    assert 'startswith("vmcli_")' in body, \
+        "anything Password Safe returns is spent as if it were a PAT"
+
+
+# -- the identity is not Azure-only --------------------------------------------
+
+def test_every_cloud_can_vouch_for_the_machine():
+    """The mechanism is OIDC federation of a non-human identity, which all three clouds
+    offer. Treating it as an Azure application identity is the narrower claim, and it is
+    the one that makes the cell look Azure-shaped when it is not."""
+    code = _code(_WORKER)
+    for fn in ("_azure_identity_token", "_gcp_identity_token", "_projected_token",
+               "_spire_jwt_svid"):
+        assert f"def {fn}" in code, f"no identity branch for {fn}"
+    for platform in ("azure", "gcp", "aws", "spire", "file"):
+        assert f'"{platform}"' in code, f"{platform} is not a selectable platform"
+
+
+def test_gcp_is_not_parsed_as_json():
+    """The GCP metadata server returns the token as PLAIN TEXT. Parsing it as JSON fails
+    on a valid token, which reads like a broken service account."""
+    code = _code(_WORKER)
+    body = code.split("def _gcp_identity_token", 1)[1].split("\ndef ")[0]
+    assert "_get_text" in body and "_get_json" not in body
+    assert "Metadata-Flavor" in body, "the GCP metadata server refuses without the header"
+
+
+def test_aws_reads_a_projected_file_rather_than_imds():
+    """There is no OIDC endpoint on EC2's IMDS: it issues SigV4 credentials and a signed
+    identity document, not a JWT. Reaching for IMDS here would fail in a way that looks
+    like a permissions problem."""
+    code = _code(_WORKER)
+    body = code.split("def _aws_token_file", 1)[1].split("\ndef ")[0]
+    assert "AWS_WEB_IDENTITY_TOKEN_FILE" in code and \
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE" in code, \
+        "neither IRSA nor Pod Identity is honoured"
+    assert "169.254.169.254" not in body, "the AWS branch reaches for IMDS"
+    assert "spire" in body, \
+        "the refusal does not point at the platform that works on plain EC2"
+
+
+def test_spire_can_be_the_issuer_without_a_cloud():
+    """The row that ties this back to the lab: a bare-metal host has no metadata service,
+    and the Workload Lab already publishes its trust domain as an OIDC issuer."""
+    code = _code(_WORKER)
+    body = code.split("def _spire_jwt_svid", 1)[1].split("\ndef ")[0]
+    assert "fetch" in body and "jwt" in body and "-audience" in body, \
+        "the SPIRE branch does not fetch an audience-bound JWT-SVID"
+
+
+def test_auto_refuses_rather_than_guessing():
+    """No marker distinguishes a bare Azure VM from a bare GCE one, and 169.254.169.254 is
+    both their metadata addresses. A guess means a request that has to time out to say no,
+    on the host most likely to be neither."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("mcp_agent", _WORKER)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    assert m.detect_platform(env={}, exists=lambda p: False) == "", \
+        "auto guesses a platform on a host that declares none"
+    assert m.detect_platform(env={"IDENTITY_ENDPOINT": "http://x", "IDENTITY_HEADER": "h"},
+                             exists=lambda p: False) == "azure"
+    assert m.detect_platform(env={"AWS_WEB_IDENTITY_TOKEN_FILE": "/t"},
+                             exists=lambda p: False) == "aws"
+    assert m.detect_platform(env={}, exists=lambda p: p == m.K8S_TOKEN_FILE) == "file"
+
+
+def test_the_refusal_to_guess_names_the_choices():
+    r = subprocess.run([sys.executable, _WORKER, "--url", "https://x/mcp",
+                        "--token-source", "wlc", "--wlc-base-url", "https://a",
+                        "--wlc-site-id", "s", "--wlc-service-name", "n",
+                        "--wlc-resource", "r", "--wlc-secret-name", "k"],
+                       capture_output=True, text=True, timeout=30,
+                       env=dict(os.environ, AGENT_IDENTITY_PLATFORM="auto"))
+    assert r.returncode != 0
+    out = r.stdout + r.stderr
+    for platform in ("azure", "gcp", "aws", "spire"):
+        assert platform in out, f"the refusal does not offer {platform}"
+
+
+# -- the play ------------------------------------------------------------------
+
+def test_the_play_refuses_a_ps_worker_with_no_way_into_the_vault():
+    unit = _yaml_code(_INSTALL)
+    assert "agent_token_source == 'ps'" in unit, "the ps source has no guard of its own"
+    block = unit.split("Refuse a Password-Safe-sourced worker", 1)[1][:900]
+    for var in ("agent_ps_client_id_secret", "agent_ps_client_secret_secret",
+                "agent_ps_api_url", "agent_ps_account_id"):
+        assert var in block, f"the ps guard does not require {var}"
+
+
+def test_the_exec_start_survives_every_mode():
+    """It did not, once. The unit's ExecStart was built from backslash continuations with
+    `{% if %}` blocks between them, and the `file` branch ended without a trailing
+    backslash -- silently truncating the command so --spiffe-socket and --interval never
+    reached the worker, and leaving systemd an orphan line it reads as an unknown
+    directive. One folded line has no continuations to get wrong."""
+    import yaml
+    with open(_INSTALL, encoding="utf-8") as fh:
+        play = yaml.safe_load(fh)[0]
+    unit = [t for t in play["tasks"] if t["name"] == "Install the systemd unit"][0]
+    exec_line = [ln for ln in unit["ansible.builtin.copy"]["content"].splitlines()
+                 if ln.startswith("ExecStart=")]
+    assert len(exec_line) == 1, "ExecStart is not a single line"
+    assert not exec_line[0].rstrip().endswith("\\"), \
+        "ExecStart ends in a continuation, which is how the arguments were lost before"
+    assert "{{ agent_args }}" in exec_line[0]
+    args = play["vars"]["agent_args"]
+    for mode in ("file", "wlc", "ps"):
+        branch = args.split(f"agent_token_source == '{mode}'", 1)
+        assert len(branch) == 2 or mode == "file", f"no branch for {mode}"
+    # Every mode keeps the tail that the continuation bug ate.
+    head = args.split("{% if", 1)[0]
+    assert "--spiffe-socket" in head and "--interval" in head, \
+        "the arguments every mode needs are inside a conditional again"
+
+
 def test_the_play_removes_a_token_when_moving_to_wlc():
     """Re-running to move a host from `file` to `wlc` must leave nothing behind, or the
     claim that nothing is stored is contradicted by a file in /etc."""
