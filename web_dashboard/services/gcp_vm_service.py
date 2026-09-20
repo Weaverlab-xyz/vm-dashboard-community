@@ -475,7 +475,13 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                                       # address is projectId/zone/instanceName, so
                                       # reading the CURRENT default would onboard the VM
                                       # under an address that resolves to nothing.
-                                      project=project_id, zone=result["zone"])
+                                      project=project_id, zone=result["zone"],
+                                      # Blank on every normal deploy, so the cloud default
+                                      # stands. A network cell sets "ssh": its VyOS guest
+                                      # runs no google-guest-agent, and the gcpvm plugin
+                                      # rotates by writing instance metadata that nothing
+                                      # on the guest would ever read.
+                                      method=getattr(payload, "passwordsafe_method", "") or "")
 
         job_service.set_completed(db, job_id, final_meta)
         await cache_service.invalidate_prefix("gcp_instances")

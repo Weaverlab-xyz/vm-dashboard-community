@@ -33,6 +33,7 @@ expects, exactly as the OT tab expects `ot-sim`.
 | What | Where | Notes |
 |---|---|---|
 | Demo administrator | `VYOS_ADMIN_USER`, default `adminuser` | `level admin`, so it can enter configuration mode. This is the account the cloud's VM deploy path onboards into Password Safe. |
+| Its credential | `VYOS_ADMIN_PUBKEY`, or `VYOS_ADMIN_PASSWORD` | Baked in. VyOS does not create users from a cloud's key injection the way a stock Linux image does, so an account baked with neither is an account nothing can log into — the Shell Jump included. The script warns when you bake one anyway. |
 | SSH | `:22` | The whole of Layer 1 here. A firewall needs a Shell Jump and nothing else, so the cell provisions no Web Jump and no protocol tunnel. |
 | Baseline ruleset | `VYOS_RULESET`, default `BLOCKLIST` | Attached to forwarded traffic, `default-action accept`, and **empty**. The demo's `rule 10 action drop` is the first rule in a ruleset that is already wired in, so the change bites on commit. |
 | Hostname | `VYOS_HOSTNAME`, default `vyos-cell` | It is in the prompt, so it is what the audience reads in the recording. |
@@ -51,7 +52,8 @@ OT side.
 | Variable | Default | What it does |
 |---|---|---|
 | `VYOS_ADMIN_USER` | `adminuser` | The Password-Safe-managed demo account. Matches the OT image's `OT_ADMIN_USER` so both cells onboard under one name. |
-| `VYOS_ADMIN_PASSWORD` | *(unset)* | Initial password. Unset means the account is key-only — see below. |
+| `VYOS_ADMIN_PUBKEY` | *(unset)* | The whole `ssh-ed25519 AAAA… comment` line. Bake the public half of the key pair your PRA Jumpoint presents. VyOS keeps authorized keys **in configuration** and regenerates `~/.ssh/authorized_keys` from it on commit, so the key has to go in as config or not at all. |
+| `VYOS_ADMIN_PASSWORD` | *(unset)* | Initial password, for a Password Safe functional account that rotates passwords rather than keys. |
 | `VYOS_HOSTNAME` | `vyos-cell` | Device hostname. |
 | `VYOS_RULESET` | `BLOCKLIST` | The ruleset the demo appends to. |
 | `VYOS_WAN_IF` | `eth0` | Cloud-facing interface (1.3 syntax attaches the ruleset to it). |
@@ -67,14 +69,20 @@ them**, so a cell onboarded on a cloud default attaches to a platform that can n
 rotate it and looks healthy until the first rotation attempt. `services/netcell_service.py`
 carries the guard; `services/ps_vm_hook.py` documents the methods.
 
-> **Not yet proven on live infrastructure: whether a pushed key survives a commit.**
-> VyOS keeps authorized keys in configuration (`set system login user … authentication
-> public-keys …`) and regenerates `~/.ssh/authorized_keys` from it. The SSH onboarding
-> method writes that file directly. Whether the pushed key survives the next `commit`
-> on a given VyOS release has not been verified here, and it decides whether Layer 2
-> is *rotation* or only *storage and checkout* for this cell. Validate it against your
-> own image before you demo rotation, and set `VYOS_ADMIN_PASSWORD` to fall back to
-> password-based management if it does not hold.
+> **Not proven on live infrastructure: whether Password Safe can rotate this account.**
+> VyOS keeps authorized keys in configuration and regenerates `~/.ssh/authorized_keys`
+> from it on every commit of `system login`. Password Safe's SSH method writes that
+> file directly, so a rotated key is liable to be reverted by the next commit — and a
+> generic Linux platform's change-password command diverges from `config.boot` the same
+> way. Managing a VyOS account properly needs a Password Safe platform whose change
+> command is `configure; set system login user … authentication plaintext-password …;
+> commit; save` in vbash. **That is a Password Safe artifact, not dashboard code**, and
+> per `CONTRIBUTING.md` it is not this repo's to ship.
+>
+> So treat Layer 2 here as **storage and checkout** — the credential is vaulted, handed
+> out and never seen — and do not demo rotation until you have verified it against your
+> own image and platform. The cell is deployed with auto-management left to your
+> functional account's platform rather than forced on.
 
 ## Baking it
 

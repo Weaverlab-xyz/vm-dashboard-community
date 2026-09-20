@@ -324,7 +324,7 @@ async def _register_vm_in_entitle(db, job_id: str, vm_name: str, hostname: str,
 
 async def _register_vm_in_passwordsafe(db, job_id: str, vm_name: str, hostname: str,
                                        result: dict, *, instance_id: str = "",
-                                       region: str = "") -> None:
+                                       region: str = "", method: str = "") -> None:
     """Thin wrapper around the shared Password Safe VM hook (tag=AWS). Onboards the VM as
     a managed system + its baked-in adminuser account. AWS defaults to the cloud-native
     AWS Systems Manager plugin (managed system DNS = ``{instance_id}:{region}``); the SSH
@@ -332,7 +332,11 @@ async def _register_vm_in_passwordsafe(db, job_id: str, vm_name: str, hostname: 
     from ..services import ps_vm_hook
     await ps_vm_hook.register(db, job_id, vm_name, hostname, result=result, tag="AWS",
                               ssh_key_secret=result.get("ssh_secret_name") or "",
-                              instance_id=instance_id, region=region)
+                              instance_id=instance_id, region=region,
+                              # Blank on every normal deploy, so the SSM default stands. A
+                              # network cell sets "ssh": its VyOS guest runs no SSM agent,
+                              # so SendCommand has nothing to send to.
+                              method=method)
 
 
 async def _run_deploy(
@@ -512,8 +516,13 @@ async def _run_deploy(
         from ..services import ps_vm_hook
         _psreg = bool((_job.metadata_dict or {}).get("register_in_passwordsafe")) if _job else False
         if _psreg and not is_windows and ps_vm_hook.registration_enabled():
-            await _register_vm_in_passwordsafe(db, job_id, instance_name, hostname, result,
-                                               instance_id=instance_id, region=_aws_region)
+            await _register_vm_in_passwordsafe(
+                db, job_id, instance_name, hostname, result,
+                instance_id=instance_id, region=_aws_region,
+                # Read off the job row rather than a payload: this path takes its
+                # Password Safe opt-in from metadata too (`_psreg` above), because
+                # _run_deploy is called with unpacked arguments rather than a request.
+                method=str((_job.metadata_dict or {}).get("passwordsafe_method") or "") if _job else "")
 
         job_service.set_completed(db, job_id, result)
         await cache_service.invalidate(cache_service.key_global("aws_instances"))

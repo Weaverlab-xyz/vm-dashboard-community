@@ -88,6 +88,10 @@ class DeployRequest(BaseModel):
     workgroup: str = Field(..., description="Workgroup the instance belongs to (written as Workgroup tag)")
     register_in_entitle: bool = Field(default=False, description="Opt in to registering this VM as an Entitle SSH integration (requires entitle_registration_enabled + a provisioned agent)")
     register_in_passwordsafe: bool = Field(default=False, description="Opt in to onboarding this VM into Password Safe as a managed system + account (requires passwordsafe_registration_enabled)")
+    # Password Safe onboarding method for THIS deploy, overriding the cloud default
+    # (services/ps_vm_hook._resolve_method). Blank everywhere but a network cell,
+    # whose VyOS guest runs none of the agents the cloud-native plugins drive.
+    passwordsafe_method: str = ""
     ssh_key_secret_override: Optional[str] = Field(default=None, description="Optional Secrets Manager secret name to use for the SSH key instead of the configured default (must be JSON with a public_key)")
     # PRA/jumpoint per-deploy overrides — config defaults are the fallback. Values
     # are secrets-backend references (e.g. aws_sm://…), not raw secrets.

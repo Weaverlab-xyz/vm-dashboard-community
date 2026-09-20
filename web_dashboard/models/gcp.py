@@ -68,6 +68,10 @@ class GCPDeployRequest(BaseModel):
     workgroup: str              # written as `workgroup` GCE label
     register_in_entitle: bool = False  # opt in to registering this VM as an Entitle SSH integration
     register_in_passwordsafe: bool = False  # opt in to onboarding this VM into Password Safe (managed system + account)
+    # Password Safe onboarding method for THIS deploy, overriding the cloud default
+    # (services/ps_vm_hook._resolve_method). Blank everywhere but a network cell,
+    # whose VyOS guest runs none of the agents the cloud-native plugins drive.
+    passwordsafe_method: str = ""
     ssh_key_secret_override: Optional[str] = None  # optional Secret Manager secret to use for the SSH key (must be JSON with a public_key)
     # PRA per-deploy overrides — the configured defaults are the fallback when blank.
     jump_group: Optional[str] = None             # PRA Jump Group name override (else gcp_bt_jump_group_name / bt_jump_group_name)

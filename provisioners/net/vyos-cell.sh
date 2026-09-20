@@ -33,10 +33,18 @@
 #   VYOS_ADMIN_USER   the Password-Safe-managed demo account (default: adminuser).
 #                     Matches the OT image's OT_ADMIN_USER so the two cells onboard
 #                     under the same name.
-#   VYOS_ADMIN_PASSWORD  initial password for that account. Default: unset, and the
-#                     account is then created with NO password — key-only. Set it
-#                     only if your Password Safe functional account rotates passwords
+#   VYOS_ADMIN_PUBKEY the SSH public key to bake onto that account, as the whole
+#                     "ssh-rsa AAAA... comment" line. STRONGLY RECOMMENDED: VyOS does
+#                     not create users from a cloud's key-injection the way a stock
+#                     Linux image does, so an account baked with neither a key nor a
+#                     password is an account nothing can log into — including the
+#                     Shell Jump. Bake the public half of the key pair your PRA
+#                     Jumpoint presents, or set VYOS_ADMIN_PASSWORD instead.
+#   VYOS_ADMIN_PASSWORD  initial password for that account. Default: unset. Use it
+#                     when your Password Safe functional account rotates passwords
 #                     rather than keys; see README.md, "How the credential is managed".
+#                     At least one of PUBKEY or PASSWORD should be set — the script
+#                     warns loudly when neither is.
 #   VYOS_HOSTNAME     the device's hostname (default: vyos-cell). Shows in the prompt,
 #                     so it is what the audience reads in the session recording.
 #   VYOS_RULESET      name of the baseline ruleset the demo appends to
@@ -60,6 +68,7 @@ fi
 set -eu
 
 VYOS_ADMIN_USER="${VYOS_ADMIN_USER:-adminuser}"
+VYOS_ADMIN_PUBKEY="${VYOS_ADMIN_PUBKEY:-}"
 VYOS_ADMIN_PASSWORD="${VYOS_ADMIN_PASSWORD:-}"
 VYOS_HOSTNAME="${VYOS_HOSTNAME:-vyos-cell}"
 VYOS_RULESET="${VYOS_RULESET:-BLOCKLIST}"
@@ -92,6 +101,33 @@ log "firewall syntax: $VYOS_SYNTAX"
 # Written out and then run under `sg vyattacfg`, because a VyOS config session needs
 # the vyattacfg group even when the caller is root — `my_set` writes into a per-group
 # scratch tree and silently has nothing to commit without it.
+# Split "ssh-rsa AAAA... comment" into the two fields VyOS stores separately. Done
+# here rather than inline so a malformed key fails BEFORE a config session opens --
+# a commit that dies halfway leaves the image in a state the bake cannot describe.
+PUBKEY_TYPE=""
+PUBKEY_BODY=""
+if [ -n "$VYOS_ADMIN_PUBKEY" ]; then
+  PUBKEY_TYPE=$(echo "$VYOS_ADMIN_PUBKEY" | awk '{print $1}')
+  PUBKEY_BODY=$(echo "$VYOS_ADMIN_PUBKEY" | awk '{print $2}')
+  if [ -z "$PUBKEY_TYPE" ] || [ -z "$PUBKEY_BODY" ]; then
+    echo "[vyos-cell] FATAL: VYOS_ADMIN_PUBKEY is not an 'ssh-... AAAA... [comment]' line." >&2
+    exit 1
+  fi
+  case "$PUBKEY_TYPE" in
+    ssh-rsa|ssh-dss|ssh-ed25519|ecdsa-sha2-*) ;;
+    *)
+      echo "[vyos-cell] FATAL: '$PUBKEY_TYPE' is not an SSH key type VyOS accepts." >&2
+      exit 1
+      ;;
+  esac
+fi
+
+if [ -z "$VYOS_ADMIN_PUBKEY" ] && [ -z "$VYOS_ADMIN_PASSWORD" ]; then
+  echo "[vyos-cell] WARNING: '$VYOS_ADMIN_USER' is being baked with NO key and NO password." >&2
+  echo "[vyos-cell] Nothing will be able to log in as it -- the Shell Jump included." >&2
+  echo "[vyos-cell] Set VYOS_ADMIN_PUBKEY (preferred) or VYOS_ADMIN_PASSWORD." >&2
+fi
+
 CFG=/tmp/vyos-cell-configure.sh
 
 {
@@ -108,6 +144,14 @@ CFG=/tmp/vyos-cell-configure.sh
   echo "set system login user '$VYOS_ADMIN_USER' level admin"
   if [ -n "$VYOS_ADMIN_PASSWORD" ]; then
     echo "set system login user '$VYOS_ADMIN_USER' authentication plaintext-password '$VYOS_ADMIN_PASSWORD'"
+  fi
+  if [ -n "$VYOS_ADMIN_PUBKEY" ]; then
+    # VyOS keeps authorized keys IN CONFIGURATION, split into type and body, and
+    # regenerates ~/.ssh/authorized_keys from it on commit. Writing the file directly
+    # would therefore be undone by the next commit of `system login` -- so the key has
+    # to go in as config or not at all.
+    echo "set system login user '$VYOS_ADMIN_USER' authentication public-keys 'default' type '$PUBKEY_TYPE'"
+    echo "set system login user '$VYOS_ADMIN_USER' authentication public-keys 'default' key '$PUBKEY_BODY'"
   fi
 
   # The baseline ruleset. Default-accept and empty on purpose: the cell is a demo
@@ -145,6 +189,7 @@ mkdir -p /opt/netcell
   echo "admin_user=$VYOS_ADMIN_USER"
   echo "hostname=$VYOS_HOSTNAME"
   echo "ruleset=$VYOS_RULESET"
+  echo "auth=$([ -n "$VYOS_ADMIN_PUBKEY" ] && printf pubkey || printf none)$([ -n "$VYOS_ADMIN_PASSWORD" ] && printf +password || printf "")"
   echo "syntax=$VYOS_SYNTAX"
   echo "baked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } > /opt/netcell/IMAGE.txt
