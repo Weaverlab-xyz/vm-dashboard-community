@@ -2538,6 +2538,15 @@ _PREVIEW_FLAGS = {
     # general-purpose Linux guest. Whether that provisioner runs at all, and whether the
     # baked account is reachable once deployed, have not been seen once. Off means the
     # dashboard behaves exactly as before and no cell can be deployed.
+    # Preview because the worker has never run against a live SPIRE trust domain or a
+    # real MCP endpoint. Off means no agent can be minted, and nothing else changes.
+    "agentcell_enabled": (
+        "Agent Demo Cell",
+        "Preview. Install a non-human principal that reads the estate through this "
+        "dashboard's MCP server — attested by a SPIRE trust domain, authorized by a "
+        "token that expires and can be revoked mid-run. Needs the MCP server on and a "
+        "SPIRE lab on the host. The agent's token is minted against a user you pick, and "
+        "an administrator is refused."),
     "netcell_enabled": (
         "Network Demo Cell",
         "Preview. Deploy a VyOS router/firewall with no external IP, reached only "

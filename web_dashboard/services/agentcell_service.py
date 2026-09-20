@@ -1,0 +1,186 @@
+"""The agent demo cell: a non-human principal, and the refusals that keep it honest.
+
+**This module mints an authorization and records it. It does not create a VM, and it
+does not bridge identity to authorization.** Both of those are deliberate, and both are
+the interesting part of the design.
+
+*Attached, never created.* The worker runs on a Linux VM this dashboard already
+deployed, resolved through ``spire_lab_service.resolve_host`` — which re-derives the
+host from completed deploy-job rows rather than trusting a supplied address, because
+privileged playbooks against a host of the caller's choosing is not something this
+should accept. The SPIRE lab made exactly this call for exactly this reason, and the
+payoff is the same: the host keeps its auto-delete timer, its Password Safe onboarding
+and its Destroy button, so this feature owns no teardown beyond revoking what it issued.
+
+*Identity and authorization stay two things.* The worker attests itself to SPIRE and
+gets an SVID — that is who it is, and it holds nothing. It calls ``/mcp`` with a
+Personal Access Token — that is what it may do here, bounded by the token user's RBAC.
+**Nothing mints one from the other**, because ``api/mcp_server`` takes a Bearer PAT and
+has no mTLS path; the bridge would need the Password Safe SPIFFE SVID plugin, whose
+configuration question ``spire_lab_service``'s own docstring records as unresolved.
+Writing that bridge here would be betting on the answer, so the cell shows both halves
+and names the gap.
+
+The refusals below are the module's real content. They follow
+``ot_service.in_plant_agent_problem``'s shape — a remedy string the route turns into a
+400 — because a worker that installs and then cannot attest, or cannot call anything, has
+cost a playbook run and a demo.
+"""
+import logging
+from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
+
+
+class AgentCellError(Exception):
+    """An invalid agent-cell request. The message is rendered straight into a 400, so it
+    carries the remedy rather than the symptom -- the contract ``ot_service.OTCellError``
+    states for the failed-job page."""
+
+
+# The worker's SPIFFE path under the trust domain. A path rather than a bare name so the
+# ID reads as what it is in a log line, and fixed rather than configurable so the
+# registration entry the playbook creates and the ID the worker expects cannot drift.
+AGENT_SPIFFE_PATH = "/agent/mcp-reader"
+
+# The PAT's lifetime, and the reason it is not optional. `expires_at` is nullable on the
+# model (None = never expires, for a human's CI token), and a non-expiring token for a
+# non-human principal is precisely what this cell argues against -- so the cell always
+# sets one and `pat_expiry_problem` refuses to let it be turned off.
+DEFAULT_PAT_HOURS = 8
+MAX_PAT_HOURS = 72
+
+# The two playbooks, in the order a cell runs them.
+STAGES = ("agent-spiffe-entry", "agent-install")
+
+
+def spiffe_id_for(trust_domain: str) -> str:
+    """The SPIFFE ID this cell's worker will attest as."""
+    td = (trust_domain or "").strip().strip("/")
+    if not td:
+        return ""
+    return f"spiffe://{td}{AGENT_SPIFFE_PATH}"
+
+
+def mcp_problem(mcp_enabled: bool) -> str:
+    """Refuse a worker that would have nothing to call.
+
+    The whole loop is one MCP tool call. With the server off, the install succeeds, the
+    unit starts, and every poll fails against a 404 -- which reads as a broken worker
+    rather than as a feature that was never turned on.
+    """
+    if mcp_enabled:
+        return ""
+    return ("The MCP server is off, so the worker would have nothing to call — every "
+            "poll would 404 and read as a broken agent. Turn on **MCP Server** under "
+            "Settings → Integrations first.")
+
+
+def trust_domain_problem(trust_domain: str) -> str:
+    """Refuse a cell with no trust domain to attest against.
+
+    Not fatal to the worker -- it logs ``unattested`` and keeps polling -- but it is
+    fatal to the demo, because the identity half becomes a claim rather than a fact. So
+    it is refused at the door rather than discovered in a log line in front of an
+    audience.
+    """
+    if (trust_domain or "").strip():
+        return ""
+    return ("No SPIRE trust domain. The worker would run, but it could not attest, so it "
+            "would log `unattested` and the identity half of the demo would be an "
+            "assertion. Stand up a SPIRE lab on this host first — Workload Lab → SPIRE.")
+
+
+def pat_expiry_problem(hours) -> str:
+    """Refuse a token that outlives the demo, or never expires at all.
+
+    The model allows ``expires_at = None``; this cell does not. That is the single
+    strongest claim it makes -- a non-human principal whose authorization has no end is
+    the status quo being argued against, and shipping a cell that could create one would
+    undercut every card pointing at it.
+    """
+    try:
+        h = int(hours)
+    except (TypeError, ValueError):
+        return (f"{hours!r} is not a number of hours. The agent's token must expire; "
+                f"pick something between 1 and {MAX_PAT_HOURS}.")
+    if h < 1:
+        return ("The agent's token must expire, and a non-positive lifetime would mean "
+                "never. That is the arrangement this cell exists to argue against — "
+                f"pick between 1 and {MAX_PAT_HOURS} hours.")
+    if h > MAX_PAT_HOURS:
+        return (f"{h} hours is longer than this cell will issue ({MAX_PAT_HOURS}). A "
+                "demo credential that outlives the demo becomes a standing one; shorten "
+                "it, or mint a fresh cell when you next present.")
+    return ""
+
+
+def pat_user_problem(is_admin: bool, username: str = "") -> str:
+    """Refuse to mint an agent token for an administrator.
+
+    **The refusal that matters most in this module.** An agent holding administrator is
+    not a demonstration of scoped non-human access; it is the thing the demo warns about,
+    wearing the demo's own badge. Every MCP tool resolves the token's user and applies
+    that user's RBAC (``api/mcp_server._caller``), so the token user IS the agent's
+    blast radius -- which makes picking an admin the one choice that silently makes the
+    whole cell say the opposite of what it means to.
+    """
+    if not is_admin:
+        return ""
+    who = f" ({username})" if username else ""
+    return (f"That account is an administrator{who}. Every MCP tool applies the token "
+            "user's own permissions, so an agent minted against it would read the entire "
+            "estate — which is the arrangement this cell argues against. Create a narrow "
+            "user for the agent and mint the token against that.")
+
+
+def host_problem(host_ref: str) -> str:
+    """Refuse a request with no host to attach to.
+
+    Only the shallow check lives here. The real one is
+    ``spire_lab_service.resolve_host``, which re-derives the host against this
+    dashboard's own deploy rows -- a name that looks fine here and resolves to nothing
+    there is the case that matters, and it is that function's to answer.
+    """
+    if (host_ref or "").strip():
+        return ""
+    return ("No host. The worker attaches to a Linux VM this dashboard deployed — it "
+            "does not create one — so name the VM running your SPIRE agent.")
+
+
+def pat_expires_at(hours: int = DEFAULT_PAT_HOURS, now=None) -> datetime:
+    """When the agent's token dies. Always a datetime, never None."""
+    base = now or datetime.utcnow()
+    return base + timedelta(hours=int(hours))
+
+
+def pat_name_for(cell_name: str) -> str:
+    """A token name that says what it belongs to, so the row in Settings → API Tokens is
+    identifiable without opening anything. Revoking is the demo's closing beat, and
+    hunting for which of six tokens to revoke is a bad thirty seconds."""
+    slug = "".join(c if c.isalnum() or c in "-_" else "-"
+                   for c in (cell_name or "agent").strip().lower())[:60]
+    return f"agent-cell-{slug or 'agent'}"
+
+
+def stages_done(row) -> list:
+    return [s for s in ((getattr(row, "stages_done", "") or "").split(",")) if s]
+
+
+def is_wired(row) -> bool:
+    """Both playbooks ran. A cell with only the entry has an identity nothing uses; one
+    with only the install has a worker that logs ``unattested``."""
+    return set(STAGES).issubset(set(stages_done(row)))
+
+
+def deploy_notes(hours: int = DEFAULT_PAT_HOURS) -> list:
+    """What the form says back, so the shape of the demo is read before it is run."""
+    return [
+        f"The agent's token expires in {hours}h and can be revoked at any time from "
+        "Settings → API Tokens. Revoking it mid-run is the demo.",
+        "Its identity (a SPIFFE SVID) and its authorization (this token) are two "
+        "separate things — the SVID does not authenticate to /mcp. The worker names both "
+        "in every log line so the gap stays visible.",
+        "The worker attaches to a VM you already deployed. Destroying that VM reaps the "
+        "worker with it; this cell adds no teardown of its own beyond revoking the token.",
+    ]

@@ -80,6 +80,10 @@ VALID_PERSONAS = (
     # conditional it appears in -- the same argument `itops` settled above.
     "netadmin",
     "finops",
+    # `aiops`, not `agent`: this codebase already calls a remote-execution container an
+    # "agent" (services/remote_agent*), and a persona sharing that word would make every
+    # grep for either return both.
+    "aiops",
 )
 
 # Human names for the flags a card can require, for the "Needs: ..." copy. A card names a
@@ -105,6 +109,8 @@ _FLAG_LABELS = {
     "cloud_functions_enabled": "Cloud functions",
     "cert_lab_enabled": "Certificate Lab",
     "spire_lab_enabled": "SPIRE Lab",
+    "mcp_server_enabled": "MCP Server",
+    "agentcell_enabled": "Agent Demo Cell",
     "netcell_enabled": "Network Demo Cell",
     "k8s_management_enabled": "Kubernetes",
     "portainer_enabled": "Portainer",
@@ -1038,9 +1044,101 @@ _FINOPS = Persona(
 )
 
 
+_AIOPS = Persona(
+    key="aiops",
+    label="AI / agent platform",
+    blurb="The things that act without a person at the keyboard — and whether you could "
+          "say what they are allowed to do, or stop one mid-task.",
+    section_order=("overview", "managed", "cloud", "containers", "hypervisors"),
+    tile_emphasis=("active_jobs", "deployed_resources"),
+    nav_pins=("dashboard", "workload_lab", "rbac", "audit", "jobs", "secrets"),
+    # Empty, like `security` and `finops`. The agent cell ATTACHES to a VM this dashboard
+    # already deployed rather than creating one -- the call spire_lab_service made first,
+    # and for the same reason -- so there is no deploy button that belongs to this role.
+    quick_deploy=(),
+    docs=("profiles/demo/personas/aiops",),
+    # Deliberately empty, and worth the comment because every other persona has one.
+    # Nothing this role needs is a toggle the wizard's Features step renders: the MCP
+    # server, the SPIRE lab and the agent cell are all Settings-only. A preset naming one
+    # would be a silent no-op (tests/test_persona_wizard), so the cards report them as
+    # `needs_flag` and point at the panel instead.
+    preset_flags=(),
+    use_cases=(
+        # The spine. First because it is the one beat nobody else in the catalog has, and
+        # because everything below is a different angle on the same question.
+        UseCase(
+            id="aiops-revoke-mid-task",
+            title="Revoke it mid-task, and watch it stop",
+            summary="A worker is reading your estate on a loop. Revoke its token while "
+                    "the log is on screen: the next poll is refused, it says so, and the "
+                    "unit stops. Ask the room how they would do that to an agent today.",
+            target="/settings",
+            minutes=12,
+            docs="profiles/demo/agent-demo-cell",
+            requires_flags=("agentcell_enabled", "mcp_server_enabled"),
+        ),
+        UseCase(
+            id="aiops-earned-identity",
+            title="An identity it had to earn",
+            summary="The worker holds no identity document. It attests itself to a SPIRE "
+                    "trust domain on every loop and names the SPIFFE ID it got — so "
+                    "deleting the registration entry is enough to make it anonymous.",
+            target="/workload-lab#spire",
+            minutes=10,
+            docs="integrations/spiffe",
+            # The constituent, not the derived `workload_lab_enabled`. The page gate is
+            # `cert_lab OR spire_lab`, so requiring the derived flag would leave a card
+            # reading `ready` on an instance where only the Certificate lab is on and the
+            # SPIRE tab is not rendered. test_a_card_declares_the_flag_its_target_page_is_gated_on
+            # pins that distinction.
+            requires_flags=("spire_lab_enabled",),
+        ),
+        UseCase(
+            id="aiops-blast-radius",
+            title="What the agent could see, and why",
+            summary="Every tool the agent calls resolves its token's user and applies "
+                    "that user's permissions. So the answer to 'what can this agent "
+                    "reach' is a row in the RBAC table rather than a guess — and the "
+                    "cell refuses to mint one against an administrator.",
+            target="/rbac",
+            minutes=10,
+            docs="integrations/mcp-server",
+            requires_flags=("mcp_server_enabled",),
+        ),
+        UseCase(
+            id="aiops-what-it-did",
+            title="Every call it made, and when",
+            summary="The token records when it was last used, the job trail records what "
+                    "ran, and the worker's own log names the identity behind each call. "
+                    "Three records that agree, for a principal nobody was watching.",
+            target="/audit",
+            minutes=8,
+            docs="audit-log",
+        ),
+        UseCase(
+            id="aiops-not-a-secret",
+            title="A credential that was never a secret to begin with",
+            summary="For workloads that reach a cloud rather than this dashboard: a "
+                    "credential minted per run and leased, with its own issuance audit. "
+                    "The honest caveat included — on AWS a lease cannot be revoked, so "
+                    "the TTL is the only control there is.",
+            target="/workload-lab#cloud",
+            minutes=10,
+            docs="integrations/workload-cloud",
+            # `spire_lab_enabled` is here for the PAGE, not the tab: with both lab flags
+            # off the whole Workload Lab 404s and the Cloud tab is unreachable however
+            # its own flag is set -- which docs/workload-lab.md states as a deliberate
+            # property rather than a gap. This persona's other cards need the SPIRE lab
+            # anyway, so naming it costs nothing an operator was not already turning on.
+            requires_flags=("spire_lab_enabled", "workload_credentials_enabled"),
+        ),
+    ),
+)
+
+
 _PERSONAS = {p.key: p for p in (
     _CLOUDOPS, _DEVOPS, _HYPERVISOR, _ITOPS, _OT, _DBA, _SECURITY, _SRE, _NETADMIN,
-    _FINOPS,
+    _FINOPS, _AIOPS,
 )}
 
 

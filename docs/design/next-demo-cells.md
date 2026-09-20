@@ -56,6 +56,12 @@ is missing, and these two survive that question.
 > one — "nobody is a standing admin of the thing that spends the money". `entitle_registration`
 > stays orphaned and stays noise: registration happens at deploy time, by the thing
 > being deployed, which is a `devops` concern.
+>
+> **Since updated again:** the `aiops` persona (§3) claimed `mcp_server_enabled`, leaving
+> six. Of those, three are POV-profile flags that are not persona territory by design, so
+> the substantive remainder is `entitle_registration`, `portainer` and `workload_lab` —
+> the last of which is derived and deliberately unclaimable, since a card must name the
+> constituent lab flag its target tab actually needs.
 
 ## 2. What a demo cell is, and what it is not
 
@@ -79,7 +85,7 @@ Two consequences follow, and both have teeth:
   (`services/netcell_service.py` argues this at length). **A proposed cell whose wiring
   needs its own teardown path should be costed as the OT cell, not the network cell.**
 
-## 3. Candidate A — the agent cell (recommended)
+## 3. Candidate A — the agent cell (recommended) — **BUILT**
 
 **Role:** AI / agent platform engineer. **Owns:** the things that act without a person
 at the keyboard.
@@ -117,10 +123,28 @@ token, a workload identity — is a post-deploy job, because a token baked into 
 has expired before the image is used. That is not a constraint peculiar to this cell: it
 is the rule both shipped cells follow, and it is why `provisioners/` exists.
 
-**Open question to answer before building:** what the agent actually does. A worker that
-only fetches a credential proves the plumbing; one that performs a recognisable task —
-remediating a finding, rotating something, running a change — proves the story. The
-second is materially more work and should be a deliberate choice rather than a drift.
+**Open question, now answered:** the worker **drives this dashboard's own MCP server**.
+It reads the estate on a loop and names, in one line, the SPIFFE ID it proved and the
+token it spent. Reading rather than acting, deliberately: the argument does not need the
+blast radius to be frightening, it needs nobody to be able to say what the blast radius
+*is*.
+
+**Shipped as the agent cell** — [`agent-demo-cell.md`](../profiles/demo/agent-demo-cell.md),
+`examples/playbooks/agent/`, `services/agentcell_service.py`, and the `aiops` persona.
+Three things the build settled that this section had guessed at:
+
+- **The SVID does not authenticate to `/mcp`.** The MCP server takes a Bearer PAT and has
+  no mTLS path, so identity and authorization stay two things and nothing mints one from
+  the other. Closing that gap needs the Password Safe SPIFFE SVID plugin, whose
+  configuration question `spire_lab_service` already records as unresolved. The cell shows
+  both halves in one log line and names the gap rather than papering over it.
+- **The cell attaches; it does not create.** Same call the SPIRE lab made, same reason
+  (`resolve_host` re-derives the host from deploy rows), same payoff: teardown is
+  inherited and the cell owns none.
+- **The strongest refusal was not obvious from here.** The cell refuses to mint an agent
+  token against an administrator. Every MCP tool applies the token user's RBAC, so the
+  token user *is* the agent's blast radius — and picking an admin would quietly make the
+  whole demo argue the opposite of its point.
 
 ## 4. Candidate B — cloud governance (a persona, deliberately not a cell) — **BUILT**
 
@@ -242,6 +266,64 @@ injection into a Remote RDP jump item would add something real.
 That is **one card, not a project**, and it does not belong in the ordering below as a
 peer of the cells. It is worth doing whenever someone is next in `personas.py` anyway.
 
+## 5b. The agent cell as the Workload Lab's consumer
+
+**The Workload Lab issues four credentials and nothing in this repository consumes any of
+them.** Its hub is explicit that there is no human in these workflows — *"the consumer is
+a pipeline, a broker or a cluster"* — and all three of those are hypothetical. Each tab
+ends at a credential handed to an operator to paste somewhere else.
+
+The agent cell (§3) is that consumer, and it is already governed, recorded and revocable.
+Wiring the two together is the next piece of work on this note, and it is worth doing for
+a reason sharper than tidiness.
+
+### What it completes, not just adds
+
+The lab's cross-cutting invariant is **issue / record / remove**
+(`tests/test_workload_lab_governance.py`). Today the *remove* half ends at an API call: the
+lease is revoked, the managed system is deregistered, and nothing observable happens,
+because nothing was using the credential. **A consumer makes removal demonstrable.**
+
+That matters most on the tab that already documents an asymmetry it cannot show:
+
+> on AWS a lease **cannot be revoked** at all, so the TTL is the only control there is.
+> Azure honours the revoke.
+
+With a consumer, that stops being a footnote and becomes two side-by-side demos — the
+Azure worker stops, the AWS one keeps going until its TTL. That is a far better argument
+for short TTLs than a sentence in a table, and it is the sort of thing a room remembers.
+
+### The design constraint that decides the shape
+
+**One credential at a time, fetched per task.** An agent holding an SVID *and* a cluster
+token *and* a cloud lease *and* a certificate would be the most over-credentialed
+principal in the estate — the mechanism would argue precisely against the thing the cell
+exists to argue for.
+
+So the mechanism is a *consumption* step, not a provisioning one: the worker asks for the
+credential its next task needs, uses it, and lets it lapse. Which credential it asks for
+is the operator's choice per agent, and the row records which mechanism that agent is
+wired to — the same way it already records its SPIFFE ID and its PAT.
+
+### What each tab would need
+
+| Tab | What the worker would hold | The honest problem |
+|---|---|---|
+| **SPIRE** | an SVID | **Done** — the worker already attests every loop. |
+| **Cloud** | an AWS/Azure lease | Needs a task that touches a cloud API. The revoke asymmetry above is the demo. |
+| **Kubernetes** | a bound ServiceAccount token | Needs a cluster the agent may read. `sre`'s cards already stand one up. |
+| **Certificates** | an X.509 from the private CA | Needs an mTLS endpoint to present to; the certificate plays' subject-DN echo is the closest existing shape. |
+
+### What this must not become
+
+**Not a fifth Workload Lab tab.** `test_workload_lab_governance` blocks one until it names
+an authority that issues, records and removes — and a *consumer* names none, because it
+issues nothing. The relationship is the other way round: the lab issues, the cell
+consumes, and the cell's page links back. §2's definition holds.
+
+**Not a way to widen the agent's standing access.** If this ever ends with a worker that
+holds four credentials because it might need them, it has been built wrong.
+
 ## 6. What is deliberately not proposed
 
 - **A vendor-access cell.** Third-party access into a network they should not have is
@@ -255,17 +337,23 @@ peer of the cells. It is worth doing whenever someone is next in `personas.py` a
 ## 7. Suggested order
 
 1. ~~**Cloud governance persona**~~ — **done.** Shipped as `finops`; see §4.
-2. **Windows EPM integration, then the Windows endpoint cell** — the biggest demo payoff
-   per unit of new thinking. EPM-L is a working template to copy rather than a design to
-   invent, and the image prep, the WinRM runner and the bake-then-activate pattern are
-   all already here.
-3. **The agent cell** — the more differentiated story, and the most greenfield. Nothing
-   blocks it; it simply has less to copy, and §3's open question should be settled before
-   anyone starts.
+2. ~~**The agent cell**~~ — **done.** Shipped with the `aiops` persona; see §3.
+3. **Wire the agent cell to the rest of the Workload Lab** (§5b) — the cheapest
+   remaining item with the most leverage: it gives four issuance demos an end, and makes
+   the AWS/Azure revocation asymmetry something a room can watch rather than read.
+4. **Windows EPM integration, then the Windows endpoint cell** — the last item on this
+   note, and the biggest demo payoff per unit of new thinking. EPM-L is a working template
+   to copy rather than a design to invent, and the image prep, the WinRM runner and the
+   bake-then-activate pattern are all already here.
 
-The 2-before-3 call is about risk, not importance. The agent cell is the story fewer
-vendors can tell; the Windows cell is the story more buyers already recognise, and it is
-the one where being wrong costs less because the shape is known.
+The agent cell was built before the Windows one despite this list's earlier ordering, and
+the reason is worth recording: the risk it carried was **unproven infrastructure**, which
+a preview flag and an honest "not yet run against live infrastructure" note handle. The
+Windows item's risk is a **missing integration**, which nothing but building it removes.
+Shipping the one whose risk could be bounded first was the cheaper order.
+
+**`itops` cloud cards are not on this list**, and an earlier draft was wrong to put them
+there — see §5. The gap is one card, not a piece of work worth sequencing.
 
 **`itops` cloud cards are not on this list**, and an earlier draft was wrong to put them
 there — see §5. The gap is one card, not a piece of work worth sequencing.

@@ -212,6 +212,7 @@ def flags() -> dict:
         "cert_lab_enabled":     enabled("cert_lab_enabled",      settings.cert_lab_enabled),
         "spire_lab_enabled":    enabled("spire_lab_enabled",     settings.spire_lab_enabled),
         "netcell_enabled":      enabled("netcell_enabled",       settings.netcell_enabled),
+        "agentcell_enabled":    enabled("agentcell_enabled",     settings.agentcell_enabled),
         # Derived from the two above -- see _DERIVED. Gates the nav link and /workload-lab.
         "workload_lab_enabled": enabled("workload_lab_enabled"),
         # Workload Credentials. Present here because `main._feature_gate` already gates the
@@ -360,6 +361,7 @@ def feature_map() -> dict:
         "cert_lab":       raw["cert_lab_enabled"],
         "spire_lab":      raw["spire_lab_enabled"],
         "netcell":        raw["netcell_enabled"],
+        "agentcell":      raw["agentcell_enabled"],
         "resource_expiry": raw["resource_expiry_enabled"],
         "remote_agents": raw["remote_agents_enabled"],
         "cloud_unmanaged_discovery": raw["cloud_unmanaged_discovery_enabled"],
