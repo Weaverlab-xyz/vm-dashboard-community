@@ -2158,22 +2158,44 @@ class Settings(BaseSettings):
     wlc_site_id: str = ""                           # site (tenant) GUID — the `tenant_id` claim in your access JWT
     wlc_pat: str = ""                               # Personal Access Token; SECRET — registered in secret_hygiene.SECRET_REGISTRY
     # How this deployment authenticates: "pat" (the stored token above) or
-    # "entra" (this container's own Azure managed identity, trusted by a Workload
-    # Identity registered in Pathfinder's GUI). "entra" stores NO credential at
-    # all — the last standing secret this feature needed — and is only available
-    # where the platform hands the container an identity, i.e. Azure. Default
-    # "pat": an unrecognised value reads as "pat" too, so an install that never
-    # sets this is untouched. See docs/cloud-hosting.md → "No PAT".
+    # "workload" (this container's own cloud identity, trusted by a Workload
+    # Identity registered in Pathfinder's GUI). "workload" stores NO credential at
+    # all — the last standing secret this feature needed — and is available
+    # wherever the platform hands the container an OIDC token, which is all three
+    # clouds this dashboard is documented to run on. Default "pat": an
+    # unrecognised value reads as "pat" too, so an install that never sets this is
+    # untouched. The older spelling "entra" still reads as "workload", so installs
+    # configured before the mode covered more than Azure keep working.
+    # See docs/cloud-hosting.md → "No PAT".
     wlc_auth_mode: str = "pat"
+    # Which platform vouches for this container: "azure" | "gcp" | "aws" | "file".
+    # Blank reads as "azure", because every install that predates this setting is
+    # an Azure one. AWS serves a workload identity token only on EKS (IRSA or Pod
+    # Identity); ECS and plain EC2 have no OIDC endpoint, so a dashboard there
+    # stays on "pat". Not a secret.
+    wlc_identity_platform: str = "azure"
     # The registration's Service Name, sent as the `X-BT-Service-Name` header on
-    # every call. Required in "entra" mode: it tells the platform WHICH Workload
+    # every call. Required in "workload" mode: it tells the platform WHICH Workload
     # Identity to evaluate the token against. Not a secret.
     wlc_service_name: str = ""
-    # The App ID URI the identity token is requested for — it becomes the token's
-    # `aud`. Required in "entra" mode; no default, because the value is one your
-    # own tenant exposes. Not a secret.
+    # What the identity token is requested FOR — it becomes the token's `aud`.
+    # Azure calls it an App ID URI, GCP calls it an audience string; it is the same
+    # field. Required in "workload" mode on the HTTP platforms (azure, gcp); on the
+    # file platforms the audience is baked into the projected token by whoever
+    # configured the service account, so there is nothing to set. Not a secret.
+    wlc_identity_audience: str = ""
+    # Where the platform mounts a projected identity token, for "aws" and "file".
+    # Blank means the defaults: AWS_WEB_IDENTITY_TOKEN_FILE or
+    # AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE on aws, the Kubernetes
+    # ServiceAccount token path on file. Not a secret — the FILE is the token,
+    # and it is the platform's to write and rotate, not this app's to hold.
+    wlc_identity_token_file: str = ""
+    # Superseded by wlc_identity_audience, which is read first. Kept because
+    # installs hold this value; it means exactly the same thing.
     wlc_entra_resource: str = ""
-    # Client id of a USER-ASSIGNED managed identity. Blank = the container's
+    # Client id of a USER-ASSIGNED managed identity. AZURE ONLY, and honestly
+    # named: GCP attaches a service account to the revision and AWS projects a
+    # token for the pod, so neither has a parameter here. Blank = the container's
     # system-assigned one. A user-assigned identity is the shareable case: the app
     # and the worker are separate Container Apps, and one identity across both
     # means one registration in Pathfinder rather than two.

@@ -99,7 +99,7 @@ def _bootstrap_blocked(target_backend: str) -> frozenset[str]:
     blocked = _BOOTSTRAP_BLOCKLIST.get(target_backend, frozenset())
     if target_backend == "wlc" and "wlc_pat" in blocked:
         from ..services import workload_credentials_service as wlc
-        if wlc.auth_mode() == wlc.AUTH_MODE_ENTRA:
+        if wlc.auth_mode() == wlc.AUTH_MODE_WORKLOAD:
             return blocked - {"wlc_pat"}
     return blocked
 

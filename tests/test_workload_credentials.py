@@ -758,8 +758,22 @@ def test_an_unrecognised_auth_mode_reads_as_pat_not_as_entra():
 
 
 def test_the_auth_mode_is_case_and_space_insensitive():
-    with _config(wlc_auth_mode=" Entra "):
-        assert wlc.auth_mode() == "entra"
+    with _config(wlc_auth_mode=" Workload "):
+        assert wlc.auth_mode() == "workload"
+
+
+def test_a_stored_entra_still_means_workload_identity():
+    """Installs configured before this mode covered more than Azure hold `entra`
+    in app_config. Demoting them to stored-token auth would break the one mode
+    that has no stored token to fall back on."""
+    with _config(wlc_auth_mode="entra"):
+        assert wlc.auth_mode() == wlc.AUTH_MODE_WORKLOAD
+    assert wlc.normalise_auth_mode(" ENTRA ") == wlc.AUTH_MODE_WORKLOAD
+    # And it is never written back out under the old name.
+    html = _read("web_dashboard", "templates", "settings.html")
+    panel = html[html.index("panelCfg.wlc_auth_mode"):]
+    panel = panel[:panel.index("panelCfg.wlc_api_version")]
+    assert 'value="workload"' in panel and 'value="entra"' not in panel
 
 
 def test_pat_mode_still_requires_the_pat():
@@ -771,26 +785,31 @@ def test_entra_mode_never_asks_for_a_pat():
     """The whole point of the mode is that there is no token to hold, so naming
     `wlc_pat` here would send an operator hunting for one they are right not to
     have."""
+    with _config(wlc_auth_mode="workload", wlc_site_id="SITE",
+                 wlc_service_name="vm-dashboard",
+                 wlc_identity_audience="api://vm-dashboard-wlc"):
+        assert wlc.missing_settings() == []
+    # The pre-rename key satisfies it too — see identity_audience.
     with _config(wlc_auth_mode="entra", wlc_site_id="SITE",
                  wlc_service_name="vm-dashboard",
                  wlc_entra_resource="api://vm-dashboard-wlc"):
         assert wlc.missing_settings() == []
-    with _config(wlc_auth_mode="entra", wlc_site_id="SITE"):
+    with _config(wlc_auth_mode="workload", wlc_site_id="SITE"):
         missing = wlc.missing_settings()
-    assert missing == ["wlc_service_name", "wlc_entra_resource"]
+    assert missing == ["wlc_service_name", "wlc_identity_audience"]
     assert "wlc_pat" not in missing
 
 
 def test_entra_headers_carry_the_service_name():
     """Without `X-BT-Service-Name` the platform holds a valid token and no
     statement of which registration it is meant to satisfy."""
-    original = wlc._entra_token
-    wlc._entra_token = lambda: "IDENTITY-TOKEN"
+    original = wlc._workload_token
+    wlc._workload_token = lambda: "IDENTITY-TOKEN"
     try:
-        with _config(wlc_auth_mode="entra", wlc_service_name="vm-dashboard"):
+        with _config(wlc_auth_mode="workload", wlc_service_name="vm-dashboard"):
             headers = wlc._headers()
     finally:
-        wlc._entra_token = original
+        wlc._workload_token = original
     assert headers["Authorization"] == "Bearer IDENTITY-TOKEN"
     assert headers["X-BT-Service-Name"] == "vm-dashboard"
 
@@ -829,6 +848,177 @@ def test_a_system_assigned_identity_sends_no_client_id():
     assert "client_id" not in params
     _, _, params = wlc.build_identity_request("api://x", "uami-client-id", env={})
     assert params["client_id"] == "uami-client-id"
+
+
+# -- the identity is not Azure-only -------------------------------------------
+#
+# docs/cloud-hosting.md documents this dashboard running as a managed container on
+# Azure Container Apps, GCP Cloud Run OR AWS ECS. Wiring only Azure left two of the
+# three unable to use the mode that stores nothing.
+
+def test_every_documented_hosting_cloud_can_vouch_for_the_container():
+    for platform in ("azure", "gcp", "aws", "file"):
+        assert platform in wlc.VALID_IDENTITY_PLATFORMS
+
+
+def test_an_install_that_predates_the_setting_is_still_azure():
+    """Every install that set up this mode before it had a platform selector is an
+    Azure one, so an unset value must not become a refusal or a different cloud."""
+    with _config():
+        assert wlc.identity_platform() == wlc.PLATFORM_AZURE
+    with _config(wlc_identity_platform="nonsense"):
+        assert wlc.identity_platform() == wlc.PLATFORM_AZURE
+    with _config(wlc_identity_platform=" GCP "):
+        assert wlc.identity_platform() == wlc.PLATFORM_GCP
+
+
+def test_the_audience_reads_the_pre_rename_key_too():
+    """`wlc_entra_resource` holds exactly this value on every install that set it,
+    and the service must keep working before anyone opens the panel."""
+    with _config(wlc_entra_resource="api://old"):
+        assert wlc.identity_audience() == "api://old"
+    with _config(wlc_identity_audience="api://new", wlc_entra_resource="api://old"):
+        assert wlc.identity_audience() == "api://new"
+
+
+def test_the_panel_carries_a_pre_rename_audience_forward():
+    """Without this the operator opens the page to a blank audience box while the
+    old key is silently still in force, and the first save leaves the new one empty."""
+    setup = _read("web_dashboard", "api", "setup.py")
+    assert "def _carry_legacy_wlc_identity(" in setup
+    getter = setup[setup.index('def get_feature_config('):]
+    getter = getter[:getter.index('@router.patch')]
+    assert "_carry_legacy_wlc_identity(data)" in getter
+    # The platform too: _read_feature returns "" for a key that did not exist yet,
+    # and a <select> bound to "" renders blank on an install that works fine.
+    shim = setup[setup.index("def _carry_legacy_wlc_identity("):]
+    shim = shim[:shim.index("@router.get")]
+    assert "wlc_identity_platform" in shim and "PLATFORM_AZURE" in shim
+
+
+def test_gcp_asks_the_metadata_server_for_an_audience_bound_token():
+    url, headers, params = wlc.build_identity_request(
+        "beyondtrust-wlc", platform=wlc.PLATFORM_GCP, env={})
+    assert "metadata.google.internal" in url
+    assert headers == {"Metadata-Flavor": "Google"}
+    assert params["audience"] == "beyondtrust-wlc"
+    # `format=full` carries the instance details a Custom IDP claim condition can
+    # asserted on, so the registration can be about this revision.
+    assert params["format"] == "full"
+
+
+def test_gcp_ignores_the_azure_only_client_id():
+    """A service account is attached to the revision, so there is no identity to
+    select. Sending one would be a parameter the metadata server does not know."""
+    _, _, params = wlc.build_identity_request(
+        "aud", "some-client-id", platform=wlc.PLATFORM_GCP, env={})
+    assert "client_id" not in params
+
+
+def test_a_file_platform_has_no_endpoint_to_call():
+    for platform in wlc.FILE_PLATFORMS:
+        try:
+            wlc.build_identity_request("aud", platform=platform, env={})
+        except wlc.WorkloadCredentialsError as exc:
+            assert "projected token file" in str(exc)
+        else:
+            raise AssertionError(
+                f"{platform} built an HTTP request for a token that is a file")
+
+
+def test_aws_reads_a_projected_file_and_honours_both_variables():
+    """IRSA sets the first, EKS Pod Identity the second."""
+    with _config():
+        assert wlc.identity_token_path(
+            wlc.PLATFORM_AWS,
+            env={"AWS_WEB_IDENTITY_TOKEN_FILE": "/var/run/irsa"}) == "/var/run/irsa"
+        assert wlc.identity_token_path(
+            wlc.PLATFORM_AWS,
+            env={"AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE": "/var/run/pi"}) == "/var/run/pi"
+        # ECS sets neither, and that is the ordinary state of an ECS task.
+        assert wlc.identity_token_path(wlc.PLATFORM_AWS, env={}) == ""
+    with _config(wlc_identity_token_file="/explicit"):
+        assert wlc.identity_token_path(wlc.PLATFORM_AWS, env={}) == "/explicit"
+
+
+def test_an_ecs_task_is_told_it_needs_a_stored_token():
+    """The one case where this mode genuinely cannot work. ECS and plain EC2 hand
+    out SigV4 credentials and an instance identity document; neither is an OIDC
+    token. Saying so beats letting the file read fail as a missing path."""
+    msg = wlc.identity_error_message(0, "", wlc.PLATFORM_AWS)
+    assert "EKS" in msg and "ECS" in msg
+    assert "Personal Access Token" in msg
+
+
+def test_a_file_platform_reports_a_missing_token_as_configuration():
+    with _config(wlc_auth_mode="workload", wlc_site_id="SITE",
+                 wlc_service_name="svc", wlc_identity_platform="aws"):
+        missing = wlc.missing_settings()
+    assert missing == ["wlc_identity_token_file"]
+    # And it does NOT ask for an audience: on these platforms the audience is baked
+    # into the projected token by whoever configured the service account.
+    assert "wlc_identity_audience" not in missing
+
+
+def test_the_identity_error_names_the_platforms_own_cause():
+    for platform, needle in ((wlc.PLATFORM_AZURE, "managed identity"),
+                             (wlc.PLATFORM_GCP, "service account"),
+                             (wlc.PLATFORM_AWS, "EKS")):
+        msg = wlc.identity_error_message(400, {"error": "x"}, platform)
+        assert needle in msg, f"{platform} advice does not mention {needle!r}"
+        assert platform in msg
+
+
+def test_a_gcp_token_expiry_comes_out_of_the_token():
+    """The metadata server returns the JWT as plain text — there is no envelope
+    carrying expires_on, so the memo has to read the claim."""
+    import base64
+    import json as _json
+    payload = base64.urlsafe_b64encode(
+        _json.dumps({"exp": 1789000000}).encode()).decode().rstrip("=")
+    token = f"eyJhbGciOiJSUzI1NiJ9.{payload}.sig"
+    assert wlc.parse_jwt_expiry(token, now_epoch=1788999000.0) == 1789000000.0
+
+
+def test_an_unreadable_jwt_expires_now_rather_than_raising():
+    """Same rule as the envelope path: the memo is an optimisation and must never
+    be the reason a request fails."""
+    for bad in ("", "not-a-jwt", "a.b", "a.!!!!.c"):
+        assert wlc.parse_jwt_expiry(bad, now_epoch=1000.0) == 1000.0
+
+
+def test_reading_a_jwt_expiry_verifies_nothing_and_says_so():
+    """Decoding a token without verifying it looks alarming, so the reason it is
+    safe here is written down: the only consumer is the re-fetch memo, and
+    Pathfinder is what verifies."""
+    src = _read("web_dashboard", "services", "workload_credentials_service.py")
+    body = src[src.index("def parse_jwt_expiry("):]
+    body = body[:body.index("\ndef ")]
+    assert "does not verify" in body.lower()
+    assert "memo" in body
+
+
+def test_a_projected_token_is_never_memoised():
+    """The platform rotates the file in place. A memo would be the only thing
+    capable of serving a stale one."""
+    src = _read("web_dashboard", "services", "workload_credentials_service.py")
+    body = src[src.index("def _workload_token("):]
+    body = body[:body.index("\ndef ")]
+    file_branch = body[body.index("if platform in FILE_PLATFORMS:"):]
+    file_branch = file_branch[:file_branch.index("if not audience:")]
+    assert "_token_cache" not in file_branch, \
+        "the projected-token path memoises a file the platform rotates underneath it"
+    assert "return _projected_token(" in file_branch
+
+
+def test_gcp_is_not_parsed_as_json():
+    """Parsing plain text as JSON fails on a perfectly good token and reads like a
+    broken service account."""
+    src = _read("web_dashboard", "services", "workload_credentials_service.py")
+    body = src[src.index("def _workload_token("):]
+    gcp = body[body.index("if platform == PLATFORM_GCP:"):]
+    gcp = gcp[:gcp.index("else:")]
+    assert "resp.text" in gcp and "resp.json()" not in gcp
 
 
 def test_the_token_expiry_reads_expires_on_as_an_absolute_epoch():
@@ -879,9 +1069,12 @@ def test_the_token_memo_is_keyed_on_the_resource_and_identity():
     """A memo keyed on nothing serves a token minted for the previous resource
     after a settings change, and the failure arrives as an opaque 401."""
     src = _read("web_dashboard", "services", "workload_credentials_service.py")
-    body = src[src.index("def _entra_token("):]
+    body = src[src.index("def _workload_token("):]
     key_line = next(line for line in body.splitlines() if "key = " in line)
-    assert "resource" in key_line and "client_id" in key_line
+    assert "audience" in key_line and "client_id" in key_line
+    # And on the platform, or switching clouds would serve the previous cloud's
+    # token to the new one and fail at BeyondTrust as an opaque 401.
+    assert "platform" in key_line
 
 
 def test_a_panel_save_clears_the_identity_token_too():
@@ -899,7 +1092,8 @@ def test_every_bound_entra_field_is_declared_on_the_panel_model():
     html = _read("web_dashboard", "templates", "settings.html")
     setup = _read("web_dashboard", "api", "setup.py")
     config = _read("web_dashboard", "config.py")
-    for field in ("wlc_auth_mode", "wlc_service_name", "wlc_entra_resource",
+    for field in ("wlc_auth_mode", "wlc_identity_platform", "wlc_service_name",
+                  "wlc_identity_audience", "wlc_identity_token_file",
                   "wlc_entra_client_id"):
         assert f"panelCfg.{field}" in html, f"{field} is not on the panel"
         assert f"{field}: str" in setup, f"{field} is not on the panel model"
@@ -911,6 +1105,8 @@ def test_the_pat_box_hides_in_entra_mode_and_the_identity_fields_hide_in_pat_mod
     panel = html[html.index("panelCfg.wlc_auth_mode"):]
     panel = panel[:panel.index("panelCfg.wlc_api_version")]
     assert "x-show" in panel and "panelCfg.wlc_pat" in panel
+    assert "panelCfg.wlc_identity_platform" in panel, \
+        "the panel cannot choose which platform vouches for the container"
     # x-show rather than x-if on purpose: a removed subtree drops its binding,
     # and the panel sends what it has bound.
     assert "x-if" not in panel
@@ -978,7 +1174,7 @@ def test_the_pat_is_only_a_bootstrap_credential_while_it_is_the_auth_method():
     untrue, and it is the one secret such an install most wants to move."""
     api = _read("web_dashboard", "api", "secrets.py")
     fn = api[api.index("def _bootstrap_blocked("):api.index("# ── Pydantic models")]
-    assert "auth_mode()" in fn and "AUTH_MODE_ENTRA" in fn
+    assert "auth_mode()" in fn and "AUTH_MODE_WORKLOAD" in fn
     assert '- {"wlc_pat"}' in fn
     # And the migration loop has to ASK, not read the static map directly.
     loop = api[api.index("async def migrate_secrets("):]
@@ -1037,7 +1233,7 @@ def test_pat_auth_refuses_a_pat_that_points_at_itself():
             wlc._headers()
         except wlc.WorkloadCredentialsError as exc:
             assert "wlc://" in str(exc)
-            assert "entra" in str(exc)          # the mode that makes it readable
+            assert "workload identity" in str(exc)   # the mode that makes it readable
         else:
             raise AssertionError("built an Authorization header out of a reference")
 
@@ -1050,14 +1246,14 @@ def test_a_migrated_pat_is_not_reported_as_missing():
 
 
 def test_entra_auth_does_not_care_where_the_pat_ended_up():
-    original = wlc._entra_token
-    wlc._entra_token = lambda: "IDENTITY-TOKEN"
+    original = wlc._workload_token
+    wlc._workload_token = lambda: "IDENTITY-TOKEN"
     try:
-        with _stored(wlc_pat=_MIGRATED_PAT), _config(wlc_auth_mode="entra",
+        with _stored(wlc_pat=_MIGRATED_PAT), _config(wlc_auth_mode="workload",
                                                      wlc_service_name="vm-dashboard"):
             headers = wlc._headers()
     finally:
-        wlc._entra_token = original
+        wlc._workload_token = original
     assert headers["Authorization"] == "Bearer IDENTITY-TOKEN"
 
 
@@ -1068,7 +1264,10 @@ def test_the_panel_refuses_the_flip_back_to_a_migrated_pat():
     guard = setup[setup.index("def _guard_wlc_auth_mode("):
                   setup.index('@router.get("/feature/{feature_name}")')]
     assert "pat_is_self_referential()" in guard
-    assert "AUTH_MODE_ENTRA" in guard          # an entra save is never blocked
+    assert "AUTH_MODE_WORKLOAD" in guard       # a workload-identity save is never blocked
+    # Normalised, not compared raw: the panel writes "workload" and old installs
+    # hold "entra". Comparing the raw string refuses a well-formed save.
+    assert "normalise_auth_mode(" in guard
     assert "typed_pat" in guard                # a PAT in the same save is allowed
     assert "status_code=400" in guard
     patch = setup[setup.index("def patch_feature_config("):]

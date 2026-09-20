@@ -366,8 +366,10 @@ another sidecar: [job-worker.md](job-worker.md#container-apps).
 > **Applies to:** an install using [Workload Credentials](integrations/workload-credentials.md).
 > Skip this if you do not. **Status:** run end to end on the Azure Container
 > Apps install on 2026-09-15, so the walkthrough below is a transcript rather
-> than a sketch. One leg is still unproven: the *worker* minting under a real
-> job, which is a different process from the one Test connection exercises.
+> than a sketch. Two legs are still unproven: the *worker* minting under a real
+> job, which is a different process from the one Test connection exercises — and
+> the **GCP and AWS platforms**, whose client paths are unit-tested but which
+> nobody has yet pointed at a live Pathfinder registration.
 
 Workload Credentials replaced three standing cloud keys with **one** standing
 platform credential: a Personal Access Token, stored encrypted in `app_config`.
@@ -376,12 +378,33 @@ actually caused an outage here — a dead PAT produces
 `401 Personal access token not found` on every mint, from a dashboard that looks
 entirely healthy.
 
-On Azure that token can go away. Container Apps can hand the container a
-**managed identity**; Pathfinder can be told, once, to trust that identity. The
-container then presents a short-lived Entra token it fetched from the platform a
-moment earlier, and there is **no BeyondTrust credential anywhere in the
-deployment** — nothing in `app_config`, nothing in the Container App's secrets,
-nothing to rotate.
+That token can go away. The platform can hand the container an identity of its
+own; Pathfinder can be told, once, to trust it. The container then presents a
+short-lived OIDC token it fetched from the platform a moment earlier, and there
+is **no BeyondTrust credential anywhere in the deployment** — nothing in
+`app_config`, nothing in the Container App's secrets, nothing to rotate.
+
+**This is not Azure-only, and the walkthrough below is Azure only because that
+is the install it was run on.** The three hosting options at the top of this
+page each hand a container an identity, with one exception worth knowing before
+you start:
+
+| Identity platform | Where the token comes from | Registers in Pathfinder as |
+|---|---|---|
+| **Azure** — Container Apps, App Service, a VM | `IDENTITY_ENDPOINT`/`IDENTITY_HEADER`, else IMDS | **Azure Entra ID**, or **Custom IDP** |
+| **GCP** — Cloud Run, GCE, GKE | the metadata server's instance identity endpoint | **Custom IDP**, issuer `https://accounts.google.com` |
+| **AWS** — **EKS only** | a projected token file (IRSA, or Pod Identity) | **Custom IDP**, issuer = the cluster's OIDC provider URL |
+| **Other** | any projected token on disk, e.g. a Kubernetes ServiceAccount token | **Custom IDP** |
+
+> **ECS is the exception.** An ECS task — and a plain EC2 instance — gets SigV4
+> credentials and a signed instance identity document from the task metadata
+> endpoint. Neither is an OIDC token, and there is no endpoint that will issue
+> one. A dashboard on ECS stays on a stored Personal Access Token; the panel says
+> so, and so does the error if you select AWS anyway.
+
+Which one you pick is **Settings → Integrations → Workload Credentials →
+Identity platform**. Everything after that is the same shape: register the trust
+once, name the audience, and hold nothing.
 
 **Registration is a GUI action and there is no API for it.** Pathfinder →
 **Administration → Workload Identities → Register Workload Identity**. That is
@@ -560,9 +583,10 @@ here than at runtime, where all of it collapses into one `HTTP 401`.
 
 **Settings → Integrations → Workload Credentials**:
 
-- **Authentication** → *Azure workload identity (nothing stored)*
+- **Authentication** → *Workload identity (nothing stored)*
+- **Identity platform** → *Azure — Container Apps, App Service, VM*
 - **Service name** → the Service Name from step 3
-- **Token resource** → the `aud` from step 2 — `https://management.azure.com/`, or your own `api://…` if you registered one
+- **Token audience** → the `aud` from step 2 — `https://management.azure.com/`, or your own `api://…` if you registered one
 - **User-assigned identity client ID** → `clientId` from step 1
 
 **Save, then press Test connection** — it tests the *saved* values. The test is
