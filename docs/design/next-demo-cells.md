@@ -5,9 +5,12 @@
 > **Status:** Design note, v1. **Nothing here is built.** It records a measurement, a
 > definition, and three candidates in the order they are worth doing — so the next person
 > to ask "what else could we demo?" starts from evidence rather than from a brainstorm.
-> **Corrected after review:** an earlier draft called the Windows endpoint story blocked.
-> It is not. EPM for Windows is a shipping product; what is missing is the dashboard
-> integration, and §5 now says so.
+> **Corrected after review, twice.** (1) An earlier draft called the Windows endpoint
+> story blocked. It is not — EPM for Windows is a shipping product; what is missing is
+> the dashboard integration. (2) It also called `itops` the weakest persona shipped and
+> made "give it cloud cards" a sequenced work item. Measured, that is three of five cards
+> needing a local VMware install and two working on cloud — a single missing card, not a
+> project. §5 carries both corrections and §7 no longer lists the second.
 > **Depends on:** the two cells that exist —
 > [OT Demo Cell](../profiles/demo/ot-demo-cell.md) and
 > [Network Demo Cell](../profiles/demo/net-demo-cell.md) — whose shared shape §2 extracts.
@@ -209,10 +212,35 @@ Roughly the EPM-L integration's shape (`services/epml_sync_service.py`, `api/epm
 installation tokens. A second product on the same Pathfinder gateway rather than a new
 subsystem.
 
-`itops` feels the absence today: three of its five cards require `vmware_enabled`, so on
-a cloud-only estate instance most of the IT-engineer catalog reads as not-ready. That is
-worth fixing with one or two cloud-reachable cards against the existing Azure VDI path
-**whether or not** the EPM-W work happens — it is a much smaller change than the cell.
+### What `itops` can and cannot tell today
+
+An earlier draft of this section called `itops` the weakest persona shipped and treated
+"give it cloud cards" as a work item. **That was overstated**, and the correction matters
+because the claim was steering what to build next.
+
+Measured rather than asserted — `itops` ships five cards:
+
+| Card | Needs | Reachable on a cloud-only instance |
+|---|---|---|
+| Least privilege on a Linux endpoint | `epml_enabled` | **yes** — no cloud or hypervisor requirement |
+| Support a user on a virtual desktop, recorded | `vdesktops_enabled`, `pra_enabled` | **yes** — Virtual Desktops provisions on all three clouds |
+| Rotate a workstation local-admin password | `password_safe_enabled`, `vmware_enabled` | no |
+| Power a workstation on and off without RDP | `remote_agents_enabled`, `vmware_enabled` | no |
+| Remote support with no VPN | `pra_enabled`, `vmware_enabled` | no |
+
+So three of five need VMware **Workstation** — a local desktop hypervisor, and
+`_DEMO_ONLY` — and two work on cloud without it. "Three cards need a local VMware
+install" is the accurate statement. "The persona is mostly unavailable" is not: the two
+that work are the EPM and the recorded-support stories, which are the two an IT audience
+came for.
+
+**What is genuinely thin** is narrower: the *Windows* endpoint story on cloud. Azure is
+the only cloud with Windows seats and credential injection, and the VDI card above does
+not lean on that specifically. One card about an Azure Windows seat with credential
+injection into a Remote RDP jump item would add something real.
+
+That is **one card, not a project**, and it does not belong in the ordering below as a
+peer of the cells. It is worth doing whenever someone is next in `personas.py` anyway.
 
 ## 6. What is deliberately not proposed
 
@@ -227,19 +255,20 @@ worth fixing with one or two cloud-reachable cards against the existing Azure VD
 ## 7. Suggested order
 
 1. ~~**Cloud governance persona**~~ — **done.** Shipped as `finops`; see §4.
-2. **`itops` cloud cards** — small, fixes the weakest persona on the instance most demos
-   run on. Worth doing whether or not anything below happens. Now the cheapest item left.
-3. **Windows EPM integration, then the Windows endpoint cell** — the biggest demo payoff
+2. **Windows EPM integration, then the Windows endpoint cell** — the biggest demo payoff
    per unit of new thinking. EPM-L is a working template to copy rather than a design to
    invent, and the image prep, the WinRM runner and the bake-then-activate pattern are
    all already here.
-4. **The agent cell** — the more differentiated story, and the most greenfield. Nothing
+3. **The agent cell** — the more differentiated story, and the most greenfield. Nothing
    blocks it; it simply has less to copy, and §3's open question should be settled before
    anyone starts.
 
-The 3-before-4 call is about risk, not importance. The agent cell is the story fewer
+The 2-before-3 call is about risk, not importance. The agent cell is the story fewer
 vendors can tell; the Windows cell is the story more buyers already recognise, and it is
 the one where being wrong costs less because the shape is known.
+
+**`itops` cloud cards are not on this list**, and an earlier draft was wrong to put them
+there — see §5. The gap is one card, not a piece of work worth sequencing.
 
 ## Verification
 
