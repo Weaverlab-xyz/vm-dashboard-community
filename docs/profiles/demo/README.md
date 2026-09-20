@@ -33,6 +33,7 @@ presenting: the per-role narratives and the purpose-built demo environments. Ski
 | [OT Demo Cell](ot-demo-cell.md) | A simulated OT/ICS plant cell — PLC simulators and a web SCADA/HMI in an egress-less subnet, reached only through a Gateway. The air gap *is* the demo. |
 | [OT protocol clients on Windows](ot-protocol-clients.md) | Setting up a rep machine to read that cell: the four Python clients, a runnable snippet per protocol, and why DNP3 answers nothing. |
 | [Network Demo Cell](net-demo-cell.md) | **Preview.** A VyOS router/firewall with no inbound rule, reached only through a recorded Shell Jump — the emergency rule change, made on a credential nobody sees. |
+| [Agent Demo Cell](agent-demo-cell.md) | **Preview.** A non-human principal that reads the estate through the MCP server, attested by SPIRE — and stops when you revoke its token while the room watches. |
 
 ## Everything else is a capability doc
 
