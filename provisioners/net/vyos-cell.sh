@@ -39,7 +39,7 @@
 #                     Linux image does, so an account baked with neither a key nor a
 #                     password is an account nothing can log into — including the
 #                     Shell Jump. Bake the public half of the key pair your PRA
-#                     Jumpoint presents, or set VYOS_ADMIN_PASSWORD instead.
+#                     Gateway presents, or set VYOS_ADMIN_PASSWORD instead.
 #   VYOS_ADMIN_PASSWORD  initial password for that account. Default: unset. Use it
 #                     when your Password Safe functional account rotates passwords
 #                     rather than keys; see README.md, "How the credential is managed".

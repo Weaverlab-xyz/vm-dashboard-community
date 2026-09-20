@@ -1203,6 +1203,15 @@ except ImportError as exc:
     logger.warning("API router 'ot' not loaded: %s", exc)
 
 try:
+    # The network demo cell (a VyOS router/firewall). Same gate as the OT cell and for
+    # the same reason: the cell is reached only through a Shell Jump, so with PRA off it
+    # would be a device nobody can log into.
+    from .api import netcell as netcell_api  # noqa: E402
+    app.include_router(netcell_api.router, dependencies=[_feature_gate("pra_enabled")])
+except ImportError as exc:
+    logger.warning("API router 'netcell' not loaded: %s", exc)
+
+try:
     # POV environments on a lab platform. Gated on pov_environments_enabled, which
     # feature_flags._POV_ONLY masks off entirely on a demo instance — so on the demo
     # dashboard these routes 404 naming the profile rather than half-working.
