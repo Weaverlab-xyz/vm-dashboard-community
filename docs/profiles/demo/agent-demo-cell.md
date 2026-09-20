@@ -65,6 +65,40 @@ Who it is, what it spent, what it saw. The token hint is enough to find the row 
 > what has to be answered first.** That is a better moment than a hand-wave, and this
 > audience is listening for it.
 
+## What this agent is answerable for
+
+An agent can be **linked** to one Workload Lab credential
+(`POST /api/agentcell/agent/{id}/link`, `cloud` only today), so that "what does this
+agent have access to" is one lookup rather than a conversation. The agent's listing then
+reports that credential's lease state beside it.
+
+> **A link is not a consumption, and the distinction is the point.** The worker is given
+> nothing by it. The Cloud tab's credential *"is returned to nobody"*, and the Kubernetes
+> and Certificate tabs vault theirs where a consumer needs a Password Safe client — which
+> is another credential — to reach. So no Workload Lab credential can reach this worker
+> without it already holding one, which is the standing secret this whole cell argues
+> against.
+>
+> The way out would be an independent trust path the worker can prove without holding
+> anything — an SVID — and that is the same bridge
+> [What is not built](#what-is-not-built) already names. See
+> [§5b of the design note](https://github.com/Weaverlab-xyz/vm-dashboard-community/blob/main/docs/design/next-demo-cells.md)
+> for the full reasoning and what would have to be answered first.
+
+What the link is genuinely good for is the thing the Cloud tab cannot currently show:
+
+- **It says the revoke asymmetry out loud at link time.** Azure leases can be released
+  early; **AWS leases cannot be revoked at all**, so the TTL is the only control there is.
+  That is the provider's limit rather than this dashboard's, and hearing it when you link
+  is better than discovering it when you try to revoke in front of a room.
+- **An expired lease reads as the mechanism working**, not as a fault — honouring
+  `workload_cloud_service.lease_state`, which exists to keep those two apart.
+
+**One link at a time.** An agent answerable for a cloud lease *and* a cluster token *and*
+a certificate would be the most over-credentialed principal in the estate, which is the
+arrangement this cell argues against. Unlink before relinking, so widening is a decision
+rather than an accumulation.
+
 ## The refusals, and why each one exists
 
 The cell refuses rather than installing something that would mislead:

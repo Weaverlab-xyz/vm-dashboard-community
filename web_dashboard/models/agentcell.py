@@ -48,6 +48,25 @@ class AgentCellCreateResponse(BaseModel):
     notes: List[str] = []
 
 
+class AgentCellLinkRequest(BaseModel):
+    """Make an agent answerable for one Workload Lab credential.
+
+    **Not a consumption.** The worker is given nothing by this; see
+    ``services/agentcell_service.LINKABLE_MECHANISMS`` for why none of the lab's
+    credentials can reach it, and what would have to exist before one could.
+    """
+    mechanism: str = Field(min_length=1, description="a Workload Lab tab name; 'cloud' today")
+    credential_id: str = Field(min_length=1, description="that tab's own row id")
+
+
+class AgentCellLinkResponse(BaseModel):
+    id: str
+    mechanism: str = ""
+    credential_id: str = ""
+    summary: str = ""
+    notes: List[str] = []
+
+
 class AgentCellInfo(BaseModel):
     id: str
     name: str = ""
@@ -67,6 +86,13 @@ class AgentCellInfo(BaseModel):
     # out loud rather than leave to a log line.
     wired: bool = False
     stages_done: List[str] = []
+    # What this agent is answerable for in the Workload Lab, and the state of that
+    # credential. `link_summary` renders an expired lease as the mechanism working rather
+    # than as a fault, which is the distinction workload_cloud_service.lease_state exists
+    # to preserve.
+    linked_mechanism: str = ""
+    linked_credential_id: str = ""
+    linked_summary: str = ""
 
 
 class AgentCellListResponse(BaseModel):

@@ -266,63 +266,74 @@ injection into a Remote RDP jump item would add something real.
 That is **one card, not a project**, and it does not belong in the ordering below as a
 peer of the cells. It is worth doing whenever someone is next in `personas.py` anyway.
 
-## 5b. The agent cell as the Workload Lab's consumer
+## 5b. The Workload Lab has no consumer, and cannot easily be given one
 
-**The Workload Lab issues four credentials and nothing in this repository consumes any of
-them.** Its hub is explicit that there is no human in these workflows — *"the consumer is
-a pipeline, a broker or a cluster"* — and all three of those are hypothetical. Each tab
-ends at a credential handed to an operator to paste somewhere else.
+**Corrected after attempting it.** An earlier draft called wiring the agent cell to the
+rest of the Workload Lab "the cheapest remaining item with the most leverage" and put it
+third in §7. That was wrong, and the reason is structural rather than a matter of effort.
 
-The agent cell (§3) is that consumer, and it is already governed, recorded and revocable.
-Wiring the two together is the next piece of work on this note, and it is worth doing for
-a reason sharper than tidiness.
+### The observation still holds
 
-### What it completes, not just adds
+The lab issues four credentials and nothing in this repository consumes any of them. Its
+hub is explicit that there is no human in these workflows — *"the consumer is a pipeline,
+a broker or a cluster"* — and all three are hypothetical. Each tab ends at a credential
+handed to an operator to paste somewhere else. The agent cell (§3) is a real non-human
+identity, already governed and recorded, and it is the consumer those tabs describe.
 
-The lab's cross-cutting invariant is **issue / record / remove**
-(`tests/test_workload_lab_governance.py`). Today the *remove* half ends at an API call: the
-lease is revoked, the managed system is deregistered, and nothing observable happens,
-because nothing was using the credential. **A consumer makes removal demonstrable.**
+### Why it cannot simply be wired
 
-That matters most on the tab that already documents an asymmetry it cannot show:
+**Every unbuilt tab puts its credential somewhere a consumer needs another credential to
+reach.** That is correct security design — the dashboard is not the vault — and it is
+exactly what blocks this:
 
-> on AWS a lease **cannot be revoked** at all, so the TTL is the only control there is.
-> Azure honours the revoke.
-
-With a consumer, that stops being a footnote and becomes two side-by-side demos — the
-Azure worker stops, the AWS one keeps going until its TTL. That is a far better argument
-for short TTLs than a sentence in a table, and it is the sort of thing a room remembers.
-
-### The design constraint that decides the shape
-
-**One credential at a time, fetched per task.** An agent holding an SVID *and* a cluster
-token *and* a cloud lease *and* a certificate would be the most over-credentialed
-principal in the estate — the mechanism would argue precisely against the thing the cell
-exists to argue for.
-
-So the mechanism is a *consumption* step, not a provisioning one: the worker asks for the
-credential its next task needs, uses it, and lets it lapse. Which credential it asks for
-is the operator's choice per agent, and the row records which mechanism that agent is
-wired to — the same way it already records its SPIFFE ID and its PAT.
-
-### What each tab would need
-
-| Tab | What the worker would hold | The honest problem |
+| Tab | Where the credential goes | Source |
 |---|---|---|
-| **SPIRE** | an SVID | **Done** — the worker already attests every loop. |
-| **Cloud** | an AWS/Azure lease | Needs a task that touches a cloud API. The revoke asymmetry above is the demo. |
-| **Kubernetes** | a bound ServiceAccount token | Needs a cluster the agent may read. `sre`'s cards already stand one up. |
-| **Certificates** | an X.509 from the private CA | Needs an mTLS endpoint to present to; the certificate plays' subject-DN echo is the closest existing shape. |
+| **Cloud** | nowhere the dashboard can reach — *"The credential itself is returned to nobody"*, and the minted values are deliberately not read | `workload_cloud_service._run_issue` |
+| **Kubernetes** | Password Safe — *"The consumer is a program with a Password Safe API client"* | `workload_k8s_service` |
+| **Certificates** | Secrets Safe, as a PKCS#12, on the same principle | `cert_lab_service` |
 
-### What this must not become
+So for the worker to spend any of them it must already hold a credential in order to
+fetch a credential — **which is the standing secret the agent cell exists to argue
+against.** Handing it one at mint time would also fight a pinned invariant:
+`test_workload_lab_governance` asserts that no tab writes a credential onto its own row.
 
-**Not a fifth Workload Lab tab.** `test_workload_lab_governance` blocks one until it names
-an authority that issues, records and removes — and a *consumer* names none, because it
-issues nothing. The relationship is the other way round: the lab issues, the cell
-consumes, and the cell's page links back. §2's definition holds.
+The way out is an independent trust path — something the worker can prove without holding
+anything. That is precisely what an SVID is, and precisely the bridge §3 already records
+as unbuilt: it needs the Password Safe **SPIFFE SVID** plugin, whose configuration
+question `spire_lab_service` says is unresolved.
 
-**Not a way to widen the agent's standing access.** If this ever ends with a worker that
-holds four credentials because it might need them, it has been built wrong.
+**So §5b and §3's open gap are the same gap.** Closing one closes the other, and neither
+is a wiring job.
+
+### What was built instead
+
+A **link**, not a consumption. An agent can be made *answerable for* one Workload Lab
+credential: the row records the mechanism and the credential's id, and the agent's
+listing reports that credential's lease state beside it
+(`POST /api/agentcell/agent/{id}/link`).
+
+Being precise about what that is and is not matters, because a governance record reading
+as a capability is the failure mode here:
+
+- **It is**: one lookup for "what is this agent answerable for", and the place where the
+  Cloud tab's revoke asymmetry gets said out loud at link time rather than discovered
+  when somebody tries to revoke in front of a room.
+- **It is not**: the worker getting a credential, or any evidence it used one. The API
+  response and the page both lead with that.
+
+Only `cloud` is linkable, and the refusal for the others names the structural reason
+rather than reading as unfinished work. One link at a time, for the original reason: an
+agent accumulating credentials is the shape the cell argues against.
+
+An expired lease renders as *"the mechanism working, not a fault"*, honouring
+`workload_cloud_service.lease_state`, whose docstring makes exactly that point.
+
+### What would still be worth doing
+
+If the SPIFFE bridge is ever answered, the consumer becomes real and the payoff this
+section originally claimed arrives with it: the lab's *remove* half becomes observable,
+and the AWS/Azure revoke asymmetry becomes two workers side by side, one of which stops.
+Until then it is a research question, not a build.
 
 ## 6. What is deliberately not proposed
 
@@ -338,10 +349,7 @@ holds four credentials because it might need them, it has been built wrong.
 
 1. ~~**Cloud governance persona**~~ — **done.** Shipped as `finops`; see §4.
 2. ~~**The agent cell**~~ — **done.** Shipped with the `aiops` persona; see §3.
-3. **Wire the agent cell to the rest of the Workload Lab** (§5b) — the cheapest
-   remaining item with the most leverage: it gives four issuance demos an end, and makes
-   the AWS/Azure revocation asymmetry something a room can watch rather than read.
-4. **Windows EPM integration, then the Windows endpoint cell** — the last item on this
+3. **Windows EPM integration, then the Windows endpoint cell** — the last item on this
    note, and the biggest demo payoff per unit of new thinking. EPM-L is a working template
    to copy rather than a design to invent, and the image prep, the WinRM runner and the
    bake-then-activate pattern are all already here.
@@ -355,8 +363,11 @@ Shipping the one whose risk could be bounded first was the cheaper order.
 **`itops` cloud cards are not on this list**, and an earlier draft was wrong to put them
 there — see §5. The gap is one card, not a piece of work worth sequencing.
 
-**`itops` cloud cards are not on this list**, and an earlier draft was wrong to put them
-there — see §5. The gap is one card, not a piece of work worth sequencing.
+**Wiring the agent cell to the rest of the Workload Lab is not on this list either**, and
+an earlier draft was wrong to sequence it third — see §5b. It is blocked on the same
+SPIFFE bridge §3 names, so it is a research question rather than a build. What could be
+built without that bridge was built: a link that records accountability, which is
+explicitly not a consumption.
 
 ## Verification
 
