@@ -41,6 +41,19 @@ some noise:
 A flag with no card is not automatically a gap. It is a prompt to ask whether a *role*
 is missing, and these two survive that question.
 
+> **Since written:** the `finops` persona (§4) claimed five of these —
+> `cloud_unmanaged_discovery`, `cost_explorer`, `vm_spend_cap`, `vm_suspend_schedule`
+> and `entitle_user_jit` — taking the list from twelve to seven. The snippet in
+> **Verification** reproduces the current list; the block above is kept as the
+> measurement this note was written from, not as live state.
+>
+> One reading changed in the doing. `entitle_user_jit` was filed as noise above; it is
+> not. It grants time-boxed access **to the dashboard itself**, including administrator,
+> which turns out to be the governance role's strongest card rather than an adjacent
+> one — "nobody is a standing admin of the thing that spends the money". `entitle_registration`
+> stays orphaned and stays noise: registration happens at deploy time, by the thing
+> being deployed, which is a `devops` concern.
+
 ## 2. What a demo cell is, and what it is not
 
 Both shipped cells share a shape, and naming it is the load-bearing part of this note —
@@ -106,7 +119,7 @@ only fetches a credential proves the plumbing; one that performs a recognisable 
 remediating a finding, rotating something, running a change — proves the story. The
 second is materially more work and should be a deliberate choice rather than a drift.
 
-## 4. Candidate B — cloud governance (a persona, deliberately not a cell)
+## 4. Candidate B — cloud governance (a persona, deliberately not a cell) — **BUILT**
 
 **Role:** FinOps / cloud governance. **Owns:** privileged infrastructure nobody is
 accounting for.
@@ -120,14 +133,30 @@ onboarded, and what is it costing?" is a real role with real machinery behind it
 environment to demonstrate discovery would be staging the answer — you would be
 discovering the thing you just built, which proves nothing about a real estate.
 
-So: a persona whose cards point at existing surfaces (`/inventory`, `/costs`,
-`/settings`). Cheap, and it closes four orphan flags at once.
+So: a persona whose cards point at existing surfaces. Cheap, and it closes five orphan
+flags at once.
 
-**Counter-argument worth recording:** `cloud_unmanaged_discovery` may belong to
-`security` as a missing card rather than to a new role — "find the privileged thing
-nobody onboarded" is oversight, and `security` already owns oversight. If the FinOps
-persona is not built, **add that card to `security` rather than leaving the flag
-orphaned.**
+**Shipped as `finops`** — label *FinOps / cloud governance*, page at
+[`personas/finops.md`](../profiles/demo/personas/finops.md). Five cards: unmanaged
+discovery, the spend cap, Entitle user JIT, the costs page, and suspend schedules.
+
+Two things the build changed about the analysis above:
+
+- **Entitle is the spine, not a side note.** The role reads as a cost story until you
+  notice that `entitle_user_jit` governs the dashboard itself. Standing access and
+  standing infrastructure accumulate for the same reason — removing them is nobody's job
+  — so one persona covers both, and the Entitle card is the one to close a conversation
+  on. It is positioned third for that reason: between the two halves it joins.
+- **Only two of its six flags are wizard toggles.** `preset_flags` may only name what the
+  Features step renders, so the spend cap, suspend schedule, unmanaged discovery and
+  Entitle user JIT are configured in Settings and reported by the cards as `needs_flag`.
+  That is the arrangement `vdesktops` and `notifications` already have, and it is worth
+  knowing before designing any persona around Settings-only capabilities.
+
+**Counter-argument that no longer applies, kept for the record:** `cloud_unmanaged_discovery`
+might have belonged to `security` as a missing card rather than to a new role. It went to
+`finops` because the discovery story is about *what is accumulating*, not *who has
+access* — but a `security` card pointing at the same listing would not be wrong.
 
 ## 5. Candidate C — a Windows endpoint cell
 
@@ -197,9 +226,9 @@ worth fixing with one or two cloud-reachable cards against the existing Azure VD
 
 ## 7. Suggested order
 
-1. **Cloud governance persona** — cheapest, closes four orphan flags, no new subsystem.
+1. ~~**Cloud governance persona**~~ — **done.** Shipped as `finops`; see §4.
 2. **`itops` cloud cards** — small, fixes the weakest persona on the instance most demos
-   run on. Worth doing whether or not anything below happens.
+   run on. Worth doing whether or not anything below happens. Now the cheapest item left.
 3. **Windows EPM integration, then the Windows endpoint cell** — the biggest demo payoff
    per unit of new thinking. EPM-L is a working template to copy rather than a design to
    invent, and the image prep, the WinRM runner and the bake-then-activate pattern are

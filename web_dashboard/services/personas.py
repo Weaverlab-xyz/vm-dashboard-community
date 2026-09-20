@@ -79,6 +79,7 @@ VALID_PERSONAS = (
     # in this codebase, and `persona == "net"` reads like a truncation in every
     # conditional it appears in -- the same argument `itops` settled above.
     "netadmin",
+    "finops",
 )
 
 # Human names for the flags a card can require, for the "Needs: ..." copy. A card names a
@@ -108,6 +109,9 @@ _FLAG_LABELS = {
     "k8s_management_enabled": "Kubernetes",
     "portainer_enabled": "Portainer",
     "cost_explorer_enabled": "Cost reporting",
+    "cloud_unmanaged_discovery_enabled": "Discover unmanaged cloud VMs",
+    "vm_spend_cap_enabled": "VM spend caps",
+    "vm_suspend_schedule_enabled": "VM suspend schedules",
     "remote_agents_enabled": "Remote agents",
     "admission_control_enabled": "Admission control",
     "resource_expiry_enabled": "Auto-delete timer",
@@ -943,8 +947,100 @@ _NETADMIN = Persona(
 )
 
 
+_FINOPS = Persona(
+    key="finops",
+    label="FinOps / cloud governance",
+    blurb="What is still running that nobody decided to keep — and what it is costing "
+          "while nobody decides.",
+    section_order=("overview", "cloud", "managed", "containers", "hypervisors"),
+    tile_emphasis=("cloud_cost", "deployed_resources", "active_jobs"),
+    nav_pins=("dashboard", "costs", "inventory", "rbac", "audit", "jobs"),
+    # Empty, like `security`. This role does not stand things up; it answers for what
+    # is already standing. A quick-deploy button on the focus whose whole argument is
+    # "stop accumulating infrastructure" would be arguing with itself.
+    quick_deploy=(),
+    docs=("profiles/demo/personas/finops",),
+    # Only these two, and the constraint is real rather than editorial: a preset may
+    # only name a toggle the wizard's Features step RENDERS, or selecting the focus
+    # silently does nothing for it (tests/test_persona_wizard). The spend cap, the
+    # suspend schedule, unmanaged discovery and Entitle user JIT are all configured in
+    # Settings rather than the wizard, so the cards below report them as `needs_flag`
+    # and point there -- which is the arrangement vdesktops and notifications already
+    # have, for the same reason.
+    preset_flags=("cost_explorer_enabled", "entitle_enabled"),
+    use_cases=(
+        UseCase(
+            id="finops-unmanaged",
+            title="The VMs nobody told the dashboard about",
+            summary="Every cloud console here starts from completed deploy jobs, so a VM "
+                    "launched in the provider's own console is invisible to it. Turn on "
+                    "discovery and show the second listing — the privileged machines "
+                    "that exist without anyone here having decided they should.",
+            target="/aws#instances",
+            minutes=8,
+            docs="cloud-vms",
+            requires_flags=("cloud_unmanaged_discovery_enabled",),
+            requires_clouds=("aws", "azure", "gcp", "oci"),
+        ),
+        UseCase(
+            id="finops-spend-cap",
+            title="A cap in dollars, not a reminder to check",
+            summary="Put a ceiling in dollars on one VM and watch it accrue against it. "
+                    "The total is rate times elapsed on every sweep rather than a figure "
+                    "read off a bill — a bill lags a day, which is long enough to report "
+                    "a runaway instead of stopping one.",
+            target="/aws#instances",
+            minutes=8,
+            docs="cloud-vms",
+            requires_flags=("vm_spend_cap_enabled",),
+            requires_clouds=("aws", "azure", "gcp", "oci"),
+        ),
+        # Third on purpose. This is the card that joins the two halves of the role --
+        # standing access and standing infrastructure -- so it sits between them rather
+        # than last, where it would read as an afterthought about a different product.
+        UseCase(
+            id="finops-standing-admin",
+            title="Nobody is a standing admin of the thing that spends the money",
+            summary="Grant dashboard administrator through Entitle for the length of a "
+                    "change and no longer. It lands immediately and revokes immediately, "
+                    "for any user — so the console that can deploy your estate has no "
+                    "permanent owner.",
+            target="/rbac",
+            minutes=12,
+            docs="integrations/entitle-dashboard-permissions",
+            requires_flags=("entitle_user_jit_enabled",),
+        ),
+        UseCase(
+            id="finops-what-it-cost",
+            title="What it cost, without asking the cloud twice",
+            summary="Spend by workgroup and by resource, from the dashboard's own "
+                    "record of what it built — so the question 'whose lab was that?' has "
+                    "an answer that does not start with exporting a billing CSV.",
+            target="/costs",
+            minutes=8,
+            docs="cloud-hosting",
+            requires_flags=("cost_explorer_enabled",),
+        ),
+        UseCase(
+            id="finops-business-hours",
+            title="Business hours for a lab that is not in one",
+            summary="Suspend at seven, resume at seven, weekdays only — set per VM. The "
+                    "rule is whether a boundary was crossed rather than whether it ought "
+                    "to be asleep now, which is what stops a machine someone deliberately "
+                    "woke from being put back to sleep on the next sweep.",
+            target="/aws#instances",
+            minutes=6,
+            docs="cloud-vms",
+            requires_flags=("vm_suspend_schedule_enabled",),
+            requires_clouds=("aws", "azure", "gcp", "oci"),
+        ),
+    ),
+)
+
+
 _PERSONAS = {p.key: p for p in (
     _CLOUDOPS, _DEVOPS, _HYPERVISOR, _ITOPS, _OT, _DBA, _SECURITY, _SRE, _NETADMIN,
+    _FINOPS,
 )}
 
 
