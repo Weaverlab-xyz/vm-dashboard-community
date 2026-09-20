@@ -1,0 +1,70 @@
+# Register the MCP agent worker as a SPIFFE workload.
+# Target: the SPIRE **server** — not the worker's host. Run it before or after
+# agent-install.yml; the worker re-fetches its SVID every loop, so an entry created
+# afterwards is picked up without restarting anything. Idempotent.
+#
+# WHY THE WORKER GETS AN ENTRY AT ALL, given it authenticates to /mcp with a PAT. The
+# entry is what makes the worker's IDENTITY real rather than asserted. Without it the
+# worker logs `unattested` and the demo's first half is a claim; with it, the worker can
+# state a SPIFFE ID it had to earn, in the same line as the token it spent. See
+# docs/profiles/demo/agent-demo-cell.md for why those are deliberately two things.
+#
+# THE SELECTOR IS THE UNIX UID, not a path. A path selector attests whatever happens to
+# live at that path, so anything that can write there inherits the identity; the worker
+# runs as a known user and that is what is attested. Change the selector and you change
+# what "this workload" means -- which is the whole content of a registration entry.
+#
+# extra_vars:
+#   trust_domain:     weaverlab.test    # REQUIRED — must match the server
+#   agent_node_id:    spiffe://weaverlab.test/node/<host>   # REQUIRED — the parent
+#   agent_workload_uid: 0               # the uid the worker runs as (root via systemd)
+#   agent_workload_path: /agent/mcp-reader
+---
+- name: Register the MCP agent worker with SPIRE
+  hosts: all
+  become: true
+  vars:
+    agent_workload_uid: 0
+    agent_workload_path: /agent/mcp-reader
+    spire_bin: /opt/spire/bin/spire-server
+    spire_socket: /tmp/spire-server/private/api.sock
+
+  tasks:
+    - name: Refuse to run without a trust domain and a parent
+      ansible.builtin.assert:
+        that:
+          - trust_domain is defined and trust_domain | length > 0
+          - agent_node_id is defined and agent_node_id | length > 0
+        fail_msg: >-
+          trust_domain and agent_node_id are both required. The parent ID names the node
+          this workload may attest on; without it the entry would let the workload attest
+          anywhere in the trust domain.
+
+    - name: Create the registration entry
+      # `entry create` is not idempotent on its own -- a second run errors on a duplicate
+      # -- so the similar-entry check turns that into a no-op rather than a failed play.
+      ansible.builtin.command:
+        argv:
+          - "{{ spire_bin }}"
+          - entry
+          - create
+          - -socketPath
+          - "{{ spire_socket }}"
+          - -parentID
+          - "{{ agent_node_id }}"
+          - -spiffeID
+          - "spiffe://{{ trust_domain }}{{ agent_workload_path }}"
+          - -selector
+          - "unix:uid:{{ agent_workload_uid }}"
+      register: entry_create
+      changed_when: "'Entry ID' in entry_create.stdout"
+      failed_when:
+        - entry_create.rc != 0
+        - "'similar entry already exists' not in (entry_create.stderr | default(''))"
+
+    - name: Show the entry the worker will attest as
+      ansible.builtin.debug:
+        msg: >-
+          spiffe://{{ trust_domain }}{{ agent_workload_path }} — the worker's next loop
+          will name this. If it logs `unattested`, the selector does not match the user
+          the worker runs as.

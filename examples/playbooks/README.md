@@ -363,6 +363,26 @@ admin credential moves one way only — into Password Safe under `no_log`, never
 through the job log. See [`spire/README.md`](spire/README.md) for the order to run them
 in and what each one proves.
 
+## The agent cell (`agent/`)
+
+A non-human principal that reads the estate through the dashboard's own MCP server, and
+can be stopped while somebody watches. Cloud-agnostic, and it needs a host that is
+already a SPIRE agent node — the `spire/` plays above are the prerequisite.
+
+| File | Purpose |
+|---|---|
+| `agent-install.yml` | The worker, its 0600 token file and a systemd unit |
+| `agent-spiffe-entry.yml` | One registration entry on the SPIRE **server**, so the worker can attest |
+| `files/mcp_agent.py` | The worker itself |
+
+**Two credentials, and they are not the same one.** The SVID is the worker's identity —
+re-fetched every loop, stored nowhere. The PAT is its authorization to this dashboard —
+scoped to a user's RBAC, expiring, revocable instantly. The SVID does **not** authenticate
+to `/mcp`, which takes a Bearer PAT and has no mTLS path; bridging them would need the
+Password Safe SPIFFE SVID plugin, whose configuration question the SPIRE lab records as
+unresolved. The worker names both in one log line so the gap stays visible. See
+[`agent/README.md`](agent/README.md).
+
 ## Kubernetes (`k8s/`)
 
 Localhost plays (`- hosts: localhost`, `connection: local`) using `kubernetes.core`.

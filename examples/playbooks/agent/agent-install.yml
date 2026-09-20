@@ -1,0 +1,141 @@
+# Install the MCP agent worker onto a dashboard-deployed Linux VM.
+# Target: a host that is ALREADY a SPIRE agent node — run the spire/ plays first, so the
+# workload API socket exists for this worker to attest against. Idempotent.
+#
+# WHAT THIS IS FOR. The agent demo cell needs a non-human principal that reads the estate
+# and can be stopped while somebody watches. This play puts that worker on a host and
+# under systemd; api/agentcell.py mints the PAT it spends and records what was issued.
+#
+# THE TOKEN ARRIVES AS AN EXTRA VAR AND LANDS IN A 0600 FILE, never in the unit and never
+# in the environment. An Environment= line in a systemd unit is world-readable through
+# `systemctl show`, and an env var is readable from /proc/<pid>/environ by anything running
+# as the same user. `no_log` keeps it out of the run output as well — the same discipline
+# spire-admin-identity.yml uses for the PKCS#12 passphrase.
+#
+# THE WORKER IS NOT GIVEN A ROUTE IT DOES NOT NEED. It talks to exactly two things: the
+# dashboard's /mcp endpoint and the local SPIRE workload API socket. It is not given cloud
+# credentials, a kubeconfig, or SSH anywhere, because the cell's argument is that a
+# non-human principal should hold the least it can and spend it visibly.
+#
+# NEEDS EGRESS to the dashboard's MCP endpoint, and the `mcp` Python client on the host.
+# The play installs the client from pip; on an air-gapped host, pre-bake it instead and
+# set agent_skip_pip=true.
+#
+# NEVER LIVE-VALIDATED — see docs/profiles/demo/agent-demo-cell.md.
+#
+# extra_vars:
+#   agent_mcp_url:      https://dashboard.example/mcp   # REQUIRED
+#   agent_token:        vmcli_<64hex>                   # REQUIRED — minted by the cell
+#   agent_trust_domain: weaverlab.test                  # for the log line only
+#   agent_interval:     30
+#   agent_spiffe_socket: unix:///tmp/spire-agent/public/api.sock
+#   agent_skip_pip:     false
+---
+- name: Install the MCP agent worker
+  hosts: all
+  become: true
+  vars:
+    agent_interval: 30
+    agent_spiffe_socket: "unix:///tmp/spire-agent/public/api.sock"
+    agent_skip_pip: false
+    agent_home: /opt/mcp-agent
+    agent_conf: /etc/mcp-agent
+
+  tasks:
+    - name: Refuse to run without the values that make the worker meaningful
+      ansible.builtin.assert:
+        that:
+          - agent_mcp_url is defined and agent_mcp_url | length > 0
+          - agent_token is defined and agent_token | length > 0
+        fail_msg: >-
+          agent_mcp_url and agent_token are both required. The token is minted by the
+          agent cell, not by hand: a worker with a token nothing recorded is the thing
+          this demo argues against.
+
+    - name: Create the worker's directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ agent_home }}"
+        - "{{ agent_conf }}"
+
+    - name: Install the MCP client library
+      ansible.builtin.pip:
+        name: "mcp>=1.2.0,<2"
+        state: present
+      when: not agent_skip_pip
+
+    - name: Install the worker
+      ansible.builtin.copy:
+        src: files/mcp_agent.py
+        dest: "{{ agent_home }}/mcp_agent.py"
+        owner: root
+        group: root
+        mode: "0755"
+
+    # 0600 and root-owned. The worker reads it once at startup; nothing else on the host
+    # should be able to.
+    - name: Write the PAT where only the worker can read it
+      ansible.builtin.copy:
+        content: "{{ agent_token }}"
+        dest: "{{ agent_conf }}/token"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Install the systemd unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/mcp-agent.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=MCP agent worker (agent demo cell)
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/env python3 {{ agent_home }}/mcp_agent.py \
+            --url {{ agent_mcp_url }} \
+            --token-file {{ agent_conf }}/token \
+            --spiffe-socket {{ agent_spiffe_socket }} \
+            --interval {{ agent_interval }}
+          # NOT Restart=always. The worker exits 2 when its token is refused, and that
+          # exit IS the demo's closing beat -- restarting it would hide the revoke behind
+          # a loop of failures. on-failure with SuccessExitStatus=2 means a genuine crash
+          # still restarts and a revoke stops, visibly.
+          Restart=on-failure
+          SuccessExitStatus=2
+          RestartSec=10
+          # The worker needs the SPIRE socket under /tmp, so PrivateTmp would hide it --
+          # the same trap spire-agent-install.yml documents.
+          PrivateTmp=no
+          NoNewPrivileges=yes
+          ProtectSystem=strict
+          ReadWritePaths={{ agent_conf }}
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Start the worker
+      ansible.builtin.systemd:
+        name: mcp-agent
+        enabled: true
+        state: restarted
+        daemon_reload: true
+
+    - name: Say where to watch it
+      ansible.builtin.debug:
+        msg: >-
+          Worker running. Follow it with `journalctl -u mcp-agent -f`; each line names the
+          SPIFFE ID it proved and the token it spent. Revoke the token in
+          Settings -> API Tokens to end it.
