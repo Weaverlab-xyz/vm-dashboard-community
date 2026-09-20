@@ -42,6 +42,7 @@ always meant, and `/use-cases` stays ungated on both.
 | [DBA / data platform](dba.md) | The databases, their credentials, and who gets a session on them. |
 | [Security / IAM analyst](security.md) | Who has access to what, and the proof of it. |
 | [Platform / SRE](sre.md) | The clusters and the services running on them. |
+| [Network / firewall admin](netadmin.md) | The routers and firewalls — the boxes every other demo assumes are already reachable. |
 
 `/docs` lists these in the same order for everybody. The profile-aware view is `/use-cases`,
 behind the auth shell — the docs shell is public, so ordering it by the instance's chosen

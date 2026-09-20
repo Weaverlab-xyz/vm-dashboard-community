@@ -2533,6 +2533,18 @@ _PREVIEW_FLAGS = {
     # gateway populates those for a plugin action has not been observed once. See
     # docs/runbooks/spire-lab-standup.md section 5 — the lab exists to answer it. Off
     # means the dashboard behaves exactly as before and no port is opened.
+    # Preview because the load-bearing question is unobserved: the cell's image comes
+    # from a Packer SHELL provisioner run against a VyOS builder, and VyOS is not a
+    # general-purpose Linux guest. Whether that provisioner runs at all, and whether the
+    # baked account is reachable once deployed, have not been seen once. Off means the
+    # dashboard behaves exactly as before and no cell can be deployed.
+    "netcell_enabled": (
+        "Network Demo Cell",
+        "Preview. Deploy a VyOS router/firewall with no external IP, reached only "
+        "through a recorded PRA Shell Jump, so an emergency firewall rule change can be "
+        "demonstrated on a device with a real `configure` mode. Needs a `vyos-cell` "
+        "image you bake first from a VyOS image you supply. Password Safe vaults and "
+        "injects the credential; rotating it needs a VyOS platform you build."),
     "spire_lab_enabled": (
         "SPIRE Lab",
         "Preview. Stand a SPIRE trust domain up on a VM this dashboard already "

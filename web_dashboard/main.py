@@ -1203,6 +1203,21 @@ except ImportError as exc:
     logger.warning("API router 'ot' not loaded: %s", exc)
 
 try:
+    # The network demo cell (a VyOS router/firewall). A PREVIEW flag of its own rather
+    # than the OT cell's bare pra_enabled: the bake has never been run against a live
+    # VyOS image, so this ships off and an operator turns it on knowingly.
+    #
+    # Gated on netcell_enabled ALONE, deliberately. PRA is required for a cell to be
+    # reachable, but that is enforced at deploy time by
+    # netcell_service.pra_preflight_problem(), which refuses with the remedy in the
+    # message. A router gate cannot say anything -- it 404s -- so making PRA a second
+    # gate here would turn a fixable misconfiguration into a missing page.
+    from .api import netcell as netcell_api  # noqa: E402
+    app.include_router(netcell_api.router, dependencies=[_feature_gate("netcell_enabled")])
+except ImportError as exc:
+    logger.warning("API router 'netcell' not loaded: %s", exc)
+
+try:
     # POV environments on a lab platform. Gated on pov_environments_enabled, which
     # feature_flags._POV_ONLY masks off entirely on a demo instance — so on the demo
     # dashboard these routes 404 naming the profile rather than half-working.

@@ -320,6 +320,42 @@ def _db_tiles(db: Session, user: User) -> dict:
         return _tile(total, secondary=wired, href=f"/{busiest}#ot")
     _safe("ot_cells", _ot_cells)
 
+    def _net_cells():
+        # Same profile gate as _ot_cells, for the same reason: the only href this tile
+        # can produce is /gcp#net, and main._profile_page_gate("cloud_pages") 404s that
+        # page on a POV instance -- leaving an honest count whose only link is dead.
+        from ..services import feature_flags
+        if not feature_flags.profile_page_allowed("cloud_pages"):
+            return _unavailable("the cloud consoles are not served on this instance")
+        # Preview feature, off by default. Reported as unavailable rather than as a zero:
+        # a zero says "no cells yet" and invites the operator to go make one, on a page
+        # whose tab is not rendered and whose router 404s.
+        if not feature_flags.enabled("netcell_enabled"):
+            return _unavailable("the Network Demo Cell preview is off")
+        # Network cells, GCP only. A cell IS its gce_deploy row (metadata netcell=True)
+        # -- there is no parent job and no separate record -- so this is a Job-table
+        # read, never a cloud call, which is the whole contract of this endpoint.
+        #
+        # No secondary count, deliberately. The OT tile reports "wired" because a cell
+        # there is wired incrementally and can be half-done; a network cell has nothing
+        # to wire beyond what the deploy itself does, so "wired" would either always
+        # equal the total or restate the job status.
+        from ..services import netcell_service
+        perms = user.effective_permissions_dict
+        if not (user.is_effective_admin or not perms or "read" in perms.get("gcp", [])):
+            return _forbidden()
+        accessible = _accessible_for("gcp", user)
+        total = 0
+        for row in db.query(Job).filter(Job.job_type == "gce_deploy").all():
+            meta = row.metadata_dict
+            if not netcell_service.is_cell(meta) or meta.get("destroyed") or row.status == "cancelled":
+                continue
+            if accessible is not None and (row.workgroup or "").lower() not in accessible:
+                continue
+            total += 1
+        return _tile(total, href="/gcp#net")
+    _safe("net_cells", _net_cells)
+
     out.update(_pov_tiles(db, user))
     return out
 

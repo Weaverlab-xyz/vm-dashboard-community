@@ -618,6 +618,12 @@
             // server half.
             { key: 'ot_cells',        title: 'OT Demo Cells',       href: '/gcp#ot',    flag: 'pra',             secondaryLabel: 'wired',
               anyFlag: ['cloud_pages'] },
+            // Same flag pairing as the OT tile above, and for the same reason: the href
+            // is a cloud console a POV instance 404s. No secondaryLabel -- a network
+            // cell has nothing to wire beyond the deploy itself, so "wired" would
+            // always equal the total.
+            { key: 'net_cells',       title: 'Network Cells',       href: '/gcp#net',   flag: 'netcell',
+              anyFlag: ['cloud_pages'] },
           ],
         },
         {

@@ -84,6 +84,17 @@ def _registration_method(tag: str) -> str:
     return "ssh"
 
 
+def _resolve_method(tag: str, override: str = "") -> str:
+    """The onboarding method for ONE deploy: the caller's override, else the cloud default.
+
+    Split out of :func:`register` so it can be pinned by a test without standing up the
+    Password Safe API. The precedence is the whole of it -- an override wins, a blank
+    override changes nothing -- and "changes nothing" is the property that matters,
+    because every existing caller passes nothing.
+    """
+    return (override or "").strip().lower() or _registration_method(tag)
+
+
 def _platform_name_ok(platform_name: str, *required_tokens: str) -> bool:
     """Sanity-check that the functional account's platform is the expected custom
     plugin, tolerant of admin renames.
@@ -104,7 +115,8 @@ async def register(db, job_id: str, vm_name: str, hostname: str, *,
                    result: dict, tag: str = "cloud",
                    private_key: str = "", ssh_key_secret: str = "",
                    instance_id: str = "", region: str = "",
-                   resource_group: str = "", project: str = "", zone: str = "") -> None:
+                   resource_group: str = "", project: str = "", zone: str = "",
+                   method: str = "") -> None:
     """Onboard a built VM into Password Safe as a managed system + managed account.
 
     Method is per-cloud (``_registration_method``):
@@ -127,13 +139,23 @@ async def register(db, job_id: str, vm_name: str, hostname: str, *,
       the same way the Entitle SSH registration does: ``ssh_key_secret`` = the per-launch
       override when set, else the configured default).
 
+    ``method`` overrides the per-cloud default for ONE deploy. It exists for a guest
+    that runs none of the three cloud agents the plugins drive — SSM on AWS, waagent on
+    Azure, google-guest-agent on GCP. A VyOS network cell is the case that motivated it
+    (``services/netcell_service``): onboarded on a cloud default it attaches to a
+    platform that can never rotate it, and looks healthy until the first rotation. The
+    alternative was to have the operator flip ``passwordsafe_<cloud>_registration_method``
+    globally, which would change how EVERY VM on the instance onboards to accommodate one
+    appliance. Left empty — which is every existing caller — the per-cloud default
+    stands exactly as before.
+
     The per-cloud functional account is resolved to its id + platform via the Password
     Safe REST API (its platform binds the managed system — for ssm this is the custom
     plugin). Writes ``ps_managed_system_id`` / ``ps_managed_account_id`` /
     ``ps_registration_tf_state`` onto ``result``. Non-fatal."""
     from . import entitle_vm_hook, ps_api_service, ps_resource_service, job_service, config_service
     try:
-        method = _registration_method(tag)
+        method = _resolve_method(tag, method)
 
         fa_name = _functional_account_name(tag)
         if not fa_name:

@@ -601,7 +601,11 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
             await ps_vm_hook.register(db, job_id, req.vm_name, hostname,
                                       result=result, tag="Azure",
                                       ssh_key_secret=req.ssh_key_secret_override or "",
-                                      resource_group=rg)
+                                      resource_group=rg,
+                                      # See the note on the GCP call site: blank normally,
+                                      # "ssh" for a network cell, whose VyOS guest runs no
+                                      # waagent for Run Command to reach.
+                                      method=getattr(req, "passwordsafe_method", "") or "")
 
         job_service.set_completed(db, job_id, result)
         await cache_service.invalidate(cache_service.key_global("azure_vms"))

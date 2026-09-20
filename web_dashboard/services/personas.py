@@ -75,6 +75,10 @@ VALID_PERSONAS = (
     "dba",
     "security",
     "sre",
+    # `netadmin`, not `net`: three letters collide with every occurrence of "network"
+    # in this codebase, and `persona == "net"` reads like a truncation in every
+    # conditional it appears in -- the same argument `itops` settled above.
+    "netadmin",
 )
 
 # Human names for the flags a card can require, for the "Needs: ..." copy. A card names a
@@ -100,6 +104,7 @@ _FLAG_LABELS = {
     "cloud_functions_enabled": "Cloud functions",
     "cert_lab_enabled": "Certificate Lab",
     "spire_lab_enabled": "SPIRE Lab",
+    "netcell_enabled": "Network Demo Cell",
     "k8s_management_enabled": "Kubernetes",
     "portainer_enabled": "Portainer",
     "cost_explorer_enabled": "Cost reporting",
@@ -859,8 +864,87 @@ _SRE = Persona(
 )
 
 
+_NETADMIN = Persona(
+    key="netadmin",
+    label="Network / firewall admin",
+    blurb="The devices every other demo assumes are already reachable — where the "
+          "password is memorised, the change window is an incident, and the config "
+          "diff has nobody's name on it.",
+    section_order=("cloud", "managed", "overview", "containers", "hypervisors"),
+    tile_emphasis=("net_cells", "gateways", "active_jobs"),
+    nav_pins=("dashboard", "gcp", "containers", "inventory", "jobs", "secrets"),
+    quick_deploy=("gce",),
+    docs=("profiles/demo/personas/netadmin",),
+    preset_flags=("pra_enabled", "password_safe_enabled"),
+    use_cases=(
+        UseCase(
+            id="netadmin-emergency-rule",
+            title="The emergency rule change, recorded end to end",
+            summary="Block a subnet on a real firewall during a real incident — "
+                    "configure, set, commit, save — in a session that was recorded "
+                    "from the first keystroke, on a device nobody had to be handed a "
+                    "password for.",
+            target="/gcp#net",
+            minutes=15,
+            docs="profiles/demo/net-demo-cell",
+            requires_flags=("pra_enabled", "netcell_enabled"),
+            requires_clouds=("gcp",),
+        ),
+        UseCase(
+            id="netadmin-no-shared-password",
+            title="Nobody is handed the firewall password",
+            summary="The router's credential is vaulted and injected, so the person "
+                    "making the change never sees it and nothing has to be rotated "
+                    "afterwards because somebody left.",
+            target="/gcp#net",
+            minutes=10,
+            docs="profiles/demo/net-demo-cell",
+            requires_flags=("pra_enabled", "password_safe_enabled", "netcell_enabled"),
+            requires_clouds=("gcp",),
+        ),
+        UseCase(
+            id="netadmin-no-inbound-rule",
+            title="Reach the device with no inbound rule and no VPN",
+            summary="The firewall has no public address and no port open to anyone, "
+                    "and an admin still gets a shell on it — the Gateway dials out, "
+                    "so there is nothing inbound to attack.",
+            target="/containers#gateways",
+            minutes=8,
+            docs="integrations/gateways",
+            requires_flags=("pra_enabled",),
+        ),
+        UseCase(
+            id="netadmin-window-closes",
+            # Password Safe's checkout window, not Entitle. Entitle's SSH integration
+            # creates ephemeral accounts with useradd, which is not how VyOS manages
+            # users, so the cell does not register there and a card promising it would
+            # be promising something this demo cannot do.
+            title="The credential dies when the window closes",
+            summary="Check the router's credential out for the change window, then let "
+                    "Password Safe rotate it shut — whatever anyone wrote down stops "
+                    "working without a person having to decide to revoke it.",
+            target="/gcp#net",
+            minutes=10,
+            docs="profiles/demo/net-demo-cell",
+            requires_flags=("password_safe_enabled", "netcell_enabled"),
+            requires_clouds=("gcp",),
+        ),
+        UseCase(
+            id="netadmin-what-changed",
+            title="What changed, and the session it changed in",
+            summary="Answer 'who touched this rule on the third, and why' from the "
+                    "record rather than from memory — the question every network team "
+                    "currently answers with a config diff and a guess.",
+            target="/inventory",
+            minutes=6,
+            docs="audit-log",
+        ),
+    ),
+)
+
+
 _PERSONAS = {p.key: p for p in (
-    _CLOUDOPS, _DEVOPS, _HYPERVISOR, _ITOPS, _OT, _DBA, _SECURITY, _SRE,
+    _CLOUDOPS, _DEVOPS, _HYPERVISOR, _ITOPS, _OT, _DBA, _SECURITY, _SRE, _NETADMIN,
 )}
 
 
