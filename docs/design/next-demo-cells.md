@@ -10,7 +10,10 @@
 > the dashboard integration. (2) It also called `itops` the weakest persona shipped and
 > made "give it cloud cards" a sequenced work item. Measured, that is three of five cards
 > needing a local VMware install and two working on cloud — a single missing card, not a
-> project. §5 carries both corrections and §7 no longer lists the second.
+> project. §5 carries both corrections and §7 no longer lists the second. (3) §5b called
+> the Workload Lab consumer blocked on the SPIFFE bridge. It is not — Workload
+> Credentials authenticates a workload identity with no stored PAT, which is the whole
+> point of the product, and §5b now says so.
 > **Depends on:** the two cells that exist —
 > [OT Demo Cell](../profiles/demo/ot-demo-cell.md) and
 > [Network Demo Cell](../profiles/demo/net-demo-cell.md) — whose shared shape §2 extracts.
@@ -266,74 +269,72 @@ injection into a Remote RDP jump item would add something real.
 That is **one card, not a project**, and it does not belong in the ordering below as a
 peer of the cells. It is worth doing whenever someone is next in `personas.py` anyway.
 
-## 5b. The Workload Lab has no consumer, and cannot easily be given one
+## 5b. The Workload Lab's consumer, and the static secret it removes
 
-**Corrected after attempting it.** An earlier draft called wiring the agent cell to the
-rest of the Workload Lab "the cheapest remaining item with the most leverage" and put it
-third in §7. That was wrong, and the reason is structural rather than a matter of effort.
+**Corrected twice, and the second correction reverses the first.** An earlier draft
+called this "the cheapest remaining item". A later one called it *blocked* — reasoning
+that every unbuilt tab vaults its credential where a consumer would need another
+credential to reach it, and concluding that the only way out was the SPIFFE bridge §3
+records as unresolved.
 
-### The observation still holds
+**That conclusion was wrong**, and wrong in the direction that stops work happening. It
+reasoned about Password Safe without checking what **Workload Credentials** is for.
 
-The lab issues four credentials and nothing in this repository consumes any of them. Its
-hub is explicit that there is no human in these workflows — *"the consumer is a pipeline,
-a broker or a cluster"* — and all three are hypothetical. Each tab ends at a credential
-handed to an operator to paste somewhere else. The agent cell (§3) is a real non-human
-identity, already governed and recorded, and it is the consumer those tabs describe.
+### The chain that needs no static secret
 
-### Why it cannot simply be wired
+`services/workload_credentials_service` states it in its own docstring: *"Two auth modes,
+and the second one stores nothing."* `wlc_auth_mode` is either `pat` — a stored token —
+or **`entra`**, where the platform vouches for the machine and no PAT exists at all:
 
-**Every unbuilt tab puts its credential somewhere a consumer needs another credential to
-reach.** That is correct security design — the dashboard is not the vault — and it is
-exactly what blocks this:
+1. the workload asks the platform for **its own identity token** (IMDS, or
+   `IDENTITY_ENDPOINT`/`IDENTITY_HEADER` where the runtime injects them);
+2. it presents that to **Workload Credentials** in place of a PAT, with
+   `X-BT-Service-Name` naming which registered Workload Identity it satisfies;
+3. Workload Credentials serves the secret — its own static store, a dynamic
+   short-lived cloud credential, or a `bt_safe://` reference into Password Safe.
 
-| Tab | Where the credential goes | Source |
-|---|---|---|
-| **Cloud** | nowhere the dashboard can reach — *"The credential itself is returned to nobody"*, and the minted values are deliberately not read | `workload_cloud_service._run_issue` |
-| **Kubernetes** | Password Safe — *"The consumer is a program with a Password Safe API client"* | `workload_k8s_service` |
-| **Certificates** | Secrets Safe, as a PKCS#12, on the same principle | `cert_lab_service` |
+Everything the workload is *configured* with — site id, service name, entra resource,
+base URL — is non-secret. **Nothing is stored on the host.**
 
-So for the worker to spend any of them it must already hold a credential in order to
-fetch a credential — **which is the standing secret the agent cell exists to argue
-against.** Handing it one at mint time would also fight a pinned invariant:
-`test_workload_lab_governance` asserts that no tab writes a credential onto its own row.
+The repo already records this as implemented: *"Authenticating to WC with an Azure
+workload identity instead of a stored PAT — **Implemented**; client path unit-tested, the
+Azure + Pathfinder wiring not yet run live."*
 
-The way out is an independent trust path — something the worker can prove without holding
-anything. That is precisely what an SVID is, and precisely the bridge §3 already records
-as unbuilt: it needs the Password Safe **SPIFFE SVID** plugin, whose configuration
-question `spire_lab_service` says is unresolved.
+### Why this is the point rather than a workaround
 
-**So §5b and §3's open gap are the same gap.** Closing one closes the other, and neither
-is a wiring job.
+It is the suite solving a new problem with a combination of old and new. Password Safe
+(old) holds the secret and governs it. Workload Credentials (new) brokers access to it
+against an identity the platform vouches for. The workload holds nothing. Neither product
+does this alone, and the interesting demo is the seam between them — which is exactly the
+thing a competitor with one of the two cannot show.
 
-### What was built instead
+### What was built
 
-A **link**, not a consumption. An agent can be made *answerable for* one Workload Lab
-credential: the row records the mechanism and the credential's id, and the agent's
-listing reports that credential's lease state beside it
-(`POST /api/agentcell/agent/{id}/link`).
+The worker gained a second token source. `--token-source file` reads a 0600 file — a
+static secret, honestly labelled. `--token-source wlc` holds nothing: it fetches its own
+identity token and reads its dashboard PAT back out of Workload Credentials.
 
-Being precise about what that is and is not matters, because a governance record reading
-as a capability is the failure mode here:
+That removes the asterisk the cell had been carrying. "A non-human principal that holds
+no standing credential" was the argument, and a PAT in a file was that argument with a
+caveat. Now the caveat is a *mode*, and the default can move once the path has been run
+live.
 
-- **It is**: one lookup for "what is this agent answerable for", and the place where the
-  Cloud tab's revoke asymmetry gets said out loud at link time rather than discovered
-  when somebody tries to revoke in front of a room.
-- **It is not**: the worker getting a credential, or any evidence it used one. The API
-  response and the page both lead with that.
+The install play refuses a `wlc` worker missing any of its non-secret configuration,
+naming each one — there is no reason to be vague about a value that is not a credential
+— and it **removes** any token left behind by a previous `file`-sourced install, because
+"nothing is stored on this host" must not be contradicted by a file in `/etc`.
 
-Only `cloud` is linkable, and the refusal for the others names the structural reason
-rather than reading as unfinished work. One link at a time, for the original reason: an
-agent accumulating credentials is the shape the cell argues against.
+The link from the earlier draft stays: an agent is still made *answerable for* one
+Workload Lab credential, and that is still a governance record rather than a capability.
+What changed is that the worker can now hold its own credential without one being left
+on a disk for it.
 
-An expired lease renders as *"the mechanism working, not a fault"*, honouring
-`workload_cloud_service.lease_state`, whose docstring makes exactly that point.
+### Still unproven
 
-### What would still be worth doing
-
-If the SPIFFE bridge is ever answered, the consumer becomes real and the payoff this
-section originally claimed arrives with it: the lab's *remove* half becomes observable,
-and the AWS/Azure revoke asymmetry becomes two workers side by side, one of which stops.
-Until then it is a research question, not a build.
+The identity path is **Azure-shaped today** — IMDS and `X-IDENTITY-HEADER` — and the
+in-cluster form (a pod federating its ServiceAccount token) is listed as *Planned*. The
+Azure + Pathfinder wiring has not been run live by anyone. So `file` stays the default
+and the page says which mode was used on every line the worker logs.
 
 ## 6. What is deliberately not proposed
 
@@ -363,11 +364,10 @@ Shipping the one whose risk could be bounded first was the cheaper order.
 **`itops` cloud cards are not on this list**, and an earlier draft was wrong to put them
 there — see §5. The gap is one card, not a piece of work worth sequencing.
 
-**Wiring the agent cell to the rest of the Workload Lab is not on this list either**, and
-an earlier draft was wrong to sequence it third — see §5b. It is blocked on the same
-SPIFFE bridge §3 names, so it is a research question rather than a build. What could be
-built without that bridge was built: a link that records accountability, which is
-explicitly not a consumption.
+**The Workload Lab consumer is not on this list**, because it is built — see §5b. Note
+that the section had to be corrected twice, the second time reversing the first: it was
+called blocked on the SPIFFE bridge, and it is not. Workload Credentials' `entra` auth
+mode removes the static secret without that bridge, which is what the suite is for.
 
 ## Verification
 

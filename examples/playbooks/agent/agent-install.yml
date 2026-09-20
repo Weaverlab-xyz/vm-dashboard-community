@@ -25,7 +25,19 @@
 #
 # extra_vars:
 #   agent_mcp_url:      https://dashboard.example/mcp   # REQUIRED
-#   agent_token:        vmcli_<64hex>                   # REQUIRED — minted by the cell
+#   agent_token_source: file | wlc                      # default file
+#   agent_token:        vmcli_<64hex>                   # REQUIRED when source is `file`
+#
+#   # `wlc` puts NO SECRET ON THE HOST. Every value below is non-secret: the worker asks
+#   # the platform for its own identity token and presents that to Workload Credentials
+#   # in place of a PAT. See docs/profiles/demo/agent-demo-cell.md.
+#   agent_wlc_base_url:     https://…                   # REQUIRED when source is `wlc`
+#   agent_wlc_site_id:      …                           # REQUIRED when source is `wlc`
+#   agent_wlc_service_name: …                           # the registered Workload Identity
+#   agent_wlc_resource:     …                           # the entra resource to ask for
+#   agent_wlc_secret_name:  agent-mcp-pat               # where the PAT lives in WC
+#   agent_wlc_folder:       ""
+#   agent_wlc_client_id:    ""                          # user-assigned identity only
 #   agent_trust_domain: weaverlab.test                  # for the log line only
 #   agent_interval:     30
 #   agent_spiffe_socket: unix:///tmp/spire-agent/public/api.sock
@@ -35,6 +47,14 @@
   hosts: all
   become: true
   vars:
+    agent_token_source: file
+    agent_wlc_base_url: ""
+    agent_wlc_site_id: ""
+    agent_wlc_service_name: ""
+    agent_wlc_resource: ""
+    agent_wlc_secret_name: ""
+    agent_wlc_folder: ""
+    agent_wlc_client_id: ""
     agent_interval: 30
     agent_spiffe_socket: "unix:///tmp/spire-agent/public/api.sock"
     agent_skip_pip: false
@@ -42,15 +62,35 @@
     agent_conf: /etc/mcp-agent
 
   tasks:
-    - name: Refuse to run without the values that make the worker meaningful
+    - name: Refuse to run without an endpoint to call
       ansible.builtin.assert:
         that:
           - agent_mcp_url is defined and agent_mcp_url | length > 0
+        fail_msg: agent_mcp_url is required.
+
+    - name: Refuse a file-sourced worker with no token
+      ansible.builtin.assert:
+        that:
           - agent_token is defined and agent_token | length > 0
         fail_msg: >-
-          agent_mcp_url and agent_token are both required. The token is minted by the
-          agent cell, not by hand: a worker with a token nothing recorded is the thing
-          this demo argues against.
+          agent_token is required when agent_token_source is `file`. The token is minted
+          by the agent cell, not by hand: a worker with a token nothing recorded is the
+          thing this demo argues against.
+      when: agent_token_source == 'file'
+
+    - name: Refuse a workload-identity worker with nothing to identify itself to
+      ansible.builtin.assert:
+        that:
+          - agent_wlc_base_url | length > 0
+          - agent_wlc_site_id | length > 0
+          - agent_wlc_service_name | length > 0
+          - agent_wlc_resource | length > 0
+          - agent_wlc_secret_name | length > 0
+        fail_msg: >-
+          agent_token_source is `wlc`, which needs the site, the registered Workload
+          Identity name, the entra resource and the secret name. Every one of those is
+          NON-SECRET -- if you are reaching for a credential here, the mode is wrong.
+      when: agent_token_source == 'wlc'
 
     - name: Create the worker's directories
       ansible.builtin.file:
@@ -87,6 +127,16 @@
         group: root
         mode: "0600"
       no_log: true
+      when: agent_token_source == 'file'
+
+    # Not merely skipped -- REMOVED. Re-running this play to move a host from `file` to
+    # `wlc` must leave no token behind, or the demo's claim that nothing is stored on
+    # the host would be false and the evidence would be sitting in /etc.
+    - name: Remove any token left from a file-sourced install
+      ansible.builtin.file:
+        path: "{{ agent_conf }}/token"
+        state: absent
+      when: agent_token_source == 'wlc'
 
     - name: Install the systemd unit
       ansible.builtin.copy:
@@ -104,7 +154,16 @@
           Type=simple
           ExecStart=/usr/bin/env python3 {{ agent_home }}/mcp_agent.py \
             --url {{ agent_mcp_url }} \
-            --token-file {{ agent_conf }}/token \
+            --token-source {{ agent_token_source }} \
+            {% if agent_token_source == 'file' %}--token-file {{ agent_conf }}/token{% else %}\
+            --wlc-base-url {{ agent_wlc_base_url }} \
+            --wlc-site-id {{ agent_wlc_site_id }} \
+            --wlc-service-name {{ agent_wlc_service_name }} \
+            --wlc-resource {{ agent_wlc_resource }} \
+            --wlc-secret-name {{ agent_wlc_secret_name }} \
+            {% if agent_wlc_folder %}--wlc-folder {{ agent_wlc_folder }} \{% endif %}
+            {% if agent_wlc_client_id %}--wlc-client-id {{ agent_wlc_client_id }} \{% endif %}
+            {% endif %}
             --spiffe-socket {{ agent_spiffe_socket }} \
             --interval {{ agent_interval }}
           # NOT Restart=always. The worker exits 2 when its token is refused, and that

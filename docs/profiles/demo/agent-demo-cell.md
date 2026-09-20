@@ -54,16 +54,53 @@ Who it is, what it spent, what it saw. The token hint is enough to find the row 
 ## What is not built
 
 > **The SVID does not authenticate to `/mcp`, and nothing here pretends it does.** The MCP
-> server takes a Bearer PAT (`api/mcp_server.py`) and has no mTLS path. Bridging the two —
-> having the SVID *mint* the PAT — needs the Password Safe **SPIFFE SVID** plugin, and
-> `services/spire_lab_service.py` records in its own docstring that whether the gateway
-> populates plugin attributes is unresolved, so writing against it "would be betting on
-> the answer". This cell does not bet on it either.
+> server takes a Bearer PAT (`api/mcp_server.py`) and has no mTLS path. Bridging *those
+> two specifically* — having the SVID mint the PAT — would need the Password Safe
+> **SPIFFE SVID** plugin, whose configuration question `spire_lab_service` records as
+> unresolved. This cell does not bet on it.
 >
-> So the two halves are shown side by side, each real, with the gap named. If somebody
-> asks whether the identity could issue the authorization: **not yet, and here is exactly
-> what has to be answered first.** That is a better moment than a hand-wave, and this
-> audience is listening for it.
+> **But the worker still need not hold a static secret**, and that is the part worth
+> demoing — see [No static secret on the host](#no-static-secret-on-the-host). The
+> identity that removes it is the platform's, not SPIRE's.
+
+## No static secret on the host
+
+The worker has two token sources, and the second one stores nothing.
+
+| `--token-source` | What sits on the host | Honest name for it |
+|---|---|---|
+| `file` (default) | a 0600 file holding the PAT | a static secret, smaller than an env var but still a static secret |
+| `wlc` | **nothing** | the platform vouches for the machine; Workload Credentials hands the token back |
+
+In `wlc` mode the worker:
+
+1. asks the platform for **its own identity token** — IMDS on a VM, or
+   `IDENTITY_ENDPOINT`/`IDENTITY_HEADER` where the runtime injects them;
+2. presents that to **Workload Credentials** in place of a PAT, with
+   `X-BT-Service-Name` naming which registered Workload Identity it satisfies;
+3. reads its dashboard PAT back out.
+
+Everything it is configured with — site id, service name, resource, base URL — is
+**non-secret**. `services/workload_credentials_service` puts it plainly: *"Two auth
+modes, and the second one stores nothing."*
+
+**This is the suite answering its own question.** Password Safe (old) holds and governs
+the secret; Workload Credentials (new) brokers access to it against an identity the
+platform vouches for; the workload holds nothing. Neither product does that alone, and
+the seam between them is the thing worth showing — a competitor with one half cannot.
+
+It also removes the asterisk this cell was carrying. "A non-human principal that holds no
+standing credential" is the argument, and a PAT in a file was that argument with a
+caveat.
+
+> **Unproven, so `file` is still the default.** The identity path is Azure-shaped today
+> (IMDS, `X-IDENTITY-HEADER`), the in-cluster form is listed as *Planned*, and the
+> Azure + Pathfinder wiring has not been run live. The worker names its token source on
+> every line it logs, so which mode is in play is never in doubt.
+
+Re-running the install play with `agent_token_source: wlc` **removes** any token a
+previous `file` install left behind — "nothing is stored on this host" must not be
+contradicted by a file in `/etc`.
 
 ## What this agent is answerable for
 

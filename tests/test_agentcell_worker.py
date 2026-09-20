@@ -153,6 +153,86 @@ def test_the_unit_keeps_tmp_shared():
         "the unit gets a private /tmp, so the SPIRE socket would be invisible"
 
 
+# -- the second token source, which stores nothing -----------------------------
+
+def test_the_worker_offers_a_source_that_holds_nothing():
+    code = _code(_WORKER)
+    assert "def fetch_token_from_wlc" in code, \
+        "the worker can only read its token from a file, so it always holds a static secret"
+    assert "def fetch_identity_token" in code, \
+        "nothing asks the platform to vouch for this machine"
+
+
+def test_the_identity_request_handles_both_runtimes():
+    """IMDS on a VM; IDENTITY_ENDPOINT/IDENTITY_HEADER where the runtime injects them.
+    The same two-branch shape workload_credentials_service.build_identity_request has,
+    and a worker that only knew one would fail on the other with an auth-shaped error."""
+    code = _code(_WORKER)
+    assert "IDENTITY_ENDPOINT" in code and "IDENTITY_HEADER" in code
+    assert "169.254.169.254" in code, "no IMDS fallback for a plain VM"
+
+
+def test_the_wlc_request_names_its_workload_identity():
+    """Without X-BT-Service-Name the platform holds a valid token and no statement of
+    which registered Workload Identity it is meant to satisfy."""
+    code = _code(_WORKER)
+    assert "X-BT-Service-Name" in code, "the WC call does not name its Workload Identity"
+    assert "bt-secrets-api-version" in code, \
+        "the mandatory API-version header is missing; it fails looking like an auth problem"
+
+
+def test_the_wlc_path_matches_the_providers_grammar():
+    code = _code(_WORKER)
+    assert "/site/" in code and "/secrets/" in code, \
+        "the secrets path no longer mirrors the provider's BuildPath"
+
+
+def test_the_worker_refuses_wlc_mode_with_missing_configuration():
+    r = subprocess.run([sys.executable, _WORKER, "--url", "https://x/mcp",
+                        "--token-source", "wlc"],
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode != 0, "wlc mode started with nothing to identify itself to"
+    out = r.stdout + r.stderr
+    for flag in ("--wlc-base-url", "--wlc-site-id", "--wlc-service-name"):
+        assert flag in out, (
+            f"the refusal does not name {flag}. Every one of these is NON-SECRET, so "
+            "there is no reason to be vague about which is absent")
+
+
+def test_the_worker_says_which_source_it_used():
+    """Which mode is in play must never be in doubt -- the whole claim is about what is
+    or is not sitting on the host."""
+    code = _code(_WORKER)
+    run_body = code.split("def run(", 1)[1]
+    assert "token_source" in run_body, "the worker never reports where its token came from"
+    assert "nothing on this host" in code, \
+        "the worker does not say plainly when it is holding nothing"
+
+
+def test_the_worker_takes_no_http_dependency_for_this():
+    """It runs on somebody else's VM; every dependency is something the play must put
+    there. The MCP client is unavoidable, an HTTP library is not."""
+    code = _code(_WORKER)
+    for dep in ("import httpx", "import requests", "from httpx", "from requests"):
+        assert dep not in code, f"the worker imports {dep!r} just to fetch a token"
+    assert "urllib.request" in code, "no stdlib HTTP path"
+
+
+def test_the_play_removes_a_token_when_moving_to_wlc():
+    """Re-running to move a host from `file` to `wlc` must leave nothing behind, or the
+    claim that nothing is stored is contradicted by a file in /etc."""
+    unit = _yaml_code(_INSTALL)
+    assert "state: absent" in unit, \
+        "the play does not remove a token left by a previous file-sourced install"
+
+
+def test_the_play_writes_no_token_in_wlc_mode():
+    unit = _yaml_code(_INSTALL)
+    block = unit.split("Write the PAT where only the worker can read it", 1)[1][:400]
+    assert "agent_token_source == 'file'" in block, \
+        "the token file is written regardless of source"
+
+
 # -- the token's handling on the host -----------------------------------------
 
 def test_the_token_lands_in_a_file_not_the_environment():

@@ -24,7 +24,7 @@ missed:
 | | What it is | Where it lives |
 |---|---|---|
 | **SVID** | the worker's **identity** — it attests itself | nowhere. Re-fetched from the SPIRE workload API every loop, held in memory |
-| **PAT** | the worker's **authorization** to this dashboard | a 0600 file the operator owns; scoped to a user's RBAC, with an expiry, revocable instantly |
+| **PAT** | the worker's **authorization** to this dashboard | either a 0600 file, or **nothing at all** — see below. Scoped to a user's RBAC, with an expiry, revocable instantly |
 
 > **The SVID does not authenticate to `/mcp`, and nothing here pretends it does.** The MCP
 > server takes a Bearer PAT (`api/mcp_server.py`) and has no mTLS path. Bridging the two —
@@ -32,6 +32,38 @@ missed:
 > configuration question `services/spire_lab_service.py` records as unresolved. So the
 > worker proves its identity and spends its authorization in the same log line, and the
 > gap between them stays visible rather than papered over.
+
+## Two token sources, and the second stores nothing
+
+`agent_token_source: file` (default) writes a 0600 file. That is a static secret —
+smaller than an env var, which is readable from `/proc/<pid>/environ` and shows up in a
+`ps e`, but a static secret nonetheless.
+
+`agent_token_source: wlc` puts **nothing** on the host. The worker asks the platform for
+its own identity token, presents that to **BeyondTrust Workload Credentials** in place of
+a PAT, and reads its dashboard token back out. Everything it is configured with — site
+id, service name, entra resource, base URL — is non-secret:
+
+```
+agent_token_source:     wlc
+agent_wlc_base_url:     https://…
+agent_wlc_site_id:      …
+agent_wlc_service_name: …        # the registered Workload Identity this token satisfies
+agent_wlc_resource:     …
+agent_wlc_secret_name:  agent-mcp-pat
+```
+
+This is the suite answering its own question: Password Safe holds and governs the secret,
+Workload Credentials brokers access to it against an identity the platform vouches for,
+and the workload holds nothing. `services/workload_credentials_service` states the
+principle — *"Two auth modes, and the second one stores nothing."*
+
+Re-running the play with `wlc` **removes** any token a previous `file` install left
+behind. "Nothing is stored on this host" must not be contradicted by a file in `/etc`.
+
+> **`file` is still the default**, because the identity path is Azure-shaped today (IMDS,
+> `X-IDENTITY-HEADER`), the in-cluster form is *Planned*, and the Azure + Pathfinder
+> wiring has not been run live. The worker names its source on every line it logs.
 
 ## The log line is the demo
 
