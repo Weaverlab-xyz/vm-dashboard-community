@@ -69,20 +69,31 @@ them**, so a cell onboarded on a cloud default attaches to a platform that can n
 rotate it and looks healthy until the first rotation attempt. `services/netcell_service.py`
 carries the guard; `services/ps_vm_hook.py` documents the methods.
 
-> **Not proven on live infrastructure: whether Password Safe can rotate this account.**
-> VyOS keeps authorized keys in configuration and regenerates `~/.ssh/authorized_keys`
-> from it on every commit of `system login`. Password Safe's SSH method writes that
-> file directly, so a rotated key is liable to be reverted by the next commit — and a
-> generic Linux platform's change-password command diverges from `config.boot` the same
-> way. Managing a VyOS account properly needs a Password Safe platform whose change
-> command is `configure; set system login user … authentication plaintext-password …;
-> commit; save` in vbash. **That is a Password Safe artifact, not dashboard code**, and
-> per `CONTRIBUTING.md` it is not this repo's to ship.
+> **Rotation needs a VyOS platform, and you supply it.**
+> A stock Linux platform will not manage this account. VyOS keeps authorized keys in
+> configuration and regenerates `~/.ssh/authorized_keys` from it on every commit of
+> `system login`, and a generic change-password command diverges from `config.boot` the
+> same way — so whatever Password Safe writes is reverted by the next commit.
 >
-> So treat Layer 2 here as **storage and checkout** — the credential is vaulted, handed
-> out and never seen — and do not demo rotation until you have verified it against your
-> own image and platform. The cell is deployed with auto-management left to your
-> functional account's platform rather than forced on.
+> What works is a platform whose change command runs the change the way the device
+> expects it:
+>
+> ```bash
+> configure
+> set system login user <account> authentication plaintext-password '<new>'
+> commit
+> save
+> ```
+>
+> in `vbash`, via `sg vyattacfg`. **That is a Password Safe artifact, not dashboard
+> code**, and per `CONTRIBUTING.md` it is not this repo's to ship — so the cell is
+> deployed with auto-management left to your functional account's platform rather than
+> forced on, and it onboards cleanly either way.
+>
+> Until that platform exists, Layer 2 here is **storage and checkout** — the credential
+> is vaulted, injected and never seen, which is the whole of the "nobody is handed the
+> firewall password" story. Once it exists, rotation is the ordinary Password Safe
+> behaviour. Verify against your own image before demoing the rotation half.
 
 ## Baking it
 

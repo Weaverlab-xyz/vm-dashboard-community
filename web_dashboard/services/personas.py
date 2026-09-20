@@ -914,14 +914,19 @@ _NETADMIN = Persona(
         ),
         UseCase(
             id="netadmin-window-closes",
-            title="Access to the firewall that expires on its own",
-            summary="Grant the change window rather than the account: two hours on the "
-                    "edge router, then the access is gone without anyone remembering "
-                    "to take it away.",
-            target="/settings",
+            # Password Safe's checkout window, not Entitle. Entitle's SSH integration
+            # creates ephemeral accounts with useradd, which is not how VyOS manages
+            # users, so the cell does not register there and a card promising it would
+            # be promising something this demo cannot do.
+            title="The credential dies when the window closes",
+            summary="Check the router's credential out for the change window, then let "
+                    "Password Safe rotate it shut — whatever anyone wrote down stops "
+                    "working without a person having to decide to revoke it.",
+            target="/gcp#net",
             minutes=10,
-            docs="design/entitle-user-jit",
-            requires_flags=("entitle_enabled",),
+            docs="profiles/demo/net-demo-cell",
+            requires_flags=("password_safe_enabled",),
+            requires_clouds=("gcp",),
         ),
         UseCase(
             id="netadmin-what-changed",

@@ -22,9 +22,12 @@ visibly different questions:
   image's administrator account is onboarded as a managed system + account. Read
   [What Password Safe does here](#what-password-safe-does-here) before you promise
   rotation — it is narrower than on a Linux VM, for a reason worth understanding.
-- **Layer 3 — Entitle** *(grant time-boxed access)* — *not wired by the cell.* Entitle's
-  SSH integration creates ephemeral accounts with `useradd`, which is not how VyOS
-  manages users. The expiring-window story is told against the Jump Group instead.
+- **Layer 3 — Entitle** *(grant time-boxed access)* — **not part of this cell**, and
+  that is a decision rather than a gap. Entitle's SSH integration creates ephemeral
+  accounts with `useradd`, which is not how VyOS manages users, and VyOS ships no
+  official management site for a Web Jump to render or Entitle to grant. The
+  expiring-window beat is told with **Password Safe's checkout window** instead: the
+  credential lapses and is rotated shut, so the copy someone wrote down stops working.
 
 **GCP only, for now.** The [OT cell](ot-demo-cell.md) reached three clouds in later
 phases once its shape had settled, and this feature has a sharper reason to do the same:
@@ -90,15 +93,18 @@ GCP — and **VyOS runs none of them**. Onboarded on the GCP default, the cell w
 onboard *successfully*, attach to a platform that can never talk to it, and look healthy
 until the first rotation — which is long after the demo.
 
-> **Treat this as storage and checkout, not rotation.** The credential is vaulted,
-> handed out and never seen, which is the whole of the "nobody is handed the firewall
-> password" story. Actually *rotating* a VyOS account needs a Password Safe platform
-> whose change command runs `configure; set system login user … authentication
-> plaintext-password …; commit; save` in vbash — because VyOS regenerates
-> `~/.ssh/authorized_keys` and reverts a plain `passwd` at the next commit of
-> `system login`. That platform is a Password Safe artifact, not dashboard code, and
-> lives outside this repository. Verify it against your own image before you demo
-> rotation.
+> **Rotation needs a VyOS platform, and it is yours to build.** The credential is
+> vaulted, injected and never seen the moment the cell is onboarded — that is the whole
+> of the "nobody is handed the firewall password" story, and it works today. *Rotating*
+> it needs a Password Safe platform whose change command runs
+> `configure; set system login user … authentication plaintext-password …; commit; save`
+> in vbash, because VyOS regenerates `~/.ssh/authorized_keys` from configuration and
+> reverts a plain `passwd` at the next commit of `system login`. That platform is a
+> Password Safe artifact rather than dashboard code, so it lives outside this
+> repository — see
+> [the bake's README](https://github.com/Weaverlab-xyz/vm-dashboard-community/blob/main/provisioners/net/README.md)
+> for the change command. Until it exists, demo the checkout half and say so; once it
+> does, rotation is ordinary Password Safe behaviour.
 
 ## The demo, end to end
 
@@ -122,7 +128,9 @@ Roughly fifteen minutes, and the pause in step 4 is the whole point.
 4. **Stop, and play it back.** Open the session recording. Every keystroke, timestamped,
    with a name against it. This is the moment the demo lands — do not rush past it to
    the next feature.
-5. **Let the access lapse**, and fail to reconnect.
+5. **Let the checkout lapse**, and fail to reconnect with the credential you used.
+   (Needs the VyOS platform above; without it the credential stays as issued and this
+   step is a talking point rather than a demo.)
 6. **Destroy the cell** from the *Instances* tab and show the VM, the Shell Jump and the
    managed system all go together.
 

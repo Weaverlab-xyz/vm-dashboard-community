@@ -165,11 +165,14 @@ def deploy_notes(register_in_passwordsafe: bool) -> list:
     """What the form should say back, so a caveat is read before the demo rather than
     discovered during it.
 
-    Rotation is the one that matters. Password Safe can vault and hand out this
-    credential, but managing it needs a platform whose change command runs in vbash and
-    commits -- VyOS regenerates authorized_keys and reverts a plain `passwd` at the next
-    commit of `system login`. That platform is a Password Safe artifact, which
-    CONTRIBUTING.md puts outside this repo.
+    Rotation is the one that matters, and the note is deliberately about a MISSING
+    PREREQUISITE rather than a missing capability. Password Safe rotates this account
+    fine once it is bound to a platform whose change command runs in vbash and commits;
+    what it cannot do is manage VyOS through a stock Linux platform, because VyOS
+    regenerates authorized_keys from configuration and undoes a plain `passwd` at the
+    next commit of `system login`. That platform is a Password Safe artifact, which
+    CONTRIBUTING.md puts outside this repo -- so the operator supplies it, and until
+    they do the demo is checkout rather than rotation.
     """
     notes = [
         "Reached over SSH through PRA. A firewall needs a Shell Jump and nothing else, "
@@ -180,7 +183,7 @@ def deploy_notes(register_in_passwordsafe: bool) -> list:
             f"Password Safe onboarding is forced to the {NETCELL_PS_METHOD!r} method — "
             "the cloud-native plugins manage a guest through an agent VyOS does not run.")
         notes.append(
-            "Treat this as storage and checkout, not rotation: rotating a VyOS account "
-            "needs a Password Safe platform whose change command commits in vbash. See "
-            "provisioners/net/README.md.")
+            "Rotation needs a VyOS platform whose change command commits in vbash; a "
+            "stock Linux platform is reverted by the next commit of `system login`. "
+            "Without one this is checkout, not rotation — see provisioners/net/README.md.")
     return notes

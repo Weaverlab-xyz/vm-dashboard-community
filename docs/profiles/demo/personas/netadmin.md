@@ -34,7 +34,7 @@ What a demo has to show, concretely:
 | **Provisioning** | Stands up a [network cell](../net-demo-cell.md) — a VyOS router/firewall from a baked image, with no external IP, in the sandbox's private subnet. It is a real network OS: `configure`, `set firewall`, `commit`, `save`. |
 | **PRA** | The only way in, and the whole of the access layer. A Shell Jump over SSH, recorded. No Web Jump and no protocol tunnel — a firewall needs a shell and nothing else, which is exactly why this cell is so much smaller than the OT one. |
 | **Password Safe** | Vaults the device's administrator credential and injects it, so the admin never sees it. Read [what this does and does not do](../net-demo-cell.md#what-password-safe-does-here) before you promise rotation. |
-| **Entitle** | Grants the change *window* rather than the account — two hours on the edge router, then gone. |
+| **Entitle** | **Not part of this cell.** Its SSH integration creates ephemeral accounts with `useradd`, which is not how VyOS manages users. The expiring-window beat is told with Password Safe's checkout instead. |
 
 ## Use cases
 
@@ -62,12 +62,13 @@ cloud?", which is the question that usually ends these conversations.
 
 **Guide:** [Gateways](../../../integrations/gateways.md)
 
-### Access to the firewall that expires on its own
+### The credential dies when the window closes
 
-Grant the window, not the account. Two hours on the edge router for the contractor
-doing the migration, and then it is gone without anyone remembering to take it away.
+Check the credential out for the change window and let it lapse. Password Safe rotates
+it shut, so whatever the contractor wrote down stops working — without anyone having to
+remember to revoke it, which is the step that never happens.
 
-**Guide:** [Entitle user JIT](../../../design/entitle-user-jit.md)
+**Guide:** [Network Demo Cell](../net-demo-cell.md)
 
 ### What changed, and the session it changed in
 
@@ -82,13 +83,13 @@ the change that made it, the session it happened in, and the person who was ther
 |---|---|
 | **`pra_enabled`** | Required. The cell is reached only through a Shell Jump; with PRA off it is a device nobody can log into. |
 | **`password_safe_enabled`** | For the credential half of the story. Without it the cell still deploys and is still reachable, but "nobody is handed the password" has nothing behind it. |
-| **`entitle_enabled`** | Only for the expiring-window card. |
+| **A VyOS Password Safe platform** | For the rotation half. A stock Linux platform is reverted by the next commit of `system login`; the change command has to run in vbash. You build it — see [the network cell page](../net-demo-cell.md#what-password-safe-does-here). |
 | A **Gateway** | On the cell's subnet, before you deploy. The deploy refuses without one rather than building a device it cannot reach. |
 | The **`vyos-cell` image** | Baked first, from a VyOS image you supply — see [provisioners/net/README.md](https://github.com/Weaverlab-xyz/vm-dashboard-community/blob/main/provisioners/net/README.md). |
 
-Two of the five cards above target a cloud console, which a POV instance does not serve
-— see [the POV profile](../../pov/README.md) for why the two install profiles differ
-there. The other three run on either.
+Three of the five cards above target a cloud console, which a POV instance does not
+serve — see [the POV profile](../../pov/README.md) for why the two install profiles
+differ there. The other two run on either.
 
 ## Talking to this buyer
 
