@@ -266,6 +266,64 @@ injection into a Remote RDP jump item would add something real.
 That is **one card, not a project**, and it does not belong in the ordering below as a
 peer of the cells. It is worth doing whenever someone is next in `personas.py` anyway.
 
+## 5b. The agent cell as the Workload Lab's consumer
+
+**The Workload Lab issues four credentials and nothing in this repository consumes any of
+them.** Its hub is explicit that there is no human in these workflows — *"the consumer is
+a pipeline, a broker or a cluster"* — and all three of those are hypothetical. Each tab
+ends at a credential handed to an operator to paste somewhere else.
+
+The agent cell (§3) is that consumer, and it is already governed, recorded and revocable.
+Wiring the two together is the next piece of work on this note, and it is worth doing for
+a reason sharper than tidiness.
+
+### What it completes, not just adds
+
+The lab's cross-cutting invariant is **issue / record / remove**
+(`tests/test_workload_lab_governance.py`). Today the *remove* half ends at an API call: the
+lease is revoked, the managed system is deregistered, and nothing observable happens,
+because nothing was using the credential. **A consumer makes removal demonstrable.**
+
+That matters most on the tab that already documents an asymmetry it cannot show:
+
+> on AWS a lease **cannot be revoked** at all, so the TTL is the only control there is.
+> Azure honours the revoke.
+
+With a consumer, that stops being a footnote and becomes two side-by-side demos — the
+Azure worker stops, the AWS one keeps going until its TTL. That is a far better argument
+for short TTLs than a sentence in a table, and it is the sort of thing a room remembers.
+
+### The design constraint that decides the shape
+
+**One credential at a time, fetched per task.** An agent holding an SVID *and* a cluster
+token *and* a cloud lease *and* a certificate would be the most over-credentialed
+principal in the estate — the mechanism would argue precisely against the thing the cell
+exists to argue for.
+
+So the mechanism is a *consumption* step, not a provisioning one: the worker asks for the
+credential its next task needs, uses it, and lets it lapse. Which credential it asks for
+is the operator's choice per agent, and the row records which mechanism that agent is
+wired to — the same way it already records its SPIFFE ID and its PAT.
+
+### What each tab would need
+
+| Tab | What the worker would hold | The honest problem |
+|---|---|---|
+| **SPIRE** | an SVID | **Done** — the worker already attests every loop. |
+| **Cloud** | an AWS/Azure lease | Needs a task that touches a cloud API. The revoke asymmetry above is the demo. |
+| **Kubernetes** | a bound ServiceAccount token | Needs a cluster the agent may read. `sre`'s cards already stand one up. |
+| **Certificates** | an X.509 from the private CA | Needs an mTLS endpoint to present to; the certificate plays' subject-DN echo is the closest existing shape. |
+
+### What this must not become
+
+**Not a fifth Workload Lab tab.** `test_workload_lab_governance` blocks one until it names
+an authority that issues, records and removes — and a *consumer* names none, because it
+issues nothing. The relationship is the other way round: the lab issues, the cell
+consumes, and the cell's page links back. §2's definition holds.
+
+**Not a way to widen the agent's standing access.** If this ever ends with a worker that
+holds four credentials because it might need them, it has been built wrong.
+
 ## 6. What is deliberately not proposed
 
 - **A vendor-access cell.** Third-party access into a network they should not have is
@@ -280,7 +338,10 @@ peer of the cells. It is worth doing whenever someone is next in `personas.py` a
 
 1. ~~**Cloud governance persona**~~ — **done.** Shipped as `finops`; see §4.
 2. ~~**The agent cell**~~ — **done.** Shipped with the `aiops` persona; see §3.
-3. **Windows EPM integration, then the Windows endpoint cell** — the last item on this
+3. **Wire the agent cell to the rest of the Workload Lab** (§5b) — the cheapest
+   remaining item with the most leverage: it gives four issuance demos an end, and makes
+   the AWS/Azure revocation asymmetry something a room can watch rather than read.
+4. **Windows EPM integration, then the Windows endpoint cell** — the last item on this
    note, and the biggest demo payoff per unit of new thinking. EPM-L is a working template
    to copy rather than a design to invent, and the image prep, the WinRM runner and the
    bake-then-activate pattern are all already here.
