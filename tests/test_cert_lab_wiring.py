@@ -428,7 +428,11 @@ def test_the_flag_gates_the_router_the_page_and_the_nav():
         "the tab must not render on an instance that never enabled this lab"
     flags = _read("web_dashboard", "services", "feature_flags.py")
     assert '"cert_lab_enabled"' in flags
-    assert '"workload_lab_enabled": ("cert_lab_enabled", "spire_lab_enabled")' in flags, \
+    # MEMBERSHIP, not the literal tuple. The set grew when the agent cell joined it, and
+    # pinning the exact text failed a change that preserved every property this asserts —
+    # a test that forbids the next constituent rather than protecting this one.
+    from web_dashboard.services.feature_flags import _DERIVED
+    assert "cert_lab_enabled" in _DERIVED["workload_lab_enabled"], \
         "the nav link and /workload-lab resolve through the derived flag; see _DERIVED"
 
 

@@ -120,7 +120,9 @@ the plays fail.
 
 The third consumer is the agent cell, and what it adds is not *a* consumer but **a consumer
 that holds nothing to retrieve with**. `POST /api/agentcell/agent/{id}/k8s-request`
-(`web_dashboard/api/agentcell.py`) opens one bounded episode, and
+(`web_dashboard/api/agentcell.py`) opens one bounded episode — the **Request access**
+button on the lab's own **Agent** tab, once the agent is linked to a Kubernetes token
+there — and
 `mcp_agent.py --k8s-episode` runs it: it asks, **waits for a person**, runs the same two
 probes as steps 3 and 4 of [Proving it works](kubernetes.md#proving-it-works), and checks
 the request slot back in. Its chain is workload identity → Workload Credentials → the

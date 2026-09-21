@@ -445,6 +445,43 @@ def secret_refs(row: SpireLab) -> dict:
     return {role: f"{folder}/{title}" for role, title in SECRET_TITLES.items()}
 
 
+def deployed_hosts(db: Session) -> dict:
+    """Every live dashboard-deployed VM a lab can attach to, keyed by cloud.
+
+    The LIST form of :func:`resolve_host`, and it exists as one function because two
+    callers need it: the SPIRE Lab's build form and the agent cell's mint form. Two
+    copies of this loop would be two opinions about what "a host this dashboard
+    deployed" means, and the one that drifts is the one that offers a host the other
+    would refuse — an option that 400s on submit with a message about the caller having
+    invented an address.
+
+    Reads completed deploy jobs, which is the same source of truth ``/cloud-targets``
+    uses. The cloud tabs' own cache is NOT that source: it is empty on a fresh restart
+    and after every deploy.
+    """
+    hosts: dict = {c: [] for c in PROVISIONING_CLOUDS}
+    types = {host_backend(c).deploy_job_type: c for c in PROVISIONING_CLOUDS}
+    jobs = (db.query(Job)
+            .filter(Job.job_type.in_(tuple(types)), Job.status == "completed")
+            .order_by(Job.created_at.desc()).all())
+    seen = set()
+    for job in jobs:
+        meta = job.metadata_dict or {}
+        if meta.get("destroyed"):
+            continue
+        cloud = types[job.job_type]
+        name = meta.get("vm_name") or meta.get("instance_name") or ""
+        ip = meta.get("public_ip") or meta.get("private_ip") or ""
+        if not name or not ip or (cloud, name) in seen:
+            continue
+        seen.add((cloud, name))
+        hosts[cloud].append({"name": name, "ip": ip,
+                             "private_ip": meta.get("private_ip") or "",
+                             "public_ip": meta.get("public_ip") or "",
+                             "region": meta.get("location") or meta.get("region") or ""})
+    return hosts
+
+
 def resolve_host(db: Session, cloud: str, host_ref: str) -> dict:
     """The dashboard-deployed VM named by ``host_ref``, as ``{name, private_ip,
     public_ip, meta, deploy_job_id}``.

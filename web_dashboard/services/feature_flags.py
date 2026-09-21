@@ -157,10 +157,19 @@ def profile_page_allowed(name: str) -> bool:
 # module exists to prevent.
 _DERIVED = {
     # The Workload Lab page carries the Certificate and SPIRE labs as tabs, so the nav link
-    # and the page route turn on either lab being on. It is deliberately NOT a preview flag
-    # of its own: Settings owns exactly one toggle per lab, and a third row there would
-    # offer an operator a switch that controls nothing they cannot already reach.
-    "workload_lab_enabled": ("cert_lab_enabled", "spire_lab_enabled"),
+    # and the page route turn on any of its own labs being on. It is deliberately NOT a
+    # preview flag of its own: Settings owns exactly one toggle per lab, and a further row
+    # there would offer an operator a switch that controls nothing they cannot already
+    # reach.
+    #
+    # The agent cell joins them because its toggle IS such a switch otherwise: turning it
+    # on with both labs off left a router serving and no surface anywhere to reach it
+    # from. Only flags with a Settings toggle of their own belong here. Capability flags
+    # -- the ones the Kubernetes and Cloud tabs ride -- must stay out, or this stops
+    # resolving as all-preview and tests/test_permission_catalog.py demands an RBAC scope
+    # for the page.
+    "workload_lab_enabled": ("cert_lab_enabled", "spire_lab_enabled",
+                             "agentcell_enabled"),
 }
 
 
@@ -213,7 +222,8 @@ def flags() -> dict:
         "spire_lab_enabled":    enabled("spire_lab_enabled",     settings.spire_lab_enabled),
         "netcell_enabled":      enabled("netcell_enabled",       settings.netcell_enabled),
         "agentcell_enabled":    enabled("agentcell_enabled",     settings.agentcell_enabled),
-        # Derived from the two above -- see _DERIVED. Gates the nav link and /workload-lab.
+        # Derived from the three above -- see _DERIVED. Gates the nav link and
+        # /workload-lab.
         "workload_lab_enabled": enabled("workload_lab_enabled"),
         # Workload Credentials. Present here because `main._feature_gate` already gates the
         # /api/workload-cloud router on it, and a flag one reader can see and the other

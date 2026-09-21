@@ -2583,9 +2583,11 @@ _PREVIEW_FLAGS = {
         "Agent Demo Cell",
         "Preview. Install a non-human principal that reads the estate through this "
         "dashboard's MCP server — attested by a SPIRE trust domain, authorized by a "
-        "token that expires and can be revoked mid-run. Needs the MCP server on and a "
-        "SPIRE lab on the host. The agent's token is minted against a user you pick, and "
-        "an administrator is refused."),
+        "token that expires and can be revoked mid-run. Adds the Agent tab to the "
+        "Workload Lab, where it can also be made answerable for that page's cloud and "
+        "Kubernetes credentials. Needs the MCP server on and a SPIRE lab on the host. "
+        "The agent's token is minted against a user you pick, and an administrator is "
+        "refused."),
     "netcell_enabled": (
         "Network Demo Cell",
         "Preview. Deploy a VyOS router/firewall with no external IP, reached only "

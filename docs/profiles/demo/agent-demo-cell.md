@@ -16,6 +16,15 @@ while the audience watches**.
 
 That last part is the demo. Everything else is arrangement.
 
+**Where it lives: `/workload-lab`, the `Agent` tab.** Not a page of its own, and the
+placement is the argument. Every other tab on that page answers *how does a machine get a
+credential* — a certificate, a SPIFFE identity, a Kubernetes token, a short-lived cloud
+credential — and each stays a description of a mechanism until something holds one. This
+cell is that something: it attests to the **SPIRE** tab's trust domain, and it can be made
+answerable for the **Cloud** tab's lease or ask for the **Kubernetes** tab's token. Turning
+the preview on makes the Workload Lab reachable on its own, so the tab cannot be switched
+on and then be unfindable.
+
 - **Provisioning** *(stand it up)* — **nothing is created.** The worker attaches to a VM
   this dashboard already deployed, resolved from completed deploy-job rows rather than an
   address anyone supplied. The same call the [SPIRE lab](../../workload-lab/spiffe.md)
@@ -378,6 +387,9 @@ The cell refuses rather than installing something that would mislead:
 
 ## Before you deploy
 
+The tab's own *Not ready yet* panel checks most of this at load and names the remedy, so
+open **Workload Lab → Agent** first and read it before working down the list.
+
 - [ ] The **Agent Demo Cell preview** on, and **MCP Server** on.
 - [ ] A **SPIRE lab** stood up on the host — the worker attaches to a machine that is
       already a SPIRE agent node.
@@ -392,13 +404,18 @@ About twelve minutes, and step 5 is the whole thing.
 
 1. **Ask the question.** How many non-human principals are running in your estate right
    now, and could you stop one in the next sixty seconds?
-2. **Mint the agent.** Show the response: a SPIFFE ID, a token name, an expiry — and the
-   raw token exactly once. Point out that the row keeps the first three and never the
-   fourth.
-3. **Install it** with the two playbooks in `examples/playbooks/agent/`, then
-   `journalctl -u mcp-agent -f`.
+2. **Mint the agent** — **Workload Lab → Agent → Mint an agent**. Show the response: a
+   SPIFFE ID, a token name, an expiry — and the raw token exactly once. Point out that the
+   row keeps the first three and never the fourth. Worth saying while the form is open:
+   the user list holds **no administrators**, because the cell refuses one.
+3. **Install it** with the two playbooks in `examples/playbooks/agent/` — the tab's
+   **Install** button has both commands with this agent's values filled in — then
+   `journalctl -u mcp-agent -f`. The dashboard does not run them and does not watch them,
+   which is why the tab shows no progress bar and points at the journal instead.
 4. **Read one line aloud.** The SPIFFE ID it proved, the token it spent, what it saw.
-5. **Revoke the token** from Settings → API Tokens, with the log still on screen:
+5. **Revoke the token**, with the log still on screen — the tab's **Revoke** button, or
+   Settings → API Tokens if you would rather show it landing among the ordinary human
+   tokens:
 
    ```
    [agent] spiffe://weaverlab.test/agent/mcp-reader · token "mcp-reader-pat" · REFUSED — the token is revoked or expired · 14:06:41

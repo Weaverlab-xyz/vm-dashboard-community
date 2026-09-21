@@ -2018,7 +2018,10 @@ class Settings(BaseSettings):
     # expected on the target release, and whether the MCP SSE client negotiates cleanly
     # through the dashboard's ingress, are both unobserved. Off means no agent can be
     # minted and the dashboard behaves exactly as before.
-    agentcell_enabled: bool = False                  # master gate: router, page, tile
+    # Also a constituent of the DERIVED workload_lab_enabled, because the cell's surface
+    # is the Workload Lab's fifth tab: without that, turning this on left a router
+    # serving behind a page that still 404'd.
+    agentcell_enabled: bool = False                  # master gate: router, Workload Lab tab
     # TWO platforms, because the plugin ships as two .psplugin packages over a shared
     # core with different plugin ids: "Certificate" issues an end-entity certificate on
     # any of its nine backends, "Subordinate CA" issues an issuing authority on the four

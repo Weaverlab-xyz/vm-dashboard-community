@@ -1,9 +1,17 @@
 """The agent cell is a preview feature, and every reader of that fact must agree.
 
-Smaller than tests/test_netcell_preview.py because this cell has no tab and no tile —
-its surfaces are a router, a persona card set and a page. The failure mode is the same
-though, and it is partial adoption: the router 404s while a card still reads `ready`,
-which looks like a broken feature rather than a flag doing its job.
+Smaller than tests/test_netcell_preview.py because this cell has no tile — its surfaces
+are a router, a persona card set, a documentation page and the Workload Lab's `Agent`
+tab. The failure mode is the same though, and it is partial adoption: the router 404s
+while a card still reads `ready`, which looks like a broken feature rather than a flag
+doing its job.
+
+**And one failure specific to this flag, which shipped: a toggle that reaches nothing.**
+The tab lives on `/workload-lab`, whose route is gated on the DERIVED
+`workload_lab_enabled`. Turning the cell on without either lab therefore left a router
+serving behind a page that still 404'd, and the only surface was Swagger. So the flag is
+a constituent of that derived one, and the tests below pin both halves of that: the tab
+renders behind the flag, and the flag can reach the page.
 
 Also pins the one thing specific to this cell: **its preview flag is its own, not
 `mcp_server_enabled`.** The MCP server is a shipped feature an operator may legitimately
@@ -106,6 +114,85 @@ def test_the_flagship_card_requires_it():
     assert _FLAG in card.requires_flags, (
         "the card pointing at the agent cell does not require its preview flag, so it "
         "would read as ready on an instance where the router 404s")
+
+
+def test_the_tab_renders_behind_the_same_flag():
+    """The surface. Both halves — the pill and the panel — or the tab bar grows an entry
+    that shows nothing, which is worse than no tab at all."""
+    shell = _read("web_dashboard", "templates", "workload_lab", "index.html")
+    assert "{% if agentcell_enabled %}" in shell, \
+        "the Workload Lab does not gate anything on the agent cell's flag"
+    assert "{'slug': 'agent', 'label': 'Agent'}" in shell, "no Agent pill in the tab bar"
+    assert 'workload_lab/_agent.html' in shell, "the Agent panel is never included"
+
+
+def test_the_flag_can_actually_reach_the_page():
+    """A preview toggle that turns a router on behind a page that still 404s is a switch
+    an operator cannot act on, and Swagger is not a surface. This is the regression the
+    tab was built to fix, so it is pinned rather than left to the template."""
+    from web_dashboard.services.feature_flags import _DERIVED
+    assert _FLAG in _DERIVED["workload_lab_enabled"], (
+        f"{_FLAG} is not a constituent of workload_lab_enabled, so turning the agent "
+        f"cell on leaves /workload-lab 404ing and the tab unreachable")
+
+
+def test_joining_the_derived_flag_keeps_the_page_all_preview():
+    """The constraint that makes the line above safe. `workload_lab_enabled` counts as
+    preview only while EVERY constituent is a preview toggle — the moment one is not,
+    tests/test_permission_catalog.py demands an RBAC scope for the page."""
+    from web_dashboard.api.setup import _PREVIEW_FLAGS
+    from web_dashboard.services.feature_flags import _DERIVED
+    not_preview = [f for f in _DERIVED["workload_lab_enabled"]
+                   if f not in _PREVIEW_FLAGS]
+    assert not not_preview, (
+        f"{not_preview} are in workload_lab_enabled but have no Settings preview "
+        f"toggle — the page stops resolving as all-preview")
+
+
+def test_the_tab_partial_is_self_contained():
+    """Markup and factory in the one file, which is what test_template_scripts.py and
+    test_templates_parse.py require of any template naming an x-data helper. A script tag
+    inside an `x-if` template is cloned rather than executed, so moving the factory out
+    leaves a dead x-data and a blank panel."""
+    partial = _read("web_dashboard", "templates", "workload_lab", "_agent.html")
+    assert 'x-data="workloadAgentTab()"' in partial
+    assert "function workloadAgentTab()" in partial, \
+        "the partial names an x-data helper it does not define"
+
+
+def test_the_tab_is_a_consumer_of_the_other_tabs():
+    """The reason it is a tab rather than a page. If the cross-links go, the page is five
+    unrelated features sharing a URL — and the argument that the other four are governed
+    rather than merely demonstrated loses the one thing that holds their credentials."""
+    partial = _read("web_dashboard", "templates", "workload_lab", "_agent.html")
+    for slug in ("spire", "cloud", "kubernetes"):
+        assert f"$dispatch('select-tab', '{slug}')" in partial, (
+            f"the Agent tab does not point at the {slug} tab — it consumes what that tab "
+            f"builds, and an operator who cannot get there has to go looking")
+
+
+def test_the_tab_never_renders_a_field_nothing_writes():
+    """`stages_done`, `stage_job_ids` and `error_message` exist on `AgentCell` and nothing
+    writes any of them: the two playbooks are runs the OPERATOR makes, and the dashboard
+    neither starts nor watches them. A panel bound to a permanently empty field reads as
+    "nothing happened yet" on a cell where plenty did — the trap the model's own comment
+    about `episode_request_id` records.
+    """
+    api = _read("web_dashboard", "api", "agentcell.py")
+    for never_written in ("row.stages_done =", "row.stage_job_ids =",
+                          "row.error_message ="):
+        assert never_written not in api, (
+            f"{never_written.strip()} is now written — the Agent tab suppresses the "
+            f"surfaces for these fields precisely because nothing does, so give them a "
+            f"panel in templates/workload_lab/_agent.html")
+    partial = _read("web_dashboard", "templates", "workload_lab", "_agent.html")
+    assert 'x-text="row.error_message"' not in partial, \
+        "the tab renders an error field nothing ever fills"
+    # `wired` is derived from stages_done, so it is permanently false. Rendering it only
+    # when TRUE is what keeps a running agent from wearing a permanent accusation.
+    assert 'x-show="row.wired"' in partial and 'x-show="!row.wired"' not in partial, (
+        "the tab renders a NOT-wired state — `wired` is derived from stages_done, which "
+        "nothing writes, so every agent would carry it forever")
 
 
 def test_the_flag_has_a_human_label():

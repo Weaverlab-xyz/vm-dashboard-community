@@ -218,32 +218,13 @@ async def build_options(db: Session = Depends(get_db),
 
     ``hosts`` comes from the completed cloud-deploy rows — the same source of truth
     ``/api/config-mgmt/cloud-targets`` reads, rather than the cloud tabs' cache, which is
-    empty on a fresh restart and after every deploy.
+    empty on a fresh restart and after every deploy. It is built in the service rather
+    than here because the agent cell's mint form offers the same list, and two copies of
+    that derivation would eventually offer a host the other's `resolve_host` refuses.
     """
     _require_enabled()
-    from ..database import Job
 
-    hosts: dict = {c: [] for c in spire_lab_service.PROVISIONING_CLOUDS}
-    types = {spire_lab_service.host_backend(c).deploy_job_type: c
-             for c in spire_lab_service.PROVISIONING_CLOUDS}
-    jobs = (db.query(Job)
-            .filter(Job.job_type.in_(tuple(types)), Job.status == "completed")
-            .order_by(Job.created_at.desc()).all())
-    seen = set()
-    for job in jobs:
-        meta = job.metadata_dict or {}
-        if meta.get("destroyed"):
-            continue
-        cloud = types[job.job_type]
-        name = meta.get("vm_name") or meta.get("instance_name") or ""
-        ip = meta.get("public_ip") or meta.get("private_ip") or ""
-        if not name or not ip or (cloud, name) in seen:
-            continue
-        seen.add((cloud, name))
-        hosts[cloud].append({"name": name, "ip": ip,
-                             "private_ip": meta.get("private_ip") or "",
-                             "public_ip": meta.get("public_ip") or "",
-                             "region": meta.get("location") or meta.get("region") or ""})
+    hosts = spire_lab_service.deployed_hosts(db)
 
     cidrs = spire_lab_service.source_cidrs()
     missing = []
