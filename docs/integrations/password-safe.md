@@ -790,6 +790,31 @@ Password Safe and that the registration has not expired.
 Read** and **Credentials → Read** permissions, and that the specific secret is
 in scope for the registration.
 
+**A file secret retrieves with no contents** — expected, if you reached for
+`ps-cli secrets get`. That verb projects a **per-type** field set, and the file one is
+metadata only: `FileName` and `FileHash`, with no content field at all (a text secret gets
+`Text`, a credential gets `Password`). `-d` / `--decrypt` cannot rescue it — the flag only
+adds a `decrypt=true` query parameter, and there is no payload field in the projection for
+it to fill. The body comes from a different verb, which takes **only** a GUID (there is no
+`--title` and no `--path`), so fetching a file secret by name is always two calls:
+
+```bash
+ps-cli secrets get -t 'api-gateway-chain'
+```
+
+```bash
+ps-cli secrets download -id <GUID-from-the-Id-column> -s ./chain.pem
+```
+
+`download -s` writes the file `0600`. Two adjacent traps: `secrets get -id <GUID> -d`
+**ignores** `--decrypt` — only the `--title` branch enables it — so resolving by ID hands
+back a masked credential and no error; and the download decodes as UTF-8 text, so binary
+material (`.pfx`, `.p12`, DER) comes back corrupted rather than refused. Keep certificates
+in file secrets as PEM.
+
+In a playbook none of this applies — the `beyondtrust.secrets_safe` lookup resolves all
+three types in one call by `folder/title`. See [Secrets in a Remote Worker run](ansible/secrets.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe).
+
 **A checkout returns `4031` / 403** — usually the API identity is missing the **Requestor**
 role or an access policy granting View on a Smart Rule containing the account. There is no
 Smart Rule API, so this is out-of-band; see [Operator prerequisites](#operator-prerequisites).

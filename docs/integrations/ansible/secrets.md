@@ -143,6 +143,28 @@ Two implementation notes that matter if you adapt the pattern:
   cloud secrets). `tests/test_playbook_ps_lookup.py` pins these invariants across the
   samples.
 
+**A file secret needs no different call.** `retrieval_type='SECRET'` covers all three
+Secrets Safe types — credential, text and **file**. The collection's library branches on
+the type itself and fetches the file body for you when it sees one, returning the file's
+*contents* as a string under the same `folder/title` path a text secret would use. So
+`lookup-secret.yml` above works unchanged against a file secret — a PEM chain, say:
+
+```bash
+ansible-playbook lookup-secret.yml \
+  -e secret_path='Certificates/api-gateway-chain' \
+  -e dest_file=/etc/ssl/private/api-gateway.pem
+```
+
+Two constraints bite the file type only:
+
+- **Text payloads only.** The body is decoded as UTF-8 on the way back, so a PEM
+  certificate, a private key, a config file or a JSON blob round-trips exactly — but a
+  **binary** payload (`.pfx`, `.p12`, DER, an archive) is corrupted, with no error. Store
+  certificate material as PEM if a play has to read it.
+- **`ps-cli` is not equivalent here.** At the CLI the file type *is* a special case —
+  `secrets get` returns only the filename and hash, and the contents need a second,
+  GUID-only call. See [Password Safe → Troubleshooting](../password-safe.md#troubleshooting).
+
 **Auto-injected credentials.** The lookup runs on the Ansible controller (the runner
 container) and reads `PASSWORD_SAFE_API_URL` / `PASSWORD_SAFE_CLIENT_ID` /
 `PASSWORD_SAFE_CLIENT_SECRET`. When **Password Safe is enabled** (`password_safe_enabled`)
