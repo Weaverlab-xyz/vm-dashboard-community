@@ -72,6 +72,48 @@ def test_nothing_configured_is_empty_not_an_exception():
     assert secretref.resolve("FN_THING") == ""
 
 
+# ── The reference the platform never resolved ────────────────────────────────
+#
+# Azure leaves an unreadable Key Vault reference in the app setting VERBATIM: no
+# error, no empty value, nothing in the app's own logs. Live, a portainer_access
+# adapter whose identity was short a vault grant sent that text as its API key and
+# reported the only thing it could see — Portainer answering 401 — which reads as a
+# revoked token and sends the operator to the wrong system entirely.
+
+def test_an_unresolved_key_vault_reference_is_refused_not_forwarded():
+    """The failure has to surface HERE. A reference is never a credential, so there
+    is no case where passing it on does anything but fail somewhere less obvious."""
+    _reset(FN_THING="@Microsoft.KeyVault(SecretUri=https://v.vault.azure.net/secrets/k/)")
+    try:
+        secretref.resolve("FN_THING")
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("an unresolved Key Vault reference was returned as a "
+                             "credential")
+    assert "FN_THING" in message, message
+    # The remedy, not just the diagnosis: the identity is the thing to go and fix.
+    assert "identity" in message.lower(), message
+
+
+def test_an_app_configuration_reference_is_refused_too():
+    """Same mechanism, same silent failure mode, so the same answer."""
+    _reset(FN_THING="@Microsoft.AppConfiguration(Endpoint=https://c.azconfig.io; Key=k)")
+    try:
+        secretref.resolve("FN_THING")
+    except RuntimeError:
+        return
+    raise AssertionError("an unresolved App Configuration reference was returned")
+
+
+def test_a_resolved_value_that_merely_mentions_the_vault_is_not_refused():
+    """The guard is a PREFIX test on purpose. A credential is opaque bytes and may
+    contain anything; refusing one for its content would be a new way to break a
+    working function."""
+    _reset(FN_THING="ptr_secret@Microsoft.KeyVault(nonsense)")
+    assert secretref.resolve("FN_THING") == "ptr_secret@Microsoft.KeyVault(nonsense)"
+
+
 # ── The AWS path ─────────────────────────────────────────────────────────────
 
 def test_an_id_resolves_through_secrets_manager():

@@ -394,6 +394,90 @@ def test_the_firewall_entry_is_cleared_even_if_the_retirement_failed():
     assert "portainer_adapter_source_cidr" in _teardown()
 
 
+# ── The stored API token ─────────────────────────────────────────────────────
+# The adapter authenticates to Portainer with the token in `portainer_pat` and
+# nothing else, and it keeps its OWN copy in the cloud's secret store — staged once,
+# inside the pairing job. So the two ways a token goes wrong (the dashboard's is bad,
+# or only the adapter's copy is stale) both used to end at "retire and pair again".
+
+def test_both_token_routes_exist_and_need_write():
+    api = _read(_API)
+    for decorator in ('@router.post("/portainer/token"',
+                      '@router.post("/portainer/token/stage"'):
+        assert decorator in api, decorator
+        assert 'require_permission("containers", "write")' in _route(decorator), decorator
+
+
+def test_minting_does_not_need_the_cloud_function_scope():
+    """It writes no cloud_functions row and runs no apply — it restarts at most the
+    function that already exists. Requiring the deploy scope to repair a credential
+    would put the repair out of reach of the operator holding the credential."""
+    for decorator in ('@router.post("/portainer/token"',
+                      '@router.post("/portainer/token/stage"'):
+        assert "_require_function_write" not in _route(decorator), decorator
+
+
+def test_the_token_never_comes_back_in_the_response():
+    """Portainer shows a token's value exactly once and this dashboard is where it
+    is kept — not something that hands it back out into a response body that gets
+    logged, cached and rendered."""
+    body = _read(_MODELS).split("class PortainerTokenResponse(")[1].split("\nclass ")[0]
+    declared = set(re.findall(r"^    (\w+):", body, re.M))
+    for field in ("token", "pat", "api_key", "key", "raw_api_key", "value"):
+        assert field not in declared, f"PortainerTokenResponse carries {field}"
+    assert "token_configured" in declared, declared
+
+
+def test_the_mint_stores_before_it_stages():
+    """Staging can fail on its own (an unreachable secret store, no adapter). Losing
+    a minted token to that would be unrecoverable: Portainer will not show it twice,
+    so the operator would be left with a live token nothing holds."""
+    body = _route('@router.post("/portainer/token"')
+    assert body.index("mint_api_token") < body.index("restage_pat")
+    # And the staging failure is reported, not raised over the top of the mint.
+    after = body.split("restage_pat")[1]
+    assert "except Exception" in after and "token is stored" in after
+
+
+def test_the_stage_route_refuses_when_there_is_nothing_to_stage():
+    """Staging an empty value would overwrite the adapter's working copy with
+    nothing, turning a stale credential into no credential."""
+    body = _route('@router.post("/portainer/token/stage"')
+    assert "portainer_pat" in body and "nothing to stage" in body
+
+
+def test_the_token_handlers_post_to_the_routes_the_router_declares():
+    page = _read(_PAGE)
+    api = _read(_API)
+    for method, path in (("mintPortainerToken", "/api/containers/portainer/token"),
+                         ("stagePortainerToken",
+                          "/api/containers/portainer/token/stage")):
+        body = page.split(f"async {method}()")[1].split("\n    async ")[0]
+        assert f"'{path}'" in body, f"{method} does not call {path}"
+        assert f'"{path.replace("/api/containers", "")}"' in api, path
+
+
+def test_every_token_field_the_page_reads_is_one_the_model_declares():
+    """The card's own text comes from `note`, which is the only place an operator is
+    told WHEN a re-staged token takes effect — a typo there is a silent blank."""
+    page = _read(_PAGE)
+    declared = set(re.findall(r"^    (\w+):", _read(_MODELS).split(
+        "class PortainerTokenResponse(")[1].split("\nclass ")[0], re.M))
+    for method in ("mintPortainerToken", "stagePortainerToken"):
+        body = page.split(f"async {method}()")[1].split("\n    async ")[0]
+        for field in set(re.findall(r"\bdata\.(\w+)", body)):
+            assert field in declared, f"{method} reads data.{field}, which is not a field"
+
+
+def test_the_mint_confirm_says_old_tokens_are_not_revoked():
+    """Minting adds a token, it does not replace one. An operator who assumed
+    otherwise leaves live credentials behind believing they are gone."""
+    page = _read(_PAGE)
+    body = page.split("async mintPortainerToken()")[1].split("\n    async ")[0]
+    assert "confirm(" in body
+    assert "keep working" in body and "revoke" in body
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]

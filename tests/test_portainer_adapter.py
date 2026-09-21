@@ -311,6 +311,22 @@ def test_check_config_reports_a_missing_url_instead_of_500ing_on_it():
     assert any("FN_PORTAINER_URL" in p for p in data["problems"]), data
 
 
+def test_check_config_names_an_unresolved_key_vault_reference():
+    """On Azure the API key arrives as an ``@Microsoft.KeyVault(...)`` app setting
+    that the PLATFORM resolves, and an identity that cannot read the vault leaves the
+    setting as written. Sending that text to Portainer earns a 401, and a 401 about a
+    token sends the operator looking at Portainer's token list — which is fine, and
+    is not the problem. The reference has to be named here instead."""
+    _env(FN_PORTAINER_API_KEY="@Microsoft.KeyVault(SecretUri=https://v.vault.azure.net/secrets/k/)")
+    resp = _call("POST", "/check_config")
+    assert resp.status == 200, (resp.status, resp.body)
+    data = resp.body["data"]
+    assert data["valid"] is False, data
+    assert any("FN_PORTAINER_API_KEY" in p for p in data["problems"]), data
+    # And Portainer was never called with it: a reference is not a credential.
+    assert not CALLS, CALLS
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0
