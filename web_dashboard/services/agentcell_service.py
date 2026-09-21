@@ -408,7 +408,7 @@ def cert_link_notes(account_name: str, bundle_title: str, cn: str = "") -> list:
         f"(`{bundle_title}`). Neither is usable without the other, which is the point "
         "of the split.",
         "**Revoking this certificate will not stop the agent.** The consumer checks "
-        "neither CRL nor OCSP — `docs/integrations/certificates.md` states that as a "
+        "neither CRL nor OCSP — `docs/workload-lab/certificates.md` states that as a "
         "deliberate design position, with short lifetimes as the mitigation. The agent "
         "stops when the certificate **expires**, not when somebody takes it away.",
         "That is the opposite of the PAT, and deliberately so. Say it out loud: this is "

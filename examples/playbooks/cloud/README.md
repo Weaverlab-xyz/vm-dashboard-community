@@ -4,7 +4,7 @@ The consumer half of the Workload Lab's **Cloud** tab: a program that reaches AW
 with a credential minted on demand by BeyondTrust **Workload Credentials**, and then proves
 the credential dies on its own.
 
-Feature reference: [docs/integrations/workload-cloud.md](../../../docs/integrations/workload-cloud.md).
+Feature reference: [docs/workload-lab/cloud.md](../../../docs/workload-lab/cloud.md).
 
 | File | Target | Runner image | What it does |
 |---|---|---|---|

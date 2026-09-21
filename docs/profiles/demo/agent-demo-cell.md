@@ -18,7 +18,7 @@ That last part is the demo. Everything else is arrangement.
 
 - **Provisioning** *(stand it up)* — **nothing is created.** The worker attaches to a VM
   this dashboard already deployed, resolved from completed deploy-job rows rather than an
-  address anyone supplied. The same call the [SPIRE lab](../../integrations/spiffe.md)
+  address anyone supplied. The same call the [SPIRE lab](../../workload-lab/spiffe.md)
   made, for the same reason, with the same payoff: the host keeps its auto-delete timer,
   its Password Safe onboarding and its Destroy button.
 - **Layer 1 — PRA** *(reach it)* — **not part of this cell**, and that is worth saying out
@@ -225,7 +225,7 @@ cluster and being unable to proceed until they say yes.
 
 Then the two reads. The success proves the token works; **the 403 proves it is scoped**,
 which is the half worth showing — the same two beats the shipped consumer plays assert,
-and for the same reason `docs/integrations/workload-kubernetes.md` gives: *"a step in a
+and for the same reason `docs/workload-lab/kubernetes.md` gives: *"a step in a
 runbook gets skipped, and an assertion does not."*
 
 | Profile | Succeeds | Must be refused |
@@ -437,3 +437,14 @@ unit. The worker exits 2 on a refusal deliberately, so systemd must treat that a
 **The agent sees more than expected.** Look at the token's user, not the agent. Every tool
 applies that user's permissions — which is the point of the *What the agent could see*
 card.
+
+## Related
+
+* [Workload Lab](../../workload-lab.md) — the four credential mechanisms this cell was
+  aligned to. Three of them it can hold; one of them it deliberately cannot.
+* [What consumes these credentials](../../workload-lab/consumers.md) — the register of
+  what spends each one, and where this cell sits in it.
+* [Workload access to Kubernetes](../../workload-lab/kubernetes.md) — the tab whose token
+  this cell can genuinely request, holding nothing.
+* [SPIFFE and SPIRE](../../workload-lab/spiffe.md) — the trust domain this worker attests
+  itself against every loop.

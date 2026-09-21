@@ -4,7 +4,7 @@ The two halves of the lab for the Password Safe **Certificate** custom plugin: a
 endpoint that demands a client certificate, and a consumer that fetches one out of
 Password Safe and authenticates with it.
 
-Feature reference: [docs/integrations/certificates.md](../../../docs/integrations/certificates.md).
+Feature reference: [docs/workload-lab/certificates.md](../../../docs/workload-lab/certificates.md).
 The ADCS half lives next door in
 [`windows/adcs-pipeline-template.yml`](../windows/adcs-pipeline-template.yml), because it
 targets a Windows CA over WinRM rather than a Linux host over SSH.

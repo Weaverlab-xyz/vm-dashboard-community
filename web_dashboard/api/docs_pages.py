@@ -162,6 +162,7 @@ _INDEX_SECTIONS = {
     "General", "integrations",
     "profiles", "profiles/demo", "profiles/demo/personas", "profiles/pov",
     "integrations/databases", "onboarding", "integrations/ansible", "remote-agents",
+    "workload-lab",
 }
 
 # Heading text per section. Without this a nested section renders as
@@ -177,6 +178,7 @@ _SECTION_LABELS = {
     "onboarding":                 "Onboarding · per-cloud setup",
     "integrations/ansible":       "Remote Worker runners",
     "remote-agents":              "Remote agents",
+    "workload-lab":               "Workload Lab",
 }
 
 # Titles for docs whose filename is an identifier rather than a phrase. The persona pages are
@@ -227,12 +229,18 @@ _TITLE_OVERRIDES = {
     "onboarding/feature-test":           "Feature-test checklist",
     "onboarding/troubleshooting":        "Onboarding troubleshooting",
     "integrations/entra-oauth":          "Sign in with Microsoft (Entra)",
-    # The four Workload Lab tab guides. Derived titles read as filenames here -- "Spiffe",
-    # "Workload Cloud", "Workload Kubernetes" -- and the index sits them among the
-    # integrations, where a reader has no tab bar to tell them what they are looking at.
-    "integrations/spiffe":               "SPIFFE and SPIRE",
-    "integrations/workload-cloud":       "Short-lived cloud credentials",
-    "integrations/workload-kubernetes":  "Workload access to Kubernetes",
+    # The Workload Lab folder. Derived titles read as filenames here -- "Spiffe", "Cloud",
+    # "Kubernetes", "Subordinate Ca" -- and the last of those is simply wrong. "Cloud" and
+    # "Kubernetes" are also the short names of two unrelated top-level pages, so without
+    # these the index lists the same word twice under different sections.
+    "workload-lab/spiffe":               "SPIFFE and SPIRE",
+    "workload-lab/cloud":                "Short-lived cloud credentials",
+    "workload-lab/kubernetes":           "Workload access to Kubernetes",
+    "workload-lab/certificate-lab":      "The Certificate Lab",
+    "workload-lab/subordinate-ca":       "Onboarding a subordinate CA",
+    "workload-lab/workload-credentials": "BeyondTrust Workload Credentials",
+    "workload-lab/dynamic-credentials":  "Dynamic AWS and Azure credentials",
+    "workload-lab/consumers":            "What consumes these credentials",
     "integrations/ansible/config-reference":  "Config field reference",
     "integrations/ansible/shared-cloud":      "Shared cloud infrastructure",
     "integrations/ansible/ansible-runner":    "The Ansible runner",

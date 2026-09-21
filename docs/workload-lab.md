@@ -21,13 +21,26 @@ where the credential eventually reaches a person.
 
 | Tab | Guide | The credential | What governs it |
 |---|---|---|---|
-| **Certificates** | [Certificates](integrations/certificates.md) | an X.509 certificate from a private CA you stand up here | Password Safe |
-| **SPIRE** | [SPIFFE and SPIRE](integrations/spiffe.md) | an SVID issued in a trust domain, to a workload that attested itself | Password Safe |
-| **Kubernetes** | [Workload access to Kubernetes](integrations/workload-kubernetes.md) | a bound ServiceAccount token for a machine *outside* the cluster | Password Safe |
-| **Cloud** | [Short-lived cloud credentials](integrations/workload-cloud.md) | an AWS or Azure credential minted per run and leased | Workload Credentials |
+| **Certificates** | [Certificates](workload-lab/certificates.md) | an X.509 certificate from a private CA you stand up here | Password Safe |
+| **SPIRE** | [SPIFFE and SPIRE](workload-lab/spiffe.md) | an SVID issued in a trust domain, to a workload that attested itself | Password Safe |
+| **Kubernetes** | [Workload access to Kubernetes](workload-lab/kubernetes.md) | a bound ServiceAccount token for a machine *outside* the cluster | Password Safe |
+| **Cloud** | [Short-lived cloud credentials](workload-lab/cloud.md) | an AWS or Azure credential minted per run and leased | Workload Credentials |
 
-All four live under [`integrations/`](integrations/README.md), with the rest of the pages
-about systems the dashboard talks to.
+Those four are the way in. Two of them carry more than one page, because two of them carry
+an argument that is not the tab's own: a certificate authority has a whole lifecycle before
+any identity exists, and the Cloud tab's authority is a product in its own right.
+
+| Also under `workload-lab/` | Read this when |
+|---|---|
+| [The Certificate Lab](workload-lab/certificate-lab.md) | you are standing a private CA up and tearing it down — the prerequisites, the build form, the timer, and the AD CS variant for a CA you already run. |
+| [Onboarding a subordinate CA](workload-lab/subordinate-ca.md) | the thing that will hold the credential mints its own certificates beneath it, so the question is rotation rather than delivery. |
+| [BeyondTrust Workload Credentials](workload-lab/workload-credentials.md) | the product behind the Cloud tab — what it is, how the dashboard authenticates to it, and how to empty the database into it. |
+| [Dynamic AWS and Azure credentials](workload-lab/dynamic-credentials.md) | you are moving a cloud off its standing access key, and need the lease behaviour, the IAM chain and what an issuance costs. |
+| [What consumes these credentials](workload-lab/consumers.md) | somebody asks what actually spends what the lab issues. |
+
+**All nine pages live in `docs/workload-lab/`**, so the feature is browsable without coming
+through this page first. That was not true before: the guides sat among twenty-odd
+unrelated pages under `integrations/`, where nothing marked them as a set.
 
 ## Which one you actually want
 
@@ -74,6 +87,26 @@ One consequence of the Cloud tab's authority worth knowing before you demo it: o
 lease **cannot be revoked** at all, so the TTL is the only control there is. Azure honours
 the revoke. The service reports the difference rather than swallowing it.
 
+## Something spends each of them, and it is not hypothetical
+
+The mirror of the invariant above, and it needs stating because the record was wrong about
+it for a while. A design note argued that the lab issued four credentials and that nothing
+consumed them — calling the candidates this page names, *"a pipeline, a broker or a
+cluster"*, hypothetical. That was an under-reading of what had already shipped, and it has
+been corrected three times since.
+
+Each tab now has a file that spends its credential: two certificate plays that fetch both
+halves and present the result to an endpoint which checks the name, two Kubernetes plays
+that are the first in this repo to authenticate with something they fetched themselves, a
+cloud play that uses a lease and then asserts the lease died, and a worker that reaches
+Password Safe holding nothing at all.
+
+[What consumes these credentials](workload-lab/consumers.md) is the register — which file,
+what it has to hold in order to retrieve, and the cases where the answer is still *nothing
+does*. It is deliberately honest in both directions: the SVID does not authenticate to
+`/mcp`, the Cloud tab's credential is returned to nobody so no worker can spend it, and no
+subordinate CA has ever been uploaded to a live PRA.
+
 ## Turning it on
 
 Settings owns **exactly two toggles** here, one per lab — Certificate Lab and SPIRE Lab.
@@ -105,9 +138,11 @@ rendering fault.
 
 ## Related
 
-* [Workload Credentials](integrations/workload-credentials.md) — the product behind the
-  Cloud tab, and the only authority here that is not Password Safe.
-* [Password Safe](integrations/password-safe.md) — the authority behind the other three.
+* [Password Safe](integrations/password-safe.md) — the authority behind three of the four
+  tabs. The fourth's is [Workload Credentials](workload-lab/workload-credentials.md), the
+  only authority here that is not Password Safe.
+* [Agent Demo Cell](profiles/demo/agent-demo-cell.md) — the non-human principal this lab
+  was aligned to, and the consumer that holds nothing.
 * [Kubernetes](kubernetes.md) — managing the clusters the Kubernetes tab acts on.
 * [Permissions](permissions.md) — who may reach the page. It is all-preview today, so it
   carries no RBAC scope of its own.

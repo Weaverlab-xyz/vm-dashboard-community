@@ -58,6 +58,21 @@ docker run --rm -v "$PWD:/pb" \
 
 Pass a comma-separated list (and `wantlist=True`) to fetch several at once.
 
+`SECRET` covers all three Secrets Safe types — credential, text and **file** — with the
+same path and the same call; a file secret returns its *contents*, so `lookup-secret.yml`
+needs no variant for one:
+
+```bash
+ansible-playbook lookup-secret.yml \
+  -e secret_path='Certificates/api-gateway-chain' \
+  -e dest_file=/etc/ssl/private/api-gateway.pem
+```
+
+The body is decoded as UTF-8, so keep file secrets textual (PEM, config, JSON) — a `.pfx`
+or DER payload comes back corrupted rather than refused. Note this is a lookup-only
+convenience: at the CLI, `ps-cli secrets get` returns a file secret's name and hash but
+never its contents, which need a separate GUID-only `ps-cli secrets download`.
+
 ## The samples
 
 | File | Target kind | Runner image | What it shows |

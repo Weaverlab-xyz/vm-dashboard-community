@@ -1,7 +1,7 @@
 # Workload Credentials Terraform module
 
 Provisions the **BeyondTrust side** of the dynamic-credential tier described in
-[`docs/integrations/workload-credentials.md`](../../docs/integrations/workload-credentials.md),
+[`docs/workload-lab/workload-credentials.md`](../../docs/workload-lab/workload-credentials.md),
 plus the AWS IAM trust chain it needs. One `terraform apply` creates:
 
 1. A **folder** for the dashboard's dynamic secrets.
