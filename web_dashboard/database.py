@@ -1592,7 +1592,7 @@ class WorkloadCredentialLease(Base):
     cloud = Column(String(16), primary_key=True)
     # provision | readonly. Splitting by lifecycle rather than by operation is what lets
     # the request path hold a read-only credential while write privilege exists only for
-    # the duration of a job. See docs/integrations/workload-credentials.md.
+    # the duration of a job. See docs/workload-lab/workload-credentials.md.
     purpose = Column(String(32), primary_key=True)
 
     # ── last-known-good (written ONLY on a successful generate) ──────────────
@@ -2427,7 +2427,7 @@ class WorkloadK8sToken(Base):
     credential with no expiry and no audit trail, which is the artefact this feature
     exists to remove. The consumer assembles one at run time from what it retrieved.
 
-    **The timer is not about cost.** It is the same argument ``docs/integrations/spiffe.md`` makes for
+    **The timer is not about cost.** It is the same argument ``docs/workload-lab/spiffe.md`` makes for
     the SPIRE lab: a forgotten workload token keeps authenticating, and this row is the
     only page it appears on.
     """

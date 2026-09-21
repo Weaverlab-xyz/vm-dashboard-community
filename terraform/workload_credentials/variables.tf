@@ -9,7 +9,7 @@ variable "beyondtrust_access_token" {
     widened. Minting one while the Pathfinder admin tenant is selected, rather than the
     site itself, produces `401 Access denied for this site` on every call — which reads
     like the site is missing the application. See
-    docs/integrations/workload-credentials.md.
+    docs/workload-lab/workload-credentials.md.
   EOT
   type        = string
   default     = ""

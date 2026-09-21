@@ -1027,7 +1027,7 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str) -> None:
 # accepts the result, because nothing in this dashboard has ever presented a JWT-SVID to a
 # relying party. This links a second VM — a small k3s node — into the same trust domain and
 # makes its API server accept those tokens, so the lab finally demonstrates the path
-# docs/integrations/spiffe.md argues for rather than only the vaulted downgrade.
+# docs/workload-lab/spiffe.md argues for rather than only the vaulted downgrade.
 #
 # WHY THIS IS A SEPARATE JOB, not extra stages on provision:
 #   * the governance half is what most labs are built for and it stands on its own. A k3s

@@ -53,7 +53,7 @@ The worker holds no identity document. It attests itself to a SPIRE trust domain
 loop and names the SPIFFE ID it was given — so deleting the registration entry is enough
 to make it anonymous, and nothing has to be revoked from the host.
 
-**Guide:** [SPIFFE and SPIRE](../../../integrations/spiffe.md)
+**Guide:** [SPIFFE and SPIRE](../../../workload-lab/spiffe.md)
 
 ### What the agent could see, and why
 
@@ -79,7 +79,7 @@ credential minted per run and leased, with its own issuance audit. Carry the cav
 honestly: on AWS a lease **cannot be revoked**, so the TTL is the only control there is.
 Azure honours the revoke.
 
-**Guide:** [Short-lived cloud credentials](../../../integrations/workload-cloud.md)
+**Guide:** [Short-lived cloud credentials](../../../workload-lab/cloud.md)
 
 ## What to enable
 

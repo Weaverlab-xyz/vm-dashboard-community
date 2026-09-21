@@ -206,7 +206,7 @@ def test_no_seeded_path_uses_characters_spire_rejects():
 
 def test_seed_population_matches_the_documented_counts():
     """11 entries in, 8 discovered — one node/agent plus two privileged excluded.
-    The README, docs/integrations/spiffe.md and the plugin's lab-scenario all state this number."""
+    The README, docs/workload-lab/spiffe.md and the plugin's lab-scenario all state this number."""
     entries = _seed_entries()
     privileged = [e for e in entries
                   if "-admin" in (e.get("extra") or "") or "-downstream" in (e.get("extra") or "")]

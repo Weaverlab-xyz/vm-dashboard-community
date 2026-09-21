@@ -41,7 +41,7 @@ Nothing in the repository, nothing in the inventory file, nothing on disk when i
 Replace a long-lived access key with a short-lived one the workload requests when it needs
 it — the secret nobody can leak because nobody is holding it.
 
-**Guide:** [Workload Credentials](../../../integrations/workload-credentials.md)
+**Guide:** [Workload Credentials](../../../workload-lab/workload-credentials.md)
 
 ### SSH accounts that exist only for the run
 
@@ -60,7 +60,7 @@ Issue one under approval instead, have the build retrieve it over the API with n
 the loop, and — the step demonstrations skip — prove it completes a real mTLS handshake.
 Then rotate it and show the build never notices.
 
-**Guide:** [Certificates](../../../integrations/certificates.md)
+**Guide:** [Certificates](../../../workload-lab/certificates.md)
 
 ### Every workload identity in a trust domain, inventoried and governed
 
@@ -79,7 +79,7 @@ deliberately bypassing attestation, deliberately inert until an operator names t
 namespace it may mint in, and deliberately the only part of this that touches a private
 key.
 
-**Guide:** [SPIFFE and SPIRE](../../../integrations/spiffe.md)
+**Guide:** [SPIFFE and SPIRE](../../../workload-lab/spiffe.md)
 
 ### A build server that reaches the cluster without a kubeconfig
 
@@ -104,7 +104,7 @@ Say the limit out loud while you are there: the vault authenticates whoever can 
 not the workload. Anyone who can retrieve *is* the workload. That is precisely the axis the
 trust domain above wins on, and it is why both live on one page.
 
-**Guide:** [Workload access to Kubernetes](../../../integrations/workload-kubernetes.md)
+**Guide:** [Workload access to Kubernetes](../../../workload-lab/kubernetes.md)
 
 ### A build that reaches AWS with no access key anywhere
 
@@ -130,7 +130,7 @@ can be released early, **AWS leases cannot**, because STS will not withdraw a cr
 has already signed. On AWS the TTL is the only control there is, which makes a short one
 matter more rather than less.
 
-**Guide:** [Short-lived cloud credentials](../../../integrations/workload-cloud.md)
+**Guide:** [Short-lived cloud credentials](../../../workload-lab/cloud.md)
 
 ### A serverless function that fetches its secret at cold start
 

@@ -312,7 +312,7 @@ Showing both, on one page, is a stronger demonstration than either alone.
 The Workload Lab's **Kubernetes tab** is the Bound-mode column made operable against a
 cluster you already have, with the scoping this comparison leaves implicit: two profiles, a
 namespace-scoped Deployer and a cluster-wide Reader that cannot read Secrets, neither of
-them `cluster-admin`. See [Workload access to Kubernetes](workload-kubernetes.md). It is the
+them `cluster-admin`. See [Workload access to Kubernetes](kubernetes.md). It is the
 path to reach for when the fourth row above rules this one out — which it does on every
 managed cluster.
 
