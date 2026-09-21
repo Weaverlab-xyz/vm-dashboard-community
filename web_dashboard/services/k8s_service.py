@@ -1285,7 +1285,8 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
         try:
             from . import rancher_service
             if _cfg("rancher_server_url") and _cfg("rancher_api_token"):
-                await rancher_service.delete_cluster_direct(cluster_id=rancher_import_id)
+                await rancher_service.delete_cluster_direct(
+                    cluster_id=rancher_import_id, job_id=job_id)
             config_service.set(f"rancher_cluster_id_{cluster_id}", "")
             config_service.set(f"rancher_manifest_url_{cluster_id}", "")
         except Exception as exc:

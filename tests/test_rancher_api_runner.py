@@ -393,6 +393,42 @@ def test_rancher_service_runner_routing():
     assert 'url = "https://10.9.8.7/v3/cluster"' in stdin
 
 
+def test_rancher_service_threads_job_id_to_the_runner():
+    """Every launcher names its container group / Cloud Run job / log stream after
+    ``job_id``. Unthreaded it arrived empty, so two Rancher API calls in flight at
+    once (two jobs, or a job plus an interactive call) targeted ONE fixed resource:
+    the second create landed on the first's live container and whichever finished
+    first deleted it in its finally. Nothing serialises Rancher API calls."""
+    cfgmod = types.ModuleType("web_dashboard.services.config_service")
+    store = {"rancher_api_transport": "runner",
+             "rancher_internal_url": "https://10.9.8.7",
+             "rancher_server_url": "https://34.1.2.3",
+             "rancher_api_token": "token-cfg:secret"}
+    cfgmod.get = lambda key, default="", workgroup=None: store.get(key, default)
+    cfgmod.get_bool = lambda key, default=False: bool(store.get(key, default))
+    sys.modules["web_dashboard.services.config_service"] = cfgmod
+    from web_dashboard.services import rancher_service as rs
+
+    _reset(output=_b64_line('{"id": "c-m-abc"}', "201"))
+    asyncio.run(rs._call("POST", "/v3/cluster", token="t", job_id="job-1234abcd"))
+    assert _CALLS[0]["job_id"] == "job-1234abcd", _CALLS[0].get("job_id")
+
+    # ...and through the public entry points a job drives, not just _call.
+    _reset(output=_b64_line("{}", "200"))
+    asyncio.run(rs.set_server_url_direct(server_url="https://34.1.2.3",
+                                         api_token="t", job_id="job-1234abcd"))
+    assert _CALLS[0]["job_id"] == "job-1234abcd", _CALLS[0].get("job_id")
+
+    # All FOUR first-run calls carry it — they are the sequence that stalls.
+    _reset(output=_b64_line("{}", "200"))
+    asyncio.run(rs.complete_first_run_direct(
+        api_token="t", server_url="https://34.1.2.3",
+        current_password="bootpw-123456", new_password="adminpw-123456",
+        job_id="job-1234abcd"))
+    assert len(_CALLS) == 4, len(_CALLS)
+    assert all(c["job_id"] == "job-1234abcd" for c in _CALLS), [c.get("job_id") for c in _CALLS]
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

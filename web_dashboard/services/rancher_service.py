@@ -26,6 +26,7 @@ isolated here on purpose so corrections are one-liners.
 import functools
 import json as _jsonlib
 import logging
+import time
 
 import httpx
 
@@ -121,21 +122,38 @@ def _client(token: str = "", *, base_url: str = "") -> httpx.AsyncClient:
 
 
 async def _call(method: str, path: str, *, token: str = "", base_url: str = "",
-                json=None) -> tuple:
+                json=None, job_id: str = "") -> tuple:
     """One Rancher API call over the configured transport → ``(status, body)``
     where ``body`` is a dict when the response parses as JSON, else raw text.
 
     On the runner transport the explicit ``base_url`` is IGNORED for addressing —
     the runner can only reach the internal URL — but callers that pin the public
-    ``server-url`` still pass it in their JSON payloads, which is unaffected."""
+    ``server-url`` still pass it in their JSON payloads, which is unaffected.
+
+    ``job_id`` names the runner's per-cloud container/job so two calls in flight at
+    once don't land on the same resource. It MUST be threaded through by every
+    job-driven caller: without it the launchers fall back to a per-invocation
+    random name, which is collision-free but anonymous in the cloud console.
+    Each runner call is a full container cold start (one API call = one job), so
+    the timing lines below are the only thing that distinguishes a slow step from
+    a hung one — a first-run step was observed live at 15m12s (2026-09-21)."""
     if _transport() == "runner":
         from . import rancher_api_runner
         url = f"{_runner_base_url()}{path}"
+        tag = f" [job {job_id[:8]}]" if job_id else ""
+        logger.info("Rancher API (runner): %s %s — starting an in-cloud runner job%s "
+                    "(container cold start; the runner's own ceiling is ~20 min)",
+                    method.upper(), path, tag)
+        _t0 = time.monotonic()
         try:
             status, text = await rancher_api_runner.request(
-                method, url, token=token, json_body=json)
+                method, url, token=token, json_body=json, job_id=job_id)
         except rancher_api_runner.RancherRunnerError as exc:
+            logger.warning("Rancher API (runner): %s %s failed after %.0fs: %s",
+                           method.upper(), path, time.monotonic() - _t0, exc)
             raise RancherError(str(exc)) from exc
+        logger.info("Rancher API (runner): %s %s → HTTP %s in %.0fs",
+                    method.upper(), path, status, time.monotonic() - _t0)
         try:
             body = _jsonlib.loads(text) if text.strip() else {}
         except ValueError:
@@ -161,7 +179,8 @@ def _raise_status(status: int, body, context: str) -> None:
 # ── Rancher v3 API ────────────────────────────────────────────────────────────
 
 @_wrap_transport_errors
-async def bootstrap_direct(*, bootstrap_password: str, server_url: str) -> str:
+async def bootstrap_direct(*, bootstrap_password: str, server_url: str,
+                           job_id: str = "") -> str:
     """First-run bootstrap: log in with the bootstrap password, pin the public
     ``server-url`` (what Rancher hands to imported cluster-agents), and mint a
     non-expiring API token. Returns ``token-xxxxx:yyyyy``. ``server_url`` is
@@ -169,7 +188,8 @@ async def bootstrap_direct(*, bootstrap_password: str, server_url: str) -> str:
     it is the PINNED value; the transport decides how the calls travel."""
     status, body = await _call(
         "POST", "/v3-public/localProviders/local?action=login", base_url=server_url,
-        json={"username": "admin", "password": bootstrap_password, "responseType": "json"})
+        json={"username": "admin", "password": bootstrap_password, "responseType": "json"},
+        job_id=job_id)
     if status >= 300:
         _raise_status(status, body, "Rancher bootstrap login failed")
     login_token = body.get("token") if isinstance(body, dict) else None
@@ -178,12 +198,12 @@ async def bootstrap_direct(*, bootstrap_password: str, server_url: str) -> str:
 
     status, body = await _call(
         "PUT", "/v3/settings/server-url", token=login_token, base_url=server_url,
-        json={"name": "server-url", "value": server_url})
+        json={"name": "server-url", "value": server_url}, job_id=job_id)
     if status >= 300:
         _raise_status(status, body, "Rancher set server-url failed")
     status, body = await _call(
         "POST", "/v3/token", token=login_token, base_url=server_url,
-        json={"type": "token", "description": "vm-dashboard", "ttl": 0})
+        json={"type": "token", "description": "vm-dashboard", "ttl": 0}, job_id=job_id)
     if status >= 300:
         _raise_status(status, body, "Rancher token mint failed")
     api_token = body.get("token") if isinstance(body, dict) else None
@@ -193,19 +213,29 @@ async def bootstrap_direct(*, bootstrap_password: str, server_url: str) -> str:
 
 
 @_wrap_transport_errors
-async def set_server_url_direct(*, server_url: str, api_token: str) -> None:
+async def set_server_url_direct(*, server_url: str, api_token: str,
+                                job_id: str = "") -> None:
     """(Re-)pin the Rancher ``server-url`` using the API token. Used when a reused
     node's ephemeral IP changed after a stop/start (state on disk survives, so the
     token is still valid but the server-url is stale — agents dial the new IP)."""
     status, body = await _call(
         "PUT", "/v3/settings/server-url", token=api_token, base_url=server_url,
-        json={"name": "server-url", "value": server_url})
+        json={"name": "server-url", "value": server_url}, job_id=job_id)
     if status >= 300:
         _raise_status(status, body, "Rancher set server-url failed")
 
 
+# The four first-run wizard calls, in order, with the progress percentage each
+# reports. They sit between the caller's 85 ("Completing Rancher first-run") and
+# the next stage at 90, so the bar keeps moving through a step that can take many
+# minutes on the runner transport instead of freezing at 85.
+_FIRST_RUN_STEPS = 4
+_FIRST_RUN_PCT_BASE = 84  # step n reports 84 + n -> 85, 86, 87, 88
+
+
 async def complete_first_run_direct(*, api_token: str, server_url: str,
-                                    current_password: str, new_password: str) -> dict:
+                                    current_password: str, new_password: str,
+                                    job_id: str = "", progress=None) -> dict:
     """Finish Rancher's interactive first-run so the operator lands on a ready,
     logged-in UI instead of the "Welcome — enter your bootstrap password" wizard.
 
@@ -222,14 +252,45 @@ async def complete_first_run_direct(*, api_token: str, server_url: str,
     failure here NEVER raises — worst case the operator still sees the wizard
     (today's behavior). Returns ``{"password_changed": bool, "reason": str}`` for
     the caller to surface. Call ONLY on a fresh bootstrap (a reused, already-set-up
-    node would have the wrong ``current_password``)."""
+    node would have the wrong ``current_password``).
+
+    **Four sequential API calls.** On the ``runner`` transport each one is a whole
+    container-group/job cold start, so this stage can run for many minutes with
+    nothing else in the log — live 2026-09-21 three calls took ~60s each and the
+    fourth took 15m12s, and the deploy sat at 85% looking dead. ``progress`` (a
+    ``(pct, message)`` callable, e.g. a ``job_service.update_progress`` closure) is
+    invoked before each step so the bar names the step actually running; the same
+    thing is logged at INFO either way, with each step's elapsed time."""
     import datetime
 
+    runner = _transport() == "runner"
+    slow_note = (" — on the runner transport this is a fresh in-cloud container per "
+                 "call (minutes each; the runner's own ceiling is ~20 min), so a long "
+                 "pause here is slow, not hung") if runner else ""
+
+    def _step(n: int, label: str) -> float:
+        """Announce first-run step ``n`` (log + optional progress); return its t0."""
+        logger.info("Rancher first-run step %d/%d: %s%s", n, _FIRST_RUN_STEPS, label,
+                    slow_note if n == 1 else "")
+        if progress is not None:
+            try:
+                progress(_FIRST_RUN_PCT_BASE + n,
+                         f"Completing Rancher first-run ({n}/{_FIRST_RUN_STEPS}: {label})")
+            except Exception as exc:  # progress is cosmetic — never fail the stage on it
+                logger.debug("Rancher first-run: progress callback failed: %s", exc)
+        return time.monotonic()
+
+    def _done(n: int, label: str, t0: float) -> None:
+        logger.info("Rancher first-run step %d/%d (%s) finished in %.0fs",
+                    n, _FIRST_RUN_STEPS, label, time.monotonic() - t0)
+
     result = {"password_changed": False, "reason": ""}
+    _t0 = _step(1, "changing the admin password")
     try:
         status, body = await _call(
             "POST", "/v3/users?action=changepassword", token=api_token, base_url=server_url,
-            json={"currentPassword": current_password, "newPassword": new_password})
+            json={"currentPassword": current_password, "newPassword": new_password},
+            job_id=job_id)
         if status < 300:
             result["password_changed"] = True
         else:
@@ -242,31 +303,37 @@ async def complete_first_run_direct(*, api_token: str, server_url: str,
     except Exception as exc:  # transport wrapped by the decorator normally; belt-and-suspenders
         result["reason"] = f"changepassword error: {exc}"
         logger.warning("Rancher first-run: changepassword failed (non-fatal): %s", exc)
+    _done(1, "changing the admin password", _t0)
 
     # Dismiss the remaining wizard steps — each independently best-effort so an
     # older/newer Rancher missing one setting doesn't block the others.
     today = datetime.date.today().isoformat()
-    for name, value in (("eula-agreed", today), ("telemetry-opt", "out"), ("first-login", "false")):
+    for n, (name, value, label) in enumerate(
+            (("eula-agreed", today, "accepting the EULA"),
+             ("telemetry-opt", "out", "setting the telemetry preference"),
+             ("first-login", "false", "clearing the first-login prompt")), start=2):
+        _t0 = _step(n, label)
         try:
             status, body = await _call(
                 "PUT", f"/v3/settings/{name}", token=api_token, base_url=server_url,
-                json={"name": name, "value": value})
+                json={"name": name, "value": value}, job_id=job_id)
             if status >= 300:
                 logger.info("Rancher first-run: setting %s not applied (%s) — non-fatal.", name, status)
         except Exception as exc:
             logger.info("Rancher first-run: setting %s failed (non-fatal): %s", name, exc)
+        _done(n, label, _t0)
     return result
 
 
 @_wrap_transport_errors
 async def create_import_cluster_direct(*, name: str, api_token: str = "",
-                                       server_url: str = "") -> tuple:
+                                       server_url: str = "", job_id: str = "") -> tuple:
     """Create an *imported* cluster in Rancher + fetch its registration manifest
     URL. Returns ``(rancher_cluster_id, manifest_url)``. The caller applies the
     manifest into the downstream cluster (cattle-cluster-agent dials out)."""
     token = _api_token(api_token)
     status, body = await _call("POST", "/v3/cluster", token=token, base_url=server_url,
-                               json={"type": "cluster", "name": name})
+                               json={"type": "cluster", "name": name}, job_id=job_id)
     if status >= 300:
         _raise_status(status, body, "Rancher cluster create failed")
     cluster_id = body.get("id") if isinstance(body, dict) else None
@@ -274,7 +341,7 @@ async def create_import_cluster_direct(*, name: str, api_token: str = "",
         raise RancherError("Rancher cluster create returned no id")
     status, body = await _call(
         "POST", "/v3/clusterregistrationtoken", token=token, base_url=server_url,
-        json={"type": "clusterRegistrationToken", "clusterId": cluster_id})
+        json={"type": "clusterRegistrationToken", "clusterId": cluster_id}, job_id=job_id)
     if status >= 300:
         _raise_status(status, body, "Rancher registration token failed")
     manifest_url = (body.get("manifestUrl") or body.get("manifest_url")) if isinstance(body, dict) else None
@@ -286,10 +353,10 @@ async def create_import_cluster_direct(*, name: str, api_token: str = "",
 
 @_wrap_transport_errors
 async def delete_cluster_direct(*, cluster_id: str, api_token: str = "",
-                                server_url: str = "") -> None:
+                                server_url: str = "", job_id: str = "") -> None:
     """Remove an imported cluster from Rancher (best-effort; caller logs errors)."""
     token = _api_token(api_token)
     status, body = await _call("DELETE", f"/v3/cluster/{cluster_id}",
-                               token=token, base_url=server_url)
+                               token=token, base_url=server_url, job_id=job_id)
     if status >= 300 and status != 404:
         _raise_status(status, body, "Rancher cluster delete failed")

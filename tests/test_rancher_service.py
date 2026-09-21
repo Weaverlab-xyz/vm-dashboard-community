@@ -131,6 +131,51 @@ def test_complete_first_run_direct():
         assert ("PUT", f"/v3/settings/{s}") in seen
 
 
+def test_complete_first_run_reports_progress_for_every_step():
+    """Four sequential API calls, and on the runner transport each is a container
+    cold start — live 2026-09-21 the fourth took 15m12s while the job sat at a
+    silent 85%, which reads as hung. Every step must move the bar and name itself,
+    across the whole 85→88 band the caller reserves before the next stage at 90."""
+    def handler(request):
+        return httpx.Response(200, json={})
+
+    _mock(handler)
+    seen = []
+    result = asyncio.run(rs.complete_first_run_direct(
+        api_token="t", server_url="https://rancher.example",
+        current_password="bootpw-123456", new_password="adminpw-123456",
+        progress=lambda pct, msg: seen.append((pct, msg))))
+    assert result["password_changed"] is True
+    assert [p for p, _ in seen] == [85, 86, 87, 88], seen
+    # Each message names the step actually running, so two consecutive log/UI
+    # samples during a long stage are distinguishable.
+    assert len({m for _, m in seen}) == 4, seen
+    assert "1/4" in seen[0][1] and "password" in seen[0][1].lower(), seen[0]
+    assert "4/4" in seen[3][1], seen[3]
+
+
+def test_complete_first_run_progress_failure_does_not_break_the_stage():
+    """Progress is cosmetic; the stage is best-effort by contract. A callback that
+    raises (a closed DB session on a long deploy) must not lose the wizard steps."""
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        return httpx.Response(200, json={})
+
+    def _boom(pct, msg):
+        raise RuntimeError("session closed")
+
+    _mock(handler)
+    result = asyncio.run(rs.complete_first_run_direct(
+        api_token="t", server_url="https://rancher.example",
+        current_password="bootpw-123456", new_password="adminpw-123456",
+        progress=_boom))
+    assert result["password_changed"] is True
+    for s in ("eula-agreed", "telemetry-opt", "first-login"):
+        assert f"/v3/settings/{s}" in calls, calls
+
+
 def test_complete_first_run_changepassword_failure_is_non_fatal():
     def handler(request):
         if request.url.path == "/v3/users":
@@ -166,6 +211,8 @@ if __name__ == "__main__":
     test_bootstrap_direct_orchestration()
     test_create_import_cluster_direct()
     test_complete_first_run_direct()
+    test_complete_first_run_reports_progress_for_every_step()
+    test_complete_first_run_progress_failure_does_not_break_the_stage()
     test_complete_first_run_changepassword_failure_is_non_fatal()
     test_delete_cluster_direct_ignores_404()
     test_not_configured_raises()

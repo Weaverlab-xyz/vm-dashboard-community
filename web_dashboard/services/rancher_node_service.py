@@ -626,7 +626,8 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             # ephemeral IP may have changed across a stop/start).
             job_service.update_progress(db, job_id, 70, "Re-pinning server-url on the live node")
             try:
-                await rancher_service.set_server_url_direct(server_url=url, api_token=existing_token)
+                await rancher_service.set_server_url_direct(
+                    server_url=url, api_token=existing_token, job_id=job_id)
             except Exception as exc:
                 logger.warning("Rancher re-pin server-url failed (continuing): %s", exc)
             token = existing_token
@@ -688,7 +689,7 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
                 return
             job_service.update_progress(db, job_id, 75, "Bootstrapping Rancher admin")
             token = await rancher_service.bootstrap_direct(
-                bootstrap_password=bootstrap_password, server_url=url)
+                bootstrap_password=bootstrap_password, server_url=url, job_id=job_id)
             # Store the token FIRST: a retry then takes the reuse branch above and
             # won't re-run first-run (which would fail on the now-changed password).
             config_service.set("rancher_api_token", token)
@@ -708,10 +709,18 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
                     new_pw = _generate_admin_password()
                     config_service.set("rancher_admin_password", new_pw)
                     config_service.set("rancher_admin_password_generated", "1")
+                # First-run is FOUR sequential API calls, and on the runner
+                # transport each is a container cold start — live 2026-09-21 the
+                # fourth alone took 15m12s and the bar sat at a silent 85% the
+                # whole time. Report each step so a slow stage reads as slow.
+                def _first_run_progress(pct: int, message: str) -> None:
+                    job_service.update_progress(db, job_id, pct, message)
+
                 try:
                     fr = await rancher_service.complete_first_run_direct(
                         api_token=token, server_url=url,
-                        current_password=bootstrap_password, new_password=new_pw)
+                        current_password=bootstrap_password, new_password=new_pw,
+                        job_id=job_id, progress=_first_run_progress)
                 except Exception as exc:
                     logger.warning("Rancher first-run completion failed (non-fatal): %s", exc)
                     fr = {"password_changed": False, "reason": str(exc)}

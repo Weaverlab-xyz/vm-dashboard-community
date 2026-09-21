@@ -3542,9 +3542,18 @@ def _run_aci_k8s_sync(
     ``$KUBECONFIG``) are the only differences.
     """
     import time
+    import uuid
 
     aci = _get_aci(cred, sub_id)
-    group_name = f"{_K8S_RUNNER_PREFIX}-{job_id[:8]}" if job_id else f"{_K8S_RUNNER_PREFIX}-adhoc"
+    # Unique per invocation when there is no job to name it after. The previous
+    # fixed suffix made this a SHARED resource: two ad-hoc runs at once (a Rancher
+    # API call from a job alongside an interactive one) both begin_create_or_update
+    # the same group, the second lands on the first's live container, and whichever
+    # finishes first deletes it out from under the other in its finally. Nothing
+    # serialises these calls, so the name has to do it. (gcp_service does the same
+    # for Cloud Run jobs, where the clash surfaced as a 409 instead.)
+    group_name = (f"{_K8S_RUNNER_PREFIX}-{job_id[:8]}" if job_id
+                  else f"{_K8S_RUNNER_PREFIX}-{uuid.uuid4().hex[:8]}")
 
     setup = (
         "set -e; "
