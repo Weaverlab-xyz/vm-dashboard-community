@@ -60,9 +60,9 @@ def test_linkable_and_spendable_are_different_sets():
     holding nothing, so it can genuinely request that token. A link that confers
     capability and one that confers only accountability must not read the same way back.
     """
-    assert A.LINKABLE_MECHANISMS == ("cloud", "kubernetes"), \
+    assert A.LINKABLE_MECHANISMS == ("cloud", "kubernetes", "certificates"), \
         "the linkable set changed; the refusals below and the docs must change with it"
-    assert A.SPENDABLE_MECHANISMS == ("kubernetes",)
+    assert A.SPENDABLE_MECHANISMS == ("kubernetes", "certificates")
     assert "cloud" not in A.SPENDABLE_MECHANISMS, \
         "cloud became spendable — that tab's credential is returned to nobody"
     for tab in A.LINKABLE_MECHANISMS:
@@ -90,13 +90,33 @@ def test_the_stale_unreachable_reasoning_is_gone():
              "superseded — an operator reading it would believe it")
 
 
-def test_certificates_is_refused_for_the_reason_that_is_actually_true():
-    """A different retrieval path, not a structural barrier. PKCS#12 into Secrets Safe is
-    not a managed-account password, and this worker has only the second."""
-    msg = A.link_problem("certificates")
-    assert msg, "certificates was accepted as linkable"
-    assert "PKCS#12" in msg or "Secrets Safe" in msg, \
-        "the certificates refusal does not name the real difference"
+def test_certificates_became_linkable_and_the_old_refusal_is_gone():
+    """That refusal said the tab "writes a PKCS#12 into Secrets Safe rather than a
+    managed-account password". Half of a certificate identity IS a managed-account
+    password — the passphrase — and the worker could always reach it. The gap was the
+    bundle alone, and Secrets Safe being part of Password Safe means the same client pair
+    opens it."""
+    assert A.link_problem("certificates") == ""
+    assert "certificates" in A.SPENDABLE_MECHANISMS
+    svc = _read(os.path.join(_ROOT, "web_dashboard", "services",
+                             "agentcell_service.py"))
+    if "rather than a managed-account" in svc:
+        near = svc[max(0, svc.index("rather than a managed-account") - 500):
+                   svc.index("rather than a managed-account") + 500]
+        assert "imprecise" in near or "The gap was the BUNDLE" in near, \
+            ("the superseded refusal is quoted with nothing marking it as superseded — "
+             "an operator reading it would believe it")
+
+
+def test_the_certificate_notes_lead_with_what_revocation_cannot_do():
+    """The limit easiest to assume away, and the one this episode exists to show:
+    revoking the certificate does not stop the agent, because nothing on the path checks
+    a CRL or OCSP."""
+    notes = " ".join(A.cert_link_notes("svc-deploy-pipeline", "cert/sys/acct",
+                                       "svc-deploy-pipeline"))
+    assert "will not stop the agent" in notes
+    assert "CRL" in notes and "OCSP" in notes
+    assert "expires" in notes, "the notes do not say what DOES stop it"
 
 
 def test_spire_is_refused_because_it_is_already_the_agents_identity():

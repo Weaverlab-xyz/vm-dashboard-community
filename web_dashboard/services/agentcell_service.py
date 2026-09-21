@@ -182,23 +182,28 @@ def pat_name_for(cell_name: str) -> str:
 # client" -- describes this worker, and `kubernetes` is linkable because the agent can
 # genuinely request that token.
 #
-# The two remaining differ, and differ for different reasons:
-#   * `cloud` is linkable but NOT spendable -- its credential is returned to nobody by
-#     design, so the link records a lease whose STATE is worth reporting beside the agent
-#     and nothing more. See `link_notes`.
-#   * `certificates` writes a PKCS#12 into Secrets Safe rather than a managed-account
-#     password, which is a different retrieval path this worker has not been given.
+# `certificates` followed, and the refusal it used to carry was imprecise in a way worth
+# recording: it said the tab "writes a PKCS#12 into Secrets Safe rather than a
+# managed-account password". Half of that identity IS a managed-account password -- the
+# PKCS#12 passphrase -- and the worker could always reach it. The gap was the BUNDLE
+# alone, a Secrets Safe file secret. Secrets Safe is part of Password Safe, so the same
+# client pair opens it; the worker now reads it with `ps-cli`, which is the path this
+# repo already runs against a live tenant.
 #
-# See docs/design/next-demo-cells.md sections 5b and 5d.
-LINKABLE_MECHANISMS = ("cloud", "kubernetes")
+# `cloud` remains linkable but NOT spendable -- its credential is returned to nobody by
+# design, so the link records a lease whose STATE is worth reporting beside the agent and
+# nothing more. See `link_notes`.
+#
+# See docs/design/next-demo-cells.md sections 5b, 5d and 5e.
+LINKABLE_MECHANISMS = ("cloud", "kubernetes", "certificates")
 
 # Mechanisms a worker can actually SPEND, as opposed to merely be answerable for. The
 # distinction is load-bearing: a link that confers capability and one that confers only
 # accountability must not read the same way back to an operator.
-SPENDABLE_MECHANISMS = ("kubernetes",)
+SPENDABLE_MECHANISMS = ("kubernetes", "certificates")
 
 # Named here so the refusal can list them without claiming they are coming.
-_UNWIRED_MECHANISMS = ("certificates", "spire")
+_UNWIRED_MECHANISMS = ("spire",)
 
 
 def link_problem(mechanism: str) -> str:
@@ -215,11 +220,6 @@ def link_problem(mechanism: str) -> str:
     if m == "spire":
         return ("The agent is already attested by SPIRE — that link is its SPIFFE ID, "
                 "recorded when the cell was created, and it does not need a second one.")
-    if m == "certificates":
-        return ("The certificates tab writes a PKCS#12 into Secrets Safe rather than a "
-                "managed-account password, and this worker has only the managed-account "
-                "retrieval path. That is a missing path rather than a structural "
-                "barrier — see docs/design/next-demo-cells.md §5d.")
     return (f"{mechanism!r} is not a Workload Lab mechanism. Linkable today: "
             f"{', '.join(LINKABLE_MECHANISMS)}.")
 
@@ -392,6 +392,29 @@ def episode_summary(row) -> str:
     if state == "released":
         return "access released — the request was checked back in"
     return f"cluster access: {state}"
+
+
+def cert_link_notes(account_name: str, bundle_title: str, cn: str = "") -> list:
+    """What to say back when an agent is linked to a certificate identity.
+
+    The third control surface, and the one whose limit is easiest to assume away. The
+    other two links warn about what the agent *can* do; this one warns about what taking
+    it away *cannot* do.
+    """
+    who = cn or account_name or "this identity"
+    return [
+        f"This agent can now request **both halves** of `{who}` — the PKCS#12 "
+        f"passphrase from the managed account, and the bundle from Secrets Safe "
+        f"(`{bundle_title}`). Neither is usable without the other, which is the point "
+        "of the split.",
+        "**Revoking this certificate will not stop the agent.** The consumer checks "
+        "neither CRL nor OCSP — `docs/integrations/certificates.md` states that as a "
+        "deliberate design position, with short lifetimes as the mitigation. The agent "
+        "stops when the certificate **expires**, not when somebody takes it away.",
+        "That is the opposite of the PAT, and deliberately so. Say it out loud: this is "
+        "the shape that shows why a revocable credential and an approval gate are worth "
+        "having.",
+    ]
 
 
 def link_summary(mechanism: str, lease_state: str) -> str:

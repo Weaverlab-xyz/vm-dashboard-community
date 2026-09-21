@@ -512,6 +512,87 @@ No Password Safe tenant, no cluster, no approver. The client paths are unit-test
 a fake gateway and that is all they are. **Without an approval policy there is no wait**,
 and the best beat silently does not happen — so the worker logs which path it took.
 
+## 5e. The third control surface
+
+§5d gave the agent a credential it must ask permission for. This gives it one **nobody
+can take away**, and the arc is the reason to build it at all:
+
+| Episode | Credential | How you take it away |
+|---|---|---|
+| the loop | its MCP PAT | **revoke it** — the worker stops mid-poll |
+| cluster access | a Workload Lab token | **gated at retrieval**; once released it lives out its TTL |
+| certificate use | a PKCS#12 identity | **neither** |
+
+`docs/integrations/certificates.md` states the third position plainly: *"No revocation
+checking. The plugin consults neither CRLs nor OCSP. Short lifetimes are the mitigation,
+and that is a deliberate design position."* So the closing beat is deliberately
+uncomfortable — disable the managed account, which revokes the certificate, run the agent
+again, and it works. It stops when the certificate expires, not when somebody takes it
+away. A room that has just watched a revoke kill an agent understands immediately why
+that matters.
+
+### The consumer correction, for the third time — and it was a smaller gap than stated
+
+Like Kubernetes, this tab already had consumers: `ci-fetch-cert.yml` and
+`nginx-mtls-endpoint.yml`, with the page calling the step that runs them *"the step
+usually skipped, and the only one that proves anything"*. They authenticate with a
+Password Safe client pair supplied to the run; the agent's contribution is the same narrow
+one it was for Kubernetes.
+
+**And my own refusal text overstated the barrier.** It said the tab *"writes a PKCS#12
+into Secrets Safe rather than a managed-account password, and this worker has only the
+managed-account retrieval path"*. Half of a certificate identity **is** a managed-account
+password — the passphrase — and the worker could always fetch it. The gap was the
+**bundle** alone.
+
+### The decision, and the reason I first got it wrong
+
+An earlier draft of this plan recommended writing a Secrets Safe REST client and rejected
+`ps-cli`, on the grounds that the binary *"would need its own credential configuration,
+which is the standing secret this cell exists to argue against"*.
+
+**That was false**, and one grep settled it: `secrets_backend_service._pscli_env` maps
+`PSCLI_CLIENT_ID` / `PSCLI_CLIENT_SECRET` from the **environment**, and they are the same
+OAuth2 pair the worker already fetches from Workload Credentials. Secrets Safe being part
+of Password Safe is the whole point — one tenant, one client pair. There is no second
+credential to configure.
+
+So `ps-cli` it is: the path this repo already runs against a live tenant, rather than a
+REST shape nobody here has called. In a cell carrying several unverified surfaces,
+removing one beat adding another.
+
+Two costs, neither hidden:
+
+* **An unpinned pip package on the agent host.** Precedented — the install play already
+  installs `mcp` — but `beyondtrust-bips-cli` is unpinned and `tests/test_pscli_grammar.py`
+  exists because six calls once shipped with the wrong argv and sat unnoticed for months.
+  The worker's argv is checked against that same verb table.
+* **The pair passes through a subprocess environment.** In tension with the cell's own
+  rule against env vars, and the tension resolves rather than being waved away: the play's
+  objection is to a systemd `Environment=` line, world-readable through `systemctl show`
+  for the unit's whole life. This is one subprocess for one call, and the worker runs as
+  root — so "anything running as the same user" means root, which already holds
+  everything. Never argv, though: `/proc/<pid>/cmdline` is world-readable, and a test
+  pins it.
+
+### The one place something touches disk
+
+Python's `ssl` needs file paths for a client certificate and `openssl` needs a file to
+open a PKCS#12, so the probe writes both into a `0700` temporary directory, `0600` for the
+key, passphrase through `PFXPASS` rather than argv — mirroring `ci-fetch-cert.yml` — and
+removes the directory on the failure path too. It is the one unavoidable exception to
+"nothing is stored on this host", and the code says so where somebody would otherwise find
+it and conclude the cell is careless about the thing it argues for.
+
+### Still unproven
+
+No CA, no Password Safe tenant, no mTLS endpoint. The probe is exercised against a
+generated CA, a real PKCS#12 and a local mutual-TLS server in
+`tests/test_agentcell_cert_episode.py` — which is considerably more than the other
+episodes get, and still not a live run. One shape is genuinely unknown: whether a bundle
+comes back through `ps-cli secrets get -d` or needs `download-secret-file`. The worker
+checks for DER and names the alternative in the refusal rather than guessing.
+
 ## 6. What is deliberately not proposed
 
 - **A vendor-access cell.** Third-party access into a network they should not have is

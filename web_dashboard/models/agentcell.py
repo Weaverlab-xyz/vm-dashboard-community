@@ -59,6 +59,18 @@ class AgentCellLinkRequest(BaseModel):
     mechanism: str = Field(min_length=1,
                            description="a Workload Lab tab name: 'cloud' or 'kubernetes'")
     credential_id: str = Field(min_length=1, description="that tab's own row id")
+    # Certificates only. A CA row carries many identities -- one managed account per
+    # identity -- and the dashboard does not track them individually, so the link names
+    # which one. All three are identifiers; none is a credential.
+    account_name: str = ""
+    # `bundle_title`, not `secret_title`: it is the bundle's NAME and not a
+    # credential, and a field whose name says otherwise trips a guard that is right
+    # to be suspicious (tests/test_agentcell_link, and services/gcp_service's
+    # `resource_id` for the same reason). Renaming says what the value actually is.
+    bundle_title: str = Field(
+        default="", description="the bundle's Secrets Safe title, e.g. cert/<sys>/<acct>")
+    expect_cn: str = Field(
+        default="", description="the subject the mTLS endpoint should echo")
 
 
 class AgentCellEpisodeRequest(BaseModel):

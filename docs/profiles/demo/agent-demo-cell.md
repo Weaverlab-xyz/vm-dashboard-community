@@ -249,6 +249,70 @@ means a refusal did not refuse — the one outcome that would otherwise look lik
 - **Without an approval policy there is no wait**, and the best beat silently does not
   happen. The worker logs which path it took, so check the journal rather than assuming.
 
+## The third demo: the credential nobody can take away
+
+The three episodes are worth running in order, because the arc teaches what no single one
+does:
+
+| Episode | The credential | How you take it away |
+|---|---|---|
+| the loop | its MCP **PAT** | **revoke it** — the worker stops mid-poll, visibly |
+| cluster access | a Workload Lab **token** | **gated at retrieval** — a person decides; once released it lives out its TTL |
+| this one | a **certificate** | **neither** |
+
+`docs/integrations/certificates.md` states the third position rather than hiding it:
+
+> **No revocation checking.** The plugin consults neither CRLs nor OCSP. Short lifetimes
+> are the mitigation, and that is a deliberate design position.
+
+With a `certificates` link in place, `mcp_agent.py --cert-episode`:
+
+```
+[agent] spiffe://weaverlab.test/agent/mcp-reader · requesting the certificate identity behind svc-deploy-pipeline
+[agent] holding nothing: the Password Safe client pair came from Workload Credentials against this machine's own identity
+[agent] spiffe://weaverlab.test/agent/mcp-reader · WAITING for approval (20s) — this agent cannot authorise its own access
+[agent] spiffe://weaverlab.test/agent/mcp-reader · passphrase released; reading the bundle from Secrets Safe
+[agent] spiffe://weaverlab.test/agent/mcp-reader · identity proved — the endpoint answered 200 and echoed svc-deploy-pipeline
+[agent] spiffe://weaverlab.test/agent/mcp-reader · the request was checked back in
+```
+
+**Two halves, and neither is usable alone.** That is the tab's design and the agent
+honours it: the PKCS#12 **passphrase** is the managed account's credential, fetched
+through the same recorded request as the cluster token; the **bundle** it opens is a
+Secrets Safe file secret. Retrieving one without the other yields nothing.
+
+Secrets Safe is part of Password Safe — one tenant, one client pair — so the worker reads
+the bundle with `ps-cli`, the same path the dashboard uses. The pair reaches it through
+the **environment**, never argv: `/proc/<pid>/cmdline` is world-readable and
+`/proc/<pid>/environ` is not.
+
+### Then do the thing that does not work
+
+**Disable the managed account — which revokes the certificate on a backend that can — and
+run the episode again. It still works.**
+
+Nothing on this path checks a CRL or an OCSP responder. The agent stops when the
+certificate **expires**, not when somebody takes it away.
+
+Say that out loud. It is the opposite of the PAT demo and it is the reason the PAT demo
+matters: a room that has just watched a revoke stop an agent dead will understand exactly
+what it means that this one does not.
+
+### What this demo does not prove
+
+- **The bundle and the private key touch disk**, in one place. Python's `ssl` needs file
+  paths for a client certificate and `openssl` needs a file to open a PKCS#12, so the
+  episode uses a `0700` temporary directory, writes the key `0600`, passes the passphrase
+  through `PFXPASS` rather than the command line, and removes the directory on the failure
+  path too. It is the one unavoidable exception to "nothing is stored on this host", and
+  it is better said than found.
+- **Revocation on six of nine backends only.** EST, step-ca and `selfsigned` have no
+  revocation operation at all, so on those the certificate stays valid until it expires
+  whatever you do. Check which backend the CA uses before promising a revoke.
+- **Nothing here has been run against a real CA**, a real Password Safe tenant or a real
+  mTLS endpoint. The probe is exercised against a generated CA and a local server in
+  `tests/test_agentcell_cert_episode.py`, and that is all it is.
+
 ## The refusals, and why each one exists
 
 The cell refuses rather than installing something that would mislead:

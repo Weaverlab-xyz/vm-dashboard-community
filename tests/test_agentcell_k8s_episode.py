@@ -454,12 +454,16 @@ def test_the_request_id_never_reaches_a_log():
     than an internal id only this process can see.
     """
     code = _code(_WORKER)
-    body = code[code.index("def run_k8s_episode("):code.index("\ndef main(")]
-    uses = [ln.strip() for ln in body.splitlines() if "request_id" in ln]
-    assert uses == ["token, base, headers, request_id = password_safe_episode(",
-                    "_checkin(base, headers, request_id, reason)"], (
-        f"the request id is used somewhere other than the call that returns it and the "
-        f"check-in that spends it: {uses}")
+    # Per episode, not across both: the slice used to run to `main` and silently widened
+    # when a second episode landed between them, which turned an exact assertion into a
+    # brittle one that a correct change could fail.
+    for fn in ("run_k8s_episode", "run_cert_episode"):
+        body = code.split(f"def {fn}(", 1)[1].split("\ndef ")[0]
+        uses = [ln.strip() for ln in body.splitlines() if "request_id" in ln]
+        assert len(uses) == 2 and uses[0].endswith("password_safe_episode(") \
+            and uses[1] == "_checkin(base, headers, request_id, reason)", (
+            f"{fn}: the request id is used somewhere other than the call that returns "
+            f"it and the check-in that spends it: {uses}")
     # And nowhere in the module does one reach a print.
     for ln in code.splitlines():
         if "print(" in ln:
