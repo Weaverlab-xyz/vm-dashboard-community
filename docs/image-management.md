@@ -93,6 +93,32 @@ are too varied to template statically. The build job streams Packer
 stdout/stderr to the live job log so you can watch the provision
 steps.
 
+#### GCP source image: a family or an exact name
+
+The GCP form's **Source Image** control has two modes, and the
+difference matters for anything you did not get from a public
+catalogue:
+
+- **Public family** (the default) emits `source_image_family` —
+  `debian-12`, `rocky-linux-9`, `ubuntu-2204-lts-amd64` — which
+  resolves to the family's newest image at build time.
+- **Custom image** emits a literal `source_image`, the exact name of an
+  image in your project. This is the mode an image you **imported
+  yourself** requires: an imported image carries no family, so no value
+  in the family field can ever name it. It is the GCE counterpart of
+  the AWS form's literal source AMI.
+
+The optional **Image project** under Custom image emits
+`source_image_project_id`. Leave it blank unless the image lives in a
+separate shared image project — unset, the builder searches the build
+project first and the standard public image projects after it.
+
+Picking the wrong mode is a build that runs, and then fails a minute in
+against the wrong OS. The provisioners that check what they were given
+(`provisioners/net/vyos-cell.sh` refuses a non-VyOS image) report it
+clearly; one that does not will happily bake the wrong thing. The job
+log's template step names the source it used either way.
+
 #### OCI build prerequisites
 
 The OCI builder has two requirements the other three don't, because

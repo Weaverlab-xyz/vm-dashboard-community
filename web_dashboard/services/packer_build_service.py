@@ -510,7 +510,15 @@ async def _run_gcp_build(job_id: str, req: GCPPackerBuildRequest, created_by: st
             creds_file.write_text(sa_json)
             env["GOOGLE_APPLICATION_CREDENTIALS"] = str(creds_file)
 
-        job_service.update_progress(db, job_id, 5, "Generating Packer template…")
+        # Name the source in the job log. A provisioner that refuses the image it
+        # was given (the network cell's vyatta check) otherwise fails against a
+        # source only Packer's own "Using image:" line records.
+        src_desc = (f"image {req.source_image_name}" if req.source_image_name
+                    else f"family {req.source_image}")
+        if req.source_image_project:
+            src_desc += f" in project {req.source_image_project}"
+        job_service.update_progress(
+            db, job_id, 5, f"Generating Packer template — source {src_desc}…")
         if req.provisioner_script.strip():
             plain_env, secret_vars, pkr_env = await _provisioner_env(req)
         else:
@@ -518,6 +526,8 @@ async def _run_gcp_build(job_id: str, req: GCPPackerBuildRequest, created_by: st
         env.update(pkr_env)
         template = packer_service.generate_gcp_template(
             source_image=req.source_image,
+            source_image_name=req.source_image_name,
+            source_image_project=req.source_image_project,
             machine_type=req.machine_type,
             ssh_username=req.ssh_username,
             image_name=req.image_name,
