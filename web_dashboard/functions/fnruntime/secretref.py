@@ -38,6 +38,20 @@ _CACHE = {}
 # dashboard's staging path writes, without the caller having to say so.
 _JSON_KEYS = ("password", "admin_password", "secret", "api_key", "value")
 
+# Prefixes of a PLATFORM reference that is still sitting in the env var verbatim.
+#
+# Azure resolves an ``@Microsoft.KeyVault(...)`` app setting with the app's Key Vault
+# reference identity, and when that identity cannot read the secret it leaves the
+# setting exactly as written — no error, no empty value, nothing in the app's logs.
+# Without this check the workload then sends the literal reference text as its
+# credential, and the first thing that notices is the TARGET: a Portainer adapter
+# whose vault grant was missing reported Portainer answering 401, which reads as a
+# revoked API token and sends you to entirely the wrong place.
+#
+# A reference is never a credential, so refusing is not a judgement call: there is no
+# case where passing this string on does anything but fail further away.
+_UNRESOLVED_PREFIXES = ("@Microsoft.KeyVault(", "@Microsoft.AppConfiguration(")
+
 
 def _env(name: str) -> str:
     return (os.environ.get(name, "") or "").strip()
@@ -69,6 +83,24 @@ def _from_payload(payload: str, secret_id: str) -> str:
     raise RuntimeError(
         f"secret {secret_id!r} is a JSON object with no recognised credential key "
         f"(has: {', '.join(sorted(parsed))}); expected one of {', '.join(_JSON_KEYS)}")
+
+
+def _refuse_unresolved(value_env: str, value: str) -> None:
+    """Raise when ``value`` is a platform reference the platform never resolved.
+
+    Names the setting and the remedy rather than the value: the reference itself is
+    not a secret, but it is also not information the operator is missing — what they
+    need to know is which identity is short a grant.
+    """
+    for prefix in _UNRESOLVED_PREFIXES:
+        if value.startswith(prefix):
+            raise RuntimeError(
+                f"{value_env} is still the literal {prefix}…) reference, so the "
+                f"platform did not resolve it: the Function App's Key Vault reference "
+                f"identity cannot read that secret. Grant it get on the vault (or "
+                f"check that the secret name in the reference exists). Until then "
+                f"this function holds no credential at all — sending the reference on "
+                f"would only make the target report a bad one.")
 
 
 def _read_aws(secret_id: str) -> str:
@@ -104,9 +136,14 @@ def resolve(value_env: str, *id_envs: str) -> str:
     Returns ``""`` rather than raising when nothing is set: "no credential" is a
     condition several workloads handle themselves (dry run needs none), and their
     error messages say more about what to do than a generic one could.
+
+    An UNRESOLVED platform reference is the one thing it does raise on — that is not
+    "nothing is set", it is a misconfiguration wearing a credential's clothes. See
+    :data:`_UNRESOLVED_PREFIXES`.
     """
     direct = _env(value_env)
     if direct:
+        _refuse_unresolved(value_env, direct)
         return direct
     for name in (*id_envs, id_env_for(value_env)):
         secret_id = _env(name)

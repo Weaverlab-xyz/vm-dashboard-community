@@ -48,6 +48,10 @@ _cfgsvc = types.ModuleType("web_dashboard.services.config_service")
 _cfgsvc.get = lambda key, default=None: _CONFIG.get(key, "")
 _cfgsvc.set = lambda key, val: _CONFIG.__setitem__(key, val)
 _cfgsvc.get_bool = lambda key, default=False: str(_CONFIG.get(key, default)).lower() in ("1", "true", "yes")
+# get_raw / is_reference are how a caller tells a stored literal from a vault
+# reference (aws_sm://, bt_safe://, ...) — the mint path refuses to overwrite one.
+_cfgsvc.get_raw = lambda key, default="": _CONFIG.get(key, default) or ""
+_cfgsvc.is_reference = lambda raw: "://" in (raw or "")
 sys.modules["web_dashboard.services.config_service"] = _cfgsvc
 
 # ── Stub the heavy deps portainer_node_service imports at module load ────────────
@@ -572,6 +576,154 @@ def test_a_region_move_is_refused_when_state_is_durable():
     deploy = body[body.index("async def run_deploy"):]
     assert 'elif p["data_disk_name"]:' in deploy
     assert "cannot be attached in another region" in deploy
+
+
+# ── Minting an API token on demand ───────────────────────────────────────────
+# Portainer shows a token's value exactly once, so before this the ONLY way to get
+# one was to deploy a node: a revoked token, or a DB an ephemeral node threw away,
+# left no supported repair.
+
+_portainer_stub = sys.modules["web_dashboard.services.portainer_service"]
+
+
+class _StubPortainerError(Exception):
+    pass
+
+
+class _StubNotConfigured(_StubPortainerError):
+    pass
+
+
+_portainer_stub.PortainerError = _StubPortainerError
+_portainer_stub.PortainerNotConfigured = _StubNotConfigured
+
+
+def _await(coro):
+    import asyncio
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+def _stub_portainer(**calls):
+    """Record what the mint path asks Portainer for. Returns the log."""
+    log = []
+
+    async def _login(url, username, password, verify=False):
+        log.append(("login", url, username, password, verify))
+        return calls.get("jwt", "jwt-abc")
+
+    async def _create(url, jwt, password, description="vm-dashboard", verify=False):
+        log.append(("token", url, jwt, password, description, verify))
+        return calls.get("pat", "ptr_minted")
+
+    _portainer_stub.login = _login
+    _portainer_stub.create_access_token = _create
+    return log
+
+
+def test_minting_stores_the_token_and_never_returns_it():
+    _reset(portainer_url="https://10.0.0.4:9443/",
+           portainer_admin_password="hunter2hunter2", portainer_verify_ssl="0")
+    log = _stub_portainer()
+    out = _await(portainer_node_service.mint_api_token())
+    assert _CONFIG["portainer_pat"] == "ptr_minted", _CONFIG
+    # The response is what a page may render. A token Portainer shows once belongs
+    # in config, not in an HTTP response that gets logged on the way out.
+    assert "ptr_minted" not in repr(out), out
+    assert out["token_configured"] is True and out["username"] == "admin", out
+    # The trailing slash is stripped: every Portainer path is appended to this.
+    assert log[0][1] == "https://10.0.0.4:9443", log
+
+
+def test_the_jwt_is_a_means_and_is_never_stored():
+    """Storing the session token instead would produce an integration that works
+    this afternoon and 401s tomorrow — Portainer's JWT expires in hours and nothing
+    here can refresh one on an integration's behalf."""
+    _reset(portainer_url="https://p", portainer_admin_password="pw")
+    _stub_portainer(jwt="jwt-that-expires")
+    _await(portainer_node_service.mint_api_token())
+    assert "jwt-that-expires" not in str(_CONFIG.values()), _CONFIG
+
+
+def test_the_description_is_unique_per_mint():
+    """Portainer refuses a second token with a description the user already has, and
+    the node bootstrap has already taken the plain 'vm-dashboard' — so a fixed name
+    would fail on the first RE-mint, which is the case this exists for."""
+    _reset(portainer_url="https://p", portainer_admin_password="pw")
+    log = _stub_portainer()
+    first = _await(portainer_node_service.mint_api_token())["description"]
+    assert first != "vm-dashboard", first
+    assert first.startswith("vm-dashboard-"), first
+    # An explicit one still wins, for an operator who wants a recognisable label.
+    named = _await(portainer_node_service.mint_api_token(description="entitle"))
+    assert named["description"] == "entitle", named
+    assert log[-1][4] == "entitle", log
+
+
+def test_the_verify_flag_follows_the_configured_value():
+    """A managed node serves a self-signed certificate on :9443 and the deploy sets
+    this to 0 for that reason; an operator's own Portainer keeps verification on."""
+    _reset(portainer_url="https://p", portainer_admin_password="pw",
+           portainer_verify_ssl="1")
+    log = _stub_portainer()
+    _await(portainer_node_service.mint_api_token())
+    assert log[0][4] is True, log
+    _reset(portainer_url="https://p", portainer_admin_password="pw",
+           portainer_verify_ssl="0")
+    log = _stub_portainer()
+    _await(portainer_node_service.mint_api_token())
+    assert log[0][4] is False, log
+
+
+def test_minting_without_a_password_says_which_one_is_missing():
+    """Portainer re-checks the password on the token call even with a valid session,
+    so 'sign in somehow' is not enough and the error has to name the setting."""
+    _reset(portainer_url="https://p")
+    _stub_portainer()
+    try:
+        _await(portainer_node_service.mint_api_token())
+    except _StubNotConfigured as exc:
+        assert "portainer_admin_password" in str(exc), str(exc)
+    else:
+        raise AssertionError("minted a token with no credential to sign in with")
+
+
+def test_minting_without_a_url_is_refused_before_any_call():
+    _reset(portainer_admin_password="pw")
+    log = _stub_portainer()
+    try:
+        _await(portainer_node_service.mint_api_token())
+    except _StubNotConfigured as exc:
+        assert "portainer_url" in str(exc), str(exc)
+    else:
+        raise AssertionError("minted a token against no Portainer at all")
+    assert log == [], log
+
+
+def test_minting_refuses_to_overwrite_a_vault_reference():
+    """An operator who keeps the token in their own vault said where it lives.
+    Writing a literal over that reference leaves the dashboard working and the vault
+    stale, so the next rotation there does nothing and nothing says why."""
+    _reset(portainer_url="https://p", portainer_admin_password="pw",
+           portainer_pat="bt_safe://Portainer_PAT")
+    log = _stub_portainer()
+    try:
+        _await(portainer_node_service.mint_api_token())
+    except _StubNotConfigured as exc:
+        assert "bt_safe://Portainer_PAT" in str(exc), str(exc)
+    else:
+        raise AssertionError("a vault reference was replaced with a literal token")
+    assert _CONFIG["portainer_pat"] == "bt_safe://Portainer_PAT", _CONFIG
+    assert log == [], "Portainer was asked for a token that could not be stored"
+
+
+def test_a_supplied_credential_is_used_and_not_persisted():
+    """For a Portainer this dashboard did not deploy: the admin is not 'admin' and
+    its password is not in config. The password is for the sign-in only."""
+    _reset(portainer_url="https://p", portainer_admin_password="stored-one")
+    log = _stub_portainer()
+    _await(portainer_node_service.mint_api_token(username="ops", password="theirs"))
+    assert log[0][2] == "ops" and log[0][3] == "theirs", log
+    assert _CONFIG["portainer_admin_password"] == "stored-one", _CONFIG
 
 
 if __name__ == "__main__":

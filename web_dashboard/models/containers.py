@@ -352,6 +352,31 @@ class PortainerAdapterResponse(BaseModel):
     source_cidrs: list[str] = []         # ranges added to the node firewall for it
 
 
+class PortainerTokenRequest(BaseModel):
+    """Mint a Portainer API token from the dashboard.
+
+    Both credentials are optional and exist for a Portainer this dashboard did not
+    deploy: a managed node's admin username is fixed and its password is already
+    stored, so the normal call carries no body at all. A password sent here is used
+    for the sign-in and is never written anywhere.
+    """
+    username: Optional[str] = None      # blank -> the managed node's "admin"
+    password: Optional[str] = None      # blank -> the stored portainer_admin_password
+    description: Optional[str] = None   # blank -> vm-dashboard-<unix>; must be unique
+
+
+class PortainerTokenResponse(BaseModel):
+    """What a mint / re-stage did. Never carries the token: Portainer shows it once
+    and this dashboard is where it is kept, not something that hands it back out."""
+    token_configured: bool = False
+    url: str = ""
+    username: str = ""
+    description: str = ""               # the label the token carries in Portainer
+    restaged: bool = False              # the adapter's own copy was updated too
+    restarted: bool = False             # ...and the function was restarted to see it
+    note: str = ""                      # when the new value takes effect, or why not
+
+
 class PortainerEdgeRequest(BaseModel):
     """Register an Edge-agent environment on the configured Portainer."""
     name: str                                # environment name shown in Portainer

@@ -18,6 +18,8 @@ Portainer CE container management endpoints.
   GET  /api/containers/portainer/adapter — the Entitle JIT adapter's state
   POST /api/containers/portainer/adapter-pair   — deploy + register it via job
   POST /api/containers/portainer/adapter-retire — remove it via job
+  POST /api/containers/portainer/token          — mint an API token + stage it
+  POST /api/containers/portainer/token/stage    — push the stored one to the adapter
 """
 import base64
 import binascii
@@ -56,6 +58,8 @@ from ..models.containers import (
     PortainerImportRequest,
     PortainerNodeInfo,
     PortainerNodeResponse,
+    PortainerTokenRequest,
+    PortainerTokenResponse,
     RancherDeployRequest,
     RancherImportRequest,
     RancherImportResponse,
@@ -1448,6 +1452,88 @@ def retire_portainer_adapter(
     return DeployContainerResponse(
         job_id=result["job_id"], status="pending",
         message="Removing the Portainer Entitle adapter…")
+
+
+# ── The stored API token ─────────────────────────────────────────────────────
+# Everything that talks to Portainer from here — the Containers tab, the Edge
+# registration, the JIT adapter — authenticates with the one API token in
+# `portainer_pat`, and Portainer shows a token's value exactly once. These two routes
+# are the supported ways to put a working one in place without a node redeploy:
+# mint a new one, or push the one already stored to the deployed adapter.
+
+
+@router.post("/portainer/token", response_model=PortainerTokenResponse)
+async def mint_portainer_token(
+    req: PortainerTokenRequest = PortainerTokenRequest(),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("containers", "write")),
+):
+    """Mint a Portainer API token and store it, then hand it to the paired adapter.
+
+    The dashboard signs in to Portainer as the admin (which yields a short-lived JWT)
+    and uses that session to mint a non-expiring API token. The JWT is a means and is
+    never stored: it expires in hours, and neither this dashboard nor the adapter can
+    refresh one on an integration's behalf, so an integration holding a JWT would
+    work today and 401 tomorrow.
+
+    Re-staging is part of the same click on purpose. A minted token that only reached
+    ``app_config`` fixes the Containers tab and leaves the adapter — the caller most
+    likely to be failing — holding the old one, with no sign anything is out of step.
+    A re-stage failure does not lose the token: it is stored first and the response
+    says which half did not happen.
+    """
+    from ..services import portainer_adapter_service as adapter
+    from ..services import portainer_node_service, portainer_service
+
+    try:
+        minted = await portainer_node_service.mint_api_token(
+            username=req.username or "", password=req.password or "",
+            description=req.description or "")
+    except portainer_service.PortainerNotConfigured as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except portainer_service.PortainerError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    staged: dict = {"restaged": False, "note": ""}
+    try:
+        staged = await adapter.restage_pat(db)
+    except Exception as exc:  # noqa: BLE001 — the token IS minted and stored
+        logger.warning("Portainer token minted but not staged to the adapter: %s", exc)
+        staged = {"restaged": False, "note": (
+            f"The token is stored, but the adapter's copy was not updated: {exc}")}
+    return PortainerTokenResponse(
+        token_configured=True, url=minted["url"], username=minted["username"],
+        description=minted["description"], restaged=bool(staged.get("restaged")),
+        restarted=bool(staged.get("restarted")), note=staged.get("note") or "")
+
+
+@router.post("/portainer/token/stage", response_model=PortainerTokenResponse)
+async def stage_portainer_token(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("containers", "write")),
+):
+    """Push the token already in ``portainer_pat`` to the deployed adapter's copy.
+
+    For the case where the dashboard's own token is fine — the Containers tab lists
+    environments — and only the function's staged copy is stale. Minting a new token
+    would work too, but it invalidates nothing and leaves an extra live token behind
+    in Portainer for no reason.
+    """
+    from ..services import config_service
+    from ..services import portainer_adapter_service as adapter
+
+    if not (config_service.get("portainer_pat") or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="No Portainer API token is stored, so there is nothing to stage. "
+                   "Mint one first.")
+    try:
+        staged = await adapter.restage_pat(db)
+    except adapter.AdapterPairingError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return PortainerTokenResponse(
+        token_configured=True, restaged=bool(staged.get("restaged")),
+        restarted=bool(staged.get("restarted")), note=staged.get("note") or "")
 
 
 # ── Bundle import ────────────────────────────────────────────────────────────

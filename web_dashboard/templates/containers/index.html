@@ -423,8 +423,33 @@
         <p x-show="portainerNodes.length > 0 && !portainerNodeTokenConfigured" x-cloak
            class="mt-2 text-xs text-amber-700">
           No API token is stored for this node, so the environments below can't be listed yet.
-          Add one in <a href="/settings" class="underline font-medium">Settings → Containers</a>.
+          Mint one below, or add your own in
+          <a href="/settings" class="underline font-medium">Settings → Containers</a>.
         </p>
+        <!-- Portainer shows an API token's value exactly once, so "add it in Settings"
+             is only an answer for someone who still has it. Mint signs in as the admin
+             and makes a new one; Stage re-pushes the stored one to the adapter, which
+             keeps its own copy in the cloud's secret store and is the caller most
+             likely to be holding a stale token. -->
+        <div x-show="portainerNodes.length > 0" x-cloak class="mt-2 flex flex-wrap items-center gap-2">
+          <button @click="mintPortainerToken()" :disabled="portainerTokenPending"
+                  class="px-3 py-1.5 text-xs font-medium text-gray-700 border border-gray-300 hover:bg-gray-50 disabled:opacity-50 rounded-lg transition">
+            <span x-show="!portainerTokenPending"
+                  x-text="portainerNodeTokenConfigured ? 'Mint a new API token' : 'Mint an API token'"></span>
+            <span x-show="portainerTokenPending" x-cloak>Minting…</span>
+          </button>
+          <button @click="stagePortainerToken()"
+                  x-show="portainerNodeTokenConfigured && portainerAdapter.fn_id"
+                  :disabled="portainerTokenPending"
+                  class="px-3 py-1.5 text-xs font-medium text-gray-700 border border-gray-300 hover:bg-gray-50 disabled:opacity-50 rounded-lg transition">
+            Re-send the token to the adapter
+          </button>
+        </div>
+        <p x-show="portainerTokenNote" x-cloak class="mt-2 text-xs text-green-700"
+           x-text="portainerTokenNote"></p>
+        <p x-show="portainerTokenError" x-cloak
+           class="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2"
+           x-text="portainerTokenError"></p>
         <p x-show="portainerNodeDataDiskEnabled" x-cloak class="mt-2 text-xs text-blue-700">
           Durable state is on: <code x-text="portainerNodeDataDiskName"></code> survives a teardown,
           so the next deploy comes back with its users, environments and settings. The disk keeps
@@ -2018,6 +2043,12 @@ function containersDashboard() {
                         network_mode: '', invoke_url: '', entitle_integration_id: '',
                         target_url: '', dry_run: true, source_cidrs: [] },
     portainerAdapterPending: false,
+    // The stored API token. `portainerTokenNote` carries WHEN a re-staged token takes
+    // effect, which differs per cloud and is the part an operator would otherwise
+    // have to guess at after clicking.
+    portainerTokenPending: false,
+    portainerTokenNote: '',
+    portainerTokenError: '',
     // Only ever used when there is NO managed node — a managed one dictates its own
     // placement, because a function has to share the node's region to reach its VPC.
     portainerAdapterForm: { cloud: 'gcp', region: '', network_mode: 'public' },
@@ -2760,6 +2791,52 @@ function containersDashboard() {
       this.portainerDeployForm.region = '';
       this.portainerDeployForm.zone = '';
       this.portainerRegions = this.portainerRegionsByCloud[this.portainerDeployForm.cloud] || [];
+    },
+
+    // ── The stored Portainer API token ─────────────────────────────────────
+    // Portainer shows a token's value once, so the only way to replace one used to
+    // be a node redeploy. Both of these also hand the result to the deployed adapter,
+    // which holds its own copy in the cloud's secret store and is otherwise the last
+    // thing to find out the token changed.
+
+    async mintPortainerToken() {
+      if (!confirm(`Mint a new Portainer API token?\n\n`
+        + `The dashboard signs in as the Portainer admin, mints a token that does not `
+        + `expire, and stores it. Existing tokens keep working — revoke them in `
+        + `Portainer if you want them gone. If the Entitle adapter is deployed, its `
+        + `copy is updated too.`)) return;
+      this.portainerTokenPending = true;
+      this.portainerTokenNote = '';
+      this.portainerTokenError = '';
+      try {
+        const data = await API.post('/api/containers/portainer/token', {});
+        if (data) {
+          this.portainerTokenNote = `Minted "${data.description}". ${data.note || ''}`.trim();
+        }
+        await this.loadPortainerNode();
+        await this.loadPortainerAdapter();
+      } catch (e) {
+        this.portainerTokenError = e.message;
+      } finally {
+        this.portainerTokenPending = false;
+      }
+    },
+
+    async stagePortainerToken() {
+      this.portainerTokenPending = true;
+      this.portainerTokenNote = '';
+      this.portainerTokenError = '';
+      try {
+        const data = await API.post('/api/containers/portainer/token/stage', {});
+        if (data) {
+          this.portainerTokenNote = data.note
+            || (data.restaged ? 'The adapter now holds the stored token.' : '');
+        }
+      } catch (e) {
+        this.portainerTokenError = e.message;
+      } finally {
+        this.portainerTokenPending = false;
+      }
     },
 
     // ── The portainer_access Entitle adapter ───────────────────────────────

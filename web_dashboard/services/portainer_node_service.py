@@ -457,6 +457,79 @@ async def _readmit_and_retry(db, job_id: str, placement: dict, call):
         return await call()
 
 
+async def mint_api_token(*, username: str = "", password: str = "",
+                         description: str = "") -> dict:
+    """Mint a fresh Portainer API token and store it as ``portainer_pat``.
+
+    The same two calls :func:`_bootstrap` makes — sign in for a JWT, then
+    ``POST /api/users/{id}/tokens`` — but on demand rather than only during a node
+    deploy. Until this existed a token could be obtained in exactly one way: deploy a
+    node. There was no supported repair for a token that had been revoked, that
+    belonged to a Portainer DB an ephemeral node threw away, or that an operator
+    simply never pasted in — the Settings field was the only route, and it needs a
+    value Portainer shows once.
+
+    **A JWT is the means, not the product.** Portainer's session token expires (8h by
+    default) and neither this dashboard nor the adapter function can refresh one on
+    an integration's behalf, so storing the JWT itself would produce an integration
+    that works this afternoon and 401s tomorrow. The API token it mints does not
+    expire and is revocable from Portainer's own UI, which is what a machine
+    credential wants.
+
+    The description is timestamped by default because Portainer rejects a second
+    token with a description the user already has — and the node bootstrap has
+    already taken the unadorned ``vm-dashboard``, so a fixed name here would fail on
+    the very first re-mint, which is the case this function exists for.
+
+    Returns what the caller may show; never the token. The raw key is written to
+    config and nowhere else.
+    """
+    import time
+
+    url = (config_service.get("portainer_url") or "").strip().rstrip("/")
+    if not url:
+        raise portainer_service.PortainerNotConfigured(
+            "no Portainer URL is configured — deploy the managed node, or set "
+            "portainer_url in Settings → Containers")
+    user = (username or "").strip() or _ADMIN_USERNAME
+    secret = password or (config_service.get("portainer_admin_password") or "")
+    if not secret:
+        raise portainer_service.PortainerNotConfigured(
+            f"no Portainer password is stored for {user!r}, and minting a token needs "
+            f"one: Portainer re-checks the password on POST /api/users/<id>/tokens "
+            f"even with a valid session. Set portainer_admin_password in Settings → "
+            f"Containers to this Portainer's admin password, or supply one with the "
+            f"request.")
+    # Read the configured value rather than defaulting: a managed node serves a
+    # self-signed certificate on :9443 and the deploy sets this to 0 for exactly that
+    # reason, while an operator's own Portainer behind a real certificate keeps it on.
+    verify = config_service.get_bool("portainer_verify_ssl", True)
+    label = (description or "").strip() or f"vm-dashboard-{int(time.time())}"
+
+    # An operator who keeps the token in their own vault said where it lives, and
+    # storing a literal over that reference would disconnect the two silently: the
+    # dashboard would work, the vault would go stale, and the next rotation there
+    # would do nothing. Refuse, and say which half to change.
+    stored = config_service.get_raw("portainer_pat")
+    if config_service.is_reference(stored):
+        raise portainer_service.PortainerNotConfigured(
+            f"portainer_pat holds the vault reference {stored!r}, and minting here "
+            f"would replace it with a literal token — the vault would stay behind, "
+            f"still holding the old value. Mint the token in Portainer and update "
+            f"that secret instead, then use 'Re-send the token to the adapter'. To "
+            f"hand ownership of the token to the dashboard, clear the field in "
+            f"Settings → Containers first.")
+
+    jwt = await portainer_service.login(url, user, secret, verify=verify)
+    pat = await portainer_service.create_access_token(
+        url, jwt, secret, description=label, verify=verify)
+    config_service.set("portainer_pat", pat)
+    logger.info("Portainer API token '%s' minted for %s at %s and stored as "
+                "portainer_pat", label, user, url)
+    return {"url": url, "username": user, "description": label,
+            "token_configured": True}
+
+
 async def _launch_node(cloud: str, p: dict, *, admin_password_hash: str) -> dict:
     """Create (or reuse/start) the node VM on ``cloud`` and return
     ``{external_ip, internal_ip, url, zone, reused, data_disk_reused}``.

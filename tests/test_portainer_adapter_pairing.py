@@ -334,6 +334,68 @@ def test_an_unsupported_cloud_has_no_secret_backend():
     raise AssertionError("a cloud with no secret store was accepted")
 
 
+# ── Re-staging the token onto a deployed adapter ──────────────────────────────
+# Staging runs once, inside the pairing job. Without a way to redo it, changing a
+# deployed adapter's token meant retiring and pairing again — destroying a working
+# function and taking a new Entitle integration id to rewrite one secret.
+
+def _restage_stubs(found, *, restarted=False):
+    """The secret store, plus a cloud_function_service whose restart is recorded."""
+    written = []
+    restarts = []
+
+    async def _restart(row):
+        restarts.append(row.name)
+        return restarted
+
+    _stub("web_dashboard.services.secrets_backend_service",
+          write_sync=lambda backend, key, value: written.append((backend, key, value))
+          or f"dashboard-{key}",
+          ref_for=lambda backend, key: f"dashboard-{key}",
+          delete_sync=lambda backend, ref: None)
+    _fnsvc(found=found, restart_function=_restart)
+    return written, restarts
+
+
+def test_restaging_writes_the_current_token_for_the_adapters_cloud():
+    _ready(portainer_pat="ptr_the_new_one")
+    row = _FakeFn(name="jit-portainer", cloud="azure")
+    written, restarts = _restage_stubs(row, restarted=True)
+    out = asyncio.run(adapter.restage_pat(None))
+    assert out["restaged"] is True and out["fn_id"] == "fn-1", out
+    assert written == [("azure_kv", adapter._SECRET_KEY, "ptr_the_new_one")], written
+    # Azure resolves a VERSIONLESS Key Vault reference once, at start, and re-polls
+    # on its own schedule — documented as up to 24h. Rewriting the secret without a
+    # restart changes nothing the running app can see.
+    assert restarts == ["jit-portainer"], restarts
+    assert "restarted" in out["note"], out
+
+
+def test_restaging_says_when_the_new_token_takes_effect_without_a_restart():
+    """GCP resolves the secret at instance start and AWS re-reads it behind a TTL,
+    so neither is restarted — but "done" with nothing visible for minutes is the
+    kind of silence that gets a working fix clicked three more times."""
+    for cloud, expect in (("gcp", "cold start"), ("aws", "5 minutes")):
+        _ready()
+        row = _FakeFn(name="jit-portainer", cloud=cloud)
+        _written, restarts = _restage_stubs(row, restarted=False)
+        out = asyncio.run(adapter.restage_pat(None))
+        assert out["restarted"] is False, out
+        assert expect in out["note"], (cloud, out)
+        assert restarts == ["jit-portainer"], restarts
+
+
+def test_restaging_with_no_adapter_writes_nothing():
+    """There is no staged copy to update, and writing a Portainer credential into a
+    cloud secret store that nothing reads is how orphans are made."""
+    _ready()
+    written, restarts = _restage_stubs(None)
+    out = asyncio.run(adapter.restage_pat(None))
+    assert out["restaged"] is False, out
+    assert written == [] and restarts == [], (written, restarts)
+    assert out["note"], "a no-op has to say it was a no-op"
+
+
 # ── Retiring the staged token ─────────────────────────────────────────────────
 # The REAL secrets_backend_service here: reproducing the writer's key mangling by hand
 # is exactly how a delete quietly targets a name nothing was written under.

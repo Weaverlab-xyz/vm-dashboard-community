@@ -1478,6 +1478,46 @@ async def _fetch_azure_host_key(name: str) -> str:
         return str((response.json().get("functionKeys") or {}).get("default") or "")
 
 
+async def restart_function(row: CloudFunction) -> bool:
+    """Restart ``row``'s host so it re-reads its platform-resolved secrets.
+
+    Returns whether a restart was actually needed and performed.
+
+    Only Azure needs one, and it is not optional there. An app setting written as
+    ``@Microsoft.KeyVault(SecretUri=…/secrets/<name>/)`` is VERSIONLESS, and the
+    platform re-polls a versionless reference on its own schedule — documented as up
+    to 24 hours. So rewriting the vault secret changes nothing an already-running app
+    can see; the value is resolved once, at start. A restart is what makes a rotated
+    credential take effect now instead of tomorrow.
+
+    The other two need nothing and get nothing:
+
+    * **GCP** pins ``version = "latest"`` on the secret env var, resolved when an
+      instance starts, so the next cold start has the new value.
+    * **AWS** reads Secrets Manager in ``fnruntime.secretref`` behind a 300s TTL, so
+      it picks the new value up by itself within five minutes.
+    """
+    if (row.cloud or "") != "azure":
+        return False
+    import asyncio
+
+    import httpx
+    from . import azure_service
+    credential, subscription = await azure_service._ensure_creds()
+    resource_group = _cfg("azure_resource_group")
+    token = (await asyncio.to_thread(
+        credential.get_token, "https://management.azure.com/.default")).token
+    url = (f"https://management.azure.com/subscriptions/{subscription}"
+           f"/resourceGroups/{resource_group}/providers/Microsoft.Web/sites/"
+           f"{row.name}/restart?api-version=2022-03-01")
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(url, headers={"Authorization": f"Bearer {token}"})
+        response.raise_for_status()
+    logger.info("cloudfn: restarted %s so it re-resolves its Key Vault references",
+                row.name)
+    return True
+
+
 async def _store_azure_host_key(
         row: CloudFunction, *,
         grace_seconds: int = _HOST_KEY_GRACE_SECONDS) -> str:
@@ -1840,6 +1880,21 @@ _FRONT_DOOR_GRACE_SECONDS = 120
 _FRONT_DOOR_POLL_SECONDS = 5
 
 
+def _is_transport_timeout(exc: Exception) -> bool:
+    """Whether a request ran out of time, as opposed to failing.
+
+    Matched on the class names in the MRO rather than
+    ``isinstance(exc, httpx.TimeoutException)`` so it needs no import — httpx is
+    imported lazily inside :func:`invoke`, and every httpx timeout (read, connect,
+    write, pool) derives from ``TimeoutException``, so the one name covers them all.
+    A connect timeout counts: on a fresh deploy it means the front door is not up
+    yet, which is exactly the thing worth waiting for. A connect *error* does not —
+    that is a refusal, and it will be refused again.
+    """
+    return any(base.__name__ in ("TimeoutException", "TimeoutError")
+               for base in type(exc).__mro__)
+
+
 async def _refuse_unconfigured_adapter(
         db: Session, row: CloudFunction, *,
         grace_seconds: int = _FRONT_DOOR_GRACE_SECONDS) -> None:
@@ -1873,6 +1928,32 @@ async def _refuse_unconfigured_adapter(
         except CloudFunctionError:
             raise
         except Exception as exc:
+            # A TIMEOUT here is the same kind of thing as a front-door 401 and gets
+            # the same grace: this runs seconds after a deploy, and the FIRST request
+            # to a function that has never served one pays for the platform starting
+            # a worker, mounting the package and importing the handler. Live, an Azure
+            # adapter timed out the 60s invoke on call one and answered normally
+            # minutes later — so failing on call one made a cold start look like a
+            # dead endpoint and left an otherwise healthy adapter unregistered.
+            #
+            # Everything else (refused, DNS, TLS) still fails immediately: those do
+            # not improve by being asked again.
+            if _is_transport_timeout(exc) and time.monotonic() < deadline:
+                logger.info("cloudfn: %s did not answer /check_config in time (%s); "
+                            "retrying within the %ss grace — a first call to a cold "
+                            "function pays for its start-up",
+                            row.name, type(exc).__name__, int(grace_seconds))
+                await asyncio.sleep(_FRONT_DOOR_POLL_SECONDS)
+                continue
+            if _is_transport_timeout(exc):
+                raise CloudFunctionError(
+                    f"{row.name} never answered /check_config, through "
+                    f"{int(grace_seconds)}s of retries ({type(exc).__name__}) — "
+                    f"Entitle would be pointed at an endpoint that does not answer "
+                    f"either. A cold start does not take this long: check that the "
+                    f"function can reach what it talks to, because a workload waiting "
+                    f"on an unreachable target is what holds the request open."
+                ) from exc
             # Unreachable is disqualifying on its own: Entitle would be pointed at an
             # endpoint that does not answer.
             raise CloudFunctionError(

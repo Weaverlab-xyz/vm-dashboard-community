@@ -330,6 +330,48 @@ def _already_gone(exc: Exception) -> bool:
     return False
 
 
+async def restage_pat(db) -> dict:
+    """Push the token currently in ``portainer_pat`` to the paired adapter.
+
+    The staging step runs exactly once, inside the pairing job, so before this the
+    only way to give a deployed adapter a different token was to retire it and pair
+    again — destroying and rebuilding a working function, re-registering it in
+    Entitle, and taking a new Entitle integration id, all to rewrite one secret.
+    Every reason a token changes (a re-mint here, a rotation in Portainer's UI, an
+    ephemeral node that came back with a new DB) hit that.
+
+    The function is restarted where the platform would otherwise keep serving the old
+    value — see :func:`cloud_function_service.restart_function`, which is also where
+    the two clouds that need no restart are explained.
+
+    Returns ``{restaged, fn_id, cloud, restarted, note}``; ``restaged`` is False, and
+    nothing is written, when no adapter is paired.
+    """
+    from . import cloud_function_service
+
+    row = find_adapter(db)
+    if row is None:
+        return {"restaged": False, "fn_id": "", "cloud": "", "restarted": False,
+                "note": "No adapter is paired, so there is no staged copy to update."}
+    cloud = row.cloud or ""
+    await asyncio.to_thread(_stage_pat_secret, cloud)
+    restarted = await cloud_function_service.restart_function(row)
+    if restarted:
+        note = (f"{row.name} was restarted so it re-reads the Key Vault reference; "
+                f"give it a few seconds to come back.")
+    elif cloud == "gcp":
+        note = (f"{row.name} resolves the secret at instance start, so the next cold "
+                f"start uses the new token; an instance still warm keeps the old one "
+                f"for a few minutes.")
+    else:
+        note = (f"{row.name} re-reads Secrets Manager every 5 minutes, so the new "
+                f"token takes effect within that.")
+    logger.info("portainer adapter: restaged the API token for %s in %s (restarted=%s)",
+                row.name, cloud, restarted)
+    return {"restaged": True, "fn_id": row.id, "cloud": cloud,
+            "restarted": restarted, "note": note}
+
+
 def retire_pat_secret(cloud: str) -> str:
     """Delete the token :func:`_stage_pat_secret` put in the cloud's secret store.
     Returns the ref it removed, or ``""`` when there was nothing to do.

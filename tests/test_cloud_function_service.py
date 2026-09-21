@@ -832,6 +832,100 @@ def test_the_workloads_own_401_fails_at_once_and_names_the_secret():
     assert calls == ["/check_config"], calls
 
 
+class _FakeTimeout(Exception):
+    """Stands in for httpx's timeout family, which all derive from
+    ``TimeoutException`` — the name :func:`svc._is_transport_timeout` matches, so a
+    fake with that base is indistinguishable from the real thing here and the test
+    needs no httpx."""
+
+
+class TimeoutException(Exception):
+    pass
+
+
+class _FakeReadTimeout(TimeoutException):
+    pass
+
+
+def test_a_timeout_is_a_cold_start_until_the_grace_runs_out():
+    """The preflight runs SECONDS after a deploy, so the first call pays for the
+    platform starting a worker and importing the handler. Failing on call one turned
+    an Azure adapter's cold start into 'a dead endpoint' and left a healthy adapter
+    unregistered."""
+    row = types.SimpleNamespace(id="fn1", name="jit-portainer", workload="portainer_access")
+    calls = []
+
+    async def _fake_invoke(db, *, fn_id, method="POST", path="/", payload=None):
+        calls.append(path)
+        if len(calls) < 3:
+            raise _FakeReadTimeout()
+        return {"status": 200, "body": {"data": {"valid": True, "problems": []}}}
+
+    real, svc.invoke = svc.invoke, _fake_invoke
+    poll, svc._FRONT_DOOR_POLL_SECONDS = svc._FRONT_DOOR_POLL_SECONDS, 0
+    try:
+        _run(svc._refuse_unconfigured_adapter(None, row))     # must not raise
+    finally:
+        svc.invoke, svc._FRONT_DOOR_POLL_SECONDS = real, poll
+    assert len(calls) == 3, calls
+
+
+def test_a_function_that_never_answers_is_still_refused():
+    """The grace is a wait, not a pass: an endpoint that never answers is exactly
+    what registration exists to keep out of Entitle."""
+    row = types.SimpleNamespace(id="fn1", name="jit-portainer", workload="portainer_access")
+
+    async def _fake_invoke(db, *, fn_id, method="POST", path="/", payload=None):
+        raise _FakeReadTimeout()
+
+    real, svc.invoke = svc.invoke, _fake_invoke
+    try:
+        _run(svc._refuse_unconfigured_adapter(None, row, grace_seconds=0))
+    except svc.CloudFunctionError as exc:
+        assert "never answered" in str(exc), str(exc)
+        assert "_FakeReadTimeout" in str(exc), str(exc)
+    else:
+        raise AssertionError("registered an adapter that does not answer")
+    finally:
+        svc.invoke = real
+
+
+def test_a_refusal_is_not_retried_as_if_it_were_a_timeout():
+    """A connection that is REFUSED is not a cold start and does not improve by
+    being asked again — retrying it would only delay a correct diagnosis."""
+    row = types.SimpleNamespace(id="fn1", name="jit-portainer", workload="portainer_access")
+    calls = []
+
+    async def _fake_invoke(db, *, fn_id, method="POST", path="/", payload=None):
+        calls.append(path)
+        raise ConnectionRefusedError("nope")
+
+    real, svc.invoke = svc.invoke, _fake_invoke
+    try:
+        _run(svc._refuse_unconfigured_adapter(None, row))
+    except svc.CloudFunctionError as exc:
+        assert "dead endpoint" in str(exc), str(exc)
+    else:
+        raise AssertionError("registered an adapter nothing can connect to")
+    finally:
+        svc.invoke = real
+    assert calls == ["/check_config"], calls
+
+
+def test_the_timeout_test_matches_what_httpx_actually_raises():
+    """The guard is a name match up the MRO, so it is only as good as the name. Pin
+    the one httpx uses — every httpx timeout derives from TimeoutException — and the
+    builtin, so a rename upstream fails here rather than in production."""
+    assert svc._is_transport_timeout(_FakeReadTimeout())
+    assert svc._is_transport_timeout(TimeoutError())
+    assert not svc._is_transport_timeout(ConnectionRefusedError())
+    assert not svc._is_transport_timeout(_FakeTimeout())
+    import httpx
+    for name in ("ReadTimeout", "ConnectTimeout", "WriteTimeout", "PoolTimeout"):
+        assert svc._is_transport_timeout(getattr(httpx, name)("")), name
+    assert not svc._is_transport_timeout(httpx.ConnectError(""))
+
+
 # ── Test invoke: reaching the route the operator actually meant ───────────────
 
 def test_the_invoke_path_is_appended_not_substituted():

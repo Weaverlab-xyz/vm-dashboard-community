@@ -154,6 +154,33 @@ On success the job **writes the connection settings for you** — `portainer_url
 `portainer_pat`, and `portainer_verify_ssl` (off, because of the self-signed cert) —
 so the Containers tab starts working with no Settings round-trip.
 
+### Minting a token later
+
+The deploy is not the only way to get one. **Mint a new API token**, under the node
+table on the Containers page, does the same two calls on demand: the dashboard signs
+in as the Portainer admin (using `portainer_admin_password`) and mints a token through
+`POST /api/users/{id}/tokens`. Use it when the stored token was revoked, when a node
+was redeployed without durable state so the DB that issued the old one is gone, or
+when a bootstrap reported that it could not mint one.
+
+Each mint gets a distinct description (`vm-dashboard-<unix>`) because Portainer
+refuses two tokens with the same description for one user. It **adds** a token rather
+than replacing one — revoke the old ones in Portainer if you want them gone.
+
+Minting also re-stages the token to the `portainer_access` adapter, if one is deployed
+(see below). **Re-send the token to the adapter** does only that half, for when the
+dashboard's own token is fine and only the function's copy is stale.
+
+If `portainer_pat` holds a **vault reference** rather than a literal, minting is
+refused: storing a token over the reference would leave the vault holding a stale
+value that nothing reads. Rotate the token in Portainer, update the vault secret, then
+re-send it to the adapter.
+
+A short-lived Portainer **JWT** is the means here, never the product. Portainer's
+session token expires in hours and nothing can refresh one on an integration's behalf,
+so a JWT stored as the credential would work this afternoon and start answering 401
+tomorrow. An API token does not expire, and is revocable from Portainer's own UI.
+
 If you left **Admin password** blank the dashboard generates a 24-character one and
 shows it once, on the Containers page (`Log in as admin / …`). Change it in Portainer
 after first login.
@@ -258,6 +285,22 @@ and a request to delete one is refused. See
 Needs Cloud Functions enabled, a stored `portainer_pat`, and a configured secret store
 for the node's cloud. The card names whichever of those is missing instead of offering
 a button that cannot work.
+
+#### Changing the adapter's token
+
+Step 1 runs once, inside the pairing job, so the adapter holds its own copy of the
+token — and that copy is what fails when the token changes. **Re-send the token to the
+adapter** (under the node table) rewrites the staged secret in place; minting a token
+does it for you. Neither one redeploys the function or touches its Entitle
+integration.
+
+When the new value takes effect differs by cloud, and the button says which applies:
+
+| Cloud | Mechanism | When it takes effect |
+|---|---|---|
+| Azure | `@Microsoft.KeyVault(...)` app setting, resolved by the platform at app start. The reference is versionless and Azure re-polls it on its own schedule (up to 24h) | Immediately — the function is **restarted** for exactly this reason |
+| GCP | `secret_environment_variables` at `version = "latest"`, resolved when an instance starts | At the next cold start; a warm instance keeps the old value for a few minutes |
+| AWS | The function reads Secrets Manager itself, behind a 300s cache | Within five minutes |
 
 ### Teardown
 
@@ -585,7 +628,8 @@ as the subnet.
 **Deploy finishes but reports "the node already had an admin user"** — Portainer only
 allows first-run initialization while no admin exists, and closes that window shortly
 after the container starts. This happens when redeploying onto a reused VM. The node
-is running and usable; add an API token by hand in **Settings → Containers**.
+is running and usable; click **Mint an API token** on the Containers page (or add one
+by hand in **Settings → Containers**) once you can sign in to it.
 
 **Deploy times out waiting for Portainer to start** — the VM is up but nothing
 answered. Usually the firewall doesn't admit the dashboard's egress IP; check the
@@ -595,9 +639,27 @@ merged allow-list in **Settings → Containers**, then redeploy. Raise
 **"Connection refused" or timeout** — verify the Portainer URL is reachable from
 inside the container: `docker compose exec app curl -Isk <portainer-url>/api/system/status`.
 
-**"Unauthorized" error** — the PAT may have expired or been deleted. Regenerate a
-token in Portainer and update it in **Settings → Integrations → Portainer CE** (or
-update the vault secret if you stored a reference).
+**"Unauthorized" error** — the stored token is not one this Portainer knows: it was
+deleted, or its Portainer DB was. For a managed node, click **Mint a new API token**
+on the Containers page. For your own Portainer, regenerate a token there and update
+**Settings → Integrations → Portainer CE** (or the vault secret, if you stored a
+reference).
+
+Note that Portainer answers **`{"message": "Invalid JWT token"}`** here whatever kind
+of credential you sent — that is its generic message for a rejected one, not a request
+for a JWT. This dashboard and the adapter both authenticate with `X-API-Key`.
+
+**The Entitle adapter reports a Portainer 401 while the Containers tab works fine** —
+they read different copies of the token. The Containers tab reads `portainer_pat`; the
+adapter reads the copy staged in the cloud's secret store when it was paired. Click
+**Re-send the token to the adapter**.
+
+**The adapter's `/check_config` names an unresolved `@Microsoft.KeyVault(...)`
+reference** — on Azure the token arrives as a Key Vault reference that the *platform*
+resolves, and an identity that cannot read the secret leaves the setting as written
+instead of failing. Grant the Function App's Key Vault reference identity `get` on the
+vault. (The adapter refuses to send a reference as a credential, which is why you get
+this instead of Portainer's 401.)
 
 **An Edge environment never comes online** — the agent polls outbound to the node's
 port 8000, so check that egress is allowed from the Docker host. If the node was
