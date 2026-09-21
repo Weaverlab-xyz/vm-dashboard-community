@@ -24,6 +24,11 @@ And the NULL latch, which is the arming rule: a schedule that has never been eva
 acts on nothing, so enabling this on an existing fleet cannot replay a backlog of
 boundaries crossed while nobody was watching.
 
+Skips the one check that imports the Azure SDK when ``azure-mgmt-network`` isn't
+installed (it is a requirement in CI; locally it often isn't), matching the way the
+docs tests degrade without ``markdown``. The source-scan half of that check needs no
+SDK and always runs.
+
 Run: python tests/test_vm_suspend_schedule.py   (or under pytest)
 """
 import ast
@@ -53,6 +58,26 @@ except Exception as exc:  # pragma: no cover — app deps missing
     except ModuleNotFoundError:
         print(f"SKIP: {exc}")
         sys.exit(0)
+
+try:  # the Azure SDK is a CI requirement, but often absent on a dev machine
+    from azure.mgmt.network.models import NetworkInterfaceIPConfiguration as _NicIPConfig
+    _AZURE_ERR = None
+except Exception as exc:  # pragma: no cover — azure-mgmt-network absent outside CI
+    _NicIPConfig, _AZURE_ERR = None, exc
+
+
+def _skip(reason):
+    """Report a skip in whichever runner is driving.
+
+    ``pytest.skip`` raises a ``BaseException`` the ``__main__`` loop below does not
+    catch, which would turn a skip into a non-zero standalone exit — so reach for it
+    only when pytest is actually running, and otherwise just say so on stdout.
+    """
+    print(f"SKIP: {reason}")
+    if "pytest" in sys.modules:
+        import pytest
+        pytest.skip(reason)
+
 
 Base.metadata.create_all(bind=engine)
 
@@ -349,7 +374,24 @@ def test_the_sweep_is_its_own_job_type_and_a_singleton():
 
 
 def test_the_pin_uses_the_sdks_real_attribute_name():
-    """The test that would have caught the bug this fix was written on top of.
+    """The SDK half of the test that would have caught the bug this fix was written on
+    top of: which of the two spellings the model actually declares.
+
+    Skipped rather than failed when the SDK is not installed — the spelling can only be
+    asked of the SDK itself, and a sweep that reports a missing optional dependency as a
+    failure teaches people to ignore sweep failures. The source scan that catches a
+    relapse lives in the sibling test below and needs no SDK.
+    """
+    if _NicIPConfig is None:
+        _skip(f"azure-mgmt-network not installed ({_AZURE_ERR}); it is a requirement in "
+              "CI (web_dashboard/requirements.txt), where this check runs")
+        return
+    assert "private_ip_allocation_method" in _NicIPConfig._attribute_map
+    assert "private_ip_address_allocation" not in _NicIPConfig._attribute_map
+
+
+def test_the_pin_spells_the_attribute_the_way_the_sdk_does():
+    """The source half of the same guard, kept SDK-free so it runs everywhere.
 
     `private_ip_address_allocation` is NOT an attribute of the SDK's
     NetworkInterfaceIPConfiguration — the model warns and discards it. Three call sites
@@ -358,10 +400,6 @@ def test_the_pin_uses_the_sdks_real_attribute_name():
     misspelling would silently not pin, and would pass every test that does not talk to
     Azure. This is that test.
     """
-    from azure.mgmt.network.models import NetworkInterfaceIPConfiguration as _Cfg
-    assert "private_ip_allocation_method" in _Cfg._attribute_map
-    assert "private_ip_address_allocation" not in _Cfg._attribute_map
-
     src = open(os.path.join(_ROOT, "web_dashboard/services/azure_service.py"),
                encoding="utf-8").read()
     tree = ast.parse(src)
