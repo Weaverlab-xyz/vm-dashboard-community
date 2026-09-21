@@ -91,12 +91,17 @@ def test_the_stale_unreachable_reasoning_is_gone():
 
 
 def test_certificates_is_refused_for_the_reason_that_is_actually_true():
-    """A different retrieval path, not a structural barrier. PKCS#12 into Secrets Safe is
-    not a managed-account password, and this worker has only the second."""
+    """A different retrieval path, not a structural barrier — but the refusal has to say
+    which, because the answer depends on ``bundle=``. A Secrets Safe FILE secret is not
+    readable by the managed-account path at all, and the leaf package's PKCS#12 default
+    is binary on top of that, so "just a missing path" is true only of a PEM bundle."""
     msg = A.link_problem("certificates")
     assert msg, "certificates was accepted as linkable"
     assert "PKCS#12" in msg or "Secrets Safe" in msg, \
         "the certificates refusal does not name the real difference"
+    assert "file secret" in msg.lower(), \
+        ("the refusal does not say the bundle is a FILE secret — that, not the format, "
+         "is why the managed-account retrieval path cannot reach it")
 
 
 def test_spire_is_refused_because_it_is_already_the_agents_identity():

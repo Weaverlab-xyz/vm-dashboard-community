@@ -23,6 +23,22 @@ The verb sets below were read from ``ps-cli <service> -h`` (0.13.0), which lists
 name and a short alias for each — ``list-safes`` / ``list``, ``create-folder`` / ``create``.
 Both are valid. Adding a call with a new verb means adding it here, deliberately.
 
+**This file had two blind spots of its own**, closed after a sweep for the certificate
+lab went looking for an invented call and found instead that most of the tree was simply
+unread. Both were the same mistake — assuming the shape the original bug happened to take
+was the only shape it could take:
+
+  * **One module.** It scanned ``secrets_backend_service`` alone, because that is where
+    the six stale calls were. ``btapi_service`` has a *second* ``_ps_run`` funnel with
+    nine calls under four more services, checked by nothing. See ``_MODULES``.
+  * **One call shape.** It matched ``_ps_run(...)`` and nothing else, so a call that
+    skips the funnel was invisible even in a scanned module — and
+    ``btapi_service._get_ps_secret_sync`` is exactly that, a ``subprocess.run`` built
+    around ``settings.pscli_executable``. See ``_direct_cli_argvs``.
+
+Nothing was wrong in either place; that is the point. The guard was reporting on a tenth
+of the surface and reading as though it covered all of it.
+
 Static and stdlib-only — no app imports, no ps-cli, no tenant.
 Runs under pytest or standalone:  python tests/test_pscli_grammar.py
 """
@@ -34,7 +50,20 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-_MODULE = os.path.join(_ROOT, "web_dashboard", "services", "secrets_backend_service.py")
+def _svc(name):
+    return os.path.join(_ROOT, "web_dashboard", "services", name)
+
+
+# `_read()` defaults to this one: it owns the `_ps_run` docstring the unpinned-note test
+# reads, and it is where the six stale calls lived.
+_MODULE = _svc("secrets_backend_service.py")
+
+# Every module that builds a ps-cli argv. There are TWO `_ps_run` funnels, not one —
+# `btapi_service` has its own, and for a long time nothing checked it: this file scanned
+# `secrets_backend_service` alone while nine calls next door (managed-systems,
+# managed-accounts, requests, credentials, raw) went unread. Adding a third funnel means
+# adding it here.
+_MODULES = (_MODULE, _svc("btapi_service.py"))
 
 # Verified against `ps-cli <service> -h`. Long form and short alias are both accepted.
 VERBS = {
@@ -54,6 +83,47 @@ VERBS = {
         "move-secrets", "move", "update-secret", "update",
     },
     "settings": set(),
+    # Used by btapi_service. Same source: `ps-cli <service> -h` (0.13.0).
+    "managed-systems": {
+        "create-managed-system-by-asset", "create-by-asset",
+        "create-managed-system-by-database-id", "create-by-database-id",
+        "create-managed-system-by-workgroup", "create-by-workgroup-id",
+        "delete-managed-system-by-id", "delete-by-id", "delete",
+        "get-managed-system-by-asset", "get-by-asset",
+        "get-managed-system-by-database-id", "get-by-database-id",
+        "get-managed-system-by-functional-account-id", "get-by-functional-account-id",
+        "get-managed-system-by-id", "get-by-id",
+        "get-managed-system-by-workgroup-id", "get-by-workgroup-id",
+        "list-managed-systems", "list", "list-systems",
+        "update-managed-system-by-id", "update-by-id",
+    },
+    "managed-accounts": {
+        "assign-attribute", "add-attribute", "change-credentials",
+        "create-managed-account", "create", "delete-all-attributes",
+        "delete-attribute", "delete-managed-account", "delete", "force-reset",
+        "get-managed-account", "get", "list-accounts", "list-managed-accounts", "list",
+        "list-managed-accounts-by-quick-rule", "list-by-quick-rule", "list-by-qr",
+        "list-managed-accounts-by-smart-rule", "list-by-smart-rule", "list-by-sr",
+        "test-credentials", "update-credentials", "update-managed-account", "update",
+    },
+    "requests": {
+        "create-request", "create", "create-request-alias", "create-by-alias",
+        "create-request-set", "create-request-sets", "get-request-set",
+        "get-request-sets", "list-requests", "list", "put-request-approve",
+        "approve-request", "put-request-checkin", "checkin-request", "put-request-deny",
+        "deny", "request-rotate-on-checkin", "rotate-on-checkin",
+        "terminate-user-request", "termination-by-user",
+        "termination-managed-account-id", "termination-by-ma-id",
+        "termination-managed-system-id", "termination-by-ms-id",
+    },
+    "credentials": {
+        "get-credential-by-alias-id", "get-by-alias-id",
+        "get-credential-by-managed-account-id", "get-by-managed-account-id",
+        "get-credential-by-request-id", "get-by-request-id",
+    },
+    # `raw` escapes the grammar on purpose — its "verb" is an HTTP method and the rest is
+    # a REST path, so it is the one service where argv shape says nothing about validity.
+    "raw": {"GET", "POST", "PUT", "DELETE"},
 }
 
 
@@ -107,34 +177,111 @@ def _ps_run_argvs(src: str):
     return found, dynamic
 
 
+# Global flags that sit BEFORE the service and swallow the token after them.
+_VALUE_FLAGS = {"--format", "-f"}
+
+
+def _is_cli_executable(elt) -> bool:
+    """Whether this argv element is the ps-cli binary itself — either the literal, or
+    ``settings.pscli_executable``, which is the same thing spelled indirectly."""
+    if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+        return elt.value == "ps-cli" or elt.value.endswith("/ps-cli")
+    return isinstance(elt, ast.Attribute) and elt.attr == "pscli_executable"
+
+
+def _direct_cli_argvs(src: str):
+    """``(lineno, argv)`` for every argv list that names ps-cli itself, with the
+    executable and any global flags stripped so the service lands at ``[0]``.
+
+    **The second blind spot.** The sweep above reads ``_ps_run(...)`` and nothing else,
+    so a call that skips the funnel is invisible to it no matter which module it is in —
+    and one does: ``btapi_service._get_ps_secret_sync`` builds
+    ``[settings.pscli_executable, "--format", "json", "secrets", "get", ...]`` and hands
+    it straight to ``subprocess.run``. It is correct today. Nothing would have said so.
+
+    Every ``ast.List`` in the module is considered, not just call arguments, so a
+    ``cmd = [...]`` assigned first and run later is caught too. A list that is only the
+    funnel prefix (``[exe, "--format", "json"]``, completed by ``+ args`` elsewhere)
+    strips to nothing and is skipped — the service it eventually gets is checked as a
+    ``_ps_run`` argv instead.
+    """
+    tree = ast.parse(src)
+    found = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.List) and node.elts
+                and _is_cli_executable(node.elts[0])):
+            continue
+        argv = [e.value if (isinstance(e, ast.Constant) and isinstance(e.value, str))
+                else "<var>" for e in node.elts[1:]]
+        i = 0
+        while i < len(argv) and argv[i].startswith("-"):
+            i += 2 if argv[i] in _VALUE_FLAGS else 1
+        argv = argv[i:]
+        if argv:
+            found.append((node.lineno, argv))
+    return found
+
+
+def _all_argvs():
+    """Every checkable ps-cli argv in the tree, tagged with where it came from."""
+    out = []
+    for path in _MODULES:
+        src, label = _read(path), os.path.basename(path)
+        for ln, argv in _ps_run_argvs(src)[0]:
+            out.append((f"{label}:{ln}", argv))
+        for ln, argv in _direct_cli_argvs(src):
+            out.append((f"{label}:{ln}", argv))
+    return out
+
+
 def test_the_sweep_actually_finds_the_calls():
     """A sweep that silently matches nothing passes forever."""
-    found, _ = _ps_run_argvs(_read())
-    assert len(found) >= 10, f"expected the module's ps-cli calls; found {len(found)}"
+    found = _all_argvs()
+    assert len(found) >= 19, f"expected both modules' ps-cli calls; found {len(found)}"
+
+
+def test_the_sweep_reaches_past_the_first_module():
+    """The first blind spot, asserted rather than trusted: widening ``_MODULES`` is only
+    worth anything if every module in it actually yields calls. A path typo would leave
+    this file quietly scanning one module again, which is the state it started in."""
+    for path in _MODULES:
+        src, label = _read(path), os.path.basename(path)
+        n = len(_ps_run_argvs(src)[0]) + len(_direct_cli_argvs(src))
+        assert n, f"{label} is listed in _MODULES but no ps-cli argv was read from it"
+
+
+def test_the_direct_subprocess_sweep_finds_the_call_that_skips_the_funnel():
+    """The second blind spot. ``btapi_service`` runs one ps-cli call through
+    ``subprocess.run`` directly instead of its own ``_ps_run``; if this stops matching,
+    either that call was refactored into the funnel (good — delete this) or the detector
+    broke (bad — and every direct call silently stopped being checked)."""
+    direct = _direct_cli_argvs(_read(_svc("btapi_service.py")))
+    assert direct, ("no direct ps-cli subprocess argv found in btapi_service — the "
+                    "detector or the call shape changed")
+    assert any(argv[:2] == ["secrets", "get"] for _, argv in direct), (
+        f"expected the direct `secrets get` call; got {[a for _, a in direct]}")
 
 
 def test_every_ps_run_argv_starts_with_a_service():
     """The bug this file exists for. ``["create", ...]`` is not a ps-cli command."""
-    found, _ = _ps_run_argvs(_read())
-    offenders = [(ln, argv) for ln, argv in found if argv[0] not in VERBS]
+    offenders = [(w, argv) for w, argv in _all_argvs() if argv[0] not in VERBS]
     assert not offenders, (
         "ps-cli argv must start with a service (%s):\n  %s"
         % (", ".join(sorted(VERBS)),
-           "\n  ".join(f"line {ln}: {argv}" for ln, argv in offenders)))
+           "\n  ".join(f"{w}: {argv}" for w, argv in offenders)))
 
 
 def test_every_verb_is_one_the_service_actually_has():
     """Catches the other half: right service, verb that does not exist under it."""
-    found, _ = _ps_run_argvs(_read())
     offenders = []
-    for ln, argv in found:
+    for where, argv in _all_argvs():
         service = argv[0]
         if service not in VERBS or not VERBS[service]:
             continue
         if len(argv) < 2:
-            offenders.append(f"line {ln}: {argv} names a service with no verb")
+            offenders.append(f"{where}: {argv} names a service with no verb")
         elif argv[1] not in VERBS[service]:
-            offenders.append(f"line {ln}: {service!r} has no verb {argv[1]!r}")
+            offenders.append(f"{where}: {service!r} has no verb {argv[1]!r}")
     assert not offenders, "unknown ps-cli verb:\n  " + "\n  ".join(offenders)
 
 
@@ -142,10 +289,13 @@ def test_every_ps_run_argv_is_a_readable_literal():
     """An argv assembled from a variable cannot be checked above, so it must not exist
     without someone deciding it should. If one is added deliberately, extend this file to
     understand it rather than deleting the guard."""
-    _, dynamic = _ps_run_argvs(_read())
+    dynamic = []
+    for path in _MODULES:
+        label = os.path.basename(path)
+        dynamic += [f"{label}:{ln}" for ln in _ps_run_argvs(_read(path))[1]]
     assert not dynamic, (
-        "ps-cli argv built dynamically at line(s) %s — the grammar guard cannot read it"
-        % ", ".join(str(ln) for ln in dynamic))
+        "ps-cli argv built dynamically at %s — the grammar guard cannot read it"
+        % ", ".join(dynamic))
 
 
 def test_the_folder_calls_are_the_ones_the_spire_lab_needs():

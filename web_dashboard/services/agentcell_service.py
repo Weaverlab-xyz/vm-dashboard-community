@@ -188,6 +188,10 @@ def pat_name_for(cell_name: str) -> str:
 #     and nothing more. See `link_notes`.
 #   * `certificates` writes a PKCS#12 into Secrets Safe rather than a managed-account
 #     password, which is a different retrieval path this worker has not been given.
+#     A FILE secret, specifically: `secrets get` cannot read one at all, so this is a
+#     different retrieval path and not a harder version of the same one. How much
+#     different depends on `bundle=`, whose two package defaults land on opposite sides.
+#     §5d has the three obstacles and which of them are common to both packages.
 #
 # See docs/design/next-demo-cells.md sections 5b and 5d.
 LINKABLE_MECHANISMS = ("cloud", "kubernetes")
@@ -216,10 +220,10 @@ def link_problem(mechanism: str) -> str:
         return ("The agent is already attested by SPIRE — that link is its SPIFFE ID, "
                 "recorded when the cell was created, and it does not need a second one.")
     if m == "certificates":
-        return ("The certificates tab writes a PKCS#12 into Secrets Safe rather than a "
-                "managed-account password, and this worker has only the managed-account "
-                "retrieval path. That is a missing path rather than a structural "
-                "barrier — see docs/design/next-demo-cells.md §5d.")
+        return ("The certificates tab writes the bundle into Secrets Safe as a file "
+                "secret, not a managed-account password, and this worker has only the "
+                "managed-account retrieval path — unbuilt work rather than a barrier. "
+                "See docs/design/next-demo-cells.md §5d.")
     return (f"{mechanism!r} is not a Workload Lab mechanism. Linkable today: "
             f"{', '.join(LINKABLE_MECHANISMS)}.")
 

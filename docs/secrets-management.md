@@ -235,13 +235,42 @@ the value from any backend without backend-specific parsing.
 | Operation | DB | AWS SM | Azure KV | GCP SM | BT Secrets Safe |
 |---|---|---|---|---|---|
 | List secrets | ✅ | ✅ | ✅ | ✅ | ✅ (per folder) |
-| Read secret value | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Create / update secret | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Read secret value | ✅ | ✅ | ✅ | ✅ | ✅ (file secrets: text only) |
+| Create / update secret | ✅ | ✅ | ✅ | ✅ | ✅ (text or file) |
 | Delete secret | ✅ | ✅ | ✅ | ✅ | ✅ |
 | List Safes | — | — | — | — | ✅ |
 | Create / rename / delete Safe | — | — | — | — | ✅ |
 | List Folders | — | — | — | — | ✅ |
 | Create / delete Folder | — | — | — | — | ✅ |
+
+**Reading a file secret takes a second call, and it is made for you.** `ps-cli secrets
+get` returns a file secret's `FileName` and `FileHash` and no contents — there is no
+payload field in that projection for `--decrypt` to fill — so the read would otherwise
+resolve to an empty string rather than failing. The dashboard detects `SecretType: File`
+and fetches the body from `GET Secrets-Safe/Secrets/{id}/file/download` over `ps-cli
+raw`. **Text payloads only:** that endpoint is byte-faithful, but every ps-cli route
+decodes its response to text, so a PEM bundle, a config file or JSON round-trips and a
+PKCS#12 or DER payload does not. A payload showing decode damage is **refused rather
+than returned**, since a corrupt bundle that looks like a value fails much later and
+somewhere unrelated. See
+[Password Safe → Troubleshooting](integrations/password-safe.md#troubleshooting).
+
+**Writing one goes through a file, because ps-cli has no inline route.** The type is
+inferred from the argument: `--text` makes a text secret, `-fp <path>` makes a file
+one, and there is no way to hand the CLI a file body directly. The dashboard writes the
+value to a `0600` file inside a `0700` private directory, passes that path, and removes
+the directory afterwards — including when the write fails, which is when a leftover
+would go unnoticed. The file's *name* is chosen rather than left as a temp name,
+because Password Safe records the basename as the secret's `FileName`. Dashboard config
+values stay **text** secrets by default; the file type is opt-in.
+
+**An edit preserves the type.** Writing `--text` over a file secret would not just fail
+to update it — it would change what the secret *is*, and reads route on that field. So
+an update reads the existing type first and matches it, carrying the recorded
+`FileName` over so the edit does not rename the file either. One consequence worth
+knowing: a file secret's body comes back on ps-cli's stdout, which is stripped, so a
+**trailing newline cannot survive a round trip**. That is not treated as a failed
+write.
 
 BeyondTrust hierarchy management is driven through the
 [ps-cli subcommands](https://docs.beyondtrust.com/bips/docs/ps-cli-application):
