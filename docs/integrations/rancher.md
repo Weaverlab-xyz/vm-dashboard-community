@@ -390,6 +390,16 @@ Two ways out:
    Request payloads (API token, bootstrap password) travel to the job as a curl
    config over stdin — never in the container's argv.
 
+   **Runner jobs are serialised — one at a time.** There is one Rancher node, so
+   two runner jobs in flight against it are always two overlapping sequences (a
+   deploy's first-run alongside a cluster import, say) rather than parallel work,
+   and each costs a cold start and its own cloud resource. Every launch — including
+   the readiness probe — queues behind the one in flight. The wait is capped at 30
+   minutes and then **fails open**: the caller launches anyway rather than wedging,
+   which is safe because each job's cloud resource is named per invocation. This is
+   per process: it covers everything the job worker runs, which is where the long
+   chains are, but not a job overlapping the inline **Import cluster** request.
+
    **Every API call is a whole container cold start, and it is not always quick.**
    A typical call is ~20-60 s, but they are not bounded by that: on Azure ACI a
    single first-run call was measured at **15 m 12 s** (2026-09-21) while its three
