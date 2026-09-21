@@ -172,7 +172,13 @@ def test_no_tab_stores_a_credential_on_its_row():
     promises the absence of.
     """
     db = _read("web_dashboard", "database.py")
-    for model in ("CertLab", "SpireLab", "WorkloadK8sToken", "WorkloadCloudCredential"):
+    # AgentCell is here because it now FETCHES one: an agent can open a bounded,
+    # approval-gated request against the Kubernetes tab's managed account. The row
+    # records the request — id, state, timestamps — and a credential landing on it would
+    # outlive the request that fetched it, which is the whole property the recorded-
+    # request flow exists to provide. See design note §5d.
+    for model in ("CertLab", "SpireLab", "WorkloadK8sToken", "WorkloadCloudCredential",
+                  "AgentCell"):
         start = db.index(f"class {model}(Base):")
         end = db.index(chr(10) + "class ", start + 10)
         columns = [ln.strip() for ln in db[start:end].splitlines() if "= Column(" in ln]

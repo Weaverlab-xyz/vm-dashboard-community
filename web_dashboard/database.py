@@ -2325,20 +2325,57 @@ class AgentCell(Base):
     pat_revoked_at = Column(DateTime, nullable=True)
 
     # ── What this agent is answerable for in the Workload Lab ───────────────
-    # A LINK, NOT A CONSUMPTION, and the distinction is the whole honesty of the field.
-    # The worker cannot spend any of the lab's credentials: the Cloud tab returns its
-    # credential to nobody, and the Kubernetes and Certificate tabs vault theirs where a
-    # consumer needs a Password Safe client -- another credential -- to reach. So this
-    # records which lab identity an operator has made this agent ANSWERABLE FOR, so that
-    # "what does this agent have access to" is one lookup rather than a conversation.
+    # Which lab identity an operator has made this agent answerable for, so that "what
+    # does this agent have access to" is one lookup rather than a conversation.
+    # `linked_mechanism` is a Workload Lab tab name; `linked_credential_id` is that tab's
+    # own row.
     #
-    # `linked_mechanism` is a Workload Lab tab name ("cloud"); `linked_credential_id` is
-    # that tab's own row. Nothing here is a credential, and nothing here is evidence the
-    # agent used one -- see docs/design/next-demo-cells.md section 5b for what would have
-    # to exist before it could.
+    # WHETHER THE LINK IS A CAPABILITY DEPENDS ON THE TAB, and conflating the two is the
+    # failure mode here:
+    #   * `cloud` is accountability only -- that tab returns its credential to nobody by
+    #     design, so no worker can spend it;
+    #   * `kubernetes` is a capability. The worker reaches Password Safe holding nothing
+    #     (a workload identity brokered by Workload Credentials), so it can genuinely
+    #     REQUEST that tab's token -- subject to an access policy that can hold the
+    #     request for a human. See `agentcell_service.SPENDABLE_MECHANISMS`.
+    #
+    # An earlier version of this comment said no worker could spend any of them. That
+    # stopped being true when the worker got `--token-source ps`; see
+    # docs/design/next-demo-cells.md sections 5b and 5d.
     linked_mechanism = Column(String(32), nullable=True)
     linked_credential_id = Column(String(36), nullable=True)
     linked_at = Column(DateTime, nullable=True)
+
+    # ── The current cluster-access episode, and NEVER its credential ─────────
+    # One bounded request at a time: the agent asks Password Safe for the linked token,
+    # waits for whatever the access policy requires, probes the cluster, and gives the
+    # slot back. What is recorded is the REQUEST -- its id, its state, when it started
+    # and when it was released -- because that is what an operator needs to answer "is
+    # something out right now" and what makes an abandoned slot findable.
+    #
+    # THERE IS NO TOKEN COLUMN HERE AND THERE MUST NOT BE. The same rule the four lab
+    # models state: the row names the credential, Password Safe holds it. A token that
+    # landed here would outlive the request that fetched it, which is the entire property
+    # the recorded-request flow exists to provide.
+    # "requested" or "released" -- the only two the DASHBOARD writes. The waiting, the
+    # approval and the probes happen on the host, and the worker cannot report them back:
+    # its PAT belongs to a non-admin user, and these endpoints need `config_mgmt:write`.
+    # Granting it that so it could file progress would give a non-human principal more
+    # authority than this cell argues for. The journal is the truth for what happened;
+    # this answers "is something out right now". See agentcell_service.ROW_STATES.
+    episode_state = Column(String(20), nullable=True)
+    episode_started_at = Column(DateTime, nullable=True)
+    episode_released_at = Column(DateTime, nullable=True)
+    # THERE IS NO `episode_request_id` OR `episode_result` HERE, and their absence is a
+    # decision rather than an omission. A first draft had both. Neither can ever be
+    # filled: the WORKER opens the Password Safe request and runs the probes, so the
+    # dashboard never learns the id or the outcome, and the worker has no way to tell it
+    # (see above). A column that is structurally always NULL is worse than no column --
+    # it reads as "nothing happened yet" on a row where plenty did, and it invites a
+    # later change to grant the worker the authority needed to fill it.
+    #
+    # `journalctl -u mcp-agent` holds both, and the SPIFFE ID in the request's reason is
+    # what correlates the two.
 
     # Progress through the two playbooks, as the names of the ones that finished, and
     # their job ids -- the same arrangement SpireLab uses, and for the same reason: a

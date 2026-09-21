@@ -305,9 +305,12 @@ def test_the_retrieval_is_a_recorded_request():
     """The reason the extra hop is worth it. A request has a duration and a reason, it can
     require approval, and it is checked back in -- a PAT in a file has none of those."""
     code = _code(_WORKER)
-    body = code.split("def password_safe_credential", 1)[1].split("\ndef ")[0]
-    for part in ("Requests", "Credentials/", "Checkin", "DurationMinutes", "Reason"):
-        assert part in body, f"the credential fetch does not {part!r}"
+    # The flow lives in three small helpers now, because the approval-gated episode
+    # reuses every step but the check-in placement. Assert on the whole seam.
+    seam = code[code.index("def _ps_session("):code.index("def fetch_spiffe_id(")]
+    for part in ("Auth/Connect/Token", "Auth/SignAppIn", "Requests", "Credentials/",
+                 "Checkin", "DurationMinutes", "Reason"):
+        assert part in seam, f"the credential fetch does not {part!r}"
 
 
 def test_the_request_is_checked_in_even_when_the_fetch_fails():
@@ -317,7 +320,7 @@ def test_the_request_is_checked_in_even_when_the_fetch_fails():
     code = _code(_WORKER)
     body = code.split("def password_safe_credential", 1)[1].split("\ndef ")[0]
     assert "finally:" in body, "the credential request is not released on a failure path"
-    assert body.index("finally:") < body.index("Checkin"), \
+    assert body.index("finally:") < body.index("_checkin("), \
         "the check-in is not inside the finally"
 
 
@@ -338,9 +341,18 @@ def test_a_soft_failure_string_is_not_spent_as_a_token():
     polled with that as its bearer would get a 401 and report the demo's closing beat for
     entirely the wrong reason."""
     code = _code(_WORKER)
+    # Explicit now rather than incidental. It used to be caught by the hardcoded
+    # `vmcli_` prefix check, which had to go: the same flow fetches a ServiceAccount
+    # token, and a JWT is not a PAT. The soft-failure sentence needs its own guard.
+    assert "_SOFT_FAILURE" in code, \
+        "nothing recognises Password Safe's soft-failure sentence"
+    poll = code.split("def _poll_credential(", 1)[1].split("\ndef ")[0]
+    assert "_SOFT_FAILURE in value.lower()" in poll, \
+        "the soft-failure sentence is not detected where the credential is read"
     body = code.split("def password_safe_credential", 1)[1].split("\ndef ")[0]
-    assert 'startswith("vmcli_")' in body, \
-        "anything Password Safe returns is spent as if it were a PAT"
+    assert "validate or _is_dashboard_pat" in body, \
+        "the expected credential shape is no longer a parameter, so this flow can only "\
+        "ever fetch a PAT"
 
 
 # -- the identity is not Azure-only --------------------------------------------
