@@ -70,6 +70,16 @@ identities, and ``--identity-platform`` picks which is asked:
   * ``auto``   (default) whichever of the above this host declares. It refuses rather
                than guessing: see ``detect_platform``.
 
+ONE MORE THING IT DOES, AND IT IS A DIFFERENT DEMO. ``--k8s-episode`` runs a single
+bounded, approval-gated errand rather than the loop: it asks Password Safe for the
+Workload Lab Kubernetes token the dashboard linked to this agent, **waits for a human to
+approve**, proves with two reads that the token is SCOPED rather than merely working, and
+gives the request slot back. The closing beat there is not a revoke -- it is an agent
+that asks for access to a cluster and cannot proceed until somebody says yes.
+
+Exit codes are that demo's punctuation: 0 proved the scope, 3 was never approved, 4 means
+a refusal did not refuse -- the one outcome that would otherwise look like success.
+
 EXITS NON-ZERO ON 401, DELIBERATELY. The revoke is the demo's closing beat, so the
 worker must visibly stop rather than log a warning and keep polling -- systemd then
 shows a failed unit, which is the thing to point at.
@@ -133,16 +143,23 @@ def read_token(path: str) -> str:
 # headers in an exception repr would otherwise hand the Authorization header to the log --
 # on the one cell whose entire argument is about not leaking a credential.
 TOKEN_RE = re.compile(r"vmcli_[0-9a-fA-F]{8,}")
+# A ServiceAccount token is a JWT, and an episode handles one. Scrubbed on the same
+# principle and in the same place: what a third-party client or an API server puts in an
+# error body is not this worker's decision, so anything credential-shaped is removed on
+# the way out rather than trusted not to appear.
+JWT_SCRUB_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*")
 
 
 def scrub(text: str) -> str:
-    """An exception's text with anything PAT-shaped removed.
+    """An exception's text with anything credential-shaped removed.
 
-    `call_once` hands the token to an HTTP client as an Authorization header, and what a
-    third-party client puts in its error repr is not this worker's decision. So the value
-    is removed on the way OUT, at the one place error text becomes a log line.
+    `call_once` hands the PAT to an HTTP client as an Authorization header, and the
+    cluster probes hand a ServiceAccount token to an API server the same way. What either
+    puts in an error repr is not this worker's decision, so the values are removed on the
+    way OUT, at the one place error text becomes a log line.
     """
-    return TOKEN_RE.sub("vmcli_<redacted>", text or "")
+    out = TOKEN_RE.sub("vmcli_<redacted>", text or "")
+    return JWT_SCRUB_RE.sub("<jwt redacted>", out)
 
 
 def token_label(label: str) -> str:
@@ -460,24 +477,35 @@ def fetch_token_via_password_safe(
         reason=reason)
 
 
-def password_safe_credential(*, api_url: str, client_id: str, client_secret: str,
-                             account_id: int, system_id: int = 0,
-                             duration_min: int = 30,
-                             reason: str = "mcp-agent credential fetch") -> str:
-    """One managed credential, with a pair this host was handed rather than keeps.
+# Password Safe can exit SUCCESSFULLY and return this in the credential position when
+# the request is not releasable -- the access policy requires approval, or the requestor
+# cannot auto-release. services/btapi_service learned it the hard way: the text is handed
+# back as the "credential" and only surfaces much later as an opaque failure once
+# something tries to authenticate with it.
+#
+# THIS IS HOW "AWAITING APPROVAL" ARRIVES. Not as a status code -- as a sentence. The
+# wait loop below reads it as *not yet* rather than as failure, which is the whole reason
+# an approval-gated episode can be waited on at all.
+_SOFT_FAILURE = "not possible to get a credential"
 
-    Mirrors ``services/ps_api_service`` step for step, because a second dialect of the
-    same API is how the two drift apart:
 
-      * ``POST Auth/Connect/Token`` (form-encoded) for a Bearer token, then
-        ``POST Auth/SignAppIn`` to establish the session the retrieval endpoints need;
-      * ``POST Requests`` -> a request id, then ``GET Credentials/{id}`` -> the value;
-      * ``PUT Requests/{id}/Checkin`` to release it. Plain check-in ONLY -- never the
-        rotate-on-release variant, for the reason ``ps_api_service._checkin`` records.
+def _looks_like_jwt(value: str) -> bool:
+    """Three dot-separated segments. What a ServiceAccount token is, in both bound and
+    long-lived mode -- the same check ``ps_api_service._looks_like_sa_token`` makes."""
+    parts = (value or "").split(".")
+    return len(parts) == 3 and all(parts) and not any(c.isspace() for c in value)
 
-    The check-in is in a ``finally``: an open request holds the account's concurrent slot
-    for its whole duration, so a worker that crashed between retrieval and release would
-    make the NEXT fetch fail on the cap and report the wrong cause.
+
+def _is_dashboard_pat(value: str) -> bool:
+    return (value or "").startswith("vmcli_")
+
+
+def _ps_session(api_url: str, client_id: str, client_secret: str) -> tuple:
+    """``(base, headers)`` for an authenticated Password Safe session.
+
+    ``POST Auth/Connect/Token`` (form-encoded) then ``POST Auth/SignAppIn``, mirroring
+    ``services/ps_api_service._sign_in`` step for step -- a second dialect of the same API
+    is how the two drift apart.
     """
     base = api_url.rstrip("/") + "/"
     token_body = _post_json(base + "Auth/Connect/Token", {"Accept": "application/json"},
@@ -490,7 +518,12 @@ def password_safe_credential(*, api_url: str, client_id: str, client_secret: str
                          "client-credentials pair Workload Credentials handed over.")
     headers = {"Accept": "application/json", "Authorization": f"Bearer {bearer}"}
     _post_json(base + "Auth/SignAppIn", headers)
+    return base, headers
 
+
+def _open_request(base: str, headers: dict, *, account_id: int, system_id: int,
+                  duration_min: int, reason: str) -> int:
+    """``POST Requests`` -> a request id."""
     body = _post_json(base + "Requests", headers, body={
         "AccessType": "View", "SystemID": int(system_id or 0),
         "AccountID": int(account_id), "DurationMinutes": int(duration_min),
@@ -500,31 +533,235 @@ def password_safe_credential(*, api_url: str, client_id: str, client_secret: str
         or (body or {}).get("id"))
     if not request_id:
         raise SystemExit("[agent] FATAL: Password Safe returned no request id.")
+    return int(request_id)
+
+
+def _poll_credential(base: str, headers: dict, request_id: int) -> tuple:
+    """``(value, pending)`` for one attempt at ``GET Credentials/{id}``.
+
+    ``pending`` true means *not yet* -- the request exists and Password Safe has not
+    released it, which on an approval-gated policy means a person has not said yes. Both
+    shapes that state arrives in are handled: a non-200, and a 200 carrying the
+    soft-failure sentence.
+    """
+    import urllib.error
+
     try:
-        got = _get_json(base + f"Credentials/{int(request_id)}", headers)
-        if isinstance(got, dict):
-            got = got.get("Credentials") or got.get("Password") or ""
-        value = str(got or "").strip().strip('"')
-        if not value.startswith("vmcli_"):
-            # Password Safe can return a soft-failure STRING in the credential position
-            # ("It was not possible to get a credential for Request ID: 5") -- the case
-            # ps_api_service._looks_like_sa_token guards for the k8s tunnel. The same
-            # guard here, because a worker that polls with that string as its bearer
-            # gets a 401 and reports the demo's closing beat for the wrong reason.
+        raw = _request(base + f"Credentials/{int(request_id)}", headers)
+    except urllib.error.HTTPError as exc:
+        # 403/404/409 here mean the request is not releasable yet; anything else is a
+        # problem worth stopping for rather than waiting on.
+        if exc.code in (403, 404, 409):
+            return "", True
+        raise
+    try:
+        got = json.loads(raw) if raw.strip() else ""
+    except ValueError:
+        got = raw
+    if isinstance(got, dict):
+        got = got.get("Credentials") or got.get("Password") or ""
+    value = str(got or "").strip().strip('"')
+    if not value or _SOFT_FAILURE in value.lower():
+        return "", True
+    return value, False
+
+
+def _checkin(base: str, headers: dict, request_id: int, reason: str) -> None:
+    """Release the request. Plain check-in ONLY -- never the rotate-on-release variant,
+    for the reason ``ps_api_service._checkin`` records: under synced accounts a change on
+    either member re-rotates both."""
+    try:
+        _request(base + f"Requests/{int(request_id)}/Checkin",
+                 dict(headers, **{"Content-Type": "application/json"}),
+                 data=json.dumps({"Reason": reason}).encode("utf-8"),
+                 method="PUT")
+    except Exception:  # noqa: BLE001 — best effort; the duration expires it anyway
+        print("[agent] note: the credential check-in was refused; the request "
+              "expires on its own duration.", flush=True)
+
+
+def password_safe_credential(*, api_url: str, client_id: str, client_secret: str,
+                             account_id: int, system_id: int = 0,
+                             duration_min: int = 30,
+                             reason: str = "mcp-agent credential fetch",
+                             validate=None, expected: str = "a dashboard PAT") -> str:
+    """One managed credential, with a pair this host was handed rather than keeps.
+
+    ``validate`` says what shape the credential should be; it defaults to a dashboard PAT
+    because that is what this worker fetches for itself. **It is a parameter rather than
+    a literal** because the same recorded-request flow serves the cluster token too, and
+    a hardcoded ``vmcli_`` check would reject a perfectly good ServiceAccount token. It
+    also used to be what caught the soft-failure sentence, by accident -- that guard is
+    explicit now (see ``_poll_credential``).
+
+    The check-in is in a ``finally``: an open request holds the account's concurrent slot
+    for its whole duration, so a worker that crashed between retrieval and release would
+    make the NEXT fetch fail on the cap and report the wrong cause.
+
+    This does NOT wait. It is the fetch for a policy that auto-releases; an
+    approval-gated one is ``password_safe_episode``.
+    """
+    check = validate or _is_dashboard_pat
+    base, headers = _ps_session(api_url, client_id, client_secret)
+    request_id = _open_request(base, headers, account_id=account_id,
+                               system_id=system_id, duration_min=duration_min,
+                               reason=reason)
+    try:
+        value, pending = _poll_credential(base, headers, request_id)
+        if pending or not check(value):
             raise SystemExit(
-                "[agent] FATAL: Password Safe did not release a dashboard PAT for "
-                f"account {int(account_id)} — the request may be awaiting approval, or "
-                "the access policy may not auto-release.")
+                f"[agent] FATAL: Password Safe did not release {expected} for account "
+                f"{int(account_id)} — the request may be awaiting approval, or the "
+                "access policy may not auto-release.")
         return value
     finally:
+        _checkin(base, headers, request_id, reason)
+
+
+def password_safe_episode(*, api_url: str, client_id: str, client_secret: str,
+                          account_id: int, system_id: int = 0,
+                          duration_min: int = 15, reason: str,
+                          max_wait_seconds: int = 1800, poll_seconds: int = 20,
+                          on_wait=None) -> tuple:
+    """One approval-gated episode: ask, wait for a person, hand back ``(value, base,
+    headers, request_id)`` so the caller can use it and then release.
+
+    **The waiting is the demonstration**, so it is visible: ``on_wait`` is called every
+    poll with the seconds elapsed, and the worker prints a line. An agent that cannot
+    authorise its own access to a cluster is the argument; a silent sleep would hide it.
+
+    **It does NOT check in while pending**, and that is the difference from
+    ``password_safe_credential`` and from ``ps_api_service._request_credential``. Those
+    release the slot when the credential does not come back, which is right for an
+    auto-release policy and exactly wrong here: it would cancel the very request a human
+    is being asked to approve.
+
+    **It does give up.** An abandoned request holds the account's concurrent slot for its
+    whole duration, so the next attempt fails on the cap (4035) reporting a cap problem
+    instead of the approval it was waiting on -- the confusion
+    ``ps_api_service._request_credential`` documents. On timeout the slot is returned and
+    the caller is told it expired rather than that anything failed.
+    """
+    base, headers = _ps_session(api_url, client_id, client_secret)
+    request_id = _open_request(base, headers, account_id=account_id,
+                               system_id=system_id, duration_min=duration_min,
+                               reason=reason)
+    waited = 0
+    while True:
         try:
-            _request(base + f"Requests/{int(request_id)}/Checkin",
-                     dict(headers, **{"Content-Type": "application/json"}),
-                     data=json.dumps({"Reason": reason}).encode("utf-8"),
-                     method="PUT")
-        except Exception:  # noqa: BLE001 — best effort; the duration expires it anyway
-            print("[agent] note: the credential check-in was refused; the request "
-                  "expires on its own duration.", flush=True)
+            value, pending = _poll_credential(base, headers, request_id)
+        except Exception:
+            _checkin(base, headers, request_id, reason)
+            raise
+        if not pending:
+            if not _looks_like_jwt(value):
+                _checkin(base, headers, request_id, reason)
+                raise SystemExit(
+                    "[agent] FATAL: Password Safe released something that is not a "
+                    f"ServiceAccount token for account {int(account_id)}.")
+            return value, base, headers, request_id
+        if waited >= max_wait_seconds:
+            _checkin(base, headers, request_id, reason)
+            return "", base, headers, request_id
+        if on_wait:
+            on_wait(waited)
+        time.sleep(poll_seconds)
+        waited += poll_seconds
+
+
+# ── Proving the token is SCOPED, not merely that it works ────────────────────
+#
+# The two beats examples/playbooks/k8s/ci-*-with-ps-token.yml assert, in the same shape
+# and for the same reason. docs/integrations/workload-kubernetes.md is explicit that
+# steps 3 and 4 -- the REFUSALS -- are the ones that prove something, and that they are
+# written as assertions rather than runbook steps because "a step in a runbook gets
+# skipped, and an assertion does not".
+#
+# Each profile gets one read that must succeed and one that must be refused:
+PROBES = {
+    # ClusterRole `edit` through a RoleBinding in ONE namespace.
+    "deployer": {
+        "allow": "/api/v1/namespaces/{ns}/pods",
+        "deny": "/api/v1/namespaces/{other}/pods",
+        "says": "namespace-scoped: it can list pods in {ns} and is refused in {other}",
+    },
+    # ClusterRole `view` cluster-wide, which upstream omits Secrets from by design.
+    "reader": {
+        "allow": "/api/v1/pods",
+        "deny": "/api/v1/namespaces/{ns}/secrets",
+        "says": "cluster-wide read, and Secrets refused — `view` omits them by design",
+    },
+}
+
+
+def k8s_probe(*, api_server: str, token: str, profile: str, namespace: str,
+              other_namespace: str = "kube-system", verify: bool = True) -> dict:
+    """Run one profile's two reads. Returns what happened; raises only on a broken setup.
+
+    **The refusal has to fail with 403 specifically.** A wrong API server, an expired
+    token or a typo in the path also fail, and a check that only asserted "it failed"
+    would report a passing demonstration on any of them -- the trap
+    ``docs/integrations/workload-kubernetes.md`` records the plays encoding with
+    ``failed_when: false`` rather than ``ignore_errors``.
+
+    ``verify`` is honoured rather than assumed: a lab cluster's API server is often
+    self-signed, and turning verification off is a decision the caller makes visibly
+    rather than something buried here.
+    """
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    spec = PROBES.get(profile)
+    if not spec:
+        raise SystemExit(f"[agent] FATAL: no probe defined for profile {profile!r}; "
+                         f"known: {', '.join(sorted(PROBES))}")
+    ctx = None
+    if not verify:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+    def _status(path: str) -> int:
+        url = api_server.rstrip("/") + path
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"Bearer {token}", "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:  # noqa: S310
+                return resp.status
+        except urllib.error.HTTPError as exc:
+            return exc.code
+        except Exception as exc:  # noqa: BLE001
+            raise SystemExit(f"[agent] FATAL: the API server at {api_server} did not "
+                             f"answer: {exc}")
+
+    fmt = {"ns": namespace, "other": other_namespace}
+    allow_code = _status(spec["allow"].format(**fmt))
+    deny_code = _status(spec["deny"].format(**fmt))
+    allowed = allow_code == 200
+    refused = deny_code == 403
+    return {
+        "profile": profile,
+        "allow_path": spec["allow"].format(**fmt), "allow_status": allow_code,
+        "deny_path": spec["deny"].format(**fmt), "deny_status": deny_code,
+        "allowed": allowed, "refused": refused,
+        "proved": allowed and refused,
+        "says": spec["says"].format(**fmt),
+    }
+
+
+def probe_summary(result: dict) -> str:
+    """One line for the journal. Says which half failed when one did, because "the probe
+    failed" sends somebody to the wrong place."""
+    if result.get("proved"):
+        return f"scope proved — {result['says']}"
+    if not result.get("allowed"):
+        return (f"the allowed read returned {result['allow_status']} rather than 200 "
+                f"({result['allow_path']}) — the token may be wrong or expired, so the "
+                "refusal below proves nothing")
+    return (f"THE REFUSAL DID NOT REFUSE: {result['deny_path']} returned "
+            f"{result['deny_status']}, not 403. The token is broader than the profile "
+            "claims, which is the one outcome this probe exists to catch")
 
 
 def fetch_spiffe_id(socket_path: str) -> str:
@@ -627,6 +864,90 @@ def run(url: str, token: str, tool: str, socket_path: str, interval: int,
         time.sleep(interval)
 
 
+def run_k8s_episode(args) -> int:
+    """One bounded, approval-gated cluster-access episode.
+
+    The whole beat, in order, with every step on its own line because the point of this
+    is that somebody can watch it happen:
+
+      1. the platform vouches for this machine, Workload Credentials hands over the
+         Password Safe client pair -- nothing is stored here to make either happen;
+      2. a request is opened against the linked account, naming this agent;
+      3. **it waits**, and says so every poll. It cannot approve its own request;
+      4. on release, two reads prove the token is SCOPED, not merely that it works;
+      5. the slot goes back.
+
+    Exit codes are the demo's punctuation: 0 proved it, 3 was never approved, 4 means a
+    refusal did not refuse. That last one is a failure worth its own code -- it is the
+    outcome that would otherwise look like success.
+    """
+    missing = [n for n, v in (("--k8s-api-server", args.k8s_api_server),
+                              ("--k8s-profile", args.k8s_profile),
+                              ("--k8s-namespace", args.k8s_namespace),
+                              ("--k8s-account-id", args.k8s_account_id),
+                              ("--wlc-base-url", args.wlc_base_url),
+                              ("--wlc-site-id", args.wlc_site_id),
+                              ("--wlc-service-name", args.wlc_service_name),
+                              ("--wlc-resource", args.wlc_resource),
+                              ("--ps-client-id-secret", args.ps_client_id_secret),
+                              ("--ps-client-secret-secret", args.ps_client_secret_secret),
+                              ("--ps-api-url", args.ps_api_url)) if not v]
+    if missing:
+        raise SystemExit("[agent] FATAL: --k8s-episode needs " + ", ".join(missing))
+
+    spiffe_id = fetch_spiffe_id(args.spiffe_socket)
+    reason = f"mcp-agent cluster access — {spiffe_id}"
+    print(f"[agent] {spiffe_id} · requesting {args.k8s_profile} access to "
+          f"{args.k8s_api_server} · {_now()}", flush=True)
+
+    # The client pair, against this machine's own identity. Nothing static on this host.
+    identity = fetch_identity_token(args.wlc_resource, args.identity_platform,
+                                    args.wlc_client_id, args.identity_token_file,
+                                    args.spiffe_socket)
+    wlc = dict(base_url=args.wlc_base_url, site_id=args.wlc_site_id,
+               service_name=args.wlc_service_name, identity_token=identity,
+               folder=args.wlc_folder)
+    ps_client_id = read_wlc_secret(secret_name=args.ps_client_id_secret, **wlc)
+    ps_client_secret = read_wlc_secret(secret_name=args.ps_client_secret_secret, **wlc)
+    print("[agent] holding nothing: the Password Safe client pair came from Workload "
+          f"Credentials against this machine's own identity · {_now()}", flush=True)
+
+    def _waiting(elapsed: int) -> None:
+        print(f"[agent] {spiffe_id} · WAITING for approval ({elapsed}s) — this agent "
+              f"cannot authorise its own access · {_now()}", flush=True)
+
+    token, base, headers, request_id = password_safe_episode(
+        api_url=args.ps_api_url, client_id=ps_client_id,
+        client_secret=ps_client_secret, account_id=args.k8s_account_id,
+        system_id=args.k8s_system_id, duration_min=args.k8s_duration,
+        reason=reason, max_wait_seconds=args.k8s_max_wait, on_wait=_waiting)
+
+    if not token:
+        print(f"[agent] {spiffe_id} · request {request_id} was never approved within "
+              f"{args.k8s_max_wait}s — the slot has been given back · {_now()}",
+              flush=True)
+        print("[agent] stopping: no approval, no access. That is the mechanism working.",
+              flush=True)
+        return 3
+
+    try:
+        print(f"[agent] {spiffe_id} · approved — request {request_id} released a token "
+              f"· {_now()}", flush=True)
+        result = k8s_probe(api_server=args.k8s_api_server, token=token,
+                           profile=args.k8s_profile, namespace=args.k8s_namespace,
+                           other_namespace=args.k8s_other_namespace,
+                           verify=not args.k8s_insecure)
+        print(f"[agent] {spiffe_id} · {probe_summary(result)} · {_now()}", flush=True)
+    finally:
+        _checkin(base, headers, request_id, reason)
+        print(f"[agent] {spiffe_id} · request {request_id} checked back in · {_now()}",
+              flush=True)
+        print("[agent] note: the check-in returns the slot. A token already released "
+              "lives out its TTL — rotation does not revoke it, and only deleting the "
+              "ServiceAccount does.", flush=True)
+    return 0 if result.get("proved") else 4
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--url", default=os.environ.get("AGENT_MCP_URL", ""),
@@ -686,6 +1007,32 @@ def main(argv=None) -> int:
     ap.add_argument("--spiffe-socket", default=os.environ.get("AGENT_SPIFFE_SOCKET",
                                                               DEFAULT_SOCKET))
     ap.add_argument("--interval", type=int, default=30)
+    # ── One cluster-access episode ───────────────────────────────────────────
+    # A MODE, not a loop. The worker's job is the MCP loop; this is a bounded errand it
+    # runs once and reports on. Keeping them separate is what makes the episode a single
+    # request/check-in pair in the Password Safe audit trail rather than a stream.
+    ap.add_argument("--k8s-episode", action="store_true",
+                    help="request the linked cluster token, wait for approval, prove "
+                         "the token is scoped, and give the slot back. Exits when done.")
+    ap.add_argument("--k8s-api-server", default=os.environ.get("AGENT_K8S_API", ""),
+                    help="e.g. https://10.0.0.5:6443")
+    ap.add_argument("--k8s-profile", default=os.environ.get("AGENT_K8S_PROFILE", ""),
+                    choices=("", "deployer", "reader"))
+    ap.add_argument("--k8s-namespace", default=os.environ.get("AGENT_K8S_NS", ""))
+    ap.add_argument("--k8s-other-namespace",
+                    default=os.environ.get("AGENT_K8S_OTHER_NS", "kube-system"),
+                    help="the namespace the deployer profile must be REFUSED in.")
+    ap.add_argument("--k8s-account-id", type=int,
+                    default=int(os.environ.get("AGENT_K8S_ACCOUNT_ID", "0") or 0),
+                    help="the WorkloadK8sToken row's ps_account_id.")
+    ap.add_argument("--k8s-system-id", type=int,
+                    default=int(os.environ.get("AGENT_K8S_SYSTEM_ID", "0") or 0))
+    ap.add_argument("--k8s-duration", type=int, default=15,
+                    help="minutes the request holds the account's slot.")
+    ap.add_argument("--k8s-max-wait", type=int, default=1800,
+                    help="seconds to wait for approval before giving the slot back.")
+    ap.add_argument("--k8s-insecure", action="store_true",
+                    help="skip API server certificate verification (lab clusters).")
     ap.add_argument("--selftest", action="store_true",
                     help="check the argument wiring and exit, touching nothing")
     args = ap.parse_args(argv)
@@ -699,6 +1046,9 @@ def main(argv=None) -> int:
                           "identity_platform": args.identity_platform,
                           "detected_platform": detect_platform() or "none"}))
         return 0
+    if args.k8s_episode:
+        return run_k8s_episode(args)
+
     if not args.url:
         raise SystemExit("[agent] FATAL: --url (or AGENT_MCP_URL) is required.")
 

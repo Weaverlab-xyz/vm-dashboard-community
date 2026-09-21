@@ -440,6 +440,78 @@ Azure was run end to end on 2026-09-15 and remains the only platform that has be
 and AWS have unit-tested client paths and no live Pathfinder registration behind them. The
 hosting page and the integration page both say which is which.
 
+## 5d. The consumer that asks permission
+
+§5b said the Workload Lab's four credentials had no consumer, and that the hub called the
+candidates — *"a pipeline, a broker or a cluster"* — hypothetical.
+
+**That was not true of the Kubernetes tab, and the tab's own page says so.**
+`examples/playbooks/k8s/ci-deploy-with-ps-token.yml` and `ci-read-with-ps-token.yml` ship
+with it and are *"the first Kubernetes plays in this repo that authenticate with something
+they fetched themselves"*, with the 403 refusals written as in-play assertions precisely so
+they cannot be skipped. Reading §5b's framing onto that tab was a third correction in the
+same direction as the first two: an under-reading of what already existed.
+
+### What the agent actually adds
+
+Not a consumer. A consumer **that holds nothing in order to retrieve**.
+
+| | The shipped plays | The agent cell |
+|---|---|---|
+| Who retrieves | an Ansible run, as the dashboard | a principal on its own host |
+| What it holds to do so | `PASSWORD_SAFE_CLIENT_ID` + secret, from the run's environment | nothing — workload identity → Workload Credentials → the client pair |
+| When | operator-triggered | on request, and only after a person approves |
+| What it proves | the RBAC scope | the scope **and** that the retriever had no standing credential |
+
+`workload_k8s_service` is candid about the axis it loses on: *"The vault authenticates
+whoever can retrieve. Anyone who can retrieve **is** the workload, as far as this mechanism
+can tell."* The agent **narrows** that — what reaches the vault is no longer transferable —
+and does not close it. Saying it closes it would be the one way this demo becomes a lie.
+
+### The shape, and why approval-gated
+
+A bounded episode rather than a loop: ask, wait, probe, release. One request/check-in pair
+in the audit trail with a person's approval in the middle, instead of a stream of
+retrievals nobody can point at.
+
+The cell's existing closing beat is a revoke — pull the PAT and the worker stops. This one
+is better, because it happens *before* anything: an AI agent that asks for access to a
+production cluster and cannot proceed until somebody says yes.
+
+### Three traps, each already written down in this repo
+
+* **"Awaiting approval" arrives as a soft-failure STRING**, not a status code —
+  `btapi_service` learned it: *"It was not possible to get a credential for Request ID:
+  N"*, returned in the credential position on a successful call. Treating it as failure
+  makes the request unwaitable; treating it as a value hands a sentence to an API server
+  as a bearer token.
+* **Never check in while pending.** `ps_api_service._request_credential` checks in when
+  the credential does not come back — right for auto-release, and exactly wrong here: it
+  cancels the request a human is being asked to approve. But it must still give up, or an
+  abandoned request holds the account's slot and the next attempt trips the concurrent cap
+  (4035) reporting the cap instead of the approval it waited on.
+* **The credential is a JWT, not a `vmcli_` PAT.** The worker's `password_safe_credential`
+  hardcoded that prefix, which had to become a parameter — and which had been catching the
+  soft-failure sentence by accident. That guard is explicit now.
+
+### What was built
+
+`kubernetes` joins `cloud` in `LINKABLE_MECHANISMS`, with a new `SPENDABLE_MECHANISMS`
+keeping the two kinds of link apart — one confers accountability, the other confers
+access, and a response that read the same for both would mislead either way. The stale
+refusal text and the `AgentCell` comment that said no worker could spend any of them are
+corrected rather than left as fossils.
+
+The row records the **request** — id, state, timestamps, result — and never the
+credential. `test_workload_lab_governance`'s no-credential-on-row rule now covers
+`AgentCell` too, rather than relying on that being obvious.
+
+### Still unproven
+
+No Password Safe tenant, no cluster, no approver. The client paths are unit-tested against
+a fake gateway and that is all they are. **Without an approval policy there is no wait**,
+and the best beat silently does not happen — so the worker logs which path it took.
+
 ## 6. What is deliberately not proposed
 
 - **A vendor-access cell.** Third-party access into a network they should not have is

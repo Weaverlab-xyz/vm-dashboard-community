@@ -52,19 +52,51 @@ def _code(path):
 
 # -- what can be linked, and what the refusals say -----------------------------
 
-def test_only_cloud_is_linkable_today():
-    assert A.LINKABLE_MECHANISMS == ("cloud",), \
+def test_linkable_and_spendable_are_different_sets():
+    """The distinction this change introduces, and the one that must not blur.
+
+    `cloud` is linkable and NOT spendable — that tab returns its credential to nobody, so
+    the link is accountability. `kubernetes` is both: the worker reaches Password Safe
+    holding nothing, so it can genuinely request that token. A link that confers
+    capability and one that confers only accountability must not read the same way back.
+    """
+    assert A.LINKABLE_MECHANISMS == ("cloud", "kubernetes"), \
         "the linkable set changed; the refusals below and the docs must change with it"
-    assert A.link_problem("cloud") == ""
+    assert A.SPENDABLE_MECHANISMS == ("kubernetes",)
+    assert "cloud" not in A.SPENDABLE_MECHANISMS, \
+        "cloud became spendable — that tab's credential is returned to nobody"
+    for tab in A.LINKABLE_MECHANISMS:
+        assert A.link_problem(tab) == ""
 
 
-def test_an_unwired_tab_is_refused_with_the_structural_reason():
-    """Not "coming soon". An operator trying this is asking a reasonable question."""
-    for tab in ("kubernetes", "certificates"):
-        msg = A.link_problem(tab)
-        assert msg, f"{tab} was accepted as linkable"
-        assert "Password Safe" in msg, \
-            f"the {tab} refusal does not say why no worker can reach that credential"
+def test_the_stale_unreachable_reasoning_is_gone():
+    """The refusal used to tell every unwired tab that a consumer "needs a Password Safe
+    client to reach it — another credential". That stopped being true when the worker got
+    `--token-source ps`: it reaches Password Safe holding nothing. A refusal repeating it
+    would send an operator looking for a barrier that was removed two PRs ago."""
+    for src in (A.link_problem("certificates"), A.link_problem("banana")):
+        assert "another credential" not in src, \
+            "a refusal still claims the worker would need a second credential"
+    # The superseded conclusion may still APPEAR — the comment quotes it to record that
+    # it was reversed, and that record is worth keeping. What it must never do is stand
+    # alone as current. So wherever the phrase is, the correction has to be with it.
+    svc = _read(os.path.join(_ROOT, "web_dashboard", "services",
+                             "agentcell_service.py"))
+    if "cannot SPEND any of them" in svc:
+        para = svc[max(0, svc.index("cannot SPEND any of them") - 600):
+                   svc.index("cannot SPEND any of them") + 600]
+        assert "It did not" in para or "earlier version" in para.lower(), \
+            ("the service states the superseded conclusion with nothing marking it as "
+             "superseded — an operator reading it would believe it")
+
+
+def test_certificates_is_refused_for_the_reason_that_is_actually_true():
+    """A different retrieval path, not a structural barrier. PKCS#12 into Secrets Safe is
+    not a managed-account password, and this worker has only the second."""
+    msg = A.link_problem("certificates")
+    assert msg, "certificates was accepted as linkable"
+    assert "PKCS#12" in msg or "Secrets Safe" in msg, \
+        "the certificates refusal does not name the real difference"
 
 
 def test_spire_is_refused_because_it_is_already_the_agents_identity():
@@ -175,12 +207,29 @@ def test_the_api_is_reachable_and_paired():
 
 # -- the page says it too ------------------------------------------------------
 
-def test_the_page_states_that_a_link_is_not_a_consumption():
+def test_the_page_distinguishes_accountability_from_capability():
+    """This replaces an assertion that the page said a link "is not a consumption".
+    That was true of every tab once and is now true of only one, so the flat claim had
+    to go — but the distinction it protected matters MORE now, not less: a `cloud` link
+    that read as capability, or a `kubernetes` link that read as a mere record, would
+    both mislead."""
     doc = _read(_DOC)
-    assert "not a consumption" in doc, \
-        "the cell page does not state that a link gives the worker nothing"
+    assert "accountability only" in doc and "a capability" in doc, \
+        "the page does not distinguish a link that confers access from one that does not"
     assert "returned to nobody" in doc, \
-        "the page never says why no Workload Lab credential can reach the worker"
+        "the page never says why the cloud tab's credential cannot reach the worker"
+    assert "cannot authorise its own access" in doc, \
+        "the page does not state the beat the kubernetes link exists for"
+
+
+def test_the_page_states_what_the_approval_does_not_gate():
+    """The limit somebody will assume away. The approval gates RETRIEVAL; a token already
+    released lives out its TTL, because rotation does not revoke."""
+    doc = _read(_DOC)
+    assert "gates retrieval, not use" in doc
+    assert "rotation does not revoke" in doc.lower()
+    assert "ServiceAccount" in doc, \
+        "the page does not name the only hard kill switch"
 
 
 if __name__ == "__main__":

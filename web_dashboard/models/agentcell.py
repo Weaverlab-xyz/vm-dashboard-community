@@ -51,12 +51,39 @@ class AgentCellCreateResponse(BaseModel):
 class AgentCellLinkRequest(BaseModel):
     """Make an agent answerable for one Workload Lab credential.
 
-    **Not a consumption.** The worker is given nothing by this; see
-    ``services/agentcell_service.LINKABLE_MECHANISMS`` for why none of the lab's
-    credentials can reach it, and what would have to exist before one could.
+    **Whether this is a consumption depends on the tab.** ``cloud`` gives the worker
+    nothing — that tab returns its credential to nobody. ``kubernetes`` lets the agent
+    *request* the token, because the worker reaches Password Safe holding nothing. See
+    ``services/agentcell_service.LINKABLE_MECHANISMS`` and ``SPENDABLE_MECHANISMS``.
     """
-    mechanism: str = Field(min_length=1, description="a Workload Lab tab name; 'cloud' today")
+    mechanism: str = Field(min_length=1,
+                           description="a Workload Lab tab name: 'cloud' or 'kubernetes'")
     credential_id: str = Field(min_length=1, description="that tab's own row id")
+
+
+class AgentCellEpisodeRequest(BaseModel):
+    """Ask for one bounded window of cluster access.
+
+    ``duration_minutes`` is how long Password Safe holds the request, which is also how
+    long the account's concurrent slot stays occupied if nobody approves — so it is
+    clamped rather than honoured. See ``agentcell_service.episode_duration_problem``.
+    """
+    duration_minutes: int = Field(
+        default=15, description="clamped to 5–60; the window, not the token's TTL")
+
+
+class AgentCellEpisodeResponse(BaseModel):
+    """What came back from asking. Never the credential.
+
+    ``state`` is the interesting field and ``waiting`` is the interesting value: an agent
+    that cannot authorise its own access to a cluster is the whole argument, so the state
+    that says so is reported rather than inferred from an absence.
+    """
+    id: str
+    state: str
+    request_id: str = ""
+    summary: str = ""
+    notes: list = []
 
 
 class AgentCellLinkResponse(BaseModel):

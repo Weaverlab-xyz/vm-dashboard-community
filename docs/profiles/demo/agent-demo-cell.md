@@ -166,27 +166,31 @@ Re-running the install play with `agent_token_source: wlc` or `ps` **removes** a
 previous `file` install left behind — "nothing is stored on this host" must not be
 contradicted by a file in `/etc`.
 
-## What this agent is answerable for
+## What this agent is answerable for — and what it can ask for
 
 An agent can be **linked** to one Workload Lab credential
-(`POST /api/agentcell/agent/{id}/link`, `cloud` only today), so that "what does this
-agent have access to" is one lookup rather than a conversation. The agent's listing then
-reports that credential's lease state beside it.
+(`POST /api/agentcell/agent/{id}/link`), so that "what does this agent have access to" is
+one lookup rather than a conversation.
 
-> **A link is not a consumption, and the distinction is the point.** The worker is given
-> nothing by it. The Cloud tab's credential *"is returned to nobody"*, and the Kubernetes
-> and Certificate tabs vault theirs where a consumer needs a Password Safe client — which
-> is another credential — to reach. So no Workload Lab credential can reach this worker
-> without it already holding one, which is the standing secret this whole cell argues
-> against.
->
-> The way out would be an independent trust path the worker can prove without holding
-> anything — an SVID — and that is the same bridge
-> [What is not built](#what-is-not-built) already names. See
-> [§5b of the design note](https://github.com/Weaverlab-xyz/vm-dashboard-community/blob/main/docs/design/next-demo-cells.md)
-> for the full reasoning and what would have to be answered first.
+**What the link confers depends on the tab, and conflating the two is the failure mode:**
 
-What the link is genuinely good for is the thing the Cloud tab cannot currently show:
+| Link | What it is | Why |
+|---|---|---|
+| `cloud` | **accountability only** | That tab's credential *"is returned to nobody"* by design, so no worker can spend it. The link records a lease whose state is worth reporting beside the agent. |
+| `kubernetes` | **a capability** | The worker reaches Password Safe holding nothing, so it can genuinely *request* that tab's token — subject to whatever the access policy requires. |
+
+> **An earlier version of this page said no Workload Lab credential could reach this
+> worker without it already holding one.** That stopped being true when the worker gained
+> `--token-source ps`: it reaches Password Safe with a workload identity brokered by
+> Workload Credentials, holding nothing at all. The Kubernetes tab's own sentence — *"the
+> consumer is a program with a Password Safe API client"* — describes this worker.
+
+**One link at a time.** An agent answerable for a cloud lease *and* a cluster token would
+be the most over-credentialed principal in the estate, which is the arrangement this cell
+argues against. Unlink before relinking, so widening is a decision rather than an
+accumulation.
+
+### What a `cloud` link is good for
 
 - **It says the revoke asymmetry out loud at link time.** Azure leases can be released
   early; **AWS leases cannot be revoked at all**, so the TTL is the only control there is.
@@ -195,10 +199,55 @@ What the link is genuinely good for is the thing the Cloud tab cannot currently 
 - **An expired lease reads as the mechanism working**, not as a fault — honouring
   `workload_cloud_service.lease_state`, which exists to keep those two apart.
 
-**One link at a time.** An agent answerable for a cloud lease *and* a cluster token *and*
-a certificate would be the most over-credentialed principal in the estate, which is the
-arrangement this cell argues against. Unlink before relinking, so widening is a decision
-rather than an accumulation.
+## The second demo: an agent that cannot authorise its own access
+
+This is the one worth building the room around, and it is a different beat from the
+revoke. With a `kubernetes` link in place:
+
+```
+POST /api/agentcell/agent/{id}/k8s-request      # open one bounded episode
+```
+
+Then, on the host, `mcp_agent.py --k8s-episode`:
+
+```
+[agent] spiffe://weaverlab.test/agent/mcp-reader · requesting deployer access to https://10.0.0.5:6443 · 14:02:11
+[agent] holding nothing: the Password Safe client pair came from Workload Credentials against this machine's own identity · 14:02:11
+[agent] spiffe://weaverlab.test/agent/mcp-reader · WAITING for approval (20s) — this agent cannot authorise its own access · 14:02:31
+[agent] spiffe://weaverlab.test/agent/mcp-reader · WAITING for approval (40s) — this agent cannot authorise its own access · 14:02:51
+[agent] spiffe://weaverlab.test/agent/mcp-reader · approved — request 77 released a token · 14:03:14
+[agent] spiffe://weaverlab.test/agent/mcp-reader · scope proved — namespace-scoped: it can list pods in app and is refused in kube-system · 14:03:15
+[agent] spiffe://weaverlab.test/agent/mcp-reader · request 77 checked back in · 14:03:15
+```
+
+**Read the WAITING lines aloud.** That is an AI agent asking a person for access to a
+cluster and being unable to proceed until they say yes.
+
+Then the two reads. The success proves the token works; **the 403 proves it is scoped**,
+which is the half worth showing — the same two beats the shipped consumer plays assert,
+and for the same reason `docs/integrations/workload-kubernetes.md` gives: *"a step in a
+runbook gets skipped, and an assertion does not."*
+
+| Profile | Succeeds | Must be refused |
+|---|---|---|
+| `deployer` | list pods in its namespace | the same list in another namespace |
+| `reader` | list pods cluster-wide | read a Secret — upstream `view` omits them by design |
+
+Exit codes are the punctuation: **0** proved the scope, **3** was never approved, **4**
+means a refusal did not refuse — the one outcome that would otherwise look like success.
+
+### What this demo does not prove, and you should say so
+
+- **The approval gates retrieval, not use.** In bound mode rotation does not revoke: a
+  token already released lives out its TTL whatever happens next. Checking the request
+  back in returns the *slot*, not the token. Deleting the ServiceAccount is the only hard
+  kill, and it kills every token ever issued to that account.
+- **The vault still cannot tell who retrieved.** The agent holds no standing credential to
+  ask with, so what reaches Password Safe is not transferable — but *anyone who can
+  retrieve is the workload*, as far as this mechanism can tell. That is the axis the SPIRE
+  path wins on and this one does not, which is why both exist on the same page.
+- **Without an approval policy there is no wait**, and the best beat silently does not
+  happen. The worker logs which path it took, so check the journal rather than assuming.
 
 ## The refusals, and why each one exists
 

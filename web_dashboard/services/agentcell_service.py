@@ -172,17 +172,33 @@ def pat_name_for(cell_name: str) -> str:
 #     Password Safe API client" (workload_k8s_service);
 #   * the **Certificates** tab writes a PKCS#12 into Secrets Safe on the same principle.
 #
-# So a worker cannot SPEND any of them without already holding a credential to fetch the
-# credential -- which is the standing secret this whole cell argues against. Closing that
-# needs an independent trust path, which is the SPIFFE bridge the agent cell already
-# names as unbuilt. See docs/design/next-demo-cells.md section 5b.
+# THAT REASONING HELD UNTIL THE WORKER BECAME THAT PROGRAM. An earlier version of this
+# comment concluded that a worker "cannot SPEND any of them without already holding a
+# credential to fetch the credential", and that closing the gap needed the SPIFFE bridge
+# the cell names as unbuilt. It did not: the worker now reaches Password Safe with a
+# workload identity brokered by Workload Credentials, holding nothing
+# (`--token-source ps`, see examples/playbooks/agent/files/mcp_agent.py). So the
+# Kubernetes tab's own sentence -- "the consumer is a program with a Password Safe API
+# client" -- describes this worker, and `kubernetes` is linkable because the agent can
+# genuinely request that token.
 #
-# `cloud` is wired not because the worker can use it, but because its row carries a lease
-# whose STATE is worth reporting beside the agent -- see `link_notes`.
-LINKABLE_MECHANISMS = ("cloud",)
+# The two remaining differ, and differ for different reasons:
+#   * `cloud` is linkable but NOT spendable -- its credential is returned to nobody by
+#     design, so the link records a lease whose STATE is worth reporting beside the agent
+#     and nothing more. See `link_notes`.
+#   * `certificates` writes a PKCS#12 into Secrets Safe rather than a managed-account
+#     password, which is a different retrieval path this worker has not been given.
+#
+# See docs/design/next-demo-cells.md sections 5b and 5d.
+LINKABLE_MECHANISMS = ("cloud", "kubernetes")
+
+# Mechanisms a worker can actually SPEND, as opposed to merely be answerable for. The
+# distinction is load-bearing: a link that confers capability and one that confers only
+# accountability must not read the same way back to an operator.
+SPENDABLE_MECHANISMS = ("kubernetes",)
 
 # Named here so the refusal can list them without claiming they are coming.
-_UNWIRED_MECHANISMS = ("kubernetes", "certificates", "spire")
+_UNWIRED_MECHANISMS = ("certificates", "spire")
 
 
 def link_problem(mechanism: str) -> str:
@@ -199,11 +215,11 @@ def link_problem(mechanism: str) -> str:
     if m == "spire":
         return ("The agent is already attested by SPIRE — that link is its SPIFFE ID, "
                 "recorded when the cell was created, and it does not need a second one.")
-    if m in _UNWIRED_MECHANISMS:
-        return (f"The {m} tab vaults its credential where a consumer needs a Password "
-                "Safe client to reach it — another credential — so nothing here could "
-                "report on it honestly. Only 'cloud' can be linked today; see "
-                "docs/design/next-demo-cells.md §5b for what would have to exist first.")
+    if m == "certificates":
+        return ("The certificates tab writes a PKCS#12 into Secrets Safe rather than a "
+                "managed-account password, and this worker has only the managed-account "
+                "retrieval path. That is a missing path rather than a structural "
+                "barrier — see docs/design/next-demo-cells.md §5d.")
     return (f"{mechanism!r} is not a Workload Lab mechanism. Linkable today: "
             f"{', '.join(LINKABLE_MECHANISMS)}.")
 
@@ -247,6 +263,135 @@ def link_notes(cloud: str, revocable: bool) -> list:
             "there is. That is the provider's limit, not this dashboard's, and it is "
             "worth saying out loud before somebody promises a revoke.")
     return notes
+
+
+def k8s_link_notes(profile: str, account_name: str, namespace: str) -> list:
+    """What to say back when an agent is linked to a Kubernetes token.
+
+    The opposite risk to `link_notes`. There the danger is a governance record reading as
+    a capability; here it IS a capability, so the danger is an operator assuming the
+    approval gates more than it does. Both limits come straight from
+    ``workload_k8s_service``'s own docstring rather than being softened on the way out.
+    """
+    where = f" in {namespace}" if namespace else ""
+    return [
+        f"This agent can now **request** the `{account_name or profile}` token"
+        f"{where} — it holds nothing until Password Safe releases one, and every "
+        "retrieval is a recorded request with a duration and a reason.",
+        "**The approval gates retrieval, not use.** In bound mode rotation does not "
+        "revoke: a token the agent has already been given lives out its TTL whatever "
+        "happens next. Deleting the ServiceAccount is the only hard kill.",
+        "**The vault still cannot tell who retrieved.** The agent holds no standing "
+        "credential to ask with, so what reaches Password Safe is not transferable — "
+        "but anyone who can retrieve is the workload, as far as this mechanism can "
+        "tell. That is the axis the SPIRE path wins on and this one does not.",
+    ]
+
+
+# ── The cluster-access episode ────────────────────────────────────────────────
+#
+# One bounded request: ask, wait for whatever the access policy requires, probe, release.
+# The states are named rather than boolean because "waiting" and "denied" are different
+# answers an operator needs to tell apart, and because WAITING IS THE DEMO -- an agent
+# that cannot authorise its own access to a cluster is the argument, so the state that
+# says so has to be visible rather than inferred from an absence.
+# WHICH OF THESE THE ROW ACTUALLY HOLDS, because the split is not obvious and pretending
+# otherwise would make the row look live when it is not.
+#
+# The dashboard writes two: an operator opens an episode, and an operator (or the worker's
+# operator) closes it. Everything between happens on the host, and **the worker has no way
+# to report it back** -- its PAT belongs to a non-admin user by construction, and these
+# endpoints need `config_mgmt:write`. Giving the worker that authority to file status
+# updates would hand a non-human principal more than the cell argues it should have, which
+# is a bad trade for a progress bar.
+#
+# So the journal is the truth for what happened, and the row answers only "is something
+# out right now". The worker states are named here because `episode_summary` renders them
+# when one is quoted back -- not because the row will hold them.
+ROW_STATES = ("requested", "released")
+WORKER_STATES = ("waiting", "approved", "probed", "denied", "expired")
+EPISODE_STATES = ROW_STATES + WORKER_STATES
+# Terminal states: the slot is back and a new episode may start.
+EPISODE_CLOSED = ("released", "denied", "expired")
+
+# How long an episode may sit waiting before it gives the slot back. An abandoned request
+# holds the account's concurrent-request slot for its WHOLE duration, so the next attempt
+# fails on the cap (Password Safe code 4035) reporting a cap problem instead of the
+# approval it was actually waiting on -- the confusion `ps_api_service._request_credential`
+# documents. Giving up is therefore part of the design, not a timeout bolted on.
+MAX_WAIT_MINUTES = 30
+DEFAULT_DURATION_MINUTES = 15
+
+
+def episode_problem(row) -> str:
+    """Refuse a second episode while one is open.
+
+    Same reasoning as `already_linked_problem` one level down: an agent holding two open
+    requests against the same account trips the concurrent cap, and the failure arrives
+    as a cap error on the *next* attempt rather than here where the cause is legible.
+    """
+    state = (getattr(row, "episode_state", "") or "").strip()
+    if not state or state in EPISODE_CLOSED:
+        return ""
+    return (f"This agent already has a cluster-access request open ({state}). Let it "
+            "finish or release it first — two open requests against one account trip "
+            "Password Safe's concurrent-request cap, and that failure reports the cap "
+            "rather than the reason.")
+
+
+def episode_link_problem(row) -> str:
+    """Refuse an episode on an agent linked to nothing, or to something unspendable."""
+    mechanism = (getattr(row, "linked_mechanism", "") or "").strip().lower()
+    if not mechanism:
+        return ("This agent is not linked to a Workload Lab credential. Link it to a "
+                "Kubernetes token first — the link is what says which identity it may "
+                "ask for.")
+    if mechanism not in SPENDABLE_MECHANISMS:
+        return (f"This agent is answerable for a {mechanism} credential, which no worker "
+                "can spend — that tab returns its credential to nobody. Only "
+                f"{', '.join(SPENDABLE_MECHANISMS)} can be requested.")
+    return ""
+
+
+def episode_duration_problem(minutes) -> int:
+    """Clamp the request duration, returning the value to use.
+
+    Not a refusal: a duration outside the sane band is a slider in the wrong place rather
+    than an error worth stopping for. But it is clamped rather than honoured, because the
+    duration is how long the slot stays held if nobody approves.
+    """
+    try:
+        m = int(minutes)
+    except (TypeError, ValueError):
+        return DEFAULT_DURATION_MINUTES
+    return max(5, min(m, MAX_WAIT_MINUTES * 2))
+
+
+def episode_reason(agent_name: str, spiffe_id: str = "") -> str:
+    """What Password Safe records as the reason for the request.
+
+    Names the agent AND its SPIFFE ID, because the audit row is the one place a human
+    approving this can see WHAT is asking. A reason of "automated" would make the
+    approval a rubber stamp, which is the opposite of the point.
+    """
+    who = (spiffe_id or "").strip() or (agent_name or "agent")
+    return f"mcp-agent cluster access — {who}"
+
+
+def episode_summary(row) -> str:
+    """One clause for the agent's row, honouring what each state actually means."""
+    state = (getattr(row, "episode_state", "") or "").strip()
+    if not state:
+        return "no cluster-access request"
+    if state == "waiting":
+        return "waiting for approval — the agent cannot authorise its own access"
+    if state == "denied":
+        return "request denied — the mechanism working, not a fault"
+    if state == "expired":
+        return "request expired unapproved — the slot was given back"
+    if state == "released":
+        return "access released — the request was checked back in"
+    return f"cluster access: {state}"
 
 
 def link_summary(mechanism: str, lease_state: str) -> str:

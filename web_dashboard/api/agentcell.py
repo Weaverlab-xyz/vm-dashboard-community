@@ -29,6 +29,8 @@ from ..models.agentcell import (
     AgentCellLinkRequest,
     AgentCellLinkResponse,
     AgentCellListResponse,
+    AgentCellEpisodeRequest,
+    AgentCellEpisodeResponse,
 )
 from ..services import agentcell_service
 from .auth import get_current_user, require_permission
@@ -205,11 +207,15 @@ def link_agent(
 ):
     """Make an agent answerable for one Workload Lab credential.
 
-    **This gives the worker nothing.** None of the lab's credentials can reach it — the
-    Cloud tab's is returned to nobody and the other two are vaulted behind a Password
-    Safe client — so what this records is accountability, not capability. The response
-    leads with that rather than burying it, because a governance record that reads as a
-    capability is the failure mode here.
+    **What the link confers depends on the tab**, and the response says which rather than
+    letting the operator assume:
+
+      * ``cloud`` gives the worker **nothing** — that tab returns its credential to
+        nobody by design, so the link is accountability and the notes lead with that. A
+        governance record reading as a capability is the failure mode there.
+      * ``kubernetes`` is a **capability**: the worker reaches Password Safe holding
+        nothing, so it can request that token. The notes lead with what the approval
+        does and does not gate, because assuming it gates use is the failure mode here.
     """
     row = db.query(AgentCell).filter(AgentCell.id == agent_id).first()
     if not row:
@@ -220,13 +226,37 @@ def link_agent(
         if problem:
             raise HTTPException(status_code=400, detail=problem)
 
-    from ..services import workload_cloud_service as wcs
-    wl_row = wcs.get_row(db, payload.credential_id)
-    if not wl_row:
-        raise HTTPException(status_code=404,
-                            detail="No such Workload Lab cloud credential.")
+    mechanism = payload.mechanism.strip().lower()
+    if mechanism == "kubernetes":
+        from ..services import workload_k8s_service as wks
+        wl_row = wks.get_row(db, payload.credential_id)
+        if not wl_row:
+            raise HTTPException(
+                status_code=404, detail="No such Workload Lab Kubernetes token.")
+        # A token whose first rotation has not completed holds a placeholder, not a
+        # credential -- `WorkloadK8sToken.rotated`'s own comment says that state is
+        # "indistinguishable from success on the page". Linking to it would promise the
+        # agent something it cannot be given.
+        if not getattr(wl_row, "rotated", False):
+            raise HTTPException(
+                status_code=400,
+                detail="That token has never completed a rotation, so Password Safe "
+                       "still holds the placeholder it was created with rather than a "
+                       "credential. Rotate it first.")
+        summary = agentcell_service.link_summary(mechanism, "live")
+        notes = agentcell_service.k8s_link_notes(
+            wl_row.profile or "", wl_row.ps_account_name or "", wl_row.namespace or "")
+    else:
+        from ..services import workload_cloud_service as wcs
+        wl_row = wcs.get_row(db, payload.credential_id)
+        if not wl_row:
+            raise HTTPException(status_code=404,
+                                detail="No such Workload Lab cloud credential.")
+        summary = agentcell_service.link_summary(mechanism, wcs.lease_state(wl_row))
+        notes = agentcell_service.link_notes(wl_row.cloud or "",
+                                             wcs.revocable(wl_row.cloud or ""))
 
-    row.linked_mechanism = payload.mechanism.strip().lower()
+    row.linked_mechanism = mechanism
     row.linked_credential_id = wl_row.id
     row.linked_at = datetime.utcnow()
     db.commit()
@@ -238,11 +268,111 @@ def link_agent(
         id=row.id,
         mechanism=row.linked_mechanism,
         credential_id=row.linked_credential_id,
-        summary=agentcell_service.link_summary(
-            row.linked_mechanism, wcs.lease_state(wl_row)),
-        notes=agentcell_service.link_notes(wl_row.cloud or "",
-                                           wcs.revocable(wl_row.cloud or "")),
+        summary=summary,
+        notes=notes,
     )
+
+
+@router.post("/agent/{agent_id}/k8s-request",
+             response_model=AgentCellEpisodeResponse)
+def request_cluster_access(
+    agent_id: str,
+    payload: AgentCellEpisodeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("config_mgmt", "write")),
+):
+    """Open one bounded cluster-access episode for a linked agent.
+
+    **This opens a request; it does not hand anything over.** Password Safe decides
+    whether to release, and where the access policy requires approval it holds the
+    request for a person — which is the beat this exists for. The response says which
+    state the request landed in and never carries a credential.
+
+    The dashboard records that an episode is open. The **worker** is what waits on it,
+    retrieves when released, probes the cluster and checks back in — this endpoint does
+    not fetch on the worker's behalf, because a credential that came through here would
+    have travelled through a process the agent does not control.
+
+    **The row does not track the worker's progress**, and it is worth being plain about
+    why rather than letting the field look live: the worker cannot call back. Its PAT
+    belongs to a non-admin user, and this route needs ``config_mgmt:write`` — giving a
+    non-human principal that so it could file status updates would hand it more authority
+    than the cell argues for. ``journalctl -u mcp-agent`` is where the episode happens.
+    """
+    row = db.query(AgentCell).filter(AgentCell.id == agent_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="No such agent cell.")
+
+    for problem in (agentcell_service.episode_link_problem(row),
+                    agentcell_service.episode_problem(row)):
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+
+    from ..services import workload_k8s_service as wks
+    wl_row = wks.get_row(db, row.linked_credential_id or "")
+    if not wl_row:
+        raise HTTPException(
+            status_code=404,
+            detail="The linked Kubernetes token no longer exists. Unlink and relink.")
+
+    minutes = agentcell_service.episode_duration_problem(payload.duration_minutes)
+    row.episode_state = "requested"
+    row.episode_request_id = None
+    row.episode_started_at = datetime.utcnow()
+    row.episode_released_at = None
+    row.episode_result = None
+    db.commit()
+    db.refresh(row)
+
+    logger.info("agent cell %s opened a cluster-access episode on %s (%s min) by %s",
+                row.id, wl_row.id, minutes, current_user.username)
+    return AgentCellEpisodeResponse(
+        id=row.id,
+        state=row.episode_state,
+        request_id="",
+        summary=agentcell_service.episode_summary(row),
+        notes=[
+            f"The worker will ask Password Safe for `{wl_row.ps_account_name or ''}` "
+            f"with a {minutes}-minute window and the reason "
+            f"`{agentcell_service.episode_reason(row.name or '', row.spiffe_id or '')}`.",
+            "**If the access policy requires approval, the agent waits** — and says so "
+            "on every poll. It cannot approve its own request; that is the point.",
+            "**The approval gates retrieval, not use.** A token already released lives "
+            "out its TTL whatever happens next — rotation does not revoke it, and only "
+            "deleting the ServiceAccount does.",
+        ],
+    )
+
+
+@router.delete("/agent/{agent_id}/k8s-request")
+def release_cluster_access(
+    agent_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("config_mgmt", "write")),
+):
+    """Close an open episode from this side.
+
+    **Releasing the record is not releasing the token.** If Password Safe already
+    released one, it lives out its TTL — this marks the episode closed and frees the
+    agent to open another. Say so rather than letting "release" read as a revoke.
+    """
+    row = db.query(AgentCell).filter(AgentCell.id == agent_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="No such agent cell.")
+    was = (row.episode_state or "").strip()
+    if not was or was in agentcell_service.EPISODE_CLOSED:
+        return {"id": row.id, "released": "", "message": "No episode was open."}
+    row.episode_state = "released"
+    row.episode_released_at = datetime.utcnow()
+    db.commit()
+    logger.info("agent cell %s cluster-access episode closed from %s by %s",
+                row.id, was, current_user.username)
+    return {
+        "id": row.id,
+        "released": was,
+        "message": ("Episode closed. If a token was already released it lives out its "
+                    "TTL — this frees the request slot, it does not revoke anything."),
+    }
 
 
 @router.delete("/agent/{agent_id}/link")
@@ -257,6 +387,15 @@ def unlink_agent(
     if not row:
         raise HTTPException(status_code=404, detail="No such agent cell.")
     was = row.linked_mechanism or ""
+    # An open episode is refused rather than silently orphaned: unlinking mid-wait would
+    # leave a request holding the account's concurrent slot for an identity this agent is
+    # no longer answerable for, and nothing would be left pointing at it.
+    problem = agentcell_service.episode_problem(row)
+    if problem:
+        raise HTTPException(
+            status_code=400,
+            detail=problem + " Unlinking now would orphan it against an account this "
+                             "agent would no longer be answerable for.")
     row.linked_mechanism = None
     row.linked_credential_id = None
     row.linked_at = None

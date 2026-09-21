@@ -103,6 +103,24 @@ nothing, which is convenient and is exactly the property these remove.
 | 6 | Break the Secrets Safe permission | retrieval fails — **and a token already held keeps working until its TTL** |
 | 7 | Delete and recreate the ServiceAccount | every token ever issued dies. The only hard kill switch |
 
+### A third consumer, which asks permission
+
+The two plays above authenticate with something they fetched themselves — but they fetch
+it with a Password Safe client id and secret handed to the run in its environment. The
+[Agent Demo Cell](../profiles/demo/agent-demo-cell.md) is the consumer that holds
+**nothing**: it reaches Password Safe with a workload identity brokered by Workload
+Credentials, so the client pair is never on its host either.
+
+Link an agent to one of these tokens and it can open a bounded, **approval-gated**
+episode: it asks, waits for a person, runs the same two probes as steps 3 and 4 above,
+and gives the request slot back. The closing beat is an AI agent that cannot authorise
+its own access to a cluster.
+
+That narrows the axis this mechanism loses on — the credential reaching the vault is no
+longer transferable — but it does **not** close it. See
+[Compared against the SPIFFE path](#compared-against-the-spiffe-path); anyone who can
+retrieve is still the workload, as far as this mechanism can tell.
+
 **Steps 3, 4, 6 and 7 are the ones that prove something.** Steps 3 and 4 are written as
 *asserted tasks inside the plays*, not as runbook steps, and that distinction is the point:
 a step in a runbook gets skipped, and an assertion does not. If the refusals do not refuse,
@@ -184,6 +202,9 @@ A third row belongs beside them for a workload that needs **cloud** rather than 
   own issuer.
 * **No Operator/incident profile.** Two profiles cover the two consumers worth
   demonstrating; a break-glass one is a different conversation about approval.
+* **The agent cell's episode gates retrieval, not use.** The approval decides whether a
+  token is released; once it is, the boundary above applies unchanged — it lives out its
+  TTL, and checking the request back in returns the *slot*, not the token.
 * **Nothing here replaces the standing cluster-admin kubeconfig the dashboard itself uses**
   for registered clusters ([Kubernetes](../kubernetes.md)). That is the strongest engineering
   case for this mechanism and it deserves its own change — it alters how every existing
