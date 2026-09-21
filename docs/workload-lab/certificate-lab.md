@@ -338,6 +338,23 @@ Run these in order; each is cheap and fails fast.
 | 7 | **Change Password** again, re-run the consumer | Renewal is transparent. Note the new serial |
 | 8 | Break the Secrets Safe folder permission, **Change Password** | It fails — *and* step 6 still works on the previous certificate |
 
+### A third consumer, which holds nothing
+
+`ci-fetch-cert.yml` proves the mechanism, and it does so with a Password Safe client id
+and secret supplied to the run. The [Agent Demo Cell](../profiles/demo/agent-demo-cell.md)
+is the consumer that has neither: it reaches Password Safe with a workload identity
+brokered by Workload Credentials, requests the passphrase as a recorded request, downloads
+the bundle over `GET Secrets-Safe/Secrets/{id}/file/download`, and presents the certificate
+to an mTLS endpoint.
+
+That route rather than `ps-cli` for the reason
+[password-safe.md](../integrations/password-safe.md) records: every path ps-cli offers
+decodes the body to text, so a PEM bundle survives and a **PKCS#12 is corrupted rather
+than refused**. The lab writes a `.pfx`, so the agent keeps the bytes itself.
+
+It is also where the boundary below gets demonstrated rather than described. Revoke the
+certificate, run the agent again, and watch it work — because nothing on that path checks.
+
 **Step 8 is the one to spend time on.** The plugin writes the bundle to Secrets Safe and
 only *then* reports success, because Password Safe commits the new passphrase when the
 action reports success. Reporting first would leave an account holding a passphrase that

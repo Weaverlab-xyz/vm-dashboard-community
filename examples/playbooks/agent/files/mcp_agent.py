@@ -618,13 +618,45 @@ def password_safe_credential(*, api_url: str, client_id: str, client_secret: str
         _checkin(base, headers, request_id, reason)
 
 
+def approval_problem(polls: int, required: bool) -> str:
+    """Why an episode that got its credential should stop anyway. Pure.
+
+    **This worker cannot make Password Safe require approval** -- that is the account's
+    access policy, set in BeyondInsight, and nothing here can or should change it. What it
+    can do is refuse to PRETEND there was a human when there was not.
+
+    Without this the failure is silent and the demo is a lie: on an auto-releasing policy
+    the episode fetches, probes and prints a success line that reads exactly like the
+    approved one. The operator concludes an approval gate is in force; the audit trail
+    shows a request nobody was asked about. Turning that into a refusal costs one flag and
+    removes the only way this demo can mislead.
+    """
+    if not required or polls > 0:
+        return ""
+    return ("Password Safe released the credential on the first ask — no person was "
+            "consulted. This episode is supposed to demonstrate a human in the loop, so "
+            "it refuses rather than printing a success line that reads exactly like an "
+            "approved one. Either set the account's access policy to require approval "
+            "(BeyondInsight → the managed account → its access policy, with auto-release "
+            "off), or pass --no-require-approval to run it as an ungated fetch and say so "
+            "when you present it.")
+
+
 def password_safe_episode(*, api_url: str, client_id: str, client_secret: str,
                           account_id: int, system_id: int = 0,
                           duration_min: int = 15, reason: str,
                           max_wait_seconds: int = 1800, poll_seconds: int = 20,
-                          on_wait=None) -> tuple:
+                          on_wait=None, validate=None,
+                          expected: str = "a ServiceAccount token") -> tuple:
     """One approval-gated episode: ask, wait for a person, hand back ``(value, base,
-    headers, request_id)`` so the caller can use it and then release.
+    headers, request_id, waits)`` so the caller can use it and then release.
+
+    ``waits`` is **how many polls went by before the credential came back**, and it is
+    returned rather than kept because it is the only evidence available here that a human
+    was involved at all. Zero means Password Safe released on the first ask -- the access
+    policy auto-releases, no person was consulted, and an episode that reported "approved"
+    would be describing something that did not happen. What to DO about that is the
+    caller's decision (see ``--require-approval``); knowing it is this function's job.
 
     **The waiting is the demonstration**, so it is visible: ``on_wait`` is called every
     poll with the seconds elapsed, and the worker prints a line. An agent that cannot
@@ -642,11 +674,13 @@ def password_safe_episode(*, api_url: str, client_id: str, client_secret: str,
     ``ps_api_service._request_credential`` documents. On timeout the slot is returned and
     the caller is told it expired rather than that anything failed.
     """
+    check = validate or _looks_like_jwt
     base, headers = _ps_session(api_url, client_id, client_secret)
     request_id = _open_request(base, headers, account_id=account_id,
                                system_id=system_id, duration_min=duration_min,
                                reason=reason)
     waited = 0
+    polls = 0
     while True:
         try:
             value, pending = _poll_credential(base, headers, request_id)
@@ -654,19 +688,24 @@ def password_safe_episode(*, api_url: str, client_id: str, client_secret: str,
             _checkin(base, headers, request_id, reason)
             raise
         if not pending:
-            if not _looks_like_jwt(value):
+            # `validate` is a parameter for the same reason it is one on
+            # password_safe_credential: this flow serves a cluster token (a JWT) AND a
+            # PKCS#12 passphrase (an opaque string). A hardcoded shape would reject one
+            # of the two, and the rejection would read as Password Safe misbehaving.
+            if not check(value):
                 _checkin(base, headers, request_id, reason)
                 raise SystemExit(
-                    "[agent] FATAL: Password Safe released something that is not a "
-                    f"ServiceAccount token for account {int(account_id)}.")
-            return value, base, headers, request_id
+                    f"[agent] FATAL: Password Safe released something that is not "
+                    f"{expected} for account {int(account_id)}.")
+            return value, base, headers, request_id, polls
         if waited >= max_wait_seconds:
             _checkin(base, headers, request_id, reason)
-            return "", base, headers, request_id
+            return "", base, headers, request_id, polls
         if on_wait:
             on_wait(waited)
         time.sleep(poll_seconds)
         waited += poll_seconds
+        polls += 1
 
 
 # ── Proving the token is SCOPED, not merely that it works ────────────────────
@@ -762,6 +801,199 @@ def probe_summary(result: dict) -> str:
     return (f"THE REFUSAL DID NOT REFUSE: {result['deny_path']} returned "
             f"{result['deny_status']}, not 403. The token is broader than the profile "
             "claims, which is the one outcome this probe exists to catch")
+
+
+# ── The certificate half: Secrets Safe, on the session already open ──────────
+#
+# A certificate identity is TWO objects and both are governed: the PKCS#12 passphrase is
+# the managed account's credential, and the bundle it opens is a Secrets Safe FILE SECRET.
+# Retrieving one without the other yields nothing usable, which is the point of the split.
+#
+# WHY NOT ps-cli, WHICH IS WHAT THE DASHBOARD USES. Because it cannot carry these bytes.
+# docs/integrations/password-safe.md establishes it and services/secrets_backend_service
+# REFUSES on it: the endpoint returns application/octet-stream faithfully, but every route
+# ps-cli offers decodes the body to text before anyone sees it -- the library hands back
+# `response.text`, and `raw` falls through its JSON parse to print `response.text` too. A
+# PEM bundle is ASCII and survives. **A .pfx is corrupted rather than refused**, which is
+# the worst of the three outcomes: the DER check below would fire and send somebody to
+# look for a wrong bundle in Secrets Safe, when what is wrong is the transport.
+#
+# So the worker calls GET Secrets-Safe/Secrets/{id}/file/download itself and keeps the
+# bytes -- which is what password-safe.md prescribes for exactly this case, naming this
+# worker: "the way the agent worker already calls Requests and Credentials".
+#
+# AND IT COSTS NOTHING TO DO SO. Secrets Safe is part of Password Safe: the session opened
+# for the passphrase reaches the bundle unchanged, so this is one sign-in for both halves
+# rather than a second authentication in a second dialect. It also removes an unpinned pip
+# package from the agent host, and removes the one place this cell put a credential into a
+# subprocess environment -- a tension against its own rule against env vars that no longer
+# has to be argued, because it is gone.
+
+# `Secrets-Safe/Secrets` resolves by TITLE, or by PATH when the reference carries folders.
+# The cert lab's references read `cert/<system>/<account>`, so a reference containing a
+# separator is sent as a path, exactly as the `beyondtrust.secrets_safe` lookup resolves
+# `folder/title`. UNVERIFIED AGAINST A TENANT, and the single place to change if a live
+# one disagrees; the refusal below says which of the two lookups came back empty.
+SECRETS_PATH_SEPARATOR = "/"
+
+
+def _get_bytes(url: str, headers: dict, timeout: int = 60) -> bytes:
+    """A GET whose body is BYTES rather than text.
+
+    The one call in this worker that must not decode. Everything else here is JSON and
+    goes through ``_request``; a PKCS#12 that went through ``_request`` would come back
+    mangled by ``.decode("utf-8")`` in precisely the way ps-cli mangles it.
+    """
+    import urllib.request
+
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        return resp.read()
+
+
+def secrets_safe_file(title: str, *, dest_dir: str, base: str, headers: dict,
+                      timeout: int = 60) -> str:
+    """Download one Secrets Safe FILE secret into ``dest_dir``. Returns its path.
+
+    Two calls, because the download endpoint takes an id and the operator knows a title:
+    resolve, then fetch. ``base`` and ``headers`` are the session ``password_safe_episode``
+    already opened -- Secrets Safe is part of Password Safe, so nothing is signed in twice.
+
+    **The bundle lands on disk here, and that is the design rather than a slip.** The
+    episode owns a single 0700 temporary directory: the bundle arrives in it, openssl
+    opens it there, and the whole directory goes at the end. One guarded place beats a
+    blob in memory that has to be written out for openssl anyway.
+    """
+    import urllib.error
+    import urllib.parse
+
+    key = "path" if SECRETS_PATH_SEPARATOR in title else "title"
+    query = {key: title}
+    if key == "path":
+        query["separator"] = SECRETS_PATH_SEPARATOR
+    lookup = base + "Secrets-Safe/Secrets?" + urllib.parse.urlencode(query)
+    try:
+        found = _get_json(lookup, headers, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        raise SystemExit(f"[agent] FATAL: Secrets Safe rejected the lookup for {title!r} "
+                         f"by {key}: HTTP {exc.code}.")
+    if isinstance(found, dict):
+        found = [found]
+    secret_id = ""
+    for entry in found or []:
+        if isinstance(entry, dict) and (entry.get("Id") or entry.get("id")):
+            secret_id = str(entry.get("Id") or entry.get("id"))
+            break
+    if not secret_id:
+        raise SystemExit(
+            f"[agent] FATAL: Secrets Safe has no secret at {title!r} (looked up by "
+            f"{key}). A reference containing {SECRETS_PATH_SEPARATOR!r} is treated as a "
+            "folder path; one without it as a bare title.")
+
+    dest = os.path.join(dest_dir, "bundle.pfx")
+    # Written with 0600 ALREADY SET rather than chmod-ed afterwards: between the two there
+    # is a window where the bundle is on disk at the umask's discretion.
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        download = base + f"Secrets-Safe/Secrets/{secret_id}/file/download"
+        try:
+            blob = _get_bytes(download, dict(headers, Accept="application/octet-stream"),
+                              timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            raise SystemExit(f"[agent] FATAL: Secrets Safe would not release the bundle "
+                             f"{title!r}: HTTP {exc.code}. The API registration needs "
+                             "Secrets Safe read on the folder holding it.")
+        os.write(fd, blob)
+    finally:
+        os.close(fd)
+
+    # A PKCS#12 is DER: it starts with a SEQUENCE tag. Checking beats handing openssl
+    # something that is not a bundle and reading its error as a passphrase problem --
+    # which sends somebody to debug the wrong half of a two-half identity.
+    if not blob.startswith(b"\x30"):
+        hint = ""
+        if blob.lstrip()[:5] == b"-----":
+            hint = (" It looks like PEM, which is a perfectly good thing to keep in a "
+                    "file secret — but this episode opens a PKCS#12, so the lab's "
+                    "Change Password has to have written one.")
+        raise SystemExit(
+            f"[agent] FATAL: {title!r} downloaded, but it does not look like a PKCS#12 "
+            f"bundle (DER starts 0x30).{hint}")
+    return dest
+
+
+def cert_mtls_probe(*, endpoint: str, bundle_path: str, passphrase: str,
+                    expect_cn: str, work_dir: str, verify: bool = True,
+                    timeout: int = 15) -> dict:
+    """Present the client certificate to the lab's mTLS endpoint and read back the CN.
+
+    Takes a PATH and a working directory rather than bytes, because the bundle already
+    arrives as a file: ps-cli downloads it, openssl opens it, and Python's ``ssl`` needs
+    file paths for a client certificate. Inventing a round trip through memory would add
+    a copy of a credential and remove nothing.
+
+    **The caller owns ``work_dir`` and must remove it.** One guarded 0700 directory for
+    the whole episode — the bundle, the certificate and the key — is easier to reason
+    about, and to clean up, than one per step.
+
+    The passphrase reaches openssl through the ENVIRONMENT rather than argv, exactly as
+    ``examples/playbooks/certificates/ci-fetch-cert.yml`` does it and for the same reason.
+    """
+    import ssl
+    import subprocess as _sp
+    import urllib.error
+    import urllib.request
+
+    crt = os.path.join(work_dir, "client.crt")
+    key = os.path.join(work_dir, "client.key")
+    env = dict(os.environ, PFXPASS=passphrase)
+    for args, out_path in ((["-clcerts", "-nokeys"], crt),
+                           (["-nocerts", "-nodes"], key)):
+        r = _sp.run(["openssl", "pkcs12", "-in", bundle_path, "-passin", "env:PFXPASS",
+                     *args, "-out", out_path],
+                    capture_output=True, text=True, timeout=timeout,
+                    stdin=_sp.DEVNULL, env=env)
+        if r.returncode != 0:
+            raise SystemExit(
+                "[agent] FATAL: openssl could not open the bundle — the passphrase "
+                "and the bundle are two halves of one identity, so this usually "
+                f"means they are out of step: {scrub(r.stderr)[:300]}")
+    os.chmod(key, 0o600)
+
+    ctx = ssl.create_default_context()
+    if not verify:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    ctx.load_cert_chain(certfile=crt, keyfile=key)
+
+    req = urllib.request.Request(endpoint, headers={"Accept": "text/plain"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:  # noqa: S310
+            body = resp.read().decode("utf-8", "replace")
+            status = resp.status
+    except urllib.error.HTTPError as exc:
+        body, status = exc.read().decode("utf-8", "replace"), exc.code
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(f"[agent] FATAL: the mTLS endpoint {endpoint} did not "
+                         f"answer: {scrub(str(exc))}")
+
+    echoed = expect_cn and expect_cn in body
+    return {"status": status, "expect_cn": expect_cn, "echoed": bool(echoed),
+            "proved": status == 200 and bool(echoed),
+            "body": body.strip()[:200]}
+
+
+def cert_probe_summary(result: dict) -> str:
+    """One line. Names which half failed, because "the probe failed" sends somebody to
+    the wrong place."""
+    if result.get("proved"):
+        return (f"identity proved — the endpoint answered {result['status']} and echoed "
+                f"{result['expect_cn']}")
+    if result.get("status") != 200:
+        return (f"the endpoint returned {result['status']}, not 200 — the certificate "
+                "was not accepted, so nothing below proves anything")
+    return (f"the endpoint answered 200 but did not echo {result['expect_cn']!r} — it is "
+            "not seeing the certificate this agent presented")
 
 
 def fetch_spiffe_id(socket_path: str) -> str:
@@ -916,7 +1148,7 @@ def run_k8s_episode(args) -> int:
         print(f"[agent] {spiffe_id} · WAITING for approval ({elapsed}s) — this agent "
               f"cannot authorise its own access · {_now()}", flush=True)
 
-    token, base, headers, request_id = password_safe_episode(
+    token, base, headers, request_id, polls = password_safe_episode(
         api_url=args.ps_api_url, client_id=ps_client_id,
         client_secret=ps_client_secret, account_id=args.k8s_account_id,
         system_id=args.k8s_system_id, duration_min=args.k8s_duration,
@@ -932,6 +1164,15 @@ def run_k8s_episode(args) -> int:
     # is the SPIFFE ID, which travels in the request's own `reason` and which Password
     # Safe records -- so the log names what the other system shows, rather than an
     # internal id only this process can see. Exactly the lesson the PAT hint taught.
+    if token:
+        # This episode's page claims the agent "cannot authorise its own access". On an
+        # auto-releasing policy that claim is false, and nothing would have said so.
+        problem = approval_problem(polls, args.require_approval)
+        if problem:
+            _checkin(base, headers, request_id, reason)
+            print(f"[agent] {spiffe_id} · REFUSING: {problem} · {_now()}", flush=True)
+            return 5
+
     if not token:
         print(f"[agent] {spiffe_id} · the request was never approved within "
               f"{args.k8s_max_wait}s — the slot has been given back · {_now()}",
@@ -955,6 +1196,122 @@ def run_k8s_episode(args) -> int:
         print("[agent] note: the check-in returns the slot. A token already released "
               "lives out its TTL — rotation does not revoke it, and only deleting the "
               "ServiceAccount does.", flush=True)
+    return 0 if result.get("proved") else 4
+
+
+def run_cert_episode(args) -> int:
+    """One certificate episode, and the THIRD control surface this cell demonstrates.
+
+    The arc matters more than this episode does:
+
+      * the **PAT** is revocable — pull it and the loop stops mid-poll;
+      * the **cluster token** is gated at retrieval — a person decides, and once released
+        it lives out its TTL;
+      * a **certificate** is neither. docs/workload-lab/certificates.md is blunt about it:
+        "No revocation checking. The plugin consults neither CRLs nor OCSP. Short
+        lifetimes are the mitigation, and that is a deliberate design position."
+
+    So the uncomfortable demo is the point. Disable the managed account -- which revokes
+    the certificate on a backend that can -- and run this again. **It still works.**
+    Nothing on this path checks. The agent stops when the certificate EXPIRES, not when
+    somebody takes it away, and showing the mechanism that does not stop on demand is
+    what makes the two that do worth having.
+
+    Exit codes: 0 proved the identity, 3 the passphrase was never released, 4 the
+    endpoint did not accept or echo the certificate.
+    """
+    missing = [n for n, v in (("--cert-endpoint", args.cert_endpoint),
+                              ("--cert-cn", args.cert_cn),
+                              ("--cert-bundle-title", args.cert_bundle_title),
+                              ("--cert-account-id", args.cert_account_id),
+                              ("--wlc-base-url", args.wlc_base_url),
+                              ("--wlc-site-id", args.wlc_site_id),
+                              ("--wlc-service-name", args.wlc_service_name),
+                              ("--wlc-resource", args.wlc_resource),
+                              ("--ps-client-id-secret", args.ps_client_id_secret),
+                              ("--ps-client-secret-secret", args.ps_client_secret_secret),
+                              ("--ps-api-url", args.ps_api_url)) if not v]
+    if missing:
+        raise SystemExit("[agent] FATAL: --cert-episode needs " + ", ".join(missing))
+
+    spiffe_id = fetch_spiffe_id(args.spiffe_socket)
+    reason = f"mcp-agent certificate use — {spiffe_id}"
+    print(f"[agent] {spiffe_id} · requesting the certificate identity behind "
+          f"{args.cert_cn} · {_now()}", flush=True)
+
+    identity = fetch_identity_token(args.wlc_resource, args.identity_platform,
+                                    args.wlc_client_id, args.identity_token_file,
+                                    args.spiffe_socket)
+    wlc = dict(base_url=args.wlc_base_url, site_id=args.wlc_site_id,
+               service_name=args.wlc_service_name, identity_token=identity,
+               folder=args.wlc_folder)
+    ps_client_id = read_wlc_secret(secret_name=args.ps_client_id_secret, **wlc)
+    ps_client_secret = read_wlc_secret(secret_name=args.ps_client_secret_secret, **wlc)
+    print("[agent] holding nothing: the Password Safe client pair came from Workload "
+          f"Credentials against this machine's own identity · {_now()}", flush=True)
+
+    def _waiting(elapsed: int) -> None:
+        print(f"[agent] {spiffe_id} · WAITING for approval ({elapsed}s) — this agent "
+              f"cannot authorise its own access · {_now()}", flush=True)
+
+    # HALF ONE: the passphrase, through the same recorded-request flow the cluster
+    # episode uses. Approval-gated wherever the access policy says so.
+    passphrase, base, headers, request_id, polls = password_safe_episode(
+        api_url=args.ps_api_url, client_id=ps_client_id,
+        client_secret=ps_client_secret, account_id=args.cert_account_id,
+        system_id=args.cert_system_id, duration_min=args.cert_duration,
+        reason=reason, max_wait_seconds=args.cert_max_wait, on_wait=_waiting,
+        # A PKCS#12 passphrase is an opaque string -- there is no shape to check beyond
+        # "not empty", and _poll_credential has already rejected the soft-failure
+        # sentence by the time this runs.
+        validate=lambda v: bool(v), expected="a PKCS#12 passphrase")
+    if not passphrase:
+        print(f"[agent] {spiffe_id} · the request was never approved within "
+              f"{args.cert_max_wait}s — the slot has been given back · {_now()}",
+              flush=True)
+        return 3
+
+    # A CERTIFICATE IS THE ONE THAT CANNOT BE TAKEN BACK, which is why the human matters
+    # most here: the approval is the ONLY moment anybody gets a say. Once the passphrase
+    # is out, the identity works until it expires whatever anyone does afterwards.
+    problem = approval_problem(polls, args.require_approval)
+    if problem:
+        _checkin(base, headers, request_id, reason)
+        print(f"[agent] {spiffe_id} · REFUSING: {problem} · {_now()}", flush=True)
+        print("[agent] this matters more here than anywhere else in the cell: a "
+              "certificate cannot be revoked out from under this agent, so the approval "
+              "is the only moment a person gets a say.", flush=True)
+        return 5
+
+    import tempfile
+
+    try:
+        # ONE GUARDED DIRECTORY FOR THE WHOLE EPISODE. The bundle is downloaded into it,
+        # openssl writes the certificate and key beside it, and it all goes at the end --
+        # including on the failure paths below. This is the one place in this worker
+        # where a credential touches disk, and saying so beats letting somebody find it.
+        with tempfile.TemporaryDirectory(prefix="mcp-agent-cert-") as work:
+            os.chmod(work, 0o700)
+            # HALF TWO: the bundle. Neither half is usable alone, which is the design.
+            print(f"[agent] {spiffe_id} · passphrase released; downloading the bundle "
+                  f"from Secrets Safe · {_now()}", flush=True)
+            # The SAME session that released the passphrase. Secrets Safe is part of
+            # Password Safe, so both halves of this identity come down one sign-in.
+            bundle_path = secrets_safe_file(args.cert_bundle_title, dest_dir=work,
+                                            base=base, headers=headers)
+            result = cert_mtls_probe(endpoint=args.cert_endpoint,
+                                     bundle_path=bundle_path, passphrase=passphrase,
+                                     expect_cn=args.cert_cn, work_dir=work,
+                                     verify=not args.cert_insecure)
+            print(f"[agent] {spiffe_id} · {cert_probe_summary(result)} · {_now()}",
+                  flush=True)
+    finally:
+        _checkin(base, headers, request_id, reason)
+        print(f"[agent] {spiffe_id} · the request was checked back in · {_now()}",
+              flush=True)
+        print("[agent] note: nothing here checks a CRL or OCSP. Revoking this "
+              "certificate does not stop this agent — only its expiry does. That is the "
+              "mechanism this episode exists to show, not a gap in it.", flush=True)
     return 0 if result.get("proved") else 4
 
 
@@ -1043,6 +1400,39 @@ def main(argv=None) -> int:
                     help="seconds to wait for approval before giving the slot back.")
     ap.add_argument("--k8s-insecure", action="store_true",
                     help="skip API server certificate verification (lab clusters).")
+    # ── One certificate episode ──────────────────────────────────────────────
+    ap.add_argument("--cert-episode", action="store_true",
+                    help="request the linked certificate identity's two halves, present "
+                         "the client certificate to an mTLS endpoint, and release. "
+                         "Exits when done.")
+    ap.add_argument("--cert-endpoint", default=os.environ.get("AGENT_CERT_ENDPOINT", ""),
+                    help="the lab's mTLS endpoint, e.g. https://api.demo.internal:8443/")
+    ap.add_argument("--cert-cn", default=os.environ.get("AGENT_CERT_CN", ""),
+                    help="the subject the endpoint should echo back.")
+    ap.add_argument("--cert-bundle-title",
+                    default=os.environ.get("AGENT_CERT_BUNDLE", ""),
+                    help="the bundle's Secrets Safe reference, e.g. "
+                         "cert/<system>/<account>. One containing '/' is resolved as a "
+                         "folder path, one without it as a bare title.")
+    ap.add_argument("--cert-account-id", type=int,
+                    default=int(os.environ.get("AGENT_CERT_ACCOUNT_ID", "0") or 0),
+                    help="the managed account holding the PKCS#12 passphrase.")
+    ap.add_argument("--cert-system-id", type=int,
+                    default=int(os.environ.get("AGENT_CERT_SYSTEM_ID", "0") or 0))
+    ap.add_argument("--cert-duration", type=int, default=15)
+    ap.add_argument("--cert-max-wait", type=int, default=1800)
+    ap.add_argument("--cert-insecure", action="store_true",
+                    help="skip endpoint certificate verification (lab endpoints).")
+    # Applies to BOTH episodes. #912's page already claims the agent "cannot authorise
+    # its own access"; on an auto-releasing policy that was silently untrue there too, so
+    # this is a correctness fix to an existing claim rather than a new rule for one
+    # episode. Default on: the ungated case is the one that needs saying out loud.
+    ap.add_argument("--no-require-approval", dest="require_approval",
+                    action="store_false", default=True,
+                    help="run an episode even when Password Safe released without "
+                         "consulting anybody. Off by default — an ungated fetch that "
+                         "prints an approved-looking line is the one way this demo can "
+                         "mislead.")
     ap.add_argument("--selftest", action="store_true",
                     help="check the argument wiring and exit, touching nothing")
     args = ap.parse_args(argv)
@@ -1058,6 +1448,8 @@ def main(argv=None) -> int:
         return 0
     if args.k8s_episode:
         return run_k8s_episode(args)
+    if args.cert_episode:
+        return run_cert_episode(args)
 
     if not args.url:
         raise SystemExit("[agent] FATAL: --url (or AGENT_MCP_URL) is required.")

@@ -246,6 +246,26 @@ def link_agent(
         summary = agentcell_service.link_summary(mechanism, "live")
         notes = agentcell_service.k8s_link_notes(
             wl_row.profile or "", wl_row.ps_account_name or "", wl_row.namespace or "")
+    elif mechanism == "certificates":
+        from ..services import cert_lab_service as cls
+        wl_row = cls.get_lab(db, payload.credential_id)
+        if not wl_row:
+            raise HTTPException(
+                status_code=404, detail="No such certificate authority.")
+        # An identity onboarded against a CA that is not built yet produces a managed
+        # system that fails every rotation -- cert_lab_service.start_ps_register refuses
+        # for exactly this reason, and linking to one would promise the agent a
+        # certificate that cannot be issued.
+        if (wl_row.status or "") != "available":
+            raise HTTPException(
+                status_code=400,
+                detail=f"{wl_row.name} is {wl_row.status or 'unknown'}, not available. "
+                       "An identity against a CA that is not built yet fails every "
+                       "rotation, so there would be nothing for the agent to request.")
+        summary = agentcell_service.link_summary(mechanism, "live")
+        notes = agentcell_service.cert_link_notes(
+            payload.account_name or "", payload.bundle_title or "",
+            payload.expect_cn or "")
     else:
         from ..services import workload_cloud_service as wcs
         wl_row = wcs.get_row(db, payload.credential_id)
