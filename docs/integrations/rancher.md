@@ -388,9 +388,27 @@ Two ways out:
    fails fast naming `aci_subnet_id` instead.
 
    Request payloads (API token, bootstrap password) travel to the job as a curl
-   config over stdin — never in the container's argv. Note each API call costs a
-   Cloud Run job cold-start (~20-40 s), which is fine for the deploy/import flows
-   this covers.
+   config over stdin — never in the container's argv.
+
+   **Runner jobs are serialised — one at a time.** There is one Rancher node, so
+   two runner jobs in flight against it are always two overlapping sequences (a
+   deploy's first-run alongside a cluster import, say) rather than parallel work,
+   and each costs a cold start and its own cloud resource. Every launch — including
+   the readiness probe — queues behind the one in flight. The wait is capped at 30
+   minutes and then **fails open**: the caller launches anyway rather than wedging,
+   which is safe because each job's cloud resource is named per invocation. This is
+   per process: it covers everything the job worker runs, which is where the long
+   chains are, but not a job overlapping the inline **Import cluster** request.
+
+   **Every API call is a whole container cold start, and it is not always quick.**
+   A typical call is ~20-60 s, but they are not bounded by that: on Azure ACI a
+   single first-run call was measured at **15 m 12 s** (2026-09-21) while its three
+   siblings each took ~60 s. The launcher's own ceiling is ~20 minutes per call
+   (it polls 120 × 10 s), so a deploy can legitimately sit in one step for that
+   long. The deploy reports which of the four first-run steps it is on, and the
+   worker log has a `Rancher API (runner): <METHOD> <path>` line on each side of
+   every call with its elapsed time — check those before concluding a deploy is
+   hung — see [Troubleshooting](#troubleshooting).
 
 **Downstream clusters are unaffected** either way — cattle-cluster-agents dial out
 from their cloud NAT, not through your corp proxy. The Rancher **UI** in your
@@ -683,6 +701,19 @@ this network TLS-inspects and rejects the node's self-signed cert at the proxy
 (plain-HTTP `/ping` answered, so the node itself is fine). Set
 `rancher_api_transport=runner` and redeploy, or add a proxy *Do Not Inspect*
 exception for the node — see [Corp TLS inspection](#corp-tls-inspection-api-transport).
+
+**Deploy sits at 85% "Completing Rancher first-run" for a long time** — on
+`rancher_api_transport=runner` this stage is **four sequential API calls**, and each
+one is a whole container cold start. Usually ~60 s apiece, but not bounded by that:
+one was measured at **15 m 12 s** on Azure ACI (2026-09-21) while the other three
+took ~60 s. The launcher's own ceiling is ~20 minutes per call, so up to ~80 minutes
+in this stage is slow, not hung. The progress message names the step currently
+running (`1/4: changing the admin password` … `4/4: clearing the first-login
+prompt`), and the worker log brackets each call with
+`Rancher API (runner): <METHOD> <path>` lines carrying its elapsed time. If a call
+does hit the ceiling the stage still finishes — first-run is best-effort by
+contract, so the deploy completes and the job note says what was skipped; you finish
+that wizard step by hand once. On `direct` transport this stage takes seconds.
 
 **Readiness flip-flops / works one minute, times out the next** — a corp proxy
 pool (e.g. Cloudflare WARP) egresses from multiple IPs while the firewall pins one

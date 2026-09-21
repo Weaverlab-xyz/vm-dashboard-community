@@ -393,6 +393,145 @@ def test_rancher_service_runner_routing():
     assert 'url = "https://10.9.8.7/v3/cluster"' in stdin
 
 
+def _swap_launcher(fn):
+    """Point the stubbed Cloud Run launcher at ``fn``; return a restore callable."""
+    gcp = sys.modules["web_dashboard.services.gcp_service"]
+    prev = gcp.run_cloud_run_k8s_task
+    gcp.run_cloud_run_k8s_task = fn
+    return lambda: setattr(gcp, "run_cloud_run_k8s_task", prev)
+
+
+def test_two_runner_jobs_do_not_overlap():
+    """One Rancher node, so two runner jobs at once are two overlapping sequences
+    (a deploy's first-run alongside a cluster import), never parallel work — each
+    paying a container cold start and launching its own cloud resource. _run holds
+    a lock for the whole job, so the second one starts only after the first ends."""
+    events = []
+
+    async def _slow(**kw):
+        events.append("enter")
+        await asyncio.sleep(0.05)
+        events.append("exit")
+        return 0, _b64_line("ok")
+
+    _reset()
+    restore = _swap_launcher(_slow)
+    try:
+        async def _both():
+            await asyncio.gather(rar.request("GET", "https://10.1.2.3/ping"),
+                                 rar.request("GET", "https://10.1.2.3/ping"))
+        asyncio.run(_both())
+    finally:
+        restore()
+    # Interleaved would be enter, enter, exit, exit.
+    assert events == ["enter", "exit", "enter", "exit"], events
+
+
+def test_the_lock_is_per_event_loop():
+    """Regression pin: a module-level asyncio.Lock binds to the loop that first
+    acquires it and raises 'bound to a different event loop' on any other. The
+    worker has one long-lived loop, but every test here gets a fresh asyncio.run —
+    so a single shared Lock would pass once and then break the whole file."""
+    _reset(output=_b64_line("ok"))
+    asyncio.run(rar.request("GET", "https://10.1.2.3/ping"))
+    asyncio.run(rar.request("GET", "https://10.1.2.3/ping"))  # a brand-new loop
+    assert len(_CALLS) == 2, len(_CALLS)
+
+
+def test_a_long_runner_job_does_not_wedge_the_next_one():
+    """The wait is bounded and fails OPEN. A first-run sequence can hold the lock
+    for the better part of an hour; blocking a second job behind it forever would
+    turn a throughput problem into a wedged job. Past the deadline the caller
+    launches anyway — safe, because the cloud resources are named per invocation."""
+    events = []
+
+    async def _slow(**kw):
+        events.append("enter")
+        await asyncio.sleep(0.2)
+        return 0, _b64_line("ok")
+
+    _reset()
+    restore = _swap_launcher(_slow)
+    saved = rar._LOCK_WAIT_S
+    rar._LOCK_WAIT_S = 0.01
+    try:
+        async def _both():
+            await asyncio.gather(rar.request("GET", "https://10.1.2.3/ping"),
+                                 rar.request("GET", "https://10.1.2.3/ping"))
+        asyncio.run(_both())
+    finally:
+        rar._LOCK_WAIT_S = saved
+        restore()
+    # Both ran: the second gave up waiting rather than queueing behind the first.
+    assert events == ["enter", "enter"], events
+
+
+def test_the_lock_is_released_when_a_runner_job_raises():
+    """A launcher that blows up must not leave the lock held — the next Rancher
+    call would then block for the full deadline before failing open, turning one
+    cloud error into a stalled queue."""
+    calls = []
+
+    async def _boom_then_ok(**kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            raise RuntimeError("the cloud said no")
+        return 0, _b64_line("ok")
+
+    _reset()
+    restore = _swap_launcher(_boom_then_ok)
+    try:
+        async def _sequence():
+            try:
+                await rar.request("GET", "https://10.1.2.3/ping")
+            except RuntimeError:
+                pass
+            # Checked in-loop, on the same lock object the next call will take:
+            # a leak shows up here instead of as a 30-minute hang below.
+            assert not rar._run_lock().locked(),                 "the lock survived a launcher exception — the next call would block"
+            return await rar.request("GET", "https://10.1.2.3/ping")
+        status, _ = asyncio.run(_sequence())
+    finally:
+        restore()
+    assert status == 201, status
+
+
+def test_rancher_service_threads_job_id_to_the_runner():
+    """Every launcher names its container group / Cloud Run job / log stream after
+    ``job_id``. Unthreaded it arrived empty, so two Rancher API calls in flight at
+    once (two jobs, or a job plus an interactive call) targeted ONE fixed resource:
+    the second create landed on the first's live container and whichever finished
+    first deleted it in its finally. Nothing serialises Rancher API calls."""
+    cfgmod = types.ModuleType("web_dashboard.services.config_service")
+    store = {"rancher_api_transport": "runner",
+             "rancher_internal_url": "https://10.9.8.7",
+             "rancher_server_url": "https://34.1.2.3",
+             "rancher_api_token": "token-cfg:secret"}
+    cfgmod.get = lambda key, default="", workgroup=None: store.get(key, default)
+    cfgmod.get_bool = lambda key, default=False: bool(store.get(key, default))
+    sys.modules["web_dashboard.services.config_service"] = cfgmod
+    from web_dashboard.services import rancher_service as rs
+
+    _reset(output=_b64_line('{"id": "c-m-abc"}', "201"))
+    asyncio.run(rs._call("POST", "/v3/cluster", token="t", job_id="job-1234abcd"))
+    assert _CALLS[0]["job_id"] == "job-1234abcd", _CALLS[0].get("job_id")
+
+    # ...and through the public entry points a job drives, not just _call.
+    _reset(output=_b64_line("{}", "200"))
+    asyncio.run(rs.set_server_url_direct(server_url="https://34.1.2.3",
+                                         api_token="t", job_id="job-1234abcd"))
+    assert _CALLS[0]["job_id"] == "job-1234abcd", _CALLS[0].get("job_id")
+
+    # All FOUR first-run calls carry it — they are the sequence that stalls.
+    _reset(output=_b64_line("{}", "200"))
+    asyncio.run(rs.complete_first_run_direct(
+        api_token="t", server_url="https://34.1.2.3",
+        current_password="bootpw-123456", new_password="adminpw-123456",
+        job_id="job-1234abcd"))
+    assert len(_CALLS) == 4, len(_CALLS)
+    assert all(c["job_id"] == "job-1234abcd" for c in _CALLS), [c.get("job_id") for c in _CALLS]
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

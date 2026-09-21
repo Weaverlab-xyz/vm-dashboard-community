@@ -30,10 +30,19 @@ Request marshalling: method/URL/headers/body travel as a **curl config file** on
 the runner's stdin (``STDIN_B64`` → ``curl -K -``), so the API token and payload
 never appear in the container's argv. The HTTP response is extracted from the job
 log between sentinels plus a trailing ``RANCHER_STATUS:<code>`` write-out.
+
+**One runner job at a time, per process** — every launch funnels through
+:func:`_run`, which holds a lock for the whole job. One Rancher node means two
+concurrent runner jobs are always two overlapping sequences rather than parallel
+work, and each is a container cold start with its own cloud resource. The wait is
+bounded and fails open; see the note above ``_RUN_LOCKS`` for what that does and
+does not cover.
 """
+import asyncio
 import base64
 import json as _json
 import logging
+import weakref
 
 logger = logging.getLogger(__name__)
 
@@ -255,8 +264,82 @@ def _resolve_aci():
     return cfg
 
 
+# One runner job at a time, per process. There is exactly ONE Rancher node, so two
+# runner jobs in flight against it are never work the node needed done in parallel
+# — they are two overlapping sequences (a deploy's first-run alongside a cluster
+# import, say) that each pay a container cold start and each launch a cloud
+# resource. The launchers now name those resources uniquely, so an overlap is
+# SAFE; this makes it orderly as well, and keeps one node from being hit by two
+# in-cloud jobs (and two lots of cost/quota) at once.
+#
+# **Scope: one process.** The job worker is a separate process from the API
+# (``jobs_worker`` — its own Container App / Compose service) and runs several jobs
+# at once inside ONE event loop, so this covers every job-driven sequence, which is
+# where the long chains live. It does NOT cover a job overlapping the inline
+# ``POST /rancher/import`` route, which runs in a gunicorn request worker. Closing
+# that would need a cross-process lock, and the obvious one is wrong here: a
+# pg advisory lock must stay transaction-scoped in this codebase (a session-scoped
+# one leaks through QueuePool), and holding a transaction — and its pooled
+# connection — for the ~20 min a single runner call can take, let alone a 4-call
+# first-run, is the blocking-lock failure this repo already has scar tissue for.
+# Unique naming is what makes that residual overlap harmless.
+#
+# How long to queue before giving up and launching anyway: comfortably longer than
+# a single runner call's own ~20 min ceiling, short of the ~hour a full first-run
+# sequence can hold the lock — past that, waiting is worse than overlapping.
+_LOCK_WAIT_S = 1800
+# Locks are per event loop: asyncio.Lock binds to the loop that first acquires it
+# and raises if reused from another, and the test suite runs each case in its own
+# asyncio.run. A WeakKeyDictionary keeps the real case (one long-lived loop per
+# process) to a single lock without pinning dead loops.
+_RUN_LOCKS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _run_lock() -> "asyncio.Lock":
+    """The serialising lock for THIS event loop (created on first use)."""
+    loop = asyncio.get_running_loop()
+    lock = _RUN_LOCKS.get(loop)
+    if lock is None:
+        lock = _RUN_LOCKS[loop] = asyncio.Lock()
+    return lock
+
+
 async def _run(command: str, *, stdin_b64: str = "", job_id: str = "") -> tuple:
     """Run one shell command in an in-cloud runner job; return ``(exit_code, output)``.
+
+    Serialised against every other runner job in this process (see ``_RUN_LOCKS``),
+    which is why ``wait_ready`` goes through here too rather than launching directly.
+
+    **The wait is bounded and fails OPEN.** A first-run sequence can hold the lock
+    for the better part of an hour, and blocking a second job behind it indefinitely
+    would turn a throughput problem into a wedged job. After ``_LOCK_WAIT_S`` the
+    caller proceeds unserialised with a warning — safe, because the launchers name
+    their cloud resources per invocation.
+    """
+    lock = _run_lock()
+    tag = f" [job {job_id[:8]}]" if job_id else ""
+    if lock.locked():
+        logger.info("Rancher runner: another runner job is in flight — queueing "
+                    "behind it%s (one node, one job at a time)", tag)
+    held = False
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=_LOCK_WAIT_S)
+        held = True
+    except asyncio.TimeoutError:
+        logger.warning("Rancher runner: waited %ds for the in-flight runner job to "
+                       "finish and gave up%s — launching anyway, unserialised. The "
+                       "cloud resources are named per invocation so this is safe, but "
+                       "two runner jobs will now run against the one node.",
+                       _LOCK_WAIT_S, tag)
+    try:
+        return await _launch(command, stdin_b64=stdin_b64, job_id=job_id)
+    finally:
+        if held:
+            lock.release()
+
+
+async def _launch(command: str, *, stdin_b64: str = "", job_id: str = "") -> tuple:
+    """Fan out to the node cloud's runner. Call through :func:`_run`, never directly.
 
     The COMMANDS are cloud-independent (a shell string in a stock helm-kubectl image),
     so only the launcher differs — which is why both callers below share this rather

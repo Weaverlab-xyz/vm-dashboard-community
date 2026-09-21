@@ -3188,10 +3188,17 @@ def _run_ecs_k8s_sync(
     `image`, the generic shell `command`, and the kubeconfig (decoded from
     ``KUBECONFIG_B64`` env into ``$KUBECONFIG``) are the only differences."""
     import time
+    import uuid
     ecs = _get_ecs(region)
     logs_client = boto3.client("logs", **_aws_kwargs(region))
     log_group = "/ecs/k8s-runner"
-    log_stream_prefix = f"k8s/{job_id[:8]}" if job_id else "k8s/adhoc"
+    # Unique per invocation when there is no job to name it after, matching the
+    # GCP/Azure launchers. ECS itself never collided the way a named Cloud Run job
+    # or ACI group does — run_task always makes a fresh task and the stream carries
+    # its id — but under the previous fixed prefix two concurrent ad-hoc runs
+    # interleaved into one group of streams, which is exactly the log you need to
+    # read when they race.
+    log_stream_prefix = f"k8s/{job_id[:8]}" if job_id else f"k8s/{uuid.uuid4().hex[:8]}"
 
     try:
         logs_client.create_log_group(logGroupName=log_group)
