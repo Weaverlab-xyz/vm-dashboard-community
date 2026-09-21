@@ -2357,7 +2357,6 @@ class AgentCell(Base):
     # models state: the row names the credential, Password Safe holds it. A token that
     # landed here would outlive the request that fetched it, which is the entire property
     # the recorded-request flow exists to provide.
-    episode_request_id = Column(String(64), nullable=True)
     # "requested" or "released" -- the only two the DASHBOARD writes. The waiting, the
     # approval and the probes happen on the host, and the worker cannot report them back:
     # its PAT belongs to a non-admin user, and these endpoints need `config_mgmt:write`.
@@ -2367,9 +2366,16 @@ class AgentCell(Base):
     episode_state = Column(String(20), nullable=True)
     episode_started_at = Column(DateTime, nullable=True)
     episode_released_at = Column(DateTime, nullable=True)
-    # What the probes found, as text: which read succeeded and which was refused. Not a
-    # credential and not a transcript -- one line an operator can read on the row.
-    episode_result = Column(Text, nullable=True)
+    # THERE IS NO `episode_request_id` OR `episode_result` HERE, and their absence is a
+    # decision rather than an omission. A first draft had both. Neither can ever be
+    # filled: the WORKER opens the Password Safe request and runs the probes, so the
+    # dashboard never learns the id or the outcome, and the worker has no way to tell it
+    # (see above). A column that is structurally always NULL is worse than no column --
+    # it reads as "nothing happened yet" on a row where plenty did, and it invites a
+    # later change to grant the worker the authority needed to fill it.
+    #
+    # `journalctl -u mcp-agent` holds both, and the SPIFFE ID in the request's reason is
+    # what correlates the two.
 
     # Progress through the two playbooks, as the names of the ones that finished, and
     # their job ids -- the same arrangement SpireLab uses, and for the same reason: a

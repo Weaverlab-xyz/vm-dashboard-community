@@ -81,7 +81,6 @@ class AgentCellEpisodeResponse(BaseModel):
     """
     id: str
     state: str
-    request_id: str = ""
     summary: str = ""
     notes: list = []
 

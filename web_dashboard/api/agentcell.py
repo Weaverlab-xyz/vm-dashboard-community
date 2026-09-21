@@ -317,10 +317,8 @@ def request_cluster_access(
 
     minutes = agentcell_service.episode_duration_problem(payload.duration_minutes)
     row.episode_state = "requested"
-    row.episode_request_id = None
     row.episode_started_at = datetime.utcnow()
     row.episode_released_at = None
-    row.episode_result = None
     db.commit()
     db.refresh(row)
 
@@ -329,7 +327,6 @@ def request_cluster_access(
     return AgentCellEpisodeResponse(
         id=row.id,
         state=row.episode_state,
-        request_id="",
         summary=agentcell_service.episode_summary(row),
         notes=[
             f"The worker will ask Password Safe for `{wl_row.ps_account_name or ''}` "

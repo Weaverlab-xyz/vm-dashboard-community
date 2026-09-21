@@ -334,8 +334,14 @@ def test_the_agent_row_holds_no_credential():
         assert banned not in declared, (
             f"AgentCell declares a column matching {banned!r} — the row names what was "
             "requested, Password Safe holds the credential")
-    for expected in ("episode_request_id", "episode_state"):
-        assert expected in declared, f"the row cannot report an episode without {expected}"
+    assert "episode_state" in declared, "the row cannot report an episode at all"
+    # And the two that are deliberately absent, because nothing can fill them: the
+    # WORKER opens the request and runs the probes, so the dashboard never learns the id
+    # or the outcome. A structurally always-NULL column reads as "nothing happened yet"
+    # on a row where plenty did, and invites granting the worker authority to fill it.
+    for absent in ("episode_request_id", "episode_result"):
+        assert absent not in declared, (
+            f"{absent} is back — nothing can write it, so it can only mislead")
 
 
 def test_an_open_episode_blocks_a_second_and_an_unlink():
@@ -434,6 +440,30 @@ def test_the_episode_runner_logs_no_token():
         assert "{token}" not in ln, f"a print carries the cluster token: {ln.strip()}"
     body = runner[runner.index("password_safe_episode"):]
     assert "{token}" not in body
+
+
+def test_the_request_id_never_reaches_a_log():
+    """The second time this repo has reached this conclusion — `ps_api_service._checkin`
+    carries the same note, "never log the request id (CodeQL taints it)".
+
+    The taint is real rather than pedantic: the id comes back from the same call as the
+    credential, so an analyser cannot tell them apart and neither, at a glance, can a
+    reader. Nothing is lost by dropping it — the handle that correlates this with the
+    Password Safe audit row is the SPIFFE ID, which travels in the request's own reason
+    and which Password Safe records. The log names what the other system shows rather
+    than an internal id only this process can see.
+    """
+    code = _code(_WORKER)
+    body = code[code.index("def run_k8s_episode("):code.index("\ndef main(")]
+    uses = [ln.strip() for ln in body.splitlines() if "request_id" in ln]
+    assert uses == ["token, base, headers, request_id = password_safe_episode(",
+                    "_checkin(base, headers, request_id, reason)"], (
+        f"the request id is used somewhere other than the call that returns it and the "
+        f"check-in that spends it: {uses}")
+    # And nowhere in the module does one reach a print.
+    for ln in code.splitlines():
+        if "print(" in ln:
+            assert "request_id" not in ln, f"a print carries the request id: {ln.strip()}"
 
 
 def test_the_episode_says_what_the_checkin_does_not_do():

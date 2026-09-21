@@ -922,8 +922,18 @@ def run_k8s_episode(args) -> int:
         system_id=args.k8s_system_id, duration_min=args.k8s_duration,
         reason=reason, max_wait_seconds=args.k8s_max_wait, on_wait=_waiting)
 
+    # THE REQUEST ID IS NOT LOGGED, and this is the second time this repo has reached
+    # that conclusion -- `ps_api_service._checkin` carries the same note, "never log the
+    # request id (CodeQL taints it)". The taint is real rather than pedantic: the id
+    # comes back from the same call as the credential, so an analyser cannot tell them
+    # apart and neither, at a glance, can a reader.
+    #
+    # Nothing is lost. The handle that correlates this with the Password Safe audit row
+    # is the SPIFFE ID, which travels in the request's own `reason` and which Password
+    # Safe records -- so the log names what the other system shows, rather than an
+    # internal id only this process can see. Exactly the lesson the PAT hint taught.
     if not token:
-        print(f"[agent] {spiffe_id} · request {request_id} was never approved within "
+        print(f"[agent] {spiffe_id} · the request was never approved within "
               f"{args.k8s_max_wait}s — the slot has been given back · {_now()}",
               flush=True)
         print("[agent] stopping: no approval, no access. That is the mechanism working.",
@@ -931,8 +941,8 @@ def run_k8s_episode(args) -> int:
         return 3
 
     try:
-        print(f"[agent] {spiffe_id} · approved — request {request_id} released a token "
-              f"· {_now()}", flush=True)
+        print(f"[agent] {spiffe_id} · approved — a token was released · {_now()}",
+              flush=True)
         result = k8s_probe(api_server=args.k8s_api_server, token=token,
                            profile=args.k8s_profile, namespace=args.k8s_namespace,
                            other_namespace=args.k8s_other_namespace,
@@ -940,7 +950,7 @@ def run_k8s_episode(args) -> int:
         print(f"[agent] {spiffe_id} · {probe_summary(result)} · {_now()}", flush=True)
     finally:
         _checkin(base, headers, request_id, reason)
-        print(f"[agent] {spiffe_id} · request {request_id} checked back in · {_now()}",
+        print(f"[agent] {spiffe_id} · the request was checked back in · {_now()}",
               flush=True)
         print("[agent] note: the check-in returns the slot. A token already released "
               "lives out its TTL — rotation does not revoke it, and only deleting the "

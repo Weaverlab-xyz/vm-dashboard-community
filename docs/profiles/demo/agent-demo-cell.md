@@ -215,9 +215,9 @@ Then, on the host, `mcp_agent.py --k8s-episode`:
 [agent] holding nothing: the Password Safe client pair came from Workload Credentials against this machine's own identity · 14:02:11
 [agent] spiffe://weaverlab.test/agent/mcp-reader · WAITING for approval (20s) — this agent cannot authorise its own access · 14:02:31
 [agent] spiffe://weaverlab.test/agent/mcp-reader · WAITING for approval (40s) — this agent cannot authorise its own access · 14:02:51
-[agent] spiffe://weaverlab.test/agent/mcp-reader · approved — request 77 released a token · 14:03:14
+[agent] spiffe://weaverlab.test/agent/mcp-reader · approved — a token was released · 14:03:14
 [agent] spiffe://weaverlab.test/agent/mcp-reader · scope proved — namespace-scoped: it can list pods in app and is refused in kube-system · 14:03:15
-[agent] spiffe://weaverlab.test/agent/mcp-reader · request 77 checked back in · 14:03:15
+[agent] spiffe://weaverlab.test/agent/mcp-reader · the request was checked back in · 14:03:15
 ```
 
 **Read the WAITING lines aloud.** That is an AI agent asking a person for access to a
