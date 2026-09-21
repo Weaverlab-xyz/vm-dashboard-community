@@ -58,12 +58,35 @@ def test_generate_rancher_hcl_private():
     assert 'application = { name = "rancher" }' in hcl
     assert "connection_json = jsonencode({" in hcl
     assert URL_SENTINEL in hcl
-    assert "access_token = var.rancher_access_token" in hcl
-    assert "secret_key   = var.rancher_secret_key" in hcl
-    assert "verify       = false" in hcl
-    assert 'variable "rancher_access_token" { sensitive = true }' in hcl
+    assert "access_key = var.rancher_access_key" in hcl
+    assert "secret_key = var.rancher_secret_key" in hcl
+    assert "verify     = false" in hcl
+    assert 'variable "rancher_access_key" { sensitive = true }' in hcl
     assert 'variable "rancher_secret_key" { sensitive = true }' in hcl
     assert "agent_token" in hcl   # private → the shared Entitle agent brokers it
+
+
+def test_rancher_access_key_is_not_named_access_token():
+    """The tenant's connector schema asks for `access_key`. `access_token` — which
+    is what the published connector doc prints — matched no schema at all and 400'd
+    every registration, so pin the spelling against a doc-led "correction"."""
+    hcl = ers._generate_rancher_hcl(name="central-rancher", url=URL_SENTINEL,
+                                    verify=False, private=False)
+    assert "access_key = var.rancher_access_key" in hcl
+    assert "access_token" not in hcl
+
+
+def test_rancher_credential_keys_are_scrubbed_from_state():
+    """Both halves of the Rancher API key are credential material, and the scrub
+    matches connection_json keys EXACTLY — so the connector's own spellings have to
+    be listed or a stored state keeps them in plaintext."""
+    for key in ("access_key", "secret_key", "access_token"):
+        assert key in ers._SECRET_JSON_KEYS, f"{key} is not scrubbed from stored state"
+    blob = ers._scrub_connection_json(
+        '{"url": "u", "access_key": "token-abcde", "secret_key": "s3cr3t", "verify": false}')
+    assert "token-abcde" not in blob
+    assert "s3cr3t" not in blob
+    assert '"url"' in blob and '"verify"' in blob   # configuration stays legible
 
 
 def test_register_rancher_rejects_non_pair_token():
@@ -77,5 +100,7 @@ def test_register_rancher_rejects_non_pair_token():
 
 if __name__ == "__main__":
     test_generate_rancher_hcl_private()
+    test_rancher_access_key_is_not_named_access_token()
+    test_rancher_credential_keys_are_scrubbed_from_state()
     test_register_rancher_rejects_non_pair_token()
     print("ok")

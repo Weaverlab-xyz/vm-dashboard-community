@@ -411,6 +411,26 @@ If **Entitle resource registration** is enabled
 **Rancher** integration at the end of the deploy job, so users can request
 just-in-time Rancher RBAC through Entitle.
 
+### What gets sent
+
+The integration's `connection_json` is `{url, access_key, secret_key, verify}`,
+where the access/secret pair is the node's `rancher_api_token` (`token-xxxxx:yyyyy`)
+split on the `:`, and `verify` follows `rancher_verify_tls` (off by default — the
+node serves a self-signed certificate).
+
+> **The key is `access_key`, not `access_token`.** BeyondTrust's own Rancher
+> connector page prints `access_token`; the connector does not accept it. Take the
+> field names from **Integrations → Add Integration → Rancher** in your tenant, not
+> from the doc.
+
+If Entitle answers `integration.invalidConfiguration` / **"Didn't find matching
+connection schema"**, it matched the payload's *key set* against none of the
+connector's schemas — and it will not say which key it disliked. The job error names
+the keys that were sent; diff those against the Add Integration form. If the
+application itself is named something other than `Rancher` in your catalog, set
+`entitle_rancher_app_slug` (lowercased); a wrong name fails differently, as a 404
+`Application not found`.
+
 ### Register and deregister by hand
 
 The node row on **Containers → Rancher** carries the state and the controls: an

@@ -484,22 +484,31 @@ output "integration_id" {{
 
 
 def _generate_rancher_hcl(*, name: str, url: str, verify: bool, private: bool) -> str:
-    """Entitle **Rancher** integration. connection_json = {url, access_token,
-    secret_key, verify} — Rancher's API access+secret key PAIR (sensitive TF_VARs;
-    see docs.beyondtrust.com/entitle/docs/entitle-integration-rancher). ``private``
-    (the Rancher server isn't reachable from Entitle's cloud — the internal-LB case)
-    attaches the shared agent_token via _common_attrs_hcl."""
+    """Entitle **Rancher** integration. connection_json = ``{url, access_key,
+    secret_key, verify}`` — Rancher's API access+secret key PAIR (sensitive TF_VARs).
+
+    ⚠️  The key is ``access_key``, **not** ``access_token``, which is what
+    docs.beyondtrust.com/entitle/docs/entitle-integration-rancher prints. The
+    published doc is wrong; the live tenant's Add Integration form is the authority,
+    and it asks for ``access_key``. ``access_token`` cost every Rancher registration
+    between 2026-09-16 and 2026-09-21 an API 400
+    ``integration.invalidConfiguration`` / "Didn't find matching connection schema"
+    — Entitle matches the payload's key SET against the connector's schemas, so one
+    wrong name matches nothing and the error never says which key it disliked.
+
+    ``private`` (the Rancher server isn't reachable from Entitle's cloud — the
+    internal-LB case) attaches the shared agent_token via _common_attrs_hcl."""
     label = _safe_name(name)
     slug = _cfg("entitle_rancher_app_slug") or "rancher"
     header = _provider_header(
-        'variable "rancher_access_token" { sensitive = true }\n'
+        'variable "rancher_access_key" { sensitive = true }\n'
         'variable "rancher_secret_key" { sensitive = true }\n')
     conn = (
         "  connection_json = jsonencode({\n"
-        f"    url          = {json.dumps(url)}\n"
-        "    access_token = var.rancher_access_token\n"
-        "    secret_key   = var.rancher_secret_key\n"
-        f"    verify       = {str(bool(verify)).lower()}\n"
+        f"    url        = {json.dumps(url)}\n"
+        "    access_key = var.rancher_access_key\n"
+        "    secret_key = var.rancher_secret_key\n"
+        f"    verify     = {str(bool(verify)).lower()}\n"
         "  })\n"
     )
     return header + f"""
@@ -548,8 +557,15 @@ _REDACTED = "**REDACTED-BY-DASHBOARD**"
 # _generate_ssh_hcl); the rest are the database, REST and Kubernetes connectors' own
 # spellings. Redacting a name no connector uses costs nothing, so this list errs wide.
 _SECRET_ATTRS = ("password", "private_key", "passphrase", "token", "secret")
+# Matched EXACTLY, not by substring — so a connector's own spelling has to be listed.
+# `access_key` + `secret_key` are the Rancher connector's, and BOTH halves of that pair
+# are credential material: until they were added here a successful Rancher registration
+# would have stashed the Rancher API key in the stored state in plaintext. `access_token`
+# is listed alongside them because it is the spelling the published docs use, and a
+# connector that really does take it must not be the one that finds this gap.
 _SECRET_JSON_KEYS = ("key", "privateKey", "private_key", "password", "token",
-                     "secret", "clientSecret", "apiKey")
+                     "secret", "clientSecret", "apiKey",
+                     "access_key", "secret_key", "access_token")
 
 
 def _scrub_state(tf_state_json: Optional[str]) -> Optional[str]:
@@ -1018,9 +1034,30 @@ async def register_rancher(*, name: str, server_url: str, api_token: str,
         raise EntitleRegistrationError(
             "Rancher api_token must be a Rancher API key pair 'access:secret' (e.g. token-xxxxx:yyyyy)")
     hcl = _generate_rancher_hcl(name=name, url=server_url, verify=verify, private=private)
-    return await asyncio.to_thread(
-        _apply_hcl_sync, hcl,
-        {"rancher_access_token": access, "rancher_secret_key": secret})
+    try:
+        return await asyncio.to_thread(
+            _apply_hcl_sync, hcl,
+            {"rancher_access_key": access, "rancher_secret_key": secret})
+    except EntitleRegistrationError as exc:
+        # "Didn't find matching connection schema" is Entitle saying the payload
+        # matched NONE of the connector's schemas — and it never names the schema it
+        # wanted, so the operator has to diff what we sent against the Add
+        # Integration form in their own tenant. Say what we sent (key names and the
+        # url shape only — never the token) so that diff is possible from the job
+        # result alone, instead of needing a worker log and this source file.
+        if "connection schema" not in str(exc):
+            raise
+        raise EntitleRegistrationError(
+            f"{exc}\n\nEntitle matched no connection schema for application "
+            f"{_cfg('entitle_rancher_app_slug') or 'rancher'!r}. Sent keys: url, "
+            f"access_key, secret_key, verify (url={server_url!r}, verify={bool(verify)}, "
+            f"agent_token={'yes' if private else 'no'}). Entitle matches on the key SET "
+            f"and will not say which key it disliked — compare the list above against "
+            f"Integrations → Add Integration → Rancher in your own tenant, which is the "
+            f"authority over the published connector docs. The application slug is "
+            f"overridable with entitle_rancher_app_slug, though a wrong one fails "
+            f"differently, as a 404 'Application not found'."
+        ) from exc
 
 
 # ── Agent token (bootstrap for the k8s agent + private-target registration) ─────
