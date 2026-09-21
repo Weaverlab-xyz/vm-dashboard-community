@@ -281,7 +281,7 @@ def test_a_broken_setup_is_not_reported_as_a_proved_scope():
 
 
 def test_a_non_403_failure_on_the_deny_path_proves_nothing():
-    """The trap docs/integrations/workload-kubernetes.md records the plays encoding: a
+    """The trap docs/workload-lab/kubernetes.md records the plays encoding: a
     refusal assertion that accepts *any* failure passes on an expired token, a wrong
     path or an unreachable server. Only 403 means "RBAC refused this". A 401 here means
     the token is bad, which makes the whole probe meaningless — and a weaker check would
@@ -305,7 +305,7 @@ def test_a_non_403_failure_on_the_deny_path_proves_nothing():
 
 
 def test_both_profiles_have_a_refusal_to_prove():
-    """Per docs/integrations/workload-kubernetes.md: steps 3 and 4 — the refusals — are
+    """Per docs/workload-lab/kubernetes.md: steps 3 and 4 — the refusals — are
     the ones that prove something. A profile with only a success path proves the token
     works, which is the half that was never in doubt."""
     m = _worker()

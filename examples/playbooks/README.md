@@ -399,6 +399,13 @@ reach a private API server and bypass the corporate TLS-inspecting proxy; they u
 | `namespace-ensure.yml` | Create a namespace (`k8s_namespace`) |
 | `deployment-apply.yml` | Apply a sample nginx Deployment + Service |
 | `helm-install.yml` | `helm upgrade --install` a chart (`helm_release`/`helm_chart`/…) |
+| `ci-deploy-with-ps-token.yml` | Deploy as a namespace-scoped Deployer, then assert another namespace is refused |
+| `ci-read-with-ps-token.yml` | Read cluster-wide as a Reader, then assert reading a Secret is refused |
+
+The last two are the odd ones out: they **blank** the injected kubeconfig and authenticate
+with a bound ServiceAccount token they fetched from Password Safe themselves — the consumer
+half of the Workload Lab's Kubernetes tab. See [`k8s/README.md`](k8s/README.md) for the
+order to run them in and the two traps they encode.
 
 ## Databases (`database/`)
 

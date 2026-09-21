@@ -12,7 +12,7 @@
 # definition decides what the credential can do — which role is assumed, which subscription.
 # This play cannot widen or narrow it and does not try.
 #
-# NEVER LIVE-VALIDATED — see docs/integrations/workload-cloud.md.
+# NEVER LIVE-VALIDATED — see docs/workload-lab/cloud.md.
 #
 # ── THE INJECTED CLOUD CREDENTIALS ARE CLEARED ON PURPOSE, and this is the trap that would
 # otherwise make the whole play prove nothing. A dashboard runner may already carry

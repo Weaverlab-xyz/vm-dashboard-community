@@ -6,7 +6,7 @@
 # installs no agent, because the Password Safe plugin only ever talks to the server's API
 # and every identity it governs is vaulted. An agent is what makes the OTHER half possible:
 # a workload that attests itself and fetches its own short-lived token, with nothing stored
-# anywhere. docs/integrations/spiffe.md argues at length that this is the path to prefer when it is
+# anywhere. docs/workload-lab/spiffe.md argues at length that this is the path to prefer when it is
 # available; this play is what makes it available.
 #
 # NEVER LIVE-VALIDATED — see docs/design/workload-k8s-short-lived-token.md.

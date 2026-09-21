@@ -672,7 +672,7 @@ def password_safe_episode(*, api_url: str, client_id: str, client_secret: str,
 # ── Proving the token is SCOPED, not merely that it works ────────────────────
 #
 # The two beats examples/playbooks/k8s/ci-*-with-ps-token.yml assert, in the same shape
-# and for the same reason. docs/integrations/workload-kubernetes.md is explicit that
+# and for the same reason. docs/workload-lab/kubernetes.md is explicit that
 # steps 3 and 4 -- the REFUSALS -- are the ones that prove something, and that they are
 # written as assertions rather than runbook steps because "a step in a runbook gets
 # skipped, and an assertion does not".
@@ -701,7 +701,7 @@ def k8s_probe(*, api_server: str, token: str, profile: str, namespace: str,
     **The refusal has to fail with 403 specifically.** A wrong API server, an expired
     token or a typo in the path also fail, and a check that only asserted "it failed"
     would report a passing demonstration on any of them -- the trap
-    ``docs/integrations/workload-kubernetes.md`` records the plays encoding with
+    ``docs/workload-lab/kubernetes.md`` records the plays encoding with
     ``failed_when: false`` rather than ``ignore_errors``.
 
     ``verify`` is honoured rather than assumed: a lab cluster's API server is often

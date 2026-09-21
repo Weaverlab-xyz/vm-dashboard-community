@@ -1995,7 +1995,7 @@ class Settings(BaseSettings):
     # create the Secrets Safe folder's parent safe. The functional account is NOT one of
     # them any more — the dashboard mints it from the CA build's own terraform outputs,
     # which is the only moment the enrollment credential exists in this process.
-    # See docs/integrations/certificates.md.
+    # See docs/workload-lab/certificates.md.
     # PREVIEW flag, alongside vdesktops_enabled / workload_credentials_enabled in
     # setup._PREVIEW_FLAGS: none of the plugin's four
     # submission paths has been proven against a live CA yet. Off means the dashboard
@@ -2105,7 +2105,7 @@ class Settings(BaseSettings):
     # PREVIEW flag, alongside cert_lab_enabled in setup._PREVIEW_FLAGS, and DEMO-ONLY for
     # the same tenancy reason: the credential is written through the global pscli_*
     # singletons, so on a POV instance it would land in the wrong customer's tenant.
-    # See docs/integrations/spiffe.md and docs/runbooks/spire-lab-standup.md.
+    # See docs/workload-lab/spiffe.md and docs/runbooks/spire-lab-standup.md.
     spire_lab_enabled: bool = False                  # master gate: page, nav, router
     # WHO MAY REACH tcp/8081. Blank means no cloud ACL change is made at all — NOT open
     # to the world: 8081 is an API that mints identities, so "I did not say who" can only
@@ -2152,7 +2152,7 @@ class Settings(BaseSettings):
     # a community install with no BeyondTrust products is untouched and keeps
     # using the static keys in app_config. Turning this on is what UNLOCKS
     # retiring an install's own static credentials — it never retires them for
-    # anyone else. See docs/integrations/workload-credentials.md.
+    # anyone else. See docs/workload-lab/workload-credentials.md.
     workload_credentials_enabled: bool = False
     wlc_api_base_url: str = "https://api.beyondtrust.io"
     wlc_site_id: str = ""                           # site (tenant) GUID — the `tenant_id` claim in your access JWT

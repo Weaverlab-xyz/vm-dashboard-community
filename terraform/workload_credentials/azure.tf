@@ -75,5 +75,5 @@ resource "beyondtrust_workload_credentials_azure_dynamic_secret" "dashboard" {
 # the target. Parity by construction, and no list to maintain in either place. Run it
 # before this module.
 #
-# See docs/integrations/workload-credentials.md for what those grants are, including the
+# See docs/workload-lab/workload-credentials.md for what those grants are, including the
 # subscription-scoped quota read that fails EVERY VM deploy when it is missing.

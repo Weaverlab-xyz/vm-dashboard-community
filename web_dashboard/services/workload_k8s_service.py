@@ -61,7 +61,7 @@ Two boundaries the docs state and this module will not pretend away:
     workload, as far as this mechanism can tell. That is exactly the axis the SPIRE path
     wins on and this one does not, which is why both exist on the same page.
 
-See docs/integrations/workload-kubernetes.md.
+See docs/workload-lab/kubernetes.md.
 """
 import json
 import logging

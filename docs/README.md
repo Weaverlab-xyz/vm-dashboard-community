@@ -44,7 +44,7 @@ demoing, running a lab, or running production.
 | [Image Management](image-management.md) | you are about to build a custom image and need to know how it will reach the other clouds. |
 | [Config Management](config-management.md) | you are about to run an Ansible job and want to know how the runner handles secrets and isolation. |
 | [Secrets Management](secrets-management.md) | you are deciding where to store cloud credentials, and how to evolve that over time. |
-| [Workload Lab](workload-lab.md) | something that is not a person needs a credential — a certificate, a SPIFFE identity, a cluster token or a cloud key — and you want to pick the mechanism before reading any one guide. The four per-tab guides live under [`integrations/`](integrations/README.md). |
+| [Workload Lab](workload-lab.md) | something that is not a person needs a credential — a certificate, a SPIFFE identity, a cluster token or a cloud key — and you want to pick the mechanism before reading any one guide. The per-tab guides, the Workload Credentials product pages and the register of what consumes each credential are all under [`workload-lab/`](workload-lab.md). |
 | [Storage Management](storage-management.md) | you are enabling a feature that needs a storage backend, which several of them do. |
 | [Remote Agents](remote-agents.md) | your hypervisors, databases or clusters live somewhere the dashboard cannot reach. |
 | [Auto-delete Timer](auto-delete-timer.md) | you want lab resources to clean themselves up — read it before enabling it, because it deletes infrastructure. |
@@ -64,6 +64,7 @@ demoing, running a lab, or running production.
 |---|---|
 | [profiles/](profiles/README.md) | The `demo` / `pov` gate, the per-feature matrix, and everything specific to one profile or the other. |
 | [integrations/](integrations/README.md) | One page per external system the dashboard talks to — the BeyondTrust products, the hypervisors, the runners, SSO. |
+| [workload-lab/](workload-lab.md) | Giving a credential to something that is not a person: the four mechanisms, the Workload Credentials product, and what consumes each. Indexed by [workload-lab.md](workload-lab.md) rather than a README. |
 | [design/](design/README.md) | Why a subsystem is shaped the way it is. Facts that are not recoverable from reading the code. |
 | [runbooks/](runbooks/README.md) | Procedures to run against a real instance, usually to prove a phase of work landed. |
 | [notes/](notes/README.md) | Dated investigations, kept for their conclusions rather than their narrative. |
