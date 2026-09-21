@@ -806,14 +806,31 @@ ps-cli secrets get -t 'api-gateway-chain'
 ps-cli secrets download -id <GUID-from-the-Id-column> -s ./chain.pem
 ```
 
-`download -s` writes the file `0600`. Two adjacent traps: `secrets get -id <GUID> -d`
+`download -s` writes the file `0600`. One adjacent trap: `secrets get -id <GUID> -d`
 **ignores** `--decrypt` — only the `--title` branch enables it — so resolving by ID hands
-back a masked credential and no error; and the download decodes as UTF-8 text, so binary
-material (`.pfx`, `.p12`, DER) comes back corrupted rather than refused. Keep certificates
-in file secrets as PEM.
+back a masked credential and no error.
 
-In a playbook none of this applies — the `beyondtrust.secrets_safe` lookup resolves all
-three types in one call by `folder/title`. See [Secrets in a Remote Worker run](ansible/secrets.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe).
+A `raw` call reaches the same endpoint in **one** step if you already hold the GUID, and
+it is the shape to reuse if you are scripting around ps-cli rather than through it:
+
+```bash
+ps-cli raw GET "Secrets-Safe/Secrets/<GUID>/file/download"
+```
+
+**Neither route is binary-safe, and that is a ps-cli limit rather than an API one.** The
+endpoint itself returns `application/octet-stream` — raw bytes, faithfully — but every
+path ps-cli offers decodes them to text before you see them: `download-secret-file` hands
+back `response.text`, and `raw` falls through its JSON parse to print `response.text` too.
+A PEM bundle is ASCII and survives; a `.pfx`, `.p12` or DER payload is **corrupted rather
+than refused**. So keep certificate material in file secrets as PEM — or, if it genuinely
+has to be a PKCS#12, call
+[`GET .../file/download`](https://docs.beyondtrust.com/bips/reference/get-api-public-v3-secrets-safe-secrets-secretid-file-download)
+directly and keep the bytes, the way the agent worker already calls `Requests` and
+`Credentials`.
+
+In a playbook none of this applies for text bundles — the `beyondtrust.secrets_safe`
+lookup resolves all three types in one call by `folder/title` (it decodes as text too, so
+the PEM-only caveat carries over). See [Secrets in a Remote Worker run](ansible/secrets.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe).
 
 **A checkout returns `4031` / 403** — usually the API identity is missing the **Requestor**
 role or an access policy granting View on a Smart Rule containing the account. There is no

@@ -520,11 +520,16 @@ both certificate packages:
    query parameter and there is no payload field for it to fill. The body comes from a
    separate call that takes **only a GUID**, so even the happy path is two round trips.
    See [Password Safe → Troubleshooting](../integrations/password-safe.md#troubleshooting).
-2. **On the leaf package it is binary.** `bundle` defaults to `Pkcs12` for `Certificate`
-   and `PemBundle` for `Subordinate CA`. The bips library returns a downloaded file
-   secret as decoded text, which a PEM bundle survives and a PKCS#12 does not — so the
-   subordinate package needs a path nobody wrote, and the leaf package needs that plus a
-   byte-preserving fetch.
+2. **On the leaf package it is binary — which rules out ps-cli, not the API.** `bundle`
+   defaults to `Pkcs12` for `Certificate` and `PemBundle` for `Subordinate CA`. The
+   endpoint returns `application/octet-stream` and is byte-faithful; every route ps-cli
+   offers is not, because both `download-secret-file` and `raw` print `response.text`. A
+   PEM bundle is ASCII and survives that; a PKCS#12 does not. So the subordinate package
+   needs a path nobody wrote, and the leaf package needs that path to bypass ps-cli and
+   call the endpoint directly. **That is a small ask of this worker specifically** — it
+   already speaks Password Safe REST for `Auth/SignAppIn`, `Requests` and `Credentials`
+   and holds no static credential doing it, so one more GET is the same shape it is
+   already built around, not a new capability.
 3. **It wants BeyondInsight ≥ 26.1 regardless.** Below 26.1.0.878, file secrets
    downloaded through the API came back larger than the original and did not match the
    web console's copy, so a non-human identity would have retrieved a corrupt bundle no
