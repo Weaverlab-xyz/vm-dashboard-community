@@ -566,7 +566,8 @@ Two costs, neither hidden:
 * **An unpinned pip package on the agent host.** Precedented — the install play already
   installs `mcp` — but `beyondtrust-bips-cli` is unpinned and `tests/test_pscli_grammar.py`
   exists because six calls once shipped with the wrong argv and sat unnoticed for months.
-  The worker's argv is checked against that same verb table.
+  The worker's argv is checked against that same verb table, and against a stub ps-cli
+  that records how it was actually called.
 * **The pair passes through a subprocess environment.** In tension with the cell's own
   rule against env vars, and the tension resolves rather than being waved away: the play's
   objection is to a systemd `Environment=` line, world-readable through `systemctl show`
@@ -577,12 +578,22 @@ Two costs, neither hidden:
 
 ### The one place something touches disk
 
-Python's `ssl` needs file paths for a client certificate and `openssl` needs a file to
-open a PKCS#12, so the probe writes both into a `0700` temporary directory, `0600` for the
-key, passphrase through `PFXPASS` rather than argv — mirroring `ci-fetch-cert.yml` — and
-removes the directory on the failure path too. It is the one unavoidable exception to
-"nothing is stored on this host", and the code says so where somebody would otherwise find
-it and conclude the cell is careless about the thing it argues for.
+**The bundle is a file secret, not text** — so the verb is `secrets download-secret-file`
+and ps-cli *writes* it rather than printing it. An earlier draft had it coming back as a
+string and being held in memory; that was wrong about the secret, and it was also the
+weaker design, because `openssl` needs a file to open a PKCS#12 and Python's `ssl` needs
+file paths for a client certificate. A blob in memory would have been written out three
+lines later anyway.
+
+So there is no version of this that stays off the filesystem, and the episode bounds it
+instead of pretending otherwise: **one** `0700` temporary directory, opened before
+anything is fetched, holding the bundle, the certificate and the key; `0600` on the key
+and on the bundle; the passphrase through `PFXPASS` rather than argv, mirroring
+`ci-fetch-cert.yml`; and the whole directory removed on the failure path too. The probe
+takes that directory as an argument rather than making its own, which is what makes "one
+guarded place" a fact rather than a manner of speaking. It is the one unavoidable
+exception to "nothing is stored on this host", and the code says so where somebody would
+otherwise find it and conclude the cell is careless about the thing it argues for.
 
 ### The human has to be real, not assumed
 
@@ -613,9 +624,14 @@ approval is the last decision anybody makes about that identity until it expires
 No CA, no Password Safe tenant, no mTLS endpoint. The probe is exercised against a
 generated CA, a real PKCS#12 and a local mutual-TLS server in
 `tests/test_agentcell_cert_episode.py` — which is considerably more than the other
-episodes get, and still not a live run. One shape is genuinely unknown: whether a bundle
-comes back through `ps-cli secrets get -d` or needs `download-secret-file`. The worker
-checks for DER and names the alternative in the refusal rather than guessing.
+episodes get, and still not a live run. **One value is genuinely unverified**: the flag
+`download-secret-file` takes for its output path. `-o` is already spoken for (owner, and
+integer ids only), so the worker uses `-f` by convention rather than by observation. It is
+a single constant at the top of the file, argparse rejects it immediately if it is wrong,
+and the failure path recognises `invalid choice` and says which constant to change rather
+than letting it read as a missing secret. The worker also checks the downloaded bytes are
+DER before treating them as a PKCS#12 — otherwise `openssl` complains about the
+passphrase, which sends somebody to debug the wrong half of a two-half identity.
 
 ## 6. What is deliberately not proposed
 

@@ -62,6 +62,7 @@
 #   agent_interval:     30
 #   agent_spiffe_socket: unix:///tmp/spire-agent/public/api.sock
 #   agent_skip_pip:     false
+#   agent_cert_episode: false                           # also install ps-cli, for --cert-episode
 ---
 - name: Install the MCP agent worker
   hosts: all
@@ -88,6 +89,11 @@
     agent_interval: 30
     agent_spiffe_socket: "unix:///tmp/spire-agent/public/api.sock"
     agent_skip_pip: false
+    # The certificate episode is the only thing here that needs ps-cli, and it is opt-in:
+    # `beyondtrust-bips-cli` is UNPINNED in the dashboard's own requirements, so putting it
+    # on every agent host for an episode most of them never run buys a moving dependency
+    # for nothing. Set this true on the host that will run `--cert-episode`.
+    agent_cert_episode: false
     agent_home: /opt/mcp-agent
     agent_conf: /etc/mcp-agent
 
@@ -204,6 +210,16 @@
         name: "mcp>=1.2.0,<2"
         state: present
       when: not agent_skip_pip
+
+    # ps-cli reads the certificate bundle out of Secrets Safe. It takes its credentials
+    # from the ENVIRONMENT (PSCLI_CLIENT_ID / PSCLI_CLIENT_SECRET), which is why this adds
+    # a binary and not a stored secret: the worker passes, per invocation, the pair
+    # Workload Credentials handed it moments earlier.
+    - name: Install ps-cli for the certificate episode
+      ansible.builtin.pip:
+        name: beyondtrust-bips-cli
+        state: present
+      when: agent_cert_episode and not agent_skip_pip
 
     - name: Install the worker
       ansible.builtin.copy:

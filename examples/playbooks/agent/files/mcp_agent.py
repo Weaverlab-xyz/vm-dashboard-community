@@ -826,135 +826,141 @@ def probe_summary(result: dict) -> str:
 # for the unit's whole life), and the difference is why this is not the cell contradicting
 # itself.
 PSCLI_SERVICE = "secrets"
-PSCLI_VERB = "get"
+# `download-secret-file`, not `get`. The bundle is a FILE secret: `get -d` is the text
+# path, and secrets_backend_service's own field probing (Text / FileContent / Content /
+# Password) is written for text-type secrets that sometimes arrive under a file-ish name.
+# A genuine file attachment is a different verb, and it WRITES rather than printing --
+# which is why this function takes a destination directory.
+PSCLI_VERB = "download-secret-file"
+# THE ONE VALUE HERE NOBODY HAS VERIFIED. `-o` is taken (owner, and integer ids only --
+# see secrets_backend_service), so the output path flag is `-f` by convention rather than
+# by observation. If a live tenant disagrees, argparse says so immediately and this is the
+# single line to change; the refusal below names it so the error points here rather than
+# at the bundle.
+PSCLI_FILE_FLAG = "-f"
 
 
-def secrets_safe_file(title: str, *, api_url: str, client_id: str,
-                      client_secret: str, timeout: int = 60) -> bytes:
-    """One Secrets Safe file secret, as bytes. Never written to disk by this function.
+def download_secrets_safe_file(title: str, *, dest_dir: str, api_url: str,
+                               client_id: str, client_secret: str,
+                               timeout: int = 60) -> str:
+    """Download one Secrets Safe FILE secret into ``dest_dir``. Returns its path.
 
-    Mirrors ``secrets_backend_service.read_bt_secrets_safe`` -- same argv, same field
-    probing -- rather than inventing a second opinion about a shape that module already
-    settled against a live tenant.
+    Mirrors ``secrets_backend_service``'s ps-cli discipline -- service then verb, the
+    client pair in the environment -- and differs in the one way that matters: this is a
+    file attachment, so ps-cli writes it rather than printing it.
+
+    **The bundle lands on disk here, and that is the design rather than a slip.** The
+    episode owns a single 0700 temporary directory: the bundle arrives in it, openssl
+    opens it there, and the whole directory goes at the end. One guarded place beats a
+    blob in memory that has to be written out for openssl anyway.
+
+    THE PAIR GOES IN THE ENVIRONMENT, NEVER IN ARGV. /proc/<pid>/cmdline is
+    world-readable; /proc/<pid>/environ is readable only by the same user, which here is
+    root -- which already holds everything this worker has.
     """
-    import base64
     import subprocess as _sp
 
+    dest = os.path.join(dest_dir, "bundle.pfx")
     env = dict(os.environ)
     env.update({"PSCLI_API_URL": api_url, "PSCLI_CLIENT_ID": client_id,
                 "PSCLI_CLIENT_SECRET": client_secret})
     argv = ["ps-cli", "-y", "--format", "json", PSCLI_SERVICE, PSCLI_VERB,
-            "-t", title, "-d"]
+            "-t", title, PSCLI_FILE_FLAG, dest]
     try:
         out = _sp.run(argv, capture_output=True, text=True, timeout=timeout,
                       stdin=_sp.DEVNULL, env=env)
     except FileNotFoundError:
         raise SystemExit(
             "[agent] FATAL: ps-cli is not on PATH. The certificate episode needs it to "
-            "read the bundle from Secrets Safe — install beyondtrust-bips-cli, or "
-            "re-run the install play without agent_skip_pip.")
+            "download the bundle from Secrets Safe — re-run agent-install.yml with "
+            "agent_cert_episode=true, or install beyondtrust-bips-cli by hand on an "
+            "air-gapped host.")
     except _sp.TimeoutExpired:
         raise SystemExit("[agent] FATAL: ps-cli did not answer within "
-                         f"{timeout}s reading {title!r}.")
+                         f"{timeout}s downloading {title!r}.")
     if out.returncode != 0:
-        raise SystemExit("[agent] FATAL: ps-cli could not read the bundle "
-                         f"{title!r}: {scrub((out.stderr or out.stdout))[:400]}")
-
-    raw = (out.stdout or "").strip()
-    try:
-        data = json.loads(raw) if raw else ""
-    except ValueError:
-        data = raw
-    if isinstance(data, list):
-        data = data[0] if data else {}
-    value = ""
-    if isinstance(data, dict):
-        # The same four fields secrets_backend_service probes, in its order: ps-cli
-        # versions disagree about which one a file secret lands in.
-        for field in ("Text", "FileContent", "Content", "Password"):
-            if data.get(field):
-                value = data[field]
-                break
-    elif isinstance(data, str):
-        value = data
-    if not value:
-        raise SystemExit(f"[agent] FATAL: Secrets Safe returned no content for {title!r}.")
-
-    try:
-        blob = base64.b64decode(value, validate=True)
-    except Exception:  # noqa: BLE001 — not base64, so take the bytes as they came
-        blob = value.encode("utf-8", "surrogateescape")
-    # A PKCS#12 is DER: it starts with a SEQUENCE tag. Checking beats handing openssl
-    # something that is not a bundle and reading its error as a passphrase problem.
-    if not blob.startswith(b"\x30"):
+        detail = scrub((out.stderr or out.stdout))[:400]
+        hint = ""
+        if "invalid choice" in detail.lower() or "unrecognized" in detail.lower():
+            hint = (f" — this reads like ps-cli rejecting the argv rather than the "
+                    f"secret: {PSCLI_VERB!r} or its output flag {PSCLI_FILE_FLAG!r} may "
+                    "differ on this CLI version. Both are constants at the top of this "
+                    "file.")
+        raise SystemExit("[agent] FATAL: ps-cli could not download the bundle "
+                         f"{title!r}{hint}: {detail}")
+    if not os.path.exists(dest):
         raise SystemExit(
-            f"[agent] FATAL: {title!r} does not look like a PKCS#12 bundle (DER starts "
-            "0x30). If this Secrets Safe entry is a file attachment rather than a text "
-            "secret, it may need `ps-cli secrets download-secret-file` instead — a shape "
-            "this repo has not exercised.")
-    return blob
+            f"[agent] FATAL: ps-cli reported success but wrote nothing to {dest}. The "
+            f"output flag {PSCLI_FILE_FLAG!r} may not be the one this version takes.")
+    os.chmod(dest, 0o600)
+
+    # A PKCS#12 is DER: it starts with a SEQUENCE tag. Checking beats handing openssl
+    # something that is not a bundle and reading its error as a passphrase problem --
+    # which sends somebody to debug the wrong half of a two-half identity.
+    with open(dest, "rb") as fh:
+        head = fh.read(1)
+    if head != b"\x30":
+        raise SystemExit(
+            f"[agent] FATAL: {title!r} downloaded, but it does not look like a PKCS#12 "
+            "bundle (DER starts 0x30). Check that this Secrets Safe entry is the "
+            "certificate bundle rather than, say, its chain in PEM.")
+    return dest
 
 
-def cert_mtls_probe(*, endpoint: str, bundle: bytes, passphrase: str,
-                    expect_cn: str, verify: bool = True, timeout: int = 15) -> dict:
+def cert_mtls_probe(*, endpoint: str, bundle_path: str, passphrase: str,
+                    expect_cn: str, work_dir: str, verify: bool = True,
+                    timeout: int = 15) -> dict:
     """Present the client certificate to the lab's mTLS endpoint and read back the CN.
 
-    **The bundle and the key DO touch disk**, and this is the one place in this worker
-    where that is unavoidable: Python's ``ssl`` needs file paths for a client certificate,
-    and ``openssl`` needs a file to open a PKCS#12. So it happens inside a 0700
-    ``TemporaryDirectory`` removed in a ``finally``, the key is written 0600, and the
-    passphrase reaches openssl through the ENVIRONMENT rather than argv -- exactly as
-    ``examples/playbooks/certificates/ci-fetch-cert.yml`` does it, for the same reason.
+    Takes a PATH and a working directory rather than bytes, because the bundle already
+    arrives as a file: ps-cli downloads it, openssl opens it, and Python's ``ssl`` needs
+    file paths for a client certificate. Inventing a round trip through memory would add
+    a copy of a credential and remove nothing.
 
-    Saying that out loud beats letting a reader find the temporary file and conclude the
-    cell is careless about the thing it argues for.
+    **The caller owns ``work_dir`` and must remove it.** One guarded 0700 directory for
+    the whole episode — the bundle, the certificate and the key — is easier to reason
+    about, and to clean up, than one per step.
+
+    The passphrase reaches openssl through the ENVIRONMENT rather than argv, exactly as
+    ``examples/playbooks/certificates/ci-fetch-cert.yml`` does it and for the same reason.
     """
     import ssl
     import subprocess as _sp
-    import tempfile
     import urllib.error
     import urllib.request
 
-    with tempfile.TemporaryDirectory(prefix="mcp-agent-cert-") as work:
-        os.chmod(work, 0o700)
-        pfx = os.path.join(work, "bundle.pfx")
-        crt = os.path.join(work, "client.crt")
-        key = os.path.join(work, "client.key")
-        with open(pfx, "wb") as fh:
-            os.chmod(pfx, 0o600)
-            fh.write(bundle)
+    crt = os.path.join(work_dir, "client.crt")
+    key = os.path.join(work_dir, "client.key")
+    env = dict(os.environ, PFXPASS=passphrase)
+    for args, out_path in ((["-clcerts", "-nokeys"], crt),
+                           (["-nocerts", "-nodes"], key)):
+        r = _sp.run(["openssl", "pkcs12", "-in", bundle_path, "-passin", "env:PFXPASS",
+                     *args, "-out", out_path],
+                    capture_output=True, text=True, timeout=timeout,
+                    stdin=_sp.DEVNULL, env=env)
+        if r.returncode != 0:
+            raise SystemExit(
+                "[agent] FATAL: openssl could not open the bundle — the passphrase "
+                "and the bundle are two halves of one identity, so this usually "
+                f"means they are out of step: {scrub(r.stderr)[:300]}")
+    os.chmod(key, 0o600)
 
-        env = dict(os.environ, PFXPASS=passphrase)
-        for args, out_path in (
-                (["-clcerts", "-nokeys"], crt),
-                (["-nocerts", "-nodes"], key)):
-            r = _sp.run(["openssl", "pkcs12", "-in", pfx, "-passin", "env:PFXPASS",
-                         *args, "-out", out_path],
-                        capture_output=True, text=True, timeout=timeout,
-                        stdin=_sp.DEVNULL, env=env)
-            if r.returncode != 0:
-                raise SystemExit(
-                    "[agent] FATAL: openssl could not open the bundle — the passphrase "
-                    "and the bundle are two halves of one identity, so this usually "
-                    f"means they are out of step: {scrub(r.stderr)[:300]}")
-        os.chmod(key, 0o600)
+    ctx = ssl.create_default_context()
+    if not verify:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    ctx.load_cert_chain(certfile=crt, keyfile=key)
 
-        ctx = ssl.create_default_context()
-        if not verify:
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-        ctx.load_cert_chain(certfile=crt, keyfile=key)
-
-        req = urllib.request.Request(endpoint, headers={"Accept": "text/plain"})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:  # noqa: S310
-                body = resp.read().decode("utf-8", "replace")
-                status = resp.status
-        except urllib.error.HTTPError as exc:
-            body, status = exc.read().decode("utf-8", "replace"), exc.code
-        except Exception as exc:  # noqa: BLE001
-            raise SystemExit(f"[agent] FATAL: the mTLS endpoint {endpoint} did not "
-                             f"answer: {scrub(str(exc))}")
+    req = urllib.request.Request(endpoint, headers={"Accept": "text/plain"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:  # noqa: S310
+            body = resp.read().decode("utf-8", "replace")
+            status = resp.status
+    except urllib.error.HTTPError as exc:
+        body, status = exc.read().decode("utf-8", "replace"), exc.code
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(f"[agent] FATAL: the mTLS endpoint {endpoint} did not "
+                         f"answer: {scrub(str(exc))}")
 
     echoed = expect_cn and expect_cn in body
     return {"status": status, "expect_cn": expect_cn, "echoed": bool(echoed),
@@ -1262,18 +1268,27 @@ def run_cert_episode(args) -> int:
               "is the only moment a person gets a say.", flush=True)
         return 5
 
+    import tempfile
+
     try:
-        # HALF TWO: the bundle. Neither half is usable alone, which is the whole design.
-        print(f"[agent] {spiffe_id} · passphrase released; reading the bundle from "
-              f"Secrets Safe · {_now()}", flush=True)
-        bundle = secrets_safe_file(args.cert_bundle_title, api_url=args.ps_api_url,
-                                   client_id=ps_client_id,
-                                   client_secret=ps_client_secret)
-        result = cert_mtls_probe(endpoint=args.cert_endpoint, bundle=bundle,
-                                 passphrase=passphrase, expect_cn=args.cert_cn,
-                                 verify=not args.cert_insecure)
-        print(f"[agent] {spiffe_id} · {cert_probe_summary(result)} · {_now()}",
-              flush=True)
+        # ONE GUARDED DIRECTORY FOR THE WHOLE EPISODE. The bundle is downloaded into it,
+        # openssl writes the certificate and key beside it, and it all goes at the end --
+        # including on the failure paths below. This is the one place in this worker
+        # where a credential touches disk, and saying so beats letting somebody find it.
+        with tempfile.TemporaryDirectory(prefix="mcp-agent-cert-") as work:
+            os.chmod(work, 0o700)
+            # HALF TWO: the bundle. Neither half is usable alone, which is the design.
+            print(f"[agent] {spiffe_id} · passphrase released; downloading the bundle "
+                  f"from Secrets Safe · {_now()}", flush=True)
+            bundle_path = download_secrets_safe_file(
+                args.cert_bundle_title, dest_dir=work, api_url=args.ps_api_url,
+                client_id=ps_client_id, client_secret=ps_client_secret)
+            result = cert_mtls_probe(endpoint=args.cert_endpoint,
+                                     bundle_path=bundle_path, passphrase=passphrase,
+                                     expect_cn=args.cert_cn, work_dir=work,
+                                     verify=not args.cert_insecure)
+            print(f"[agent] {spiffe_id} · {cert_probe_summary(result)} · {_now()}",
+                  flush=True)
     finally:
         _checkin(base, headers, request_id, reason)
         print(f"[agent] {spiffe_id} · the request was checked back in · {_now()}",
@@ -1380,7 +1395,9 @@ def main(argv=None) -> int:
                     help="the subject the endpoint should echo back.")
     ap.add_argument("--cert-bundle-title",
                     default=os.environ.get("AGENT_CERT_BUNDLE", ""),
-                    help="the bundle's Secrets Safe title, e.g. cert/<system>/<account>.")
+                    help="the bundle's Secrets Safe title, e.g. cert/<system>/<account>. "
+                         "A FILE secret — ps-cli downloads it rather than printing it, "
+                         "and needs beyondtrust-bips-cli on this host.")
     ap.add_argument("--cert-account-id", type=int,
                     default=int(os.environ.get("AGENT_CERT_ACCOUNT_ID", "0") or 0),
                     help="the managed account holding the PKCS#12 passphrase.")

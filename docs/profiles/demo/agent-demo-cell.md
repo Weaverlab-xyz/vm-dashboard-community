@@ -269,13 +269,14 @@ does:
 > **No revocation checking.** The plugin consults neither CRLs nor OCSP. Short lifetimes
 > are the mitigation, and that is a deliberate design position.
 
-With a `certificates` link in place, `mcp_agent.py --cert-episode`:
+With a `certificates` link in place, `mcp_agent.py --cert-episode` — on a host
+installed with `agent_cert_episode=true`, which is what puts `ps-cli` there:
 
 ```
 [agent] spiffe://weaverlab.test/agent/mcp-reader · requesting the certificate identity behind svc-deploy-pipeline
 [agent] holding nothing: the Password Safe client pair came from Workload Credentials against this machine's own identity
 [agent] spiffe://weaverlab.test/agent/mcp-reader · WAITING for approval (20s) — this agent cannot authorise its own access
-[agent] spiffe://weaverlab.test/agent/mcp-reader · passphrase released; reading the bundle from Secrets Safe
+[agent] spiffe://weaverlab.test/agent/mcp-reader · passphrase released; downloading the bundle from Secrets Safe
 [agent] spiffe://weaverlab.test/agent/mcp-reader · identity proved — the endpoint answered 200 and echoed svc-deploy-pipeline
 [agent] spiffe://weaverlab.test/agent/mcp-reader · the request was checked back in
 ```
@@ -285,10 +286,16 @@ honours it: the PKCS#12 **passphrase** is the managed account's credential, fetc
 through the same recorded request as the cluster token; the **bundle** it opens is a
 Secrets Safe file secret. Retrieving one without the other yields nothing.
 
-Secrets Safe is part of Password Safe — one tenant, one client pair — so the worker reads
-the bundle with `ps-cli`, the same path the dashboard uses. The pair reaches it through
+Secrets Safe is part of Password Safe — one tenant, one client pair — so the worker goes
+after the bundle with `ps-cli`, the same path the dashboard uses. The pair reaches it through
 the **environment**, never argv: `/proc/<pid>/cmdline` is world-readable and
 `/proc/<pid>/environ` is not.
+
+The bundle is a **file** secret, not text, so the verb is `secrets download-secret-file`
+and ps-cli *writes* it rather than printing it. That is why the episode opens a directory
+before it fetches anything: the bundle lands there, `openssl` opens it there, and the whole
+directory goes at the end. One guarded place, named in the section below rather than left
+to be discovered.
 
 ### The approval is the only moment anybody gets a say
 
@@ -329,12 +336,14 @@ what it means that this one does not.
 
 ### What this demo does not prove
 
-- **The bundle and the private key touch disk**, in one place. Python's `ssl` needs file
-  paths for a client certificate and `openssl` needs a file to open a PKCS#12, so the
-  episode uses a `0700` temporary directory, writes the key `0600`, passes the passphrase
-  through `PFXPASS` rather than the command line, and removes the directory on the failure
-  path too. It is the one unavoidable exception to "nothing is stored on this host", and
-  it is better said than found.
+- **The bundle and the private key touch disk**, in one place. There is no version of
+  this that keeps them out of the filesystem: the bundle is a file secret and ps-cli
+  downloads it, `openssl` needs a file to open a PKCS#12, and Python's `ssl` needs file
+  paths for a client certificate. So the episode bounds it instead — **one** `0700`
+  temporary directory holds the bundle, the certificate and the key; the key is written
+  `0600`, the passphrase reaches `openssl` through `PFXPASS` rather than the command line,
+  and the directory goes on the failure path too. It is the one unavoidable exception to
+  "nothing is stored on this host", and it is better said than found.
 - **Revocation on six of nine backends only.** EST, step-ca and `selfsigned` have no
   revocation operation at all, so on those the certificate stays valid until it expires
   whatever you do. Check which backend the CA uses before promising a revoke.

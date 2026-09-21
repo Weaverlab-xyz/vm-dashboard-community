@@ -836,8 +836,9 @@ Run these in order; each is cheap and fails fast.
 `ci-fetch-cert.yml` proves the mechanism, and it does so with a Password Safe client id
 and secret supplied to the run. The [Agent Demo Cell](../profiles/demo/agent-demo-cell.md)
 is the consumer that has neither: it reaches Password Safe with a workload identity
-brokered by Workload Credentials, requests the passphrase as a recorded request, reads the
-bundle with `ps-cli`, and presents the certificate to an mTLS endpoint.
+brokered by Workload Credentials, requests the passphrase as a recorded request,
+downloads the bundle with `ps-cli secrets download-secret-file` into one `0700` directory
+it removes afterwards, and presents the certificate to an mTLS endpoint.
 
 It is also where the boundary below gets demonstrated rather than described. Revoke the
 certificate, run the agent again, and watch it work — because nothing on that path checks.
