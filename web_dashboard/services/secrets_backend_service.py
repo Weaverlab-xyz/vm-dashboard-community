@@ -12,10 +12,13 @@ these blocking SDK calls off the event loop.
 The "database" backend is handled entirely by config_service itself and does
 not appear here.
 """
+import contextlib
 import json
 import logging
 import os
+import shutil
 import subprocess
+import tempfile
 
 logger = logging.getLogger(__name__)
 
@@ -590,7 +593,72 @@ def test_bt_secrets_safe() -> dict:
     return {"ok": True, "message": f"Connected to BeyondTrust Secrets Safe at {host} (folder: {folder})."}
 
 
-def write_bt_secrets_safe(key: str, value: str) -> str:
+def _bt_file_name_for(title: str, file_name: str = "") -> str:
+    """The name Password Safe will record as the secret's ``FileName``.
+
+    It comes from the **basename of the uploaded file**, so a temp file called
+    ``tmp8fq2x1`` would be what the console shows forever. The name is therefore
+    chosen deliberately: the caller's if given, otherwise the secret's own title.
+
+    Sanitised rather than validated — this ends up as a path component, and the
+    title reaches here from an operator-supplied key, so a ``../`` or a separator in
+    it must not escape the temp directory.
+    """
+    raw = (file_name or (title or "").rsplit("/", 1)[-1] or "secret").strip()
+    safe = "".join(ch for ch in raw if ch.isalnum() or ch in "._- ").strip(" .")
+    return safe or "secret"
+
+
+@contextlib.contextmanager
+def _bt_file_payload(value: str, title: str, file_name: str = ""):
+    """Yield a path to ``value`` on disk, for ``create-secret -fp``.
+
+    There is no way to hand ps-cli a file secret's body inline: ``-fp`` takes a path
+    and the CLI reads it. Nor can a `raw` call substitute — uploading is multipart and
+    ``raw`` sends `json=`, so the file verbs are the only route in.
+
+    The file therefore exists, briefly, holding a secret. It is written **0600 inside
+    a 0700 private directory** so the mode is right from `os.open` onward rather than
+    after a chmod, and the whole directory is removed in `finally` — including on the
+    ps-cli failure path, which is exactly when a leftover would go unnoticed.
+
+    Text only, matching the read side: `value` is a `str` everywhere in this module,
+    and a PKCS#12 could not survive the round trip anyway.
+    """
+    tmpdir = tempfile.mkdtemp(prefix="btfile-")
+    try:
+        os.chmod(tmpdir, 0o700)
+        path = os.path.join(tmpdir, _bt_file_name_for(title, file_name))
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(value)
+        yield path
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _bt_payload_args(value: str, title: str, as_file: bool, file_name: str = ""):
+    """``(context manager, argv fragment)`` for the body of a write.
+
+    Text and file secrets differ only in these two arguments — `--text <value>` versus
+    `-fp <path>` — and ps-cli infers the secret TYPE from which one it is given. Note
+    the flag is `-fp` / `--file-path`: `ps-cli secrets -h` advertises it as `--path`,
+    which is the flag `secrets get` uses for something else entirely.
+    """
+    if not as_file:
+        return contextlib.nullcontext(None), ["--text", value]
+    return _bt_file_payload(value, title, file_name), None
+
+
+def write_bt_secrets_safe(key: str, value: str, *, as_file: bool = False,
+                          file_name: str = "") -> str:
+    """Create a Secrets Safe secret. ``as_file`` makes it a **file** secret.
+
+    The default stays a text secret: that is what every dashboard config value is, and
+    a file secret costs a second round trip to read back. Pass ``as_file`` for content
+    that belongs in a file — a PEM bundle, a kubeconfig — where the type is what makes
+    it usable by the things that consume it from Secrets Safe directly.
+    """
     _, folder = _bt_cfg()
     owner = _bt_owner_id()
     if not folder:
@@ -616,9 +684,12 @@ def write_bt_secrets_safe(key: str, value: str) -> str:
     # Dashboard values are JSON blobs that can exceed BeyondTrust's password
     # length limit (notably gcp_service_account_json), and text secrets carry
     # arbitrary content without the credential-style username pairing.
-    args = ["secrets", "create-secret", "-t", title, "--text", value,
-            "-o", owner, "-ot", "User", "-fid", folder_id]
-    _ps_run(args, timeout=30)
+    payload, body = _bt_payload_args(value, title, as_file, file_name)
+    with payload as payload_path:
+        args = ["secrets", "create-secret", "-t", title,
+                *(body if body is not None else ["-fp", payload_path]),
+                "-o", owner, "-ot", "User", "-fid", folder_id]
+        _ps_run(args, timeout=60 if as_file else 30)
     # ps-cli has been observed to exit 0 from `create-secret` even when the
     # underlying write was silently dropped. Round-trip the title through
     # `secrets get` to confirm the row is actually there and lives in the
@@ -674,6 +745,12 @@ def _read_bt_file_secret(secret_id: str, ref: str) -> str:
     PKCS#12, a `.p12` or DER does not. Rather than hand back a plausible-looking but
     mangled string, a payload showing decode damage is refused. Anything needing real
     bytes has to call the endpoint directly, off ps-cli entirely.
+
+    **Trailing newlines do not survive.** The body arrives on ps-cli's stdout and
+    ``_ps_run`` strips it, so a stored PEM ending in a newline reads back without
+    one. Nothing here can recover it, and for PEM it does not matter — but it is why
+    ``update_bt_secrets_safe`` compares with ``rstrip`` on the file path rather than
+    treating the difference as a write that did not persist.
     """
     out = _ps_run(["raw", "GET", f"Secrets-Safe/Secrets/{secret_id}/file/download"],
                   timeout=60)
@@ -1632,10 +1709,20 @@ def update_bt_secrets_safe(ref: str, value: str) -> str:
     ``<Folder>/<Folder>/<Title>``, and would also drag a secret the operator
     browsed to in some other folder into the configured one.
 
-    ps-cli exposes no update verb, so the write reuses ``create-secret`` at the
-    existing title. That is precisely the call this module has already seen exit 0
-    without persisting, so the value is read back and compared: an edit that did
-    not take raises instead of reporting a successful save.
+    The write reuses ``create-secret`` at the existing title. (``update-secret``
+    exists, but is addressed by ``-sid`` GUID rather than by title, so it would need
+    a lookup this path does not otherwise do.) ``create-secret`` is precisely the
+    call this module has already seen exit 0 without persisting, so the value is read
+    back and compared: an edit that did not take raises instead of reporting a
+    successful save.
+
+    **The existing secret's TYPE is preserved.** ps-cli infers the type from the body
+    argument, so writing ``--text`` over a **file** secret would not just fail to
+    update it — it would change what the secret *is*, and `read_bt_secrets_safe`
+    routes on exactly that field. An operator editing a certificate bundle in Browse
+    & Edit would have silently converted it, and anything reading it through the
+    download endpoint would then break. So the type is read first and matched, along
+    with the recorded ``FileName`` so an edit does not rename the file either.
     """
     folder, title = _bt_split_ref(ref)
     if not title:
@@ -1655,9 +1742,21 @@ def update_bt_secrets_safe(ref: str, value: str) -> str:
             f"secret {ref!r} cannot be updated. `folders list` returned no folder "
             f"by that name."
         )
-    _ps_run(["secrets", "create-secret", "-t", ref, "--text", value,
-             "-o", _bt_owner_id(), "-ot", "User", "-fid", folder_id], timeout=30)
-    if read_bt_secrets_safe(ref) != value:
+    existing = _ps_run(["secrets", "get", "-t", ref])
+    entry = existing[0] if isinstance(existing, list) and existing else {}
+    as_file = str(entry.get("SecretType") or "").strip().lower() == "file"
+    payload, body = _bt_payload_args(value, ref, as_file, entry.get("FileName") or "")
+    with payload as payload_path:
+        _ps_run(["secrets", "create-secret", "-t", ref,
+                 *(body if body is not None else ["-fp", payload_path]),
+                 "-o", _bt_owner_id(), "-ot", "User", "-fid", folder_id],
+                timeout=60 if as_file else 30)
+    # A file secret's body reaches us through ps-cli's stdout, which `_ps_run` strips,
+    # so trailing newlines cannot survive the round trip and are not evidence of a
+    # failed write. Compare without them rather than raising on a value that did save.
+    read_back = read_bt_secrets_safe(ref)
+    if (read_back.rstrip("\n") if as_file else read_back) != (
+            value.rstrip("\n") if as_file else value):
         raise ValueError(
             f"BeyondTrust secret {ref!r} still reads back its previous value after "
             f"the update — ps-cli exited 0 but did not persist the new one. "
