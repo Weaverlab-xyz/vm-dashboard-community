@@ -980,14 +980,19 @@ const WLA = 'workload_lab/_agent.html';
 const mkAgent = (over) => {
   const o = {};
   for (const m of ['tokenLabel', 'tokenClass', 'episodeOpen', 'spendable', 'linkKind',
-                   'credentialLabel', 'selectedLab', 'labChanged', 'hostsForCloud',
-                   'canMint', 'mintReady'])
+                   'episodeMechanism', 'credentialLabel', 'selectedLab', 'labChanged',
+                   'hostsForCloud', 'canMint', 'mintReady', 'mechanisms', 'choices',
+                   'blankLinkForm', 'mechanismChanged', 'linkReady'])
     Object.assign(o, eval('({' + extract(WLA, m) + '})'));
   return Object.assign(o, {
     readOnly: false,
     form: {name: '', spire_lab_id: '', cloud: '', host_ref: '', pat_user_id: ''},
-    options: {labs: [], users: [], hosts: {}, spendable: ['kubernetes'],
-              credentials: {cloud: [], kubernetes: []}},
+    linkForm: {mechanism: '', credential_id: '', account_name: '', bundle_title: '',
+               expect_cn: ''},
+    options: {labs: [], users: [], hosts: {},
+              spendable: ['kubernetes', 'certificates'],
+              episode_mechanisms: ['kubernetes'],
+              credentials: {cloud: [], kubernetes: [], certificates: []}},
   }, over || {});
 };
 
@@ -1020,6 +1025,8 @@ ok(WLA + ' a kubernetes link renders as a capability',
    mkAgent().linkKind({linked_mechanism: 'kubernetes'}) === 'capability');
 ok(WLA + ' a cloud link renders as accountability',
    mkAgent().linkKind({linked_mechanism: 'cloud'}) === 'accountability');
+ok(WLA + ' a certificate link renders as a capability too',
+   mkAgent().linkKind({linked_mechanism: 'certificates'}) === 'capability');
 ok(WLA + ' with no options loaded the tab claims neither',
    mkAgent({options: {labs: [], users: [], hosts: [], spendable: [], credentials: {}}})
      .linkKind({linked_mechanism: 'kubernetes'}) === '');
@@ -1035,6 +1042,29 @@ ok(WLA + ' a released request frees it',
 ok(WLA + ' no request at all is not an open one',
    mkAgent().episodeOpen({episode_state: ''}) === false);
 
+// SPENDABLE IS NOT THE EPISODE GATE, and confusing the two is what made the
+// Request-access button lie. `certificates` is spendable and has NO episode route on
+// this dashboard — that episode is one shot on the host — so a button gated on
+// spendability posted a certificate link at /k8s-request, which looked it up in the
+// TOKEN table, missed, and refused a perfectly valid link with "the linked Kubernetes
+// token no longer exists. Unlink and relink." If these two answers ever agree for
+// `certificates` again, that refusal is back.
+ok(WLA + ' a certificates link IS spendable',
+   mkAgent().spendable({linked_mechanism: 'certificates'}) === true);
+ok(WLA + ' and it still gets no cluster-access button',
+   mkAgent().episodeMechanism({linked_mechanism: 'certificates'}) === '');
+ok(WLA + ' a kubernetes link is the one episode this dashboard opens',
+   mkAgent().episodeMechanism({linked_mechanism: 'kubernetes'}) === 'kubernetes');
+ok(WLA + ' a cloud link gets no episode',
+   mkAgent().episodeMechanism({linked_mechanism: 'cloud'}) === '');
+ok(WLA + ' an unlinked agent gets no episode',
+   mkAgent().episodeMechanism({linked_mechanism: ''}) === '');
+// Resolved server-side for the same reason `linkKind` is: a reader whose /options call
+// was refused has no basis to offer the button, and could not press it anyway.
+ok(WLA + ' with no options loaded no episode is offered',
+   mkAgent({options: {episode_mechanisms: [], credentials: {}}})
+     .episodeMechanism({linked_mechanism: 'kubernetes'}) === '');
+
 // A credential the other tab no longer lists must not degrade into a bare uuid.
 (() => {
   const a = mkAgent({options: {labs: [], users: [], hosts: {}, spendable: [],
@@ -1046,6 +1076,68 @@ ok(WLA + ' no request at all is not an open one',
   ok(WLA + ' a vanished credential falls back to the mechanism',
      a.credentialLabel({linked_mechanism: 'cloud', linked_credential_id: 'x'})
        === 'cloud');
+})();
+
+// The certificates listing is read from the same place, so an empty `certificates` key —
+// which is what /options emitted before it populated one — degrades a linked CA to the
+// bare word "certificates" beside a uuid nobody can look up.
+(() => {
+  const a = mkAgent({options: {credentials: {certificates: [{id: 'ca1',
+                                                             name: 'demo-ca'}]}}});
+  ok(WLA + ' a linked CA shows its name',
+     a.credentialLabel({linked_mechanism: 'certificates', linked_credential_id: 'ca1'})
+       === 'certificates · demo-ca');
+})();
+
+// A certificate link cannot be made from a picker that does not offer one. The note
+// leads with the LIMIT rather than the capability, because this is the mechanism whose
+// limit an operator assumes away: revoking it stops nothing.
+(() => {
+  const a = mkAgent();
+  ok(WLA + ' the picker offers all three linkable mechanisms',
+     a.mechanisms().map(m => m.key).join(',') === 'cloud,kubernetes,certificates');
+  const cert = a.mechanisms().find(m => m.key === 'certificates');
+  ok(WLA + ' the certificate note says revoking it does not stop the agent',
+     /revoking the certificate does not stop it/i.test(cert.note));
+  ok(WLA + ' and that its episode is not run from here',
+     /on the host/i.test(cert.note));
+  // The picker's keys have to be keys of the credentials map, or choosing a mechanism
+  // offers an empty list and the option is inert for no stated reason.
+  a.linkForm.mechanism = 'certificates';
+  ok(WLA + ' choosing certificates reads the certificates listing',
+     Array.isArray(a.choices()));
+})();
+
+// A CA IS NOT AN IDENTITY. It carries one managed account per identity and this
+// dashboard tracks none of them individually, so the link has to name which one — and
+// the route would accept a blank name and return notes promising nothing.
+(() => {
+  const a = mkAgent();
+  ok(WLA + ' nothing picked, nothing to link', a.linkReady() === false);
+  Object.assign(a.linkForm, {mechanism: 'kubernetes', credential_id: 'k1'});
+  ok(WLA + ' a kubernetes link needs only its credential', a.linkReady() === true);
+  Object.assign(a.linkForm, a.blankLinkForm(),
+                {mechanism: 'certificates', credential_id: 'ca1'});
+  ok(WLA + ' a CA alone does not name an identity', a.linkReady() === false);
+  a.linkForm.account_name = 'svc-deploy-pipeline';
+  ok(WLA + ' the passphrase half alone is not both halves', a.linkReady() === false);
+  a.linkForm.bundle_title = 'cert/demo-ca/svc-deploy-pipeline';
+  ok(WLA + ' both halves named, the link can be made', a.linkReady() === true);
+  ok(WLA + ' the echoed subject stays optional', !a.linkForm.expect_cn);
+})();
+
+// Switching mechanism drops the identity fields with the credential. A name left behind
+// from an abandoned certificate choice rides along on a kubernetes link, where the route
+// ignores it — then reappears the next time certificates is picked, looking saved.
+(() => {
+  const a = mkAgent();
+  Object.assign(a.linkForm, {
+    mechanism: 'certificates', credential_id: 'ca1', account_name: 'svc-deploy-pipeline',
+    bundle_title: 'cert/demo-ca/svc-deploy-pipeline', expect_cn: 'svc-deploy-pipeline'});
+  a.mechanismChanged('kubernetes');
+  ok(WLA + ' switching mechanism clears the credential and the identity fields',
+     a.linkForm.mechanism === 'kubernetes' && !a.linkForm.credential_id
+     && !a.linkForm.account_name && !a.linkForm.bundle_title && !a.linkForm.expect_cn);
 })();
 
 // Choosing a lab moves the cloud and the host with it: the worker attaches to a machine

@@ -227,10 +227,12 @@ def build_options(
     is a failure that would otherwise surface as a 400 on submit, or — worse — as a
     worker that installs cleanly and then 404s every poll in front of an audience.
     """
-    from ..services import (config_service, feature_flags, spire_lab_service,
-                            workgroup_service,
+    from ..config import settings
+    from ..services import (cert_lab_service as cls, config_service, feature_flags,
+                            spire_lab_service, workgroup_service,
                             workload_cloud_service as wcs,
                             workload_k8s_service as wks)
+    from .cert_lab import _visible as _ca_visible
     from .spire_lab import _visible as _lab_visible
 
     missing = []
@@ -332,6 +334,46 @@ def build_options(
             "Password Safe), so there is no token for an agent to request. That is the "
             "second demo — an agent that cannot authorise its own access — and without "
             "it only the revoke beat is available.")
+    # The Certificate tab's CAs. Its own flag and its own visibility rule, both borrowed
+    # rather than restated: a CA a caller cannot see on that tab must not become
+    # selectable here, and `api/cert_lab._visible` is CREATOR-scoped for a non-admin
+    # where the SPIRE and agent lists are workgroup-or-creator. Reimplementing the looser
+    # one here would disclose rows that tab does not.
+    if feature_flags.enabled("cert_lab_enabled", settings.cert_lab_enabled):
+        for row in cls.list_labs(db):
+            if (row.status or "") == "deleted" or not _ca_visible(row, current_user):
+                continue
+            available = (row.status or "") == "available"
+            credentials["certificates"].append({
+                "id": row.id, "name": row.name or "",
+                "cloud": row.cloud or "",
+                # "onboarded" only when the dashboard registered an identity against this
+                # CA. Its ABSENCE is not rendered, because the row tracks the identity IT
+                # created and an operator may have onboarded others by hand — saying "no
+                # identity" would be a claim this row cannot make.
+                "detail": " · ".join(x for x in (
+                    row.project or "", row.location or "",
+                    "onboarded" if row.ps_account_id else "") if x),
+                "state": "ready" if available else (row.status or "unknown"),
+                # The same shape as the unrotated Kubernetes token above, and the same
+                # reasoning: the refusal lives server-side (see `link_agent`), so the
+                # picker greys the row out rather than letting the operator discover it
+                # as a 400. An identity against a CA that is not built yet produces a
+                # managed system that fails every rotation, so there would be nothing
+                # for the agent to request.
+                "linkable": available,
+                "why": ("" if available else
+                        f"{row.name} is {row.status or 'unknown'}, not available. An "
+                        "identity onboarded against a CA that is not built yet fails "
+                        "every rotation, so the agent would have nothing to request. "
+                        "Finish the build on the Certificates tab first."),
+            })
+    else:
+        missing.append(
+            "the Certificate Lab is off, so there is no certificate identity for an "
+            "agent to request. That is the third demo — the credential nobody can take "
+            "away — and it is the one that makes the other two worth having. Turn on "
+            "the Certificate Lab preview under Settings → Features.")
 
     return {
         "clouds": list(spire_lab_service.PROVISIONING_CLOUDS),
@@ -352,10 +394,16 @@ def build_options(
                       "max": agentcell_service.MAX_PAT_HOURS},
         "spiffe_path": agentcell_service.AGENT_SPIFFE_PATH,
         "credentials": credentials,
-        # Which of the two links is a CAPABILITY. The page must not render them alike:
-        # a governance record that reads as a capability is this feature's headline
+        # Which links are a CAPABILITY. The page must not render them alike: a
+        # governance record that reads as a capability is this feature's headline
         # failure mode, and the reverse is the Kubernetes one.
         "spendable": list(agentcell_service.SPENDABLE_MECHANISMS),
+        # And which of THOSE this dashboard can open an episode for, which is a
+        # different question and the one the page's Request-access button belongs to.
+        # `certificates` is spendable with no route here — its episode is one shot on
+        # the host — so gating that button on `spendable` posts a certificate link at
+        # the Kubernetes route, which misses and refuses it as a token that vanished.
+        "episode_mechanisms": list(agentcell_service.EPISODE_MECHANISMS),
         "episode": {"default_minutes": agentcell_service.DEFAULT_DURATION_MINUTES,
                     "max_minutes": agentcell_service.MAX_WAIT_MINUTES * 2},
         "mcp_enabled": mcp_on,
@@ -381,6 +429,11 @@ def link_agent(
       * ``kubernetes`` is a **capability**: the worker reaches Password Safe holding
         nothing, so it can request that token. The notes lead with what the approval
         does and does not gate, because assuming it gates use is the failure mode here.
+      * ``certificates`` is a capability too, and the one whose limit is easiest to
+        assume away: the notes lead with what taking it away **cannot** do, because
+        nothing on that path checks a CRL or OCSP. It also has **no episode route
+        here** — that episode is one shot on the host — so the page must not offer a
+        Request-access button for it (see ``EPISODE_MECHANISMS``).
     """
     row = db.query(AgentCell).filter(AgentCell.id == agent_id).first()
     if not row:
@@ -489,6 +542,7 @@ def request_cluster_access(
         raise HTTPException(status_code=404, detail="No such agent cell.")
 
     for problem in (agentcell_service.episode_link_problem(row),
+                    agentcell_service.cluster_episode_mechanism_problem(row),
                     agentcell_service.episode_problem(row)):
         if problem:
             raise HTTPException(status_code=400, detail=problem)

@@ -35,6 +35,9 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-agentcell-link")
 _API = os.path.join(_ROOT, "web_dashboard", "api", "agentcell.py")
 _DB = os.path.join(_ROOT, "web_dashboard", "database.py")
 _DOC = os.path.join(_ROOT, "docs", "profiles", "demo", "agent-demo-cell.md")
+_SVC = os.path.join(_ROOT, "web_dashboard", "services", "agentcell_service.py")
+_TAB = os.path.join(_ROOT, "web_dashboard", "templates", "workload_lab",
+                    "_agent.html")
 
 from web_dashboard.services import agentcell_service as A  # noqa: E402
 
@@ -251,6 +254,109 @@ def test_the_page_states_what_the_approval_does_not_gate():
     assert "ServiceAccount" in doc, \
         "the page does not name the only hard kill switch"
 
+
+
+# -- the tab has to offer what the route accepts --------------------------------
+
+def test_the_options_route_populates_every_linkable_mechanism():
+    """`build_options` seeds `credentials` from LINKABLE_MECHANISMS and then fills the
+    keys one branch at a time, so adding a mechanism to that tuple emits an EMPTY list
+    under its name rather than a failure. An empty list is indistinguishable on the page
+    from a tab with no rows -- "That tab has no rows to link. Create one there first." --
+    so the mechanism is linkable by the API and unreachable from the UI."""
+    body = _code(_API).split("def build_options(", 1)[1].split("def link_agent(", 1)[0]
+    for mechanism in A.LINKABLE_MECHANISMS:
+        assert f'credentials["{mechanism}"].append(' in body, (
+            f"/options never populates credentials[{mechanism!r}], so the picker offers "
+            f"an empty list for a mechanism the link route accepts")
+
+
+def test_the_certificates_listing_borrows_the_certificate_tabs_visibility_rule():
+    """Creator-scoped for a non-admin, which is NOT this router's own rule. A CA a
+    caller cannot see on the Certificates tab must not become selectable here, and
+    restating the looser workgroup-or-creator rule would disclose rows that tab does
+    not."""
+    body = _code(_API).split("def build_options(", 1)[1].split("def link_agent(", 1)[0]
+    assert "from .cert_lab import _visible" in body,         "the certificates listing does not reuse the Certificate tab's visibility rule"
+    assert "_ca_visible(row, current_user)" in body
+    assert 'cert_lab_enabled' in body,         "the certificates listing is not gated on the Certificate Lab's own flag"
+
+
+def test_the_picker_offers_every_linkable_mechanism():
+    """The failure this catches is silent in both directions: the route accepts
+    `certificates` and the tab's `mechanisms()` listed two, so the link could be made by
+    curl and not by anybody using the page it was built for."""
+    tab = _read(_TAB)
+    keys = set(re.findall(r"\{ key: '([a-z]+)'", tab))
+    for mechanism in A.LINKABLE_MECHANISMS:
+        assert mechanism in keys, (
+            f"the Agent tab's mechanisms() does not offer {mechanism!r}, so that link "
+            f"cannot be made from the UI at all")
+
+
+def test_the_link_form_carries_the_fields_the_route_takes():
+    """A CA row is not an identity -- it carries one managed account per identity and
+    this dashboard tracks none of them individually -- so the three fields
+    `AgentCellLinkRequest` gained are how the link names which one. Without them the
+    route takes its blanks and returns notes promising an empty account and an empty
+    bundle."""
+    tab = _read(_TAB)
+    for field in ("account_name", "bundle_title", "expect_cn"):
+        assert f'x-model="linkForm.{field}"' in tab, (
+            f"the link modal has no field for {field!r}, which the link route accepts "
+            f"and the certificate notes render")
+    assert "linkReady()" in tab,         "the Link button does not require the identity a CA row cannot supply"
+
+
+# -- the episode the dashboard does NOT own ------------------------------------
+
+def test_spendable_is_not_the_episode_gate():
+    """The one that shipped broken. `certificates` is spendable and has no episode route
+    here, so a panel gated on spendability offered a Request-access button whose handler
+    posts at /k8s-request -- which looks the credential up in the TOKEN table, misses,
+    and refuses a perfectly valid link as one whose credential no longer exists."""
+    assert "certificates" in A.SPENDABLE_MECHANISMS
+    assert "certificates" not in A.EPISODE_MECHANISMS, (
+        "certificates now claims a dashboard episode route — if one was added, the tab "
+        "must dispatch on row.linked_mechanism rather than share /k8s-request")
+    assert set(A.EPISODE_MECHANISMS).issubset(set(A.SPENDABLE_MECHANISMS)),         "an episode is offered for a mechanism no worker can spend"
+
+
+def test_the_cluster_route_refuses_a_certificate_link_by_name():
+    """Not with the Kubernetes lookup's 404. That message accuses a valid link of having
+    lost its credential and sends the operator to unlink the one thing that was right."""
+    row = type("Row", (), {"linked_mechanism": "certificates", "episode_state": ""})()
+    msg = A.cluster_episode_mechanism_problem(row)
+    assert msg, "a certificates link is accepted for a cluster-access request"
+    assert "cert-episode" in msg,         "the refusal does not say where that episode actually runs"
+    assert "no longer exists" not in msg and "Unlink" not in msg,         "the refusal still points the operator at undoing a valid link"
+    k8s = type("Row", (), {"linked_mechanism": "kubernetes", "episode_state": ""})()
+    assert A.cluster_episode_mechanism_problem(k8s) == ""
+    unlinked = type("Row", (), {"linked_mechanism": "", "episode_state": ""})()
+    assert A.cluster_episode_mechanism_problem(unlinked) == "",         "an unlinked agent gets this refusal instead of episode_link_problem's, which "        "names the remedy"
+
+
+def test_the_refusal_happens_before_the_token_lookup():
+    """Order is the whole point: the lookup is what produces the misleading 404, so the
+    mechanism check has to run first or the message never changes."""
+    body = _code(_API).split("def request_cluster_access(", 1)[1]
+    body = body.split("def release_cluster_access(", 1)[0]
+    guard = body.index("cluster_episode_mechanism_problem")
+    lookup = body.index("wks.get_row")
+    assert guard < lookup,         "the Kubernetes lookup runs before the mechanism check, so its 404 still answers"
+
+
+def test_the_tab_says_where_the_certificate_episode_runs():
+    """A capability with no button is a dead end unless the page says why. The tab has
+    no route to offer, exactly as it has none for the two install playbooks, so it names
+    the command and the journal instead."""
+    tab = _read(_TAB)
+    assert "episodeMechanism(row)" in tab,         "the episode panel is not gated on the mechanism this dashboard has a route for"
+    panel = tab.split("Certificate use", 1)
+    assert len(panel) == 2, "the tab never mentions the certificate episode"
+    panel = panel[1][:1600]
+    assert "--cert-episode" in panel,         "the tab does not name the run that spends a certificate link"
+    assert "CRL" in panel or "revoking this certificate will not stop" in panel.lower(),         "the tab does not say that revoking the certificate stops nothing"
 
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

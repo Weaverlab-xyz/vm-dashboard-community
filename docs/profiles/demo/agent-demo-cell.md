@@ -21,7 +21,7 @@ placement is the argument. Every other tab on that page answers *how does a mach
 credential* — a certificate, a SPIFFE identity, a Kubernetes token, a short-lived cloud
 credential — and each stays a description of a mechanism until something holds one. This
 cell is that something: it attests to the **SPIRE** tab's trust domain, and it can be made
-answerable for the **Cloud** tab's lease or ask for the **Kubernetes** tab's token. Turning
+answerable for the **Cloud** tab's lease, ask for the **Kubernetes** tab's token, or hold the **Certificate** tab's identity. Turning
 the preview on makes the Workload Lab reachable on its own, so the tab cannot be switched
 on and then be unfindable.
 
@@ -187,6 +187,7 @@ one lookup rather than a conversation.
 |---|---|---|
 | `cloud` | **accountability only** | That tab's credential *"is returned to nobody"* by design, so no worker can spend it. The link records a lease whose state is worth reporting beside the agent. |
 | `kubernetes` | **a capability** | The worker reaches Password Safe holding nothing, so it can genuinely *request* that tab's token — subject to whatever the access policy requires. |
+| `certificates` | **a capability, and the one nobody can take away** | The same client pair opens both halves — the PKCS#12 passphrase from the managed account and the bundle from Secrets Safe. A CA row is not an identity, so the link names the managed account and the bundle title. **There is no Request-access button for it:** that episode is one shot on the host, not a route this dashboard owns. |
 
 > **An earlier version of this page said no Workload Lab credential could reach this
 > worker without it already holding one.** That stopped being true when the worker gained
@@ -194,8 +195,8 @@ one lookup rather than a conversation.
 > Workload Credentials, holding nothing at all. The Kubernetes tab's own sentence — *"the
 > consumer is a program with a Password Safe API client"* — describes this worker.
 
-**One link at a time.** An agent answerable for a cloud lease *and* a cluster token would
-be the most over-credentialed principal in the estate, which is the arrangement this cell
+**One link at a time.** An agent answerable for a cloud lease *and* a cluster token *and*
+a certificate would be the most over-credentialed principal in the estate, which is the arrangement this cell
 argues against. Unlink before relinking, so widening is a decision rather than an
 accumulation.
 
