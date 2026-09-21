@@ -98,6 +98,11 @@ carries the guard; `services/ps_vm_hook.py` documents the methods.
 ## Baking it
 
 1. **Images → Build** in the dashboard, source image = your imported VyOS image.
+   On GCP that means the **Custom image** mode of the source control and the
+   image's exact name — the default mode takes a public image *family*, and an
+   imported image has none, so a family can never name it. The bake then fails
+   on the vyatta check a minute in, against whatever Debian the family resolved
+   to. AWS is the same idea with its literal source AMI.
 2. Paste `vyos-cell.sh` as the provisioner script.
 3. Set any build env from the table above.
 4. Name the output image `vyos-cell`.

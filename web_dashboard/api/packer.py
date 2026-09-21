@@ -119,8 +119,12 @@ def build_gcp_image(
     current_user: User = Depends(require_permission("gcp", "write")),
 ):
     """Build a GCP Custom Image using Packer (googlecompute builder)."""
-    if not req.source_image:
-        raise HTTPException(status_code=400, detail="source_image is required.")
+    # A literal image name wins over a family (the model enforces that one of the
+    # two is set); everything user-facing below reports whichever was used.
+    source = req.source_image_name or req.source_image
+    if not source:
+        raise HTTPException(
+            status_code=400, detail="source_image (family) or source_image_name is required.")
     if not req.image_name:
         raise HTTPException(status_code=400, detail="image_name is required.")
 
@@ -130,7 +134,7 @@ def build_gcp_image(
         created_by=current_user.username,
         metadata={
             "image_name": req.image_name,
-            "source_image": req.source_image,
+            "source_image": source,
             "machine_type": req.machine_type,
             "req": req.model_dump(),
             "created_by": current_user.username,
@@ -138,12 +142,12 @@ def build_gcp_image(
     )
     job_service.log_audit(
         db, current_user.username, "packer_gcp_build",
-        details={"image_name": req.image_name, "source_image": req.source_image},
+        details={"image_name": req.image_name, "source_image": source},
     )
     return PackerBuildResponse(
         job_id=job.id,
         status="pending",
-        message=f"Packer GCP build queued: {req.image_name} from {req.source_image}",
+        message=f"Packer GCP build queued: {req.image_name} from {source}",
     )
 
 

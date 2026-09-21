@@ -795,19 +795,51 @@
 
         <!-- Source Image -->
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Source Image Family <span class="text-red-500">*</span></label>
-          <div class="flex gap-2 mb-2 flex-wrap">
-            <template x-for="p in gcpImagePresets" :key="p.id">
-              <button @click="gcpPackerForm.source_image = p.image"
-                      :class="gcpPackerForm.source_image === p.image ? 'bg-blue-600 text-white' : 'bg-white border border-gray-300 text-gray-600 hover:bg-gray-50'"
-                      class="text-xs font-medium px-3 py-1.5 rounded-md transition"
-                      x-text="p.label"></button>
-            </template>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Source Image <span class="text-red-500">*</span></label>
+          <div class="flex gap-2 mb-3">
+            <button @click="gcpPackerSourceMode = 'family'"
+                    :class="gcpPackerSourceMode === 'family' ? 'bg-blue-600 text-white' : 'bg-white border border-gray-300 text-gray-600 hover:bg-gray-50'"
+                    class="text-xs font-medium px-3 py-1.5 rounded-md transition">Public family</button>
+            <button @click="gcpPackerSourceMode = 'custom'"
+                    :class="gcpPackerSourceMode === 'custom' ? 'bg-blue-600 text-white' : 'bg-white border border-gray-300 text-gray-600 hover:bg-gray-50'"
+                    class="text-xs font-medium px-3 py-1.5 rounded-md transition">Custom image</button>
           </div>
-          <input type="text" x-model="gcpPackerForm.source_image"
-                 placeholder="debian-12"
-                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-blue-500 focus:border-blue-500">
-          <p class="text-xs text-gray-400 mt-1">GCP image <span class="font-mono">family</span> (e.g. <span class="font-mono">debian-12</span>, <span class="font-mono">rocky-linux-9</span>, <span class="font-mono">ubuntu-2204-lts-amd64</span>) — resolves to the family's latest image across the standard public projects.</p>
+
+          <div x-show="gcpPackerSourceMode === 'family'">
+            <div class="flex gap-2 mb-2 flex-wrap">
+              <template x-for="p in gcpImagePresets" :key="p.id">
+                <button @click="gcpPackerForm.source_image = p.image"
+                        :class="gcpPackerForm.source_image === p.image ? 'bg-blue-600 text-white' : 'bg-white border border-gray-300 text-gray-600 hover:bg-gray-50'"
+                        class="text-xs font-medium px-3 py-1.5 rounded-md transition"
+                        x-text="p.label"></button>
+              </template>
+            </div>
+            <input type="text" x-model="gcpPackerForm.source_image"
+                   placeholder="debian-12"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-blue-500 focus:border-blue-500">
+            <p class="text-xs text-gray-400 mt-1">GCP image <span class="font-mono">family</span> (e.g. <span class="font-mono">debian-12</span>, <span class="font-mono">rocky-linux-9</span>, <span class="font-mono">ubuntu-2204-lts-amd64</span>) — resolves to the family's latest image across the standard public projects.</p>
+          </div>
+
+          <div x-show="gcpPackerSourceMode === 'custom'" x-cloak class="space-y-3">
+            <div>
+              <input type="text" x-model="gcpPackerForm.source_image_name"
+                     placeholder="vyos-1-4-rolling"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-blue-500 focus:border-blue-500">
+              <p class="text-xs text-gray-400 mt-1">The <span class="font-mono">exact</span> name of an image in this project. Use this for an image you imported yourself — an imported image carries no family, so the family field can never name it.</p>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Image project <span class="text-gray-400 font-normal">— optional</span></label>
+              <input type="text" x-model="gcpPackerForm.source_image_project"
+                     placeholder="leave blank for this project"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-blue-500 focus:border-blue-500">
+              <p class="text-xs text-gray-400 mt-1">Only when the image lives in a separate shared image project. Left blank, the build project is searched first, then the public image projects.</p>
+            </div>
+          </div>
+
+          <p x-show="gcpPackerSourceMode === 'family' && /vyos/i.test(gcpPackerForm.provisioner_script)" x-cloak
+             class="mt-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+            This provisioner bakes a VyOS network cell and refuses any other image. Pick <span class="font-semibold">Custom image</span> and name your imported VyOS image — a public family builds Debian, and the script aborts on the missing <span class="font-mono">/opt/vyatta</span> tooling a minute in.
+          </p>
         </div>
 
         <!-- Machine Type + SSH Username -->
@@ -963,7 +995,7 @@
 
         <!-- Submit -->
         <button @click="submitGcpPackerBuild()"
-                :disabled="gcpPackerBuilding || !gcpPackerForm.image_name || !gcpPackerForm.source_image"
+                :disabled="gcpPackerBuilding || !gcpPackerForm.image_name || (gcpPackerSourceMode === 'custom' ? !gcpPackerForm.source_image_name : !gcpPackerForm.source_image)"
                 class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition">
           <span x-show="!gcpPackerBuilding">Start Packer Build</span>
           <span x-show="gcpPackerBuilding" x-cloak>Queuing build…</span>
@@ -1428,7 +1460,8 @@
           </select>
           <p class="text-xs text-gray-400 mt-1" x-show="!imagesLoading && netImages().length === 0">
             No <span class="font-mono">vyos</span> image yet — import one into this project, then bake it
-            on the <em>Build Image</em> tab, or tick "show all".
+            on the <em>Build Image</em> tab with source <em>Custom image</em> (an imported image has no
+            family, so the family field cannot name it), or tick "show all".
           </p>
         </div>
 
@@ -1642,7 +1675,9 @@ function gcpDashboard() {
     // Packer image builder
     gcpPackerForm: {
       image_name:        '',
-      source_image:      'debian-12',
+      source_image:      'debian-12',   // image family — used when gcpPackerSourceMode is 'family'
+      source_image_name:    '',         // exact image name — used when it is 'custom'
+      source_image_project: '',         // optional, custom mode only
       machine_type:      'e2-medium',
       ssh_username:      'packer',
       disk_type:         'pd-ssd',
@@ -1657,6 +1692,10 @@ function gcpDashboard() {
     },
     gcpPackerBuilding:    false,
     gcpPackerError:       '',
+    // 'family' | 'custom'. Kept outside the form because it is a UI mode, not a
+    // field: the submit blanks whichever source the mode did not pick, so a
+    // left-over value in the hidden input can never quietly win the build.
+    gcpPackerSourceMode:  'family',
     packerArchiveBucketGcs: '',
     // Scripts available across every configured storage backend — populated
     // by loadStoredScripts() so the Packer provisioner field can offer them
@@ -2517,7 +2556,9 @@ function gcpDashboard() {
     async submitGcpPackerBuild() {
       this.gcpPackerError = '';
       if (!this.gcpPackerForm.image_name)   { this.gcpPackerError = 'Image name is required.'; return; }
-      if (!this.gcpPackerForm.source_image) { this.gcpPackerError = 'Source image is required.'; return; }
+      const custom = this.gcpPackerSourceMode === 'custom';
+      if (custom && !this.gcpPackerForm.source_image_name) { this.gcpPackerError = 'Source image name is required.'; return; }
+      if (!custom && !this.gcpPackerForm.source_image)     { this.gcpPackerError = 'Source image family is required.'; return; }
       this.gcpPackerBuilding = true;
       try {
         // Blank disk size → omit it (null) so the builder uses the source image
@@ -2526,6 +2567,12 @@ function gcpDashboard() {
         const payload = {
           ...this.gcpPackerForm,
           disk_size_gb: Number.isFinite(size) && size > 0 ? size : null,
+          // The API takes a literal image name over a family, so send only the
+          // one the mode selected — otherwise switching back to a family would
+          // still build from a name left in the other input.
+          source_image:         custom ? '' : this.gcpPackerForm.source_image,
+          source_image_name:    custom ? this.gcpPackerForm.source_image_name : '',
+          source_image_project: custom ? this.gcpPackerForm.source_image_project : '',
         };
         const resp = await API.post('/api/packer/gcp/build', payload);
         toast('Packer GCP build queued!', 'success');

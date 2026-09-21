@@ -18,6 +18,14 @@ _OCI_SHAPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _OCI_AD_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:\-]*$")
 _POSIX_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]*$")
 
+# GCE resource names (an image name, an image family): lowercase letter, then
+# lowercase letters/digits/hyphens, ending alphanumeric — max 63. Pinned because
+# both are inlined into the generated HCL.
+_GCE_NAME_RE = re.compile(r"^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$")
+# Project IDs are the same shape, except a domain-scoped one carries a colon and
+# dots ("example.com:my-project").
+_GCP_PROJECT_RE = re.compile(r"^[a-z][-a-z0-9.:]{0,61}[a-z0-9]$")
+
 
 class ProvisionerEnvVar(BaseModel):
     """One environment variable handed to the shell provisioner.
@@ -100,7 +108,17 @@ class AzurePackerBuildRequest(BaseModel):
 
 class GCPPackerBuildRequest(BaseModel):
     image_name: str
-    source_image: str
+    # Exactly one source, the GCE counterpart of the AWS split: an image *family*
+    # the builder resolves to its newest image (debian-12, rocky-linux-9, …), or
+    # a literal image name, which wins. The literal is what an image you imported
+    # yourself needs — a VyOS router for the network demo cell, say — since an
+    # imported image as a rule has no family for the family field to name.
+    source_image: str = ""
+    source_image_name: str = ""
+    # Optional: the project holding that image. Unset, the builder searches the
+    # build project and then the standard public image projects, so this is only
+    # for an image kept in a separate shared image project.
+    source_image_project: str = ""
     machine_type: str = "e2-medium"
     ssh_username: str = "packer"
     # Boot-disk knobs for the transient build VM. disk_type defaults to pd-ssd —
@@ -136,6 +154,31 @@ class GCPPackerBuildRequest(BaseModel):
         if not (10 <= v <= 2000):
             raise ValueError("disk_size_gb must be between 10 and 2000")
         return v
+
+    @field_validator("source_image", "source_image_name")
+    @classmethod
+    def _valid_gce_name(cls, v: str) -> str:
+        v = (v or "").strip()
+        if v and not _GCE_NAME_RE.match(v):
+            raise ValueError(
+                f"invalid GCE image name/family {v!r} — lowercase letters, digits "
+                "and hyphens, starting with a letter"
+            )
+        return v
+
+    @field_validator("source_image_project")
+    @classmethod
+    def _valid_source_project(cls, v: str) -> str:
+        v = (v or "").strip()
+        if v and not _GCP_PROJECT_RE.match(v):
+            raise ValueError(f"invalid GCP project id {v!r}")
+        return v
+
+    @model_validator(mode="after")
+    def _one_source(self):
+        if not (self.source_image or self.source_image_name):
+            raise ValueError("one of source_image (family) or source_image_name is required")
+        return self
 
 
 class OCIPackerBuildRequest(BaseModel):
