@@ -157,6 +157,12 @@ class _MtlsEcho(http.server.BaseHTTPRequestHandler):
 def _serve_mtls(handler=_MtlsEcho):
     pki = _pki()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    # Pinned rather than left to the build's default, which is what `runners/agent/`
+    # does in five places for the same reason: PROTOCOL_TLS_SERVER *permits* TLSv1 and
+    # TLSv1.1 by contract even where the local OpenSSL happens to start at 1.2, so a
+    # static reading of this line is right to call it insecure. The lab endpoint this
+    # stands in for should not be reachable over either.
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(pki["srv_crt"], pki["srv_key"])
     ctx.load_verify_locations(pki["ca"])
     ctx.verify_mode = ssl.CERT_REQUIRED
