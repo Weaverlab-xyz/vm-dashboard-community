@@ -119,6 +119,16 @@ class AgentCellInfo(BaseModel):
     linked_mechanism: str = ""
     linked_credential_id: str = ""
     linked_summary: str = ""
+    # The current cluster-access episode, and only what the ROW holds — "requested" or
+    # "released". The waiting, the approval and the probes happen on the host and the
+    # worker cannot report them back (see the AgentCell model), so this answers "is
+    # something out right now" and nothing more. It is here because the page needs it to
+    # tell an agent that can open an episode from one that already has: opening a second
+    # trips Password Safe's concurrent-request cap, and that failure reports the cap
+    # rather than the reason.
+    episode_state: str = ""
+    episode_summary: str = ""
+    episode_started_at: str = ""
 
 
 class AgentCellListResponse(BaseModel):

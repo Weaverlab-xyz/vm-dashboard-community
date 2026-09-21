@@ -45,6 +45,11 @@ A worker is reading your estate on a loop, one line per poll. Revoke its token w
 log on screen: the next poll is refused, the worker says so in its own words, and the unit
 stops. Then ask the room how they would do that to an agent they are running today.
 
+Start on **Workload Lab → Agent**, which is where the whole beat lives: mint, the token
+shown exactly once, the install commands with this agent's values already in them, and
+Revoke. Show it from Settings → API Tokens instead if the point you want is that an
+agent's authorization is one more row among everyone else's.
+
 **Guide:** [Agent Demo Cell](../agent-demo-cell.md)
 
 ### An identity it had to earn

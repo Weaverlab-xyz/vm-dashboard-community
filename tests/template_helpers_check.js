@@ -971,6 +971,111 @@ for (const page of ['aws/index.html', 'azure/index.html', 'gcp/index.html',
      w._bulkPowerWarn({}, 'stop') === '');
 }
 
+// ── Workload Lab → Agent ────────────────────────────────────────────────────
+// The tab renders a non-human principal, and three of its helpers decide things the
+// markup cannot restate: whether a state is a FAULT, whether a link is a CAPABILITY, and
+// whether a request slot is occupied. Each is a distinction the feature's own docs call
+// its headline failure mode when it collapses, so each is exercised rather than read.
+const WLA = 'workload_lab/_agent.html';
+const mkAgent = (over) => {
+  const o = {};
+  for (const m of ['tokenLabel', 'tokenClass', 'episodeOpen', 'spendable', 'linkKind',
+                   'credentialLabel', 'selectedLab', 'labChanged', 'hostsForCloud',
+                   'canMint', 'mintReady'])
+    Object.assign(o, eval('({' + extract(WLA, m) + '})'));
+  return Object.assign(o, {
+    readOnly: false,
+    form: {name: '', spire_lab_id: '', cloud: '', host_ref: '', pat_user_id: ''},
+    options: {labs: [], users: [], hosts: {}, spendable: ['kubernetes'],
+              credentials: {cloud: [], kubernetes: []}},
+  }, over || {});
+};
+
+const _soon = new Date(Date.now() + 3600e3).toISOString();
+const _gone = new Date(Date.now() - 3600e3).toISOString();
+
+// AN EXPIRED TOKEN IS THE MECHANISM WORKING, exactly as an expired lease is on the Cloud
+// tab — so it renders grey. Red would say the agent is broken when it is behaving.
+ok(WLA + ' a live token reads live',
+   mkAgent().tokenLabel({pat_expires_at: _soon}) === 'token live');
+ok(WLA + ' an expired token is not a fault',
+   mkAgent().tokenClass({pat_expires_at: _gone}) === 'bg-gray-100 text-gray-600');
+ok(WLA + ' a revoked token outranks its expiry',
+   mkAgent().tokenLabel({pat_expires_at: _soon, pat_revoked_at: _gone})
+     === 'token revoked');
+
+// A LINK IS NOT ALWAYS A CAPABILITY. `cloud` records accountability and confers nothing;
+// reading the two alike is what makes a governance record look like a grant.
+ok(WLA + ' kubernetes is spendable',
+   mkAgent().spendable({linked_mechanism: 'kubernetes'}) === true);
+ok(WLA + ' a cloud link confers nothing spendable',
+   mkAgent().spendable({linked_mechanism: 'cloud'}) === false);
+ok(WLA + ' an unlinked agent can spend nothing',
+   mkAgent().spendable({linked_mechanism: ''}) === false);
+
+// And the tri-state that renders it. A reader whose /options call was refused knows
+// NEITHER answer, and both wrong ones are this feature's headline failure modes: a
+// governance record reading as a grant, or a real capability reading as bookkeeping.
+ok(WLA + ' a kubernetes link renders as a capability',
+   mkAgent().linkKind({linked_mechanism: 'kubernetes'}) === 'capability');
+ok(WLA + ' a cloud link renders as accountability',
+   mkAgent().linkKind({linked_mechanism: 'cloud'}) === 'accountability');
+ok(WLA + ' with no options loaded the tab claims neither',
+   mkAgent({options: {labs: [], users: [], hosts: [], spendable: [], credentials: {}}})
+     .linkKind({linked_mechanism: 'kubernetes'}) === '');
+ok(WLA + ' an unlinked agent claims neither',
+   mkAgent().linkKind({linked_mechanism: ''}) === '');
+
+// The episode slot. A terminal state has given the slot back; anything else has not, and
+// opening a second request trips Password Safe's concurrent cap.
+ok(WLA + ' an open request occupies the slot',
+   mkAgent().episodeOpen({episode_state: 'requested'}) === true);
+ok(WLA + ' a released request frees it',
+   mkAgent().episodeOpen({episode_state: 'released'}) === false);
+ok(WLA + ' no request at all is not an open one',
+   mkAgent().episodeOpen({episode_state: ''}) === false);
+
+// A credential the other tab no longer lists must not degrade into a bare uuid.
+(() => {
+  const a = mkAgent({options: {labs: [], users: [], hosts: {}, spendable: [],
+                               credentials: {cloud: [{id: 'c1', name: 'ci-deployer'}],
+                                             kubernetes: []}}});
+  ok(WLA + ' a linked credential shows its name',
+     a.credentialLabel({linked_mechanism: 'cloud', linked_credential_id: 'c1'})
+       === 'cloud · ci-deployer');
+  ok(WLA + ' a vanished credential falls back to the mechanism',
+     a.credentialLabel({linked_mechanism: 'cloud', linked_credential_id: 'x'})
+       === 'cloud');
+})();
+
+// Choosing a lab moves the cloud and the host with it: the worker attaches to a machine
+// that is ALREADY a SPIRE agent node, and a host in another cloud is the mistake.
+(() => {
+  const a = mkAgent({options: {labs: [{id: 'l1', cloud: 'gcp', vm_name: 'spire-host'}],
+                               users: [], spendable: [], credentials: {},
+                               hosts: {gcp: [{name: 'spire-host', ip: '10.0.0.5'}],
+                                       aws: []}}});
+  a.form.spire_lab_id = 'l1';
+  a.labChanged();
+  ok(WLA + ' picking a lab prefills its cloud and its host',
+     a.form.cloud === 'gcp' && a.form.host_ref === 'spire-host');
+  ok(WLA + ' the host list follows the chosen cloud', a.hostsForCloud().length === 1);
+})();
+
+// The mint gate. Both halves are required and neither is cosmetic: no trust domain means
+// an unattested worker, and no non-admin user means the cell would refuse on submit.
+(() => {
+  const base = {labs: [{id: 'l1'}], users: [{id: 'u1'}], hosts: {}, spendable: [],
+                credentials: {}};
+  ok(WLA + ' a lab and a candidate user is enough to mint', mkAgent({options: base}).canMint());
+  ok(WLA + ' no candidate user, no mint',
+     mkAgent({options: Object.assign({}, base, {users: []})}).canMint() === false);
+  ok(WLA + ' no trust domain, no mint',
+     mkAgent({options: Object.assign({}, base, {labs: []})}).canMint() === false);
+  ok(WLA + ' a reader cannot mint',
+     mkAgent({options: base, readOnly: true}).canMint() === false);
+})();
+
 ociPlacementChecks().then(() => process.exit(fail ? 1 : 0),
                           (e) => { console.log('FAIL ' + OCI + ' placement checks threw: ' + e);
                                    process.exit(1); });

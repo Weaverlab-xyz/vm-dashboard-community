@@ -1,0 +1,953 @@
+{# Workload Lab → Agent. The non-human principal that CONSUMES what the other four tabs
+   build. Backed by /api/agentcell.
+
+   IT BELONGS HERE RATHER THAN ON A PAGE OF ITS OWN, and the reason is the whole point of
+   the tab: every other tab on this page answers "how does a machine get a credential",
+   and every one of them is answered in the abstract until something actually holds one.
+   This tab is that something. It attests to the SPIRE tab's trust domain, and it can be
+   made answerable for the Cloud tab's lease or the Kubernetes tab's token — so the four
+   mechanisms stop being four demos and become one.
+
+   FIVE THINGS HERE ARE LOAD-BEARING AND EASY TO MISTAKE FOR DECORATION:
+
+     * IDENTITY AND AUTHORIZATION ARE TWO THINGS, and this tab must never draw them as
+       one. The worker attests to SPIRE and gets an SVID — that is WHO IT IS, and it holds
+       nothing. It calls /mcp with a Personal Access Token — that is WHAT IT MAY DO.
+       Nothing mints one from the other (api/mcp_server takes a Bearer PAT and has no mTLS
+       path), and the closing beat of the demo is exactly that gap: revoke the token and
+       the worker is still who it was and may no longer do anything.
+     * THE TOKEN IS SHOWN ONCE. Same contract as api/tokens.create_token — the row keeps
+       the id, the name and the expiry, never the secret. The modal that shows it is
+       therefore the only chance, and it says so.
+     * A LINK IS NOT ALWAYS A CAPABILITY. `cloud` is accountability only, because that
+       tab's credential is returned to nobody by design; `kubernetes` genuinely lets the
+       worker request the token. Rendering the two alike is this feature's headline
+       failure mode in one direction and the Kubernetes tab's in the other, so the picker
+       states which it is BEFORE the link is made, not after.
+     * THE DASHBOARD DOES NOT WATCH THE INSTALL. The two playbooks are runs the operator
+       makes; nothing writes `stages_done`, so this tab shows the install as a checklist
+       of what YOU do and names `journalctl -u mcp-agent` as the record. A progress bar
+       here would be a field that is structurally always empty, which reads as "nothing
+       happened yet" on a cell where plenty did.
+     * REVOKE IS NOT UNINSTALL, and the confirm says so. The worker keeps running and
+       keeps attesting; its next poll is refused. Hiding that behind a teardown would
+       remove the only thing worth watching. #}
+
+<div x-data="workloadAgentTab()" x-init="init()">
+
+  <div class="flex justify-end mb-3 sm:mb-1">
+    <button @click="openMint()" :disabled="!canMint()"
+            :class="canMint() ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-300 cursor-not-allowed'"
+            class="text-white text-sm font-medium px-3 py-1.5 rounded-lg">
+      Mint an agent
+    </button>
+  </div>
+  <p class="text-sm text-gray-500 mb-6">
+    <strong>The consumer.</strong> A worker on a VM this dashboard already deployed, which
+    attests itself to the
+    <button type="button" @click="$dispatch('select-tab', 'spire')"
+            class="text-blue-600 hover:underline">SPIRE tab</button>'s
+    trust domain and reads your estate through this dashboard's MCP server &mdash;
+    authorized by a token that expires and can be revoked while somebody watches. Make it
+    answerable for a
+    <button type="button" @click="$dispatch('select-tab', 'cloud')"
+            class="text-blue-600 hover:underline">Cloud</button>
+    lease or a
+    <button type="button" @click="$dispatch('select-tab', 'kubernetes')"
+            class="text-blue-600 hover:underline">Kubernetes</button>
+    token and the other tabs stop being four separate demos.
+    <a href="/docs/profiles/demo/agent-demo-cell" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>.
+  </p>
+
+  <!-- Toast -->
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm whitespace-pre-line" x-text="toast"></div>
+
+  <div x-show="missing.length" x-cloak
+       class="mb-6 border border-amber-200 bg-amber-50 rounded-lg px-4 py-3">
+    <p class="text-sm font-medium text-amber-800 mb-1">Not ready yet</p>
+    <ul class="text-sm text-amber-700 list-disc list-inside space-y-0.5">
+      <template x-for="m in missing" :key="m"><li x-text="m"></li></template>
+    </ul>
+  </div>
+
+  <!-- A reader who cannot mint still gets the list. Saying why beats a button that does
+       nothing when pressed. -->
+  <div x-show="readOnly" x-cloak
+       class="mb-6 border border-gray-200 rounded-lg px-4 py-3 text-xs text-gray-600">
+    Minting, linking and revoking need <code>config_mgmt:write</code> &mdash; what the cell
+    ultimately does is run playbooks against a host. You can see the agents below.
+  </div>
+
+  <!-- THE GAP, stated once at the top rather than only in the create response. It is the
+       claim the whole feature rests on, and an operator who learns it from a log line
+       mid-demo learns it too late. -->
+  <div x-show="!loading" x-cloak
+       class="mb-6 border border-gray-200 rounded-lg px-4 py-3 text-xs text-gray-600">
+    <p class="font-medium text-gray-700 mb-1">Two things, and nothing bridges them</p>
+    <p class="mb-0.5">
+      <strong>Its identity</strong> is a SPIFFE SVID it re-attests on every loop, holding
+      nothing at rest. <strong>Its authorization</strong> is a Personal Access Token
+      bounded by the RBAC of the user you mint it against.
+      <strong>The SVID does not authenticate to <code>/mcp</code></strong> &mdash; closing
+      that would need the Password Safe SPIFFE SVID plugin, whose configuration question is
+      still unresolved. So the cell shows both halves and names the gap rather than
+      implying a bridge.
+    </p>
+    <p>
+      That gap <em>is</em> the demo: revoke the token and the worker is still who it was,
+      and may no longer do anything.
+    </p>
+  </div>
+
+  <div x-show="loading" class="text-sm text-gray-500">Loading…</div>
+
+  <div x-show="!loading && !agents.length" x-cloak
+       class="border border-dashed border-gray-300 rounded-lg p-8 text-center">
+    <p class="text-sm text-gray-600 mb-1">No agent has been minted.</p>
+    <p class="text-xs text-gray-500">
+      Minting issues a bounded token and records what was issued. It deploys nothing
+      &mdash; the worker attaches to a VM you already have, and the two playbooks that put
+      it there are runs you make.
+    </p>
+  </div>
+
+  <!-- Agents -->
+  <div x-show="!loading && agents.length" x-cloak class="space-y-4">
+    <template x-for="row in agents" :key="row.id">
+      <div class="border border-gray-200 rounded-lg p-4">
+
+        <div class="flex flex-wrap items-start justify-between gap-2 mb-2">
+          <div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="font-medium text-gray-800" x-text="row.name"></span>
+              <span x-show="row.cloud" x-cloak
+                    class="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-700"
+                    x-text="row.cloud"></span>
+              <span class="text-xs px-2 py-0.5 rounded-full" :class="statusClass(row.status)"
+                    x-text="row.status"></span>
+              <!-- The token, as its own badge, because it is the half that gets revoked. -->
+              <span class="text-xs px-2 py-0.5 rounded-full" :class="tokenClass(row)"
+                    x-text="tokenLabel(row)"></span>
+              <!-- Rendered only when TRUE. Nothing writes the stage list today, so a
+                   "not wired" badge would be a permanent accusation against a cell that
+                   is installed and running. -->
+              <span x-show="row.wired" x-cloak
+                    class="text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                wired
+              </span>
+            </div>
+            <p class="text-xs text-gray-500 mt-1">
+              <code x-text="row.spiffe_id || '(unattested)'"></code>
+              <span x-show="row.host_name" x-cloak>
+                · on <span x-text="row.host_name"></span>
+              </span>
+              <span x-show="row.private_ip" x-cloak> · <span x-text="row.private_ip"></span></span>
+            </p>
+          </div>
+          <div class="flex gap-2">
+            <button @click="openInstall(row)"
+                    class="text-xs border border-gray-300 hover:bg-gray-50 px-2 py-1 rounded">
+              Install
+            </button>
+            <button x-show="!row.linked_mechanism" x-cloak @click="openLink(row)"
+                    :disabled="busy || readOnly"
+                    class="text-xs border border-blue-300 text-blue-700 hover:bg-blue-50 px-2 py-1 rounded disabled:opacity-50">
+              Link
+            </button>
+            <button x-show="row.linked_mechanism" x-cloak @click="unlink(row)"
+                    :disabled="busy || readOnly"
+                    class="text-xs border border-gray-300 hover:bg-gray-50 px-2 py-1 rounded disabled:opacity-50">
+              Unlink
+            </button>
+            <button @click="revoke(row)" :disabled="busy || readOnly || !!row.pat_revoked_at"
+                    class="text-xs border border-red-300 text-red-700 hover:bg-red-50 px-2 py-1 rounded disabled:opacity-50">
+              Revoke
+            </button>
+          </div>
+        </div>
+
+        <!-- The blast radius, said in the row rather than only in the refusal. -->
+        <p class="text-xs text-gray-600 bg-gray-50 border border-gray-200 rounded px-2 py-1.5 mb-2">
+          Every MCP tool applies the token user's own permissions, so
+          <strong>that user is this agent's blast radius</strong>. Revoking the token from
+          Settings → API Tokens stops the worker; it does not uninstall it.
+        </p>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-xs mb-2">
+          <div x-show="row.trust_domain" x-cloak>
+            <span class="text-gray-500">Trust domain</span>
+            <span class="ml-1" x-text="row.trust_domain"></span>
+          </div>
+          <div x-show="row.pat_name" x-cloak>
+            <span class="text-gray-500">Token</span>
+            <code class="ml-1" x-text="row.pat_name"></code>
+          </div>
+          <div x-show="row.pat_expires_at" x-cloak>
+            <span class="text-gray-500">Token expires</span>
+            <span class="ml-1" :class="expiryClass(row.pat_expires_at)"
+                  x-text="fmt(row.pat_expires_at)"></span>
+          </div>
+          <div x-show="row.pat_revoked_at" x-cloak>
+            <span class="text-gray-500">Revoked</span>
+            <span class="ml-1 text-gray-600" x-text="fmt(row.pat_revoked_at)"></span>
+          </div>
+          <div x-show="row.workgroup" x-cloak>
+            <span class="text-gray-500">Workgroup</span>
+            <span class="ml-1" x-text="row.workgroup"></span>
+          </div>
+          <div x-show="row.created_by" x-cloak>
+            <span class="text-gray-500">Minted by</span>
+            <span class="ml-1" x-text="row.created_by"></span>
+          </div>
+        </div>
+
+        <!-- ── What it is answerable for ─────────────────────────────────── -->
+        <div x-show="row.linked_mechanism" x-cloak
+             class="border border-gray-200 rounded px-2 py-1.5 text-xs mb-2">
+          <p class="text-gray-700">
+            <span class="font-medium">Answerable for</span>
+            <span x-text="credentialLabel(row)"></span>
+            <span class="text-gray-500"> &mdash; <span x-text="row.linked_summary"></span></span>
+          </p>
+          <!-- The distinction the API states on every link, kept visible afterwards. A
+               governance record that starts reading as a capability is the failure mode
+               in one direction and the Kubernetes one in the other — so this is a
+               THREE-state read, not a boolean. `linkKind` answers "" when /options never
+               loaded, and saying nothing beats guessing wrong in either direction. -->
+          <p x-show="linkKind(row) === 'accountability'" x-cloak class="text-gray-500 mt-0.5">
+            <strong>Accountability only.</strong> That tab's credential is returned to
+            nobody by design, so nothing here can spend it.
+          </p>
+          <p x-show="linkKind(row) === 'capability'" x-cloak class="text-gray-500 mt-0.5">
+            <strong>A capability.</strong> The worker reaches Password Safe holding nothing,
+            so it can genuinely <em>request</em> this token &mdash; subject to whatever the
+            access policy requires.
+          </p>
+        </div>
+
+        <!-- ── The cluster-access episode ────────────────────────────────── -->
+        <!-- Shown when the link can be spent, and ALSO whenever an episode exists at
+             all. A request in flight has to stay visible even where /options could not
+             be read: an open one holds the account's concurrent slot, and a slot nobody
+             can see is the one nobody gives back. -->
+        <div x-show="spendable(row) || row.episode_state" x-cloak
+             class="border border-gray-200 rounded px-2 py-1.5 text-xs mb-2">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <p class="text-gray-700">
+              <span class="font-medium">Cluster access</span>
+              <span class="text-gray-500"> &mdash; <span x-text="row.episode_summary"></span></span>
+            </p>
+            <div class="flex gap-2">
+              <button x-show="!episodeOpen(row)" x-cloak @click="openEpisode(row)"
+                      :disabled="busy || readOnly"
+                      class="text-xs border border-blue-300 text-blue-700 hover:bg-blue-50 px-2 py-1 rounded disabled:opacity-50">
+                Request access
+              </button>
+              <button x-show="episodeOpen(row)" x-cloak @click="releaseEpisode(row)"
+                      :disabled="busy || readOnly"
+                      class="text-xs border border-gray-300 hover:bg-gray-50 px-2 py-1 rounded disabled:opacity-50">
+                Close the request
+              </button>
+            </div>
+          </div>
+          <!-- Why the row says so little. Without this the two states look like a
+               progress indicator that is stuck. -->
+          <p class="text-gray-500 mt-0.5">
+            The dashboard records that a request is open. The waiting, the approval and the
+            probes happen on the host, and the worker cannot report them back &mdash; its
+            token belongs to a non-admin user by construction.
+            <code>journalctl -u mcp-agent -f</code> is where the episode happens.
+          </p>
+        </div>
+
+        {# No error panel here, and its absence is a decision. `AgentCell.error_message`
+           exists on the model but nothing writes it: the cell issues and records, and
+           the only thing that can fail afterwards is a playbook the dashboard neither
+           runs nor watches. A panel bound to a field that is structurally always empty
+           reads as "nothing went wrong" on a cell where plenty did. #}
+      </div>
+    </template>
+  </div>
+
+  <!-- ── Mint ─────────────────────────────────────────────────────────────── -->
+  <div x-show="mintOpen" x-cloak
+       class="fixed inset-0 bg-black/40 flex items-start justify-center p-4 overflow-y-auto z-50">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-lg my-8 p-5" @click.outside="mintOpen = false">
+      <h3 class="text-lg font-semibold text-gray-800 mb-1">Mint an agent</h3>
+      <p class="text-xs text-gray-500 mb-4">
+        Issues a bounded token and records what was issued. <strong>Deploys nothing</strong>
+        &mdash; the worker attaches to a VM you already have, and the install is two
+        playbooks you run yourself.
+      </p>
+
+      <div class="space-y-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Name</label>
+          <input x-model="form.name" type="text" placeholder="mcp-reader"
+                 class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">SPIRE trust domain</label>
+          <select x-model="form.spire_lab_id" @change="labChanged()"
+                  class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+            <option value="">— pick a lab —</option>
+            <template x-for="l in options.labs" :key="l.id">
+              <option :value="l.id" x-text="l.name + ' — ' + l.trust_domain"></option>
+            </template>
+          </select>
+          <p x-show="selectedLab()" x-cloak class="text-xs text-gray-500 mt-1">
+            The worker will attest as
+            <code x-text="selectedLab()?.spiffe_id"></code>.
+            That path is fixed, so the registration entry the playbook creates and the ID
+            the worker expects cannot drift.
+          </p>
+          <p x-show="!options.labs.length" x-cloak class="text-xs text-gray-500 mt-1">
+            None yet. Stand one up on
+            <button type="button" @click="mintOpen = false; $dispatch('select-tab', 'spire')"
+                    class="text-blue-600 hover:underline">the SPIRE tab</button>
+            first &mdash; without a trust domain the worker logs <code>unattested</code> and
+            the identity half of the demo becomes an assertion.
+          </p>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">Cloud</label>
+            <select x-model="form.cloud" class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+              <template x-for="c in options.clouds" :key="c">
+                <option :value="c" x-text="c"></option>
+              </template>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">Token lifetime (hours)</label>
+            <input x-model.number="form.pat_hours" type="number" min="1"
+                   :max="options.pat_hours.max"
+                   class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+            <p class="text-xs text-gray-500 mt-1">
+              1 to <span x-text="options.pat_hours.max"></span>.
+              <strong>It always expires</strong> &mdash; a non-human principal whose
+              authorization never ends is what this cell argues against.
+            </p>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Host</label>
+          <input x-model="form.host_ref" type="text" list="agentcell-hosts"
+                 placeholder="a VM this dashboard deployed"
+                 class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+          <datalist id="agentcell-hosts">
+            <template x-for="h in hostsForCloud()" :key="h.name">
+              <option :value="h.name" x-text="h.ip"></option>
+            </template>
+          </datalist>
+          <p class="text-xs text-gray-500 mt-1">
+            Re-derived against this dashboard's own deploy records, never trusted as given.
+            Pick the VM that is <strong>already a SPIRE agent node</strong> &mdash; the
+            lab's host is prefilled above when you choose one.
+          </p>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Mint the token against</label>
+          <select x-model="form.pat_user_id" class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+            <option value="">— pick a user —</option>
+            <template x-for="u in options.users" :key="u.id">
+              <option :value="u.id" x-text="u.username + (u.full_name ? ' (' + u.full_name + ')' : '')"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-500 mt-1">
+            <strong>Administrators are not listed, and the cell refuses one.</strong> Every
+            MCP tool applies this user's own permissions, so the token user <em>is</em> the
+            agent's blast radius &mdash; picking an admin would quietly make the demo say
+            the opposite of what it means to.
+          </p>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Workgroup</label>
+          <select x-model="form.workgroup" class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+            <option value="">(none)</option>
+            <template x-for="w in options.workgroups" :key="w">
+              <option :value="w" x-text="w"></option>
+            </template>
+          </select>
+          <!-- Not cosmetic: the listing filters on workgroup with no creator fallback, so
+               a blank one is invisible to every non-admin INCLUDING whoever minted it. -->
+          <p class="text-xs text-gray-500 mt-1">
+            Everyone in this workgroup can see and manage the agent. <strong>Leave it blank
+            and only administrators can see it</strong> &mdash; including you, if you are
+            not one.
+          </p>
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-2 mt-5">
+        <button @click="mintOpen = false"
+                class="text-sm px-3 py-1.5 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
+        <button @click="submitMint()" :disabled="busy || !mintReady()"
+                class="text-sm px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50">
+          Mint
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── The token, once ──────────────────────────────────────────────────── -->
+  <!-- THE ONE MODAL ON THIS PAGE WITH NO @click.outside, deliberately. Every other one
+       here closes on a stray click because reopening it costs nothing; this one holds a
+       credential that cannot be recovered, and a misclick at the edge would destroy it
+       silently. It closes on the button, which is also the one that opens the install
+       instructions -- so the path out of it is the path forward. -->
+  <div x-show="mintedOpen" x-cloak
+       class="fixed inset-0 bg-black/40 flex items-start justify-center p-4 overflow-y-auto z-50">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl my-8 p-5">
+      <h3 class="text-lg font-semibold text-gray-800 mb-1">
+        <span x-text="minted?.name"></span> is recorded
+      </h3>
+      <p class="text-xs text-gray-500 mb-4">
+        The row keeps the SPIFFE ID, the token's name and its expiry. <strong>It never
+        keeps the token.</strong> This is the only time it is shown &mdash; carry it into
+        the install playbook now, because nothing can recover it afterwards.
+      </p>
+
+      <div class="space-y-2 text-sm">
+        <div class="flex items-start gap-2">
+          <span class="text-xs text-gray-500 w-32 shrink-0 pt-1">SPIFFE ID</span>
+          <code class="flex-1 text-xs bg-gray-50 border border-gray-200 rounded px-2 py-1 break-all"
+                x-text="minted?.spiffe_id"></code>
+        </div>
+        <div class="flex items-start gap-2">
+          <span class="text-xs text-gray-500 w-32 shrink-0 pt-1">Token name</span>
+          <code class="flex-1 text-xs bg-gray-50 border border-gray-200 rounded px-2 py-1 break-all"
+                x-text="minted?.pat_name"></code>
+        </div>
+        <div class="flex items-start gap-2">
+          <span class="text-xs text-gray-500 w-32 shrink-0 pt-1">Expires</span>
+          <span class="text-xs pt-1" x-text="fmt(minted?.pat_expires_at)"></span>
+        </div>
+        <div class="flex items-start gap-2">
+          <span class="text-xs text-amber-700 w-32 shrink-0 pt-1 font-medium">Token</span>
+          <code class="flex-1 text-xs bg-amber-50 border border-amber-200 rounded px-2 py-1 break-all"
+                x-text="minted?.token"></code>
+          <button @click="copy(minted?.token)"
+                  class="text-xs border border-gray-300 hover:bg-gray-50 px-2 py-1 rounded shrink-0">
+            Copy
+          </button>
+        </div>
+      </div>
+
+      <ul x-show="minted?.notes?.length" x-cloak
+          class="mt-4 text-xs text-gray-600 list-disc list-inside space-y-1">
+        <template x-for="n in (minted?.notes || [])" :key="n"><li x-text="n"></li></template>
+      </ul>
+
+      <div class="flex justify-end mt-5">
+        <button @click="mintedOpen = false; openInstall(null)"
+                class="text-sm px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded">
+          I have the token — show me the install
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Install ──────────────────────────────────────────────────────────── -->
+  <div x-show="installOpen" x-cloak
+       class="fixed inset-0 bg-black/40 flex items-start justify-center p-4 overflow-y-auto z-50">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl my-8 p-5" @click.outside="installOpen = false">
+      <h3 class="text-lg font-semibold text-gray-800 mb-1">Put the worker on the host</h3>
+      <p class="text-xs text-gray-500 mb-4">
+        Two playbooks, in this order, from <code>examples/playbooks/agent/</code>. The
+        first creates the SPIRE registration entry so the worker can attest; the second
+        installs the unit and hands it the token.
+        <strong>The dashboard does not run these and does not watch them</strong> &mdash;
+        which is why there is no progress bar here and why the journal is the record.
+      </p>
+
+      <div class="space-y-3 text-sm">
+        <div>
+          <p class="text-xs text-gray-500 mb-1">1 &mdash; the registration entry</p>
+          <pre class="text-xs bg-gray-50 border border-gray-200 rounded p-2 overflow-x-auto"
+               x-text="entryCommand()"></pre>
+        </div>
+        <div>
+          <p class="text-xs text-gray-500 mb-1">2 &mdash; the worker</p>
+          <pre class="text-xs bg-gray-50 border border-gray-200 rounded p-2 overflow-x-auto"
+               x-text="installCommand()"></pre>
+          <p class="text-xs text-gray-500 mt-1">
+            <code>agent_pat</code> is the token from the mint response. It was shown once;
+            if it is gone, revoke this agent and mint another rather than reusing a token
+            whose owner you are no longer sure of.
+          </p>
+        </div>
+        <div>
+          <p class="text-xs text-gray-500 mb-1">3 &mdash; watch it</p>
+          <pre class="text-xs bg-gray-50 border border-gray-200 rounded p-2 overflow-x-auto"
+               x-text="'journalctl -u mcp-agent -f'"></pre>
+          <p class="text-xs text-gray-500 mt-1">
+            Every line names both halves &mdash; the SPIFFE ID it proved and the token it
+            spent &mdash; so the gap between them stays visible while the room watches.
+          </p>
+        </div>
+      </div>
+
+      <div class="flex justify-end mt-5">
+        <button @click="installOpen = false"
+                class="text-sm px-3 py-1.5 border border-gray-300 rounded hover:bg-gray-50">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Link ─────────────────────────────────────────────────────────────── -->
+  <div x-show="linkOpen" x-cloak
+       class="fixed inset-0 bg-black/40 flex items-start justify-center p-4 overflow-y-auto z-50">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-lg my-8 p-5" @click.outside="linkOpen = false">
+      <h3 class="text-lg font-semibold text-gray-800 mb-1">What is it answerable for?</h3>
+      <p class="text-xs text-gray-500 mb-4">
+        One credential at a time, deliberately. An agent answerable for a cloud lease
+        <em>and</em> a cluster token would be the most over-credentialed principal in the
+        estate &mdash; which is the shape this cell argues against, so widening is a
+        decision rather than an accumulation.
+      </p>
+
+      <div class="space-y-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Mechanism</label>
+          <div class="space-y-2">
+            <template x-for="m in mechanisms()" :key="m.key">
+              <label class="flex items-start gap-2 border border-gray-200 rounded px-2 py-1.5 cursor-pointer"
+                     :class="linkForm.mechanism === m.key ? 'border-blue-400 bg-blue-50' : ''">
+                <input type="radio" :value="m.key" x-model="linkForm.mechanism"
+                       @change="linkForm.credential_id = ''" class="mt-0.5">
+                <span>
+                  <span class="text-sm font-medium text-gray-800" x-text="m.label"></span>
+                  <span class="block text-xs text-gray-600" x-text="m.note"></span>
+                </span>
+              </label>
+            </template>
+          </div>
+        </div>
+
+        <div x-show="linkForm.mechanism" x-cloak>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Credential</label>
+          <select x-model="linkForm.credential_id"
+                  class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+            <option value="">— pick one —</option>
+            <template x-for="c in choices()" :key="c.id">
+              <option :value="c.id" :disabled="!c.linkable"
+                      x-text="c.name + (c.detail ? ' — ' + c.detail : '') + ' [' + c.state + ']'"></option>
+            </template>
+          </select>
+          <p x-show="!choices().length" x-cloak class="text-xs text-gray-500 mt-1">
+            That tab has no rows to link. Create one there first.
+          </p>
+          <p x-show="blockedChoice()" x-cloak class="text-xs text-amber-700 mt-1"
+             x-text="blockedChoice()"></p>
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-2 mt-5">
+        <button @click="linkOpen = false"
+                class="text-sm px-3 py-1.5 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
+        <button @click="submitLink()" :disabled="busy || !linkForm.credential_id"
+                class="text-sm px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50">
+          Link
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Request cluster access ───────────────────────────────────────────── -->
+  <div x-show="episodeOpenModal" x-cloak
+       class="fixed inset-0 bg-black/40 flex items-start justify-center p-4 overflow-y-auto z-50">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-lg my-8 p-5" @click.outside="episodeOpenModal = false">
+      <h3 class="text-lg font-semibold text-gray-800 mb-1">Request cluster access</h3>
+      <p class="text-xs text-gray-500 mb-4">
+        Opens one bounded request against the linked token. <strong>It hands nothing
+        over</strong> &mdash; Password Safe decides whether to release, and where the
+        access policy requires approval it holds the request for a person. That is the
+        beat: an agent that cannot authorise its own access.
+      </p>
+
+      <div>
+        <label class="block text-xs font-medium text-gray-700 mb-1">Window (minutes)</label>
+        <input x-model.number="episodeForm.duration_minutes" type="number" min="5"
+               :max="options.episode.max_minutes"
+               class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+        <p class="text-xs text-gray-500 mt-1">
+          Clamped to 5&ndash;<span x-text="options.episode.max_minutes"></span>, because this
+          is how long the account's concurrent slot stays held if nobody approves. An
+          abandoned request makes the <em>next</em> attempt fail on the cap, reporting the
+          cap rather than the approval it was waiting on.
+        </p>
+      </div>
+
+      <div class="flex justify-end gap-2 mt-5">
+        <button @click="episodeOpenModal = false"
+                class="text-sm px-3 py-1.5 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
+        <button @click="submitEpisode()" :disabled="busy"
+                class="text-sm px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50">
+          Open the request
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// Every call goes through window.API, which attaches the bearer token from the auth store.
+// A bare fetch against an /api route would be ANONYMOUS and 401 -- this app sets no auth
+// cookie anywhere.
+function workloadAgentTab() {
+  return {
+    loading: true,
+    busy: false,
+    // True when /options 403s: the caller can read the list but not mint, link or revoke.
+    readOnly: false,
+    agents: [],
+    // Kept in the shape /options returns so every accessor works before the fetch lands.
+    options: { clouds: [], hosts: {}, labs: [], users: [], workgroups: [],
+               pat_hours: { default: 8, max: 72 }, spiffe_path: '',
+               credentials: { cloud: [], kubernetes: [] }, spendable: [],
+               episode: { default_minutes: 15, max_minutes: 60 },
+               mcp_enabled: true, missing: [] },
+    missing: [],
+    toast: '',
+    toastType: 'info',
+
+    mintOpen: false,
+    // Kept in step with blankForm() below. Two initialisers that drift apart is how a
+    // field ends up undefined on the second mint of a session.
+    form: { name: '', spire_lab_id: '', cloud: '', host_ref: '', pat_user_id: '',
+            pat_hours: 8, workgroup: '' },
+
+    // The create response, held only as long as the modal is open. The raw token lives
+    // here and nowhere else -- not on the row, not in storage.
+    mintedOpen: false,
+    minted: null,
+
+    installOpen: false,
+    installRow: null,
+
+    linkOpen: false,
+    linkRow: null,
+    linkForm: { mechanism: '', credential_id: '' },
+
+    episodeOpenModal: false,
+    episodeRow: null,
+    episodeForm: { duration_minutes: 15 },
+
+    async init() {
+      await Promise.all([this.load(), this.loadOptions()]);
+      this.loading = false;
+    },
+
+    async load() {
+      try {
+        const out = await API.get('/api/agentcell/agents');
+        this.agents = (out && out.agents) || [];
+      } catch (e) {
+        this.notify('Could not load agents: ' + (e.message || e), 'error');
+      }
+    },
+
+    async loadOptions() {
+      try {
+        const out = await API.get('/api/agentcell/options');
+        if (out) {
+          this.options = out;
+          this.missing = out.missing || [];
+          this.form.pat_hours = out.pat_hours.default;
+          this.episodeForm.duration_minutes = out.episode.default_minutes;
+          if ((out.clouds || []).length === 1) this.form.cloud = out.clouds[0];
+        }
+      } catch (e) {
+        // A 403 here is a permission answer, not a fault: the tab still lists.
+        this.readOnly = true;
+      }
+    },
+
+    canMint() {
+      return !this.readOnly && this.options.labs.length > 0
+             && this.options.users.length > 0;
+    },
+    mintReady() {
+      return !!(this.form.name && this.form.spire_lab_id && this.form.cloud
+                && this.form.host_ref && this.form.pat_user_id);
+    },
+
+    selectedLab() {
+      return (this.options.labs || []).find(l => l.id === this.form.spire_lab_id) || null;
+    },
+
+    // Choosing a lab moves the cloud and the host with it. The worker attaches to a
+    // machine that is ALREADY a SPIRE agent node, so the lab's own host is the answer
+    // almost every time -- and a host in a different cloud from the lab is the mistake
+    // this prefill exists to avoid.
+    labChanged() {
+      const lab = this.selectedLab();
+      if (!lab) return;
+      if (lab.cloud) this.form.cloud = lab.cloud;
+      if (lab.vm_name) this.form.host_ref = lab.vm_name;
+    },
+
+    hostsForCloud() {
+      return (this.options.hosts || {})[this.form.cloud] || [];
+    },
+
+    notify(msg, type) {
+      this.toast = msg;
+      this.toastType = type || 'info';
+      setTimeout(() => { this.toast = ''; }, 11000);
+    },
+
+    statusClass(s) {
+      if (s === 'revoked') return 'bg-gray-100 text-gray-600';
+      if (s === 'failed') return 'bg-red-100 text-red-800';
+      if (s === 'running') return 'bg-green-100 text-green-800';
+      return 'bg-blue-100 text-blue-800';
+    },
+
+    // A token that has EXPIRED is the mechanism working, exactly as an expired lease is
+    // on the Cloud tab, so it is grey rather than red. Only a revoke is called out, and
+    // then as a fact rather than a fault -- it is the demo's closing beat.
+    tokenLabel(row) {
+      if (row.pat_revoked_at) return 'token revoked';
+      if (row.pat_expires_at && new Date(row.pat_expires_at) < new Date()) {
+        return 'token expired';
+      }
+      return 'token live';
+    },
+    tokenClass(row) {
+      if (row.pat_revoked_at) return 'bg-amber-100 text-amber-800';
+      if (row.pat_expires_at && new Date(row.pat_expires_at) < new Date()) {
+        return 'bg-gray-100 text-gray-600';
+      }
+      return 'bg-emerald-100 text-emerald-800';
+    },
+
+    fmt(iso) {
+      if (!iso) return '';
+      try { return new Date(iso).toLocaleString(); } catch (e) { return iso; }
+    },
+
+    expiryClass(iso) {
+      if (!iso) return 'text-gray-400';
+      const hours = (new Date(iso) - new Date()) / 3600000;
+      if (hours < 0) return 'text-gray-500';
+      if (hours < 1) return 'text-amber-600 font-medium';
+      return 'text-gray-600';
+    },
+
+    spendable(row) {
+      return (this.options.spendable || []).includes(row.linked_mechanism);
+    },
+
+    // THREE answers, because "I do not know" is one of them. Which mechanisms confer a
+    // capability is resolved server-side, so a reader whose /options call was refused
+    // has no basis to say either — and the two wrong answers here are this feature's
+    // two headline failure modes. "" renders neither sentence.
+    linkKind(row) {
+      if (!row.linked_mechanism || !(this.options.spendable || []).length) return '';
+      return this.spendable(row) ? 'capability' : 'accountability';
+    },
+
+    // The linked row's own name, resolved from the other tabs' listings. Falls back to
+    // the mechanism alone rather than printing a bare uuid at somebody.
+    credentialLabel(row) {
+      const list = (this.options.credentials || {})[row.linked_mechanism] || [];
+      const hit = list.find(c => c.id === row.linked_credential_id);
+      return hit ? (row.linked_mechanism + ' · ' + hit.name) : row.linked_mechanism;
+    },
+
+    episodeOpen(row) {
+      const s = row.episode_state || '';
+      return !!s && !['released', 'denied', 'expired'].includes(s);
+    },
+
+    mechanisms() {
+      return [
+        { key: 'cloud', label: 'Cloud — a short-lived AWS or Azure credential',
+          note: 'Accountability only. That tab returns its credential to nobody, so no '
+                + 'worker can spend it; the link records a lease worth reporting beside '
+                + 'the agent.' },
+        { key: 'kubernetes', label: 'Kubernetes — a bound ServiceAccount token',
+          note: 'A capability. The worker reaches Password Safe holding nothing, so it '
+                + 'can genuinely request this token — and wait if the policy says so.' },
+      ];
+    },
+
+    choices() {
+      return (this.options.credentials || {})[this.linkForm.mechanism] || [];
+    },
+
+    // Why the option they cannot pick is greyed out. Selecting it is impossible, so
+    // without this the row is just mysteriously inert.
+    blockedChoice() {
+      const blocked = this.choices().filter(c => !c.linkable && c.why);
+      return blocked.length ? blocked[0].why : '';
+    },
+
+    blankForm() {
+      const clouds = this.options.clouds || [];
+      return { name: '', spire_lab_id: '', cloud: clouds.length === 1 ? clouds[0] : '',
+               host_ref: '', pat_user_id: '',
+               pat_hours: this.options.pat_hours.default, workgroup: '' };
+    },
+
+    openMint() {
+      this.form = this.blankForm();
+      this.mintOpen = true;
+    },
+
+    async submitMint() {
+      this.busy = true;
+      try {
+        const body = Object.assign({}, this.form);
+        if (!body.workgroup) body.workgroup = null;
+        const out = await API.post('/api/agentcell/agent', body);
+        this.mintOpen = false;
+        this.minted = out;
+        this.mintedOpen = true;
+        // The install commands, built from the create response rather than from the row
+        // we are about to reload. A blank workgroup makes the row invisible to every
+        // non-admin INCLUDING whoever just minted it, so the lookup below can miss — and
+        // sending somebody to a modal full of <placeholders> seconds after issuing a
+        // token they can never see again is the worst moment for that.
+        this.installRow = { name: out.name, spiffe_id: out.spiffe_id,
+                            host_name: body.host_ref };
+        await this.load();
+        const row = this.agents.find(a => a.id === out.id);
+        // The listed row is authoritative about the host: `host_ref` was a proposal and
+        // may have been an IP, while the row carries the name the deploy records hold.
+        if (row) this.installRow = row;
+      } catch (e) {
+        // The refusals are the feature: an administrator, a token that never expires, a
+        // host the deploy records do not know. Each arrives here carrying its remedy.
+        this.notify('Refused: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+
+    copy(text) {
+      if (!text) return;
+      try {
+        navigator.clipboard.writeText(text);
+        this.notify('Copied. It is not shown again.');
+      } catch (e) {
+        this.notify('Could not copy — select the token and copy it by hand.', 'error');
+      }
+    },
+
+    openInstall(row) {
+      this.installRow = row || this.installRow;
+      this.installOpen = true;
+    },
+
+    entryCommand() {
+      const r = this.installRow || {};
+      return 'ansible-playbook agent-spiffe-entry.yml \\\n'
+           + '  -e spiffe_id=' + (r.spiffe_id || '<spiffe id>') + ' \\\n'
+           + '  -e agent_host=' + (r.host_name || '<host>');
+    },
+    installCommand() {
+      const r = this.installRow || {};
+      return 'ansible-playbook agent-install.yml \\\n'
+           + '  -e agent_host=' + (r.host_name || '<host>') + ' \\\n'
+           + '  -e mcp_url=' + window.location.origin + '/mcp \\\n'
+           + '  -e agent_pat=<the token, shown once at mint>';
+    },
+
+    openLink(row) {
+      this.linkRow = row;
+      this.linkForm = { mechanism: '', credential_id: '' };
+      this.linkOpen = true;
+    },
+
+    async submitLink() {
+      this.busy = true;
+      try {
+        const out = await API.post('/api/agentcell/agent/' + this.linkRow.id + '/link',
+                                   this.linkForm);
+        this.linkOpen = false;
+        // The notes carry the distinction the row then keeps: what the link is NOT on
+        // cloud, and what the approval does not gate on kubernetes.
+        this.notify([out.summary].concat(out.notes || []).join('\n\n'));
+        await this.load();
+      } catch (e) {
+        this.notify('Link refused: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+
+    async unlink(row) {
+      if (!confirm('Stop ' + row.name + ' being answerable for its '
+                   + row.linked_mechanism + ' credential?\n\nThis touches neither the '
+                   + 'agent nor the credential — the lab row keeps its own lifecycle.')) {
+        return;
+      }
+      this.busy = true;
+      try {
+        const out = await API.del('/api/agentcell/agent/' + row.id + '/link');
+        this.notify(out.message || 'Unlinked.');
+        await this.load();
+      } catch (e) {
+        this.notify('Unlink refused: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+
+    openEpisode(row) {
+      this.episodeRow = row;
+      this.episodeForm = { duration_minutes: this.options.episode.default_minutes };
+      this.episodeOpenModal = true;
+    },
+
+    async submitEpisode() {
+      this.busy = true;
+      try {
+        const out = await API.post(
+          '/api/agentcell/agent/' + this.episodeRow.id + '/k8s-request',
+          this.episodeForm);
+        this.episodeOpenModal = false;
+        this.notify([out.summary].concat(out.notes || []).join('\n\n'));
+        await this.load();
+      } catch (e) {
+        this.notify('Request refused: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+
+    async releaseEpisode(row) {
+      this.busy = true;
+      try {
+        const out = await API.del('/api/agentcell/agent/' + row.id + '/k8s-request');
+        // "Release" must not read as a revoke: a token already handed over lives out its
+        // TTL whatever happens here.
+        this.notify(out.message || 'Episode closed.');
+        await this.load();
+      } catch (e) {
+        this.notify('Could not close the request: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+
+    async revoke(row) {
+      const warn = 'Revoke ' + row.name + "'s token?\n\n"
+                 + 'The worker keeps running and keeps attesting — its identity was never '
+                 + 'in question. Its NEXT POLL is refused and the unit stops.\n\n'
+                 + 'This does not uninstall it. Destroy the host when you want the worker '
+                 + 'gone.';
+      if (!confirm(warn)) return;
+      this.busy = true;
+      try {
+        const out = await API.del('/api/agentcell/agent/' + row.id);
+        this.notify(out.message || 'Revoked.');
+        await this.load();
+      } catch (e) {
+        this.notify('Revoke failed: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+  };
+}
+</script>

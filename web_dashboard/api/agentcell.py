@@ -176,6 +176,9 @@ def list_agents(
             linked_credential_id=row.linked_credential_id or "",
             linked_summary=agentcell_service.link_summary(
                 row.linked_mechanism or "", _lease_state(db, row)),
+            episode_state=row.episode_state or "",
+            episode_summary=agentcell_service.episode_summary(row),
+            episode_started_at=_iso(row.episode_started_at),
         ))
     return AgentCellListResponse(agents=agents)
 
@@ -196,6 +199,162 @@ def _lease_state(db: Session, row) -> str:
     except Exception as exc:  # noqa: BLE001
         logger.info("agentcell: could not read the linked lease state (%s)", exc)
         return ""
+
+
+@router.get("/options")
+def build_options(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("config_mgmt", "write")),
+):
+    """What the Agent tab's forms need, and an honest list of what is not ready yet.
+
+    **``config_mgmt:write`` rather than a read scope, because of ``users``.** Every
+    other field here is derivable from routes the caller can already reach; the
+    candidate-user list is not, since ``/api/users`` is admin-only. Gating it on the
+    permission that can actually mint an agent keeps the disclosure to callers who could
+    obtain the same names by minting, and the tab degrades to read-only when it 403s.
+
+    **Administrators are omitted rather than listed-and-disabled.** ``pat_user_problem``
+    refuses them anyway, so showing them would add nothing but a roster of which
+    accounts hold admin, handed to somebody who by definition does not.
+
+    ``missing`` is the point of the route, as it is on the other tabs: every item on it
+    is a failure that would otherwise surface as a 400 on submit, or — worse — as a
+    worker that installs cleanly and then 404s every poll in front of an audience.
+    """
+    from ..services import (config_service, feature_flags, spire_lab_service,
+                            workgroup_service,
+                            workload_cloud_service as wcs,
+                            workload_k8s_service as wks)
+    from .spire_lab import _visible as _lab_visible
+
+    missing = []
+
+    mcp_on = feature_flags.enabled("mcp_server_enabled")
+    problem = agentcell_service.mcp_problem(mcp_on)
+    if problem:
+        missing.append(problem)
+
+    # The labs, filtered exactly as the SPIRE tab filters them — a lab this caller
+    # cannot see on that tab must not become selectable here.
+    labs = []
+    for lab in db.query(SpireLab).order_by(SpireLab.created_at.desc()).all():
+        if lab.status == "deleted" or not _lab_visible(lab, current_user):
+            continue
+        labs.append({
+            "id": lab.id,
+            "name": lab.name or "",
+            "trust_domain": lab.trust_domain or "",
+            "cloud": lab.cloud or "",
+            "status": lab.status or "",
+            "vm_name": lab.vm_name or "",
+            "private_ip": lab.private_ip or "",
+            "public_ip": lab.public_ip or "",
+            # What the worker would attest as if this lab is chosen. Resolved here so the
+            # form shows the same string the row will hold, rather than rebuilding
+            # `spiffe://` + path in JavaScript where the two could drift.
+            "spiffe_id": agentcell_service.spiffe_id_for(lab.trust_domain or ""),
+        })
+    if not labs:
+        spire_on = feature_flags.enabled("spire_lab_enabled")
+        missing.append(
+            "no SPIRE trust domain — the worker would have nothing to attest to, so the "
+            "identity half of the demo would be an assertion. "
+            + ("Stand one up on the SPIRE tab first."
+               if spire_on else
+               "Turn on the SPIRE Lab preview under Settings → Features and stand one "
+               "up, then come back."))
+
+    if not feature_flags.enabled("ansible_enabled",
+                                 config_service.get_bool("ansible_enabled", True)):
+        missing.append(
+            "ansible_enabled is off — minting still works, but the two playbooks that "
+            "put the worker on the host are Ansible runs you make yourself, so there "
+            "would be nothing to run them with.")
+
+    # Candidate token users. Non-admin and active only; see the docstring.
+    users = []
+    for row in db.query(User).order_by(User.username.asc()).all():
+        if not bool(getattr(row, "is_active", True)):
+            continue
+        if bool(getattr(row, "is_effective_admin", False)):
+            continue
+        users.append({"id": row.id, "username": row.username or "",
+                      "full_name": getattr(row, "full_name", "") or ""})
+    if not users:
+        missing.append(
+            "every active user on this instance is an administrator, and the cell "
+            "refuses to mint against one — the token user IS the agent's blast radius. "
+            "Create a narrow user for the agent first.")
+
+    # ── What the agent can be made answerable for ────────────────────────────
+    # The OTHER TABS' rows, which is what makes this tab a consumer rather than a fifth
+    # lab. `linkable` is resolved here because the refusals live server-side: an
+    # unrotated Kubernetes token holds a placeholder, and linking to it would promise
+    # the agent something it cannot be given.
+    credentials: dict = {m: [] for m in agentcell_service.LINKABLE_MECHANISMS}
+    if wcs.enabled():
+        for row in wcs.list_rows(db):
+            credentials["cloud"].append({
+                "id": row.id, "name": row.name or "", "cloud": row.cloud or "",
+                "detail": (row.dynamic_name or ""),
+                "state": wcs.lease_state(row),
+                "linkable": True, "why": "",
+            })
+    else:
+        missing.append(
+            "Workload Credentials is off, so the Cloud tab's leases cannot be listed "
+            "here. That link is accountability only — nothing a worker can spend — so "
+            "this does not block the demo.")
+    if wks.enabled():
+        for row in wks.list_rows(db):
+            rotated = bool(getattr(row, "rotated", False))
+            credentials["kubernetes"].append({
+                "id": row.id, "name": row.name or "",
+                "cloud": row.cloud or "",
+                "detail": " · ".join(x for x in (row.cluster_name or "",
+                                                 row.ps_account_name or "") if x),
+                "state": "ready" if rotated else "never rotated",
+                "linkable": rotated,
+                "why": ("" if rotated else
+                        "Password Safe still holds the placeholder this token was "
+                        "created with rather than a credential. Rotate it on the "
+                        "Kubernetes tab first."),
+            })
+    else:
+        missing.append(
+            "the Kubernetes tab is unavailable (it needs Kubernetes management and "
+            "Password Safe), so there is no token for an agent to request. That is the "
+            "second demo — an agent that cannot authorise its own access — and without "
+            "it only the revoke beat is available.")
+
+    return {
+        "clouds": list(spire_lab_service.PROVISIONING_CLOUDS),
+        "hosts": spire_lab_service.deployed_hosts(db),
+        "labs": labs,
+        "users": users,
+        # Through the same service /api/groups/workgroups reads, so the picker here and
+        # the one on every other page cannot offer different names — but NARROWED to the
+        # caller's own for a non-admin, which the global endpoint is not. `list_agents`
+        # filters purely on workgroup with no creator fallback, so tagging a row with a
+        # workgroup you are not in mints an agent you cannot then see, on the one page
+        # that just showed you its token for the only time.
+        "workgroups": (workgroup_service.list_names(db)
+                       if bool(getattr(current_user, "is_admin", False))
+                       else sorted(current_user.workgroups_list or [])),
+        "pat_hours": {"default": agentcell_service.DEFAULT_PAT_HOURS,
+                      "max": agentcell_service.MAX_PAT_HOURS},
+        "spiffe_path": agentcell_service.AGENT_SPIFFE_PATH,
+        "credentials": credentials,
+        # Which of the two links is a CAPABILITY. The page must not render them alike:
+        # a governance record that reads as a capability is this feature's headline
+        # failure mode, and the reverse is the Kubernetes one.
+        "spendable": list(agentcell_service.SPENDABLE_MECHANISMS),
+        "episode": {"default_minutes": agentcell_service.DEFAULT_DURATION_MINUTES,
+                    "max_minutes": agentcell_service.MAX_WAIT_MINUTES * 2},
+        "mcp_enabled": mcp_on,
+        "missing": missing,
+    }
 
 
 @router.post("/agent/{agent_id}/link", response_model=AgentCellLinkResponse)

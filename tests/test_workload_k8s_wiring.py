@@ -145,7 +145,12 @@ def test_the_tab_is_gated_on_both_capabilities_and_not_on_a_new_preview_flag():
     shell = _read("web_dashboard", "templates", "workload_lab", "index.html")
     assert "{% if k8s_management_enabled and password_safe_enabled %}" in shell
     flags = _read("web_dashboard", "services", "feature_flags.py")
-    derived = flags[flags.index("_DERIVED = {"):flags.index("_DERIVED = {") + 400]
+    # The WHOLE block, not a fixed byte window: the comment inside it has grown twice,
+    # and a window measured in characters silently stopped covering the tuple it was
+    # written to guard — an assertion that passes because it can no longer see the thing
+    # it checks.
+    start = flags.index("_DERIVED = {")
+    derived = flags[start:flags.index("\n}", start)]
     for non_preview in ("k8s_management_enabled", "password_safe_enabled"):
         assert non_preview not in derived, (
             f"{non_preview} was added to _DERIVED — workload_lab would stop resolving as "

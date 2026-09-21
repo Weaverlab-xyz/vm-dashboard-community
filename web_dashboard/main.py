@@ -1570,7 +1570,7 @@ async def oci_page(request: Request):
 async def workload_lab_page(request: Request):
     """Workload Lab: the labs for identities that belong to machines, as one page.
 
-    Four tabs, one per credential a machine is given:
+    Five tabs. Four give a machine a credential:
 
       * **Certificates** -- a private CA for the Password Safe "Certificate" plugin;
       * **SPIRE** -- a trust domain for the "SPIFFE SVID" plugin, where the workload attests
@@ -1579,7 +1579,14 @@ async def workload_lab_page(request: Request):
         answer for the managed clusters SPIFFE cannot reach;
       * **Cloud** -- a short-lived AWS or Azure credential minted by Workload Credentials.
 
-    Gated on the DERIVED workload_lab_enabled -- either LAB being on -- while each tab is
+    And the fifth is the consumer that holds one:
+
+      * **Agent** -- a worker attested by the SPIRE tab's trust domain and authorized by a
+        token that expires, which can be made answerable for the Cloud tab's lease or
+        request the Kubernetes tab's token. It is what turns the four above from
+        demonstrations of a mechanism into a principal somebody can watch be stopped.
+
+    Gated on the DERIVED workload_lab_enabled -- any LAB being on -- while each tab is
     gated inside the template on the flags its own mechanism needs. The routers stay separate
     and keep their own gates, so a tab can never render against a router that 404s. Note the
     asymmetry that follows: the page can be reachable with the Kubernetes or Cloud tab

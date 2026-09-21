@@ -165,6 +165,65 @@ def test_revoke_reports_what_the_operator_should_watch():
         "the revoke response does not say where to watch the worker stop"
 
 
+# -- /options, which exists to feed the Workload Lab's Agent tab ---------------
+
+def _options_body() -> str:
+    src = _src()
+    assert "def build_options(" in src, "api/agentcell.py has no /options route"
+    return src.split("def build_options(", 1)[1].split("\n@router.", 1)[0]
+
+
+def test_the_options_route_never_lists_an_administrator():
+    """The one thing this route could leak that nothing else the caller can reach does.
+
+    ``/api/users`` is admin-only, so the candidate list is genuinely new disclosure. It
+    is bounded two ways and both matter: only a caller who could obtain the same names
+    by minting sees it at all, and administrators are omitted rather than shown-disabled
+    — which would hand a non-admin a roster of exactly which accounts hold admin.
+    """
+    body = _code(_options_body())
+    assert "is_effective_admin" in body, (
+        "the options route no longer filters administrators out of the candidate user "
+        "list — `pat_user_problem` refuses them anyway, so listing them discloses who "
+        "holds admin and buys nothing")
+    assert "is_active" in body, "the options route offers deactivated users"
+
+
+def test_the_options_route_needs_the_permission_that_could_mint():
+    body = _options_body().split("\n", 12)
+    head = "\n".join(body)
+    assert 'require_permission("config_mgmt", "write")' in head, (
+        "the options route is not gated on the permission that can actually mint an "
+        "agent, so the user list reaches callers who could not obtain it by minting")
+
+
+def test_the_options_route_returns_no_credential():
+    """Same rule as every other surface on this feature: names and ids, never a secret.
+
+    Worth pinning here specifically because this route reaches into the OTHER Workload
+    Lab tabs to build the link picker, and those rows sit next to real vault
+    coordinates.
+    """
+    body = _code(_options_body())
+    for banned in ("token_hash", "_generate_raw", "raw", "password", "secret_value"):
+        assert banned not in body, (
+            f"the options route mentions {banned!r} — it lists what an agent may be "
+            f"made answerable for, and the credential is never part of that")
+
+
+def test_the_options_route_marks_an_unrotated_token_unlinkable():
+    """The refusal `link_agent` makes, surfaced in the picker instead of on submit.
+
+    A Kubernetes token whose first rotation never completed holds the placeholder it was
+    created with. Offering it as a choice promises the agent something it cannot be
+    given, and the operator finds out from a 400 with a room watching.
+    """
+    body = _code(_options_body())
+    assert "rotated" in body and "linkable" in body, (
+        "the options route does not report whether a Kubernetes token has rotated, so "
+        "the picker offers one that `link_agent` will refuse")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

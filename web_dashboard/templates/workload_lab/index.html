@@ -40,8 +40,16 @@
      * THE TAB BAR IS SUPPRESSED AT ONE TAB. Either preview flag can be off on its own, and
        a bar holding a single pill reads like a rendering fault.
 
-   The nav gates on the DERIVED workload_lab_enabled (either flag). It is deliberately not
-   a preview flag of its own: Settings owns exactly two toggles here, one per lab. #}
+   THE AGENT TAB IS THE ONE CONSUMER AMONG FIVE PRODUCERS, and that is why it earns a tab
+   rather than a page: every other tab answers "how does a machine get a credential", and
+   each of them stays theoretical until something holds one. It attests to the SPIRE tab's
+   trust domain and can be made answerable for the Cloud tab's lease or the Kubernetes
+   tab's token, so the page's four mechanisms resolve into one demo. It also carries the
+   page's only revoke worth watching -- see _agent.html.
+
+   The nav gates on the DERIVED workload_lab_enabled. It is deliberately not a preview flag
+   of its own: Settings owns one toggle per lab, and the Agent tab rides the preview flag
+   the agent cell already had. #}
 
 {% block content %}
 {% set tabs = [] %}
@@ -65,6 +73,21 @@
    preview toggle — Settings owns two here and that has not changed. #}
 {% if workload_credentials_enabled %}
   {% set _ = tabs.append({'slug': 'cloud', 'label': 'Cloud'}) %}
+{% endif %}
+{# The fifth tab, and the only CONSUMER on the page: every tab above issues a credential
+   to a machine, and this one is a machine holding some. It has a preview flag of its own
+   because it is a lab of its own -- unlike Kubernetes and Cloud, which ride the flags of
+   the integrations they drive -- so Settings gains no toggle here that did not already
+   exist for the feature itself.
+
+   AND IT IS IN feature_flags._DERIVED, unlike the two above it. That is the difference
+   between a capability of this page and a thing with its own switch: an operator who
+   turns the Agent Demo Cell on and finds /workload-lab still 404ing has been handed a
+   toggle that controls nothing they can reach. Safe for the all-preview invariant
+   test_permission_catalog.py depends on, because the flag is itself a preview flag --
+   which is exactly what the two capability flags are not. #}
+{% if agentcell_enabled %}
+  {% set _ = tabs.append({'slug': 'agent', 'label': 'Agent'}) %}
 {% endif %}
 {# ONE CONSEQUENCE WORTH KNOWING: with BOTH preview flags off this whole page 404s at the
    route gate, so the Kubernetes tab is unreachable no matter how its own two flags are
@@ -104,7 +127,10 @@
     cluster, not a person. A certificate, a SPIFFE identity, a Kubernetes token and a
     short-lived cloud credential are four answers to the same question, which is why they
     share a page &mdash; and which one an operator can actually use depends on what the
-    consumer is and who runs the thing it is reaching.
+    consumer is and who runs the thing it is reaching. The
+    <strong>Agent</strong> tab is the fifth, and it is not a fifth answer: it is a
+    consumer holding one, so the others stop being demonstrations of a mechanism and
+    become a principal you can watch be stopped.
     {# The hub guide, not a tab's. Each tab links its own below; this one is the page a
        reader wants BEFORE they have picked a tab, and /docs is the only other way to it. #}
     <a href="/docs/workload-lab" target="_blank" class="text-blue-600 hover:underline">Which one you want</a>.
@@ -144,6 +170,12 @@
   {% if workload_credentials_enabled %}
   <div x-show="activeTab === 'cloud'" x-cloak role="tabpanel">
     {% include "workload_lab/_cloud.html" %}
+  </div>
+  {% endif %}
+
+  {% if agentcell_enabled %}
+  <div x-show="activeTab === 'agent'" x-cloak role="tabpanel">
+    {% include "workload_lab/_agent.html" %}
   </div>
   {% endif %}
 

@@ -18,12 +18,15 @@ BeyondTrust product. The invariant that actually matters is not "calls Password 
   * the identity can be REMOVED, so nothing creates objects that cannot be cleaned up;
   * and no tab writes a credential onto its own row.
 
-Plus the property that makes this more than four assertions: **a FIFTH tab cannot ship
+Plus the property that makes this more than five assertions: **a SIXTH tab cannot ship
 without an authority**, because the roster is derived by reading `templates/workload_lab/`
 rather than hand-listed. Adding `_vault.html` fails here until somebody says what governs it.
+That is how the Agent tab arrived: it is the page's one CONSUMER rather than a producer,
+and it had to name what issues, records and revokes its principal's authorization before it
+could render.
 
 The widening is checked against becoming vacuous: `test_the_authorities_are_distinct` pins
-that the four do not all collapse onto one call, and each tab's `writes` is the specific
+that the five do not all collapse onto one call, and each tab's `writes` is the specific
 function that issues for THAT mechanism.
 
 Runs under pytest or standalone:  python tests/test_workload_lab_governance.py
@@ -118,6 +121,24 @@ _ONBOARDING = {
         "writes": "wlc.generate,",
         "records": "row.lease_id",
         "removes": "wlc.revoke_lease,",
+    },
+    # The CONSUMER tab, and the only one whose authority is this dashboard itself. The
+    # other four hand a credential to a machine; this one IS the machine, and what it is
+    # issued is a Personal Access Token against a deliberately narrow user. The file is
+    # the router rather than the service because that is where the issuance happens —
+    # `agentcell_service` argues the design and owns the refusals, and minting through
+    # `api/tokens`' own hashing rather than a second implementation is itself the point
+    # (two ways of minting the same token is one of them drifting unnoticed).
+    #
+    # It still belongs in this roster. "Governs the identity it creates" is exactly what
+    # it does: `hash_pat` issues, `row.pat_id` records, and clearing `is_active` revokes
+    # — which is the demo's closing beat rather than a teardown.
+    "agent": {
+        "service": ("web_dashboard", "api", "agentcell.py"),
+        "authority": "this dashboard's own token store",
+        "writes": "hash_pat(",
+        "records": "row.pat_id",
+        "removes": "pat.is_active = False",
     },
 }
 

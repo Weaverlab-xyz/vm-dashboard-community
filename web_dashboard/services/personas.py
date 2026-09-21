@@ -1072,7 +1072,12 @@ _AIOPS = Persona(
             summary="A worker is reading your estate on a loop. Revoke its token while "
                     "the log is on screen: the next poll is refused, it says so, and the "
                     "unit stops. Ask the room how they would do that to an agent today.",
-            target="/settings",
+            # The tab, not Settings. The whole beat lives there now -- mint, the token
+            # shown once, the install commands, and Revoke -- and landing a presenter on
+            # the Settings page left them hunting for a token row among the human ones
+            # with a room watching. Settings -> API Tokens is still where the revoke can
+            # be shown if the point is that an agent's token sits among everyone else's.
+            target="/workload-lab#agent",
             minutes=12,
             docs="profiles/demo/agent-demo-cell",
             requires_flags=("agentcell_enabled", "mcp_server_enabled"),
@@ -1125,9 +1130,10 @@ _AIOPS = Persona(
             target="/workload-lab#cloud",
             minutes=10,
             docs="workload-lab/cloud",
-            # `spire_lab_enabled` is here for the PAGE, not the tab: with both lab flags
-            # off the whole Workload Lab 404s and the Cloud tab is unreachable however
-            # its own flag is set -- which docs/workload-lab.md states as a deliberate
+            # `spire_lab_enabled` is here for the PAGE, not the tab: with every flag in
+            # feature_flags._DERIVED["workload_lab_enabled"] off the whole Workload Lab
+            # 404s and the Cloud tab is unreachable however its own flag is set -- which
+            # docs/workload-lab.md states as a deliberate
             # property rather than a gap. This persona's other cards need the SPIRE lab
             # anyway, so naming it costs nothing an operator was not already turning on.
             requires_flags=("spire_lab_enabled", "workload_credentials_enabled"),
