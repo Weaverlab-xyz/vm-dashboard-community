@@ -810,8 +810,10 @@ ps-cli secrets download -id <GUID-from-the-Id-column> -s ./chain.pem
 **ignores** `--decrypt` — only the `--title` branch enables it — so resolving by ID hands
 back a masked credential and no error.
 
-A `raw` call reaches the same endpoint in **one** step if you already hold the GUID, and
-it is the shape to reuse if you are scripting around ps-cli rather than through it:
+A `raw` call reaches the same endpoint in **one** step if you already hold the GUID.
+This is the route **the dashboard itself takes** — `read_bt_secrets_safe` spots
+`SecretType: File` and follows up with it, so a `bt_safe://` reference to a text bundle
+resolves normally rather than to an empty string:
 
 ```bash
 ps-cli raw GET "Secrets-Safe/Secrets/<GUID>/file/download"

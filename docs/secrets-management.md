@@ -235,13 +235,25 @@ the value from any backend without backend-specific parsing.
 | Operation | DB | AWS SM | Azure KV | GCP SM | BT Secrets Safe |
 |---|---|---|---|---|---|
 | List secrets | ✅ | ✅ | ✅ | ✅ | ✅ (per folder) |
-| Read secret value | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Read secret value | ✅ | ✅ | ✅ | ✅ | ✅ (file secrets: text only) |
 | Create / update secret | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Delete secret | ✅ | ✅ | ✅ | ✅ | ✅ |
 | List Safes | — | — | — | — | ✅ |
 | Create / rename / delete Safe | — | — | — | — | ✅ |
 | List Folders | — | — | — | — | ✅ |
 | Create / delete Folder | — | — | — | — | ✅ |
+
+**Reading a file secret takes a second call, and it is made for you.** `ps-cli secrets
+get` returns a file secret's `FileName` and `FileHash` and no contents — there is no
+payload field in that projection for `--decrypt` to fill — so the read would otherwise
+resolve to an empty string rather than failing. The dashboard detects `SecretType: File`
+and fetches the body from `GET Secrets-Safe/Secrets/{id}/file/download` over `ps-cli
+raw`. **Text payloads only:** that endpoint is byte-faithful, but every ps-cli route
+decodes its response to text, so a PEM bundle, a config file or JSON round-trips and a
+PKCS#12 or DER payload does not. A payload showing decode damage is **refused rather
+than returned**, since a corrupt bundle that looks like a value fails much later and
+somewhere unrelated. See
+[Password Safe → Troubleshooting](integrations/password-safe.md#troubleshooting).
 
 BeyondTrust hierarchy management is driven through the
 [ps-cli subcommands](https://docs.beyondtrust.com/bips/docs/ps-cli-application):

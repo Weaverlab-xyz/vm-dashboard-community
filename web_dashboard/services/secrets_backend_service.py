@@ -644,6 +644,67 @@ def write_bt_secrets_safe(key: str, value: str) -> str:
     return title
 
 
+# `raw`'s two stdout shapes, neither of which is an exit code. On a body it cannot
+# parse as JSON it prints a banner line and then the body; on an HTTP error it prints
+# `Status: <code>` and the response, and still exits 0. Both have to be recognised
+# here — the second especially, because returning it would hand a caller the string
+# "Status: 404 ..." as though it were the secret.
+_PSCLI_RAW_NONJSON_BANNER = "response is not valid json:"
+_PSCLI_RAW_STATUS_PREFIX = "status:"
+
+
+def _read_bt_file_secret(secret_id: str, ref: str) -> str:
+    """The contents of a **file**-type secret, over ``raw``.
+
+    `secrets get` cannot do this. It projects a per-type field set and the file one is
+    metadata only — `FileName` and `FileHash`, no content field at all — so `--decrypt`
+    has nothing to fill and the read comes back empty rather than failing. The bytes
+    live behind `GET Secrets-Safe/Secrets/{id}/file/download`, which ps-cli exposes two
+    ways: `secrets download-secret-file`, and a `raw` call.
+
+    **`raw` is the one used here**, because `download-secret-file` either writes to a
+    path (which this read path has nowhere to put) or prints to stdout, and either way
+    it is a second subprocess after the `secrets get` that resolved the id. `raw` takes
+    the id we already hold and returns the body directly.
+
+    **Text only, and that is a ps-cli limit rather than an API one.** The endpoint
+    returns `application/octet-stream` and is byte-faithful; every ps-cli route then
+    decodes it — the library returns `response.text`, and `raw` falls through its JSON
+    parse to print `response.text`. A PEM bundle, a config file or JSON survives that; a
+    PKCS#12, a `.p12` or DER does not. Rather than hand back a plausible-looking but
+    mangled string, a payload showing decode damage is refused. Anything needing real
+    bytes has to call the endpoint directly, off ps-cli entirely.
+    """
+    out = _ps_run(["raw", "GET", f"Secrets-Safe/Secrets/{secret_id}/file/download"],
+                  timeout=60)
+
+    # A JSON-bodied file secret round-trips through `raw`'s pretty-printer and comes
+    # back parsed. Re-serialising loses the original whitespace, which is the best
+    # available answer: the formatting is already gone by the time we see it.
+    if not isinstance(out, str):
+        return json.dumps(out, indent=2) if out else ""
+
+    text = out.strip("\n")
+    if text.lower().lstrip().startswith(_PSCLI_RAW_STATUS_PREFIX):
+        raise ValueError(
+            f"BeyondTrust file secret {ref!r} could not be downloaded: {text[:500]}")
+    first, _, rest = text.partition("\n")
+    if first.strip().lower() == _PSCLI_RAW_NONJSON_BANNER:
+        text = rest
+
+    # Decode damage, not a value. `raw` hands us `response.text`, so a binary payload
+    # arrives already broken — NULs or U+FFFD replacement characters are what is left
+    # of bytes that were not valid in the response encoding.
+    if "\x00" in text or "�" in text:
+        raise ValueError(
+            f"BeyondTrust file secret {ref!r} is binary (a PKCS#12 or DER payload, "
+            f"most likely) and ps-cli returns file secrets as decoded text, so the "
+            f"bytes are already corrupt by the time they reach the dashboard. Store "
+            f"the material as PEM, or read it straight from "
+            f"GET Secrets-Safe/Secrets/{{id}}/file/download without ps-cli.")
+    return text
+
+
 def read_bt_secrets_safe(ref: str, vault_id: str | None = None) -> str:
     # BT Secrets Safe is hosted by the PSCLI install; vault_id has no
     # routing effect today (the ps-cli wrapper auths once, hits one host).
@@ -654,6 +715,15 @@ def read_bt_secrets_safe(ref: str, vault_id: str | None = None) -> str:
     if not isinstance(data, list) or not data:
         return ""
     entry = data[0]
+    # A file secret carries no payload field at all, so the probe below would return
+    # "" and read as an empty secret. Route it to the download endpoint instead.
+    if str(entry.get("SecretType") or "").strip().lower() == "file":
+        secret_id = str(entry.get("Id") or "").strip()
+        if not secret_id:
+            raise ValueError(
+                f"BeyondTrust secret {ref!r} is a file secret but `secrets get` "
+                f"returned no Id, so its contents cannot be fetched.")
+        return _read_bt_file_secret(secret_id, ref)
     # Text-type secrets put the payload in Text (sometimes returned as
     # FileContent/Content depending on ps-cli version); older
     # credential-type secrets used Password. Probe both so a backend that
