@@ -32,19 +32,29 @@ _TMPDB = os.path.join(tempfile.mkdtemp(prefix="agentcell-vis-test-"), "test.db")
 os.environ["DATABASE_URL"] = f"sqlite:///{_TMPDB}"
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-agentcell-visibility")
 
+# The third-party deps are probed BY NAME and the first-party imports are unguarded,
+# which is the rule tests/test_import_guard_narrowness.py enforces. A wider handler
+# cannot tell "this machine has no fastapi" (ModuleNotFoundError, skipping is right)
+# from "AgentCell no longer exists" (plain ImportError, the file is broken) — and CI runs
+# each file standalone, so the second would print SKIP and exit 0 forever.
 try:
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-    from web_dashboard.database import AgentCell, Base, SessionLocal, engine, get_db
-    from web_dashboard.api import agentcell as agentcell_api
-    from web_dashboard.api.auth import get_current_user
-except Exception as exc:  # pragma: no cover — app deps missing
+    import fastapi  # noqa: F401
+    import fastapi.testclient  # noqa: F401
+except ModuleNotFoundError as exc:  # pragma: no cover — app deps missing
     try:
         import pytest
         pytest.skip(f"app dependencies unavailable: {exc}", allow_module_level=True)
     except ModuleNotFoundError:
         print(f"SKIP: {exc}")
         sys.exit(0)
+
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from web_dashboard.database import (  # noqa: E402
+    AgentCell, Base, SessionLocal, engine, get_db)
+from web_dashboard.api import agentcell as agentcell_api  # noqa: E402
+from web_dashboard.api.auth import get_current_user  # noqa: E402
 
 Base.metadata.create_all(bind=engine)
 
