@@ -100,6 +100,15 @@ Azure honours the revoke.
 nothing. All four are configured in Settings, so the cards report them as *needs flag* and
 point at the panel — the arrangement `vdesktops` and `notifications` already have.
 
+This focus **needs an estate instance**; on a [POV instance](../../pov/README.md) most of
+its cards report as unavailable by design. The reason is worth stating rather than
+discovering live: `spire_lab_enabled` is estate-owned because the lab's administrative
+credential is written into Secrets Safe through the global `pscli_*` singletons, which on
+a POV instance would land in the wrong customer's tenant. `agentcell_enabled` is masked
+along with it — not for the same tenancy reason, but because the cell cannot mint an
+agent without a trust domain to attest it against, and only that lab creates one. An
+unmasked toggle there would be a switch that turns on and can never work.
+
 ## Talking to this buyer
 
 Open with the question, not the product: **"how many non-human principals are running in

@@ -57,6 +57,21 @@ _DEMO_ONLY = (
     # credential is written into Secrets Safe through the global pscli_* singletons,
     # so on a POV instance it would land in the wrong customer's tenant.
     "spire_lab_enabled",
+    # Demo-only by DEPENDENCE rather than by tenancy, which is a different argument from
+    # the two above and worth keeping distinct. The cell writes nothing through the
+    # global pscli_* singletons -- it mints a dashboard PAT, and the worker reaches
+    # Password Safe with credentials Workload Credentials brokers for it. What it cannot
+    # do without is a SPIRE trust domain: `create_agent` 404s without a SpireLab row,
+    # and only the SPIRE lab creates one, and that is masked here. So on a POV instance
+    # this is a toggle an operator can switch on that can never work -- and since the
+    # cell joined _DERIVED["workload_lab_enabled"], leaving it unmasked also meant one
+    # flag could stand the whole Workload Lab up on a POV instance to show a single tab
+    # whose own remedy ("turn on the SPIRE Lab preview") points at a masked switch.
+    #
+    # If the SPIFFE bridge ever lands and the cell stops needing a lab, this entry is
+    # the one to revisit -- and it should be revisited deliberately rather than deleted
+    # because the tenancy sentence above does not happen to apply.
+    "agentcell_enabled",
     "cost_explorer_enabled",
 )
 
@@ -190,7 +205,8 @@ def enabled(flag: str, default: bool = False) -> bool:
     parts = _DERIVED.get(flag)
     if parts is not None:
         # Each part resolves through here too, so a profile mask on a constituent still
-        # subtracts -- both of the Workload Lab's are demo-only.
+        # subtracts -- all THREE of the Workload Lab's are demo-only, which is what
+        # keeps that page 404ing on a POV instance however its own flags are set.
         return any(enabled(p, getattr(settings, p, False)) for p in parts)
     return config_service.get_bool(flag, default)
 

@@ -148,16 +148,9 @@ def list_agents(
 ):
     """Every agent cell this caller may see, newest first.
 
-    **Workgroup OR creator**, which is the Certificate and SPIRE labs' rule and not the
-    cloud pages'. The difference matters because the workgroup is OPTIONAL here, where a
-    cloud deploy form requires one: filtering on workgroup alone made a blank one mean
-    "administrators only", so a non-admin who left the field empty minted an agent they
-    could not then see — on the one screen that had just shown them its token for the
-    only time, with no way to reach the Revoke button for the credential they had issued.
-
-    The creator term does not widen anything a workgroup grant does not already: it
-    restores the row to the one person who made it. Everything else stays workgroup-
-    scoped, so a shared agent is still shared by tagging it.
+    Visibility is ``agentcell_service.visible_to`` — workgroup OR creator — which the
+    home page's `agent_cells` tile also reads, so the count and the list it links to
+    cannot disagree.
     """
     from .gcp import _accessible_workgroups
 
@@ -165,9 +158,7 @@ def list_agents(
     rows = db.query(AgentCell).order_by(AgentCell.created_at.desc()).all()
     agents = []
     for row in rows:
-        if (accessible is not None
-                and (row.workgroup or "").lower() not in accessible
-                and (row.created_by or "") != current_user.username):
+        if not agentcell_service.visible_to(row, accessible, current_user.username):
             continue
         agents.append(AgentCellInfo(
             id=row.id,
