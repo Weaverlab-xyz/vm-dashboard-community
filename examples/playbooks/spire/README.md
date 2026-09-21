@@ -4,7 +4,7 @@ The lab for the Password Safe **SPIFFE SVID** custom plugin: a SPIRE Server on o
 Linux VM, seeded with registration entries worth governing, plus the administrative
 credential the plugin authenticates with.
 
-Feature reference: [docs/integrations/spiffe.md](../../../docs/integrations/spiffe.md).
+Feature reference: [docs/workload-lab/spiffe.md](../../../docs/workload-lab/spiffe.md).
 
 **These playbooks are cloud-agnostic.** They configure a Linux host over SSH, so the
 only thing that changes between Azure, GCP and AWS is how the VM is created and how its
@@ -29,7 +29,7 @@ Kubernetes/database image.
 
 > The dashboard's **SPIRE** page (preview: `spire_lab_enabled`) does all five steps below
 > as one job, on Azure, GCP or AWS, and opens the cloud ACL first — see
-> [docs/integrations/spiffe.md](../../../docs/integrations/spiffe.md#building-it-from-the-dashboard). It runs these
+> [docs/workload-lab/spiffe.md](../../../docs/workload-lab/spiffe.md#building-it-from-the-dashboard). It runs these
 > same files, fetched **by filename from the storage backend**, so upload them on the
 > **Storage** page first (Config Management only *runs* them); the build form names the
 > ones it cannot find. The steps
@@ -51,7 +51,7 @@ Three of these plays, plus `k3s/k3s-spiffe-auth.yml`, attest a **second VM** int
 domain and make its Kubernetes API server accept the tokens. **The dashboard drives them
 from a button** — the *Kubernetes* action on a lab's row, which runs all five stages
 alternating hosts and passes the join token and trust bundle between them so nothing is
-copied by hand. See [docs/integrations/spiffe.md](../../../docs/integrations/spiffe.md#reaching-a-kubernetes-cluster-with-a-jwt-svid).
+copied by hand. See [docs/workload-lab/spiffe.md](../../../docs/workload-lab/spiffe.md#reaching-a-kubernetes-cluster-with-a-jwt-svid).
 
 They exist because the four plays above prove *issuance* and *governance* and never prove
 that a relying party accepts the result. Here it does, and unlike every identity the plugin

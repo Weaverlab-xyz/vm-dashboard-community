@@ -10,7 +10,7 @@
 # NEVER LIVE-VALIDATED — see docs/design/workload-k8s-short-lived-token.md.
 #
 # THE WORKLOAD ENTRY IS DELIBERATELY NOT IN spire-seed-entries.yml. That play seeds 11
-# entries and docs/integrations/spiffe.md asserts discovery returns exactly 8 of them;
+# entries and docs/workload-lab/spiffe.md asserts discovery returns exactly 8 of them;
 # tests/test_playbook_spire.py computes those numbers from its _entries list. Adding an
 # entry there would move a count that has already caught a real bug — the plugin shipping
 # with discovery filtered to the mintable prefix — and retire the assertion that caught

@@ -330,7 +330,7 @@ _DEVOPS = Persona(
                     "nobody is holding it.",
             target="/secrets",
             minutes=12,
-            docs="integrations/workload-credentials",
+            docs="workload-lab/workload-credentials",
             requires_flags=("password_safe_enabled",),
         ),
         UseCase(
@@ -352,7 +352,7 @@ _DEVOPS = Persona(
                     "handshake — then rotate and show the build never notices.",
             target="/workload-lab#certificates",
             minutes=15,
-            docs="integrations/certificates",
+            docs="workload-lab/certificates",
             requires_flags=("cert_lab_enabled",),
         ),
         UseCase(
@@ -364,7 +364,7 @@ _DEVOPS = Persona(
                     "the one consumer that cannot run an agent.",
             target="/workload-lab#spire",
             minutes=20,
-            docs="integrations/spiffe",
+            docs="workload-lab/spiffe",
             requires_flags=("spire_lab_enabled",),
         ),
         UseCase(
@@ -377,7 +377,7 @@ _DEVOPS = Persona(
                     "SPIFFE route above cannot be configured at all.",
             target="/workload-lab#kubernetes",
             minutes=10,
-            docs="integrations/workload-kubernetes",
+            docs="workload-lab/kubernetes",
             # THREE flags, and `spire_lab_enabled` is the one that looks wrong. The tab
             # needs k8s + Password Safe, but /workload-lab itself is gated on the derived
             # `workload_lab_enabled` — either PREVIEW flag — so a card that named only the
@@ -398,7 +398,7 @@ _DEVOPS = Persona(
                     "rotating anything.",
             target="/workload-lab#cloud",
             minutes=10,
-            docs="integrations/workload-cloud",
+            docs="workload-lab/cloud",
             # The Workload Credentials integration's own flag plus a PREVIEW flag, for the
             # reason test_personas.py enforces: /workload-lab is gated on the derived
             # `workload_lab_enabled`, so a card naming only the first would link to a page
@@ -1085,7 +1085,7 @@ _AIOPS = Persona(
                     "deleting the registration entry is enough to make it anonymous.",
             target="/workload-lab#spire",
             minutes=10,
-            docs="integrations/spiffe",
+            docs="workload-lab/spiffe",
             # The constituent, not the derived `workload_lab_enabled`. The page gate is
             # `cert_lab OR spire_lab`, so requiring the derived flag would leave a card
             # reading `ready` on an instance where only the Certificate lab is on and the
@@ -1124,7 +1124,7 @@ _AIOPS = Persona(
                     "the TTL is the only control there is.",
             target="/workload-lab#cloud",
             minutes=10,
-            docs="integrations/workload-cloud",
+            docs="workload-lab/cloud",
             # `spire_lab_enabled` is here for the PAGE, not the tab: with both lab flags
             # off the whole Workload Lab 404s and the Cloud tab is unreachable however
             # its own flag is set -- which docs/workload-lab.md states as a deliberate

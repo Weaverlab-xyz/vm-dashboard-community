@@ -10,7 +10,7 @@
 # through a **ClusterRoleBinding**. A ClusterRoleBinding is a cluster-wide grant, which is
 # what a fleet scan needs and is only acceptable because of what `view` leaves out.
 #
-# NEVER LIVE-VALIDATED — see docs/integrations/workload-kubernetes.md.
+# NEVER LIVE-VALIDATED — see docs/workload-lab/kubernetes.md.
 #
 # ── WHAT `view` LEAVES OUT IS THE POINT. Upstream's `view` ClusterRole deliberately omits
 # `secrets`, so a Reader can enumerate every Pod, Deployment and Node in the cluster and

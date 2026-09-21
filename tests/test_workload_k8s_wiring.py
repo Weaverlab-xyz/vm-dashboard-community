@@ -270,13 +270,14 @@ def test_the_model_stores_no_credential_and_no_kubeconfig():
 
 
 def test_the_docs_and_persona_are_wired():
-    # The four Workload Lab tab guides are indexed by integrations/, not by the root
-    # index: docs/README.md carries the hub (docs/workload-lab.md) and the hub links each
-    # tab. Both halves are asserted, because either one going missing orphans this page.
-    assert "workload-kubernetes.md" in _read("docs", "integrations", "README.md"),         "the guide is in no index"
+    # The tab guides live in docs/workload-lab/, indexed by the sibling hub
+    # docs/workload-lab.md rather than by a README -- doc_page resolves <page>.md before
+    # <page>/README.md, so a folder cannot carry both. Both halves are asserted, because
+    # either one going missing orphans this page: the root index carries the hub, and the
+    # hub links every spoke.
     assert "workload-lab.md" in _read("docs", "README.md"), "the hub is in no index"
-    assert "integrations/workload-kubernetes.md" in _read("docs", "workload-lab.md"),         "the hub does not link this tab's guide"
-    guide = _read("docs", "integrations", "workload-kubernetes.md")
+    assert "workload-lab/kubernetes.md" in _read("docs", "workload-lab.md"),         "the hub does not link this tab's guide"
+    guide = _read("docs", "workload-lab", "kubernetes.md")
     # The four boundaries the design says to state plainly. Each is a claim somebody would
     # otherwise make wrongly in a demo.
     assert "rotation does not revoke" in guide.lower()
@@ -285,7 +286,7 @@ def test_the_docs_and_persona_are_wired():
     assert "cannot revoke certificates" in guide.lower()
     # And it cross-links with the SPIFFE guide both ways.
     assert "spiffe.md" in guide
-    assert "workload-kubernetes.md" in _read("docs", "integrations", "spiffe.md")
+    assert "kubernetes.md" in _read("docs", "workload-lab", "spiffe.md")
     personas = _read("web_dashboard", "services", "personas.py")
     assert "devops-workload-cluster-token" in personas
     assert "/workload-lab#kubernetes" in personas
