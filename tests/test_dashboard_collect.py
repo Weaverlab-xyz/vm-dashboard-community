@@ -81,6 +81,7 @@ NOT_COLLECTED = {
     "gateways":           "gateway registry table (reconcile=false on the tile)",
     "ot_cells":           "Job rows (the cell's deploy child IS its inventory record)",
     "net_cells":          "Job rows (a network cell IS its gce_deploy row — no parent job)",
+    "agent_cells":        "AgentCell rows — dashboard DB, workgroup- or creator-scoped per row",
     "cloud_cost":         "already durable — services/cost_cache",
     # The POV tiles. Indexed reads against the dashboard's own database, scoped by
     # pov_env_scope rather than by workgroup -- so collecting them would force this

@@ -411,6 +411,48 @@ def link_summary(mechanism: str, lease_state: str) -> str:
     return f"{mechanism}: no credential issued yet"
 
 
+def visible_to(row, accessible, username: str) -> bool:
+    """Who may see one agent cell. ``accessible=None`` → admin, and sees everything.
+
+    **Workgroup OR creator**, the Certificate and SPIRE labs' rule rather than the cloud
+    pages'. The difference is that a workgroup is OPTIONAL here where a cloud deploy form
+    requires one, so filtering on workgroup alone made a blank field mean "administrators
+    only" — and the person who minted an untagged agent lost the row, the token having
+    been shown exactly once and the Revoke button living on it.
+
+    **One function because two readers need the same answer**, and they are a list and a
+    count of that list: ``api/agentcell.list_agents`` and the home page's `agent_cells`
+    tile. A tile that counts rows its own link will not show is the drift worth
+    preventing here — it reads as data disappearing rather than as scoping.
+    """
+    if accessible is None:
+        return True
+    wg = (getattr(row, "workgroup", "") or "").lower()
+    if wg:
+        return wg in accessible
+    return (getattr(row, "created_by", "") or "") == username
+
+
+def token_live(row, now=None) -> bool:
+    """Whether this agent's authorization would still be accepted.
+
+    Not "is the worker running" — the dashboard cannot know that, and saying so would be
+    the same overclaim the tab avoids with `stages_done`. It is the narrower fact the row
+    genuinely holds: not revoked, and not past its expiry. That is the number worth
+    putting beside the total, because an agent whose token has lapsed is a principal that
+    has already stopped.
+    """
+    if getattr(row, "pat_revoked_at", None):
+        return False
+    expires = getattr(row, "pat_expires_at", None)
+    if not expires:
+        # Unreachable through this cell -- `pat_expiry_problem` refuses a token that
+        # never expires -- but a row that somehow has no expiry is not evidence of a
+        # live one, and counting it as live is the generous reading of the two.
+        return False
+    return expires > (now or datetime.utcnow())
+
+
 def stages_done(row) -> list:
     return [s for s in ((getattr(row, "stages_done", "") or "").split(",")) if s]
 

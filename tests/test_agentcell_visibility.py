@@ -172,6 +172,76 @@ def test_the_creator_term_does_not_widen_another_workgroup():
     assert _OTHERS not in seen, "creating one agent granted sight of another user's"
 
 
+# ── the home-page tile counts what its own link will show ────────────────────
+
+def test_the_tile_and_the_listing_agree_for_every_identity():
+    """A tile that counts rows its own link will not show reads as data disappearing.
+
+    Both go through ``agentcell_service.visible_to`` for exactly this reason, so this is
+    the assertion that keeps them one function rather than two that happen to match
+    today. Checked per identity, because the shapes only diverge for non-admins — an
+    admin sees everything either way, which is how a scoping bug hides from whoever is
+    most likely to be looking.
+    """
+    from web_dashboard.services import agentcell_service
+    from web_dashboard.api.gcp import _accessible_workgroups
+    from web_dashboard.database import AgentCell
+
+    for user in (_User("minter", workgroups=[]),
+                 _User("colleague", workgroups=["platform"]),
+                 _User("nobody", workgroups=[]),
+                 _User("root", workgroups=[], is_admin=True)):
+        listed = _names_seen_by(user)
+        db = SessionLocal()
+        try:
+            accessible = _accessible_workgroups(user)
+            counted = {r.name for r in db.query(AgentCell).all()
+                       if agentcell_service.visible_to(r, accessible, user.username)}
+        finally:
+            db.close()
+        assert counted == listed, (
+            f"{user.username}: the tile would count {sorted(counted)} and the page it "
+            f"links to lists {sorted(listed)}")
+
+
+def test_the_tiles_secondary_counts_authorization_not_installation():
+    """`authorized` is the count of tokens that would still be accepted.
+
+    NOT `wired`, which is what the OT tile's secondary means and what the obvious
+    copy-paste would have used here. `is_wired` reads `stages_done`, and nothing writes
+    it — the two install playbooks are runs the operator makes, so it would report 0
+    forever beside a working agent. `token_live` is the narrower thing the row actually
+    knows, and total-minus-it is how many of these principals have stopped.
+    """
+    from datetime import datetime, timedelta
+    from web_dashboard.services import agentcell_service as A
+
+    now = datetime.utcnow()
+
+    class _Row:
+        def __init__(self, **kw):
+            self.pat_revoked_at = kw.get("revoked")
+            self.pat_expires_at = kw.get("expires")
+
+    assert A.token_live(_Row(expires=now + timedelta(hours=1)), now) is True
+    assert A.token_live(_Row(expires=now - timedelta(hours=1)), now) is False, \
+        "a lapsed token still counts as authorized"
+    assert A.token_live(_Row(expires=now + timedelta(hours=1),
+                             revoked=now - timedelta(minutes=1)), now) is False, \
+        "a REVOKED token still counts as authorized — which is the demo's closing beat, " \
+        "so the tile would contradict the thing it is there to show"
+    assert A.token_live(_Row(expires=None), now) is False, \
+        "a row with no expiry counts as live; the generous reading is the wrong one here"
+    # And the tile must not be tempted back to the field that cannot work.
+    src = open(os.path.join(_ROOT, "web_dashboard", "api", "dashboard.py"),
+               encoding="utf-8").read()
+    body = src.split("def _agent_cells():", 1)[1].split('_safe("agent_cells"', 1)[0]
+    body = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+    assert "is_wired" not in body and "stages_done" not in body, (
+        "the agent_cells tile reads a stage field nothing writes, so its secondary "
+        "would be 0 forever")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
