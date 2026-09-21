@@ -187,8 +187,10 @@ def pat_name_for(cell_name: str) -> str:
 # managed-account password". Half of that identity IS a managed-account password -- the
 # PKCS#12 passphrase -- and the worker could always reach it. The gap was the BUNDLE
 # alone, a Secrets Safe file secret. Secrets Safe is part of Password Safe, so the same
-# client pair opens it; the worker now reads it with `ps-cli`, which is the path this
-# repo already runs against a live tenant.
+# client pair opens it -- so the session that releases the passphrase downloads the bundle
+# too, over `GET Secrets-Safe/Secrets/{id}/file/download`. NOT through ps-cli, which every
+# route of decodes the body to text and so corrupts a PKCS#12 rather than refusing it; see
+# `secrets_backend_service._read_bt_file_secret`, which refuses binary for that reason.
 #
 # `cloud` remains linkable but NOT spendable -- its credential is returned to nobody by
 # design, so the link records a lease whose STATE is worth reporting beside the agent and

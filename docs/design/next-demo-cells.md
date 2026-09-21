@@ -558,7 +558,7 @@ can take away**, and the arc is the reason to build it at all:
 | cluster access | a Workload Lab token | **gated at retrieval**; once released it lives out its TTL |
 | certificate use | a PKCS#12 identity | **neither** |
 
-`docs/integrations/certificates.md` states the third position plainly: *"No revocation
+`docs/workload-lab/certificates.md` states the third position plainly: *"No revocation
 checking. The plugin consults neither CRLs nor OCSP. Short lifetimes are the mitigation,
 and that is a deliberate design position."* So the closing beat is deliberately
 uncomfortable — disable the managed account, which revokes the certificate, run the agent
@@ -580,45 +580,58 @@ managed-account retrieval path"*. Half of a certificate identity **is** a manage
 password — the passphrase — and the worker could always fetch it. The gap was the
 **bundle** alone.
 
-### The decision, and the reason I first got it wrong
+### The retrieval decision, which took three passes to get right
 
-An earlier draft of this plan recommended writing a Secrets Safe REST client and rejected
-`ps-cli`, on the grounds that the binary *"would need its own credential configuration,
-which is the standing secret this cell exists to argue against"*.
+Worth recording in full, because each wrong turn was confidently argued.
 
-**That was false**, and one grep settled it: `secrets_backend_service._pscli_env` maps
-`PSCLI_CLIENT_ID` / `PSCLI_CLIENT_SECRET` from the **environment**, and they are the same
-OAuth2 pair the worker already fetches from Workload Credentials. Secrets Safe being part
-of Password Safe is the whole point — one tenant, one client pair. There is no second
-credential to configure.
+**Pass one** recommended a Secrets Safe REST client and rejected `ps-cli`, on the grounds
+that the binary *"would need its own credential configuration, which is the standing
+secret this cell exists to argue against"*. **False**, and one grep settled it:
+`secrets_backend_service._pscli_env` maps `PSCLI_CLIENT_ID` / `PSCLI_CLIENT_SECRET` from
+the **environment**, and they are the same OAuth2 pair the worker already fetches from
+Workload Credentials. There is no second credential to configure.
 
-So `ps-cli` it is: the path this repo already runs against a live tenant, rather than a
-REST shape nobody here has called. In a cell carrying several unverified surfaces,
-removing one beat adding another.
+**Pass two** therefore chose `ps-cli secrets get -d` — the path the repo already runs
+against a live tenant. Wrong about the secret: a file secret has no content field for
+`get` to return. `-d` cannot rescue it, because the flag only adds `decrypt=true` and
+there is nothing in the projection for it to fill.
 
-Two costs, neither hidden:
+**Pass three** moved to `ps-cli secrets download-secret-file`, the verb that does read a
+file attachment. Right about the verb and **still wrong about the transport**, which is
+the one that would have shipped: every route ps-cli offers decodes the body to text before
+the caller sees it — the library hands back `response.text`, and `raw` falls through its
+JSON parse to print `response.text` too. The endpoint itself is byte-faithful; ps-cli is
+not. A PEM bundle survives that. **A `.pfx` is corrupted rather than refused.**
 
-* **An unpinned pip package on the agent host.** Precedented — the install play already
-  installs `mcp` — but `beyondtrust-bips-cli` is unpinned and `tests/test_pscli_grammar.py`
-  exists because six calls once shipped with the wrong argv and sat unnoticed for months.
-  The worker's argv is checked against that same verb table, and against a stub ps-cli
-  that records how it was actually called.
-* **The pair passes through a subprocess environment.** In tension with the cell's own
-  rule against env vars, and the tension resolves rather than being waved away: the play's
-  objection is to a systemd `Environment=` line, world-readable through `systemctl show`
-  for the unit's whole life. This is one subprocess for one call, and the worker runs as
-  root — so "anything running as the same user" means root, which already holds
-  everything. Never argv, though: `/proc/<pid>/cmdline` is world-readable, and a test
-  pins it.
+That last one is the dangerous shape. The corruption is silent where it happens and loud
+three steps later, at the DER check, which reports *"this does not look like a PKCS#12"* —
+sending somebody to look for a wrong bundle in Secrets Safe when what is wrong is the
+transport. `services/secrets_backend_service._read_bt_file_secret` refuses binary payloads
+for exactly this reason and names the way out: call the endpoint directly.
+
+**So the worker calls `GET Secrets-Safe/Secrets/{id}/file/download` itself.** Two calls,
+because the download takes an id and an operator knows a reference — resolve, then fetch.
+
+**And the costs the ps-cli route carried are simply gone**, which is worth stating because
+the previous draft of this note argued both of them away at length:
+
+* **the unpinned pip package** on every agent host — `beyondtrust-bips-cli` moves under a
+  rebuild, and the opt-in install flag that existed to contain it is deleted;
+* **the client pair passing through a subprocess environment** — a tension against this
+  cell's own rule against env vars that had to be argued rather than resolved. There is no
+  subprocess now, so there is nothing to argue.
+
+What replaces them is smaller and better: Secrets Safe is part of Password Safe, so the
+session opened for the passphrase reaches the bundle unchanged. **One sign-in, both halves
+of one identity.**
 
 ### The one place something touches disk
 
-**The bundle is a file secret, not text** — so the verb is `secrets download-secret-file`
-and ps-cli *writes* it rather than printing it. An earlier draft had it coming back as a
-string and being held in memory; that was wrong about the secret, and it was also the
-weaker design, because `openssl` needs a file to open a PKCS#12 and Python's `ssl` needs
-file paths for a client certificate. A blob in memory would have been written out three
-lines later anyway.
+**The bundle is a file secret, not text.** An earlier draft had it coming back as a
+string and being held in memory, on the grounds that keeping a credential off disk was
+worth something. That was wrong about the secret, and it was also the weaker design:
+`openssl` needs a file to open a PKCS#12 and Python's `ssl` needs file paths for a client
+certificate, so a blob in memory would have been written out three lines later anyway.
 
 So there is no version of this that stays off the filesystem, and the episode bounds it
 instead of pretending otherwise: **one** `0700` temporary directory, opened before
@@ -659,14 +672,25 @@ approval is the last decision anybody makes about that identity until it expires
 No CA, no Password Safe tenant, no mTLS endpoint. The probe is exercised against a
 generated CA, a real PKCS#12 and a local mutual-TLS server in
 `tests/test_agentcell_cert_episode.py` — which is considerably more than the other
-episodes get, and still not a live run. **One value is genuinely unverified**: the flag
-`download-secret-file` takes for its output path. `-o` is already spoken for (owner, and
-integer ids only), so the worker uses `-f` by convention rather than by observation. It is
-a single constant at the top of the file, argparse rejects it immediately if it is wrong,
-and the failure path recognises `invalid choice` and says which constant to change rather
-than letting it read as a missing secret. The worker also checks the downloaded bytes are
-DER before treating them as a PKCS#12 — otherwise `openssl` complains about the
-passphrase, which sends somebody to debug the wrong half of a two-half identity.
+episodes get, and still not a live run. **One shape is genuinely unverified**: how
+`Secrets-Safe/Secrets` resolves the reference. The worker sends a reference containing `/`
+as `path` (with `separator`) and one without it as `title`, mirroring how the
+`beyondtrust.secrets_safe` lookup resolves `folder/title`. That is a reading of a
+documented endpoint rather than a guess at a flag — the previous draft's unverified value
+was a ps-cli output flag nobody had run — and the refusal names which of the two lookups
+came back empty, so a tenant that disagrees says so in one line.
+
+**And a floor §5d already records applies here too:** below BeyondInsight 26.1.0.878, file
+secrets downloaded through the API came back larger than the original, so this episode
+would retrieve a corrupt bundle however careful the client is. It is already a
+[Certificate Lab prerequisite](../workload-lab/certificate-lab.md#password-safe), which is
+why it is not a new one — but it is the version this episode silently depends on, and the
+DER check is not a guard against it: a too-large bundle still starts `0x30`.
+
+The worker also checks the downloaded bytes are DER before treating them as a PKCS#12, and
+names PEM specifically when it sees it: PEM is a perfectly good file secret and a
+perfectly useless one here, and `openssl` would otherwise complain about the passphrase —
+sending somebody to debug the wrong half of a two-half identity.
 
 ## 6. What is deliberately not proposed
 

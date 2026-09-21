@@ -264,13 +264,12 @@ does:
 | cluster access | a Workload Lab **token** | **gated at retrieval** — a person decides; once released it lives out its TTL |
 | this one | a **certificate** | **neither** |
 
-`docs/integrations/certificates.md` states the third position rather than hiding it:
+`docs/workload-lab/certificates.md` states the third position rather than hiding it:
 
 > **No revocation checking.** The plugin consults neither CRLs nor OCSP. Short lifetimes
 > are the mitigation, and that is a deliberate design position.
 
-With a `certificates` link in place, `mcp_agent.py --cert-episode` — on a host
-installed with `agent_cert_episode=true`, which is what puts `ps-cli` there:
+With a `certificates` link in place, `mcp_agent.py --cert-episode`:
 
 ```
 [agent] spiffe://weaverlab.test/agent/mcp-reader · requesting the certificate identity behind svc-deploy-pipeline
@@ -286,16 +285,24 @@ honours it: the PKCS#12 **passphrase** is the managed account's credential, fetc
 through the same recorded request as the cluster token; the **bundle** it opens is a
 Secrets Safe file secret. Retrieving one without the other yields nothing.
 
-Secrets Safe is part of Password Safe — one tenant, one client pair — so the worker goes
-after the bundle with `ps-cli`, the same path the dashboard uses. The pair reaches it through
-the **environment**, never argv: `/proc/<pid>/cmdline` is world-readable and
-`/proc/<pid>/environ` is not.
+Secrets Safe is part of Password Safe, so **both halves come down one session**: the
+session that released the passphrase reaches the bundle unchanged. No second sign-in, no
+second credential, and nothing on this host that was not there a moment ago.
 
-The bundle is a **file** secret, not text, so the verb is `secrets download-secret-file`
-and ps-cli *writes* it rather than printing it. That is why the episode opens a directory
-before it fetches anything: the bundle lands there, `openssl` opens it there, and the whole
-directory goes at the end. One guarded place, named in the section below rather than left
-to be discovered.
+**Not through `ps-cli`, though it is what the dashboard uses.** It cannot carry these
+bytes. [password-safe.md](../../integrations/password-safe.md) establishes it and
+`secrets_backend_service` refuses on it: the endpoint returns `application/octet-stream`
+faithfully, but every route ps-cli offers decodes the body to text first, so a PEM bundle
+survives and **a `.pfx` is corrupted rather than refused**. That is the worst of the three
+outcomes — the corruption is silent at the transport and surfaces three steps later, as
+what looks like the wrong bundle in Secrets Safe. So the worker calls
+`GET Secrets-Safe/Secrets/{id}/file/download` and keeps the bytes, which is what that page
+prescribes for exactly this case.
+
+Because the bundle arrives as a **file**, the episode opens its directory before it
+fetches anything: the bundle lands there, `openssl` opens it there, and the whole directory
+goes at the end. One guarded place, named in the section below rather than left to be
+discovered.
 
 ### The approval is the only moment anybody gets a say
 
@@ -344,6 +351,12 @@ what it means that this one does not.
   `0600`, the passphrase reaches `openssl` through `PFXPASS` rather than the command line,
   and the directory goes on the failure path too. It is the one unavoidable exception to
   "nothing is stored on this host", and it is better said than found.
+- **It needs BeyondInsight 26.1.0.878 or newer.** Below that, file secrets downloaded
+  through the API came back larger than the original, so this episode would retrieve a
+  corrupt bundle however careful it is — and the DER check does not catch it, because a
+  too-large bundle still starts `0x30`. It is already a
+  [Certificate Lab prerequisite](../../workload-lab/certificate-lab.md#password-safe);
+  it is named again here because this episode depends on it silently.
 - **Revocation on six of nine backends only.** EST, step-ca and `selfsigned` have no
   revocation operation at all, so on those the certificate stays valid until it expires
   whatever you do. Check which backend the CA uses before promising a revoke.

@@ -803,107 +803,122 @@ def probe_summary(result: dict) -> str:
             "claims, which is the one outcome this probe exists to catch")
 
 
-# ── The certificate half: Secrets Safe, through ps-cli ───────────────────────
+# ── The certificate half: Secrets Safe, on the session already open ──────────
 #
 # A certificate identity is TWO objects and both are governed: the PKCS#12 passphrase is
 # the managed account's credential, and the bundle it opens is a Secrets Safe FILE SECRET.
 # Retrieving one without the other yields nothing usable, which is the point of the split.
 #
-# The passphrase comes back through the recorded-request flow above, unchanged. The bundle
-# needs Secrets Safe, and this worker reaches it the way the dashboard does -- `ps-cli`.
+# WHY NOT ps-cli, WHICH IS WHAT THE DASHBOARD USES. Because it cannot carry these bytes.
+# docs/integrations/password-safe.md establishes it and services/secrets_backend_service
+# REFUSES on it: the endpoint returns application/octet-stream faithfully, but every route
+# ps-cli offers decodes the body to text before anyone sees it -- the library hands back
+# `response.text`, and `raw` falls through its JSON parse to print `response.text` too. A
+# PEM bundle is ASCII and survives. **A .pfx is corrupted rather than refused**, which is
+# the worst of the three outcomes: the DER check below would fire and send somebody to
+# look for a wrong bundle in Secrets Safe, when what is wrong is the transport.
 #
-# WHY A BINARY RATHER THAN REST. Secrets Safe is part of Password Safe: one tenant, one
-# OAuth2 client pair, and `ps-cli` takes that pair from its ENVIRONMENT
-# (services/secrets_backend_service._pscli_env). So it needs no credential of its own --
-# the worker passes, per invocation, what Workload Credentials handed it moments earlier,
-# and nothing standing is stored here. It is also the path this repo has actually run
-# against a live tenant, which a REST shape nobody here has called is not.
+# So the worker calls GET Secrets-Safe/Secrets/{id}/file/download itself and keeps the
+# bytes -- which is what password-safe.md prescribes for exactly this case, naming this
+# worker: "the way the agent worker already calls Requests and Credentials".
 #
-# THE PAIR GOES IN THE ENVIRONMENT, NEVER IN ARGV. /proc/<pid>/cmdline is world-readable;
-# /proc/<pid>/environ is readable only by the same user, which here is root -- which
-# already holds everything this worker has. That is a narrower window than the systemd
-# `Environment=` line agent-install.yml refuses (world-readable through `systemctl show`,
-# for the unit's whole life), and the difference is why this is not the cell contradicting
-# itself.
-PSCLI_SERVICE = "secrets"
-# `download-secret-file`, not `get`. The bundle is a FILE secret: `get -d` is the text
-# path, and secrets_backend_service's own field probing (Text / FileContent / Content /
-# Password) is written for text-type secrets that sometimes arrive under a file-ish name.
-# A genuine file attachment is a different verb, and it WRITES rather than printing --
-# which is why this function takes a destination directory.
-PSCLI_VERB = "download-secret-file"
-# THE ONE VALUE HERE NOBODY HAS VERIFIED. `-o` is taken (owner, and integer ids only --
-# see secrets_backend_service), so the output path flag is `-f` by convention rather than
-# by observation. If a live tenant disagrees, argparse says so immediately and this is the
-# single line to change; the refusal below names it so the error points here rather than
-# at the bundle.
-PSCLI_FILE_FLAG = "-f"
+# AND IT COSTS NOTHING TO DO SO. Secrets Safe is part of Password Safe: the session opened
+# for the passphrase reaches the bundle unchanged, so this is one sign-in for both halves
+# rather than a second authentication in a second dialect. It also removes an unpinned pip
+# package from the agent host, and removes the one place this cell put a credential into a
+# subprocess environment -- a tension against its own rule against env vars that no longer
+# has to be argued, because it is gone.
+
+# `Secrets-Safe/Secrets` resolves by TITLE, or by PATH when the reference carries folders.
+# The cert lab's references read `cert/<system>/<account>`, so a reference containing a
+# separator is sent as a path, exactly as the `beyondtrust.secrets_safe` lookup resolves
+# `folder/title`. UNVERIFIED AGAINST A TENANT, and the single place to change if a live
+# one disagrees; the refusal below says which of the two lookups came back empty.
+SECRETS_PATH_SEPARATOR = "/"
 
 
-def download_secrets_safe_file(title: str, *, dest_dir: str, api_url: str,
-                               client_id: str, client_secret: str,
-                               timeout: int = 60) -> str:
+def _get_bytes(url: str, headers: dict, timeout: int = 60) -> bytes:
+    """A GET whose body is BYTES rather than text.
+
+    The one call in this worker that must not decode. Everything else here is JSON and
+    goes through ``_request``; a PKCS#12 that went through ``_request`` would come back
+    mangled by ``.decode("utf-8")`` in precisely the way ps-cli mangles it.
+    """
+    import urllib.request
+
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        return resp.read()
+
+
+def secrets_safe_file(title: str, *, dest_dir: str, base: str, headers: dict,
+                      timeout: int = 60) -> str:
     """Download one Secrets Safe FILE secret into ``dest_dir``. Returns its path.
 
-    Mirrors ``secrets_backend_service``'s ps-cli discipline -- service then verb, the
-    client pair in the environment -- and differs in the one way that matters: this is a
-    file attachment, so ps-cli writes it rather than printing it.
+    Two calls, because the download endpoint takes an id and the operator knows a title:
+    resolve, then fetch. ``base`` and ``headers`` are the session ``password_safe_episode``
+    already opened -- Secrets Safe is part of Password Safe, so nothing is signed in twice.
 
     **The bundle lands on disk here, and that is the design rather than a slip.** The
     episode owns a single 0700 temporary directory: the bundle arrives in it, openssl
     opens it there, and the whole directory goes at the end. One guarded place beats a
     blob in memory that has to be written out for openssl anyway.
-
-    THE PAIR GOES IN THE ENVIRONMENT, NEVER IN ARGV. /proc/<pid>/cmdline is
-    world-readable; /proc/<pid>/environ is readable only by the same user, which here is
-    root -- which already holds everything this worker has.
     """
-    import subprocess as _sp
+    import urllib.error
+    import urllib.parse
+
+    key = "path" if SECRETS_PATH_SEPARATOR in title else "title"
+    query = {key: title}
+    if key == "path":
+        query["separator"] = SECRETS_PATH_SEPARATOR
+    lookup = base + "Secrets-Safe/Secrets?" + urllib.parse.urlencode(query)
+    try:
+        found = _get_json(lookup, headers, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        raise SystemExit(f"[agent] FATAL: Secrets Safe rejected the lookup for {title!r} "
+                         f"by {key}: HTTP {exc.code}.")
+    if isinstance(found, dict):
+        found = [found]
+    secret_id = ""
+    for entry in found or []:
+        if isinstance(entry, dict) and (entry.get("Id") or entry.get("id")):
+            secret_id = str(entry.get("Id") or entry.get("id"))
+            break
+    if not secret_id:
+        raise SystemExit(
+            f"[agent] FATAL: Secrets Safe has no secret at {title!r} (looked up by "
+            f"{key}). A reference containing {SECRETS_PATH_SEPARATOR!r} is treated as a "
+            "folder path; one without it as a bare title.")
 
     dest = os.path.join(dest_dir, "bundle.pfx")
-    env = dict(os.environ)
-    env.update({"PSCLI_API_URL": api_url, "PSCLI_CLIENT_ID": client_id,
-                "PSCLI_CLIENT_SECRET": client_secret})
-    argv = ["ps-cli", "-y", "--format", "json", PSCLI_SERVICE, PSCLI_VERB,
-            "-t", title, PSCLI_FILE_FLAG, dest]
+    # Written with 0600 ALREADY SET rather than chmod-ed afterwards: between the two there
+    # is a window where the bundle is on disk at the umask's discretion.
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        out = _sp.run(argv, capture_output=True, text=True, timeout=timeout,
-                      stdin=_sp.DEVNULL, env=env)
-    except FileNotFoundError:
-        raise SystemExit(
-            "[agent] FATAL: ps-cli is not on PATH. The certificate episode needs it to "
-            "download the bundle from Secrets Safe — re-run agent-install.yml with "
-            "agent_cert_episode=true, or install beyondtrust-bips-cli by hand on an "
-            "air-gapped host.")
-    except _sp.TimeoutExpired:
-        raise SystemExit("[agent] FATAL: ps-cli did not answer within "
-                         f"{timeout}s downloading {title!r}.")
-    if out.returncode != 0:
-        detail = scrub((out.stderr or out.stdout))[:400]
-        hint = ""
-        if "invalid choice" in detail.lower() or "unrecognized" in detail.lower():
-            hint = (f" — this reads like ps-cli rejecting the argv rather than the "
-                    f"secret: {PSCLI_VERB!r} or its output flag {PSCLI_FILE_FLAG!r} may "
-                    "differ on this CLI version. Both are constants at the top of this "
-                    "file.")
-        raise SystemExit("[agent] FATAL: ps-cli could not download the bundle "
-                         f"{title!r}{hint}: {detail}")
-    if not os.path.exists(dest):
-        raise SystemExit(
-            f"[agent] FATAL: ps-cli reported success but wrote nothing to {dest}. The "
-            f"output flag {PSCLI_FILE_FLAG!r} may not be the one this version takes.")
-    os.chmod(dest, 0o600)
+        download = base + f"Secrets-Safe/Secrets/{secret_id}/file/download"
+        try:
+            blob = _get_bytes(download, dict(headers, Accept="application/octet-stream"),
+                              timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            raise SystemExit(f"[agent] FATAL: Secrets Safe would not release the bundle "
+                             f"{title!r}: HTTP {exc.code}. The API registration needs "
+                             "Secrets Safe read on the folder holding it.")
+        os.write(fd, blob)
+    finally:
+        os.close(fd)
 
     # A PKCS#12 is DER: it starts with a SEQUENCE tag. Checking beats handing openssl
     # something that is not a bundle and reading its error as a passphrase problem --
     # which sends somebody to debug the wrong half of a two-half identity.
-    with open(dest, "rb") as fh:
-        head = fh.read(1)
-    if head != b"\x30":
+    if not blob.startswith(b"\x30"):
+        hint = ""
+        if blob.lstrip()[:5] == b"-----":
+            hint = (" It looks like PEM, which is a perfectly good thing to keep in a "
+                    "file secret — but this episode opens a PKCS#12, so the lab's "
+                    "Change Password has to have written one.")
         raise SystemExit(
             f"[agent] FATAL: {title!r} downloaded, but it does not look like a PKCS#12 "
-            "bundle (DER starts 0x30). Check that this Secrets Safe entry is the "
-            "certificate bundle rather than, say, its chain in PEM.")
+            f"bundle (DER starts 0x30).{hint}")
     return dest
 
 
@@ -1192,7 +1207,7 @@ def run_cert_episode(args) -> int:
       * the **PAT** is revocable — pull it and the loop stops mid-poll;
       * the **cluster token** is gated at retrieval — a person decides, and once released
         it lives out its TTL;
-      * a **certificate** is neither. docs/integrations/certificates.md is blunt about it:
+      * a **certificate** is neither. docs/workload-lab/certificates.md is blunt about it:
         "No revocation checking. The plugin consults neither CRLs nor OCSP. Short
         lifetimes are the mitigation, and that is a deliberate design position."
 
@@ -1280,9 +1295,10 @@ def run_cert_episode(args) -> int:
             # HALF TWO: the bundle. Neither half is usable alone, which is the design.
             print(f"[agent] {spiffe_id} · passphrase released; downloading the bundle "
                   f"from Secrets Safe · {_now()}", flush=True)
-            bundle_path = download_secrets_safe_file(
-                args.cert_bundle_title, dest_dir=work, api_url=args.ps_api_url,
-                client_id=ps_client_id, client_secret=ps_client_secret)
+            # The SAME session that released the passphrase. Secrets Safe is part of
+            # Password Safe, so both halves of this identity come down one sign-in.
+            bundle_path = secrets_safe_file(args.cert_bundle_title, dest_dir=work,
+                                            base=base, headers=headers)
             result = cert_mtls_probe(endpoint=args.cert_endpoint,
                                      bundle_path=bundle_path, passphrase=passphrase,
                                      expect_cn=args.cert_cn, work_dir=work,
@@ -1395,9 +1411,9 @@ def main(argv=None) -> int:
                     help="the subject the endpoint should echo back.")
     ap.add_argument("--cert-bundle-title",
                     default=os.environ.get("AGENT_CERT_BUNDLE", ""),
-                    help="the bundle's Secrets Safe title, e.g. cert/<system>/<account>. "
-                         "A FILE secret — ps-cli downloads it rather than printing it, "
-                         "and needs beyondtrust-bips-cli on this host.")
+                    help="the bundle's Secrets Safe reference, e.g. "
+                         "cert/<system>/<account>. One containing '/' is resolved as a "
+                         "folder path, one without it as a bare title.")
     ap.add_argument("--cert-account-id", type=int,
                     default=int(os.environ.get("AGENT_CERT_ACCOUNT_ID", "0") or 0),
                     help="the managed account holding the PKCS#12 passphrase.")

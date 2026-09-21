@@ -5,7 +5,7 @@ The agent cell now demonstrates three credentials, and the arc is the point:
   * the **PAT** is revocable — pull it and the loop stops mid-poll;
   * the **cluster token** is gated at retrieval — a person decides, and once released it
     lives out its TTL;
-  * a **certificate** is neither. `docs/integrations/certificates.md`:
+  * a **certificate** is neither. `docs/workload-lab/certificates.md`:
     *"No revocation checking. The plugin consults neither CRLs nor OCSP. Short lifetimes
     are the mitigation, and that is a deliberate design position."*
 
@@ -15,13 +15,14 @@ agent keeps working — and these tests exist to stop that honesty being quietly
 What they pin, each of which has a way of failing that leaves the demo *looking* right:
 
   * **Both halves, and neither usable alone.** The passphrase is a managed-account
-    credential; the bundle is a Secrets Safe **file** secret, downloaded by ps-cli rather
-    than printed. A change that fetched one and faked the other would still print a
-    success line.
-  * **The client pair reaches ps-cli through the ENVIRONMENT, never argv.**
-    `/proc/<pid>/cmdline` is world-readable; that one slip would undo the whole argument.
-    Checked against a stub that records its own argv and environ, not only by reading the
-    source — a pair moved into argv by some later refactor would still be caught.
+    credential; the bundle is a Secrets Safe **file** secret, downloaded over the API's
+    own file endpoint. A change that fetched one and faked the other would still print
+    a success line.
+  * **The bundle arrives as BYTES.** Not through ps-cli, which cannot carry them:
+    every route it offers hands back `response.text`, so a PEM bundle survives and a
+    `.pfx` is *corrupted rather than refused*. The worker calls
+    `GET Secrets-Safe/Secrets/{id}/file/download` on the session the passphrase already
+    opened, and a real PKCS#12 is compared byte for byte here.
   * **The bundle, the certificate and the key touch disk in exactly one guarded place**,
     which the EPISODE owns and removes — on the failure path too. The bundle arrives as a
     file, so this is not avoidable; it is bounded instead, and these tests are what keeps
@@ -44,8 +45,7 @@ import sys
 import tempfile
 import threading
 import types
-
-import yaml
+import urllib.parse
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -55,7 +55,6 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-agentcell-cert")
 _WORKER = os.path.join(_ROOT, "examples", "playbooks", "agent", "files", "mcp_agent.py")
 _API = os.path.join(_ROOT, "web_dashboard", "api", "agentcell.py")
 _DOC = os.path.join(_ROOT, "docs", "profiles", "demo", "agent-demo-cell.md")
-_PLAY = os.path.join(_ROOT, "examples", "playbooks", "agent", "agent-install.yml")
 
 from web_dashboard.services import agentcell_service as A  # noqa: E402,F401
 
@@ -172,85 +171,59 @@ def _serve_mtls(handler=_MtlsEcho):
     return f"https://127.0.0.1:{srv.server_address[1]}/"
 
 
-# A ps-cli that records how it was CALLED -----------------------------------------------
+# A Secrets Safe that serves the two endpoints the bundle comes down ---------------------
 #
-# The static source checks below are cheap and worth keeping, but the property that
-# matters -- the client pair never reaching argv -- deserves to be observed rather than
-# read. This stub writes its own argv and its own PSCLI_* environment to a file, so the
-# assertion is made against what the child process actually received. A later refactor
-# that builds argv somewhere else would slip past a source match and not past this.
+# Both halves of this identity arrive over the SAME session, so the stub is an HTTP server
+# rather than a fake binary: `Secrets-Safe/Secrets` resolves the reference to an id, and
+# `Secrets-Safe/Secrets/{id}/file/download` serves the bytes. It records what it was asked
+# for, so the assertions below are made against what the worker actually sent.
 
-_STUB = """#!{python}
-import json, os, sys
-mode = os.environ.get("STUB_MODE", "der")
-with open(os.environ["STUB_RECORD"], "w") as fh:
-    json.dump({{"argv": sys.argv[1:],
-               "env": {{k: v for k, v in os.environ.items()
-                        if k.startswith("PSCLI_")}}}}, fh)
-if mode == "reject":
-    sys.stderr.write("ps-cli: error: argument verb: invalid choice: 'nonsense'\\n")
-    sys.exit(2)
-if mode == "boom":
-    sys.stderr.write("403 Forbidden\\n")
-    sys.exit(1)
-dest = sys.argv[sys.argv.index("-f") + 1] if "-f" in sys.argv else None
-if mode == "silent" or dest is None:
-    sys.exit(0)
-payload = open(os.environ["STUB_PAYLOAD"], "rb").read() if mode == "der" \\
-    else b"-----BEGIN CERTIFICATE-----\\nnope\\n-----END CERTIFICATE-----\\n"
-with open(dest, "wb") as fh:
-    fh.write(payload)
-"""
+def _serve_secrets(*, payload=None, entries=None, lookup_status=200,
+                   download_status=200):
+    """``(base, seen)`` — a stand-in Secrets Safe and the log of what reached it."""
+    seen = []
+    blob = _pki()["bundle"] if payload is None else payload
 
+    class _H(http.server.BaseHTTPRequestHandler):
+        def _send(self, status, body=b"", ctype="application/json"):
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
 
-class _pscli:
-    """Context manager: a fake ps-cli first on PATH, and the record of its invocation.
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            seen.append({"path": parsed.path,
+                         "query": urllib.parse.parse_qs(parsed.query),
+                         "auth": self.headers.get("Authorization", ""),
+                         "accept": self.headers.get("Accept", "")})
+            if parsed.path.endswith("/file/download"):
+                if download_status != 200:
+                    return self._send(download_status, b"denied", "text/plain")
+                return self._send(200, blob, "application/octet-stream")
+            if lookup_status != 200:
+                return self._send(lookup_status, b"no", "text/plain")
+            rows = [{"Id": "9f1c-the-guid", "Title": "bundle"}] \
+                if entries is None else entries
+            return self._send(200, json.dumps(rows).encode())
 
-    ``mode`` picks the failure being reproduced — ``der`` (a real bundle), ``pem`` (the
-    wrong thing in the right place), ``silent`` (exit 0, no file), ``reject`` (argparse
-    refusing the argv) and ``boom`` (the tenant refusing).
-    """
+        def log_message(self, *a):
+            pass
 
-    def __init__(self, mode="der"):
-        self.mode = mode
-        self.dir = tempfile.mkdtemp(prefix="pscli-stub-")
-        self.record_path = os.path.join(self.dir, "record.json")
-
-    def __enter__(self):
-        binary = os.path.join(self.dir, "ps-cli")
-        with open(binary, "w", encoding="utf-8") as fh:
-            fh.write(_STUB.format(python=sys.executable))
-        os.chmod(binary, 0o755)
-        payload = os.path.join(self.dir, "payload")
-        with open(payload, "wb") as fh:
-            fh.write(_pki()["bundle"] if _have_openssl() else b"\x30\x82\x00\x00")
-        self._saved = {k: os.environ.get(k)
-                       for k in ("PATH", "STUB_MODE", "STUB_RECORD", "STUB_PAYLOAD")}
-        os.environ.update({"PATH": self.dir + os.pathsep + os.environ["PATH"],
-                           "STUB_MODE": self.mode, "STUB_RECORD": self.record_path,
-                           "STUB_PAYLOAD": payload})
-        return self
-
-    def __exit__(self, *exc):
-        for k, v in self._saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-        return False
-
-    @property
-    def record(self):
-        with open(self.record_path, encoding="utf-8") as fh:
-            return json.load(fh)
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{srv.server_address[1]}/", seen
 
 
-def _download(m, dest_dir, title="cert/lab/svc", secret="sh-sh-sh"):
-    return m.download_secrets_safe_file(title, dest_dir=dest_dir,
-                                        api_url="https://ps.example/BeyondTrust/api/"
-                                                "public/v3",
-                                        client_id="the-client-id",
-                                        client_secret=secret)
+_BEARER = "Bearer the-session-this-episode-already-opened"
+
+
+def _fetch(m, dest_dir, base, title="cert/demo-system/svc-deploy-pipeline"):
+    return m.secrets_safe_file(title, dest_dir=dest_dir, base=base,
+                               headers={"Accept": "application/json",
+                                        "Authorization": _BEARER})
 
 
 def _cert_args(**over):
@@ -277,7 +250,7 @@ def _episode(m, *, download, polls=1):
     m.read_wlc_secret = lambda **k: "pair-" + k["secret_name"]
     m.password_safe_episode = lambda **k: (_PASS, "https://ps", {}, 42, polls)
     m._checkin = lambda *a, **k: None
-    m.download_secrets_safe_file = download
+    m.secrets_safe_file = download
 
 
 # -- the probe proves the IDENTITY, not that a request succeeded ---------------
@@ -353,7 +326,7 @@ def test_the_probe_writes_only_into_the_directory_it_is_given():
 
 
 def test_the_episode_owns_the_directory_and_it_does_not_outlive_the_episode():
-    """The bundle is a FILE secret: ps-cli writes it, openssl opens it, and both live in
+    """The bundle is a FILE secret: the worker writes it, openssl opens it, and both live in
     one 0700 directory the episode opens and closes. Observed end to end rather than read
     out of the source, because this is where a credential touches disk."""
     if not _have_openssl():
@@ -391,7 +364,7 @@ def test_the_directory_goes_even_when_the_download_fails():
         seen["dir"] = dest_dir
         with open(os.path.join(dest_dir, "bundle.pfx"), "wb") as fh:
             fh.write(b"\x30partial")
-        raise SystemExit("[agent] FATAL: ps-cli could not download the bundle")
+        raise SystemExit("[agent] FATAL: Secrets Safe would not release the bundle")
 
     _episode(m, download=_explode)
     before = set(os.listdir(tempfile.gettempdir()))
@@ -423,171 +396,169 @@ def test_the_key_is_written_private_and_the_passphrase_never_reaches_argv():
         "the episode does not open one private directory for the whole of it"
 
 
-# -- ps-cli: the environment, never argv ---------------------------------------
+# -- Secrets Safe: the bytes, unmangled, on the session already open -----------
+#
+# The whole reason this path is not ps-cli. `docs/integrations/password-safe.md` and
+# `services/secrets_backend_service._read_bt_file_secret` both establish it: the endpoint
+# returns application/octet-stream faithfully, and every ps-cli route decodes the body to
+# text before anyone sees it, so a PEM bundle survives and a .pfx is CORRUPTED RATHER THAN
+# REFUSED. These tests exist because that failure is silent at the transport and loud
+# three steps later, in a place that sends somebody to look at the wrong thing.
 
-def test_the_client_pair_reaches_ps_cli_through_the_environment():
-    """The single slip that would undo the whole argument. /proc/<pid>/cmdline is
-    world-readable; /proc/<pid>/environ is readable only by the same user, which here is
-    root — which already holds everything this worker has.
-
-    Asserted against what the child process RECEIVED, not against the source: argv built
-    somewhere else by a later refactor would read clean and still be world-readable."""
+def test_the_bundle_arrives_byte_for_byte():
+    """The headline, and the property ps-cli could not give. A real PKCS#12 is binary and
+    is not valid UTF-8 — anything that decoded it on the way would corrupt it here."""
+    if not _have_openssl():
+        print("   (skipped: no openssl)")
+        return
     m = _worker()
-    with _pscli() as stub, tempfile.TemporaryDirectory() as d:
-        _download(m, d, secret="the-client-secret")
-        rec = stub.record
-    for leaked in ("the-client-secret", "the-client-id"):
-        assert leaked not in rec["argv"], f"the ps-cli argv carries {leaked!r}"
-        assert not any(leaked in a for a in rec["argv"]), \
-            f"the ps-cli argv embeds {leaked!r} inside another argument"
-    assert rec["env"]["PSCLI_CLIENT_SECRET"] == "the-client-secret", \
-        "the client secret never reached the subprocess environment"
-    assert rec["env"]["PSCLI_CLIENT_ID"] == "the-client-id"
-    assert rec["env"]["PSCLI_API_URL"].endswith("/public/v3")
-
-    code = _code(_WORKER)
-    body = code.split("def download_secrets_safe_file(", 1)[1].split("\ndef ")[0]
-    argv = body[body.index("argv = ["):body.index("]", body.index("argv = ["))]
-    for leaked in ("client_secret", "client_id", "PSCLI_CLIENT"):
-        assert leaked not in argv, f"the ps-cli argv carries {leaked!r}"
-    assert "env=env" in body, "the environment is built and then not passed"
-
-
-def test_the_bundle_is_written_where_the_worker_asked_and_left_private():
-    """`download-secret-file` writes rather than prints, so the worker names the path —
-    and owns making it unreadable to anyone else before it is opened."""
-    m = _worker()
-    with _pscli() as stub, tempfile.TemporaryDirectory() as d:
-        path = _download(m, d)
-        assert os.path.dirname(path) == d, \
-            f"the bundle landed outside the directory the episode owns: {path}"
-        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600, "the bundle is not private"
-        with open(path, "rb") as fh:
-            assert fh.read(1) == b"\x30"
-        assert "-f" in stub.record["argv"], \
-            "ps-cli was not told where to write, so it chose for itself"
-        assert path in stub.record["argv"], "the worker did not name the path it returns"
-
-
-def test_the_ps_cli_argv_names_a_service_then_a_real_verb():
-    """`beyondtrust-bips-cli` is unpinned, and argparse only rejects a bare verb at
-    RUNTIME — six calls once shipped wrong and sat unnoticed for months. The service
-    module has tests/test_pscli_grammar.py for this; the worker builds its own argv, so
-    it is checked against the same table."""
-    from tests.test_pscli_grammar import VERBS
-    m = _worker()
-    assert m.PSCLI_SERVICE in VERBS, f"{m.PSCLI_SERVICE!r} is not a ps-cli service"
-    assert m.PSCLI_VERB in VERBS[m.PSCLI_SERVICE], \
-        f"{m.PSCLI_VERB!r} is not a verb of the {m.PSCLI_SERVICE} service"
-    # A real verb is not enough: `get-secret` is real too, and it returns TEXT. The
-    # bundle is a file attachment, and picking the text verb would come back as a
-    # base64-ish string this worker would then fail to recognise as DER — three steps
-    # from the cause. The verb set above cannot catch that; only naming it can.
-    assert m.PSCLI_VERB in ("download-secret-file", "download"), \
-        f"{m.PSCLI_VERB!r} is a text verb — the bundle is a FILE secret"
-    with _pscli() as stub, tempfile.TemporaryDirectory() as d:
-        _download(m, d)
-        argv = stub.record["argv"]
-    assert argv[argv.index(m.PSCLI_SERVICE) + 1] == m.PSCLI_VERB, \
-        f"the verb does not follow the service in {argv}"
-
-
-def test_a_missing_ps_cli_says_what_to_install():
-    m = _worker()
-    body = _code(_WORKER).split("def download_secrets_safe_file(", 1)[1].split("\ndef ")[0]
-    assert "FileNotFoundError" in body and "beyondtrust-bips-cli" in body, \
-        "a host without ps-cli gets a traceback rather than an instruction"
+    base, _ = _serve_secrets()
     with tempfile.TemporaryDirectory() as d:
-        saved = os.environ["PATH"]
-        os.environ["PATH"] = d
-        try:
-            _download(m, d)
-        except SystemExit as exc:
-            assert "beyondtrust-bips-cli" in str(exc)
-        else:
-            raise AssertionError("a missing ps-cli went unnoticed")
-        finally:
-            os.environ["PATH"] = saved
+        path = _fetch(m, d, base)
+        with open(path, "rb") as fh:
+            got = fh.read()
+    assert got == _pki()["bundle"], \
+        f"the bundle changed in transit: {len(got)} bytes, expected " \
+        f"{len(_pki()['bundle'])}"
+    try:
+        got.decode("utf-8")
+    except UnicodeDecodeError:
+        pass          # what we want: this payload could not have survived a text route
+    else:
+        raise AssertionError(
+            "this PKCS#12 happens to be valid UTF-8, so it cannot prove the transport "
+            "keeps bytes — regenerate the fixture rather than trusting this test")
 
 
-def test_the_install_instruction_is_one_that_works():
-    """The refusal tells somebody how to get ps-cli. An instruction naming a variable the
-    play does not have is worse than no instruction — the first draft of this message said
-    "re-run the install play without agent_skip_pip", which installs `mcp` and nothing
-    else."""
-    body = _code(_WORKER).split("def download_secrets_safe_file(", 1)[1].split("\ndef ")[0]
-    play = _read(_PLAY)
-    # Against the play's PARSED variables, not its text: `agent_cert_episode` is also in
-    # the commented usage block at the top, so a text match keeps passing after the real
-    # variable is renamed — the same string-blindness this file's other checks avoid.
-    declared = set()
-    for play_ in yaml.safe_load(play):
-        declared |= set(play_.get("vars", {}))
-    named = [v for v in ("agent_cert_episode", "agent_skip_pip") if v in body]
-    assert named, "the refusal names no way to install ps-cli through the play"
-    for var in named:
-        assert var in declared, \
-            f"the refusal tells somebody to set {var}, which agent-install.yml has no " \
-            f"variable for — it declares {sorted(declared)}"
-    installs = [t.get("ansible.builtin.pip", {}).get("name")
-                for play_ in yaml.safe_load(play) for t in play_.get("tasks", [])]
-    assert "beyondtrust-bips-cli" in installs, \
-        "the play does not pip-install ps-cli, so the instruction cannot be followed " \
-        f"— it installs {[i for i in installs if i]}"
-
-
-def test_something_that_is_not_a_bundle_is_refused_before_openssl_sees_it():
-    """Handing openssl a non-bundle makes it complain about the passphrase, which sends
-    somebody to debug the wrong half of a two-half identity."""
+def test_the_bundle_is_private_from_the_moment_it_exists():
+    """Created 0600, not chmod-ed to 0600 afterwards: between the two there is a window
+    where a credential sits on disk at the umask's discretion."""
+    if not _have_openssl():
+        print("   (skipped: no openssl)")
+        return
     m = _worker()
-    with _pscli("pem"), tempfile.TemporaryDirectory() as d:
+    base, _ = _serve_secrets()
+    with tempfile.TemporaryDirectory() as d:
+        path = _fetch(m, d, base)
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600, "the bundle is not private"
+        assert os.path.dirname(path) == d, "the bundle landed outside the episode's dir"
+    body = _code(_WORKER).split("def secrets_safe_file(", 1)[1].split("\ndef ")[0]
+    assert "0o600" in body.split("os.open(")[1][:120], \
+        "the bundle is not created 0600 — a chmod afterwards leaves a window"
+
+
+def test_the_bundle_comes_down_the_session_already_open():
+    """Secrets Safe is part of Password Safe. A second sign-in here would be a second
+    dialect of the same API, which is how two callers drift apart."""
+    if not _have_openssl():
+        print("   (skipped: no openssl)")
+        return
+    m = _worker()
+    base, seen = _serve_secrets()
+    with tempfile.TemporaryDirectory() as d:
+        _fetch(m, d, base)
+    assert len(seen) == 2, f"expected a lookup then a download, got {len(seen)}"
+    assert all(r["auth"] == _BEARER for r in seen), \
+        "the bundle was fetched with something other than the episode's own session"
+    assert not any("Auth/" in r["path"] for r in seen), \
+        "the worker signed in again for the second half of one identity"
+    assert seen[1]["path"].endswith("/file/download")
+    assert "octet-stream" in seen[1]["accept"], \
+        "the download does not ask for bytes"
+
+
+def test_a_reference_with_folders_is_looked_up_as_a_path():
+    if not _have_openssl():
+        print("   (skipped: no openssl)")
+        return
+    m = _worker()
+    base, seen = _serve_secrets()
+    with tempfile.TemporaryDirectory() as d:
+        _fetch(m, d, base, title="cert/demo-system/svc")
+    q = seen[0]["query"]
+    assert q.get("path") == ["cert/demo-system/svc"], \
+        f"a foldered reference was not resolved as a path: {q}"
+    assert q.get("separator") == ["/"], "the path lookup carries no separator"
+
+
+def test_a_bare_reference_is_looked_up_as_a_title():
+    if not _have_openssl():
+        print("   (skipped: no openssl)")
+        return
+    m = _worker()
+    base, seen = _serve_secrets()
+    with tempfile.TemporaryDirectory() as d:
+        _fetch(m, d, base, title="just-a-bundle")
+    q = seen[0]["query"]
+    assert q.get("title") == ["just-a-bundle"], \
+        f"a bare reference was not resolved by title: {q}"
+    assert "separator" not in q, "a title lookup should not carry a path separator"
+
+
+def test_a_reference_that_resolves_to_nothing_says_which_lookup_it_tried():
+    """Resolving by the wrong one of the two is the likeliest operator error, and an
+    error that does not say which was used cannot be acted on."""
+    m = _worker()
+    base, _ = _serve_secrets(entries=[])
+    with tempfile.TemporaryDirectory() as d:
         try:
-            _download(m, d)
+            _fetch(m, d, base, title="cert/nope/nothing")
         except SystemExit as exc:
-            assert "PKCS#12" in str(exc) and "0x30" in str(exc), str(exc)
+            assert "no secret" in str(exc) and "path" in str(exc), str(exc)
+        else:
+            raise AssertionError("an unresolvable reference was treated as a download")
+
+
+def test_a_refused_download_names_the_permission_rather_than_the_bundle():
+    """403 here is a grant, not a missing secret — the lookup already found it."""
+    m = _worker()
+    base, _ = _serve_secrets(download_status=403)
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            _fetch(m, d, base)
+        except SystemExit as exc:
+            assert "403" in str(exc) and "read on the folder" in str(exc), str(exc)
+        else:
+            raise AssertionError("a refused download was treated as a bundle")
+
+
+def test_a_pem_payload_is_refused_and_says_why_it_is_the_wrong_shape():
+    """PEM is a perfectly good file secret and a perfectly useless one here. Handing it
+    to openssl makes it complain about the passphrase, which sends somebody to debug the
+    wrong half of a two-half identity."""
+    m = _worker()
+    pem = b"-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----\n"
+    base, _ = _serve_secrets(payload=pem)
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            _fetch(m, d, base)
+        except SystemExit as exc:
+            assert "PKCS#12" in str(exc) and "looks like PEM" in str(exc), str(exc)
         else:
             raise AssertionError("a PEM was accepted as a PKCS#12 bundle")
 
 
-def test_a_ps_cli_that_reports_success_and_writes_nothing_is_caught():
-    """The failure mode this verb has and `get -d` does not: exit 0, no file. Read as a
-    success it becomes an openssl error about a missing input, three steps later."""
-    m = _worker()
-    with _pscli("silent"), tempfile.TemporaryDirectory() as d:
-        try:
-            _download(m, d)
-        except SystemExit as exc:
-            assert "wrote nothing" in str(exc)
-        else:
-            raise AssertionError("a silent ps-cli was treated as a download")
+def test_nothing_on_this_path_decodes_the_bytes():
+    """The regression that would be invisible: `_request` decodes UTF-8, so routing the
+    bundle through it corrupts a .pfx in exactly the way ps-cli does."""
+    code = _code(_WORKER)
+    body = code.split("def secrets_safe_file(", 1)[1].split("\ndef ")[0]
+    assert "_get_bytes(" in body, "the bundle is fetched through a text helper"
+    fetch = code.split("def _get_bytes(", 1)[1].split("\ndef ")[0]
+    assert ".decode(" not in fetch, "_get_bytes decodes, which is the whole bug"
+    assert "resp.read()" in fetch
 
 
-def test_a_rejected_argv_points_at_the_constant_to_change():
-    """The output flag is the one value in this file nobody has checked against a live
-    tenant. When ps-cli rejects it the error must say so — otherwise it reads as a
-    missing secret and somebody goes looking in Secrets Safe."""
-    m = _worker()
-    with _pscli("reject"), tempfile.TemporaryDirectory() as d:
-        try:
-            _download(m, d)
-        except SystemExit as exc:
-            msg = str(exc)
-            assert "rejecting the argv" in msg, msg
-            assert m.PSCLI_FILE_FLAG in msg and "constants at the top" in msg, msg
-        else:
-            raise AssertionError("an argv ps-cli refused was treated as a download")
-
-
-def test_a_tenant_refusal_is_not_dressed_up_as_an_argv_problem():
-    """The hint above is only useful if it is not printed for every failure."""
-    m = _worker()
-    with _pscli("boom"), tempfile.TemporaryDirectory() as d:
-        try:
-            _download(m, d)
-        except SystemExit as exc:
-            assert "403" in str(exc) and "rejecting the argv" not in str(exc), str(exc)
-        else:
-            raise AssertionError("a refused download was treated as a success")
+def test_the_bundle_does_not_go_back_through_ps_cli():
+    """It cannot. Every ps-cli route hands back `response.text`, so a .pfx is corrupted
+    rather than refused — `secrets_backend_service._read_bt_file_secret` refuses binary
+    payloads for this exact reason and names the endpoint as the way out. A later change
+    that reached for the binary again would be re-introducing a known defect."""
+    body = _code(_WORKER).split("def secrets_safe_file(", 1)[1].split("\ndef ")[0]
+    for gone in ("ps-cli", "subprocess", "PSCLI"):
+        assert gone not in body, \
+            f"the bundle is back on {gone!r} — see docs/integrations/password-safe.md, " \
+            "every ps-cli route decodes the body to text and corrupts a PKCS#12"
 
 
 # -- the human in the loop must be real, not assumed ---------------------------
@@ -681,9 +652,9 @@ def test_the_episode_fetches_both_halves():
     code = _code(_WORKER)
     body = code.split("def run_cert_episode(", 1)[1].split("\ndef ")[0]
     assert "password_safe_episode(" in body, "the passphrase is not a recorded request"
-    assert "download_secrets_safe_file(" in body, "the bundle is never fetched"
+    assert "secrets_safe_file(" in body, "the bundle is never fetched"
     assert body.index("password_safe_episode(") < body.index(
-        "download_secrets_safe_file("), \
+        "secrets_safe_file("), \
         "the bundle is fetched before the passphrase is released — a bundle nobody can " \
         "open is not worth retrieving"
 
