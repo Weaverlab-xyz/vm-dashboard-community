@@ -164,17 +164,27 @@ a release with no -offline build is the usual cause"
 
   export KUBECONFIG="$KUBESOLO_KUBECONFIG"
   log "waiting for the KubeSolo API and a Ready node"
+  # `kubectl wait node --all` is not a wait until a Node object EXISTS: with nothing
+  # matching it prints "error: no matching resources found" and exits 1 at once,
+  # --timeout unread. The installer returns as soon as it has written the kubeconfig,
+  # seconds before kubesolo registers its node, so waiting on --all alone turns the
+  # very race this is here to absorb into an instant failed bake. Wait for the file,
+  # then for the API to serve, then for the object to exist — THEN on Ready.
   _waited=0
-  while [ ! -f "$KUBECONFIG" ]; do
+  while [ ! -f "$KUBECONFIG" ] \
+    || ! kubectl get --raw /readyz >/dev/null 2>&1 \
+    || [ -z "$(kubectl get nodes -o name 2>/dev/null)" ]; do
     _waited=$((_waited + 1))
     if [ "$_waited" -gt 60 ]; then
       journalctl -u kubesolo --no-pager -n 40 2>/dev/null || true
-      die "KubeSolo never wrote $KUBECONFIG"
+      die "KubeSolo's API never came up with a registered node ($KUBECONFIG)"
     fi
     sleep 5
   done
-  kubectl wait --for=condition=Ready node --all --timeout=300s \
-    || die "the KubeSolo node never became Ready (journalctl -u kubesolo)"
+  kubectl wait --for=condition=Ready node --all --timeout=300s || {
+    journalctl -u kubesolo --no-pager -n 40 2>/dev/null || true
+    die "the KubeSolo node never became Ready (journalctl -u kubesolo)"
+  }
 }
 
 # ── 1. OS-family gate ────────────────────────────────────────────────────────
@@ -982,11 +992,17 @@ CTR="ctr --address $KUBESOLO_PATH/containerd/containerd.sock --namespace k8s.io"
 
 log() { echo "[ot-sim] $*"; }
 
-# 1. Wait for the API. The bake drops the cluster's identity so that every cell mints
-#    its own CA, node and state on first boot -- so this is a real wait, not a
-#    formality, and it is the step that takes the time on a cell's first start.
+# 1. Wait for the API AND for the node to be registered. The bake drops the cluster's
+#    identity so that every cell mints its own CA, node and state on first boot -- so
+#    this is a real wait, not a formality, and it is the step that takes the time on a
+#    cell's first start. The node-exists clause is load-bearing: `kubectl wait node
+#    --all` with no Node object yet is not a wait at all, it exits 1 immediately with
+#    "error: no matching resources found", and on first boot the object arrives after
+#    the API starts serving.
 tries=0
-while [ ! -f "$KUBECONFIG" ] || ! kubectl get --raw /readyz >/dev/null 2>&1; do
+while [ ! -f "$KUBECONFIG" ] \
+  || ! kubectl get --raw /readyz >/dev/null 2>&1 \
+  || [ -z "$(kubectl get nodes -o name 2>/dev/null)" ]; do
   tries=$((tries + 1))
   if [ "$tries" -gt 120 ]; then
     echo "[ot-sim] ERROR: KubeSolo's API never came up (journalctl -u kubesolo)" >&2

@@ -203,6 +203,25 @@ def test_the_cell_carries_the_clients_the_kubesolo_plays_expect():
     assert re.search(r"OT_HELM_VERSION:-v\d", _SRC), "the helm version must be pinned"
 
 
+def test_every_node_ready_wait_first_waits_for_the_node_to_exist():
+    """`kubectl wait --for=condition=Ready node --all` is not a wait when the cluster
+    has no Node object yet: it exits 1 immediately with "no matching resources found"
+    and never reads --timeout. KubeSolo registers its node seconds after the installer
+    writes the kubeconfig, and a cell mints a fresh node on every first boot — so both
+    the bake and apply.sh must poll for the object's existence before waiting on its
+    condition, or the race they exist to absorb becomes an instant hard failure."""
+    loops = re.findall(r"while \[ ! -f \"\$KUBECONFIG\".*?\n *done\n", _SRC, re.S)
+    assert len(loops) == 2, (
+        "expected the bake's wait and apply.sh's wait — the KubeSolo readiness "
+        f"gate has moved (found {len(loops)})")
+    for loop in loops:
+        assert "kubectl get --raw /readyz" in loop, (
+            "a kubeconfig on disk is not an API that answers")
+        assert "kubectl get nodes -o name" in loop, (
+            "this waits on node Ready without first waiting for a node to exist — "
+            "that is an instant failure, not a wait")
+
+
 def test_apply_writes_a_kubeconfig_that_works_through_the_tunnel():
     """The rep reaches the API on 127.0.0.1 through a PRA protocol tunnel, while the
     certificate is issued to the node. Without tls-server-name the first kubectl
