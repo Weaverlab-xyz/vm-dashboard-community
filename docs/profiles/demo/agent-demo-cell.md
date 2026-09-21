@@ -234,7 +234,9 @@ runbook gets skipped, and an assertion does not."*
 | `reader` | list pods cluster-wide | read a Secret — upstream `view` omits them by design |
 
 Exit codes are the punctuation: **0** proved the scope, **3** was never approved, **4**
-means a refusal did not refuse — the one outcome that would otherwise look like success.
+means a refusal did not refuse — the one outcome that would otherwise look like success —
+and **5** means Password Safe released without consulting anybody, so there was no human
+in the loop to demonstrate.
 
 ### What this demo does not prove, and you should say so
 
@@ -246,8 +248,10 @@ means a refusal did not refuse — the one outcome that would otherwise look lik
   ask with, so what reaches Password Safe is not transferable — but *anyone who can
   retrieve is the workload*, as far as this mechanism can tell. That is the axis the SPIRE
   path wins on and this one does not, which is why both exist on the same page.
-- **Without an approval policy there is no wait**, and the best beat silently does not
-  happen. The worker logs which path it took, so check the journal rather than assuming.
+- **Without an approval policy there is no wait.** The worker no longer lets that pass
+  silently — it refuses with exit code 5 rather than printing an approved-looking line.
+  Set the managed account's access policy to require approval, or pass
+  `--no-require-approval` and say so.
 
 ## The third demo: the credential nobody can take away
 
@@ -285,6 +289,31 @@ Secrets Safe is part of Password Safe — one tenant, one client pair — so the
 the bundle with `ps-cli`, the same path the dashboard uses. The pair reaches it through
 the **environment**, never argv: `/proc/<pid>/cmdline` is world-readable and
 `/proc/<pid>/environ` is not.
+
+### The approval is the only moment anybody gets a say
+
+Both halves are governed, and the **passphrase** goes through the same approval-gated
+request as the cluster token — so a person decides before this agent gets an identity at
+all.
+
+That matters more here than anywhere else in the cell, and the reason is the next section:
+a certificate cannot be revoked out from under the agent. With the PAT you can change your
+mind afterwards. With the cluster token you can at least wait out a TTL you chose. Here,
+**the approval is the last decision anybody makes about this identity** until it expires.
+
+> **The worker refuses an ungated release.** If Password Safe hands the passphrase over on
+> the first ask, no person was consulted — and an episode that printed its usual success
+> line would be describing something that did not happen. So it stops, with exit code
+> **5**, and says which access policy to change.
+>
+> This worker cannot *make* Password Safe require approval; that is the managed account's
+> access policy, set in BeyondInsight with auto-release off. What it can do is refuse to
+> pretend. Pass `--no-require-approval` to run it as an ungated fetch — and then say so
+> when you present it.
+>
+> The same check now runs on the [cluster episode](#the-second-demo-an-agent-that-cannot-authorise-its-own-access),
+> where the page's claim that the agent "cannot authorise its own access" was equally
+> untrue on an auto-releasing policy.
 
 ### Then do the thing that does not work
 

@@ -117,7 +117,7 @@ def test_the_soft_failure_sentence_is_read_as_not_yet():
     m = _worker()
     state = {"polls": 0, "checkins": []}
     base, _ = _serve(_FakePS, state)
-    token, _, _, rid = m.password_safe_episode(
+    token, _, _, rid, _polls = m.password_safe_episode(
         api_url=base, client_id="c", client_secret="s", account_id=42,
         reason="test", max_wait_seconds=60, poll_seconds=0)
     assert token == _JWT, "the credential did not come back after approval"
@@ -166,7 +166,7 @@ def test_the_slot_is_returned_when_approval_never_comes():
     state = {"polls": 0, "checkins": []}
     never = type("Never", (_FakePS,), {"pending_polls": 10 ** 6})
     base, _ = _serve(never, state)
-    token, _, _, rid = m.password_safe_episode(
+    token, _, _, rid, _polls = m.password_safe_episode(
         api_url=base, client_id="c", client_secret="s", account_id=42,
         reason="test", max_wait_seconds=0, poll_seconds=0)
     assert token == "", "a token came back from a request nobody approved"
@@ -460,10 +460,13 @@ def test_the_request_id_never_reaches_a_log():
     for fn in ("run_k8s_episode", "run_cert_episode"):
         body = code.split(f"def {fn}(", 1)[1].split("\ndef ")[0]
         uses = [ln.strip() for ln in body.splitlines() if "request_id" in ln]
-        assert len(uses) == 2 and uses[0].endswith("password_safe_episode(") \
-            and uses[1] == "_checkin(base, headers, request_id, reason)", (
-            f"{fn}: the request id is used somewhere other than the call that returns "
-            f"it and the check-in that spends it: {uses}")
+        assert uses and uses[0].endswith("password_safe_episode("), \
+            f"{fn}: the request id does not come from the episode call: {uses}"
+        # Everything after the call must be a check-in — the only thing that legitimately
+        # SPENDS a request id. There are two now: the ungated-release refusal releases
+        # the slot before it returns, which is a spend and not a log.
+        assert all(u == "_checkin(base, headers, request_id, reason)" for u in uses[1:]), (
+            f"{fn}: the request id is used for something other than a check-in: {uses}")
     # And nowhere in the module does one reach a print.
     for ln in code.splitlines():
         if "print(" in ln:

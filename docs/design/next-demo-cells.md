@@ -584,6 +584,30 @@ removes the directory on the failure path too. It is the one unavoidable excepti
 "nothing is stored on this host", and the code says so where somebody would otherwise find
 it and conclude the cell is careless about the thing it argues for.
 
+### The human has to be real, not assumed
+
+The passphrase goes through §5d's approval-gated request, so a person decides before the
+agent gets an identity. But **whether Password Safe actually asks anybody is the access
+policy's decision, not this code's** — and on an auto-releasing policy the episode would
+fetch, probe and print a success line indistinguishable from the approved one. The
+operator would conclude a gate was in force; the audit trail would show a request nobody
+was asked about.
+
+That is the one way this demo can mislead, so the worker refuses it: released on the first
+ask means no person was consulted, and the episode stops with exit code 5 naming the
+policy to change. It cannot *create* the gate — that is BeyondInsight's — but it can
+decline to pretend there was one. `--no-require-approval` opts out, deliberately loudly.
+
+**The same check now covers the cluster episode.** §5d's page claims the agent "cannot
+authorise its own access", and on an auto-releasing policy that claim was equally untrue
+there — so this is a correctness fix to an existing statement rather than a new rule for
+one episode.
+
+It matters most here, though, and for the reason this whole section is about: a
+certificate cannot be revoked out from under the agent. With the PAT you can change your
+mind afterwards; with the cluster token you can wait out a TTL you chose. **Here the
+approval is the last decision anybody makes about that identity until it expires.**
+
 ### Still unproven
 
 No CA, no Password Safe tenant, no mTLS endpoint. The probe is exercised against a

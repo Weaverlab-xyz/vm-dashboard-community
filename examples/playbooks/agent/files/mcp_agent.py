@@ -618,6 +618,30 @@ def password_safe_credential(*, api_url: str, client_id: str, client_secret: str
         _checkin(base, headers, request_id, reason)
 
 
+def approval_problem(polls: int, required: bool) -> str:
+    """Why an episode that got its credential should stop anyway. Pure.
+
+    **This worker cannot make Password Safe require approval** -- that is the account's
+    access policy, set in BeyondInsight, and nothing here can or should change it. What it
+    can do is refuse to PRETEND there was a human when there was not.
+
+    Without this the failure is silent and the demo is a lie: on an auto-releasing policy
+    the episode fetches, probes and prints a success line that reads exactly like the
+    approved one. The operator concludes an approval gate is in force; the audit trail
+    shows a request nobody was asked about. Turning that into a refusal costs one flag and
+    removes the only way this demo can mislead.
+    """
+    if not required or polls > 0:
+        return ""
+    return ("Password Safe released the credential on the first ask — no person was "
+            "consulted. This episode is supposed to demonstrate a human in the loop, so "
+            "it refuses rather than printing a success line that reads exactly like an "
+            "approved one. Either set the account's access policy to require approval "
+            "(BeyondInsight → the managed account → its access policy, with auto-release "
+            "off), or pass --no-require-approval to run it as an ungated fetch and say so "
+            "when you present it.")
+
+
 def password_safe_episode(*, api_url: str, client_id: str, client_secret: str,
                           account_id: int, system_id: int = 0,
                           duration_min: int = 15, reason: str,
@@ -625,7 +649,14 @@ def password_safe_episode(*, api_url: str, client_id: str, client_secret: str,
                           on_wait=None, validate=None,
                           expected: str = "a ServiceAccount token") -> tuple:
     """One approval-gated episode: ask, wait for a person, hand back ``(value, base,
-    headers, request_id)`` so the caller can use it and then release.
+    headers, request_id, waits)`` so the caller can use it and then release.
+
+    ``waits`` is **how many polls went by before the credential came back**, and it is
+    returned rather than kept because it is the only evidence available here that a human
+    was involved at all. Zero means Password Safe released on the first ask -- the access
+    policy auto-releases, no person was consulted, and an episode that reported "approved"
+    would be describing something that did not happen. What to DO about that is the
+    caller's decision (see ``--require-approval``); knowing it is this function's job.
 
     **The waiting is the demonstration**, so it is visible: ``on_wait`` is called every
     poll with the seconds elapsed, and the worker prints a line. An agent that cannot
@@ -649,6 +680,7 @@ def password_safe_episode(*, api_url: str, client_id: str, client_secret: str,
                                system_id=system_id, duration_min=duration_min,
                                reason=reason)
     waited = 0
+    polls = 0
     while True:
         try:
             value, pending = _poll_credential(base, headers, request_id)
@@ -665,14 +697,15 @@ def password_safe_episode(*, api_url: str, client_id: str, client_secret: str,
                 raise SystemExit(
                     f"[agent] FATAL: Password Safe released something that is not "
                     f"{expected} for account {int(account_id)}.")
-            return value, base, headers, request_id
+            return value, base, headers, request_id, polls
         if waited >= max_wait_seconds:
             _checkin(base, headers, request_id, reason)
-            return "", base, headers, request_id
+            return "", base, headers, request_id, polls
         if on_wait:
             on_wait(waited)
         time.sleep(poll_seconds)
         waited += poll_seconds
+        polls += 1
 
 
 # ── Proving the token is SCOPED, not merely that it works ────────────────────
@@ -1094,7 +1127,7 @@ def run_k8s_episode(args) -> int:
         print(f"[agent] {spiffe_id} · WAITING for approval ({elapsed}s) — this agent "
               f"cannot authorise its own access · {_now()}", flush=True)
 
-    token, base, headers, request_id = password_safe_episode(
+    token, base, headers, request_id, polls = password_safe_episode(
         api_url=args.ps_api_url, client_id=ps_client_id,
         client_secret=ps_client_secret, account_id=args.k8s_account_id,
         system_id=args.k8s_system_id, duration_min=args.k8s_duration,
@@ -1110,6 +1143,15 @@ def run_k8s_episode(args) -> int:
     # is the SPIFFE ID, which travels in the request's own `reason` and which Password
     # Safe records -- so the log names what the other system shows, rather than an
     # internal id only this process can see. Exactly the lesson the PAT hint taught.
+    if token:
+        # This episode's page claims the agent "cannot authorise its own access". On an
+        # auto-releasing policy that claim is false, and nothing would have said so.
+        problem = approval_problem(polls, args.require_approval)
+        if problem:
+            _checkin(base, headers, request_id, reason)
+            print(f"[agent] {spiffe_id} · REFUSING: {problem} · {_now()}", flush=True)
+            return 5
+
     if not token:
         print(f"[agent] {spiffe_id} · the request was never approved within "
               f"{args.k8s_max_wait}s — the slot has been given back · {_now()}",
@@ -1193,7 +1235,7 @@ def run_cert_episode(args) -> int:
 
     # HALF ONE: the passphrase, through the same recorded-request flow the cluster
     # episode uses. Approval-gated wherever the access policy says so.
-    passphrase, base, headers, request_id = password_safe_episode(
+    passphrase, base, headers, request_id, polls = password_safe_episode(
         api_url=args.ps_api_url, client_id=ps_client_id,
         client_secret=ps_client_secret, account_id=args.cert_account_id,
         system_id=args.cert_system_id, duration_min=args.cert_duration,
@@ -1207,6 +1249,18 @@ def run_cert_episode(args) -> int:
               f"{args.cert_max_wait}s — the slot has been given back · {_now()}",
               flush=True)
         return 3
+
+    # A CERTIFICATE IS THE ONE THAT CANNOT BE TAKEN BACK, which is why the human matters
+    # most here: the approval is the ONLY moment anybody gets a say. Once the passphrase
+    # is out, the identity works until it expires whatever anyone does afterwards.
+    problem = approval_problem(polls, args.require_approval)
+    if problem:
+        _checkin(base, headers, request_id, reason)
+        print(f"[agent] {spiffe_id} · REFUSING: {problem} · {_now()}", flush=True)
+        print("[agent] this matters more here than anywhere else in the cell: a "
+              "certificate cannot be revoked out from under this agent, so the approval "
+              "is the only moment a person gets a say.", flush=True)
+        return 5
 
     try:
         # HALF TWO: the bundle. Neither half is usable alone, which is the whole design.
@@ -1336,6 +1390,16 @@ def main(argv=None) -> int:
     ap.add_argument("--cert-max-wait", type=int, default=1800)
     ap.add_argument("--cert-insecure", action="store_true",
                     help="skip endpoint certificate verification (lab endpoints).")
+    # Applies to BOTH episodes. #912's page already claims the agent "cannot authorise
+    # its own access"; on an auto-releasing policy that was silently untrue there too, so
+    # this is a correctness fix to an existing claim rather than a new rule for one
+    # episode. Default on: the ungated case is the one that needs saying out loud.
+    ap.add_argument("--no-require-approval", dest="require_approval",
+                    action="store_false", default=True,
+                    help="run an episode even when Password Safe released without "
+                         "consulting anybody. Off by default — an ungated fetch that "
+                         "prints an approved-looking line is the one way this demo can "
+                         "mislead.")
     ap.add_argument("--selftest", action="store_true",
                     help="check the argument wiring and exit, touching nothing")
     args = ap.parse_args(argv)

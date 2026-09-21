@@ -286,6 +286,75 @@ def test_something_that_is_not_a_bundle_is_refused_before_openssl_sees_it():
         "the refusal does not name the alternative ps-cli verb for a file attachment"
 
 
+# -- the human in the loop must be real, not assumed ---------------------------
+
+def test_an_ungated_release_is_refused_rather_than_reported_as_approved():
+    """The one way this demo can mislead.
+
+    The worker cannot MAKE Password Safe require approval — that is the account's access
+    policy, set in BeyondInsight. What it can do is refuse to pretend there was a person
+    when there was not. Without this, an auto-releasing policy fetches, probes and prints
+    a success line indistinguishable from the approved one: the operator concludes a gate
+    is in force, and the audit trail shows a request nobody was asked about.
+    """
+    m = _worker()
+    assert m.approval_problem(0, True), \
+        "a credential released on the first ask was accepted as approved"
+    msg = m.approval_problem(0, True)
+    assert "no person was consulted" in msg
+    assert "access policy" in msg, "the refusal does not say how to fix it"
+    assert "--no-require-approval" in msg, "the refusal does not name the opt-out"
+
+
+def test_a_real_approval_is_not_refused():
+    m = _worker()
+    assert m.approval_problem(1, True) == ""
+    assert m.approval_problem(9, True) == ""
+
+
+def test_the_opt_out_exists_and_is_off_by_default():
+    """Somebody without an approver still needs to run the episode — but they should have
+    to say so, rather than get an approved-looking line for free."""
+    m = _worker()
+    assert m.approval_problem(0, False) == ""
+    code = _code(_WORKER)
+    assert '"--no-require-approval"' in code, "there is no way to opt out"
+    assert 'dest="require_approval"' in code and "default=True" in code, \
+        "the requirement is not on by default"
+
+
+def test_both_episodes_check_it():
+    """#912's page already claims the agent "cannot authorise its own access". On an
+    auto-releasing policy that was silently untrue for the cluster episode too, so this
+    is a correctness fix to an existing claim rather than a rule for one episode."""
+    code = _code(_WORKER)
+    for fn in ("run_k8s_episode", "run_cert_episode"):
+        body = code.split(f"def {fn}(", 1)[1].split("\ndef ")[0]
+        assert "approval_problem(" in body, f"{fn} does not check that a human was asked"
+        assert "return 5" in body, f"{fn} has no distinct exit for an ungated release"
+
+
+def test_the_refusal_returns_the_slot():
+    """Refusing still has to give the request back — an abandoned one holds the account's
+    concurrent slot and the next attempt reports the cap instead of the cause."""
+    code = _code(_WORKER)
+    for fn in ("run_k8s_episode", "run_cert_episode"):
+        body = code.split(f"def {fn}(", 1)[1].split("\ndef ")[0]
+        block = body[body.index("approval_problem("):]
+        block = block[:block.index("return 5")]
+        assert "_checkin(" in block, \
+            f"{fn} refuses without releasing the request it opened"
+
+
+def test_the_certificate_episode_says_why_the_human_matters_most_here():
+    """A certificate cannot be revoked out from under the agent, so the approval is the
+    only moment anybody gets a say. That is a stronger argument than the cluster token's
+    and the episode should make it."""
+    body = _read(_WORKER)
+    body = body[body.index("def run_cert_episode("):body.index("\ndef main(")]
+    assert "only moment a person gets a say" in body
+
+
 # -- both halves, and the arc they complete ------------------------------------
 
 def test_the_episode_fetches_both_halves():
