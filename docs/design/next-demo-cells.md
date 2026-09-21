@@ -529,7 +529,7 @@ both certificate packages:
    downloaded through the API came back larger than the original and did not match the
    web console's copy, so a non-human identity would have retrieved a corrupt bundle no
    matter how careful the client was. That floor is already a
-   [certificates prerequisite](../integrations/certificates.md#password-safe).
+   [Certificate Lab prerequisite](../workload-lab/certificate-lab.md#password-safe).
 
 None of this is a structural objection of the kind `cloud` has — a certificate is a
 credential a workload legitimately spends, and an agent answerable for one is a coherent
