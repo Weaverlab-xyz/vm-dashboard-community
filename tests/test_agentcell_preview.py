@@ -236,6 +236,56 @@ def test_the_tile_needs_no_cloud_pages_guard():
         "cloud_pages-style guard it does not have would actually be needed")
 
 
+def test_it_is_demo_only_by_dependence_not_by_tenancy():
+    """A different argument from the two labs', and the distinction is worth keeping.
+
+    The cell writes nothing through the global pscli_* singletons — it mints a dashboard
+    PAT, and the worker reaches Password Safe with credentials Workload Credentials
+    brokers for it. What it cannot do without is a trust domain: `create_agent` 404s
+    without a SpireLab row, only the SPIRE lab creates one, and that flag is masked. So
+    unmasked, this is a toggle a POV operator can switch on that can never work — and
+    since the cell joined _DERIVED, it would also stand the whole Workload Lab up there
+    to show one tab whose own remedy points at a masked switch.
+    """
+    flags = _read("web_dashboard", "services", "feature_flags.py")
+    demo = flags.split("_DEMO_ONLY = (")[1].split("\n)")[0]
+    assert f'"{_FLAG}"' in demo, f"{_FLAG} is not demo-only"
+    assert '"spire_lab_enabled"' in demo, (
+        "the lab this cell depends on is no longer masked — if that is deliberate, this "
+        "entry's whole argument needs revisiting rather than inheriting")
+
+
+def test_a_pov_instance_resolves_every_reader_the_same_way():
+    """FOUR readers have to agree, and each is a different call.
+
+    The router gate and the page gate go through `enabled`; the template gate reads
+    `flags()`; the home tile reads `feature_map()`. A mask applied in some of them is the
+    see-it-but-cannot-use-it split this module exists to prevent — and with the page now
+    derived, a leak in any one of them is a Workload Lab standing up on a POV instance.
+    """
+    _schema()
+    from web_dashboard.services import config_service, feature_flags as ff
+
+    for key in (_FLAG, "spire_lab_enabled", "cert_lab_enabled"):
+        config_service.set(key, "true")
+    real = ff.install_profile
+    try:
+        ff.install_profile = lambda: "pov"
+        assert ff.enabled(_FLAG) is False, "the router would still serve"
+        assert ff.enabled("workload_lab_enabled") is False, \
+            "the Workload Lab page still resolves on a POV instance"
+        assert ff.flags()[_FLAG] is False, "the tab would still render"
+        assert ff.feature_map()["agentcell"] is False, "the home tile would still render"
+
+        ff.install_profile = lambda: "demo"
+        assert ff.enabled(_FLAG) is True, (
+            "the mask subtracts on an estate instance too — it may only ever subtract "
+            "on the profile that does not own the flag")
+        assert ff.feature_map()["agentcell"] is True
+    finally:
+        ff.install_profile = real
+
+
 def test_the_flag_has_a_human_label():
     from web_dashboard.services.personas import _FLAG_LABELS
     assert _FLAG in _FLAG_LABELS, f"_FLAG_LABELS has no entry for {_FLAG}"
