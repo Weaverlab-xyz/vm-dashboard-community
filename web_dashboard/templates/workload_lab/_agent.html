@@ -376,12 +376,12 @@
               <option :value="w" x-text="w"></option>
             </template>
           </select>
-          <!-- Not cosmetic: the listing filters on workgroup with no creator fallback, so
-               a blank one is invisible to every non-admin INCLUDING whoever minted it. -->
+          <!-- Blank is a real choice here, not a gap: `list_agents` is workgroup OR
+               creator, so an untagged agent stays with the person who minted it rather
+               than becoming admin-only. -->
           <p class="text-xs text-gray-500 mt-1">
-            Everyone in this workgroup can see and manage the agent. <strong>Leave it blank
-            and only administrators can see it</strong> &mdash; including you, if you are
-            not one.
+            Everyone in this workgroup can see and manage the agent &mdash; including
+            revoking its token. Leave it blank and only you and administrators can.
           </p>
         </div>
       </div>

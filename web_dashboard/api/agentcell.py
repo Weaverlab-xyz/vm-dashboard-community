@@ -146,14 +146,28 @@ def list_agents(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Every agent cell this caller may see, newest first."""
+    """Every agent cell this caller may see, newest first.
+
+    **Workgroup OR creator**, which is the Certificate and SPIRE labs' rule and not the
+    cloud pages'. The difference matters because the workgroup is OPTIONAL here, where a
+    cloud deploy form requires one: filtering on workgroup alone made a blank one mean
+    "administrators only", so a non-admin who left the field empty minted an agent they
+    could not then see — on the one screen that had just shown them its token for the
+    only time, with no way to reach the Revoke button for the credential they had issued.
+
+    The creator term does not widen anything a workgroup grant does not already: it
+    restores the row to the one person who made it. Everything else stays workgroup-
+    scoped, so a shared agent is still shared by tagging it.
+    """
     from .gcp import _accessible_workgroups
 
     accessible = _accessible_workgroups(current_user)
     rows = db.query(AgentCell).order_by(AgentCell.created_at.desc()).all()
     agents = []
     for row in rows:
-        if accessible is not None and (row.workgroup or "").lower() not in accessible:
+        if (accessible is not None
+                and (row.workgroup or "").lower() not in accessible
+                and (row.created_by or "") != current_user.username):
             continue
         agents.append(AgentCellInfo(
             id=row.id,
@@ -335,10 +349,11 @@ def build_options(
         "users": users,
         # Through the same service /api/groups/workgroups reads, so the picker here and
         # the one on every other page cannot offer different names — but NARROWED to the
-        # caller's own for a non-admin, which the global endpoint is not. `list_agents`
-        # filters purely on workgroup with no creator fallback, so tagging a row with a
-        # workgroup you are not in mints an agent you cannot then see, on the one page
-        # that just showed you its token for the only time.
+        # caller's own for a non-admin, which the global endpoint is not. Tagging a row
+        # into a workgroup you are not in is a grant to a group you are not part of, and
+        # it is almost always a misclick rather than an intent. `list_agents`' creator
+        # term means such a row is still visible to whoever minted it, so this is about
+        # not quietly handing an agent away rather than about not losing it.
         "workgroups": (workgroup_service.list_names(db)
                        if bool(getattr(current_user, "is_admin", False))
                        else sorted(current_user.workgroups_list or [])),
