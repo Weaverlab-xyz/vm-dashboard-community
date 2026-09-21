@@ -355,6 +355,35 @@ def episode_link_problem(row) -> str:
     return ""
 
 
+# Which spendable mechanisms the DASHBOARD can open an episode for. Spendable is not the
+# same question and must not be used as this gate: `certificates` is spendable and has no
+# episode route here, because that episode is one shot on the host
+# (`mcp_agent.py --cert-episode`, see examples/playbooks/agent/files/mcp_agent.py) which
+# the dashboard neither opens nor watches -- the same arrangement as the two install
+# playbooks. So the set is named rather than derived.
+EPISODE_MECHANISMS = ("kubernetes",)
+
+
+def cluster_episode_mechanism_problem(row) -> str:
+    """Refuse a CLUSTER-access episode on an agent whose link is not a cluster token.
+
+    Without this the request passes `episode_link_problem` -- `certificates` IS
+    spendable -- and falls through to a Kubernetes lookup that misses, so the answer is
+    "The linked Kubernetes token no longer exists. Unlink and relink.": a refusal that
+    accuses a perfectly valid link of having lost its credential, and sends the operator
+    to undo the one thing that was right. Naming the mechanism instead costs nothing and
+    points at where that episode actually runs.
+    """
+    mechanism = (getattr(row, "linked_mechanism", "") or "").strip().lower()
+    if not mechanism or mechanism in EPISODE_MECHANISMS:
+        return ""
+    return (f"This agent is answerable for a {mechanism} credential, not a cluster "
+            "token, so there is no cluster-access request to open. The certificate "
+            "episode is a run on the host — `mcp_agent.py --cert-episode` — which this "
+            "dashboard neither opens nor watches; `journalctl -u mcp-agent` is the "
+            "record. The link itself is fine; leave it alone.")
+
+
 def episode_duration_problem(minutes) -> int:
     """Clamp the request duration, returning the value to use.
 

@@ -5,10 +5,11 @@
    the tab: every other tab on this page answers "how does a machine get a credential",
    and every one of them is answered in the abstract until something actually holds one.
    This tab is that something. It attests to the SPIRE tab's trust domain, and it can be
-   made answerable for the Cloud tab's lease or the Kubernetes tab's token — so the four
-   mechanisms stop being four demos and become one.
+   made answerable for the Cloud tab's lease, the Kubernetes tab's token or the
+   Certificate tab's identity — so the four mechanisms stop being four demos and become
+   one.
 
-   FIVE THINGS HERE ARE LOAD-BEARING AND EASY TO MISTAKE FOR DECORATION:
+   SIX THINGS HERE ARE LOAD-BEARING AND EASY TO MISTAKE FOR DECORATION:
 
      * IDENTITY AND AUTHORIZATION ARE TWO THINGS, and this tab must never draw them as
        one. The worker attests to SPIRE and gets an SVID — that is WHO IT IS, and it holds
@@ -20,10 +21,19 @@
        the id, the name and the expiry, never the secret. The modal that shows it is
        therefore the only chance, and it says so.
      * A LINK IS NOT ALWAYS A CAPABILITY. `cloud` is accountability only, because that
-       tab's credential is returned to nobody by design; `kubernetes` genuinely lets the
-       worker request the token. Rendering the two alike is this feature's headline
-       failure mode in one direction and the Kubernetes tab's in the other, so the picker
-       states which it is BEFORE the link is made, not after.
+       tab's credential is returned to nobody by design; `kubernetes` and `certificates`
+       genuinely let the worker request the credential. Rendering the two kinds alike is
+       this feature's headline failure mode in one direction and the Kubernetes tab's in
+       the other, so the picker states which it is BEFORE the link is made, not after.
+     * A CAPABILITY IS NOT ALWAYS AN EPISODE THIS DASHBOARD CAN OPEN, and conflating the
+       two is what made the Request-access button lie. `certificates` is spendable and
+       has NO episode route here — that episode is one shot on the host,
+       `mcp_agent.py --cert-episode` — so a button gated on `spendable` posted a
+       certificate link at /k8s-request, which looked it up in the token table, missed,
+       and refused it as "the linked Kubernetes token no longer exists. Unlink and
+       relink." A valid link, accused of having lost its credential, with the remedy
+       pointing at the one thing that was right. `episodeMechanism` is the gate now, and
+       it is resolved server-side for the same reason `linkKind` is.
      * THE DASHBOARD DOES NOT WATCH THE INSTALL. The two playbooks are runs the operator
        makes; nothing writes `stages_done`, so this tab shows the install as a checklist
        of what YOU do and names `journalctl -u mcp-agent` as the record. A progress bar
@@ -52,10 +62,13 @@
     answerable for a
     <button type="button" @click="$dispatch('select-tab', 'cloud')"
             class="text-blue-600 hover:underline">Cloud</button>
-    lease or a
+    lease, a
     <button type="button" @click="$dispatch('select-tab', 'kubernetes')"
             class="text-blue-600 hover:underline">Kubernetes</button>
-    token and the other tabs stop being four separate demos.
+    token or a
+    <button type="button" @click="$dispatch('select-tab', 'certificates')"
+            class="text-blue-600 hover:underline">Certificate</button>
+    identity and the other tabs stop being four separate demos.
     <a href="/docs/profiles/demo/agent-demo-cell" target="_blank" class="text-blue-600 hover:underline">Feature guide</a>.
   </p>
 
@@ -220,19 +233,27 @@
             <strong>Accountability only.</strong> That tab's credential is returned to
             nobody by design, so nothing here can spend it.
           </p>
+          <!-- "credential" rather than "token", because this sentence renders for a
+               certificate link too and that one is a passphrase plus a bundle. -->
           <p x-show="linkKind(row) === 'capability'" x-cloak class="text-gray-500 mt-0.5">
             <strong>A capability.</strong> The worker reaches Password Safe holding nothing,
-            so it can genuinely <em>request</em> this token &mdash; subject to whatever the
-            access policy requires.
+            so it can genuinely <em>request</em> this credential &mdash; subject to whatever
+            the access policy requires.
           </p>
         </div>
 
         <!-- ── The cluster-access episode ────────────────────────────────── -->
-        <!-- Shown when the link can be spent, and ALSO whenever an episode exists at
-             all. A request in flight has to stay visible even where /options could not
-             be read: an open one holds the account's concurrent slot, and a slot nobody
-             can see is the one nobody gives back. -->
-        <div x-show="spendable(row) || row.episode_state" x-cloak
+        <!-- Shown when the dashboard has an episode route for the linked mechanism, and
+             ALSO whenever one is actually OPEN. A request in flight has to stay visible
+             even where /options could not be read: an open one holds the account's
+             concurrent slot, and a slot nobody can see is the one nobody gives back.
+             NOT `spendable(row)`, which was the bug: a certificates link is spendable
+             and has no route here, so this panel offered a button that posted at
+             /k8s-request and came back refused as a token that had vanished. A CLOSED
+             episode_state is deliberately no longer enough on its own either — unlink
+             leaves "released" behind, so a relinked-to-certificates agent would have
+             carried a stale cluster-access line. -->
+        <div x-show="episodeMechanism(row) || episodeOpen(row)" x-cloak
              class="border border-gray-200 rounded px-2 py-1.5 text-xs mb-2">
           <div class="flex flex-wrap items-center justify-between gap-2">
             <p class="text-gray-700">
@@ -240,8 +261,8 @@
               <span class="text-gray-500"> &mdash; <span x-text="row.episode_summary"></span></span>
             </p>
             <div class="flex gap-2">
-              <button x-show="!episodeOpen(row)" x-cloak @click="openEpisode(row)"
-                      :disabled="busy || readOnly"
+              <button x-show="episodeMechanism(row) && !episodeOpen(row)" x-cloak
+                      @click="openEpisode(row)" :disabled="busy || readOnly"
                       class="text-xs border border-blue-300 text-blue-700 hover:bg-blue-50 px-2 py-1 rounded disabled:opacity-50">
                 Request access
               </button>
@@ -259,6 +280,33 @@
             probes happen on the host, and the worker cannot report them back &mdash; its
             token belongs to a non-admin user by construction.
             <code>journalctl -u mcp-agent -f</code> is where the episode happens.
+          </p>
+        </div>
+
+        <!-- ── The certificate episode, which happens ELSEWHERE ──────────── -->
+        <!-- There is no button here, and the sentence says why rather than leaving a
+             capability looking like a dead end. The certificate episode is a one-shot
+             run on the host; the dashboard has no route for it, exactly as it has none
+             for the two install playbooks. Nothing here is bound to a row field — this
+             panel keys off the linked mechanism alone. -->
+        <div x-show="row.linked_mechanism === 'certificates'" x-cloak
+             class="border border-gray-200 rounded px-2 py-1.5 text-xs mb-2">
+          <p class="text-gray-700">
+            <span class="font-medium">Certificate use</span>
+            <span class="text-gray-500"> &mdash; a run you make on the host, not a button here</span>
+          </p>
+          <p class="text-gray-500 mt-0.5">
+            The worker asks for both halves itself &mdash; the PKCS#12 passphrase through
+            a recorded Password Safe request, and the bundle from Secrets Safe on the same
+            session &mdash; then presents the certificate to your mTLS endpoint. Run
+            <code>mcp_agent.py --cert-episode</code> with the bundle title and CN from the
+            link; <code>journalctl -u mcp-agent -f</code> is the record.
+          </p>
+          <p class="text-gray-500 mt-0.5">
+            <strong>Revoking this certificate will not stop the agent.</strong> Nothing on
+            that path consults a CRL or OCSP &mdash; it stops when the certificate
+            <em>expires</em>, not when somebody takes it away. That is the third shape, and
+            it is what makes a revocable token and an approval gate worth having.
           </p>
         </div>
 
@@ -509,9 +557,9 @@
       <h3 class="text-lg font-semibold text-gray-800 mb-1">What is it answerable for?</h3>
       <p class="text-xs text-gray-500 mb-4">
         One credential at a time, deliberately. An agent answerable for a cloud lease
-        <em>and</em> a cluster token would be the most over-credentialed principal in the
-        estate &mdash; which is the shape this cell argues against, so widening is a
-        decision rather than an accumulation.
+        <em>and</em> a cluster token <em>and</em> a certificate would be the most
+        over-credentialed principal in the estate &mdash; which is the shape this cell
+        argues against, so widening is a decision rather than an accumulation.
       </p>
 
       <div class="space-y-3">
@@ -522,7 +570,7 @@
               <label class="flex items-start gap-2 border border-gray-200 rounded px-2 py-1.5 cursor-pointer"
                      :class="linkForm.mechanism === m.key ? 'border-blue-400 bg-blue-50' : ''">
                 <input type="radio" :value="m.key" x-model="linkForm.mechanism"
-                       @change="linkForm.credential_id = ''" class="mt-0.5">
+                       @change="mechanismChanged($event.target.value)" class="mt-0.5">
                 <span>
                   <span class="text-sm font-medium text-gray-800" x-text="m.label"></span>
                   <span class="block text-xs text-gray-600" x-text="m.note"></span>
@@ -548,12 +596,62 @@
           <p x-show="blockedChoice()" x-cloak class="text-xs text-amber-700 mt-1"
              x-text="blockedChoice()"></p>
         </div>
+
+        <!-- ── Which identity on that CA ──────────────────────────────────── -->
+        <!-- A CA row is not an identity. It carries one managed account per identity and
+             this dashboard does not track them individually, so the link has to NAME the
+             one the agent may ask for — the three fields the link route takes.
+
+             NONE OF THEM IS STORED, and saying so is the point: the row keeps the
+             mechanism and the CA's id, nothing else. What they produce is the response's
+             notes, which are what you carry to the worker's flags. Hiding that would make
+             a reopened modal look like it had lost them. -->
+        <div x-show="linkForm.mechanism === 'certificates'" x-cloak class="space-y-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">Managed account</label>
+            <input x-model="linkForm.account_name" type="text" placeholder="svc-deploy-pipeline"
+                   class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+            <p class="text-xs text-gray-500 mt-1">
+              The identity you onboarded onto this CA. Its credential is the PKCS#12
+              <strong>passphrase</strong> &mdash; one half, and useless without the other.
+            </p>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">Bundle title</label>
+            <input x-model="linkForm.bundle_title" type="text" placeholder="cert/&lt;system&gt;/&lt;account&gt;"
+                   class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+            <p class="text-xs text-gray-500 mt-1">
+              The bundle's Secrets Safe reference &mdash; the other half, and what
+              <code>--cert-bundle-title</code> takes. One containing <code>/</code> is
+              looked up as a folder path, one without it as a bare title. It is a
+              <em>name</em>, not a credential.
+            </p>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">
+              Expected subject <span class="font-normal text-gray-400">(optional)</span>
+            </label>
+            <input x-model="linkForm.expect_cn" type="text" placeholder="the CN the endpoint should echo"
+                   class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+            <p class="text-xs text-gray-500 mt-1">
+              What <code>--cert-cn</code> asserts. An endpoint that answers 200 without
+              having seen the certificate proves nothing, so the episode checks that the
+              subject comes back.
+            </p>
+          </div>
+          <p class="text-xs text-gray-500">
+            <strong>Neither half is stored here.</strong> The row records the mechanism and
+            the CA; these three compose the notes you carry to
+            <code>mcp_agent.py --cert-episode</code>. And this link is the one whose
+            removal changes nothing &mdash; nothing on that path checks revocation.
+          </p>
+        </div>
       </div>
 
       <div class="flex justify-end gap-2 mt-5">
         <button @click="linkOpen = false"
                 class="text-sm px-3 py-1.5 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
-        <button @click="submitLink()" :disabled="busy || !linkForm.credential_id"
+        <button @click="submitLink()" :disabled="busy || !linkReady()"
                 class="text-sm px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-50">
           Link
         </button>
@@ -613,7 +711,8 @@ function workloadAgentTab() {
     // Kept in the shape /options returns so every accessor works before the fetch lands.
     options: { clouds: [], hosts: {}, labs: [], users: [], workgroups: [],
                pat_hours: { default: 8, max: 72 }, spiffe_path: '',
-               credentials: { cloud: [], kubernetes: [] }, spendable: [],
+               credentials: { cloud: [], kubernetes: [], certificates: [] },
+               spendable: [], episode_mechanisms: [],
                episode: { default_minutes: 15, max_minutes: 60 },
                mcp_enabled: true, missing: [] },
     missing: [],
@@ -636,7 +735,11 @@ function workloadAgentTab() {
 
     linkOpen: false,
     linkRow: null,
-    linkForm: { mechanism: '', credential_id: '' },
+    // Kept in step with blankLinkForm(). The last three are certificates-only and name
+    // WHICH identity on the chosen CA — a CA row carries many and this dashboard tracks
+    // none of them individually, so the link has to say.
+    linkForm: { mechanism: '', credential_id: '', account_name: '', bundle_title: '',
+                expect_cn: '' },
 
     episodeOpenModal: false,
     episodeRow: null,
@@ -770,6 +873,22 @@ function workloadAgentTab() {
       return !!s && !['released', 'denied', 'expired'].includes(s);
     },
 
+    // WHICH EPISODE THIS DASHBOARD CAN OPEN, which is NOT the same question as
+    // `spendable` and must not be answered with it. `certificates` is spendable and has
+    // no route here — that episode is one shot on the host — so gating the
+    // Request-access button on spendability posted a certificate link at /k8s-request,
+    // which looked it up in the token table, missed, and refused a perfectly valid link
+    // as a token that no longer existed.
+    //
+    // "" for three different reasons, like `linkKind`: nothing linked, /options refused,
+    // or a mechanism whose episode lives elsewhere. All three render no button, which is
+    // the right answer for each — a reader who could not read /options could not press
+    // it anyway.
+    episodeMechanism(row) {
+      const m = (row || {}).linked_mechanism || '';
+      return (this.options.episode_mechanisms || []).includes(m) ? m : '';
+    },
+
     mechanisms() {
       return [
         { key: 'cloud', label: 'Cloud — a short-lived AWS or Azure credential',
@@ -779,6 +898,13 @@ function workloadAgentTab() {
         { key: 'kubernetes', label: 'Kubernetes — a bound ServiceAccount token',
           note: 'A capability. The worker reaches Password Safe holding nothing, so it '
                 + 'can genuinely request this token — and wait if the policy says so.' },
+        // The third shape, and the note leads with the limit rather than the capability
+        // because this is the one an operator assumes away. Revoking it stops nothing.
+        { key: 'certificates', label: 'Certificates — a client certificate and its passphrase',
+          note: 'A capability, and the one nobody can take away. The worker requests both '
+                + 'halves — the PKCS#12 passphrase from the managed account, the bundle '
+                + 'from Secrets Safe — and revoking the certificate does not stop it. '
+                + 'Only its expiry does. That episode runs on the host, not from here.' },
       ];
     },
 
@@ -791,6 +917,27 @@ function workloadAgentTab() {
     blockedChoice() {
       const blocked = this.choices().filter(c => !c.linkable && c.why);
       return blocked.length ? blocked[0].why : '';
+    },
+
+    // A CA is not an identity, so `certificates` needs two more answers than the others.
+    // The route defaults all three to blank and would accept one — the notes it returns
+    // would then name an empty account and an empty bundle, which is a promise about
+    // nothing. `expect_cn` stays optional: the notes fall back to the account name, and
+    // the episode's own flag can supply it later.
+    linkReady() {
+      if (!this.linkForm.credential_id) return false;
+      if (this.linkForm.mechanism === 'certificates') {
+        return !!(this.linkForm.account_name && this.linkForm.bundle_title);
+      }
+      return true;
+    },
+
+    // One initialiser for the link form, because two that drift apart is how a field
+    // ends up undefined on the second link of a session — the same trap blankForm()
+    // exists for above.
+    blankLinkForm() {
+      return { mechanism: '', credential_id: '', account_name: '', bundle_title: '',
+               expect_cn: '' };
     },
 
     blankForm() {
@@ -864,8 +1011,18 @@ function workloadAgentTab() {
 
     openLink(row) {
       this.linkRow = row;
-      this.linkForm = { mechanism: '', credential_id: '' };
+      this.linkForm = this.blankLinkForm();
       this.linkOpen = true;
+    },
+
+    // Changing the mechanism clears the credential AND the three certificate fields. A
+    // managed account name left behind from an abandoned certificate choice would ride
+    // along on a kubernetes link, where the route ignores it — harmless, but it would
+    // reappear the next time certificates was picked and look like a saved value.
+    // Takes the radio's own value rather than reading linkForm.mechanism back, which
+    // would depend on x-model's listener having run before this one.
+    mechanismChanged(mechanism) {
+      Object.assign(this.linkForm, this.blankLinkForm(), { mechanism: mechanism || '' });
     },
 
     async submitLink() {
