@@ -506,6 +506,36 @@ The row records the **request** — id, state, timestamps, result — and never 
 credential. `test_workload_lab_governance`'s no-credential-on-row rule now covers
 `AgentCell` too, rather than relying on that being obvious.
 
+### Why `certificates` is still not linkable
+
+The refusal an operator gets is deliberately short, so the reasoning lives here. It is
+**not** that a certificate is unreachable in principle — it is that the bundle is a
+Secrets Safe **file secret**, and this worker only knows how to fetch a managed-account
+password. Three separate things stand between the two, and only the first is common to
+both certificate packages:
+
+1. **A file secret has no content field to read.** `ps-cli secrets get` projects a
+   per-type field set, and the file one carries `FileName` and `FileHash` and nothing
+   else — no `Text`, no `Password`. `--decrypt` cannot help, because it only adds a
+   query parameter and there is no payload field for it to fill. The body comes from a
+   separate call that takes **only a GUID**, so even the happy path is two round trips.
+   See [Password Safe → Troubleshooting](../integrations/password-safe.md#troubleshooting).
+2. **On the leaf package it is binary.** `bundle` defaults to `Pkcs12` for `Certificate`
+   and `PemBundle` for `Subordinate CA`. The bips library returns a downloaded file
+   secret as decoded text, which a PEM bundle survives and a PKCS#12 does not — so the
+   subordinate package needs a path nobody wrote, and the leaf package needs that plus a
+   byte-preserving fetch.
+3. **It wants BeyondInsight ≥ 26.1 regardless.** Below 26.1.0.878, file secrets
+   downloaded through the API came back larger than the original and did not match the
+   web console's copy, so a non-human identity would have retrieved a corrupt bundle no
+   matter how careful the client was. That floor is already a
+   [certificates prerequisite](../integrations/certificates.md#password-safe).
+
+None of this is a structural objection of the kind `cloud` has — a certificate is a
+credential a workload legitimately spends, and an agent answerable for one is a coherent
+demo. It is genuinely unbuilt work, which is why the refusal says so rather than implying
+the tab is off-limits.
+
 ### Still unproven
 
 No Password Safe tenant, no cluster, no approver. The client paths are unit-tested against
