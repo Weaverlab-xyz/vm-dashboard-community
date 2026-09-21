@@ -356,6 +356,43 @@ def _db_tiles(db: Session, user: User) -> dict:
         return _tile(total, href="/gcp#net")
     _safe("net_cells", _net_cells)
 
+    def _agent_cells():
+        # NO `cloud_pages` gate, unlike the two tiles above, and the difference is the
+        # href rather than an oversight: this one points at /workload-lab#agent, which
+        # is not a cloud console. That page is gated on the DERIVED
+        # `workload_lab_enabled`, and `agentcell_enabled` is one of its constituents --
+        # so wherever this tile renders, its link resolves. That is the same property
+        # `anyFlag: ['cloud_pages']` buys the OT and network tiles, obtained from the
+        # flag graph instead of from a second condition that could drift out of step.
+        from ..services import agentcell_service, feature_flags
+        if not feature_flags.enabled("agentcell_enabled"):
+            # Reported as unavailable rather than as a zero, exactly as _net_cells does:
+            # a zero says "no agents yet" and invites the operator to go mint one, on a
+            # tab that is not rendered and behind a router that 404s.
+            return _unavailable("the Agent Demo Cell preview is off")
+        # A DB read of the cell's own table -- never an MCP call and never a cloud call,
+        # which is the contract of this endpoint. No permission branch, because
+        # GET /api/agentcell/agents has none either: it takes any authenticated caller
+        # and scopes by row. A _forbidden() here would hide a tile whose link works.
+        from ..database import AgentCell
+        accessible = _accessible_for("gcp", user)   # same workgroup rule on every module
+        total = live = 0
+        for row in db.query(AgentCell).all():
+            if not agentcell_service.visible_to(row, accessible, user.username):
+                continue
+            total += 1
+            if agentcell_service.token_live(row):
+                live += 1
+        # `authorized`, NOT `wired`. The OT tile's secondary is how many cells are fully
+        # wired; the equivalent here would be `is_wired`, which is derived from
+        # `stages_done` -- and nothing writes that, because the two playbooks are runs
+        # the operator makes and the dashboard neither starts nor watches them. So it
+        # would read 0 forever beside a working agent. What the row DOES know is whether
+        # the token it issued would still be accepted, and that is the number worth
+        # having: total minus authorized is how many of these principals have stopped.
+        return _tile(total, secondary=live)
+    _safe("agent_cells", _agent_cells)
+
     out.update(_pov_tiles(db, user))
     return out
 

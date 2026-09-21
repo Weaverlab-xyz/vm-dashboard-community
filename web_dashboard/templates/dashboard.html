@@ -624,6 +624,19 @@
             // always equal the total.
             { key: 'net_cells',       title: 'Network Cells',       href: '/gcp#net',   flag: 'netcell',
               anyFlag: ['cloud_pages'] },
+            // NO `anyFlag: ['cloud_pages']`, unlike the two above, and that is the href
+            // rather than an omission: this one goes to the Workload Lab, not a cloud
+            // console, and `agentcell_enabled` is a constituent of the derived flag that
+            // page is gated on — so wherever this tile renders, its link resolves.
+            //
+            // The secondary is `authorized`, not `wired`. `wired` is derived from
+            // stages_done, which nothing writes (the two install playbooks are runs the
+            // operator makes), so it would read 0 forever next to a working agent. What
+            // the row knows is whether the token it issued is still good — and total
+            // minus authorized is how many of these principals have already stopped,
+            // which is the number this whole feature is about.
+            { key: 'agent_cells',     title: 'Agent Cells',         href: '/workload-lab#agent', flag: 'agentcell',
+              secondaryLabel: 'authorized' },
           ],
         },
         {

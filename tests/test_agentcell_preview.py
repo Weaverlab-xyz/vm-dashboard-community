@@ -1,10 +1,10 @@
 """The agent cell is a preview feature, and every reader of that fact must agree.
 
-Smaller than tests/test_netcell_preview.py because this cell has no tile — its surfaces
-are a router, a persona card set, a documentation page and the Workload Lab's `Agent`
-tab. The failure mode is the same though, and it is partial adoption: the router 404s
-while a card still reads `ready`, which looks like a broken feature rather than a flag
-doing its job.
+Five surfaces now: a router, a persona card set, a documentation page, the Workload Lab's
+`Agent` tab and the home page's `Agent Cells` tile. The failure mode is partial adoption —
+the router 404s while a card still reads `ready`, or a tile reports an honest zero for a
+feature nobody can reach — which looks like a broken feature rather than a flag doing its
+job.
 
 **And one failure specific to this flag, which shipped: a toggle that reaches nothing.**
 The tab lives on `/workload-lab`, whose route is gated on the DERIVED
@@ -193,6 +193,47 @@ def test_the_tab_never_renders_a_field_nothing_writes():
     assert 'x-show="row.wired"' in partial and 'x-show="!row.wired"' not in partial, (
         "the tab renders a NOT-wired state — `wired` is derived from stages_done, which "
         "nothing writes, so every agent would carry it forever")
+
+
+def test_the_home_tile_names_the_flag():
+    src = _read("web_dashboard", "templates", "dashboard.html")
+    row = [ln for ln in src.splitlines() if "'agent_cells'" in ln]
+    assert row, "the agent_cells tile is gone"
+    assert "flag: 'agentcell'" in row[0], (
+        "the agent_cells tile is not gated on the agent cell's flag, so it renders on "
+        "an instance where the preview is off")
+
+
+def test_the_tile_collector_reports_unavailable_when_the_preview_is_off():
+    """A zero says "no agents yet" and invites the operator to go mint one, on a tab
+    that is not rendered and behind a router that 404s."""
+    src = _read("web_dashboard", "api", "dashboard.py")
+    body = src.split("def _agent_cells():", 1)[1].split('_safe("agent_cells"', 1)[0]
+    assert _FLAG in body, "the agent_cells collector never consults the preview flag"
+    assert "_unavailable" in body, \
+        "the collector returns a count rather than 'unavailable' when the preview is off"
+
+
+def test_the_tile_needs_no_cloud_pages_guard():
+    """The OT and network tiles pair their flag with `anyFlag: ['cloud_pages']` because
+    every href they can produce is a cloud console a POV instance 404s. This tile's is
+    the Workload Lab, and `agentcell_enabled` gates that page through _DERIVED — so the
+    link resolves wherever the tile renders, and a second condition here would be one
+    more thing to keep in step with the flag graph.
+
+    Pinned because the copy-paste is the tempting move, and it would hide the tile on a
+    POV instance for a reason that does not apply to it.
+    """
+    src = _read("web_dashboard", "templates", "dashboard.html")
+    i = src.index("key: 'agent_cells'")
+    row = src[i:src.index("}", i)]
+    assert "cloud_pages" not in row, (
+        "the agent_cells tile carries a cloud_pages guard; its href is /workload-lab, "
+        "which is not a cloud console")
+    from web_dashboard.services.feature_flags import _DERIVED
+    assert _FLAG in _DERIVED["workload_lab_enabled"], (
+        "without this the tile's href is not guaranteed to resolve, and the "
+        "cloud_pages-style guard it does not have would actually be needed")
 
 
 def test_the_flag_has_a_human_label():
