@@ -297,6 +297,16 @@ Needs Cloud Functions enabled, a stored `portainer_pat`, and a configured secret
 for the node's cloud. The card names whichever of those is missing instead of offering
 a button that cannot work.
 
+It also needs **at least one team in Portainer**, which a fresh node has none of. A
+team is both the asset and the grant, so against a teamless Portainer the adapter
+reports itself unconfigured and step 4 refuses to register it — after steps 1–3 have
+already deployed a real function. The pair request reads the team list first and
+refuses the click instead, naming the fix; a Portainer the *dashboard* cannot reach is
+still pairable, because only the adapter's own reachability decides anything. If a
+registration fails for some other reason, the job says so and says that the function
+is deployed: fix the cause and finish it with **Register in Entitle** on the Functions
+page, or remove the adapter here and pair again — pairing twice is refused.
+
 #### Moving the node strands the adapter
 
 Step 2 is not a preference, and it is not revisited. The adapter is VPC-attached in

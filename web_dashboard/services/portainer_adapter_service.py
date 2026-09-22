@@ -66,6 +66,10 @@ _BACKEND_LABEL = {"aws_sm": "AWS Secrets Manager", "azure_kv": "Azure Key Vault"
 #: The node serves its UI on 9443 over a self-signed certificate.
 _NODE_PORT = 9443
 
+#: How long the preflight will wait for Portainer's team list. Advisory — see
+#: :func:`_team_names` — so it is bounded well inside portainer_service's own 30s.
+_TEAM_READ_TIMEOUT = 10
+
 #: Config key holding the adapter function's own subnet range, so
 #: ``portainer_node_service.refresh_portainer_firewall`` can admit it. Runtime-set on
 #: pair and cleared on retire, exactly like ``portainer_ui_jumpoint_egress_ip``.
@@ -187,6 +191,10 @@ async def preflight(*, cloud: str = "", region: str = "",
     from the pair route so an impossible pairing fails at the click, not three minutes
     into a job — and again from :func:`run_pairing`, because the two are minutes apart
     and the node can stop in between.
+
+    Includes the one thing about the *Portainer* that can sink a pairing: with no
+    teams there is nothing to grant, the adapter's own ``check_config`` says so, and
+    registration refuses — after the function is deployed and the firewall opened.
     """
     from . import cloud_function_service
 
@@ -229,7 +237,43 @@ async def preflight(*, cloud: str = "", region: str = "",
         raise AdapterPairingError(
             f"the adapter has to run in {target['region']} to reach Portainer, and "
             f"that region has no functions network configured: {exc}") from exc
+
+    teams = await _team_names()
+    if teams is not None and not teams:
+        raise AdapterPairingError(
+            "Portainer has no teams, and this adapter grants access by putting a "
+            "minted account INTO a team — so the integration would resolve no "
+            "assets, and the registration step refuses it (the adapter's own "
+            "check_config reports it unconfigured). In Portainer: create a team, "
+            "give it access to the environments a requester should reach "
+            "(Environments -> the environment -> Access), then pair.")
     return target
+
+
+async def _team_names() -> Optional[list]:
+    """Portainer's team names, or ``None`` when the dashboard could not ask.
+
+    Only an ANSWER blocks a pairing. The dashboard reaches Portainer over its
+    configured address and the adapter reaches it over the VPC, so a dashboard that
+    cannot connect from here says nothing about whether the adapter will — and
+    refusing on that would make a Portainer that is only reachable from inside the
+    VPC unpairable. The adapter's own ``check_config`` stays the authority; this
+    exists so the one refusal the dashboard can see coming is seen at the click,
+    instead of four minutes and one deployed function later.
+
+    Bounded well inside the client's own 30s timeout: this runs on the click, and a
+    Portainer the dashboard cannot reach must cost a pause, not a hung button.
+    """
+    try:
+        from . import portainer_service
+        teams = await asyncio.wait_for(portainer_service.list_teams(),
+                                       timeout=_TEAM_READ_TIMEOUT)
+    except Exception as exc:  # noqa: BLE001 — unreachable is not an answer
+        logger.info("portainer adapter preflight could not read the team list "
+                    "(%s: %s) — pairing anyway; the adapter checks for itself",
+                    type(exc).__name__, exc)
+        return None
+    return [str(team.get("Name") or "") for team in teams]
 
 
 def build_environment(*, portainer_url: str, verify_ssl: bool,
@@ -817,6 +861,7 @@ async def _run_pair(db, *, job_id: str, meta: dict) -> None:
     from . import cloud_function_service
 
     job_service.set_running(db, job_id)
+    deployed_fn_id = ""
     try:
         target = await preflight(cloud=meta.get("cloud", ""),
                                  region=meta.get("region", ""),
@@ -856,6 +901,11 @@ async def _run_pair(db, *, job_id: str, meta: dict) -> None:
             tf_variables=deployed["tf_variables"])
 
         fn_row = cloud_function_service.get_function(db, fn_id)
+        if fn_row is not None and fn_row.status == "available":
+            # From here on a failure leaves a REAL function behind, and the retry the
+            # operator reaches for is refused by the duplicate guard above. The job
+            # detail shows error_message and nothing else, so it has to say so.
+            deployed_fn_id = fn_id
         if not fn_row or fn_row.status != "available":
             raise AdapterPairingError(
                 f"adapter function did not deploy (status: "
@@ -888,6 +938,15 @@ async def _run_pair(db, *, job_id: str, meta: dict) -> None:
             await cloud_function_service.run_entitle_register(
                 db, fn_id=fn_id, job_id=register["job_id"], action="register")
             db.refresh(fn_row)
+            # run_entitle_register reports through ITS OWN job and does NOT raise, so
+            # the column is the outcome — the same reading retire_adapter already
+            # relies on. Without this, a refused registration (the adapter reporting
+            # itself unconfigured is the usual one) completed THIS job green with an
+            # empty integration id, and the only red thing in the dashboard was a
+            # child job the Portainer page does not link to.
+            if not fn_row.entitle_integration_id:
+                raise AdapterPairingError(
+                    _registration_failure(db, register["job_id"]))
 
         job_service.set_completed(db, job_id, {
             "fn_id": fn_id,
@@ -906,7 +965,32 @@ async def _run_pair(db, *, job_id: str, meta: dict) -> None:
                     dry_run, entitle_skipped)
     except Exception as exc:
         logger.error("portainer adapter pairing failed: %s", exc)
-        job_service.set_failed(db, job_id, str(exc))
+        message = str(exc)
+        if deployed_fn_id:
+            message += (
+                f" — note that the adapter function {adapter_name()!r} IS deployed "
+                f"and pointed at Portainer, so pairing again is refused. Fix the "
+                f"above and finish it with 'Register in Entitle' on the Cloud "
+                f"Functions page, or use 'Remove adapter' on the Portainer page "
+                f"and pair again.")
+        job_service.set_failed(db, job_id, message)
+
+
+def _registration_failure(db, register_job_id: str) -> str:
+    """Why the registration did not happen, in words, off the child job.
+
+    Carried up rather than pointed at: the pairing job's detail view renders
+    ``error_message`` and nothing else, and "see the other job" is not a link.
+    """
+    detail = ""
+    try:
+        child = job_service.get_job(db, register_job_id)
+        detail = str(getattr(child, "error_message", "") or "").strip()
+    except Exception:  # noqa: BLE001 — the reason is a bonus, never the blocker
+        detail = ""
+    return ("the adapter was not registered in Entitle"
+            + (f": {detail}" if detail
+               else f" — see job {register_job_id} for why"))
 
 
 async def _run_retire(db, *, job_id: str) -> None:

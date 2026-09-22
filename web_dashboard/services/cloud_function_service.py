@@ -2008,11 +2008,22 @@ async def _refuse_unconfigured_adapter(
             + " — fix that before registering it in Entitle")
     if isinstance(data, dict) and data.get("valid") is False:
         problems = [str(p) for p in (data.get("problems") or []) if p]
+        env = ", ".join(required_env(row.workload))
+        # "Set what it needs on the function (FN_...)" used to be the tail in BOTH
+        # cases, and it is wrong whenever the adapter reported a problem that is not
+        # a setting: a Portainer with no teams, a database whose grant role is
+        # missing. The adapter is configured, the target is not, and naming an
+        # environment variable sends the operator to edit one that is already right.
+        if problems:
+            hint = "Fix that, then register it once /check_config reports valid."
+        else:
+            hint = ("Set what it needs on the function"
+                    + (f" ({env})" if env else "")
+                    + " and register it once /check_config reports valid.")
         raise CloudFunctionError(
             f"{row.name} reports it is not configured"
             + (": " + "; ".join(problems) if problems else "")
-            + f". Set what it needs on the function ({', '.join(required_env(row.workload))})"
-            " and register it once /check_config reports valid.")
+            + ". " + hint)
 
 
 def _invoke_url(base: str, path: str) -> str:

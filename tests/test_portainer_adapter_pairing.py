@@ -98,6 +98,7 @@ def _ready(**over):
                  "entitle_registration_enabled": True})
     CONF.update(over)
     _node_svc()
+    _teams_are(["Platform"])
 
 
 # ── Eligibility ───────────────────────────────────────────────────────────────
@@ -230,6 +231,22 @@ def _async(fn):
     return _inner
 
 
+def _teams_are(names, *, raises=None):
+    """Install a portainer_service stub answering the preflight's team read.
+
+    Installed by :func:`_ready` as a BASELINE, like :func:`_node_svc`: without it the
+    preflight reaches the REAL portainer_service and this offline suite makes a live
+    HTTPS call to whatever ``portainer_url`` says.
+    """
+    async def _list_teams():
+        if raises is not None:
+            raise raises
+        return [{"Id": index + 1, "Name": name} for index, name in enumerate(names)]
+
+    _stub("web_dashboard.services.portainer_service", list_teams=_list_teams,
+          PortainerError=type("PortainerError", (Exception,), {}))
+
+
 def test_a_managed_node_is_reached_over_the_vpc_at_its_internal_ip():
     """The node firewall is fail-closed and a public function has no stable egress IP
     to admit, so the public URL is not an option — it deploys green and times out on
@@ -290,6 +307,57 @@ def test_an_unmanaged_portainer_without_a_placement_is_refused():
         except adapter.AdapterPairingError:
             continue
         raise AssertionError(f"preflight accepted a half placement: {kwargs}")
+
+
+# ── The Portainer at the other end ────────────────────────────────────────────
+# Registration asks the adapter's own check_config, and that route reads the team
+# list: with no teams the integration would resolve no assets, so it refuses. That
+# happens at the LAST step of the pairing, after a real function has been deployed
+# and the node firewall opened — and the retry is then refused as a duplicate.
+
+def test_a_portainer_with_no_teams_is_refused_before_anything_is_deployed():
+    _ready()
+    _managed_node()
+    _teams_are([])
+    _fnsvc(_resolved_network=lambda *a, **kw: {"vpc_subnetwork": "default"})
+    try:
+        asyncio.run(adapter.preflight())
+    except adapter.AdapterPairingError as exc:
+        # Name the fix, not just the fact: the operator has to go make one.
+        assert "no teams" in str(exc), exc
+        assert "create a team" in str(exc).lower(), exc
+        return
+    raise AssertionError("a pairing was allowed against a Portainer with no teams")
+
+
+def test_a_portainer_the_dashboard_cannot_read_is_still_pairable():
+    """The dashboard reaches Portainer over its configured address and the adapter
+    reaches it over the VPC, so a read that fails HERE says nothing about whether the
+    adapter will. Only an answer blocks; the adapter's check_config is the authority."""
+    _ready()
+    _managed_node()
+    _teams_are([], raises=RuntimeError("Cannot reach Portainer: ConnectTimeout"))
+    _fnsvc(_resolved_network=lambda *a, **kw: {"vpc_subnetwork": "default"})
+    target = asyncio.run(adapter.preflight())
+    assert target["url"] == "https://10.128.0.5:9443"
+
+
+def test_the_team_read_cannot_hang_the_click():
+    """It runs on the pair request, inside the portainer_service client's own 30s."""
+    _ready()
+    _managed_node()
+
+    async def _never():
+        await asyncio.sleep(3600)
+
+    _stub("web_dashboard.services.portainer_service", list_teams=_never)
+    _fnsvc(_resolved_network=lambda *a, **kw: {"vpc_subnetwork": "default"})
+    adapter._TEAM_READ_TIMEOUT = 0.05
+    try:
+        target = asyncio.run(adapter.preflight())
+    finally:
+        adapter._TEAM_READ_TIMEOUT = 10
+    assert target["url"] == "https://10.128.0.5:9443"
 
 
 # ── The staged token ──────────────────────────────────────────────────────────
@@ -708,6 +776,75 @@ def test_the_entitle_leg_is_the_only_skippable_one():
     # every grant would time out against the internal IP.
     assert COMPLETED["firewall_opened_to"] == ["10.128.0.0/20"]
     assert CONF[adapter.SOURCE_CIDR_KEY] == "10.128.0.0/20"
+
+
+def _refused_registration():
+    """Wire a pairing whose Entitle registration refuses — as it really refuses.
+
+    ``run_entitle_register`` reports through ITS OWN job and returns normally, so the
+    pairing sees a function with no integration id and no exception.
+    """
+    _ready()
+    _managed_node()
+    FAILED.clear()
+    COMPLETED.clear()
+    unregistered = _FakeFn(entitle_integration_id="")
+    child = types.SimpleNamespace(
+        id="j2", status="failed",
+        error_message="jit-portainer reports it is not configured: Portainer has "
+                      "no teams")
+    sys.modules["web_dashboard.services.job_service"].get_job = (
+        lambda db, job_id: child if job_id == "j2" else None)
+
+    _fnsvc(_resolved_network=lambda *a, **kw: {"vpc_subnetwork": "default"},
+           deploy=lambda db, **kw: {"fn_id": "fn-1", "job_id": "j1",
+                                    "tf_variables": {}},
+           run_deploy_apply=_async(lambda db, **kw: None),
+           get_function=lambda db, fn_id: unregistered,
+           start_entitle_register=lambda *a, **kw: {"job_id": "j2"},
+           run_entitle_register=_async(lambda db, **kw: None))
+    _stub("web_dashboard.services.secrets_backend_service",
+          write_sync=lambda backend, key, value: f"dashboard-{key}",
+          ref_for=lambda backend, key: f"dashboard-{key}",
+          delete_sync=lambda backend, ref: None)
+    _stub("web_dashboard.services.portainer_node_service",
+          refresh_portainer_firewall=_async(lambda db=None, placement=None: {}))
+    _stub("web_dashboard.services.gcp_service",
+          get_network_options=_async(lambda project, region, zone: {
+              "subnets": [{"name": "default", "ip_cidr_range": "10.128.0.0/20"}]}))
+    # db.refresh(fn_row) is a no-op against the stub row.
+    return types.SimpleNamespace(refresh=lambda row: None, commit=lambda: None)
+
+
+def test_a_refused_registration_fails_the_pairing_rather_than_completing_it():
+    """run_entitle_register does not raise — it fails its own child job. Reading the
+    exception alone completed the pairing GREEN with an empty integration id, and the
+    only red thing in the dashboard was a job the Portainer page does not link to."""
+    db = _refused_registration()
+    asyncio.run(adapter.run_job(db, job_id="j", meta={"action": "pair"}))
+    assert not COMPLETED, "an unregistered adapter was reported as paired"
+    assert FAILED.get("msg"), "the pairing neither completed nor failed"
+
+
+def test_the_pairing_carries_the_reason_and_says_the_function_is_already_there():
+    """The job detail shows error_message and nothing else, so "see the other job"
+    is not a link. And what a refused registration leaves behind is a deployed,
+    firewalled, token-holding adapter whose obvious retry is refused as a duplicate."""
+    db = _refused_registration()
+    asyncio.run(adapter.run_job(db, job_id="j", meta={"action": "pair"}))
+    message = FAILED.get("msg", "")
+    assert "no teams" in message, message
+    assert "jit-portainer" in message and "IS deployed" in message, message
+    # The two ways out, because the card's own button is now the refused one.
+    assert "Register in Entitle" in message and "Remove adapter" in message
+
+
+def test_a_failure_before_the_deploy_does_not_claim_a_function_exists():
+    _ready(portainer_pat="")
+    FAILED.clear()
+    _fnsvc()
+    asyncio.run(adapter.run_job(None, job_id="j", meta={"action": "pair"}))
+    assert "IS deployed" not in FAILED.get("msg", ""), FAILED
 
 
 def test_the_firewall_is_opened_before_entitle_is_told_about_the_adapter():
