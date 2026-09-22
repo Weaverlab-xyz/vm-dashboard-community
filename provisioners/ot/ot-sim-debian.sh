@@ -701,16 +701,15 @@ mkdir -p "$OT_IMAGE_DIR" /var/lib/ot-sim/fuxa
 docker save ot-plc-sim:baked -o "$OT_IMAGE_DIR/ot-plc-sim.tar"
 docker save "$OT_FUXA_IMAGE" -o "$OT_IMAGE_DIR/fuxa.tar"
 
-# FUXA's project data is a hostPath here, not a named volume, and nothing copies the
-# image's own _appdata into an empty hostPath the way docker does for a fresh volume.
-# Do it now, while Docker can still read the image — otherwise FUXA starts against an
-# empty directory and the seed below has no project to add a device to.
-log "priming FUXA's appdata directory from the image"
-if docker create --name ot-fuxa-appdata "$OT_FUXA_IMAGE" >/dev/null 2>&1; then
-  docker cp "ot-fuxa-appdata:/usr/src/app/FUXA/server/_appdata/." /var/lib/ot-sim/fuxa/ \
-    || log "WARNING: could not copy FUXA's appdata out of the image — it starts empty"
-  docker rm ot-fuxa-appdata >/dev/null 2>&1 || true
-fi
+# FUXA's project data is a hostPath here, not a named volume. This used to try to
+# copy the image's own _appdata into it first, on the assumption that a fresh named
+# volume had been seeded from the image and the hostPath would not be — but there is
+# nothing in the image to seed from: frangoteam/fuxa declares no VOLUME and ships no
+# _appdata, the server creates it on first start. So the copy could only ever fail,
+# and it did, loudly, on every cell bake ("Could not find the file ... in container"
+# plus a WARNING about FUXA starting empty). Empty is the correct starting state; the
+# project arrives from the bake-time seed further down, over FUXA's own API. The
+# directory itself is made with the image dir above.
 # The cell is a single-purpose appliance and this directory is its own state, so a
 # permissive mode beats guessing which UID the pinned FUXA image runs as.
 chmod 0777 /var/lib/ot-sim/fuxa
@@ -731,8 +730,18 @@ apt-get -y -q autoremove
 rm -rf /var/lib/docker /var/lib/containerd /etc/docker /var/run/docker.sock
 rm -f /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.asc
 ip link delete docker0 >/dev/null 2>&1 || true
-if command -v docker >/dev/null 2>&1; then
-  die "docker is still on PATH after the purge — KubeSolo's installer would refuse this host"
+# `command -v` is not a filesystem probe. Both dash and bash answer it out of the
+# shell's own command hash before they ever look at PATH, and this script has just
+# run docker a dozen times to build and export the images — so the purged
+# /usr/bin/docker is still cached and the guard fires on a host where Docker is
+# genuinely gone. Drop the cache first, then hold whatever survives against the
+# filesystem: the -x is what keeps this honest in a shell whose `hash -r` did
+# nothing, and it is the only one of the two tests that cannot be fooled.
+hash -r 2>/dev/null || true
+_docker_left=$(command -v docker 2>/dev/null || true)
+if [ -n "$_docker_left" ] && [ -x "$_docker_left" ]; then
+  die "docker is still on PATH after the purge ($_docker_left) — KubeSolo's \
+installer would refuse this host"
 fi
 apt-get update -q
 # Docker pulled iptables in as a dependency, so autoremove above may have taken it
