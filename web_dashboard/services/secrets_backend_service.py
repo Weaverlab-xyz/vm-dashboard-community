@@ -376,6 +376,19 @@ def _kv_name(key: str) -> str:
     return key.replace("_", "-")
 
 
+def _kv_vault_name(url: str) -> str:
+    """The `--vault-name` an `az keyvault` command wants, out of a vault URL.
+
+    Key Vault's own SDK only ever hands back the URL, while every CLI remedy is
+    keyed on the bare name, so the split happens here rather than in the operator's
+    head. A URL that does not look like a vault endpoint degrades to the URL, which
+    is still more use in a message than an empty string.
+    """
+    host = url.split("://", 1)[-1].split("/", 1)[0]
+    label = host.split(".", 1)[0]
+    return label or url
+
+
 def _kv_soft_deleted(exc: Exception) -> bool:
     """Whether a Key Vault write failed because a TOMBSTONE holds the name.
 
@@ -411,12 +424,17 @@ def write_azure_kv(key: str, value: str) -> str:
         try:
             client.begin_recover_deleted_secret(name).wait()
         except Exception as rec_exc:  # noqa: BLE001 — the operator has to do it
+            # The command is the whole point of this branch, so it carries the real
+            # vault — a `<vault>` placeholder in a message the operator copies out of
+            # a job detail view is one more thing for them to go and look up, on a
+            # vault this very message already knows the name of.
             raise RuntimeError(
                 f"Key Vault secret {name!r} in {url} is soft-deleted, so the name "
                 f"cannot be reused, and recovering it here failed ({rec_exc}). "
-                f"Grant the dashboard's service principal the secret 'recover' "
-                f"permission, or clear it by hand with: az keyvault secret recover "
-                f"--vault-name <vault> --name {name}"
+                f"Clear it by hand with: az keyvault secret recover --vault-name "
+                f"{_kv_vault_name(url)} --name {name} — and add 'recover' to the "
+                f"dashboard service principal's secret permissions on the vault to "
+                f"let it do this itself next time."
             ) from exc
         logger.info("Azure KV: recovered soft-deleted secret %s before rewriting", name)
         client.set_secret(name, value)

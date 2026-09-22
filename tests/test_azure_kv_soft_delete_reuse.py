@@ -171,13 +171,16 @@ def test_a_refused_recovery_names_the_permission_and_the_command():
         text = str(exc)
         assert "portainer-adapter-pat" in text
         assert "recover" in text
-        assert "az keyvault secret recover" in text
-        # The vault it is actually talking to, not a generic "your vault". Pinned on
-        # the vault's own label rather than its full host: CodeQL reads a `"host.tld"
-        # in x` as an incomplete URL check, and this is an assertion about a sentence,
-        # not a sanitizer. `kv-demo` reaches the message from _install's URL and
-        # nowhere else, so it distinguishes the vault just as well.
-        assert "kv-demo" in text
+        # A runnable command, not a template. The real refusal (an access-policy
+        # vault with no `recover` for the dashboard's SP) is copied straight out of
+        # the job detail view, and a `<vault>` there is one more thing to go look up
+        # on a vault this very message already names. Pinned on the vault's own
+        # label rather than its full host: CodeQL reads a `"host.tld" in x` as an
+        # incomplete URL check, and this is an assertion about a sentence, not a
+        # sanitizer. `kv-demo` reaches the message from _install's URL and nowhere
+        # else, so it distinguishes the vault just as well.
+        assert "az keyvault secret recover --vault-name kv-demo" in text
+        assert "<vault>" not in text
     else:
         raise AssertionError("a refused recovery reported success")
     finally:
@@ -193,6 +196,24 @@ def test_the_matcher_reads_the_inner_code_and_the_prose():
     assert sbs._kv_soft_deleted(RuntimeError("is currently in a deleted but "
                                              "recoverable state"))
     assert not sbs._kv_soft_deleted(RuntimeError("(Conflict) Secret is disabled"))
+
+
+def test_the_vault_name_comes_out_of_the_url():
+    """The SDK only ever hands back a URL; every az remedy is keyed on the bare
+    name. A vault-shaped URL loses scheme, domain and any trailing path."""
+    assert sbs._kv_vault_name("https://kv-demo.vault.azure.net") == "kv-demo"
+    assert sbs._kv_vault_name("https://kv-demo.vault.azure.net/") == "kv-demo"
+    # Sovereign clouds put a different domain after the same label.
+    assert sbs._kv_vault_name("https://kv-demo.vault.usgovcloudapi.net") == "kv-demo"
+
+
+def test_an_unparseable_endpoint_degrades_to_itself():
+    """A hand-typed endpoint must not turn the remedy into `--vault-name` with
+    nothing after it — a blank there reads as a bug in the dashboard, whereas
+    whatever the operator actually configured is a clue. (An EMPTY url never gets
+    this far: _azure_kv_client raises on it before any secret call.)"""
+    assert sbs._kv_vault_name("not-a-url") == "not-a-url"
+    assert sbs._kv_vault_name("kv-demo") == "kv-demo"
 
 
 def test_the_update_path_does_not_need_the_heal():

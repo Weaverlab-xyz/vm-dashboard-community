@@ -177,17 +177,37 @@ The service principal needs the **Key Vault Secrets Officer** role on the vault,
 or a custom role with `Microsoft.KeyVault/vaults/secrets/read` and
 `Microsoft.KeyVault/vaults/secrets/write`.
 
-Add `Microsoft.KeyVault/vaults/secrets/recover/action` if you use a custom role.
-Soft delete is mandatory on every vault created since 2020 and cannot be turned
-off, so deleting a secret does not free its name — the name stays reserved by a
-deleted-but-recoverable object for the vault's retention window (7–90 days), and
-writing it again fails with `Conflict … ObjectIsDeletedButRecoverable`. That
-matters for the fixed-name secrets the dashboard stages for its adapters (for
-example `portainer-adapter-pat`), where a retire followed by a re-pair reuses the
-same name. The dashboard recovers such a secret and writes the new value over it;
-without the `recover` action it can only tell you to run
-`az keyvault secret recover --vault-name <vault> --name <secret>` yourself.
-Key Vault Secrets Officer already includes the action.
+**The `recover` permission is not optional.** Soft delete is mandatory on every
+vault created since 2020 and cannot be turned off, so deleting a secret does not
+free its name — the name stays reserved by a deleted-but-recoverable object for
+the vault's retention window (7–90 days), and writing it again fails with
+`Conflict … ObjectIsDeletedButRecoverable`. That matters for the fixed-name
+secrets the dashboard stages for its adapters (for example
+`portainer-adapter-pat`), where retiring one and pairing another reuses the same
+name. The dashboard recovers such a secret and writes the new value over it, but
+only if it is allowed to:
+
+* **RBAC vault** — Key Vault Secrets Officer already includes
+  `Microsoft.KeyVault/vaults/secrets/recover/action`. Add it explicitly to a
+  custom role.
+* **Access-policy vault** — add `recover` to the service principal's secret
+  permissions. `set-policy` *replaces* the list, so pass the existing ones too:
+
+  ```bash
+  az keyvault set-policy --name <vault> --spn <app-id> \
+      --secret-permissions get list set delete recover
+  ```
+
+  A refusal here is `ForbiddenByPolicy`, and it says *"does not have secrets
+  recover permission"* — that wording means the data-plane access policy, not an
+  Azure role assignment.
+
+Without it, the dashboard can only tell you to clear the tombstone yourself, with
+the vault and secret already filled in:
+
+```bash
+az keyvault secret recover --vault-name <vault> --name <secret>
+```
 
 **GCP Secret Manager:**
 ```
