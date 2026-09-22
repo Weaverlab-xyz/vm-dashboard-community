@@ -1449,6 +1449,19 @@
                             :disabled="rancherEntitlePending" x-cloak
                             title="Register this Rancher as an Entitle integration so users request just-in-time Rancher RBAC in Entitle"
                             class="mr-2 text-xs px-2 py-1 bg-fuchsia-600 hover:bg-fuchsia-700 disabled:opacity-50 text-white rounded font-medium">Register in Entitle</button>
+                    <!-- The repair for an integration Entitle cannot reach. Register is
+                         hidden once one exists (it is not idempotent), so without this
+                         a node registered by a deploy that never re-merged the
+                         allow-list is a DEAD END in the UI: the only other things that
+                         re-apply the firewall are a redeploy or an unrelated cluster
+                         event. Agent-brokered mode opens no ranges, so it is pointless
+                         there and hidden. -->
+                    <button @click="refreshRancherEntitleFirewall()"
+                            x-show="rancherEntitle.enabled && rancherEntitle.can_register
+                                    && rancherEntitle.integration_id && !rancherEntitle.private"
+                            :disabled="rancherEntitlePending" x-cloak
+                            title="Re-apply the node firewall so Entitle's egress ranges are allowed — the fix for a grant that times out. The integration is not touched."
+                            class="mr-2 text-xs px-2 py-1 text-fuchsia-700 hover:underline disabled:opacity-50">Re-apply firewall</button>
                     <button @click="deregisterRancherEntitle()"
                             x-show="rancherEntitle.enabled && rancherEntitle.can_register
                                     && rancherEntitle.integration_id"
@@ -1505,10 +1518,14 @@
             </p>
             <p x-show="rancherEntitle.integration_id && !rancherEntitle.private
                        && rancherEntitle.source_cidrs.length" x-cloak class="text-gray-400">
-              Entitle's cloud dials this node directly, and its egress ranges are allowed on the
-              node firewall for as long as the integration exists:
+              Entitle's cloud dials this node directly, so the node firewall admits its egress
+              ranges for as long as the integration exists:
               <code x-text="rancherEntitle.source_cidrs.join(', ')"></code>. Deregistering takes
-              them away again.
+              them away again. This is the set the rule is BUILT from, not a read of the live
+              rule — if a grant still times out, <strong>Re-apply firewall</strong>, and if it
+              already lists these, your tenant egresses from somewhere else (the published
+              addresses are per-deployment, not per-region): override with
+              <code>entitle_source_cidrs</code>.
             </p>
             <p x-show="rancherEntitle.integration_id && !rancherEntitle.private
                        && !rancherEntitle.source_cidrs.length" x-cloak
@@ -2589,6 +2606,17 @@ function containersDashboard() {
         window.location.href = `/jobs/${resp.job_id}`;
       } catch (e) {
         toast(e.message || 'Entitle registration failed.', 'error');
+        this.rancherEntitlePending = false;
+      }
+    },
+
+    async refreshRancherEntitleFirewall() {
+      this.rancherEntitlePending = true;
+      try {
+        const resp = await API.post('/api/k8s/rancher/entitle-register', { action: 'reachability' });
+        window.location.href = `/jobs/${resp.job_id}`;
+      } catch (e) {
+        toast(e.message || 'Firewall re-apply failed.', 'error');
         this.rancherEntitlePending = false;
       }
     },

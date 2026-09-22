@@ -263,12 +263,17 @@ class _Jobs:
         self.running = []
         self.completed = []
         self.failed = []
+        # Kept, not discarded: the reachability warning is the one outcome that only
+        # exists in the RESULT, so a test that cannot read it can only fall back to
+        # grepping the source — which then breaks the moment the line moves.
+        self.results = {}
 
     def set_running(self, db, job_id):
         self.running.append(job_id)
 
     def set_completed(self, db, job_id, result=None):
         self.completed.append(job_id)
+        self.results[job_id] = result or {}
 
     def set_failed(self, db, job_id, msg):
         self.failed.append((job_id, msg))
@@ -329,15 +334,20 @@ def test_the_worker_fails_the_job_with_the_reason():
 # node admits Entitle -- which is why the register job has to do this and has to say
 # when it could not.
 
+#: Stand-in for the real resolver's warning. A LITERAL, deliberately: reaching into
+#: the module for it made the stub self-referential — the second `_egress()` call
+#: re-imported the FAKE installed by the first, whose lambda has no docstring, so the
+#: warning silently became None and any test after the first "unknown ranges" one saw
+#: a clean bill of health. The real sentence is pinned in test_rancher_entitle_button.
+_EGRESS_GAP = "ranges are not known ... set entitle_source_cidrs"
+
+
 def _egress(cidrs=(), region="us"):
-    from web_dashboard.services import entitle_egress
     _stub("web_dashboard.services.entitle_egress",
           cidrs=lambda: list(cidrs),
           configured=lambda: bool(cidrs),
           region=lambda: region,
-          unconfigured_warning=(lambda: "" if cidrs else
-                                entitle_egress.unconfigured_warning.__doc__ and
-                                "ranges are not known ... entitle_source_cidrs"))
+          unconfigured_warning=lambda: "" if cidrs else _EGRESS_GAP)
 
 
 def test_the_firewall_is_reapplied_after_a_register():
@@ -388,10 +398,37 @@ def test_registering_with_unknown_ranges_warns_in_the_job_result():
     _egress(cidrs=[])
     asyncio.run(k.run_rancher_entitle_register(None, job_id="j4", action="register"))
     assert jobs.completed == ["j4"]
-    svc_src = open(os.path.join(_ROOT, "web_dashboard", "services", "k8s_service.py"),
-                   encoding="utf-8").read()
-    body = svc_src.split("async def run_rancher_entitle_register(")[1]
-    assert "reachability_warning" in body
+    assert "entitle_source_cidrs" in jobs.results["j4"]["reachability_warning"]
+
+
+def test_the_reachability_action_reapplies_the_firewall_without_re_registering():
+    """The repair for a node whose integration was created before the deploy path
+    re-merged the allow-list. `register_rancher_in_entitle` is NOT idempotent, so the
+    fix cannot be "register again" — that strands the live integration in Entitle. The
+    integration id must come out untouched.
+    """
+    _registered(entitle_rancher_integration_id="int-1",
+                entitle_rancher_tfstate="{state-1}")
+    calls = _entitle()
+    jobs = _worker_stubs()
+    _egress(cidrs=["203.0.113.0/24"])
+    asyncio.run(k.run_rancher_entitle_register(None, job_id="j6", action="reachability"))
+    assert jobs.completed == ["j6"]
+    assert len(jobs.firewall_calls) == 1, "the whole point of the action"
+    assert not calls, "a repair must never create a second integration"
+    assert CONF["entitle_rancher_integration_id"] == "int-1"
+    assert jobs.results["j6"]["entitle_source_cidrs"] == ["203.0.113.0/24"]
+
+
+def test_the_reachability_action_still_reports_unknown_ranges():
+    """It is the action an operator reaches for BECAUSE grants time out, so staying
+    silent about the one thing that would explain it is the worst possible moment."""
+    _registered(entitle_rancher_integration_id="int-1")
+    _entitle()
+    jobs = _worker_stubs()
+    _egress(cidrs=[])
+    asyncio.run(k.run_rancher_entitle_register(None, job_id="j7", action="reachability"))
+    assert "reachability_warning" in jobs.results["j7"]
 
 
 def test_agent_brokered_mode_does_not_warn():

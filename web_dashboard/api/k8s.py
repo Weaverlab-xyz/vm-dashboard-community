@@ -836,12 +836,17 @@ def register_rancher_node_in_entitle(
     """Register (or deregister) the central Rancher NODE as an Entitle **Rancher**
     integration so users request JIT Rancher RBAC in Entitle. Node-scoped (not
     per-cluster). Async — enqueues a ``rancher_entitle_register`` job; open the job
-    for status/error."""
+    for status/error.
+
+    ``action="reachability"`` re-applies the node firewall for an integration that
+    already exists, without touching it — the repair for a node registered before the
+    deploy path re-merged the allow-list, where re-registering would strand the
+    existing integration rather than fix it."""
     from ..services import config_service
-    if payload.action not in k8s_service.VALID_ENTITLE_CLUSTER_ACTIONS:
+    if payload.action not in k8s_service.VALID_ENTITLE_RANCHER_ACTIONS:
         raise HTTPException(
             status_code=400,
-            detail=f"unknown action {payload.action!r} (expected one of {', '.join(k8s_service.VALID_ENTITLE_CLUSTER_ACTIONS)})",
+            detail=f"unknown action {payload.action!r} (expected one of {', '.join(k8s_service.VALID_ENTITLE_RANCHER_ACTIONS)})",
         )
     if payload.action == "register" and not (
             config_service.get("rancher_server_url") and config_service.get("rancher_api_token")):
@@ -852,8 +857,9 @@ def register_rancher_node_in_entitle(
         db, job_type="rancher_entitle_register", created_by=current_user.username,
         metadata={"action": payload.action},
     )
-    return {"ok": True, "status": "registering" if payload.action == "register" else "deregistering",
-            "action": payload.action, "job_id": job.id}
+    status = {"register": "registering", "deregister": "deregistering",
+              "reachability": "refreshing"}[payload.action]
+    return {"ok": True, "status": status, "action": payload.action, "job_id": job.id}
 
 
 # ── Reassign workgroup ───────────────────────────────────────────────────────

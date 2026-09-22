@@ -213,14 +213,27 @@ def test_the_handler_makes_no_cloud_call_for_the_entitle_state():
 # ── The handlers ─────────────────────────────────────────────────────────────
 
 def test_the_handlers_post_the_declared_actions_to_the_route():
-    valid = re.search(r"VALID_ENTITLE_CLUSTER_ACTIONS = \(([^)]*)\)", _read(_SVC)).group(1)
+    """Against the RANCHER tuple, not the per-cluster one: the node route validates on
+    its own list because only the node has a firewall this dashboard owns, so
+    `reachability` exists there and nowhere else."""
+    valid = re.search(r"VALID_ENTITLE_RANCHER_ACTIONS = \(([^)]*)\)", _read(_SVC)).group(1)
     actions = set(re.findall(r'"(\w+)"', valid))
     for method, action in (("registerRancherEntitle", "register"),
-                           ("deregisterRancherEntitle", "deregister")):
+                           ("deregisterRancherEntitle", "deregister"),
+                           ("refreshRancherEntitleFirewall", "reachability")):
         body = _method(method)
         assert f"'{ROUTE}'" in body, f"{method} does not post to {ROUTE}"
         assert f"action: '{action}'" in body, f"{method} sends the wrong action"
         assert action in actions, f"{action!r} is not an action the service accepts"
+
+
+def test_the_route_validates_against_the_rancher_action_list():
+    """Validating the node route against VALID_ENTITLE_CLUSTER_ACTIONS would 400 the
+    action that only the node has."""
+    k8s = _read(_K8S_API)
+    route = k8s.split('@router.post("/rancher/entitle-register"')[1].split("\n@router.")[0]
+    assert "VALID_ENTITLE_RANCHER_ACTIONS" in route
+    assert "VALID_ENTITLE_CLUSTER_ACTIONS" not in route
 
 
 def test_the_route_the_handlers_call_exists():
@@ -229,9 +242,12 @@ def test_the_route_the_handlers_call_exists():
 
 def test_both_handlers_confirm_first():
     """Each one changes a customer-visible integration; neither should fire on a
-    mis-click."""
+    mis-click. Re-apply firewall is deliberately NOT in this list — it touches no
+    integration and only re-applies the set a deploy applies anyway, so a confirm there
+    would train the operator to click through the two that matter."""
     for method in ("registerRancherEntitle", "deregisterRancherEntitle"):
         assert "confirm(" in _method(method), method
+    assert "confirm(" not in _method("refreshRancherEntitleFirewall")
 
 
 def test_the_register_confirm_says_what_kind_of_access_it_grants():
@@ -250,7 +266,8 @@ def test_the_deregister_confirm_says_what_survives():
 def test_the_page_uses_its_own_toast_not_the_k8s_pages_flash():
     """`this.flash()` is the k8s page's helper and does not exist here — it would throw
     inside the catch, swallowing the real error."""
-    for method in ("registerRancherEntitle", "deregisterRancherEntitle"):
+    for method in ("registerRancherEntitle", "deregisterRancherEntitle",
+                   "refreshRancherEntitleFirewall"):
         body = _method(method)
         assert "toast(" in body, method
         assert "this.flash(" not in body, method
@@ -333,21 +350,69 @@ def test_agent_brokered_mode_opens_nothing():
     assert "entitle_rancher_private" in body
 
 
+def _reachability_helper():
+    """`apply_entitle_reachability` — the one place the firewall half lives, so that
+    every path which creates an integration re-applies the same set."""
+    svc = _read(os.path.join(_ROOT, "web_dashboard", "services", "k8s_service.py"))
+    return svc.split("async def apply_entitle_reachability(")[1].split("\nasync def ")[0]
+
+
 def test_the_register_job_reapplies_the_firewall():
     """Otherwise the ranges only land on the next node deploy, and the registration the
     operator just performed still cannot grant."""
     svc = _read(os.path.join(_ROOT, "web_dashboard", "services", "k8s_service.py"))
     body = svc.split("async def run_rancher_entitle_register(")[1].split("\nasync def ")[0]
-    assert "refresh_rancher_firewall" in body
+    assert "apply_entitle_reachability" in body
+    assert "refresh_rancher_firewall" in _reachability_helper()
+
+
+def test_the_deploy_tail_reapplies_the_firewall_too():
+    """THE bug this helper was extracted for. The deploy merges the firewall at 10% and
+    auto-registers at 90%, and `_entitle_cidrs` gates on the integration id — so at
+    merge time the answer was correctly "no integration, no ranges" and the node came
+    up closed to Entitle. Nothing failed: registration never touches the node, so the
+    first symptom was a connect timeout from Entitle's cloud."""
+    node = _read(os.path.join(_ROOT, "web_dashboard", "services",
+                              "rancher_node_service.py"))
+    tail = node.split('await k8s_service.register_rancher_in_entitle("register")')[1] \
+               .split("completion = {")[0]
+    assert "apply_entitle_reachability" in tail, (
+        "a deploy-time auto-register leaves the node closed to Entitle without this")
+
+
+def test_the_deploy_surfaces_an_unresolvable_allow_list_in_its_result():
+    """The auto-register is best-effort and only logs, so the one state where the
+    deploy succeeded and the integration still cannot grant has to reach the job
+    result the operator already opens."""
+    node = _read(os.path.join(_ROOT, "web_dashboard", "services",
+                              "rancher_node_service.py"))
+    assert "entitle_reachability_warning" in node
 
 
 def test_the_register_job_reports_an_unresolvable_allow_list():
     """The one case where the job completes and the feature still does not work, so it
     has to be in the RESULT an operator opens — nothing downstream will say it."""
+    helper = _reachability_helper()
+    assert "unconfigured_warning" in helper
+    assert "reachability_warning" in helper
+
+
+def test_the_warning_is_skipped_only_for_a_deregister():
+    """A `reachability` run is a repair for a live integration, so it owes the operator
+    the same verdict a register does — gating the warning on `== "register"` would make
+    the one action taken BECAUSE grants time out the one that says nothing."""
+    helper = _reachability_helper()
+    assert '!= "deregister"' in helper
+
+
+def test_the_repair_action_does_not_re_register():
+    """register_rancher_in_entitle is not idempotent, so the fix for an unreachable
+    integration must not go anywhere near it — that would strand the existing one in
+    Entitle while pretending to repair it."""
     svc = _read(os.path.join(_ROOT, "web_dashboard", "services", "k8s_service.py"))
     body = svc.split("async def run_rancher_entitle_register(")[1].split("\nasync def ")[0]
-    assert "unconfigured_warning" in body
-    assert "reachability_warning" in body
+    guard = body.split("await register_rancher_in_entitle(action)")[0]
+    assert 'if action != "reachability"' in guard
 
 
 def test_every_published_address_is_a_cidr_with_recorded_provenance():
