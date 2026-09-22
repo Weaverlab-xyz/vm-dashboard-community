@@ -69,6 +69,11 @@ def _wire(ot, cmeta, calls):
                                                 get_bool=lambda k, d=None: False)
     stub.job_service = _FakeJobs()
     stub.terraform_pra_service = _FakePra(calls)
+    # _wire_cell imports this at the top, unconditionally, so the stub package has to
+    # carry it even though these cells have no broker and never reach the adapter.
+    # Refusing keeps that true if one ever does: this file is about tunnels.
+    stub.ot_faas_service = types.SimpleNamespace(
+        skip_reason=lambda cmeta, bmeta=None: "skipped — not under test here")
 
     ot.ps_checkout_skip_reason = lambda m: "skipped — disabled"
     ot._cell_has_gateway_ref = lambda meta, cloud: True

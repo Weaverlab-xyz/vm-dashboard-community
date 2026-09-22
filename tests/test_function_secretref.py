@@ -10,11 +10,15 @@ properties worth pinning are the ones that would quietly reintroduce one:
     returning something plausible and wrong
   * nothing is read twice inside the TTL — a grant should not cost a Secrets
     Manager call per invocation
+  * a FILE reference resolves, in both the shapes a self-hosted runtime mounts, and
+    every broken form of it raises rather than looking unconfigured
 
 Stdlib only, with a fake boto3; runs with nothing installed and reaches no cloud.
 """
 import os
+import shutil
 import sys
+import tempfile
 import types
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -22,7 +26,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from web_dashboard import functions  # noqa: F401  (puts fnruntime on sys.path)
 from fnruntime import secretref
 
-_ENV_KEYS = ("FN_THING", "FN_THING_SECRET_ID", "FN_THING_LEGACY_ID", "AWS_REGION")
+_ENV_KEYS = ("FN_THING", "FN_THING_FILE", "FN_THING_SECRET_ID", "FN_THING_LEGACY_ID",
+             "AWS_REGION")
 
 CALLS = []
 
@@ -210,6 +215,182 @@ def test_every_credential_using_workload_resolves_by_reference():
             f"{module.NAME} does not resolve {var} through fnruntime.secretref"
         assert f'_env("{var}")' not in compact, \
             f"{module.NAME} still reads {var} as a plaintext env var"
+
+
+# ── The file path (OpenFaaS, Nuclio, a plain Kubernetes Secret volume) ────────
+#
+# The fourth channel, and the only one where "the reference is set but broken" is a
+# routine operator mistake rather than an exotic one: a secret absent from a
+# function's ``secrets:`` list is simply not mounted, and the file is silently not
+# there. So every failure here has to raise and name the setting — returning ""
+# would report the operator's mistake as the workload having no credential.
+
+def _mkdtemp() -> str:
+    path = tempfile.mkdtemp(prefix="secretref-")
+    _TEMPDIRS.append(path)
+    return path
+
+
+_TEMPDIRS = []
+
+
+def _cleanup_tempdirs():
+    while _TEMPDIRS:
+        shutil.rmtree(_TEMPDIRS.pop(), ignore_errors=True)
+
+
+def _write(directory: str, name: str, body: str) -> str:
+    target = os.path.join(directory, name)
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write(body)
+    return target
+
+
+def test_a_file_reference_resolves_and_is_stripped():
+    """Stripped because every way of writing one of these adds a newline.
+
+    ``kubectl create secret --from-file``, a heredoc, an editor — all of them. A
+    credential with a trailing newline compares unequal to the same credential
+    without one, so the target reports a WRONG password rather than a malformed
+    one, and the hunt starts in the wrong place.
+    """
+    try:
+        path = _write(_mkdtemp(), "bearer", "s3cret-from-a-file\n")
+        _reset(FN_THING_FILE=path)
+        assert secretref.resolve("FN_THING") == "s3cret-from-a-file"
+    finally:
+        _cleanup_tempdirs()
+
+
+def test_the_platform_injected_value_still_wins_over_a_file():
+    try:
+        path = _write(_mkdtemp(), "bearer", "from-the-file")
+        _reset(FN_THING="from-the-env", FN_THING_FILE=path)
+        assert secretref.resolve("FN_THING") == "from-the-env"
+    finally:
+        _cleanup_tempdirs()
+
+
+def test_a_file_outranks_an_id_so_a_self_hosted_target_never_reaches_boto3():
+    """Ordering matters, and not only for tidiness.
+
+    A self-hosted runtime has no Secrets Manager to fall through to, so reaching the
+    AWS branch there costs an import that cannot succeed — and the operator gets an
+    ImportError in place of the real condition. boto3 is deliberately NOT installed
+    in this test: if the order ever flips, this fails with that import rather than
+    passing quietly.
+    """
+    sys.modules.pop("boto3", None)
+    try:
+        path = _write(_mkdtemp(), "bearer", "from-the-file")
+        _reset(FN_THING_FILE=path, FN_THING_SECRET_ID="some/secret")
+        assert secretref.resolve("FN_THING") == "from-the-file"
+    finally:
+        _cleanup_tempdirs()
+
+
+def test_a_directory_holding_one_file_resolves():
+    """A Kubernetes Secret volume mounted without ``items`` is a DIRECTORY.
+
+    OpenFaaS names one file per secret; a plain volume names a directory with one
+    file per key. An adapter cannot tell which it got, so both resolve.
+    """
+    try:
+        directory = _mkdtemp()
+        _write(directory, "bearer", "from-a-directory\n")
+        _reset(FN_THING_FILE=directory)
+        assert secretref.resolve("FN_THING") == "from-a-directory"
+    finally:
+        _cleanup_tempdirs()
+
+
+def test_kubernetes_dotdot_projection_entries_are_not_mistaken_for_keys():
+    """Kubernetes projects a Secret through ``..data`` and a timestamped directory.
+
+    Those are the projection machinery, not keys. Counting them would make every
+    real single-key mount look ambiguous and refuse — i.e. the ordinary case would
+    be the broken one.
+    """
+    try:
+        directory = _mkdtemp()
+        os.mkdir(os.path.join(directory, "..2026_09_22_00_00_00.12345"))
+        os.mkdir(os.path.join(directory, "..data"))
+        _write(directory, "bearer", "the-real-key")
+        _reset(FN_THING_FILE=directory)
+        assert secretref.resolve("FN_THING") == "the-real-key"
+    finally:
+        _cleanup_tempdirs()
+
+
+def test_a_directory_with_two_files_raises_and_names_both():
+    """Picking one would hand out whichever secret sorted earlier."""
+    try:
+        directory = _mkdtemp()
+        _write(directory, "bearer", "one")
+        _write(directory, "password", "two")
+        _reset(FN_THING_FILE=directory)
+        try:
+            secretref.resolve("FN_THING")
+            raise AssertionError("an ambiguous secret directory resolved")
+        except RuntimeError as exc:
+            message = str(exc)
+        assert "FN_THING_FILE" in message, message
+        assert "bearer" in message and "password" in message, message
+    finally:
+        _cleanup_tempdirs()
+
+
+def test_an_empty_directory_raises():
+    try:
+        _reset(FN_THING_FILE=_mkdtemp())
+        try:
+            secretref.resolve("FN_THING")
+            raise AssertionError("an empty secret directory resolved")
+        except RuntimeError as exc:
+            assert "FN_THING_FILE" in str(exc), str(exc)
+    finally:
+        _cleanup_tempdirs()
+
+
+def test_a_missing_file_raises_rather_than_looking_unconfigured():
+    """The distinction this whole channel turns on.
+
+    "nothing is configured" is a condition several workloads handle themselves; "you
+    named a file that is not there" is an operator error. Collapsing them means a
+    secret missing from the function's ``secrets:`` list presents as a workload with
+    no credential, and the error message sends you to the workload.
+    """
+    try:
+        _reset(FN_THING_FILE=os.path.join(_mkdtemp(), "never-mounted"))
+        try:
+            secretref.resolve("FN_THING")
+            raise AssertionError("a missing secret file resolved to something")
+        except RuntimeError as exc:
+            message = str(exc)
+        assert "FN_THING_FILE" in message, message
+        assert "secrets:" in message, f"the remedy is not in the message: {message}"
+    finally:
+        _cleanup_tempdirs()
+
+
+def test_an_empty_file_raises_because_empty_cannot_be_told_from_unset():
+    try:
+        path = _write(_mkdtemp(), "bearer", "   \n")
+        _reset(FN_THING_FILE=path)
+        try:
+            secretref.resolve("FN_THING")
+            raise AssertionError("an empty secret file resolved to something")
+        except RuntimeError as exc:
+            assert "empty" in str(exc).lower(), str(exc)
+    finally:
+        _cleanup_tempdirs()
+
+
+def test_file_env_for_follows_the_same_convention_as_id_env_for():
+    # The dashboard derives this name when it writes the Function's environment, so
+    # a change here is a change to a contract with an image baked weeks earlier.
+    assert secretref.file_env_for("FN_SHARED_SECRET") == "FN_SHARED_SECRET_FILE"
+    assert secretref.file_env_for("FN_THING") == "FN_THING_FILE"
 
 
 if __name__ == "__main__":

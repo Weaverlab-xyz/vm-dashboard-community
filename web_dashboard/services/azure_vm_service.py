@@ -802,6 +802,21 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg
                     result["ot_error"] = f"Zone NSG {meta['ot_zone_nsg']} removal failed: {e}"
 
             # See gcp_vm_service: the plant's own agent token dies with the plant.
+            # The plant's Entitle adapter, BEFORE the agent token below. Ordering, not
+            # taste: the integration is registered agent-brokered, so destroying the
+            # token first would leave it bound to an agent that no longer exists —
+            # authenticating fine, removing nothing, and reporting success.
+            if meta.get("ot_faas_entitle_tf_state") or meta.get("ot_faas_bearer_key"):
+                job_service.update_progress(db, destroy_job_id, 84,
+                                            "Deregistering the plant's Entitle adapter…")
+                from ..services import ot_faas_service as _ot_faas
+                note = await _ot_faas.destroy(deploy_job_id, meta)
+                if note:
+                    result["ot_faas_error"] = note
+                else:
+                    result["ot_faas_deregistered"] = (
+                        meta.get("ot_faas_entitle_integration_id") or True)
+
             if meta.get("ot_agent_token_key") or meta.get("ot_agent_token_name"):
                 job_service.update_progress(db, destroy_job_id, 85,
                                             "Destroying the plant's Entitle agent token…")

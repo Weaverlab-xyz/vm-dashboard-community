@@ -262,6 +262,62 @@ def test_handlers_agree_with_the_packaged_entry_filenames():
     assert pkg.HANDLERS["aws"].split(".")[0] + ".py" == pkg._LAYOUT["aws"]["entry"][1]
     assert pkg._LAYOUT["gcp"]["entry"][1] == "main.py"
     assert pkg.HANDLERS["gcp"] == "main"
+    # Self-hosted has no Terraform, so HANDLERS names the MODULE the baked loader
+    # runs — but it must still agree with the filename in the zip, for the same
+    # reason: a mismatch is a pod that starts and then exits.
+    assert pkg.HANDLERS["openfaas"] + ".py" == pkg._LAYOUT["openfaas"]["entry"][1]
+
+
+# ── The self-hosted target ────────────────────────────────────────────────────
+
+def test_openfaas_is_a_target_not_a_cloud():
+    """It must be buildable and NOT offerable.
+
+    ``openfaas`` reaches no Terraform module and no object store — the container is
+    put on a cluster by an Ansible run instead. So it has to be absent from the
+    tuples the Cloud Functions UI and deploy path iterate, or the page grows a
+    fourth Deploy option with nothing behind it. Both tuples are checked, and they
+    are deliberately separate objects in the two modules: this is the test that
+    fails if someone later derives one from ``_LAYOUT``.
+    """
+    from web_dashboard.services import cloud_function_service as svc
+
+    assert "openfaas" in pkg._LAYOUT, "the self-hosted layout row is gone"
+    assert "openfaas" not in pkg.VALID_CLOUDS, pkg.VALID_CLOUDS
+    assert "openfaas" not in svc.VALID_CLOUDS, svc.VALID_CLOUDS
+
+
+def test_openfaas_layout_carries_the_runtime_and_the_workload():
+    names = _names(pkg.build(cloud="openfaas", workload="echo_diag")[0])
+    assert "openfaas_entry.py" in names, names
+    assert "workload.py" in names, names
+    for module in ("contract", "adapters", "auth", "logs", "dispatch", "secretref"):
+        assert f"fnruntime/{module}.py" in names, module
+    # No requirements.txt and no host.json: nothing on the other side reads either,
+    # and a stray file in the zip is a file the loader has to be told to ignore.
+    assert not [n for n in names if n in ("requirements.txt", "host.json")], names
+
+
+def test_openfaas_packages_are_deterministic_and_within_the_wiring_budget():
+    """The package travels to the plant as base64 inside ``--extra-vars``.
+
+    Linux caps a single argv element at MAX_ARG_STRLEN (131072 bytes), and the whole
+    JSON blob is one element — so this is not a style limit, it is the point at
+    which the wiring run fails with an unhelpful E2BIG. The 90 KB figure is the
+    dashboard's own refusal threshold, well inside the kernel's, so that a workload
+    which grows past it is refused at the click with a remedy instead of at the
+    play.
+    """
+    import base64
+
+    blob, hexd, _b64 = pkg.build(cloud="openfaas", workload="echo_diag")
+    again, hex_again, _ = pkg.build(cloud="openfaas", workload="echo_diag")
+    assert blob == again and hexd == hex_again, "self-hosted builds are not reproducible"
+    encoded = len(base64.b64encode(blob))
+    assert encoded < 90_000, (
+        f"the base64 package is {encoded} bytes, past the 90000-byte refusal "
+        f"threshold; it must be delivered by a mounted Secret instead of extra_vars")
+    assert encoded < 131_072, f"{encoded} bytes exceeds MAX_ARG_STRLEN outright"
 
 
 # ── Errors + helpers ──────────────────────────────────────────────────────────

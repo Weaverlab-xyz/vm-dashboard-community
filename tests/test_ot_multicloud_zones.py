@@ -111,7 +111,7 @@ def test_the_aws_zone_replaces_the_instances_groups_rather_than_joining_them():
         "the whole reason it exists")
 
 
-def test_the_aws_broker_may_reach_the_entitle_ports_and_dns_and_nothing_else():
+def test_the_aws_broker_may_reach_entitle_dns_and_its_own_cell_and_nothing_else():
     body = _fn_body(_OT, "_wire_zones_aws")
     assert "ENTITLE_AGENT_PORTS" in body, (
         "the broker's egress does not come from the agent's port list — 8080 is the "
@@ -119,6 +119,14 @@ def test_the_aws_broker_may_reach_the_entitle_ports_and_dns_and_nothing_else():
     assert "_AWS_RESOLVER_CIDR" in body, (
         "the broker gets no DNS hole, so it cannot resolve the endpoint it is allowed "
         "to reach")
+    # The third destination. This group's egress list REPLACES the allow-all AWS
+    # creates a group with (_ensure_ot_zone_security_group_sync revokes the rest), so
+    # AWS is not the exception it looks like: without this the broker cannot reach the
+    # cell that admits it on 22, exactly as on GCP and Azure.
+    assert "dmz_to_plant_ports" in body and "cell_ip" in body, (
+        "the AWS broker gets no plant-ward egress, so the in-plant agent cannot reach "
+        "the cell — and the allow-all default was already revoked, so nothing else "
+        "covers it")
     assert "0.0.0.0/0" not in body, (
         "a literal 0.0.0.0/0 in the AWS wiring — the open-ports escape hatch belongs "
         "in _entitle_egress_targets, where it is recorded as the provenance")

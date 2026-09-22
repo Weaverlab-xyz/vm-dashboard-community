@@ -717,6 +717,21 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
             # An OT cell that brokered its own identity minted an agent token of its
             # own. It dies with the cell: a token left in the tenant outlives the plant
             # it was issued for, and nothing else will ever clean it up.
+            # The plant's Entitle adapter, BEFORE the agent token below. Ordering, not
+            # taste: the integration is registered agent-brokered, so destroying the
+            # token first would leave it bound to an agent that no longer exists —
+            # authenticating fine, removing nothing, and reporting success.
+            if meta.get("ot_faas_entitle_tf_state") or meta.get("ot_faas_bearer_key"):
+                job_service.update_progress(db, destroy_job_id, 84,
+                                            "Deregistering the plant's Entitle adapter…")
+                from ..services import ot_faas_service as _ot_faas
+                note = await _ot_faas.destroy(deploy_job_id, meta)
+                if note:
+                    result["ot_faas_error"] = note
+                else:
+                    result["ot_faas_deregistered"] = (
+                        meta.get("ot_faas_entitle_integration_id") or True)
+
             if meta.get("ot_agent_token_key") or meta.get("ot_agent_token_name"):
                 job_service.update_progress(db, destroy_job_id, 85,
                                             "Destroying the plant's Entitle agent token…")

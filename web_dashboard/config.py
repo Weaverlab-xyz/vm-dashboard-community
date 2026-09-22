@@ -976,6 +976,43 @@ class Settings(BaseSettings):
     # installed and repaired. The dashboard itself has no route to a private cell, so
     # without this there is no way in to the DMZ host but the PRA Gateway.
     ot_config_runner_source_cidr: str = ""
+    # ── The plant's function runtime (ot_faas_service) ───────────────────────
+    # An Entitle "REST API" integration is an HTTP server Entitle drives, and the
+    # targets worth gating in a plant sit behind a boundary no cloud function can
+    # reach without punching through it. So the adapter runs on the broker's KubeSolo,
+    # beside the Entitle agent that calls it, and the integration is registered
+    # agent-brokered — no inbound hole, and not one new egress destination.
+    #
+    # Default OFF, and it needs an image baked with OT_FAAS=openfaas: turning it on
+    # against a broker baked without one produces a Function object that is accepted
+    # and then ignored, so the wiring refuses up front instead.
+    ot_faas_enabled: bool = False
+    # Which fnworkloads module the plant runs. Blank = the FUXA HMI adapter, which is
+    # the point of the feature. Set it to `entitle_webhook_echo` — the no-op reference
+    # adapter, every route plus fault injection — when the question is "does the chain
+    # work at all" rather than "does the HMI grant work".
+    ot_faas_workload: str = ""
+    # The adapter's own dry run, and it is ON by default. It deploys, registers with
+    # Entitle, serves every route and reports exactly what it WOULD do — without
+    # creating or deleting anything on the HMI. Turn it off once the path is proven;
+    # until then a deployment mistake cannot mint a live HMI login.
+    ot_faas_dry_run: bool = True
+    # The FUXA account the adapter manages users as. FUXA's own default admin is
+    # `admin`, and in named-role mode only the account literally called `admin` can
+    # manage users at all — so changing this is rarely right.
+    ot_faas_fuxa_user: str = ""
+    # `bitmask` (FUXA's default permission model, and so this adapter's) or
+    # `catalogue` for an instance running with userRole on, where FUXA keeps named
+    # role objects. In catalogue mode the adapter marks a published role unavailable
+    # when the plant has no role of that name, rather than granting a bitmask that
+    # does not correspond to anything the operator configured.
+    ot_faas_fuxa_role_mode: str = ""
+    # Override the integration's endpoint. Blank = the in-cluster OpenFaaS gateway,
+    # which is the point: a name that resolves only inside the plant. This key is what
+    # makes the runtime swappable — Nuclio or a plain Deployment answers on a
+    # different name and nothing else has to change, which matters because OpenFaaS
+    # Community Edition may not be installed for a client or redistributed.
+    ot_faas_base_url: str = ""
     bt_ecs_host_instance_profile: str = "ecsInstanceRole"
     bt_ecs_host_name: str = "dashboard-sandbox-jumpoint-host"  # EC2 Name tag (find-or-create key)
     bt_ecs_execution_role_arn: str = ""  # Set to your ecsTaskExecutionRole ARN if required

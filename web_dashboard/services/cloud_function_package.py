@@ -94,6 +94,11 @@ _WORKLOAD_MODULES = {
     # so the guards that stop this adapter becoming a privilege-escalation
     # primitive are testable without an Azure subscription.
     "azure_role_grant": (("services/azure_role_rules.py", "azureroles.py"),),
+    # FUXA's permission model is a BITMASK, so the rules that turn a requested role
+    # into a `groups` integer - and refuse the administrator bit - are pure, tested
+    # once, and shared rather than retyped. An off-by-one bit here is a JIT grant
+    # that hands out administrator, and FUXA reports no error for it.
+    "fuxa_hmi_access": (("services/fuxa_access_rules.py", "fuxarules.py"),),
 }
 
 # Per-cloud zip layout. Each entry:
@@ -115,6 +120,20 @@ _LAYOUT = {
         "entry": ("fnentry/azure_entry.py", "function_app.py"),
         "extra": (("fnentry/host.json", "host.json"),),
     },
+    # NOT a cloud — a TARGET. ``openfaas`` is any runtime we put the container on
+    # ourselves (OpenFaaS on the OT broker's KubeSolo, Nuclio, or a plain
+    # Deployment), so it is absent from ``VALID_CLOUDS`` and reaches no Terraform
+    # module and no object store. ``collect_entries`` gates on this table rather
+    # than on VALID_CLOUDS, which is why adding the row is the whole change.
+    #
+    # The destination name is free here (nothing platform-fixed to obey), so it
+    # matches the source: the baked loader runs it by module name, and that name is
+    # one of the strings tests/test_ot_faas_contract.py holds against the bake
+    # script — a rename on one side only is a pod that starts and then exits.
+    "openfaas": {
+        "entry": ("fnentry/openfaas_entry.py", "openfaas_entry.py"),
+        "extra": (),
+    },
 }
 
 # Where Azure expects vendored dependencies inside a run-from-package zip.
@@ -126,6 +145,12 @@ HANDLERS = {
     "aws": "aws_entry.lambda_handler",
     "gcp": "main",
     "azure": "",           # discovered by the host; not declarable in Terraform
+    # No Terraform at all on this one: the baked loader does
+    # ``runpy.run_module(<this>)`` after unpacking the zip, so it is a MODULE name,
+    # not a dotted callable. It is recorded here anyway, beside the entry filename
+    # it has to agree with, because that agreement is the whole contract between
+    # the dashboard's package and an image somebody baked weeks earlier.
+    "openfaas": "openfaas_entry",
 }
 
 

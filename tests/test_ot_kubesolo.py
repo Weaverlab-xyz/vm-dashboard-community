@@ -229,9 +229,13 @@ def test_every_node_ready_wait_first_waits_for_the_node_to_exist():
     the bake and apply.sh must poll for the object's existence before waiting on its
     condition, or the race they exist to absorb becomes an instant hard failure."""
     loops = re.findall(r"while \[ ! -f \"\$KUBECONFIG\".*?\n *done\n", _SRC, re.S)
-    assert len(loops) == 2, (
-        "expected the bake's wait and apply.sh's wait — the KubeSolo readiness "
-        f"gate has moved (found {len(loops)})")
+    # Three sites, and the count is the tripwire: install_kubesolo (the bake), the
+    # cell's apply.sh, and the broker's ot-faas apply.sh. A fourth should be a
+    # deliberate update to this number, not a silent inheritance — the whole point is
+    # that every one of them polls for existence before it waits on a condition.
+    assert len(loops) == 3, (
+        "expected install_kubesolo's wait plus the cell's and the broker's apply.sh "
+        f"— the KubeSolo readiness gate has moved (found {len(loops)})")
     for loop in loops:
         assert "kubectl get --raw /readyz" in loop, (
             "a kubeconfig on disk is not an API that answers")

@@ -1,0 +1,190 @@
+# Rotate a FUXA HMI's admin password, from a host that can reach it
+# Target: the OT cell's DMZ broker — NOT the cell. The cell admits the PRA Gateway
+# and the broker and nothing else, so the broker is the only place a Config-Management
+# run can reach the HMI from. (If the broker cannot either, that is the DMZ-to-plant
+# egress rule, and it has to be asked from a pod: see openfaas-function-deploy.yml.)
+#
+# WHY THIS EXISTS. The cell's image bakes FUXA with authentication ON
+# (OT_FUXA_SECURE), because with it off FUXA applies NO authorization at all — an
+# anonymous caller is handed administrator and can create and delete HMI users. But
+# the account it seeds is `admin` / `123456`, and that password cannot usefully be
+# changed at BAKE time: the file would ship inside the image and every cell built
+# from it would share one credential. So it is rotated here, per cell, at wire time —
+# which is also the only point at which a password can be handed to the JIT adapter.
+#
+# IDEMPOTENT, and that is what makes Re-wire safe: a cell already rotated to this
+# password signs in with it on the first task and the play changes nothing.
+#
+# IT WILL NOT GUESS. If neither the new password nor FUXA's default works, the play
+# FAILS rather than resetting anything. Somebody else set that password, and a play
+# that "fixes" it has just locked them out of the HMI — see the no-silent-side-effects
+# rule this repo applies to tenant-visible state.
+#
+# extra_vars:
+#   fuxa_url: http://10.128.0.7:1881
+#   fuxa_admin_user: admin
+# secret_vars (bind it, never type it):
+#   fuxa_new_password: <the password the dashboard minted for this cell>
+- name: Rotate the FUXA HMI admin password
+  hosts: all
+  become: true
+  vars:
+    fuxa_url: ""
+    fuxa_admin_user: admin
+    fuxa_new_password: ""
+    # What FUXA seeds itself with, and therefore what a never-rotated cell has.
+    fuxa_default_password: "123456"
+    fuxa_timeout: 20
+  tasks:
+    - name: Require a target and a new password
+      ansible.builtin.assert:
+        that:
+          - fuxa_url | length > 0
+          - fuxa_new_password | length >= 12
+        fail_msg: >-
+          fuxa_url and fuxa_new_password are both required, and the password must be
+          at least 12 characters. Bind the password through "Use a secret" rather
+          than typing it: extra_vars is persisted to the job row.
+
+    # 1. Already done? Then this run is a no-op, which is what lets Re-wire call it.
+    - name: Try the new password first
+      ansible.builtin.uri:
+        url: "{{ fuxa_url }}/api/signin"
+        method: POST
+        body_format: json
+        body:
+          username: "{{ fuxa_admin_user }}"
+          password: "{{ fuxa_new_password }}"
+        status_code: [200, 401, 403]
+        timeout: "{{ fuxa_timeout }}"
+      register: fuxa_new_signin
+      changed_when: false
+      no_log: true
+
+    - name: Report an HMI that is already rotated
+      ansible.builtin.debug:
+        msg: "{{ fuxa_url }} already uses this password - nothing to do"
+      when: fuxa_new_signin.status == 200
+
+    - name: Rotate the password
+      when: fuxa_new_signin.status != 200
+      # On the BLOCK, so every task inside it inherits it and none can be added later
+      # that quietly does not. Three of them handle the password or a session token,
+      # and tests/test_playbook_ps_lookup.py holds this for the whole repo — it reads
+      # top-level tasks, and a block's dump carries its children's text, so the flag
+      # belongs here regardless.
+      #
+      # The two tasks that say something an operator must READ turn it back off
+      # below. A blanket no_log would hide the refusal message, which is the single
+      # most important line this play can print.
+      no_log: true
+      block:
+        - name: Sign in with FUXA's seeded default
+          ansible.builtin.uri:
+            url: "{{ fuxa_url }}/api/signin"
+            method: POST
+            body_format: json
+            body:
+              username: "{{ fuxa_admin_user }}"
+              password: "{{ fuxa_default_password }}"
+            status_code: [200, 401, 403]
+            timeout: "{{ fuxa_timeout }}"
+          register: fuxa_default_signin
+          changed_when: false
+          no_log: true
+
+        - name: Refuse to guess at a password somebody else set
+          ansible.builtin.fail:
+            msg: >-
+              Neither the intended password nor FUXA's default signs in to
+              {{ fuxa_url }} as {{ fuxa_admin_user }}. Someone has already changed it,
+              and resetting it from here would lock them out. Nothing was changed.
+              Either supply the current password, or rebuild the cell.
+          when: fuxa_default_signin.status != 200
+          # Inherited no_log would censor this message. It carries a URL and a
+          # username, never a credential.
+          #
+          # This relies on a task-level no_log overriding the block's, which is
+          # Ansible's documented inheritance but is not exercised by any test here.
+          # If it turns out not to hold, the failure is cosmetic and one-directional
+          # — the refusal still refuses, it just prints "output has been hidden" —
+          # so confirm it on the first live run rather than restructuring blind.
+          no_log: false
+
+        # Read-modify-write. `groups` and `info` MUST be carried over: the create and
+        # update paths are one upsert, so a field omitted here is a field rewritten -
+        # and `groups` is the admin account's own permission bitmask.
+        - name: Read the admin account as it stands
+          ansible.builtin.uri:
+            url: "{{ fuxa_url }}/api/users?username={{ fuxa_admin_user | urlencode }}"
+            method: GET
+            # x-access-token, NOT Authorization: Bearer. No bearer parsing exists
+            # anywhere in the FUXA server, so the wrong header is an unauthenticated
+            # request that 401s while looking correct.
+            headers:
+              x-access-token: "{{ fuxa_default_signin.json.data.token }}"
+            status_code: [200]
+            timeout: "{{ fuxa_timeout }}"
+          register: fuxa_admin_row
+          changed_when: false
+
+        - name: Keep the account's own fields
+          ansible.builtin.set_fact:
+            _fuxa_admin: >-
+              {{ (fuxa_admin_row.json | selectattr('username', 'equalto', fuxa_admin_user)
+                  | list | first) | default({}, true) }}
+
+        - name: Write the new password
+          ansible.builtin.uri:
+            url: "{{ fuxa_url }}/api/users"
+            method: POST
+            body_format: json
+            # A SINGLE OBJECT under `params`, never a list: FUXA's own OpenAPI
+            # declares an array and is wrong - setUsers reads query.username off the
+            # value directly and rejects a list with a bare 400.
+            body:
+              params:
+                username: "{{ fuxa_admin_user }}"
+                fullname: "{{ _fuxa_admin.fullname | default(fuxa_admin_user, true) }}"
+                password: "{{ fuxa_new_password }}"
+                groups: "{{ _fuxa_admin.groups | default(-1) }}"
+                # NEVER blank and always valid JSON. FUXA parses this AFTER answering
+                # 200, and on a parse failure the rejection lands on an already
+                # resolved promise - so the API reports success while the account is
+                # silently absent from its in-memory map, able to sign in and then
+                # 401 on every admin route until a restart.
+                info: "{{ _fuxa_admin.info | default('{}', true) | default('{}', true) }}"
+            headers:
+              x-access-token: "{{ fuxa_default_signin.json.data.token }}"
+            # 200 with an EMPTY body is this route's success, not 204.
+            status_code: [200]
+            timeout: "{{ fuxa_timeout }}"
+          no_log: true
+          changed_when: true
+
+        # Proven, not assumed. The write above answers 200 for a payload FUXA then
+        # drops (see the info note), so the only real confirmation is signing in.
+        - name: Confirm the new password works
+          ansible.builtin.uri:
+            url: "{{ fuxa_url }}/api/signin"
+            method: POST
+            body_format: json
+            body:
+              username: "{{ fuxa_admin_user }}"
+              password: "{{ fuxa_new_password }}"
+            status_code: [200]
+            timeout: "{{ fuxa_timeout }}"
+          register: fuxa_confirm
+          changed_when: false
+          no_log: true
+          retries: 3
+          delay: 5
+          until: fuxa_confirm.status == 200
+
+        - name: Report
+          ansible.builtin.debug:
+            msg: >-
+              Rotated the {{ fuxa_admin_user }} password on {{ fuxa_url }} and
+              confirmed it by signing in.
+          # Same: the confirmation has to be visible, and it quotes nothing secret.
+          no_log: false

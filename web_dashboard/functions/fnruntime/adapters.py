@@ -230,3 +230,62 @@ def to_gcp(resp: Response) -> tuple:
     """The ``(body, status, headers)`` triple Flask accepts."""
     text, headers, _is_base64 = resp.rendered()
     return text, int(resp.status), headers
+
+
+# ── Self-hosted (OpenFaaS / Nuclio / a plain Deployment) ──────────────────────
+#
+# The fourth target is not a cloud: it is a container the dashboard put on a
+# cluster it does not own, reached over ordinary HTTP. So unlike the three above
+# there is no vendor event shape to normalize — the entry shim owns a real HTTP
+# server and hands the pieces straight in. That is why these two take primitives
+# rather than a request object: they are the one pair that can be driven from a
+# test, or from a laptop, with nothing installed and no fixture to imitate.
+#
+# ``source`` is ``openfaas`` for every self-hosted runtime, deliberately. It
+# names the CONTRACT (an HTTP request that arrived through a gateway we do not
+# authenticate at), not the product, so swapping OpenFaaS for Nuclio or a bare
+# Deployment does not change a workload's behaviour or an auth decision. Note
+# what it does NOT unlock: ``auth.presented_secret`` accepts a secret in the body
+# for ``aws_direct`` only, because that shape has no headers at all. This one
+# always has headers, so the credential always belongs in one.
+
+def from_http(method, path, headers=None, body=None, query=None) -> Request:
+    """Normalize a plain HTTP request.
+
+    ``path`` may still carry its query string — an of-watchdog upstream receives
+    the raw request line — so it is split here rather than in the shim. A caller
+    that has already parsed the query passes ``query`` and keeps the path clean;
+    both are accepted because the two runtimes differ on which they hand over.
+    """
+    raw_path = str(path or "/")
+    parsed = dict(query or {})
+    if "?" in raw_path:
+        raw_path, _, qs = raw_path.partition("?")
+        if not parsed and qs:
+            from urllib.parse import parse_qsl
+            parsed = {str(k): str(v) for k, v in parse_qsl(qs, keep_blank_values=True)}
+    if isinstance(body, str):
+        body = body.encode("utf-8")
+    return Request(
+        method=str(method or "GET").upper(),
+        path=raw_path or "/",
+        headers=_lower_headers(headers),
+        query={str(k): str(v) for k, v in parsed.items()},
+        body=bytes(body or b""),
+        source="openfaas",
+    )
+
+
+def to_http(resp: Response) -> tuple:
+    """The ``(status, headers, body_bytes)`` triple an HTTP server writes.
+
+    Bytes, not text, because the shim writes to a socket and must set
+    ``content-length`` from the encoded length — deriving it from a str is how a
+    non-ASCII error message becomes a truncated body the caller reads as a
+    connection reset. ``rendered()`` already base64-encodes a bytes payload, so
+    what comes back here is always text safe to encode as UTF-8.
+    """
+    text, headers, _is_base64 = resp.rendered()
+    payload = (text or "").encode("utf-8")
+    headers["content-length"] = str(len(payload))
+    return int(resp.status), headers, payload

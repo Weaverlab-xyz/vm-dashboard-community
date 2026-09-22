@@ -697,6 +697,21 @@ async def _run_destroy(
             from ..services import entitle_vm_hook
             await entitle_vm_hook.deregister(deploy_meta, result)
 
+        # The plant's Entitle adapter, BEFORE the agent token below. Ordering, not
+        # taste: the integration is registered agent-brokered, so destroying the token
+        # first would leave it bound to an agent that no longer exists — authenticating
+        # fine, removing nothing, and reporting success.
+        if deploy_meta.get("ot_faas_entitle_tf_state") or deploy_meta.get("ot_faas_bearer_key"):
+            job_service.update_progress(db, job_id, 38,
+                                        "Deregistering the plant's Entitle adapter…")
+            from ..services import ot_faas_service as _ot_faas
+            note = await _ot_faas.destroy(deploy_job_id, deploy_meta)
+            if note:
+                result["ot_faas_error"] = note
+            else:
+                result["ot_faas_deregistered"] = (
+                    deploy_meta.get("ot_faas_entitle_integration_id") or True)
+
         # An OT cell that brokered its own identity minted an agent token of its own.
         # It dies with the cell: a token left in the tenant outlives the plant it was
         # issued for, and nothing else will ever clean it up. Reported, never raised —
