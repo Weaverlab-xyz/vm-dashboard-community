@@ -434,7 +434,12 @@ Secrets-Management secret via **Use a secret** (mapped to `target_role_password`
 
 Localhost plays that reach **out** to the Portainer REST API with
 `ansible.builtin.uri` — they configure your Docker hosts *through* Portainer rather
-than SSHing to them, so the target you pick is irrelevant (nothing is installed on it).
+than SSHing to them, so nothing is installed on a host. Pick **Portainer** in the run
+form's target list: it is its own target family, with no id and no SSH user, and it
+appears whenever the integration is on and a URL + token are stored.
+
+The one exception is `portainer-edge-env-ensure.yml`, which installs the Edge agent on
+a Docker host and is therefore a **VM** run. Each sample's header names its target.
 
 The connection is **auto-injected** when Portainer is configured — from Settings →
 Integrations → Portainer CE, or written by a managed-node deploy. `PORTAINER_URL`,
@@ -453,6 +458,10 @@ turns verification off and these plays follow suit.
 | `deploy-stack.yml` | Create **or update** a compose stack (`stack_name`, `endpoint_id`, `stack_file`/`stack_content`) |
 | `stack-remove.yml` | Remove a stack; a missing stack is a no-op, not a failure |
 | `prune-containers.yml` | Reclaim disk — prune stopped containers, optionally images/volumes |
+| `portainer-team-ensure.yml` | Create the teams JIT access is granted through (`team_name` / `team_names`) |
+| `portainer-env-access.yml` | Give a team standing access to an environment (`team_name` + `endpoint_id`/`endpoint_name`, `state`) |
+| `portainer-jit-prereqs.yml` | Both of the above in one run — what the JIT adapter needs before it can be paired |
+| `portainer-edge-env-ensure.yml` | Register a Docker host as an Edge environment **and** install the agent on it (a **VM** target) |
 
 > `prune-containers.yml` is destructive, and `prune_volumes: true` deletes any volume
 > not attached to a container. It is off by default; opt in deliberately.

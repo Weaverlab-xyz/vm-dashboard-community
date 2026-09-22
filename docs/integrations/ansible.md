@@ -98,6 +98,7 @@ runs in the destination cloud, where it stages the converted disk).
 |---|---|---|
 | `ansible_runner_aws` / `_azure` / `_gcp` | the Ansible runner, by the run's target cloud | `local` \| matching service — blank inherits `ansible_runner` |
 | `k8s_runner_aws` / `_azure` / `_gcp` | the Kubernetes runner, by the cluster's cloud | `local` \| matching service — blank inherits `k8s_runner` |
+| `ansible_runner_portainer` | the Ansible runner for a **Portainer** target (no cloud — see [Portainer targets](ansible/kubernetes-runner.md#portainer-targets)) | `local` \| `ecs` \| `aci` \| `gcp` — blank inherits `ansible_runner` |
 | `ansible_runner` / `k8s_runner` | global fallback for any cloud left blank | `local` \| `ecs` \| `aci` \| `gcp` |
 
 A per-cloud key takes precedence; when blank, the runner falls back to the

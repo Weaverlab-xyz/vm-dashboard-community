@@ -202,6 +202,17 @@
                 </optgroup>
               </template>
 
+              <!-- The configured Portainer (localhost play against its REST API). No
+                   resource row behind it and no id to pick — Portainer is a singleton
+                   here, so the value carries a fixed key the server ignores. -->
+              <template x-if="portainerTargets.length > 0">
+                <optgroup label="Portainer">
+                  <template x-for="p in portainerTargets" :key="`portainer:${p.key}`">
+                    <option :value="`portainer:${p.key}`" x-text="`${p.name} (${p.url})`"></option>
+                  </template>
+                </optgroup>
+              </template>
+
               <!-- On-prem VMs behind a remote agent. The playbook runs in a one-shot
                    container ON THE AGENT HOST, which is the only way to reach these at all
                    from a cloud-hosted dashboard. A row with a `reason` is shown disabled so
@@ -241,8 +252,8 @@
                           focus:outline-none focus:ring-2 focus:ring-blue-500">
             <p x-show="targetKind !== 'vm'" x-cloak class="text-xs text-blue-600 mt-1">
               Runs a localhost play on the in-cloud runner; connection details
-              (kubeconfig / DB admin credentials) are injected automatically — no SSH
-              user or key.
+              (kubeconfig / DB admin credentials / the Portainer URL and API token)
+              are injected automatically — no SSH user or key.
             </p>
             <p class="text-xs text-gray-400 mt-1">
               Cloud VMs are read from the instance lists on the AWS / Azure / GCP tabs.
@@ -533,6 +544,21 @@
             </div>
           </template>
 
+          <template x-if="portainerTargets.length > 0">
+            <div class="mb-3">
+              <p class="text-xs text-gray-500 uppercase tracking-wide mb-1">Portainer</p>
+              <ul class="space-y-1.5">
+                <template x-for="p in portainerTargets" :key="p.key">
+                  <li class="flex items-center gap-2 text-sm">
+                    <span class="w-2 h-2 rounded-full bg-sky-400 flex-shrink-0"></span>
+                    <span class="font-medium text-gray-700 truncate" x-text="p.name"></span>
+                    <span class="text-gray-400 font-mono text-xs truncate" x-text="p.url"></span>
+                  </li>
+                </template>
+              </ul>
+            </div>
+          </template>
+
           <p class="text-xs text-gray-400 mt-2">
             Add on-prem targets in <a href="/settings" class="underline">Settings → Integrations</a>.
             Cloud VMs, Kubernetes clusters, and databases appear automatically once
@@ -614,9 +640,11 @@ function configMgmt() {
     assets: [],
     assetsLoading: true,
     cloudTargets: { aws: [], azure: [], gcp: [] },
-    // Managed-service localhost targets (Kubernetes clusters + databases).
+    // Managed-service localhost targets (Kubernetes clusters + databases), plus the
+    // configured Portainer — one entry at most, since Portainer is a singleton here.
     k8sClusters: [],
     cloudDatabases: [],
+    portainerTargets: [],
     jobsLoading: true,
     recentJobs: [],
     running: false,
@@ -668,10 +696,14 @@ function configMgmt() {
           || this.cloudTargets.gcp.length > 0;
     },
 
-    // Kubernetes clusters + databases from /localhost-targets. Not SSH hosts — they
-    // run localhost plays — but they ARE runnable targets, so they count.
+    // Kubernetes clusters + databases + Portainer from /localhost-targets. Not SSH
+    // hosts — they run localhost plays — but they ARE runnable targets, so they count.
+    // An install whose only integration is Portainer is a real one: it can run every
+    // portainer/*.yml and nothing else.
     get hasLocalhostTargets() {
-      return this.k8sClusters.length > 0 || this.cloudDatabases.length > 0;
+      return this.k8sClusters.length > 0
+          || this.cloudDatabases.length > 0
+          || this.portainerTargets.length > 0;
     },
 
     // On-prem VMs and databases a remote agent can reach, from /agent-targets. These are
@@ -717,6 +749,7 @@ function configMgmt() {
       if (t.startsWith('k8s:')) return 'k8s';
       if (t.startsWith('db:'))  return 'database';
       if (t.startsWith('agentdb:')) return 'database';
+      if (t.startsWith('portainer:')) return 'portainer';
       return 'vm';
     },
 
@@ -956,7 +989,7 @@ function configMgmt() {
     clearBulk() { this.bulk = null; this.loadManagedAccounts(); },
 
     kindNoun(k) {
-      return ({ vm: 'VM', database: 'database', k8s: 'Kubernetes cluster' })[k] || k;
+      return ({ vm: 'VM', database: 'database', k8s: 'Kubernetes cluster', portainer: 'Portainer' })[k] || k;
     },
 
     async loadLocalhostTargets() {
@@ -964,9 +997,11 @@ function configMgmt() {
         const data = await API.get('/api/config-mgmt/localhost-targets') || {};
         this.k8sClusters = data.k8s || [];
         this.cloudDatabases = data.databases || [];
+        this.portainerTargets = data.portainer || [];
       } catch (e) {
         this.k8sClusters = [];
         this.cloudDatabases = [];
+        this.portainerTargets = [];
       }
     },
 

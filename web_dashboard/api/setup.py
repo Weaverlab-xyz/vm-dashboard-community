@@ -1229,6 +1229,7 @@ class AnsibleFeatureConfig(BaseModel):
     ansible_runner_aws: str = ""             # "" | "local" | "ecs"  (AWS targets)
     ansible_runner_azure: str = ""           # "" | "local" | "aci"  (Azure targets)
     ansible_runner_gcp: str = ""             # "" | "local" | "gcp"  (GCP targets)
+    ansible_runner_portainer: str = ""       # "" | "local" | "ecs" | "aci" | "gcp"
     # Per-cloud SSH user (each cloud ships with its own stock username
     # convention — see config.py for context).
     ansible_aws_user: str = "ec2-user"

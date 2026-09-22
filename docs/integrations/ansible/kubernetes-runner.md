@@ -117,6 +117,30 @@ Starters: [`examples/playbooks/k8s/`](../../../examples/playbooks/k8s) and
 image directly with `docker run … chrweav/ansible-cloud ansible-playbook -i 'localhost,'
 -c local …` against a kind/k3d cluster or a throwaway Postgres/MySQL container.
 
+### Portainer targets
+
+**Portainer** is the third localhost family, and the odd one: there is no resource row
+behind it and no cloud. The target is the one configured Portainer connection, the
+play reaches it over its REST API, and the connection is the `PORTAINER_*` env every
+runner already receives — so the picker offers a single **Portainer** entry whenever
+the integration is on and a URL and API token are stored, and the run takes no target
+id.
+
+Because there is no cloud, the runner is not derived from one. It is
+`ansible_runner_portainer`, falling back to the install's global `ansible_runner` —
+which is where these plays already ran when they were run as ordinary VM-target runs.
+The reason that key exists is reachability: a **managed** Portainer node's firewall is
+fail-closed and admits the dashboard's own egress `/32`, the Gateway `/32`s and the
+JIT adapter's subnet — **not** a transient runner's address. So an in-cloud runner can
+be dropped where the local one is admitted. If a Portainer play times out, that
+allow-list (`portainer_allowed_source_cidrs`, on the Portainer page) is the thing to
+look at; pointing `ansible_runner_portainer` at `local` is the other way out.
+
+Starters: [`examples/playbooks/portainer/`](../../../examples/playbooks/portainer) —
+teams, environment access policies, and registering a Docker host as an Edge
+environment. That last one installs an agent **on** a host, so it is a VM run, not a
+Portainer one; each sample's header says which.
+
 ---
 
 

@@ -1,0 +1,203 @@
+# Give a Portainer TEAM standing access to an environment — or take it away.
+#
+# This is the half that makes a team mean something. `portainer_access` grants by
+# adding a minted account to a team; what that team can reach is the environment's
+# access policy, which is standing configuration an operator sets once. A team with
+# no policy anywhere is an Entitle asset that grants access to nothing.
+#
+# ⚠️  PUT /api/endpoints/{id} REPLACES the whole access-policy map — the handler
+#     assigns the payload's TeamAccessPolicies straight over the stored one. A PUT
+#     naming only the new team would therefore REVOKE every other team's access. This
+#     play reads the endpoint first and merges, which is why it is a GET-then-PUT and
+#     not a one-liner.
+#
+# RoleId is sent as 0, which is what Portainer CE writes: per-role RBAC (environment
+# administrator / helpdesk / standard / read-only / operator) is a Business Edition
+# feature and CE stores the policy without one. On BE, pass team_role_id.
+#
+# Target: Portainer — a `hosts: localhost` play that reaches OUT to the Portainer REST
+# API. Nothing is installed on any host.
+#
+# OPTIONAL — fetch the PAT from BeyondTrust Password Safe instead of the injected one
+# by setting a SECRET path (folder/title):
+#   portainer_pat_secret: app-secrets/portainer-pat
+#
+# Connection is auto-injected when Portainer is configured (PORTAINER_URL /
+# PORTAINER_PAT / PORTAINER_VERIFY_SSL); override with extra vars to use another server.
+#
+# extra_vars:
+#   team_name:     Platform    # required — create it with portainer-team-ensure.yml
+#   endpoint_id:   1           # the environment, by id (see list-endpoints.yml)…
+#   endpoint_name: local       # …or by name; one of the two is required
+#   team_role_id:  0           # BE only: 1 env-admin, 2 helpdesk, 3 standard, 4 read-only, 5 operator
+#   state:         present     # or absent, to remove this team's access
+- name: Grant a Portainer team access to an environment
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    portainer_url: "{{ lookup('ansible.builtin.env', 'PORTAINER_URL') }}"
+    portainer_pat: "{{ lookup('ansible.builtin.env', 'PORTAINER_PAT') }}"
+    # Optional: fetch the PAT from BeyondTrust Password Safe instead of using the
+    # injected one — set a SECRET path (folder/title). Blank = use PORTAINER_PAT.
+    portainer_pat_secret: ""
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true          # set false only for a self-signed Password Safe
+    portainer_verify_ssl: "{{ lookup('ansible.builtin.env', 'PORTAINER_VERIFY_SSL') | default('1', true) }}"
+    team_name: ""
+    endpoint_id: ""
+    endpoint_name: ""
+    team_role_id: 0
+    state: present
+  tasks:
+    # Fetched into its OWN fact, never onto portainer_pat: extra vars outrank set_fact,
+    # so writing back to that name would be silently ignored when the PAT was also
+    # supplied as an extra var.
+    - name: Fetch the Portainer API token from Password Safe
+      ansible.builtin.set_fact:
+        _ps_portainer_pat: "{{ lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
+          api_url=ps_api_url,
+          api_version='3.1',
+          retrieval_type='SECRET',
+          client_id=ps_client_id,
+          client_secret=ps_client_secret,
+          secret_list=portainer_pat_secret,
+          decrypt=True,
+          verify_ca=ps_verify_ca,
+          wantlist=False) }}"
+      no_log: true
+      when: portainer_pat_secret | length > 0
+
+    - name: Resolve the effective token (Password Safe wins when a path was given)
+      ansible.builtin.set_fact:
+        _pat: "{{ _ps_portainer_pat | default(portainer_pat, true) }}"
+      no_log: true
+
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - portainer_url | length > 0
+          - _pat | length > 0
+          - team_name | length > 0
+          - (endpoint_id | string | length > 0) or (endpoint_name | length > 0)
+          - state in ['present', 'absent']
+        fail_msg: >-
+          Set team_name and one of endpoint_id / endpoint_name (state must be present
+          or absent), and make sure a Portainer connection is configured in
+          Settings → Containers or passed as extra vars.
+
+    - name: List environments
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/endpoints"
+        method: GET
+        headers:
+          X-API-Key: "{{ _pat }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: 200
+      register: endpoints
+      no_log: true              # the API token rides the request headers
+
+    # `| first` on an empty list is an error, not an empty value, so the match is
+    # counted before it is taken.
+    - name: Find the environment
+      ansible.builtin.set_fact:
+        env_row: "{{ (_matches | first) if (_matches | length > 0) else {} }}"
+      vars:
+        _matches: >-
+          {{ (endpoints.json | selectattr('Id', 'equalto', endpoint_id | int) | list)
+             if (endpoint_id | string | length > 0) else
+             (endpoints.json | selectattr('Name', 'equalto', endpoint_name) | list) }}
+
+    - name: Confirm the environment exists
+      ansible.builtin.assert:
+        that:
+          - env_row | length > 0
+        fail_msg: >-
+          No Portainer environment matches
+          {{ ('id ' ~ endpoint_id) if (endpoint_id | string | length > 0) else ('name ' ~ endpoint_name) }}.
+          Known: {{ endpoints.json | map(attribute='Name') | join(', ') | default('(none)', true) }}.
+          Add one on the Portainer page (Just-in-time access is per-environment, so
+          there has to be at least one), or run portainer-edge-env-ensure.yml.
+
+    - name: List teams
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/teams"
+        method: GET
+        headers:
+          X-API-Key: "{{ _pat }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: 200
+      register: teams
+      no_log: true              # the API token rides the request headers
+
+    - name: Find the team
+      ansible.builtin.set_fact:
+        team_row: "{{ (_matches | first) if (_matches | length > 0) else {} }}"
+      vars:
+        _matches: "{{ teams.json | selectattr('Name', 'equalto', team_name) | list }}"
+
+    - name: Confirm the team exists
+      ansible.builtin.assert:
+        that:
+          - team_row | length > 0
+        fail_msg: >-
+          Portainer has no team named '{{ team_name }}'
+          (it has: {{ teams.json | map(attribute='Name') | join(', ') | default('none', true) }}).
+          Create it first with portainer-team-ensure.yml — team names are matched
+          exactly here, because the name is the role code Entitle hands back.
+
+    # Merged, never replaced — see the warning in the header.
+    - name: Build the new access-policy map
+      ansible.builtin.set_fact:
+        new_policies: >-
+          {{ (_current | combine({(team_row.Id | string): {'RoleId': team_role_id | int}}))
+             if state == 'present' else
+             (_current | dict2items | rejectattr('key', 'equalto', team_row.Id | string) | list | items2dict) }}
+      vars:
+        _current: "{{ env_row.TeamAccessPolicies | default({}, true) }}"
+
+    - name: Apply the access policy
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/endpoints/{{ env_row.Id }}"
+        method: PUT
+        headers:
+          X-API-Key: "{{ _pat }}"
+        body_format: json
+        # Only this field: every other field of the update payload is optional and an
+        # omitted one is left alone, so naming just this one cannot disturb the
+        # environment's URL, TLS settings or group.
+        body:
+          TeamAccessPolicies: "{{ new_policies }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: 200
+      no_log: true              # the API token rides the request headers
+
+    - name: Re-read the environment
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/endpoints/{{ env_row.Id }}"
+        method: GET
+        headers:
+          X-API-Key: "{{ _pat }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: 200
+      register: env_after
+      no_log: true              # the API token rides the request headers
+
+    - name: Confirm the policy took
+      ansible.builtin.assert:
+        that:
+          - ((team_row.Id | string) in (env_after.json.TeamAccessPolicies | default({}, true))) == (state == 'present')
+        fail_msg: >-
+          Portainer accepted the update but '{{ team_name }}' is
+          {{ 'still absent from' if state == 'present' else 'still on' }}
+          environment '{{ env_row.Name }}'. Check the token belongs to an administrator.
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: >-
+          Team '{{ team_name }}' (id {{ team_row.Id }})
+          {{ 'can now reach' if state == 'present' else 'no longer reaches' }}
+          environment '{{ env_row.Name }}' (id {{ env_row.Id }}).
+          {{ 'That team name is the role code a requester picks in Entitle.' if state == 'present' else '' }}

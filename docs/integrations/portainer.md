@@ -307,6 +307,28 @@ registration fails for some other reason, the job says so and says that the func
 is deployed: fix the cause and finish it with **Register in Entitle** on the Functions
 page, or remove the adapter here and pair again — pairing twice is refused.
 
+#### Preparing the team and its access, as a job
+
+Both prerequisites are ordinary Config-Management runs — Portainer is its own target
+family there, so nothing is installed anywhere and no credential is typed in:
+
+| Playbook | What it does |
+|---|---|
+| [`portainer-jit-prereqs.yml`](../../examples/playbooks/portainer/portainer-jit-prereqs.yml) | The team **and** its access to the environments you name, in one run |
+| [`portainer-team-ensure.yml`](../../examples/playbooks/portainer/portainer-team-ensure.yml) | Just the teams (`team_name`, or `team_names` for several) |
+| [`portainer-env-access.yml`](../../examples/playbooks/portainer/portainer-env-access.yml) | Just the access policy, in either direction (`state: present\|absent`) |
+
+Upload one to Storage, then **Config Management → the asset → Portainer → Run** with,
+say, `{"team_name": "Platform", "endpoint_names": ["local"]}`. All three are
+idempotent, so re-running one against a Portainer that is already set up is a no-op
+rather than a second team. The team name is the **role code** a requester picks in
+Entitle, so name it the way it should read there.
+
+A grant's access policy is merged, never replaced: Portainer's environment update
+assigns the whole `TeamAccessPolicies` map, so writing only the new team would revoke
+every other team's access. [`examples/playbooks/portainer/`](../../examples/playbooks/portainer)
+has the rest of that reasoning.
+
 #### Moving the node strands the adapter
 
 Step 2 is not a preference, and it is not revisited. The adapter is VPC-attached in
@@ -453,6 +475,17 @@ inbound to your network is required, and no VPN.
    name and click **Generate join command**.
 2. Run the generated `docker run` on the Docker host you want managed.
 3. The environment appears within a few seconds; **Refresh** lists it.
+
+Step 2 can be a job instead of a paste:
+[`portainer-edge-env-ensure.yml`](../../examples/playbooks/portainer/portainer-edge-env-ensure.yml)
+runs both halves against a **VM** target — it creates the environment over the API
+(minting a fresh key, so a stale one can't be the problem) and then installs and starts
+the agent on that host. It is idempotent: a host that already has the agent is left
+alone unless you pass `force_rejoin: true`, and the agent id is derived from the node
+URL and the environment name, so a re-run rejoins as the same agent rather than
+registering a second environment for one host. Docker has to be on the host already —
+[`linux/install-docker.yml`](../../examples/playbooks/linux/install-docker.yml) if it
+isn't.
 
 The command sets `EDGE_INSECURE_POLL=1`, because the node serves a self-signed
 certificate. Without it the agent's first poll fails certificate verification and the
