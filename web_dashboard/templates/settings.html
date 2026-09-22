@@ -3315,13 +3315,26 @@
                 </div>
               </div>
 
-              <!-- Live firewall breakdown (read-only) -->
+              <!-- Live firewall breakdown, and the one action that changes it -->
               <template x-if="portainerFirewall">
                 <div class="bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs">
-                  <p class="font-semibold text-gray-700 mb-2">
-                    Effective firewall sources
-                    <span x-show="!portainerFirewall.opened" class="ml-1 text-red-600">(closed — node unreachable)</span>
-                  </p>
+                  <div class="flex items-center justify-between mb-2">
+                    <p class="font-semibold text-gray-700">
+                      Effective firewall sources
+                      <span x-show="!portainerFirewall.opened" class="ml-1 text-red-600">(closed — node unreachable)</span>
+                    </p>
+                    <!-- The deploy applies this set ONCE and never revisits it, so the
+                         rule ages out from under a node that is running perfectly well
+                         when the dashboard's outbound address moves, a gateway is
+                         rebuilt, or someone deletes the rule in the cloud console. This
+                         readout is where that gets diagnosed, so the repair belongs
+                         beside it. Same route as the Containers page button. -->
+                    <button type="button" @click="reapplyPortainerFirewall()" :disabled="portainerFirewallBusy"
+                            title="Re-detect the dashboard's egress address and re-apply the node's ingress rule"
+                            class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 font-medium disabled:opacity-50">
+                      <span x-text="portainerFirewallBusy ? 'Re-applying…' : 'Re-apply'"></span>
+                    </button>
+                  </div>
                   <div class="space-y-1 text-gray-600">
                     <p>
                       <span class="text-gray-500">Dashboard egress:</span>
@@ -7027,6 +7040,7 @@ function settingsPage() {
     dbopsBusy: '',
     rancherFirewall: null,   // read-only breakdown of the Rancher node firewall allow-list (k8s panel)
     portainerFirewall: null, // same for the managed Portainer node (Containers panel)
+    portainerFirewallBusy: false, // …and the one thing this panel can DO to it
     expirySweep: null,       // last auto-delete sweep summary (Auto-delete Timer panel)
     expirySweeping: false,
     workerStatus: null,      // what the job worker resolved its limits to (Job Worker panel)
@@ -7677,6 +7691,39 @@ function settingsPage() {
         toast('Could not queue a sweep: ' + e.message, 'error');
       } finally {
         this.expirySweeping = false;
+      }
+    },
+
+    // ── Containers panel: the managed Portainer node's ingress ──────────────
+    // The breakdown above is read-only, and for a long time so was this panel's whole
+    // relationship with the firewall: it could show you that the node admits an address
+    // the dashboard no longer egresses from, and offer nothing to do about it short of
+    // a redeploy. This is the deploy's own "Configuring firewall" step on demand.
+
+    async reapplyPortainerFirewall() {
+      this.portainerFirewallBusy = true;
+      try {
+        const data = await API.post('/api/containers/portainer/node/firewall', {});
+        if (!data) return;   // 401: API.post logs out and answers null
+        // The response IS the breakdown, so the box re-renders from the state that now
+        // exists in the cloud rather than the one it was opened with.
+        this.portainerFirewall = data;
+        const bits = [];
+        if ((data.added || []).length) bits.push('now allowing ' + data.added.join(', '));
+        if ((data.removed || []).length) bits.push('dropped ' + data.removed.join(', '));
+        // Fail-closed is the contract, so an empty set is a real outcome, not an error
+        // — but it means nothing can reach the node, which no "re-applied" can imply.
+        if (!data.opened) {
+          toast('Ingress re-applied, but the allow-list is empty — the node is now reachable by nobody.', 'error');
+        } else {
+          toast(bits.length ? 'Ingress re-applied: ' + bits.join('; ') + '.'
+                            : 'Ingress re-applied — no change.',
+                data.changed ? 'success' : 'info');
+        }
+      } catch (e) {
+        toast('Could not re-apply the node ingress: ' + e.message, 'error');
+      } finally {
+        this.portainerFirewallBusy = false;
       }
     },
 

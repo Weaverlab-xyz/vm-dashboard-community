@@ -223,6 +223,41 @@ def firewall_status(db=None) -> dict:
     }
 
 
+async def reapply_firewall(db=None, placement=None) -> dict:
+    """Re-detect the dashboard's egress address and re-apply the node's ingress — the
+    deploy's "Configuring firewall" step, on demand.
+
+    The deploy writes the allow-list from ONE egress detection and then never revisits
+    it, so the rule ages: a worker rescheduled behind a different SNAT address, a corp
+    proxy egressing from a pool, a gateway rebuilt with a new IP, or a rule deleted by
+    hand in the cloud console all leave a node that answers nobody. The symptom is
+    always the same and always unhelpful — a dropped connect, which every caller
+    renders as "unreachable" — so this is the repair, callable without a redeploy.
+
+    Returns the :func:`firewall_status` breakdown of the NEW state plus what the
+    re-apply did: ``detected_egress_ip``, ``before``, ``added``, ``removed``,
+    ``changed`` and the raw per-cloud ``applied`` result.
+
+    ``changed`` counts a RECREATED rule as a change. The source set a deleted rule
+    computes to is the same one it always computed to, so comparing sets alone would
+    report "nothing changed" about the repair that just put the rule back.
+    """
+    before = firewall_status(db).get("merged") or []
+    detected = await _ensure_dashboard_egress_cidr()
+    applied = await refresh_portainer_firewall(db, placement=placement)
+    status = firewall_status(db)
+    after = status.get("merged") or []
+    status.update({
+        "detected_egress_ip": detected,
+        "before": before,
+        "added": [c for c in after if c not in before],
+        "removed": [c for c in before if c not in after],
+        "changed": after != before or bool(applied.get("created")),
+        "applied": applied,
+    })
+    return status
+
+
 def _pra_configured() -> bool:
     """PRA is usable when the API host, an OAuth client and a Jumpoint are set."""
     return all((config_service.get("bt_api_host"), config_service.get("bt_client_id"),
@@ -409,6 +444,59 @@ async def _bootstrap(db, job_id: str, url: str, password: str,
     return pat, ""
 
 
+def _url_host(url: str) -> str:
+    """The host of a configured Portainer URL — no scheme, no port, no path."""
+    from urllib.parse import urlsplit
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    try:
+        return (urlsplit(raw).hostname or "").strip().lower()
+    except ValueError:
+        return ""
+
+
+async def _managed_node_at(url: str, placement: dict = None) -> dict:
+    """The managed node ``url`` points at, or ``{}`` — the gate on touching ingress.
+
+    The firewall this module manages belongs to the node THIS dashboard deployed.
+    ``portainer_url`` may instead hold an operator's own Portainer, typed into
+    Settings, on a network we know nothing about: re-applying an ingress rule in the
+    operator's cloud project on its behalf would be a side effect nobody asked for,
+    aimed at a firewall that is not the one dropping the packets. So confirm the
+    address really is the node's before repairing anything.
+
+    Matched on ADDRESS, because that is what a deploy pins (``_portainer_url`` builds
+    the URL from the external IP) and what a firewall rule is about. A managed node
+    reached through a DNS name an operator pointed at it therefore reads as
+    unmanaged — the conservative direction: the repair is skipped and the original
+    drop is reported, rather than a rule being rewritten on a guess.
+
+    Never raises: a cloud that will not answer only means we cannot confirm, and the
+    caller is already handling a failure.
+    """
+    host = _url_host(url)
+    if not host:
+        return {}
+    p = placement or _node_params()
+    if not p.get("account"):
+        return {}
+    cloud = p.get("cloud") or _node_cloud()
+    try:
+        nodes = await managed_node_service.list_nodes(cloud, _SPEC, p)
+    except Exception as exc:  # noqa: BLE001 — "cannot confirm" is not "not ours"
+        logger.warning("Portainer: could not list the managed node (%s) — leaving the "
+                       "node firewall alone", exc)
+        return {}
+    for node in nodes:
+        if host in {(node.get("external_ip") or "").strip().lower(),
+                    (node.get("internal_ip") or "").strip().lower()}:
+            return node
+    return {}
+
+
 async def _readmit_and_retry(db, job_id: str, placement: dict, call):
     """Run ``call()``; if it fails because the connection was DROPPED, re-detect the
     dashboard's egress address, re-apply the node's ingress, and run it once more.
@@ -420,45 +508,77 @@ async def _readmit_and_retry(db, job_id: str, placement: dict, call):
     single lucky attempt and passes; the bootstrap needs several consecutive ones and
     does not. Re-detecting admits the address actually in use now
     (``dashboard_cidr`` keeps the previous ones too, so this widens rather than swaps).
-
-    Deliberately ONE retry: if the second attempt is dropped as well, the cause is not a
-    rotation and looping would only spend the job's time before reporting the same
-    thing.
     """
     try:
         return await call()
     except portainer_service.PortainerError as exc:
         if not portainer_service.is_unreachable(exc):
             raise
-        logger.warning("Portainer bootstrap could not connect (%s) — re-detecting the "
-                       "dashboard's egress address and re-applying ingress", exc)
+        return await _readmit_egress_and_retry(
+            db, placement, exc, call, job_id=job_id, what="bootstrap",
+            serving="The node is serving (the readiness poll passed) but the "
+                    "connection is being dropped")
+
+
+async def _readmit_egress_and_retry(db, placement: dict, exc, call, *,
+                                    job_id: str = "", what: str = "call",
+                                    serving: str = ""):
+    """Re-admit the dashboard's current egress address to the node's ingress, then run
+    ``call()`` once more. Raises an enriched ``exc`` when there is nothing to re-admit.
+
+    Split out of :func:`_readmit_and_retry` so a caller that has ALREADY caught the
+    dropped connection (the on-demand token mint) gets the repair without paying a
+    second connect timeout to rediscover what it already knows.
+
+    Deliberately ONE retry: if the second attempt is dropped as well, the cause is not
+    an address rotation and looping would only spend the caller's time before reporting
+    the same thing.
+    """
+    logger.warning("Portainer %s could not connect (%s) — re-detecting the "
+                   "dashboard's egress address and re-applying ingress", what, exc)
+    if job_id:
         job_service.update_progress(db, job_id, 80, "Re-admitting the dashboard's egress IP")
-        before = firewall_status(db).get("merged") or []
-        try:
-            await _ensure_dashboard_egress_cidr()
-            await refresh_portainer_firewall(db, placement=placement)
-        except Exception as refresh_exc:  # noqa: BLE001 — report the ORIGINAL failure
-            logger.warning("Portainer ingress re-apply failed: %s", refresh_exc)
-            raise exc
-        after = firewall_status(db).get("merged") or []
-        if after == before:
-            # Nothing changed, so the retry would be dialling from the same address
-            # into the same rule. Say so instead of burning another timeout.
-            raise portainer_service.PortainerError(
-                f"{exc} The node is serving (the readiness poll passed) but the connection "
-                f"is being dropped, and re-detecting the dashboard's egress address "
-                f"produced no change (allowed: {', '.join(after) or 'none'}). Something "
-                f"between the worker and the node is discarding the packets — check the "
-                f"node's firewall rule, and set portainer_dashboard_egress_cidr manually "
-                f"to the worker's real outbound range if it egresses from a pool."
-            ) from exc.__cause__ or exc
-        logger.info("Portainer ingress re-applied (%s → %s) — retrying the bootstrap",
-                    before, after)
+    try:
+        report = await reapply_firewall(db, placement=placement)
+    except Exception as refresh_exc:  # noqa: BLE001 — report the ORIGINAL failure
+        logger.warning("Portainer ingress re-apply failed: %s", refresh_exc)
+        raise exc
+    before, after = report["before"], report["merged"]
+    # ``changed`` counts a RECREATED rule, which is the state a hand-deleted rule
+    # leaves behind: a real change even though the computed source set matched.
+    if not report["changed"]:
+        # Nothing changed, so the retry would be dialling from the same address
+        # into the same rule. Say so instead of burning another timeout.
+        raise portainer_service.PortainerError(
+            f"{exc} {serving or 'The connection to the node is being dropped'}, and "
+            f"re-detecting the dashboard's egress address produced no change (allowed: "
+            f"{', '.join(after) or 'none'}). Something between the worker and the node "
+            f"is discarding the packets — check the node's firewall rule, and set "
+            f"portainer_dashboard_egress_cidr manually to the worker's real outbound "
+            f"range if it egresses from a pool."
+        ) from exc.__cause__ or exc
+    logger.info("Portainer ingress re-applied (%s → %s) — retrying the %s",
+                before, after, what)
+    try:
         return await call()
+    except portainer_service.PortainerError as again:
+        # Still dropped. Say that the ingress was re-applied and what it now admits,
+        # or the operator reads an identical ConnectTimeout twice and has no way to
+        # know the allow-list was already widened on their behalf. Only for a DROP —
+        # any other failure is the node answering, and its own message is the news.
+        if not portainer_service.is_unreachable(again):
+            raise
+        raise portainer_service.PortainerError(
+            f"{again} The node's ingress was re-applied first (now allowing "
+            f"{', '.join(after) or 'nothing'}) and the packets are still being "
+            f"dropped. A host with no stable outbound address egresses from a "
+            f"different one per connection, so set portainer_dashboard_egress_cidr "
+            f"to the whole outbound range rather than a single address."
+        ) from again.__cause__ or again
 
 
 async def mint_api_token(*, username: str = "", password: str = "",
-                         description: str = "") -> dict:
+                         description: str = "", db=None) -> dict:
     """Mint a fresh Portainer API token and store it as ``portainer_pat``.
 
     The same two calls :func:`_bootstrap` makes — sign in for a JWT, then
@@ -481,8 +601,23 @@ async def mint_api_token(*, username: str = "", password: str = "",
     already taken the unadorned ``vm-dashboard``, so a fixed name here would fail on
     the very first re-mint, which is the case this function exists for.
 
+    **The node's ingress is managed here too, exactly as a deploy manages it.** The
+    deploy writes the allow-list from one egress detection and then never revisits
+    it, so by the time anyone clicks "mint a token" the dashboard's own outbound
+    address may have moved — a worker rescheduled behind a different SNAT address, a
+    corp proxy egressing from a pool — and the node's rule still admits the old one.
+    Every packet is then dropped and the mint fails with a ConnectTimeout, which is
+    the failure this function was added to REPAIR: telling the operator to redeploy
+    the node to fix a token is the dead end it replaced. So a dropped connect
+    re-detects the egress address, re-applies the ingress and mints again. Only for
+    the managed node (see :func:`_managed_node_at`) — a Portainer this dashboard
+    merely points at has a firewall that is the operator's, not ours.
+
     Returns what the caller may show; never the token. The raw key is written to
     config and nowhere else.
+
+    ``db`` is optional and read-only: the ingress merge reads the gateway registry
+    through it. Without one the repair still runs, just without the gateway /32s.
     """
     import time
 
@@ -520,9 +655,32 @@ async def mint_api_token(*, username: str = "", password: str = "",
             f"hand ownership of the token to the dashboard, clear the field in "
             f"Settings → Containers first.")
 
-    jwt = await portainer_service.login(url, user, secret, verify=verify)
-    pat = await portainer_service.create_access_token(
-        url, jwt, secret, description=label, verify=verify)
+    async def _mint() -> str:
+        # Both calls, so a retry signs in again: the JWT from a session that could
+        # not be used is worth nothing, and Portainer re-checks the password on the
+        # token call anyway.
+        jwt = await portainer_service.login(url, user, secret, verify=verify)
+        return await portainer_service.create_access_token(
+            url, jwt, secret, description=label, verify=verify)
+
+    try:
+        pat = await _mint()
+    except portainer_service.PortainerError as exc:
+        if not portainer_service.is_unreachable(exc):
+            raise
+        placement = _node_params()
+        if not await _managed_node_at(url, placement):
+            # Not our node, or we could not confirm it is. Say which firewall to look
+            # at instead of silently doing nothing about the one word in the error.
+            raise portainer_service.PortainerError(
+                f"{exc} {url} is not a Portainer node this dashboard deployed (or its "
+                f"cloud could not be reached to check), so there is no managed firewall "
+                f"to re-open — the packets are being dropped by something the dashboard "
+                f"does not administer. Allow the dashboard's egress address to reach "
+                f"{url} there, then mint again."
+            ) from exc.__cause__ or exc
+        pat = await _readmit_egress_and_retry(
+            db, placement, exc, _mint, what="token mint")
     config_service.set("portainer_pat", pat)
     logger.info("Portainer API token '%s' minted for %s at %s and stored as "
                 "portainer_pat", label, user, url)

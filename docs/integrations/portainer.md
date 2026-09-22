@@ -167,6 +167,17 @@ Each mint gets a distinct description (`vm-dashboard-<unix>`) because Portainer
 refuses two tokens with the same description for one user. It **adds** a token rather
 than replacing one — revoke the old ones in Portainer if you want them gone.
 
+On the **managed node**, minting manages the node's ingress as well. A deploy writes
+the allow-list from one egress detection and never revisits it, so by the time you
+mint, the dashboard's own outbound address may have moved — a worker rescheduled
+behind a different SNAT address, a proxy pool picking a different one — and the
+node's rule still names the old one. The mint then fails with a `ConnectTimeout`
+(dropped packets, not a closed port). Rather than report it, the dashboard
+re-detects its egress address, re-applies the ingress rule and mints again; if the
+rule had been deleted outright, re-applying puts it back. Only for a node this
+dashboard deployed — a Portainer you merely point it at has a firewall that is
+yours, and it says so instead of touching anything.
+
 Minting also re-stages the token to the `portainer_access` adapter, if one is deployed
 (see below). **Re-send the token to the adapter** does only that half, for when the
 dashboard's own token is fine and only the function's copy is stale.
@@ -359,6 +370,31 @@ It is **fail-closed** on every cloud — an empty merged set leaves the node unr
 Set that cloud's `*_portainer_allow_open` to open `0.0.0.0/0` when no CIDRs are set — a
 deliberate opt-in, per cloud. **Settings → Containers** shows the live merged
 allow-list.
+
+#### Re-applying it
+
+The deploy configures the firewall from **one** egress detection and never revisits
+it, so the rule ages out from under a node that is running perfectly well: the worker
+is rescheduled behind a different SNAT address, a proxy pool picks another one, a
+gateway comes back with a new IP, or someone deletes the rule in the cloud console.
+Every caller then reports the same unhelpful thing — *unreachable* — and the only cure
+used to be a redeploy.
+
+**Re-apply the node firewall** (`POST /api/containers/portainer/node/firewall`) is
+that step on its own: re-detect the dashboard's egress address, recompute the merged
+set, re-apply the rule. It reports what it added and removed, and says so plainly when
+the result is **closed** — an empty merged set is a real outcome here, not an error.
+Safe to click on a healthy node: the per-cloud apply is idempotent, and a rule that had
+been deleted is simply put back.
+
+It is in two places, because the two halves of this are in two places: under the node
+table on the **Containers** page, and next to the allow-list readout in **Settings →
+Containers** — where the button is labelled **Re-apply** and the breakdown re-renders
+from the result, so what you are reading afterwards is the rule that now exists.
+
+Minting a token does this for itself on a dropped connect, so reach for the button
+when what is failing is something else — listing environments, an Edge registration,
+a Web Jump.
 
 ---
 
@@ -591,6 +627,17 @@ allows a `/32` per gateway, refreshed on every gateway deploy/teardown. Check
 **Settings → Containers → Effective firewall sources**: the gateway should be listed
 under *Web-Jump Gateways*. If it isn't, its egress IP was never recorded — redeploy the
 gateway, or add the IP to `portainer_allowed_source_cidrs`.
+
+**"Cannot reach Portainer: ConnectTimeout"** — the TCP connect got no answer, so the
+packets are being *dropped*: an ingress rule, not a closed port (a closed port
+answers with a reset). On the managed node, click **Re-apply the node firewall** (see
+[Re-applying it](#re-applying-it)); **Mint an API token** does the same repair on its
+own way past, so the message you are left with there already says what the rule now
+allows. Compare that with where the dashboard actually egresses from: if it has no
+stable outbound address (Container Apps with no NAT Gateway, a corporate proxy pool),
+set `portainer_dashboard_egress_cidr` to the whole range rather than a single address.
+If the message says the URL is **not a node this dashboard deployed**, the firewall
+in front of that Portainer is yours to open.
 
 **Deploy fails with "the Portainer node's firewall is closed"** — no allowed source
 CIDRs, and the dashboard couldn't auto-detect its own egress IP. Set

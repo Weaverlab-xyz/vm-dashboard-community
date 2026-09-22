@@ -32,6 +32,7 @@ _SVC = os.path.join(_ROOT, "web_dashboard", "services", "portainer_adapter_servi
 _NODE = os.path.join(_ROOT, "web_dashboard", "services", "portainer_node_service.py")
 _WORKER = os.path.join(_ROOT, "web_dashboard", "jobs_worker.py")
 _MODELS = os.path.join(_ROOT, "web_dashboard", "models", "containers.py")
+_SETTINGS = os.path.join(_ROOT, "web_dashboard", "templates", "settings.html")
 _CONFIG = os.path.join(_ROOT, "web_dashboard", "config.py")
 _WORKLOAD = os.path.join(_ROOT, "web_dashboard", "functions", "fnworkloads",
                          "portainer_access.py")
@@ -476,6 +477,107 @@ def test_the_mint_confirm_says_old_tokens_are_not_revoked():
     body = page.split("async mintPortainerToken()")[1].split("\n    async ")[0]
     assert "confirm(" in body
     assert "keep working" in body and "revoke" in body
+
+
+# ── Re-applying the node's ingress rule ──────────────────────────────────────
+# The deploy configures the firewall from ONE egress detection and never revisits it.
+# When the dashboard's outbound address moves — or the rule is deleted by hand — the
+# node keeps running and every caller reports the same unhelpful thing, "unreachable".
+# Minting a token repairs that on its way past; the button is the repair on its own.
+
+def _svc_function(name, path=_NODE):
+    """A service function's source, by def line."""
+    src = _read(path)
+    marker = f"\ndef {name}("
+    if marker not in src:
+        marker = f"\nasync def {name}("
+    assert marker in src, f"no such function: {name}"
+    body = src.split(marker)[1]
+    # Up to the next top-level def, not an inner one.
+    for stop in ("\ndef ", "\nasync def "):
+        if stop in body:
+            body = body.split(stop)[0]
+    return body
+
+
+def test_the_firewall_reapply_route_exists_and_needs_write():
+    """It mutates a cloud ingress rule, so read is not enough — and it must not need
+    the Cloud Functions scope either: an operator locked out of their own node should
+    not need the adapter-deploy permission to get back in."""
+    decorator = '@router.post("/portainer/node/firewall"'
+    api = _read(_API)
+    assert decorator in api, decorator
+    body = _route(decorator)
+    assert 'require_permission("containers", "write")' in body, body[:400]
+    assert "_require_function_write" not in body
+    # The read-only breakdown keeps its own verb on the same path.
+    assert '@router.get("/portainer/node/firewall"' in api
+
+
+#: Both pages that can re-apply the rule. The Containers page owns the node; Settings
+#: owns the read-only breakdown, which is where an operator diagnoses "the node admits
+#: an address we no longer egress from" — so the repair has to be reachable from both.
+_REAPPLY_PAGES = (_PAGE, _SETTINGS)
+
+
+def _handler(path, name="reapplyPortainerFirewall"):
+    src = _read(path)
+    assert f"async {name}()" in src, f"{os.path.basename(path)}: no {name} handler"
+    return src.split(f"async {name}()")[1].split("\n    async ")[0]
+
+
+def test_the_reapply_button_posts_to_the_route_the_router_declares():
+    assert '@router.post("/portainer/node/firewall"' in _read(_API)
+    for path in _REAPPLY_PAGES:
+        body = _handler(path)
+        assert "'/api/containers/portainer/node/firewall'" in body, os.path.basename(path)
+        # And the button is actually rendered, not just defined.
+        assert 'reapplyPortainerFirewall()"' in _read(path), \
+            f"{os.path.basename(path)}: the handler has no button"
+
+
+def test_every_firewall_field_the_pages_read_is_one_the_service_returns():
+    """A field name that is not in the payload is not an error anywhere: the note
+    renders blank, or says 'no change' about a change. Pin the halves together."""
+    returned = set(re.findall(r'"(\w+)":', _svc_function("firewall_status")))
+    returned |= set(re.findall(r'"(\w+)":', _svc_function("reapply_firewall")))
+    for path in _REAPPLY_PAGES:
+        for field in set(re.findall(r"\bdata\.(\w+)", _handler(path))):
+            assert field in returned, \
+                f"{os.path.basename(path)} reads data.{field}, which is never returned"
+
+
+def test_the_settings_readout_re_renders_from_the_result():
+    """The breakdown beside the button is the whole reason Settings has one. Leaving
+    it showing the pre-click state would have the operator reading the allow-list that
+    just got replaced — and the payload is that same breakdown, so there is no excuse
+    for a second fetch or a stale box."""
+    body = _handler(_SETTINGS)
+    assert "this.portainerFirewall = data" in body, body[:400]
+
+
+def test_the_button_and_the_mint_make_the_SAME_repair():
+    """Two implementations of 'detect the egress address and re-apply the rule' would
+    drift, and the one that drifted would be the one nobody ran during the outage."""
+    assert "reapply_firewall(" in _svc_function("_readmit_egress_and_retry"), \
+        "the mint's re-admit no longer goes through reapply_firewall"
+    assert "reapply_firewall(" in _route('@router.post("/portainer/node/firewall"')
+
+
+def test_a_recreated_rule_counts_as_a_change():
+    """A deleted rule computes the same source set it always did, so comparing sets
+    alone reports 'nothing changed' about the repair that just put it back."""
+    assert 'applied.get("created")' in _svc_function("reapply_firewall")
+
+
+def test_the_reapply_reports_a_closed_firewall_rather_than_a_silent_success():
+    """Fail-closed is the contract, so an empty merged set is a real outcome, not an
+    error — and it means the node is now reachable by nobody. Saying only 'ingress
+    re-applied' would read as a fix."""
+    for path in _REAPPLY_PAGES:
+        body = _handler(path)
+        assert "data.opened" in body, os.path.basename(path)
+        assert "CLOSED" in body or "reachable by nobody" in body, os.path.basename(path)
 
 
 if __name__ == "__main__":

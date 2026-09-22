@@ -20,6 +20,9 @@ Portainer CE container management endpoints.
   POST /api/containers/portainer/adapter-retire — remove it via job
   POST /api/containers/portainer/token          — mint an API token + stage it
   POST /api/containers/portainer/token/stage    — push the stored one to the adapter
+  GET  /api/containers/portainer/node/firewall  — the node's merged allow-list
+  POST /api/containers/portainer/node/firewall  — re-detect the dashboard's egress
+                                           address and re-apply that allow-list
 """
 import base64
 import binascii
@@ -1236,6 +1239,38 @@ async def get_portainer_node_firewall(
     return portainer_node_service.firewall_status()
 
 
+@router.post("/portainer/node/firewall")
+async def reapply_portainer_node_firewall(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("containers", "write")),
+):
+    """Re-detect the dashboard's egress address and re-apply the node's ingress rule.
+
+    The deploy configures the firewall from ONE egress detection and never revisits
+    it, so the rule ages out from under a node that is running perfectly well: the
+    worker is rescheduled behind a different SNAT address, a proxy pool picks another
+    one, a gateway comes back with a new IP, or the rule is deleted by hand. Every
+    caller then renders the same unhelpful thing — "unreachable" — and the only cure
+    used to be a redeploy.
+
+    Minting a token repairs this on its own way past, but that only helps when the
+    thing failing is a mint. This is the repair on its own, for the Containers tab
+    listing environments, an Edge registration, or a Web Jump.
+
+    Safe to click on a healthy node: the per-cloud apply is idempotent, and
+    fail-closed is preserved — an empty merged set still removes the rule rather than
+    leaving a stale one behind. Returns the new breakdown plus what changed."""
+    from ..services import portainer_node_service
+
+    try:
+        return await portainer_node_service.reapply_firewall(db)
+    except Exception as exc:  # noqa: BLE001 — every cloud raises its own type here
+        logger.exception("Re-applying the Portainer node's ingress failed")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not re-apply the Portainer node's ingress rule: {exc}")
+
+
 @router.get("/portainer/node/deploy-options")
 async def get_portainer_node_deploy_options(
     current_user: User = Depends(require_permission("containers", "read")),
@@ -1481,6 +1516,11 @@ async def mint_portainer_token(
     likely to be failing — holding the old one, with no sign anything is out of step.
     A re-stage failure does not lose the token: it is stored first and the response
     says which half did not happen.
+
+    On a MANAGED node the ingress is managed here as well: a dropped connect (the
+    node's allow-list still naming an egress address the dashboard has since moved
+    off) re-admits the current one and mints again, rather than reporting a
+    ConnectTimeout whose only cure used to be redeploying the node.
     """
     from ..services import portainer_adapter_service as adapter
     from ..services import portainer_node_service, portainer_service
@@ -1488,7 +1528,7 @@ async def mint_portainer_token(
     try:
         minted = await portainer_node_service.mint_api_token(
             username=req.username or "", password=req.password or "",
-            description=req.description or "")
+            description=req.description or "", db=db)
     except portainer_service.PortainerNotConfigured as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except portainer_service.PortainerError as exc:

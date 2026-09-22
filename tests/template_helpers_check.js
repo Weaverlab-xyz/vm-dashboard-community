@@ -1168,6 +1168,115 @@ ok(WLA + ' with no options loaded no episode is offered',
      mkAgent({options: base, readOnly: true}).canMint() === false);
 })();
 
-ociPlacementChecks().then(() => process.exit(fail ? 1 : 0),
-                          (e) => { console.log('FAIL ' + OCI + ' placement checks threw: ' + e);
-                                   process.exit(1); });
+// ── Containers: re-applying the Portainer node's ingress rule ────────────────
+// The note IS the feature. The button's entire output is one line of text, and the
+// difference between "re-applied — no change" and "now also allowing <addr>" is what
+// tells an operator whether the outage they are chasing was this or something else.
+const PFW = 'containers/index.html';
+
+const mkFw = (payload) => {
+  global.API = {post: async () => payload};
+  return build(PFW, 'reapplyPortainerFirewall', {loadPortainerNode: async () => {}});
+};
+
+async function portainerFirewallChecks() {
+  let o = mkFw({changed: true, opened: true, added: ['203.0.113.9/32'],
+                removed: ['198.51.100.2/32'], merged: ['203.0.113.9/32']});
+  await o.reapplyPortainerFirewall();
+  ok(PFW + ' a widened rule names what it now allows',
+     /Now also allowing 203\.0\.113\.9\/32/.test(o.portainerFirewallNote));
+  ok(PFW + ' and what it stopped allowing',
+     /No longer allowing 198\.51\.100\.2\/32/.test(o.portainerFirewallNote));
+  ok(PFW + ' a finished re-apply is not left pending',
+     o.portainerFirewallPending === false);
+
+  o = mkFw({changed: false, opened: true, added: [], removed: [],
+            merged: ['203.0.113.9/32']});
+  await o.reapplyPortainerFirewall();
+  ok(PFW + ' no change says so, and still names the allow-list',
+     /no change/.test(o.portainerFirewallNote)
+       && /203\.0\.113\.9\/32/.test(o.portainerFirewallNote));
+
+  // Fail-closed is the contract, so an empty set is a real outcome — and reporting
+  // only "ingress re-applied" would read as a fix when nothing can reach the node.
+  o = mkFw({changed: true, opened: false, added: [], removed: ['203.0.113.9/32'],
+            merged: []});
+  await o.reapplyPortainerFirewall();
+  ok(PFW + ' a closed firewall is reported, not dressed up as success',
+     /CLOSED/.test(o.portainerFirewallNote));
+
+  // A payload with none of the arrays (an older build, a partial response) must not
+  // throw: a handler that throws leaves the button spinning for good.
+  o = mkFw({});
+  await o.reapplyPortainerFirewall();
+  ok(PFW + ' a bare payload neither throws nor leaves the button pending',
+     o.portainerFirewallPending === false && o.portainerFirewallError === '');
+
+  global.API = {post: async () => { throw new Error('502: firewall rule denied'); }};
+  o = build(PFW, 'reapplyPortainerFirewall', {loadPortainerNode: async () => {}});
+  await o.reapplyPortainerFirewall();
+  ok(PFW + ' a refused re-apply shows the reason and releases the button',
+     /denied/.test(o.portainerFirewallError) && o.portainerFirewallPending === false);
+
+  // ── the same repair, from Settings → Containers ────────────────────────────
+  // Settings answers in a toast and re-renders the breakdown beside the button. The
+  // stale-box case is the one that matters: the payload IS the new breakdown, so an
+  // operator who does not get it re-rendered reads the allow-list that was just
+  // replaced and concludes the click did nothing.
+  const SFW = 'settings.html';
+  const toasts = [];
+  global.toast = (msg, kind) => toasts.push([msg, kind || '']);
+  const mkSfw = (payload) => {
+    global.API = {post: async () => payload};
+    return build(SFW, 'reapplyPortainerFirewall',
+                 {portainerFirewall: {merged: ['198.51.100.2/32'], opened: true}});
+  };
+
+  toasts.length = 0;
+  let s = mkSfw({changed: true, opened: true, added: ['203.0.113.9/32'], removed: [],
+                 merged: ['203.0.113.9/32'], ports: ['9443', '8000']});
+  await s.reapplyPortainerFirewall();
+  ok(SFW + ' the breakdown re-renders from the result, not the pre-click state',
+     JSON.stringify(s.portainerFirewall.merged) === JSON.stringify(['203.0.113.9/32']));
+  ok(SFW + ' the toast names what is now allowed',
+     /now allowing 203\.0\.113\.9\/32/.test(toasts[0][0]) && toasts[0][1] === 'success');
+  ok(SFW + ' a finished re-apply is not left busy', s.portainerFirewallBusy === false);
+
+  toasts.length = 0;
+  s = mkSfw({changed: false, opened: true, added: [], removed: [], merged: ['x']});
+  await s.reapplyPortainerFirewall();
+  ok(SFW + ' no change is said plainly, and not as success',
+     /no change/.test(toasts[0][0]) && toasts[0][1] === 'info');
+
+  toasts.length = 0;
+  s = mkSfw({changed: true, opened: false, added: [], removed: ['203.0.113.9/32'],
+             merged: []});
+  await s.reapplyPortainerFirewall();
+  ok(SFW + ' an empty allow-list is an ERROR toast, not a success',
+     /reachable by nobody/.test(toasts[0][0]) && toasts[0][1] === 'error');
+
+  // A 401: API.post logs out and answers null. Overwriting the breakdown with that
+  // would blank the box on the way to the login page.
+  toasts.length = 0;
+  s = mkSfw(null);
+  await s.reapplyPortainerFirewall();
+  ok(SFW + ' a null response leaves the breakdown alone and releases the button',
+     s.portainerFirewall.merged[0] === '198.51.100.2/32'
+       && s.portainerFirewallBusy === false && toasts.length === 0);
+
+  toasts.length = 0;
+  global.API = {post: async () => { throw new Error('502: firewall rule denied'); }};
+  s = build(SFW, 'reapplyPortainerFirewall', {portainerFirewall: {merged: [], opened: false}});
+  await s.reapplyPortainerFirewall();
+  ok(SFW + ' a refused re-apply toasts the reason and releases the button',
+     /denied/.test(toasts[0][0]) && toasts[0][1] === 'error'
+       && s.portainerFirewallBusy === false);
+
+  delete global.API;
+  delete global.toast;
+}
+
+Promise.all([ociPlacementChecks(), portainerFirewallChecks()])
+  .then(() => process.exit(fail ? 1 : 0),
+        (e) => { console.log('FAIL a deferred check threw: ' + e);
+                 process.exit(1); });
