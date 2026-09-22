@@ -1167,6 +1167,29 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             except Exception as exc:
                 logger.warning("Portainer Web Jump provisioning failed (non-fatal): %s", exc)
 
+        # Did the node just move out from under its Entitle adapter? The adapter is a
+        # VPC-attached Cloud Function deployed BESIDE the node — it has to be, to reach
+        # a fail-closed node at its internal IP — and nothing in a relocation moves it.
+        # Left in the old cloud/region it is attached to the old network, so it cannot
+        # reach the node at all, while the stored portainer_adapter_source_cidr (a
+        # range from that old network) merges into the NEW node's allow-list and sits
+        # there inert. Nothing fails: the card shows the function 'available' with a
+        # live integration, and the only symptom is every Entitle grant timing out on
+        # Entitle's side. Refusing the move would be too strong; saying so is the fix.
+        #
+        # Asked against the placement this deploy LANDED on, not config: the reuse case
+        # goes through the same check, and mid-deploy the adapter row is the only thing
+        # that still records where the node used to be.
+        adapter_stranded = ""
+        try:
+            from . import portainer_adapter_service
+            adapter_stranded = portainer_adapter_service.stranded_reason(
+                db, node_cloud=cloud, node_region=p["region"])
+        except Exception as exc:
+            logger.warning("Portainer adapter placement check failed (continuing): %s", exc)
+        if adapter_stranded:
+            logger.warning("Portainer node deploy: %s", adapter_stranded)
+
         completion = {
             "url": url,
             "external_ip": external_ip,
@@ -1178,6 +1201,11 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             "reused": bool(res.get("reused")),
             "token_configured": bool(pat),
         }
+        # Only the gap — a pairing that still lines up needs no paragraph. The job
+        # result is where this has to land: the deploy succeeded, so there is no error
+        # anywhere, and the adapter card an operator would check next says 'available'.
+        if adapter_stranded:
+            completion["adapter_stranded"] = adapter_stranded
         # Surface the generated password ONLY when it isn't vaulted — with a PRA Vault
         # account the operator uses the portainer-ui Web Jump and never sees it.
         if config_service.get("portainer_ui_vault_account_id"):

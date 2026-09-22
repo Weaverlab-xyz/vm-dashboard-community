@@ -580,7 +580,23 @@
                     class="ml-1 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 ring-1 ring-amber-200">
                 DRY RUN
               </span>
+              <!-- Beside the status chip on purpose: the chip says `available`, which
+                   is true of the FUNCTION and says nothing about whether it can still
+                   reach the node it was paired to. -->
+              <span x-show="portainerAdapter.stranded" x-cloak
+                    class="ml-1 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 ring-1 ring-red-200">
+                STRANDED
+              </span>
             </p>
+            <!-- The node was relocated and the adapter was not. It is a VPC-attached
+                 function deployed BESIDE the node, so a move to another region (or
+                 cloud) leaves it on the old network with nothing failing: the status
+                 stays `available`, the Entitle integration stays live, and the only
+                 symptom is a grant that times out on Entitle's side. Loud, because
+                 every other line on this card reads healthy. -->
+            <p x-show="portainerAdapter.stranded" x-cloak
+               class="text-red-700 bg-red-50 border border-red-200 rounded-lg p-2"
+               x-text="portainerAdapter.stranded_reason"></p>
             <p x-show="portainerAdapter.target_url" x-cloak>
               <span class="font-medium text-gray-700">Targets:</span>
               <code x-text="portainerAdapter.target_url"></code>
@@ -596,6 +612,13 @@
             <p x-show="portainerAdapter.source_cidrs.length" x-cloak>
               <span class="font-medium text-gray-700">Added to the node firewall:</span>
               <code x-text="portainerAdapter.source_cidrs.join(', ')"></code>
+              <!-- Otherwise this line is the most convincing thing on a stranded card:
+                   the range really is in the allow-list, it just belongs to a network
+                   the node is no longer on. -->
+              <span x-show="portainerAdapter.stranded" x-cloak class="text-red-700">
+                — from the adapter's own network, which is no longer the node's, so it
+                admits nothing.
+              </span>
             </p>
             <!-- The one skippable leg. An adapter with no integration is deployed and
                  pointed at its Portainer but nothing can request it yet. -->
@@ -2073,7 +2096,8 @@ function containersDashboard() {
     portainerAdapter: { viable: false, ineligible_reason: '', entitle_enabled: false,
                         name: '', fn_id: '', status: '', cloud: '', region: '',
                         network_mode: '', invoke_url: '', entitle_integration_id: '',
-                        target_url: '', dry_run: true, source_cidrs: [] },
+                        target_url: '', dry_run: true, source_cidrs: [],
+                        stranded: false, stranded_reason: '' },
     portainerAdapterPending: false,
     // The stored API token. `portainerTokenNote` carries WHEN a re-staged token takes
     // effect, which differs per cloud and is the part an operator would otherwise

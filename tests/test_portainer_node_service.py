@@ -578,6 +578,50 @@ def test_a_region_move_is_refused_when_state_is_durable():
     assert "cannot be attached in another region" in deploy
 
 
+# ── The Entitle adapter the node can move out from under ─────────────────────
+# The node is relocatable across regions AND clouds. Its paired Entitle adapter is a
+# VPC-attached Cloud Function deployed BESIDE it — it has to be, to reach a fail-closed
+# node at its internal IP — and nothing in a relocation moves the function. Left
+# behind, it is on a network the node is no longer on, while the range it added to the
+# allow-list follows the node into the NEW firewall where it admits nothing. Nothing
+# fails: the card reads 'available' with a live integration, and the only symptom is
+# every Entitle grant timing out, reported on Entitle's side.
+
+def _run_deploy_src() -> str:
+    src = _node_service_src()
+    return src[src.index("async def run_deploy"):src.index("async def run_teardown")]
+
+
+def test_the_deploy_says_when_it_stranded_the_entitle_adapter():
+    """The deploy is the one moment anything knows the node moved, so it is the one
+    place that can say the adapter did not."""
+    body = _run_deploy_src()
+    assert "stranded_reason" in body
+    assert "adapter_stranded" in body
+
+
+def test_the_check_uses_the_placement_the_deploy_landed_on():
+    """Config was rewritten to the node's NEW home a few lines earlier, so a check that
+    re-read it would compare the new placement against itself and never fire."""
+    call = _run_deploy_src().split("stranded_reason(")[1].split(")")[0]
+    assert "node_cloud=cloud" in call
+    assert 'node_region=p["region"]' in call
+
+
+def test_a_broken_adapter_check_never_fails_the_deploy():
+    """By then the node is up, bootstrapped and written into config. An unreadable
+    adapter row is not a reason to report all of that as a failed deploy."""
+    block = _run_deploy_src().split('adapter_stranded = ""')[1].split("completion = {")[0]
+    assert "try:" in block and "except Exception" in block
+
+
+def test_only_a_real_stranding_reaches_the_job_result():
+    """A pairing that still lines up needs no paragraph in the result."""
+    tail = _run_deploy_src().split("completion = {")[1]
+    assert "if adapter_stranded:" in tail
+    assert tail.index("if adapter_stranded:") < tail.index("job_service.set_completed")
+
+
 # ── Minting an API token on demand ───────────────────────────────────────────
 # Portainer shows a token's value exactly once, so before this the ONLY way to get
 # one was to deploy a node: a revoked token, or a DB an ephemeral node threw away,
