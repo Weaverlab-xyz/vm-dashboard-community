@@ -987,11 +987,26 @@ class Settings(BaseSettings):
     # against a broker baked without one produces a Function object that is accepted
     # and then ignored, so the wiring refuses up front instead.
     ot_faas_enabled: bool = False
-    # Which fnworkloads module the plant runs. Blank = the no-op reference adapter
-    # (entitle_webhook_echo), which serves every route of the Entitle contract — so
-    # the whole path can be proven before a target-specific adapter exists, and a
-    # failure then belongs to exactly one layer.
+    # Which fnworkloads module the plant runs. Blank = the FUXA HMI adapter, which is
+    # the point of the feature. Set it to `entitle_webhook_echo` — the no-op reference
+    # adapter, every route plus fault injection — when the question is "does the chain
+    # work at all" rather than "does the HMI grant work".
     ot_faas_workload: str = ""
+    # The adapter's own dry run, and it is ON by default. It deploys, registers with
+    # Entitle, serves every route and reports exactly what it WOULD do — without
+    # creating or deleting anything on the HMI. Turn it off once the path is proven;
+    # until then a deployment mistake cannot mint a live HMI login.
+    ot_faas_dry_run: bool = True
+    # The FUXA account the adapter manages users as. FUXA's own default admin is
+    # `admin`, and in named-role mode only the account literally called `admin` can
+    # manage users at all — so changing this is rarely right.
+    ot_faas_fuxa_user: str = ""
+    # `bitmask` (FUXA's default permission model, and so this adapter's) or
+    # `catalogue` for an instance running with userRole on, where FUXA keeps named
+    # role objects. In catalogue mode the adapter marks a published role unavailable
+    # when the plant has no role of that name, rather than granting a bitmask that
+    # does not correspond to anything the operator configured.
+    ot_faas_fuxa_role_mode: str = ""
     # Override the integration's endpoint. Blank = the in-cluster OpenFaaS gateway,
     # which is the point: a name that resolves only inside the plant. This key is what
     # makes the runtime swappable — Nuclio or a plain Deployment answers on a

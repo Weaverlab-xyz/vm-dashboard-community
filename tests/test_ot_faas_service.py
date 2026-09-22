@@ -207,9 +207,13 @@ def test_the_bearer_is_minted_once_and_read_back():
 def test_the_package_is_built_for_the_openfaas_target():
     _reset()
     encoded, sha, name = svc.build_package()
-    assert name == svc.DEFAULT_WORKLOAD == "entitle_webhook_echo", (
-        "the default workload should be the no-op reference adapter, so the whole "
-        "path is provable before a target-specific adapter exists")
+    assert name == svc.DEFAULT_WORKLOAD == "fuxa_hmi_access", (
+        "the default workload should be the HMI adapter — it is the point of the "
+        "feature, and it is safe as a default because its own dry run is on until an "
+        "operator turns it off")
+    assert svc.ECHO_WORKLOAD == "entitle_webhook_echo", (
+        "the no-op reference adapter must stay reachable: it is what answers 'does "
+        "the chain work at all' without an HMI in the picture")
     import base64
     import hashlib
     import io

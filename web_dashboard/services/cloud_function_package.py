@@ -94,6 +94,11 @@ _WORKLOAD_MODULES = {
     # so the guards that stop this adapter becoming a privilege-escalation
     # primitive are testable without an Azure subscription.
     "azure_role_grant": (("services/azure_role_rules.py", "azureroles.py"),),
+    # FUXA's permission model is a BITMASK, so the rules that turn a requested role
+    # into a `groups` integer - and refuse the administrator bit - are pure, tested
+    # once, and shared rather than retyped. An off-by-one bit here is a JIT grant
+    # that hands out administrator, and FUXA reports no error for it.
+    "fuxa_hmi_access": (("services/fuxa_access_rules.py", "fuxarules.py"),),
 }
 
 # Per-cloud zip layout. Each entry:

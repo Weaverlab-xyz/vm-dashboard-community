@@ -324,7 +324,11 @@ function functionsPage() {
           API.get('/api/functions/workloads'),
           API.get('/api/functions/options'),
         ]);
-        this.workloads = w.workloads || [];
+        // A workload restricted to NO cloud is not deployable from this page — it
+        // targets a self-hosted runtime somewhere else (the OT broker's KubeSolo,
+        // via the OT cell's own wiring). Listing it would let someone pick it and
+        // then find the cloud dropdown empty, with nothing saying why.
+        this.workloads = (w.workloads || []).filter(w => (w.clouds || []).length);
         this.clouds = o.clouds || [];
         const ready = this.availableClouds().find(c => c.package_store_ready);
         if (ready) this.form.cloud = ready.cloud;

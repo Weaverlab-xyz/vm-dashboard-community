@@ -554,16 +554,48 @@ def test_check_target_rejects_unknown_cloud_and_workload():
 
 
 def test_the_catalog_covers_every_workload_on_disk():
-    """Every module in fnworkloads/ must be deployable somewhere, and the restricted
-    table must not name a cloud that doesn't exist."""
+    """Every module in fnworkloads/ appears, and the restricted table never names a
+    cloud that does not exist.
+
+    An EMPTY cloud set is now a legitimate entry rather than a bug: a workload can
+    target a self-hosted runtime instead of a cloud — `fuxa_hmi_access` runs on the
+    OT broker's KubeSolo, because the HMI it manages is behind the Purdue boundary
+    and a cloud function could not reach it without punching a hole through. Such a
+    workload still has to be in the catalog (the page reads `entitle_adapter` off it),
+    and the picker filters it out by exactly this emptiness.
+    """
     on_disk = svc.available_workloads()
     assert on_disk, "no workloads found on disk"
     for workload in on_disk:
         clouds = svc.clouds_for(workload)
-        assert clouds, workload
         assert set(clouds) <= set(svc.VALID_CLOUDS), (workload, clouds)
     catalog = {entry["name"] for entry in svc.workload_catalog()}
     assert catalog == set(on_disk), catalog ^ set(on_disk)
+
+
+def test_a_workload_with_no_cloud_is_kept_out_of_the_deploy_picker():
+    """The page filters on an empty cloud list, so the emptiness IS the signal.
+
+    Without the filter a self-hosted workload is selectable and then the cloud
+    dropdown is empty with nothing saying why — and the deploy path would refuse it
+    anyway, one step later and less clearly.
+    """
+    import os as _os
+    page = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..",
+                         "web_dashboard", "templates", "functions", "index.html")
+    with open(page, encoding="utf-8") as handle:
+        source = handle.read()
+    assert "filter(w => (w.clouds || []).length)" in source, (
+        "the picker no longer filters zero-cloud workloads, so a self-hosted one is "
+        "selectable with no cloud to deploy it to")
+    # And the deploy path refuses it regardless, so the filter is cosmetics over a
+    # real guard rather than the guard itself.
+    for workload, clouds in svc._CLOUD_RESTRICTED.items():
+        if not clouds:
+            assert workload in svc.available_workloads(), workload
+            break
+    else:
+        raise AssertionError("no zero-cloud workload to check — has the entry gone?")
 
 
 def test_restricted_table_only_names_real_clouds():

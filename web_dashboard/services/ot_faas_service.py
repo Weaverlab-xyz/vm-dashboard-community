@@ -74,11 +74,15 @@ FUNCTION_IMAGE = "ot-faas-python:baked"
 # is the machinery that was built for Azure's `/api` doing the same job here.
 GATEWAY_BASE = "http://gateway.openfaas.svc.cluster.local:8080"
 
-# The default workload is the no-op reference adapter, deliberately. It serves every
-# route of the Entitle contract and has fault injection, so the whole path — deploy,
-# register, Entitle drives it, the agent brokers the calls — is provable BEFORE a
-# target-specific adapter exists, and a failure then belongs to exactly one layer.
-DEFAULT_WORKLOAD = "entitle_webhook_echo"
+# The plant's HMI adapter. Safe as a default because its own dry run is ON unless an
+# operator turns it off (ot_faas_dry_run): it deploys, registers, serves every route
+# and reports exactly what it would do, without touching the HMI.
+#
+# `entitle_webhook_echo` — the no-op reference adapter, every route plus fault
+# injection — stays available through ot_faas_workload, and is the right choice when
+# the question is "does the chain work at all" rather than "does the HMI grant work".
+DEFAULT_WORKLOAD = "fuxa_hmi_access"
+ECHO_WORKLOAD = "entitle_webhook_echo"
 
 # Where OpenFaaS mounts a secret listed in a Function's `secrets:`.
 SECRET_MOUNT_DIR = "/var/openfaas/secrets"
@@ -161,6 +165,85 @@ def ensure_bearer(vm_job_id: str) -> str:
     value = secrets.token_urlsafe(32)
     config_service.set(key, value)
     return value
+
+
+def fuxa_admin_config_key(vm_job_id: str) -> str:
+    """Where this cell's FUXA admin password lives, when it has one.
+
+    It may not. The cell's FUXA ships with authentication OFF, and in that state FUXA
+    applies NO authorization to its user endpoints at all — an anonymous caller is
+    handed administrator — so the adapter works with no credential and
+    ``check_config`` says so in as many words. Rotating that default belongs with the
+    bake change that turns ``secureEnabled`` on; until then this key is how an
+    operator supplies a password they set themselves.
+    """
+    return f"ot/{vm_job_id}/fuxa_admin_password"
+
+
+# ── Per-workload wiring ──────────────────────────────────────────────────────
+# A workload needs its own environment and its own credentials, and the service
+# should not grow a branch per workload inside queue_deploy. One function each,
+# dispatched by name — the idiom cloud_function_service and ot_service already use.
+
+def _fuxa_env(child_id: str, cmeta: dict) -> dict:
+    """What ``fuxa_hmi_access`` needs, all of it from the cell's own record."""
+    from . import config_service
+
+    vm = cmeta.get("instance_name") or cmeta.get("vm_name") or "ot-cell"
+    hmi_url = cmeta.get("ot_hmi_url") or ""
+    env = {
+        "FN_FUXA_URL": hmi_url,
+        "FN_FUXA_HMI_URL": hmi_url,
+        "FN_FUXA_ASSET_ID": f"fuxa:{vm}:hmi",
+        "FN_FUXA_ASSET_NAME": f"FUXA HMI - {vm} (plant floor)",
+        "FN_FUXA_CELL": vm,
+        # The minted credential is useless without this. The cell admits the PRA
+        # Gateway and the broker and nothing else, so a requester's browser cannot
+        # route to the HMI: the grant has to hand over the name of the Web Jump that
+        # can. ot_service provisions it as ot-<vm>-hmi.
+        "FN_FUXA_JUMP_ITEM": cmeta.get("ot_web_jump_name") or f"ot-{vm}-hmi",
+        "FN_FUXA_USER": _cfg("ot_faas_fuxa_user") or "admin",
+        # Plain HTTP on a private address inside the plant; there is no certificate to
+        # verify and nothing in the path to present one.
+        "FN_FUXA_VERIFY_SSL": "0",
+        # Tri-state on purpose: the adapter defaults its own dry run to ON when the
+        # variable is ABSENT, so this must always be sent explicitly or the config
+        # key would be unable to turn it off.
+        "FN_FUXA_DRY_RUN": "1" if config_service.get_bool("ot_faas_dry_run", True) else "0",
+    }
+    if _cfg("ot_faas_fuxa_role_mode"):
+        env["FN_FUXA_ROLE_MODE"] = _cfg("ot_faas_fuxa_role_mode")
+    return env
+
+
+def _fuxa_secrets(child_id: str) -> dict:
+    """``{env_var: config_key}`` for the credentials this workload may have.
+
+    Only what is actually set: mounting an empty Secret would make the adapter read a
+    blank credential rather than none, and ``secretref`` refuses an empty file — so a
+    cell whose FUXA has no password would fail closed instead of working as it does
+    today.
+    """
+    from . import config_service
+
+    out = {}
+    if (config_service.get(fuxa_admin_config_key(child_id)) or "").strip():
+        out["FN_FUXA_PASSWORD"] = fuxa_admin_config_key(child_id)
+    return out
+
+
+_WORKLOAD_ENV = {"fuxa_hmi_access": _fuxa_env}
+_WORKLOAD_SECRETS = {"fuxa_hmi_access": _fuxa_secrets}
+
+
+def workload_env(workload: str, child_id: str, cmeta: dict) -> dict:
+    builder = _WORKLOAD_ENV.get(workload)
+    return dict(builder(child_id, cmeta)) if builder else {}
+
+
+def workload_secrets(workload: str, child_id: str) -> dict:
+    builder = _WORKLOAD_SECRETS.get(workload)
+    return dict(builder(child_id)) if builder else {}
 
 
 def base_url() -> str:
@@ -267,14 +350,32 @@ async def queue_deploy(db, parent_id: str, child_id: str, cmeta: dict, *,
     # One Secret per credential, each named after the variable it backs, so OpenFaaS
     # mounts it as a single FILE at /var/openfaas/secrets/<name> rather than as a
     # directory of keys — which is what fnruntime.secretref's file channel reads.
-    shared_secret_name = secret_name(child_id, SHARED_SECRET_ENV)
+    #
+    # The gate's secret is always there; a workload's own credentials are whatever it
+    # declares AND the operator has actually set. Every one of them contributes both a
+    # Secret and a `*_FILE` pointer, derived from the same helper, so a name can never
+    # be right in one place and wrong in the other.
     env = {
         "FN_CLOUD": "openfaas",
         "FN_WORKLOAD": name,
         "FN_NAME": FUNCTION_NAME,
-        SHARED_SECRET_ENV + SECRET_FILE_SUFFIX:
-            secret_file_path(child_id, SHARED_SECRET_ENV),
     }
+    env.update(workload_env(name, child_id, cmeta))
+
+    secret_vars = {"otfn_bearer": bearer_config_key(child_id)}
+    secrets_map = {secret_name(child_id, SHARED_SECRET_ENV): "otfn_bearer"}
+    env[SHARED_SECRET_ENV + SECRET_FILE_SUFFIX] = secret_file_path(
+        child_id, SHARED_SECRET_ENV)
+    for index, (env_var, config_key) in enumerate(
+            sorted(workload_secrets(name, child_id).items())):
+        # The ansible variable is positional rather than named after the credential:
+        # extra_vars is persisted to the job row, and a variable called
+        # `otfn_fuxa_password` would put the credential's PURPOSE in the database even
+        # though its value stays out.
+        var = f"otfn_secret_{index}"
+        secret_vars[var] = config_key
+        secrets_map[secret_name(child_id, env_var)] = var
+        env[env_var + SECRET_FILE_SUFFIX] = secret_file_path(child_id, env_var)
 
     parent = job_service.get_job(db, parent_id)
     payload = SimpleNamespace(
@@ -291,12 +392,12 @@ async def queue_deploy(db, parent_id: str, child_id: str, cmeta: dict, *,
             "otfn_env": env,
             # The NAMES of the bound variables, never their values — extra_vars is
             # persisted to the job row. Same discipline as epml_token_var.
-            "otfn_secrets": {shared_secret_name: "otfn_bearer"},
+            "otfn_secrets": secrets_map,
             # Prove the function answers through the gateway before the run is called a
             # success. From a POD, because the caller will be one.
             "otfn_probe": True,
         },
-        secret_vars={"otfn_bearer": bearer_config_key(child_id)},
+        secret_vars=secret_vars,
         secret_become_source="",
         secret_ssh_key_source="",
         managed_account=None,
