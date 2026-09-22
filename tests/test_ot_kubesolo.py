@@ -84,9 +84,27 @@ def test_the_broker_never_installs_docker_at_all():
     assert docker_block, (
         "the Docker install is not gated on the cell role — a broker bake would put "
         "Docker on a host whose whole job is to run KubeSolo")
-    assert re.search(r"if command -v docker >/dev/null 2>&1; then\n\s*die ", _SRC), (
+    assert re.search(r"command -v docker[^\n]*\n[^\n]*\[ -x ", _SRC), (
         "nothing checks the purge actually worked — a leftover docker binary fails "
         "the KubeSolo install with a message about the wrong thing")
+
+
+def test_the_purge_check_asks_the_filesystem_not_the_shells_command_hash():
+    """`command -v` alone cannot answer "is docker gone".
+
+    Both dash and bash resolve it from the shell's command hash before they consult
+    PATH, and neither stats the cached path (bash only does with `checkhash`, off by
+    default). The bake runs docker a dozen times building and exporting the images,
+    so by the time the purge finishes the hash still holds /usr/bin/docker and a bare
+    `command -v` guard reports Docker present on a host it has just been removed
+    from — a bake that fails for the one reason that is not true. The guard must drop
+    the hash and then test the surviving path with -x."""
+    guard = re.search(r"\n(hash -r[^\n]*\n(?:[^\n]*\n){0,4}?[^\n]*command -v docker"
+                      r"(?:[^\n]*\n){0,3}?[^\n]*\[ -x [^\n]*\n)", _SRC)
+    assert guard, (
+        "the post-purge Docker guard does not clear the shell's command hash before "
+        "asking, or does not confirm the answer against the filesystem — it would "
+        "fail every cell bake on a host where the purge worked")
 
 
 def test_the_offline_kubesolo_build_is_the_one_that_gets_installed():
