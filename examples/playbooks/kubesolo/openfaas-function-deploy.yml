@@ -1,0 +1,354 @@
+# Deploy a function onto a KubeSolo node's OpenFaaS runtime
+# Target: a host baked with OT_FAAS=openfaas (provisioners/ot/ot-sim-debian.sh), i.e.
+# the OT demo's DMZ broker — or any on-prem KubeSolo host set up the same way.
+#
+# WHAT THIS PLAY KNOWS: how to put a code package and its secrets on a function
+# runtime. It knows NOTHING about Entitle, or FUXA, or what the function does. That is
+# deliberate — the baked image is a generic loader and this is its generic delivery
+# path, so a new adapter is a new package and not a new play.
+#
+# THE PACKAGE travels as base64 in otfn_pkg_b64: the deterministic zip built by
+# web_dashboard/services/cloud_function_package.py for cloud="openfaas". It is NOT
+# baked into the image, because the bake channel is a single shell script and a baked
+# adapter would be a copy of ~45 KB of security-relevant Python that drifts from the
+# real thing and needs a re-bake per fix. otfn_pkg_sha256 is checked by the loader
+# BEFORE it runs anything: the whole extra_vars document travels as one argv element
+# with a kernel size limit, so a truncated payload is a real failure mode and a
+# truncated zip can still extract something.
+#
+# SECRETS — bind them, do not type them. otfn_secrets maps a Kubernetes Secret name to
+# the NAME of the variable holding its value, and those variables are bound through
+# the run form's "Use a secret" (or the dashboard's secret_vars channel). Only the
+# names travel in extra_vars, which is persisted to the job row; the values are
+# resolved at run time and added to the job's scrub list. Each Secret gets a single
+# key equal to its own name, which is what makes OpenFaaS mount it as a plain FILE at
+# /var/openfaas/secrets/<name> — what fnruntime.secretref's file channel reads.
+#
+# NOT IN SCOPE, on purpose: rotating a credential on the TARGET the function talks to
+# (for the OT cell that is FUXA's admin password). That belongs with the change that
+# turns FUXA's authentication on at bake time; doing it from here would alter a
+# running demo's credential for no benefit while FUXA still has auth disabled.
+#
+# extra_vars:
+#   otfn_name: ot-entitle-adapter
+#   otfn_pkg_b64: "<base64 zip>"
+#   otfn_pkg_sha256: "<hex>"
+#   otfn_env: {FN_CLOUD: openfaas, FN_SHARED_SECRET_FILE: /var/openfaas/secrets/...}
+#   otfn_secrets: {fn-shared-secret-ab12cd34: otfn_bearer}
+#   otfn_probe_only: true     # probe a deployed function and change nothing
+- name: Deploy a function onto the OpenFaaS runtime on KubeSolo
+  hosts: all
+  become: true
+  # Set once for every task below. RHEL's sudo secure_path excludes /usr/local/bin, so
+  # kubectl is called by ABSOLUTE PATH throughout — a bare `kubectl` works when tested
+  # by hand and fails under become, and tests/test_playbook_kubesolo.py holds that.
+  environment:
+    KUBECONFIG: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+  vars:
+    kubesolo_path: /var/lib/kubesolo
+    otfn_name: ""
+    otfn_namespace: openfaas-fn
+    otfn_gateway_namespace: openfaas
+    otfn_image: ot-faas-python:baked
+    otfn_pkg_b64: ""
+    otfn_pkg_sha256: ""
+    otfn_env: {}
+    # {kubernetes-secret-name: name-of-the-bound-variable}
+    otfn_secrets: {}
+    # One replica, pinned. Scale-to-zero would make the first Entitle call of every
+    # grant pay a cold start, and there is nothing here worth scaling.
+    otfn_replicas: 1
+    otfn_cpu_request: 100m
+    otfn_memory_request: 128Mi
+    otfn_cpu_limit: 500m
+    otfn_memory_limit: 256Mi
+    otfn_probe: true
+    otfn_probe_image: busybox:1.36
+    # Probe a function that is already deployed and change NOTHING: no package, no
+    # secrets, no apply. The diagnostic for "Entitle says the integration is unhealthy
+    # and nobody knows which layer moved", and safe to run against a live grant.
+    otfn_probe_only: false
+    _manifest: /root/.otfn-function.yaml
+    _secret_dir: /root/.otfn-secrets
+  tasks:
+    - name: Require a function name
+      ansible.builtin.assert:
+        that:
+          - otfn_name | length > 0
+        fail_msg: >-
+          otfn_name is required — it names the Function object, the Deployment the
+          operator creates from it, and the gateway route the caller dials.
+
+    - name: Require a package and its digest unless this is a probe-only run
+      ansible.builtin.assert:
+        that:
+          - otfn_pkg_b64 | length > 0
+          - otfn_pkg_sha256 | length > 0
+        fail_msg: >-
+          otfn_pkg_b64 and otfn_pkg_sha256 are both required. The digest is not
+          optional: the loader refuses a package it cannot verify, because this one
+          carries the code that mints credentials and it arrives over a channel with
+          a size limit that can truncate it.
+      when: not (otfn_probe_only | bool)
+
+    # The kubeconfig is the tell for "is this even a KubeSolo host", and it is worth
+    # its own message: every later failure would otherwise be a confusing kubectl error.
+    - name: Check KubeSolo is present
+      ansible.builtin.stat:
+        path: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+      register: otfn_kubeconfig
+
+    - name: Explain a host that is not running KubeSolo
+      ansible.builtin.fail:
+        msg: >-
+          No KubeSolo admin kubeconfig at {{ kubesolo_path }}/pki/admin/admin.kubeconfig.
+          Run kubesolo-install.yml first, or — for an OT broker — check the image was
+          baked from provisioners/ot/ot-sim-debian.sh with OT_ROLE=broker.
+      when: not otfn_kubeconfig.stat.exists
+
+    # THE error an operator will actually hit: a broker baked before the function
+    # runtime existed has KubeSolo and the Entitle agent but no gateway, and every
+    # symptom after this point would be a Function object that is accepted and then
+    # ignored. Named here, once, with the remedy.
+    - name: Check the OpenFaaS gateway is rolled out
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - -n
+          - "{{ otfn_gateway_namespace }}"
+          - rollout
+          - status
+          - deploy/gateway
+          - --timeout=180s
+      register: otfn_gateway
+      changed_when: false
+      failed_when: false
+
+    - name: Explain a broker with no function runtime
+      ansible.builtin.fail:
+        msg: >-
+          The OpenFaaS gateway is not running in the {{ otfn_gateway_namespace }}
+          namespace ({{ otfn_gateway.stderr | default(otfn_gateway.stdout) | trim }}).
+          This broker was baked without a function runtime — re-bake the image with
+          OT_FAAS=openfaas. Nothing was changed on this host.
+      when: otfn_gateway.rc != 0
+
+    - name: Check the Function CRD is established
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - get
+          - crd/functions.openfaas.com
+      register: otfn_crd
+      changed_when: false
+      failed_when: false
+
+    - name: Explain a runtime whose operator cannot reconcile
+      ansible.builtin.fail:
+        msg: >-
+          The functions.openfaas.com CRD is absent, so a Function object would be
+          rejected and the operator has nothing to reconcile. The baked manifest was
+          rendered without --include-crds; re-bake the image.
+      when: otfn_crd.rc != 0
+
+    - name: Deploy the function
+      when: not (otfn_probe_only | bool)
+      block:
+        # A directory, mode 0700, and removed in `always` below. The values are written
+        # to disk because `kubectl create secret --from-literal` puts them in argv,
+        # where `ps` shows them to every local user on the node.
+        - name: Create a private staging directory for the secret manifests
+          ansible.builtin.file:
+            path: "{{ _secret_dir }}"
+            state: directory
+            mode: "0700"
+
+        - name: Stage each secret as a manifest
+          ansible.builtin.copy:
+            dest: "{{ _secret_dir }}/{{ item.key }}.yaml"
+            mode: "0600"
+            # One key per Secret, equal to the Secret's own name: that is what makes
+            # OpenFaaS mount it at /var/openfaas/secrets/<name> as a FILE. A Secret
+            # with several keys mounts as a DIRECTORY, which the reader also handles,
+            # but only one of the two shapes is worth having two of.
+            content: |
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: {{ item.key }}
+                namespace: {{ otfn_namespace }}
+              type: Opaque
+              data:
+                {{ item.key }}: {{ lookup('vars', item.value) | b64encode }}
+          loop: "{{ otfn_secrets | dict2items }}"
+          loop_control:
+            label: "{{ item.key }}"
+          no_log: true
+
+        - name: Apply the secrets
+          ansible.builtin.command:
+            argv:
+              - /usr/local/bin/kubectl
+              - apply
+              - -f
+              - "{{ _secret_dir }}"
+            # apply, not create: this play converges a running function, and a second
+            # run with a rotated bearer has to replace the value rather than fail.
+          register: otfn_secrets_applied
+          changed_when: "'configured' in otfn_secrets_applied.stdout
+            or 'created' in otfn_secrets_applied.stdout"
+          when: otfn_secrets | length > 0
+
+        - name: Write the Function manifest
+          ansible.builtin.copy:
+            dest: "{{ _manifest }}"
+            mode: "0600"
+            content: |
+              apiVersion: openfaas.com/v1
+              kind: Function
+              metadata:
+                name: {{ otfn_name }}
+                namespace: {{ otfn_namespace }}
+              spec:
+                name: {{ otfn_name }}
+                image: {{ otfn_image }}
+                labels:
+                  com.openfaas.scale.min: "{{ otfn_replicas }}"
+                  com.openfaas.scale.max: "{{ otfn_replicas }}"
+                environment:
+                  OTFN_PKG_B64: "{{ otfn_pkg_b64 }}"
+                  OTFN_PKG_SHA256: "{{ otfn_pkg_sha256 }}"
+              {% for key, value in (otfn_env | dictsort) %}
+                  {{ key }}: "{{ value }}"
+              {% endfor %}
+              {% if otfn_secrets | length > 0 %}
+                secrets:
+              {% for name in (otfn_secrets.keys() | sort) %}
+                  - {{ name }}
+              {% endfor %}
+              {% endif %}
+                requests:
+                  cpu: {{ otfn_cpu_request }}
+                  memory: {{ otfn_memory_request }}
+                limits:
+                  cpu: {{ otfn_cpu_limit }}
+                  memory: {{ otfn_memory_limit }}
+          # The manifest carries the package, not a credential — but the package is
+          # code, so it is 0600 and removed with the secrets.
+          no_log: true
+
+        - name: Apply the Function
+          ansible.builtin.command:
+            argv:
+              - /usr/local/bin/kubectl
+              - apply
+              - -f
+              - "{{ _manifest }}"
+          register: otfn_applied
+          changed_when: "'configured' in otfn_applied.stdout
+            or 'created' in otfn_applied.stdout"
+
+        # Changing `environment` produces a new Deployment revision, so this also
+        # waits out the rollout of a package change — which is the case that matters:
+        # a "success" reported while the previous package is still serving would send
+        # an adapter fix into a demo that never received it.
+        - name: Wait for the function to become ready
+          ansible.builtin.command:
+            argv:
+              - /usr/local/bin/kubectl
+              - -n
+              - "{{ otfn_namespace }}"
+              - rollout
+              - status
+              - "deploy/{{ otfn_name }}"
+              - --timeout=300s
+          register: otfn_rollout
+          changed_when: false
+          retries: 3
+          delay: 10
+          # The operator creates the Deployment a moment after accepting the Function,
+          # so the first rollout-status can lose that race and report NotFound. Retried
+          # rather than pre-slept: the common case costs nothing.
+          until: otfn_rollout.rc == 0
+
+      always:
+        - name: Remove the staged package and secrets from the host
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "{{ _secret_dir }}"
+            - "{{ _manifest }}"
+
+  # ── Prove it answers, from a pod ───────────────────────────────────────────
+  # From a POD and not from the host, because the caller will be one: the Entitle
+  # agent is a pod on this cluster, and whether pod traffic resolves cluster DNS and
+  # reaches the gateway Service is a different question from whether the host can.
+  # This is also the one task that distinguishes "deployed" from "working" — there is
+  # no /invoke for a function whose endpoint only resolves inside the plant.
+    - name: Probe the function through the gateway
+      ansible.builtin.shell:
+        cmd: >-
+          /usr/local/bin/kubectl
+          -n {{ otfn_namespace }} delete pod otfn-probe --ignore-not-found
+          >/dev/null 2>&1 || true;
+          /usr/local/bin/kubectl
+          -n {{ otfn_namespace }} run otfn-probe --restart=Never --attach --rm
+          --quiet --image={{ otfn_probe_image }} --image-pull-policy=Never
+          --command -- sh -c '
+            u="http://gateway.{{ otfn_gateway_namespace }}.svc.cluster.local:8080";
+            nc -w 5 gateway.{{ otfn_gateway_namespace }}.svc.cluster.local 8080
+              </dev/null >/dev/null 2>&1 || { echo PROBE-FAIL-GATEWAY; exit 11; }
+            code=$(wget -qS -O /dev/null --timeout=20
+              "$u/function/{{ otfn_name }}/get_assets" 2>&1
+              | awk "/HTTP\\//{c=\$2} END{print c}");
+            case "$code" in
+              200|401|403) echo "PROBE-OK-$code" ;;
+              404) echo PROBE-FAIL-ROUTE ; exit 12 ;;
+              "") echo PROBE-FAIL-NORESPONSE ; exit 13 ;;
+              *) echo "PROBE-FAIL-HTTP-$code" ; exit 14 ;;
+            esac'
+      register: otfn_probe_result
+      changed_when: false
+      failed_when: false
+      when: otfn_probe | bool
+
+    # 401 is a PASS, and that is not a loophole. The probe carries no credential, so
+    # the shared-secret gate SHOULD refuse it — a 401 proves the gateway routed, the
+    # loader unpacked the package, Python started and fnruntime.auth ran. A 200 means
+    # the workload chose to answer an unauthenticated call (the reference adapter's
+    # health path does). What we are ruling out is 404 (the route is not there) and no
+    # response at all (the pod never started, or DNS did not resolve).
+    - name: Explain a function that does not answer
+      ansible.builtin.fail:
+        msg: >-
+          The function did not answer through the gateway:
+          {{ otfn_probe_result.stdout | default('') | trim }}
+          {{ otfn_probe_result.stderr | default('') | trim }}
+          —
+          {% if 'PROBE-FAIL-GATEWAY' in (otfn_probe_result.stdout | default('')) %}
+          the gateway Service is unreachable from a pod, which is cluster DNS or the
+          gateway itself, not this function.
+          {% elif 'PROBE-FAIL-ROUTE' in (otfn_probe_result.stdout | default('')) %}
+          the gateway answered 404, so it has no route for {{ otfn_name }} — the
+          Function object exists but the operator has not reconciled it into a
+          Deployment and Service.
+          {% elif 'PROBE-FAIL-NORESPONSE' in (otfn_probe_result.stdout | default('')) %}
+          nothing answered. Check the function's pod: ErrImageNeverPull means
+          {{ otfn_image }} is not in this host's containerd (re-bake), and a
+          CrashLoopBackOff with a zip or digest error means the package did not
+          survive the trip.
+          {% else %}
+          check `kubectl -n {{ otfn_namespace }} logs deploy/{{ otfn_name }}`.
+          {% endif %}
+      when:
+        - otfn_probe | bool
+        - "'PROBE-OK' not in (otfn_probe_result.stdout | default(''))"
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: >-
+          {{ otfn_name }}
+          {{ 'probed' if (otfn_probe_only | bool) else 'deployed' }} on
+          {{ otfn_namespace }} —
+          {{ otfn_probe_result.stdout | default('probe skipped') | trim }}

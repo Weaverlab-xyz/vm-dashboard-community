@@ -1517,7 +1517,8 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
     Terraform state already exists (which is what makes the rewire path idempotent).
     Every artifact is persisted onto the CHILD's metadata before the next step runs,
     so a failure part-way leaves nothing untracked for the destroy path."""
-    from . import config_service, job_service, terraform_pra_service as pra
+    from . import (config_service, job_service, ot_faas_service,
+                   terraform_pra_service as pra)
 
     # gce/ec2 rows carry instance_name; azure rows carry vm_name.
     vm = cmeta.get("instance_name") or cmeta.get("vm_name") or "ot-cell"
@@ -1680,6 +1681,7 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
     # the DMZ zone is its own call; on the other two it was written above, with the
     # cell's, for the source-ordering reason in the comment there.
     agent_note = ""
+    faas_note = ""
     if broker_id:
         if cloud == "gcp" and purdue_firewall_enabled():
             dmz_note = await _wire_dmz_firewall(
@@ -1687,6 +1689,34 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
                 plant_ip=ip, plant_ports=dmz_to_plant_ports(cmeta))
         agent_note = await _install_plant_agent(db, parent_id, child_id, cmeta,
                                                 broker_id, bmeta, cloud=cloud)
+        # The plant's Entitle adapter, on the function runtime beside the agent that
+        # calls it. AFTER the agent install, because an integration whose agent is not
+        # there yet is useless — and note the install is QUEUED, not awaited, so this
+        # cannot wait for it either: Entitle's first resource sync against a function
+        # that is still rolling out will fail and retry, which the note says out loud
+        # rather than leaving someone to read it as a broken registration.
+        #
+        # Best-effort as a whole. A cell that deployed and wired correctly must not be
+        # failed over an adapter, which is the same posture the Purdue rules take.
+        if not ot_faas_service.skip_reason(cmeta, bmeta):
+            try:
+                faas_note = await ot_faas_service.queue_deploy(
+                    db, parent_id, child_id, cmeta, broker_id=broker_id,
+                    bmeta=bmeta, cloud=cloud)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("OT cell %s: adapter deploy failed: %s", vm, exc)
+                faas_note = f"adapter deploy failed ({exc})"
+            else:
+                # Keyed on the artifact inside register(), so a Re-wire converges
+                # instead of registering a second integration nobody is tracking.
+                try:
+                    faas_note += "; " + await ot_faas_service.register(
+                        db, child_id, cmeta)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("OT cell %s: adapter registration failed: %s",
+                                   vm, exc)
+                    faas_note += (f"; Entitle registration failed ({exc}) — the "
+                                  f"function is deployed, so this can be retried")
 
     return {
         "vm_job_id": child_id,
@@ -1713,6 +1743,7 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
         "purdue_firewall": firewall_note,
         "dmz_zone": dmz_note,
         "plant_agent": agent_note,
+        "entitle_adapter": faas_note,
         "broker_job_id": broker_id,
     }
 

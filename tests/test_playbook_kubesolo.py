@@ -48,6 +48,11 @@ _EXPECTED = {
     "kubesolo-uninstall.yml",
     "entitle-agent-install.yml",
     "entitle-agent-uninstall.yml",
+    # Puts a function on the runtime the OT broker's bake installs beside the agent.
+    # It is generic on purpose — a package and its secrets, knowing nothing about
+    # Entitle or what the function talks to — so a new adapter is a new package
+    # rather than a new play.
+    "openfaas-function-deploy.yml",
 }
 
 # Storage is a FLAT namespace — a run resolves an asset by bare filename, so a name

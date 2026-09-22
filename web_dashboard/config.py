@@ -976,6 +976,28 @@ class Settings(BaseSettings):
     # installed and repaired. The dashboard itself has no route to a private cell, so
     # without this there is no way in to the DMZ host but the PRA Gateway.
     ot_config_runner_source_cidr: str = ""
+    # ── The plant's function runtime (ot_faas_service) ───────────────────────
+    # An Entitle "REST API" integration is an HTTP server Entitle drives, and the
+    # targets worth gating in a plant sit behind a boundary no cloud function can
+    # reach without punching through it. So the adapter runs on the broker's KubeSolo,
+    # beside the Entitle agent that calls it, and the integration is registered
+    # agent-brokered — no inbound hole, and not one new egress destination.
+    #
+    # Default OFF, and it needs an image baked with OT_FAAS=openfaas: turning it on
+    # against a broker baked without one produces a Function object that is accepted
+    # and then ignored, so the wiring refuses up front instead.
+    ot_faas_enabled: bool = False
+    # Which fnworkloads module the plant runs. Blank = the no-op reference adapter
+    # (entitle_webhook_echo), which serves every route of the Entitle contract — so
+    # the whole path can be proven before a target-specific adapter exists, and a
+    # failure then belongs to exactly one layer.
+    ot_faas_workload: str = ""
+    # Override the integration's endpoint. Blank = the in-cluster OpenFaaS gateway,
+    # which is the point: a name that resolves only inside the plant. This key is what
+    # makes the runtime swappable — Nuclio or a plain Deployment answers on a
+    # different name and nothing else has to change, which matters because OpenFaaS
+    # Community Edition may not be installed for a client or redistributed.
+    ot_faas_base_url: str = ""
     bt_ecs_host_instance_profile: str = "ecsInstanceRole"
     bt_ecs_host_name: str = "dashboard-sandbox-jumpoint-host"  # EC2 Name tag (find-or-create key)
     bt_ecs_execution_role_arn: str = ""  # Set to your ecsTaskExecutionRole ARN if required
