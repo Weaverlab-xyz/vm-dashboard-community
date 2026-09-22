@@ -371,7 +371,9 @@ def _check_config(req, ctx, config):
             problems.append(str(exc))
     if not problems and not teams:
         problems.append("Portainer has no teams — access is granted through team "
-                        "membership, so there is nothing to grant")
+                        "membership, so there is nothing to grant. Create a team "
+                        "in Portainer and give it access to the environments a "
+                        "requester should reach; each team is then an asset here")
     return Response(200, {"data": {
         "valid": not problems, "url": config["base"], "teams": teams,
         "dry_run": _dry_run(), "problems": problems,

@@ -510,6 +510,13 @@ async def run_pairing(db: Session, *, db_id: str, job_id: str,
             # with the native-connector path and a placeholder would read as registered.
             row.entitle_integration_id = fn_row.entitle_integration_id
             db.commit()
+            # And an EMPTY one means the registration did not happen: run_entitle_register
+            # reports through its own job and does not raise (retire_adapter above reads
+            # the column for exactly that reason). Completing here left a green pairing,
+            # an unregistered adapter and a red child job nothing links to.
+            if not fn_row.entitle_integration_id:
+                raise AdapterPairingError(
+                    _registration_failure(db, register["job_id"]))
 
         job_service.set_completed(db, job_id, {
             "db_id": db_id, "fn_id": fn_id,
@@ -523,6 +530,24 @@ async def run_pairing(db: Session, *, db_id: str, job_id: str,
     except Exception as exc:
         logger.error("clouddb adapter pairing failed db_id=%s: %s", db_id, exc)
         job_service.set_failed(db, job_id, str(exc))
+
+
+def _registration_failure(db: Session, register_job_id: str) -> str:
+    """Why the registration did not happen, in words, off the child job.
+
+    Carried up rather than pointed at: a job's detail view renders ``error_message``
+    and nothing else, and "see the other job" is not a link. Twin of the one in
+    ``portainer_adapter_service``.
+    """
+    detail = ""
+    try:
+        child = job_service.get_job(db, register_job_id)
+        detail = str(getattr(child, "error_message", "") or "").strip()
+    except Exception:  # noqa: BLE001 — the reason is a bonus, never the blocker
+        detail = ""
+    return ("the adapter was not registered in Entitle"
+            + (f": {detail}" if detail
+               else f" — see job {register_job_id} for why"))
 
 
 def _admin_credentials(db: Session, row: CloudDatabase) -> tuple:

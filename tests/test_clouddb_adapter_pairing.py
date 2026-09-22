@@ -340,6 +340,19 @@ def test_the_integration_id_is_only_stamped_when_one_really_exists():
     assert run.index("_entitle_registration_enabled()") < run.index(stamp)
 
 
+def test_an_empty_integration_id_fails_the_pairing_rather_than_completing_it():
+    """That same column is also the only report of the registration's OUTCOME:
+    run_entitle_register fails its own child job and returns normally, so a pairing
+    that only watched for an exception completed green with an unregistered adapter
+    and a red child job the Databases page does not link to."""
+    source = open(pairing.__file__, encoding="utf-8").read()
+    run = source.split("async def run_pairing(")[1]
+    guard = "if not fn_row.entitle_integration_id:"
+    assert guard in run, "a refused registration would complete the pairing"
+    assert run.index("run_entitle_register") < run.index(guard) < run.index(
+        "set_completed"), "the outcome has to be read after the call, before the end"
+
+
 def test_the_button_path_deploys_an_armed_adapter():
     """A button that silently deploys a no-op adapter is the worse surprise; the
     provision-time path keeps its observe-first default."""
