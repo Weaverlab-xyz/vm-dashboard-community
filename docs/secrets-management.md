@@ -177,6 +177,18 @@ The service principal needs the **Key Vault Secrets Officer** role on the vault,
 or a custom role with `Microsoft.KeyVault/vaults/secrets/read` and
 `Microsoft.KeyVault/vaults/secrets/write`.
 
+Add `Microsoft.KeyVault/vaults/secrets/recover/action` if you use a custom role.
+Soft delete is mandatory on every vault created since 2020 and cannot be turned
+off, so deleting a secret does not free its name — the name stays reserved by a
+deleted-but-recoverable object for the vault's retention window (7–90 days), and
+writing it again fails with `Conflict … ObjectIsDeletedButRecoverable`. That
+matters for the fixed-name secrets the dashboard stages for its adapters (for
+example `portainer-adapter-pat`), where a retire followed by a re-pair reuses the
+same name. The dashboard recovers such a secret and writes the new value over it;
+without the `recover` action it can only tell you to run
+`az keyvault secret recover --vault-name <vault> --name <secret>` yourself.
+Key Vault Secrets Officer already includes the action.
+
 **GCP Secret Manager:**
 ```
 roles/secretmanager.secretAccessor
