@@ -286,6 +286,37 @@ Needs Cloud Functions enabled, a stored `portainer_pat`, and a configured secret
 for the node's cloud. The card names whichever of those is missing instead of offering
 a button that cannot work.
 
+#### Moving the node strands the adapter
+
+Step 2 is not a preference, and it is not revisited. The adapter is VPC-attached in
+the node's **own cloud and region**, and a VPC is regional — so where the adapter sits
+is a reachability fact, decided once when you paired it.
+
+The node, meanwhile, is relocatable: redeploying it to a different region moves it, and
+redeploying it to a different cloud *relocates* it (the old node is deleted). Nothing
+in either move touches the function. Afterwards:
+
+- the adapter is still attached to the **old** network and cannot reach the node at its
+  internal IP at all;
+- `portainer_adapter_source_cidr` is a subnet range from that old network, so it is
+  merged into the **new** node's allow-list, where it admits nothing;
+- every Entitle grant times out, reported on **Entitle's** side as a connect timeout —
+  while the adapter card shows the function `available` with a live integration id.
+
+So nothing fails at the moment of the move, and nothing downstream says so. The deploy
+names it instead: a relocation (or a reuse) that lands in a cloud or region other than
+the paired adapter's puts an `adapter_stranded` note in the **job result**, and the
+adapter card carries a red **STRANDED** badge with the same explanation.
+
+**The fix is to re-pair**: **Remove adapter**, then **Deploy adapter**. That redeploys
+the function beside the new node and re-opens the new node's firewall to its range.
+Re-sending the token does *not* help — the token was never the problem. Removing the
+adapter also takes its Entitle integration with it, so anyone with a standing Portainer
+request in Entitle has to request again against the new integration.
+
+A **public** adapter (an unmanaged Portainer, reached over its configured URL) is never
+reported this way: it was never placed to match a node.
+
 #### Changing the adapter's token
 
 Step 1 runs once, inside the pairing job, so the adapter holds its own copy of the
@@ -653,6 +684,15 @@ for a JWT. This dashboard and the adapter both authenticate with `X-API-Key`.
 they read different copies of the token. The Containers tab reads `portainer_pat`; the
 adapter reads the copy staged in the cloud's secret store when it was paired. Click
 **Re-send the token to the adapter**.
+
+**Every Entitle grant times out, and the adapter card says `available`** — the node was
+relocated and the adapter was not. Entitle reports it from its own side, as a connect
+timeout against the adapter's endpoint, because the adapter itself never answers: it is
+VPC-attached in the region the node *used* to be in. Look for the red **STRANDED**
+badge on the adapter card, or for `adapter_stranded` in the node deploy's job result.
+Re-pair it — **Remove adapter**, then **Deploy adapter** — as described under
+[Moving the node strands the adapter](#moving-the-node-strands-the-adapter). Re-sending
+the token will not help; the token was never the problem.
 
 **The adapter's `/check_config` names an unresolved `@Microsoft.KeyVault(...)`
 reference** — on Azure the token arrives as a Key Vault reference that the *platform*

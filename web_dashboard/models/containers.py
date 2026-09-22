@@ -350,6 +350,11 @@ class PortainerAdapterResponse(BaseModel):
     target_url: str = ""                 # the Portainer the adapter was told about
     dry_run: bool = True                 # unset FN_PORTAINER_DRY_RUN means dry run
     source_cidrs: list[str] = []         # ranges added to the node firewall for it
+    # The node was relocated and the adapter was not: it is VPC-attached beside the
+    # node, so it is left on a network the node has moved off. Its own field because
+    # every other one here still reads healthy — see stranded_reason.
+    stranded: bool = False
+    stranded_reason: str = ""
 
 
 class PortainerTokenRequest(BaseModel):

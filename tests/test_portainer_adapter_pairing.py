@@ -97,6 +97,7 @@ def _ready(**over):
                  "portainer_verify_ssl": False,
                  "entitle_registration_enabled": True})
     CONF.update(over)
+    _node_svc()
 
 
 # ── Eligibility ───────────────────────────────────────────────────────────────
@@ -194,16 +195,32 @@ def test_the_name_is_deterministic():
 
 # ── Where the adapter points ──────────────────────────────────────────────────
 
+def _node_svc(nodes=None, *, cloud="gcp", region="us-central1",
+              account="lab-project"):
+    """Install a managed_node_service stub describing a node in ``cloud``/``region``.
+
+    Installed by :func:`_ready` as a BASELINE, not only by the tests that want a node.
+    The stub lives in ``sys.modules`` for the whole run, so anything that reads the
+    node's placement would otherwise inherit whatever the previous test happened to
+    install — and pass or fail on definition order.
+    """
+    placement = {"account": account, "region": region, "name": "portainer-server"}
+    _stub("web_dashboard.services.managed_node_service",
+          # A real NodeSpec, to the extent the service reads one: node_cloud_key is
+          # how it tells "this install has a node" from "node_cloud() defaulted".
+          PORTAINER=types.SimpleNamespace(feature="portainer",
+                                          node_cloud_key="portainer_node_cloud"),
+          CLOUDS=("gcp", "aws", "azure"),
+          node_cloud=lambda spec: cloud,
+          resolve_placement=lambda *a, **kw: dict(placement),
+          list_nodes=_async(lambda *a, **kw: list(nodes or [])))
+
+
 def _managed_node(**over):
     node = {"name": "portainer-server", "status": "RUNNING",
             "internal_ip": "10.128.0.5", "external_ip": "203.0.113.9"}
     node.update(over)
-    _stub("web_dashboard.services.managed_node_service",
-          PORTAINER=object(),
-          node_cloud=lambda spec: "gcp",
-          resolve_placement=lambda cloud, spec, region=None, zone=None: {
-              "account": "lab-project", "region": "us-central1", "name": "portainer-server"},
-          list_nodes=_async(lambda cloud, spec, p: [node]))
+    _node_svc([node])
     return node
 
 
@@ -463,6 +480,7 @@ def test_a_cloud_with_no_backend_retires_nothing_quietly():
 class _FakeFn:
     def __init__(self, **kw):
         self.id = "fn-1"
+        self.name = "jit-portainer"
         self.status = "available"
         self.cloud = "gcp"
         self.region = "us-central1"
@@ -525,6 +543,109 @@ def test_status_carries_the_entitle_flag_so_the_card_can_explain_itself():
     _fnsvc(found=_FakeFn(entitle_integration_id=""))
     st = adapter.status(None)
     assert st["entitle_enabled"] is False and st["entitle_integration_id"] == ""
+
+
+# ── The node moving out from under the adapter ────────────────────────────────
+# The adapter has to sit BESIDE the node — VPC-attached, in the node's own cloud and
+# region — to reach a fail-closed node at its internal IP. A VPC is regional, so that
+# placement is a reachability fact computed once, at pairing time. run_deploy can then
+# relocate the node and nothing revisits the function: it stays 'available' with a live
+# Entitle integration, the range it added to the allow-list is merged into the NEW
+# node's firewall where it is inert, and the only symptom is every grant timing out on
+# Entitle's side. Naming it is the whole fix.
+
+def _paired(*, node_cloud="gcp", node_region="us-central1", cidr="10.128.0.0/20",
+            **row_kw):
+    """A deployed VPC-attached adapter in GCP / us-central1, beside a node in
+    ``node_cloud`` / ``node_region``."""
+    _ready(portainer_node_cloud=node_cloud, portainer_adapter_source_cidr=cidr)
+    _node_svc(cloud=node_cloud, region=node_region)
+    _fnsvc(found=_FakeFn(**row_kw))
+
+
+def test_an_adapter_beside_its_node_is_not_stranded():
+    _paired()
+    assert adapter.stranded_reason(None) == ""
+    assert adapter.status(None)["stranded"] is False
+
+
+def test_a_region_move_strands_the_adapter():
+    """A VPC is regional, so a node one region over is unreachable from the function's
+    network even though both are still in the same cloud and the same project."""
+    _paired(node_region="us-east1")
+    reason = adapter.stranded_reason(None)
+    assert "us-central1" in reason and "us-east1" in reason
+    # The remedy, not just the diagnosis — re-pairing is the only thing that moves the
+    # function and re-opens the new node's firewall to it.
+    assert "Remove adapter" in reason and "Deploy adapter" in reason
+
+
+def test_a_cloud_move_strands_the_adapter():
+    _paired(node_cloud="azure", node_region="eastus")
+    reason = adapter.stranded_reason(None)
+    assert "GCP" in reason and "AZURE" in reason
+
+
+def test_the_stale_range_is_named_as_inert_rather_than_left_looking_applied():
+    """`portainer_adapter_source_cidr` really is merged into the new node's allow-list,
+    which makes the card's "Added to the node firewall" line the most convincing thing
+    on a stranded adapter. It belongs to the network the node left."""
+    _paired(node_region="us-east1")
+    assert "10.128.0.0/20" in adapter.stranded_reason(None)
+
+
+def test_a_public_adapter_is_never_stranded():
+    """It reaches its Portainer over the internet and was never placed to match a node,
+    so the node's cloud and region are not its business."""
+    _paired(node_cloud="azure", node_region="eastus", network_mode="public")
+    assert adapter.stranded_reason(None) == ""
+
+
+def test_an_unmanaged_install_is_never_reported_as_stranded():
+    """managed_node_service.node_cloud() answers "gcp" for an install that never
+    deployed a node, so comparing an operator's own adapter placement against that
+    invented default would send them to re-pair a perfectly healthy adapter. The RAW
+    key is what says whether there is a node at all."""
+    _ready()                      # no portainer_node_cloud: nothing was ever deployed
+    _node_svc(cloud="gcp", region="us-central1")
+    _fnsvc(found=_FakeFn(cloud="aws", region="us-east-1"))
+    assert adapter.stranded_reason(None) == ""
+
+
+def test_an_unknown_region_is_not_evidence_of_a_move():
+    """A blank on either side is missing information. Guessing here costs an operator a
+    retire-and-pair of a working adapter."""
+    _paired(node_region="")
+    assert adapter.stranded_reason(None) == ""
+    _paired(node_region="us-east1", region="")
+    assert adapter.stranded_reason(None) == ""
+
+
+def test_the_caller_can_pass_the_placement_a_deploy_is_landing_on():
+    """What run_deploy needs. By the time it asks, config already describes the node's
+    NEW home — so a check that only read config would compare the new placement
+    against itself and never fire."""
+    _paired()                     # config and the row both say gcp / us-central1
+    assert adapter.stranded_reason(None) == ""
+    reason = adapter.stranded_reason(None, node_cloud="azure", node_region="eastus")
+    assert "AZURE / eastus" in reason
+
+
+def test_a_pairing_that_does_not_exist_is_not_stranded():
+    _ready(portainer_node_cloud="azure")
+    _node_svc(cloud="azure", region="eastus")
+    _fnsvc()
+    assert adapter.stranded_reason(None) == ""
+
+
+def test_status_carries_the_stranding_so_the_card_can_say_it():
+    """Every other field the card renders still reads healthy — status 'available', a
+    live integration id, a target URL — which is exactly why this one has to exist."""
+    _paired(node_cloud="azure", node_region="eastus")
+    st = adapter.status(None)
+    assert st["stranded"] is True
+    assert st["status"] == "available" and st["entitle_integration_id"] == "int-9"
+    assert "AZURE" in st["stranded_reason"]
 
 
 # ── The job ───────────────────────────────────────────────────────────────────

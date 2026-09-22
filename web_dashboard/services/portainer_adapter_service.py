@@ -526,6 +526,110 @@ def find_adapter(db):
         db, [name], workload=ADAPTER_WORKLOAD).get(name)
 
 
+def _source_cidrs() -> list:
+    """The adapter subnet range(s) currently merged into the node's allow-list."""
+    return [c.strip() for c in (config_service.get(SOURCE_CIDR_KEY) or "").split(",")
+            if c.strip()]
+
+
+# ── Has the node moved out from under the adapter? ───────────────────────────
+
+def _node_placement_from_config() -> tuple:
+    """The managed node's ``(cloud, region)`` as CONFIG records them, or ``("", "")``
+    when this install has no managed node at all.
+
+    Cloud-free on purpose — :func:`status` polls this — and the question is answerable
+    from the two keys every deploy writes. The RAW node-cloud key is what decides
+    whether there IS a node: ``managed_node_service.node_cloud`` answers ``"gcp"`` for
+    an install that never deployed one, and comparing an operator's own adapter
+    placement against that invented default would report a perfectly healthy unmanaged
+    pairing as stranded.
+    """
+    from . import managed_node_service
+
+    cloud = ""
+    try:
+        spec = managed_node_service.PORTAINER
+        cloud = (config_service.get(spec.node_cloud_key) or "").strip().lower()
+        if cloud not in managed_node_service.CLOUDS:
+            return "", ""
+        placement = managed_node_service.resolve_placement(cloud, spec) or {}
+    except Exception as exc:
+        # Never at the card's expense: this is an advisory check, and a placement that
+        # cannot be resolved is not evidence of a move either way. An unresolvable
+        # REGION still leaves the cloud half usable on its own.
+        logger.warning("portainer adapter: could not resolve the node's placement "
+                       "(%s)", exc)
+        return cloud, ""
+    return cloud, (placement.get("region") or "")
+
+
+def _where(cloud: str, region: str) -> str:
+    return f"{cloud.upper()} / {region}" if region else cloud.upper()
+
+
+def _stranded_for_row(row, node_cloud: str, node_region: str) -> str:
+    """The shared half of :func:`stranded_reason`, against an already-resolved row —
+    so :func:`status` does not look the adapter up twice."""
+    if row is None:
+        return ""
+    if (row.network_mode or "").strip().lower() != "vpc":
+        # A public adapter reaches its Portainer over the internet and was never placed
+        # to match a node, so where the node lives is not its problem.
+        return ""
+
+    cloud = (node_cloud or "").strip().lower()
+    region = (node_region or "").strip()
+    if not cloud:
+        cloud, region = _node_placement_from_config()
+    if not cloud:
+        return ""
+
+    adapter_cloud = (row.cloud or "").strip().lower()
+    adapter_region = (row.region or "").strip()
+    # A blank on either side is missing information, not evidence of a move: say
+    # nothing rather than send an operator to re-pair a working adapter.
+    moved_cloud = bool(adapter_cloud) and adapter_cloud != cloud
+    moved_region = bool(region and adapter_region) and adapter_region != region
+    if not (moved_cloud or moved_region):
+        return ""
+
+    stale = _source_cidrs()
+    inert = (f"The range {', '.join(stale)} it added to the node's allow-list is from "
+             f"the OLD network, so it is inert there. " if stale else "")
+    return (
+        f"The Entitle adapter {row.name} is in {_where(adapter_cloud, adapter_region)} "
+        f"and the Portainer node is now in {_where(cloud, region)}. The adapter is a "
+        f"VPC-attached function deployed BESIDE the node — a VPC is regional, so it is "
+        f"still on the old network and cannot reach the node at its internal IP. "
+        f"{inert}Nothing failed, and nothing else here will say so: the function stays "
+        f"'available' with its Entitle integration live, and the only symptom is every "
+        f"grant timing out on Entitle's side. Re-pair it — Remove adapter, then Deploy "
+        f"adapter — which redeploys the function beside the new node and re-opens the "
+        f"node firewall to it.")
+
+
+def stranded_reason(db, *, node_cloud: str = "", node_region: str = "") -> str:
+    """Why the paired adapter can no longer reach the Portainer node, or ``""``.
+
+    The adapter's cloud and region are not a preference: it is deployed beside the node
+    so it can reach a fail-closed node at its INTERNAL IP (see the module docstring),
+    and a VPC is regional. That placement is therefore a reachability fact, computed
+    once at pairing time — and ``portainer_node_service.run_deploy`` can relocate the
+    node to another region, or another cloud entirely, with nothing revisiting the
+    function that was paired to where it used to be.
+
+    Refusing the relocation would be too strong; naming it is the fix. So this is a
+    check, not a guard, and it reports rather than raises.
+
+    ``node_cloud`` / ``node_region`` let a deploy pass the placement it is landing on,
+    which is the point of them — mid-deploy the row and the config keys still describe
+    where the node used to be. Omitted, both come from config, which is what the card
+    reads.
+    """
+    return _stranded_for_row(find_adapter(db), node_cloud, node_region)
+
+
 def status(db) -> dict:
     """What the Portainer page's just-in-time access card renders.
 
@@ -542,6 +646,7 @@ def status(db) -> dict:
             env = json.loads(row.env_ref or "{}") or {}
         except (TypeError, ValueError):
             env = {}
+    stranded = _stranded_for_row(row, "", "")
     return {
         "name": adapter_name(),
         "workload": ADAPTER_WORKLOAD,
@@ -560,9 +665,11 @@ def status(db) -> dict:
         # The workload treats anything truthy — including unset — as dry run, so the
         # card must read "armed" from the value actually deployed, not from its absence.
         "dry_run": env.get("FN_PORTAINER_DRY_RUN", "1") not in ("0", "false", "False"),
-        "source_cidrs": [c.strip() for c
-                         in (config_service.get(SOURCE_CIDR_KEY) or "").split(",")
-                         if c.strip()],
+        "source_cidrs": _source_cidrs(),
+        # Every other field on this card reads healthy for a stranded adapter, which is
+        # exactly why it needs its own one — see :func:`stranded_reason`.
+        "stranded": bool(stranded),
+        "stranded_reason": stranded,
     }
 
 
