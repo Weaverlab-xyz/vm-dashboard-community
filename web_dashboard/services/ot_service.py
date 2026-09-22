@@ -1028,13 +1028,47 @@ ENTITLE_AGENT_PORTS = ("443", "8080")
 _METADATA_RESOLVER_CIDR = "169.254.169.254/32"
 
 
-def _dmz_rule_names(vm: str, digest: str = "") -> dict:
+def _dmz_rule_names(vm: str, digest: str = "", plant_digest: str = "") -> dict:
     return {"egress_entitle": f"{vm}-dmz-egress-entitle-{digest or 'none'}",
+            "egress_plant":   f"{vm}-dmz-egress-plant-{plant_digest or 'none'}",
             "egress_dns_udp": f"{vm}-dmz-egress-dns-udp",
             "egress_dns_tcp": f"{vm}-dmz-egress-dns-tcp",
             "egress_deny":    f"{vm}-dmz-egress-deny",
             "ingress_allow":  f"{vm}-dmz-ingress-allow",
             "ingress_deny":   f"{vm}-dmz-ingress-deny"}
+
+
+# The second hole in the DMZ, and the one whose ABSENCE was a bug for as long as the
+# in-plant agent has existed.
+#
+# The cell admits the broker on 22 (`ingress_agent` in _wire_purdue_firewall, and its
+# per-cloud siblings) so the plant's own Entitle agent can mint ephemeral accounts on
+# it. But the broker's own egress was the Entitle channel and DNS with a catch-all
+# DENY behind it — and an egress rule is evaluated on the SENDING host. So the cell
+# opened a door that the broker's own deny closed from the inside: every grant would
+# report success, because registration talks to Entitle's API and never to the cell,
+# and then the agent's SSH would be dropped. "Granted, but it does not work."
+#
+# Two pinned tests asserted the old posture as correct ("the Entitle ports and DNS and
+# nothing else"), which is exactly how a composition failure survives review: each
+# rule set was right on its own, and nobody held the pair against the thing the agent
+# actually has to do. Those tests now assert the corrected claim — the Entitle
+# channel, DNS, and the ONE plant host this broker brokers.
+def dmz_to_plant_ports(cmeta: dict) -> list:
+    """Every port the plant's broker may open toward its cell. One projection.
+
+    Three clouds implement this rule and each used to spell its port list inline; the
+    multi-tunnel work already showed what that costs (``_cell_tunnels`` had to become
+    the single projection after three copies drifted). So it lives here, and a port
+    added for a new plant-side target is added once.
+
+    22 is the Entitle agent's, for the ephemeral Linux accounts it mints. The cell's
+    HMI port joins this list when the JIT HMI adapter is wired — deliberately NOT yet:
+    opening a port toward a listener that does not exist is this feature's own cardinal
+    sin, because a session to a dead port is indistinguishable from a blocked firewall.
+    """
+    ports = {22}
+    return sorted(ports)
 
 
 def entitle_agent_endpoint() -> str:
@@ -1648,7 +1682,9 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
     agent_note = ""
     if broker_id:
         if cloud == "gcp" and purdue_firewall_enabled():
-            dmz_note = await _wire_dmz_firewall(db, parent_id, broker_id, bmeta)
+            dmz_note = await _wire_dmz_firewall(
+                db, parent_id, broker_id, bmeta,
+                plant_ip=ip, plant_ports=dmz_to_plant_ports(cmeta))
         agent_note = await _install_plant_agent(db, parent_id, child_id, cmeta,
                                                 broker_id, bmeta, cloud=cloud)
 
@@ -1931,8 +1967,9 @@ async def destroy_agent_token(vm_job_id: str) -> str:
     return ""
 
 
-async def _wire_dmz_firewall(db, parent_id: str, broker_id: str, bmeta: dict) -> str:
-    """Fence the DMZ broker: one destination out, the Gateway and the runner in.
+async def _wire_dmz_firewall(db, parent_id: str, broker_id: str, bmeta: dict,
+                             plant_ip: str = "", plant_ports: Optional[list] = None) -> str:
+    """Fence the DMZ broker: two destinations out, the Gateway and the runner in.
 
     Mirrors ``_wire_purdue_firewall`` deliberately — same recording discipline (each
     rule lands in the row's ``ot_firewall_rules`` the moment it exists, so the cloud's
@@ -1969,7 +2006,16 @@ async def _wire_dmz_firewall(db, parent_id: str, broker_id: str, bmeta: dict) ->
     bmeta["ot_entitle_destinations"] = cidrs
     bmeta["ot_entitle_destination_source"] = provenance
 
-    names = _dmz_rule_names(vm, entitle_destination_digest(cidrs))
+    # The plant-ward hole is digest-named for the same create-only reason the Entitle
+    # one is, and its digest covers the PORTS as well as the address: a cell redeployed
+    # on a new IP, or a port added for a new plant-side target, both have to arrive as a
+    # differently-named rule or they would not arrive at all.
+    plant_ports = list(plant_ports or [])
+    plant_digest = ""
+    if plant_ip and plant_ports:
+        plant_digest = entitle_destination_digest(
+            [f"{plant_ip}/32"] + [str(p) for p in plant_ports])
+    names = _dmz_rule_names(vm, entitle_destination_digest(cidrs), plant_digest)
     created = list(bmeta.get("ot_firewall_rules") or [])
 
     def _record(rule_name):
@@ -1984,7 +2030,12 @@ async def _wire_dmz_firewall(db, parent_id: str, broker_id: str, bmeta: dict) ->
     # leave the previous allow in place beside the new one, or the hole is the union of
     # both and nobody can tell from the rule list which one is live.
     for stale in list(created):
-        if stale.startswith(f"{vm}-dmz-egress-entitle-") and stale != names["egress_entitle"]:
+        _is_stale = (
+            (stale.startswith(f"{vm}-dmz-egress-entitle-")
+             and stale != names["egress_entitle"])
+            or (stale.startswith(f"{vm}-dmz-egress-plant-")
+                and stale != names["egress_plant"]))
+        if _is_stale:
             try:
                 await gcp_service.delete_firewall_rule(project, stale)
                 created.remove(stale)
@@ -2003,6 +2054,23 @@ async def _wire_dmz_firewall(db, parent_id: str, broker_id: str, bmeta: dict) ->
                 description=f"vm-dashboard OT broker: the Entitle agent's channel "
                             f"({provenance}) — the plant's only way out")
             _record(names["egress_entitle"])
+        # The plant-ward hole. Without it the cell's `ingress_agent` allow is a door
+        # opened from the outside while this host's own catch-all deny holds it shut,
+        # and the agent's SSH to the cell never leaves the broker — see the note on
+        # dmz_to_plant_ports. Created before the catch-all deny below, like its
+        # sibling, so the broker is never left stranded behind a rule that outranks
+        # everything it needs.
+        if plant_digest and names["egress_plant"] not in created:
+            await gcp_service.ensure_segmentation_rule(
+                project=project, name=names["egress_plant"], network=network,
+                direction="EGRESS", action="allow", priority=_DMZ_EGRESS_ALLOW_PRIORITY,
+                destination_ranges=[f"{plant_ip}/32"],
+                target_tags=[OT_DMZ_NETWORK_TAG],
+                protocol="tcp", ports=[str(p) for p in plant_ports],
+                description="vm-dashboard OT broker: the one plant host this broker "
+                            "brokers — the agent mints accounts on it over SSH, and "
+                            "an egress rule is evaluated here, not on the cell")
+            _record(names["egress_plant"])
         for key, proto in (("egress_dns_udp", "udp"), ("egress_dns_tcp", "tcp")):
             if names[key] not in created:
                 await gcp_service.ensure_segmentation_rule(
@@ -2098,9 +2166,9 @@ _AWS_RESOLVER_CIDR = "169.254.169.253/32"
 _AZURE_RESOLVER_TAG = "AzurePlatformDNS"
 # Azure NSG priorities. Unique per direction, and the outbound allows have to outrank
 # the outbound deny the same way the GCP 790s outrank the 800.
-_AZ_PRIO = {"egress_entitle": 790, "egress_dns_udp": 791, "egress_dns_tcp": 792,
-            "egress_deny": 800, "ingress_allow": 800, "ingress_agent": 810,
-            "ingress_deny": 900}
+_AZ_PRIO = {"egress_entitle": 790, "egress_plant": 793, "egress_dns_udp": 791,
+            "egress_dns_tcp": 792, "egress_deny": 800, "ingress_allow": 800,
+            "ingress_agent": 810, "ingress_deny": 900}
 
 
 def _aws_zone_names(vm: str) -> dict:
@@ -2195,6 +2263,10 @@ async def _wire_zones_aws(db, parent_id: str, child_id: str, cmeta: dict,
     names = _aws_zone_names(vm)
     dmz_group_id = ""
     notes = []
+    # The broker's group is converged first (see the docstring), so the cell's group
+    # does not exist yet and cannot be named as an egress destination — the plant-ward
+    # hole goes in by address instead.
+    cell_ip = (cmeta.get("private_ip") or "").strip()
 
     if broker_id and bmeta:
         cidrs, provenance = _entitle_egress_targets()
@@ -2209,7 +2281,15 @@ async def _wire_zones_aws(db, parent_id: str, child_id: str, cmeta: dict,
                     [{"protocol": "tcp", "port": int(p), "cidrs": cidrs}
                      for p in ENTITLE_AGENT_PORTS if cidrs]
                     + [{"protocol": "udp", "port": 53, "cidrs": [_AWS_RESOLVER_CIDR]},
-                       {"protocol": "tcp", "port": 53, "cidrs": [_AWS_RESOLVER_CIDR]}]),
+                       {"protocol": "tcp", "port": 53, "cidrs": [_AWS_RESOLVER_CIDR]}]
+                    # The plant-ward hole. `_ensure_ot_zone_security_group_sync`
+                    # revokes the allow-all egress AWS creates a group with, so
+                    # without this the broker cannot reach the cell that admits it —
+                    # see dmz_to_plant_ports. By address, not by group: the cell's own
+                    # group is created AFTER this one, so naming it here would be a
+                    # forward reference.
+                    + [{"protocol": "tcp", "port": int(p), "cidrs": [f"{cell_ip}/32"]}
+                       for p in dmz_to_plant_ports(cmeta) if cell_ip]),
             )
             dmz_group_id = zone["id"]
             job_service.update_metadata(db, broker_id, {
@@ -2281,6 +2361,10 @@ async def _wire_zones_azure(db, parent_id: str, child_id: str, cmeta: dict,
 
     names = _azure_zone_names(vm)
     broker_ip = ((bmeta or {}).get("private_ip") or "").strip()
+    # Each zone names the other by address here — Azure NSG rules take addresses and
+    # tags, not "the other NSG" — so the pair is symmetric: the cell admits broker_ip
+    # inbound, and the broker allows cell_ip outbound.
+    cell_ip = (cmeta.get("private_ip") or "").strip()
     notes = []
 
     if broker_id and bmeta:
@@ -2313,6 +2397,18 @@ async def _wire_zones_azure(db, parent_id: str, child_id: str, cmeta: dict,
                 "destinations": cidrs, "ports": list(ENTITLE_AGENT_PORTS),
                 "description": f"OT DMZ broker: the Entitle agent's channel "
                                f"({provenance})"})
+        # The plant-ward hole. Azure's Outbound Deny at 800 is what actually closes the
+        # default outbound access, and it closed the cell off along with the internet —
+        # so the cell's `ingress-agent` allow admitted a connection the broker could
+        # never open. See dmz_to_plant_ports.
+        if cell_ip:
+            rules.insert(0, {
+                "name": "egress-plant", "priority": _AZ_PRIO["egress_plant"],
+                "direction": "Outbound", "access": "Allow", "protocol": "Tcp",
+                "destinations": [f"{cell_ip}/32"],
+                "ports": [str(p) for p in dmz_to_plant_ports(cmeta)],
+                "description": "OT DMZ broker: the one plant host this broker brokers "
+                               "— an egress rule is evaluated here, not on the cell"})
         try:
             zone = await azure_service.ensure_ot_zone_nsg(
                 rg, location, name=names["dmz"], rules=rules)

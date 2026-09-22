@@ -98,7 +98,20 @@ def test_the_cell_admits_the_broker_on_22_and_nothing_else():
     assert 'cmeta.get("ot_broker_job_id")' in src
 
 
-def test_the_brokers_only_way_out_is_the_entitle_channel():
+def test_the_brokers_ways_out_are_the_entitle_channel_and_its_own_cell():
+    """The broker gets THREE destinations, and the third one was missing for as long
+    as the in-plant agent existed.
+
+    The earlier version of this test asserted "the Entitle set and the DNS resolver"
+    and nothing else — and it was wrong in a way that only shows up when the two rule
+    sets are read together. The cell admits the broker on 22 (`ingress_agent`), but an
+    egress rule is evaluated on the SENDING host, so the broker's own catch-all deny
+    held that door shut from the inside: the grant reported success (registration
+    talks to Entitle's API, never to the cell) and then the agent's SSH was dropped.
+
+    That is why the assertion below names the plant destination explicitly instead of
+    allowing anything: the claim is still "narrow", it is just no longer "one".
+    """
     ot = _load()
     src = _fn_src(_OT, "_wire_dmz_firewall")
     assert ot.ENTITLE_AGENT_PORTS == ("443", "8080"), (
@@ -108,11 +121,47 @@ def test_the_brokers_only_way_out_is_the_entitle_channel():
                         src, re.S)
     assert allows, "the DMZ zone opens nothing"
     for dest in allows:
-        assert dest in ("cidrs", "[_METADATA_RESOLVER_CIDR]"), (
-            f"the broker may reach the Entitle set and the DNS resolver; {dest} is "
-            "neither")
+        assert dest in ("cidrs", "[_METADATA_RESOLVER_CIDR]", '[f"{plant_ip}/32"]'), (
+            f"the broker may reach the Entitle set, the DNS resolver and the one "
+            f"plant host it brokers; {dest} is none of the three")
+    assert '[f"{plant_ip}/32"]' in allows, (
+        "there is no plant-ward egress allow, so the cell's ingress_agent rule opens "
+        "a door this host's own catch-all deny holds shut — the agent's SSH never "
+        "leaves the broker and the failure reads as 'granted but it does not work'")
     assert 'direction="EGRESS", action="deny"' in src, (
-        "without the catch-all deny the 'one way out' claim is just a sentence")
+        "without the catch-all deny the 'narrow way out' claim is just a sentence")
+
+
+def test_the_plant_ward_hole_is_one_host_one_projection_and_digest_named():
+    ot = _load()
+    src = _fn_src(_OT, "_wire_dmz_firewall")
+    # A /32, not the subnet: "the one plant host this broker brokers" has to be true
+    # of the rule, not only of the description.
+    assert '[f"{plant_ip}/32"]' in src, "the plant destination is not a single host"
+    # Digest-named, because ensure_segmentation_rule is create-only: a cell redeployed
+    # on a new address, or a port added later, must arrive as a differently-named rule
+    # or it does not arrive at all — the same reason the Entitle allow carries one.
+    assert "plant_digest" in src and 'names["egress_plant"]' in src, (
+        "the plant-ward rule is not digest-named, so a changed cell address would "
+        "leave the old allow in place and report success")
+    assert f'{ot._dmz_rule_names("x", "d", "p")["egress_plant"]}'.startswith("x-dmz-egress-plant-")
+    # And the port list comes from the ONE projection, so three clouds cannot drift —
+    # the lesson _cell_tunnels already paid for.
+    assert "dmz_to_plant_ports" in _read(_OT), "the port list is spelled inline somewhere"
+    assert ot.dmz_to_plant_ports({}) == [22], (
+        "22 is the agent's SSH; anything else here is a port opened toward a listener "
+        "that may not exist, which is indistinguishable from a blocked firewall")
+
+
+def test_every_cloud_opens_the_plant_ward_hole():
+    """All three, from the one projection. AWS is NOT the exception it looks like:
+    `_ensure_ot_zone_security_group_sync` revokes the allow-all egress AWS creates a
+    group with, so an SG with an explicit egress list is as closed as the other two."""
+    for fn in ("_wire_dmz_firewall", "_wire_zones_aws", "_wire_zones_azure"):
+        body = _fn_src(_OT, fn)
+        assert "dmz_to_plant_ports" in body, (
+            f"{fn} does not open the plant-ward hole, so on that cloud the in-plant "
+            f"agent still cannot reach the cell that admits it")
 
 
 def test_the_egress_allow_outranks_the_deny_it_sits_behind():
