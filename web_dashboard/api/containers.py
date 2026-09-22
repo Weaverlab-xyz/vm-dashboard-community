@@ -1013,6 +1013,36 @@ def get_rancher_firewall(
     return rancher_node_service.firewall_status(db)
 
 
+@router.post("/rancher/firewall")
+async def reapply_rancher_firewall(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("containers", "write")),
+):
+    """Re-detect the dashboard's egress address and re-apply the node's ingress rule.
+
+    The GET above reports the set that WOULD be applied — it is computed from config,
+    not read back from the cloud — so an operator who adds their browser's public IP
+    to ``rancher_allowed_source_cidrs`` sees it listed there immediately and still
+    can't reach the node: saving a setting writes config, and nothing recomputes the
+    rule. The other things that re-apply it are a redeploy, an unrelated cluster
+    event, and the Entitle ``reachability`` action (hidden unless an integration
+    exists). This is the repair on its own, and the direct-access path for humans and
+    for Entitle grantees who aren't coming through the PRA Web Jump.
+
+    Safe to click on a healthy node: the per-cloud apply is idempotent, and
+    fail-closed is preserved — an empty merged set still removes the rule rather than
+    leaving a stale one behind. Returns the new breakdown plus what changed."""
+    from ..services import rancher_node_service
+
+    try:
+        return await rancher_node_service.reapply_firewall(db)
+    except Exception as exc:  # noqa: BLE001 — every cloud raises its own type here
+        logger.exception("Re-applying the Rancher node's ingress failed")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not re-apply the Rancher node's ingress rule: {exc}")
+
+
 @router.get("/rancher/pra-options")
 async def get_rancher_pra_options(
     current_user: User = Depends(require_permission("containers", "read")),

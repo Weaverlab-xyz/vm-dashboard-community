@@ -275,6 +275,48 @@ def firewall_status(db) -> dict:
     }
 
 
+async def reapply_firewall(db, placement=None) -> dict:
+    """Re-detect the dashboard's egress address and re-apply the node's ingress — the
+    deploy's "Configuring firewall" step, on demand.
+
+    ``rancher_allowed_source_cidrs`` is the operator's own lever (their browser's
+    public IP, a corp egress pool, a colleague's address), and saving it in Settings
+    writes CONFIG — nothing recomputes the cloud rule. Until now the only things that
+    did were a redeploy, an unrelated cluster event, or the Entitle-gated
+    ``reachability`` action, which is invisible unless an integration exists. So the
+    operator added their IP, watched it appear in the Settings readout — which reports
+    the set that WOULD be applied, not the live rule — and still could not reach the
+    node. This is that repair on its own.
+
+    It also covers the rule ageing out from under a healthy node: the worker gets
+    rescheduled behind a different SNAT address, a corp proxy egresses from a pool, a
+    gateway is rebuilt with a new IP, or someone deletes the rule in the cloud console.
+    Every caller renders all of those the same unhelpful way — "unreachable".
+
+    Returns the :func:`firewall_status` breakdown of the NEW state plus what the
+    re-apply did: ``detected_egress_ip``, ``before``, ``added``, ``removed``,
+    ``changed`` and the raw per-cloud ``applied`` result.
+
+    ``changed`` counts a RECREATED rule as a change. A deleted rule recomputes to the
+    same source set it always had, so comparing sets alone would report "nothing
+    changed" about the repair that just put the rule back.
+    """
+    before = firewall_status(db).get("merged") or []
+    detected = await _ensure_dashboard_egress_cidr()
+    applied = await refresh_rancher_firewall(db, placement=placement)
+    status = firewall_status(db)
+    after = status.get("merged") or []
+    status.update({
+        "detected_egress_ip": detected,
+        "before": before,
+        "added": [c for c in after if c not in before],
+        "removed": [c for c in before if c not in after],
+        "changed": after != before or bool(applied.get("created")),
+        "applied": applied,
+    })
+    return status
+
+
 async def _wait_ready(url: str, timeout_s: int = _READY_TIMEOUT_S) -> str:
     """Poll the node until Rancher answers (it needs 1-3 min; expect early 5xx).
 

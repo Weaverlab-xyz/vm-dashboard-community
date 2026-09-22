@@ -296,10 +296,70 @@ and-egg problem. The dashboard now manages the allow-list for you:
 
 The effective set is recomputed and re-applied idempotently on every relevant
 event: node deploy, cluster provision, cluster import, cluster decommission, Web Jump
-enable, and every **gateway deploy or teardown**. It stays **fail-closed** — if there
-are no manual CIDRs, no provisioned clusters, and no captured Gateway IP, the node is
-not opened (unless *Allow open* is ticked). The **Settings → Kubernetes** panel shows
-the computed allow-list read-only.
+enable, and every **gateway deploy or teardown** — plus **Re-apply the node firewall**
+on the Rancher tab, on demand. It stays **fail-closed** — if there are no manual
+CIDRs, no provisioned clusters, and no captured Gateway IP, the node is not opened
+(unless *Allow open* is ticked). The **Settings → Kubernetes** panel shows the
+computed allow-list read-only.
+
+### Letting your own browser in
+
+Editing the allow-list and **applying** it are two different actions, and this is the
+one thing that catches everybody: **saving `rancher_allowed_source_cidrs` in Settings
+writes config — it does not touch the cloud.** The Settings readout then shows your
+address, because it renders the set that *would* be applied, so the IP looks allowed
+while the rule on the node is still the one the last deploy wrote. Nothing recomputes
+it until one of the events above.
+
+1. **Find the address the node will see.** Any IP-echo works:
+
+   ```bash
+   curl -s https://api.ipify.org
+   ```
+
+   In PowerShell, `curl` is an alias for `Invoke-WebRequest` — use `curl.exe -s https://api.ipify.org`,
+   or `(Invoke-RestMethod https://api.ipify.org)`.
+
+   Your **browser** may not egress from that address. A corporate proxy or VPN
+   (Cloudflare WARP, Zscaler) can route the browser and the shell differently, and WARP
+   egresses from a **pool**, so consecutive requests leave from different IPs. The
+   reliable check is to ask the browser itself — open <https://api.ipify.org> in the
+   browser you'll use for Rancher. If it disagrees with the shell, or if the answer
+   changes on reload, allow the **pool's CIDR** (e.g. `104.28.182.0/24`) rather than a
+   single `/32`.
+2. **Add it** in Settings → Kubernetes → *Allowed source CIDRs*, as `<ip>/32`, comma-separated
+   with anything already there, and save.
+3. **Apply it**: Containers → Kubernetes (Rancher) → **Re-apply the node firewall**.
+   It re-detects the dashboard's own egress, re-merges the whole set and rewrites the
+   rule, then tells you what it is now allowing. Safe to click on a healthy node, and
+   safe to click twice.
+
+> **"Allow open" only fires when the CSV is empty.** `<cloud>_rancher_allow_open`
+> substitutes `0.0.0.0/0` for an *empty* `rancher_allowed_source_cidrs` — it is not an
+> override. With one address in the CSV the tick does nothing. To open the node to
+> everyone while keeping specific entries visible, put `0.0.0.0/0` in the CSV itself.
+
+### Direct access for Entitle grantees (no PRA)
+
+The [PRA Web Jump](#pra-web-jump-optional) is optional, and an Entitle grant doesn't
+need it: the grantee gets an ephemeral Rancher account (username = their Entitle
+email) and can sign in at the node's URL directly. But *their browser* then hits the
+same source-restricted rule you do, and Entitle's own egress ranges don't help —
+those admit **Entitle's cloud**, which is what creates the account, not the human who
+uses it.
+
+So for direct access, every grantee's egress has to be in the allow-list:
+
+- **Everyone behind one corporate egress** (office, VPN, SASE) — add that **pool
+  CIDR** once. This is the common case and the tidiest.
+- **Grantees anywhere** (home, mobile, a customer site) — you cannot enumerate those.
+  Either put `0.0.0.0/0` in `rancher_allowed_source_cidrs` and accept that the node is
+  internet-reachable (it is a lab node behind Rancher's own login, and the grant is
+  time-boxed), or keep it closed and broker access through the Web Jump after all.
+
+Either way, finish with **Re-apply the node firewall** — and remember the node is
+[ephemeral](#ephemeral-node): on GCP and AWS a recreate moves the node's address, not
+the allow-list, so the CIDRs you added stay valid and the URL you shared does not.
 
 **What "closed" means, per cloud.** The merged set is identical everywhere; only the
 mechanism differs, because the three clouds do not offer the same primitive:

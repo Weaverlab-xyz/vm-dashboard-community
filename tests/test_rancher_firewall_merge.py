@@ -332,6 +332,64 @@ def test_egress_detection_failure_keeps_existing():
     assert _CFG["rancher_dashboard_egress_cidr"] == "104.28.182.0/24"
 
 
+def _run_reapply(detected_ip: str, rows=None):
+    """Drive reapply_firewall with a stubbed egress detector (never a real probe)."""
+    orig = svc._detect_egress_ip
+
+    async def fake():
+        return detected_ip
+    svc._detect_egress_ip = fake
+    try:
+        return asyncio.run(svc.reapply_firewall(_FakeDB(rows or [])))
+    finally:
+        svc._detect_egress_ip = orig
+
+
+def test_reapply_applies_the_manual_cidr_the_operator_just_added():
+    # The bug this exists for: adding your browser's public IP in Settings writes
+    # CONFIG. Nothing recomputes the cloud rule, and the Settings readout shows the
+    # set that WOULD be applied — so the IP looks allowed while the node stays shut.
+    _reset(rancher_allowed_source_cidrs="203.0.113.4/32")
+    out = _run_reapply("198.51.100.7")
+    assert _APPLIED["called"] is True
+    assert "203.0.113.4/32" in _APPLIED["source_cidrs"]
+    assert out["opened"] is True
+    assert out["detected_egress_ip"] == "198.51.100.7/32"
+
+
+def test_reapply_reports_what_changed():
+    # before/after are both COMPUTED sets, so the diff only shows sources this run
+    # discovered — here, a dashboard egress that moved. A manual CIDR saved in
+    # Settings is already in `before` (config is the input to both), which is why the
+    # UI also prints the whole merged set: that is what tells the operator their own
+    # IP is now on the rule.
+    _reset(rancher_allowed_source_cidrs="203.0.113.4/32",
+           rancher_dashboard_egress_cidr="9.9.9.9/32")
+    out = _run_reapply("198.51.100.7")
+    assert out["before"] == sorted(["203.0.113.4/32", "9.9.9.9/32"])
+    assert out["added"] == ["198.51.100.7/32"] and out["removed"] == ["9.9.9.9/32"]
+    assert out["changed"] is True
+    assert "203.0.113.4/32" in out["merged"]
+
+
+def test_reapply_is_idempotent_and_says_so():
+    # Safe to click on a healthy node: the second run changes nothing and must not
+    # dress that up as a repair.
+    _reset(rancher_allowed_source_cidrs="203.0.113.4/32")
+    _run_reapply("198.51.100.7")
+    out = _run_reapply("198.51.100.7")
+    assert out["added"] == [] and out["removed"] == [] and out["changed"] is False
+    assert out["merged"] == sorted(["203.0.113.4/32", "198.51.100.7/32"])
+
+
+def test_reapply_stays_fail_closed():
+    # An empty allow-list still means CLOSED, and the caller is told plainly rather
+    # than being handed a successful-looking no-op.
+    _reset()
+    out = _run_reapply("")
+    assert out["merged"] == [] and out["opened"] is False
+
+
 def test_generate_admin_password_strong_and_distinct():
     # Rancher requires ≥12 chars + forbids reusing the bootstrap password, so the
     # generated one must be long, mixed-class, and different every call.
