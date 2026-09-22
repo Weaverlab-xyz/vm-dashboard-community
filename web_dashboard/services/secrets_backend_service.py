@@ -376,10 +376,50 @@ def _kv_name(key: str) -> str:
     return key.replace("_", "-")
 
 
+def _kv_soft_deleted(exc: Exception) -> bool:
+    """Whether a Key Vault write failed because a TOMBSTONE holds the name.
+
+    Soft delete is mandatory on every vault created since 2020 and cannot be turned
+    off, so `delete_azure_kv` frees nothing: the name stays reserved by a deleted-
+    but-recoverable object for the vault's retention window (7-90 days), and every
+    later write of the same name gets a 409 Conflict instead of a new version. The
+    AWS twin sidesteps this with ForceDeleteWithoutRecovery and GCP's delete is
+    permanent, so Azure is the only backend where a delete + a re-write of one
+    fixed name — a Portainer adapter retire + re-pair, say — is a dead end.
+
+    Matched on the inner error code, with the message as the fallback, because
+    ResourceExistsError also covers conflicts this must NOT swallow.
+    """
+    text = str(exc)
+    return ("ObjectIsDeletedButRecoverable" in text
+            or "deleted but recoverable state" in text)
+
+
 def write_azure_kv(key: str, value: str) -> str:
-    client, _ = _azure_kv_client()
+    client, url = _azure_kv_client()
     name = _kv_name(key)
-    client.set_secret(name, value)
+    try:
+        client.set_secret(name, value)
+    except Exception as exc:  # noqa: BLE001 — re-raised unless it is the tombstone
+        if not _kv_soft_deleted(exc):
+            raise
+        # Recover rather than purge: recovery needs only the `recover` permission
+        # and works even under purge protection, where a purge is refused outright
+        # for the whole retention window. The recovered value is immediately
+        # overwritten by the new version below, so restoring the stale secret is a
+        # step, not an outcome.
+        try:
+            client.begin_recover_deleted_secret(name).wait()
+        except Exception as rec_exc:  # noqa: BLE001 — the operator has to do it
+            raise RuntimeError(
+                f"Key Vault secret {name!r} in {url} is soft-deleted, so the name "
+                f"cannot be reused, and recovering it here failed ({rec_exc}). "
+                f"Grant the dashboard's service principal the secret 'recover' "
+                f"permission, or clear it by hand with: az keyvault secret recover "
+                f"--vault-name <vault> --name {name}"
+            ) from exc
+        logger.info("Azure KV: recovered soft-deleted secret %s before rewriting", name)
+        client.set_secret(name, value)
     logger.info("Azure KV: wrote secret %s", name)
     return name
 
