@@ -1519,6 +1519,26 @@
           <span class="font-medium text-gray-700">Access:</span> <span x-text="rancherLoginHint"></span>
         </p>
 
+        <!-- Saving rancher_allowed_source_cidrs in Settings writes CONFIG; nothing
+             recomputes the cloud rule. The Settings readout shows the set that WOULD
+             be applied, so an operator who adds their own IP sees it listed and still
+             can't reach the node. Everything else that re-applies the rule is a side
+             effect of something bigger (a redeploy, a cluster event) or is hidden
+             behind an Entitle integration — this is the repair on its own. -->
+        <div x-show="rancherNodes.length > 0" x-cloak class="mt-2 flex flex-wrap items-center gap-2">
+          <button @click="reapplyRancherFirewall()" :disabled="rancherFirewallPending"
+                  title="Re-apply the node's ingress rule from the current allow-list — after adding your browser's public IP to rancher_allowed_source_cidrs, or when a node that was reachable stops answering"
+                  class="px-3 py-1.5 text-xs font-medium text-gray-700 border border-gray-300 hover:bg-gray-50 disabled:opacity-50 rounded-lg transition">
+            <span x-show="!rancherFirewallPending">Re-apply the node firewall</span>
+            <span x-show="rancherFirewallPending" x-cloak>Re-applying…</span>
+          </button>
+        </div>
+        <p x-show="rancherFirewallNote" x-cloak class="mt-2 text-xs text-green-700"
+           x-text="rancherFirewallNote"></p>
+        <p x-show="rancherFirewallError" x-cloak
+           class="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2"
+           x-text="rancherFirewallError"></p>
+
         <!-- ── Entitle registration state ───────────────────────────────────
              Three genuinely different situations, and the remedy differs in each, so
              they get three messages rather than one hedged one. The middle case is the
@@ -2049,6 +2069,9 @@ function containersDashboard() {
     rancherLoading: false,
     rancherError: null,
     rancherDeploying: false,
+    rancherFirewallPending: false,
+    rancherFirewallNote: '',
+    rancherFirewallError: '',
     // Deploy-time cloud + region + PRA picks (parity with DB/VM deploys)
     praOpts: { configured: false, cloud: 'gcp', clouds: [], regions: [], jump_groups: [], gateways: [], vault_account_groups: [] },
     rancherRegionsByCloud: {},
@@ -2654,6 +2677,40 @@ function containersDashboard() {
       } catch (e) {
         toast(e.message || 'Entitle registration failed.', 'error');
         this.rancherEntitlePending = false;
+      }
+    },
+
+    // ── The node's ingress rule ────────────────────────────────────────────
+    // The general repair, for the operator's OWN browser IP as much as for Entitle:
+    // adding a CIDR in Settings writes config, and nothing re-applies the cloud rule
+    // until a redeploy or a cluster event. The Entitle-labelled button below does the
+    // same merge, but only exists once an integration does.
+
+    async reapplyRancherFirewall() {
+      this.rancherFirewallPending = true;
+      this.rancherFirewallNote = '';
+      this.rancherFirewallError = '';
+      try {
+        const data = await API.post('/api/containers/rancher/firewall', {});
+        if (data) {
+          const parts = [];
+          if (data.changed) {
+            parts.push('Ingress re-applied.');
+            if ((data.added || []).length) parts.push(`Now also allowing ${data.added.join(', ')}.`);
+            if ((data.removed || []).length) parts.push(`No longer allowing ${data.removed.join(', ')}.`);
+          } else {
+            parts.push(`Ingress re-applied — no change. Allowing ${(data.merged || []).join(', ') || 'nothing'}.`);
+          }
+          // Fail-closed is the contract, so an empty set is a real outcome and not an
+          // error. Say it plainly rather than reporting a successful no-op.
+          if (!data.opened) parts.push('The firewall is CLOSED — no source can reach the node. Add one in Settings → Kubernetes.');
+          this.rancherFirewallNote = parts.join(' ');
+        }
+        await this.loadRancher();
+      } catch (e) {
+        this.rancherFirewallError = e.message;
+      } finally {
+        this.rancherFirewallPending = false;
       }
     },
 
