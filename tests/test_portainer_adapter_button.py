@@ -478,6 +478,83 @@ def test_the_mint_confirm_says_old_tokens_are_not_revoked():
     assert "keep working" in body and "revoke" in body
 
 
+# ── Re-applying the node's ingress rule ──────────────────────────────────────
+# The deploy configures the firewall from ONE egress detection and never revisits it.
+# When the dashboard's outbound address moves — or the rule is deleted by hand — the
+# node keeps running and every caller reports the same unhelpful thing, "unreachable".
+# Minting a token repairs that on its way past; the button is the repair on its own.
+
+def _svc_function(name, path=_NODE):
+    """A service function's source, by def line."""
+    src = _read(path)
+    marker = f"\ndef {name}("
+    if marker not in src:
+        marker = f"\nasync def {name}("
+    assert marker in src, f"no such function: {name}"
+    body = src.split(marker)[1]
+    # Up to the next top-level def, not an inner one.
+    for stop in ("\ndef ", "\nasync def "):
+        if stop in body:
+            body = body.split(stop)[0]
+    return body
+
+
+def test_the_firewall_reapply_route_exists_and_needs_write():
+    """It mutates a cloud ingress rule, so read is not enough — and it must not need
+    the Cloud Functions scope either: an operator locked out of their own node should
+    not need the adapter-deploy permission to get back in."""
+    decorator = '@router.post("/portainer/node/firewall"'
+    api = _read(_API)
+    assert decorator in api, decorator
+    body = _route(decorator)
+    assert 'require_permission("containers", "write")' in body, body[:400]
+    assert "_require_function_write" not in body
+    # The read-only breakdown keeps its own verb on the same path.
+    assert '@router.get("/portainer/node/firewall"' in api
+
+
+def test_the_reapply_button_posts_to_the_route_the_router_declares():
+    page = _read(_PAGE)
+    body = page.split("async reapplyPortainerFirewall()")[1].split("\n    async ")[0]
+    assert "'/api/containers/portainer/node/firewall'" in body, body[:400]
+    assert '@router.post("/portainer/node/firewall"' in _read(_API)
+    # And the button is actually rendered, not just defined.
+    assert "reapplyPortainerFirewall()" in page.split("<script")[0] or \
+        'reapplyPortainerFirewall()"' in page, "the handler has no button"
+
+
+def test_every_firewall_field_the_page_reads_is_one_the_service_returns():
+    """A field name that is not in the payload is not an error anywhere: the note
+    renders blank or says 'no change' about a change. Pin the two halves together."""
+    returned = set(re.findall(r'"(\w+)":', _svc_function("firewall_status")))
+    returned |= set(re.findall(r'"(\w+)":', _svc_function("reapply_firewall")))
+    body = _read(_PAGE).split("async reapplyPortainerFirewall()")[1].split("\n    async ")[0]
+    for field in set(re.findall(r"\bdata\.(\w+)", body)):
+        assert field in returned, f"the page reads data.{field}, which is never returned"
+
+
+def test_the_button_and_the_mint_make_the_SAME_repair():
+    """Two implementations of 'detect the egress address and re-apply the rule' would
+    drift, and the one that drifted would be the one nobody ran during the outage."""
+    assert "reapply_firewall(" in _svc_function("_readmit_egress_and_retry"), \
+        "the mint's re-admit no longer goes through reapply_firewall"
+    assert "reapply_firewall(" in _route('@router.post("/portainer/node/firewall"')
+
+
+def test_a_recreated_rule_counts_as_a_change():
+    """A deleted rule computes the same source set it always did, so comparing sets
+    alone reports 'nothing changed' about the repair that just put it back."""
+    assert 'applied.get("created")' in _svc_function("reapply_firewall")
+
+
+def test_the_reapply_reports_a_closed_firewall_rather_than_a_silent_success():
+    """Fail-closed is the contract, so an empty merged set is a real outcome, not an
+    error — and it means the node is now reachable by nobody. Saying only 'ingress
+    re-applied' would read as a fix."""
+    body = _read(_PAGE).split("async reapplyPortainerFirewall()")[1].split("\n    async ")[0]
+    assert "data.opened" in body and "CLOSED" in body
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]

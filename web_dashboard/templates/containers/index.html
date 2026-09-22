@@ -444,12 +444,27 @@
                   class="px-3 py-1.5 text-xs font-medium text-gray-700 border border-gray-300 hover:bg-gray-50 disabled:opacity-50 rounded-lg transition">
             Re-send the token to the adapter
           </button>
+          <!-- The deploy configures the firewall once and never revisits it, so the
+               rule ages out from under a node that is running perfectly well. Every
+               caller then says the same unhelpful thing — "unreachable" — and the
+               only cure used to be a redeploy. -->
+          <button @click="reapplyPortainerFirewall()" :disabled="portainerFirewallPending"
+                  title="Re-detect the dashboard's egress address and re-apply the node's ingress rule"
+                  class="px-3 py-1.5 text-xs font-medium text-gray-700 border border-gray-300 hover:bg-gray-50 disabled:opacity-50 rounded-lg transition">
+            <span x-show="!portainerFirewallPending">Re-apply the node firewall</span>
+            <span x-show="portainerFirewallPending" x-cloak>Re-applying…</span>
+          </button>
         </div>
         <p x-show="portainerTokenNote" x-cloak class="mt-2 text-xs text-green-700"
            x-text="portainerTokenNote"></p>
         <p x-show="portainerTokenError" x-cloak
            class="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2"
            x-text="portainerTokenError"></p>
+        <p x-show="portainerFirewallNote" x-cloak class="mt-2 text-xs text-green-700"
+           x-text="portainerFirewallNote"></p>
+        <p x-show="portainerFirewallError" x-cloak
+           class="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2"
+           x-text="portainerFirewallError"></p>
         <p x-show="portainerNodeDataDiskEnabled" x-cloak class="mt-2 text-xs text-blue-700">
           Durable state is on: <code x-text="portainerNodeDataDiskName"></code> survives a teardown,
           so the next deploy comes back with its users, environments and settings. The disk keeps
@@ -2049,6 +2064,12 @@ function containersDashboard() {
     portainerTokenPending: false,
     portainerTokenNote: '',
     portainerTokenError: '',
+    // The node's ingress rule, re-applied on demand. Kept separate from the token
+    // flags: the two buttons sit in one row and a shared note would attribute one
+    // click's outcome to the other.
+    portainerFirewallPending: false,
+    portainerFirewallNote: '',
+    portainerFirewallError: '',
     // Only ever used when there is NO managed node — a managed one dictates its own
     // placement, because a function has to share the node's region to reach its VPC.
     portainerAdapterForm: { cloud: 'gcp', region: '', network_mode: 'public' },
@@ -2836,6 +2857,41 @@ function containersDashboard() {
         this.portainerTokenError = e.message;
       } finally {
         this.portainerTokenPending = false;
+      }
+    },
+
+    // ── The node's ingress rule ────────────────────────────────────────────
+    // The deploy configures the firewall from ONE egress detection and never revisits
+    // it, so a node that is running perfectly well stops answering when the
+    // dashboard's own outbound address moves — or when the rule is deleted by hand.
+    // Minting a token repairs that on its way past; this is the repair on its own,
+    // for everything else that can only ever report "unreachable".
+
+    async reapplyPortainerFirewall() {
+      this.portainerFirewallPending = true;
+      this.portainerFirewallNote = '';
+      this.portainerFirewallError = '';
+      try {
+        const data = await API.post('/api/containers/portainer/node/firewall', {});
+        if (data) {
+          const parts = [];
+          if (data.changed) {
+            parts.push('Ingress re-applied.');
+            if ((data.added || []).length) parts.push(`Now also allowing ${data.added.join(', ')}.`);
+            if ((data.removed || []).length) parts.push(`No longer allowing ${data.removed.join(', ')}.`);
+          } else {
+            parts.push(`Ingress re-applied — no change. Allowing ${(data.merged || []).join(', ') || 'nothing'}.`);
+          }
+          // Fail-closed is the contract, so an empty set is a real outcome and not
+          // an error. Say it plainly: the node is now reachable by nobody.
+          if (!data.opened) parts.push('The firewall is CLOSED — no source can reach the node. Add one in Settings → Containers.');
+          this.portainerFirewallNote = parts.join(' ');
+        }
+        await this.loadPortainerNode();
+      } catch (e) {
+        this.portainerFirewallError = e.message;
+      } finally {
+        this.portainerFirewallPending = false;
       }
     },
 

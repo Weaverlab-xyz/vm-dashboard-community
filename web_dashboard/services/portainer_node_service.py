@@ -223,6 +223,41 @@ def firewall_status(db=None) -> dict:
     }
 
 
+async def reapply_firewall(db=None, placement=None) -> dict:
+    """Re-detect the dashboard's egress address and re-apply the node's ingress — the
+    deploy's "Configuring firewall" step, on demand.
+
+    The deploy writes the allow-list from ONE egress detection and then never revisits
+    it, so the rule ages: a worker rescheduled behind a different SNAT address, a corp
+    proxy egressing from a pool, a gateway rebuilt with a new IP, or a rule deleted by
+    hand in the cloud console all leave a node that answers nobody. The symptom is
+    always the same and always unhelpful — a dropped connect, which every caller
+    renders as "unreachable" — so this is the repair, callable without a redeploy.
+
+    Returns the :func:`firewall_status` breakdown of the NEW state plus what the
+    re-apply did: ``detected_egress_ip``, ``before``, ``added``, ``removed``,
+    ``changed`` and the raw per-cloud ``applied`` result.
+
+    ``changed`` counts a RECREATED rule as a change. The source set a deleted rule
+    computes to is the same one it always computed to, so comparing sets alone would
+    report "nothing changed" about the repair that just put the rule back.
+    """
+    before = firewall_status(db).get("merged") or []
+    detected = await _ensure_dashboard_egress_cidr()
+    applied = await refresh_portainer_firewall(db, placement=placement)
+    status = firewall_status(db)
+    after = status.get("merged") or []
+    status.update({
+        "detected_egress_ip": detected,
+        "before": before,
+        "added": [c for c in after if c not in before],
+        "removed": [c for c in before if c not in after],
+        "changed": after != before or bool(applied.get("created")),
+        "applied": applied,
+    })
+    return status
+
+
 def _pra_configured() -> bool:
     """PRA is usable when the API host, an OAuth client and a Jumpoint are set."""
     return all((config_service.get("bt_api_host"), config_service.get("bt_client_id"),
@@ -503,18 +538,15 @@ async def _readmit_egress_and_retry(db, placement: dict, exc, call, *,
                    "dashboard's egress address and re-applying ingress", what, exc)
     if job_id:
         job_service.update_progress(db, job_id, 80, "Re-admitting the dashboard's egress IP")
-    before = firewall_status(db).get("merged") or []
     try:
-        await _ensure_dashboard_egress_cidr()
-        applied = await refresh_portainer_firewall(db, placement=placement)
+        report = await reapply_firewall(db, placement=placement)
     except Exception as refresh_exc:  # noqa: BLE001 — report the ORIGINAL failure
         logger.warning("Portainer ingress re-apply failed: %s", refresh_exc)
         raise exc
-    after = firewall_status(db).get("merged") or []
-    # ``created`` means the rule (or security group / NSG) was ABSENT and has just been
-    # put back — a real change even though the computed set matched, and exactly the
-    # state a hand-deleted rule leaves behind.
-    if after == before and not applied.get("created"):
+    before, after = report["before"], report["merged"]
+    # ``changed`` counts a RECREATED rule, which is the state a hand-deleted rule
+    # leaves behind: a real change even though the computed source set matched.
+    if not report["changed"]:
         # Nothing changed, so the retry would be dialling from the same address
         # into the same rule. Say so instead of burning another timeout.
         raise portainer_service.PortainerError(

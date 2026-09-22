@@ -1168,6 +1168,59 @@ ok(WLA + ' with no options loaded no episode is offered',
      mkAgent({options: base, readOnly: true}).canMint() === false);
 })();
 
-ociPlacementChecks().then(() => process.exit(fail ? 1 : 0),
-                          (e) => { console.log('FAIL ' + OCI + ' placement checks threw: ' + e);
-                                   process.exit(1); });
+// ── Containers: re-applying the Portainer node's ingress rule ────────────────
+// The note IS the feature. The button's entire output is one line of text, and the
+// difference between "re-applied — no change" and "now also allowing <addr>" is what
+// tells an operator whether the outage they are chasing was this or something else.
+const PFW = 'containers/index.html';
+
+const mkFw = (payload) => {
+  global.API = {post: async () => payload};
+  return build(PFW, 'reapplyPortainerFirewall', {loadPortainerNode: async () => {}});
+};
+
+async function portainerFirewallChecks() {
+  let o = mkFw({changed: true, opened: true, added: ['203.0.113.9/32'],
+                removed: ['198.51.100.2/32'], merged: ['203.0.113.9/32']});
+  await o.reapplyPortainerFirewall();
+  ok(PFW + ' a widened rule names what it now allows',
+     /Now also allowing 203\.0\.113\.9\/32/.test(o.portainerFirewallNote));
+  ok(PFW + ' and what it stopped allowing',
+     /No longer allowing 198\.51\.100\.2\/32/.test(o.portainerFirewallNote));
+  ok(PFW + ' a finished re-apply is not left pending',
+     o.portainerFirewallPending === false);
+
+  o = mkFw({changed: false, opened: true, added: [], removed: [],
+            merged: ['203.0.113.9/32']});
+  await o.reapplyPortainerFirewall();
+  ok(PFW + ' no change says so, and still names the allow-list',
+     /no change/.test(o.portainerFirewallNote)
+       && /203\.0\.113\.9\/32/.test(o.portainerFirewallNote));
+
+  // Fail-closed is the contract, so an empty set is a real outcome — and reporting
+  // only "ingress re-applied" would read as a fix when nothing can reach the node.
+  o = mkFw({changed: true, opened: false, added: [], removed: ['203.0.113.9/32'],
+            merged: []});
+  await o.reapplyPortainerFirewall();
+  ok(PFW + ' a closed firewall is reported, not dressed up as success',
+     /CLOSED/.test(o.portainerFirewallNote));
+
+  // A payload with none of the arrays (an older build, a partial response) must not
+  // throw: a handler that throws leaves the button spinning for good.
+  o = mkFw({});
+  await o.reapplyPortainerFirewall();
+  ok(PFW + ' a bare payload neither throws nor leaves the button pending',
+     o.portainerFirewallPending === false && o.portainerFirewallError === '');
+
+  global.API = {post: async () => { throw new Error('502: firewall rule denied'); }};
+  o = build(PFW, 'reapplyPortainerFirewall', {loadPortainerNode: async () => {}});
+  await o.reapplyPortainerFirewall();
+  ok(PFW + ' a refused re-apply shows the reason and releases the button',
+     /denied/.test(o.portainerFirewallError) && o.portainerFirewallPending === false);
+  delete global.API;
+}
+
+Promise.all([ociPlacementChecks(), portainerFirewallChecks()])
+  .then(() => process.exit(fail ? 1 : 0),
+        (e) => { console.log('FAIL a deferred check threw: ' + e);
+                 process.exit(1); });
