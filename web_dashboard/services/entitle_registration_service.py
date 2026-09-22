@@ -483,9 +483,55 @@ output "integration_id" {{
 """
 
 
+#: Rancher's API root. Its Account & API Keys screen prints this appended to the
+#: server URL, labelled **API Endpoint**, right beside the key pair — and that label
+#: is the one the connector's own page uses. See :func:`_rancher_api_url`.
+_RANCHER_API_PATH = "/v3"
+
+
+def _rancher_api_url(server_url: str) -> str:
+    """Turn the node's server URL into the value Entitle's Rancher connector wants.
+
+    The connector's ``url`` is **Rancher's API Endpoint** — ``https://<host>/v3``, the
+    string Rancher itself prints next to the access/secret pair on Account & API Keys —
+    not the UI origin. BeyondTrust's connector page says "your Rancher instance URL with
+    the API endpoint" and then shows only ``"<YOUR_URL>"``, which is exactly ambiguous
+    enough to send the origin, and that is what we sent until 2026-09-22.
+
+    The origin cannot work, and the failure is unusually opaque: Entitle's connector is
+    Python, it requests the url it was given (its own connect-timeout messages name
+    ``url: /``), and Rancher answers ``/`` with the **UI** — a redirect to the SPA and a
+    body of HTML. ``response.json()`` on HTML raises ``json.JSONDecodeError``, which
+    surfaces in Entitle as a bare **"Expecting value: line 1 column 1 (char 0)"** with
+    nothing naming the URL, the status, or Rancher. A sibling message —
+    ``Extra data: line 1 column N`` — is the same fault one step along: the body DID
+    start with a JSON scalar (a dotted version, a ``2026-`` date) and then ran on.
+
+    Idempotent, and never overrides a path the operator pinned: a ``server_url`` that
+    already carries one is returned untouched, so a tenant whose Rancher lives behind a
+    path-routing proxy keeps it. ``entitle_rancher_api_path`` overrides the suffix, and
+    the literal ``none`` disables it — the escape hatch for a connector build that
+    appends ``/v3`` itself, where this would send ``/v3/v3``.
+    """
+    base = (server_url or "").strip().rstrip("/")
+    if not base:
+        return base
+    path = (_cfg("entitle_rancher_api_path") or _RANCHER_API_PATH).strip()
+    if path.lower() in ("none", "-"):
+        return base
+    # "//" first, so a scheme-less value is read as a host rather than as one long
+    # path — otherwise a bare address looks like it already carries one.
+    if urlsplit(base if "//" in base else "//" + base).path.strip("/"):
+        return base
+    return base + "/" + path.strip("/")
+
+
 def _generate_rancher_hcl(*, name: str, url: str, verify: bool, private: bool) -> str:
     """Entitle **Rancher** integration. connection_json = ``{url, access_key,
     secret_key, verify}`` — Rancher's API access+secret key PAIR (sensitive TF_VARs).
+
+    ``url`` is Rancher's **API Endpoint** (``https://<host>/v3``), not the UI origin —
+    pass it through :func:`_rancher_api_url` rather than handing over a server URL.
 
     ⚠️  The key is ``access_key``, **not** ``access_token``, which is what
     docs.beyondtrust.com/entitle/docs/entitle-integration-rancher prints. The
@@ -1028,16 +1074,26 @@ async def register_rancher(*, name: str, server_url: str, api_token: str,
     API bearer (``token-xxxxx:yyyyy``) IS the access+secret key pair the connector
     wants — split on ``:``. ``private`` (internal Rancher, unreachable from Entitle's
     cloud) attaches the shared agent_token. Returns {integration_id, tf_state_json};
-    stash the state so :func:`deregister` can remove it."""
+    stash the state so :func:`deregister` can remove it.
+
+    ``server_url`` is the node's **UI origin** (what ``rancher_server_url`` holds, and
+    what Rancher is pinned to serve cluster agents); :func:`_rancher_api_url` turns it
+    into the API Endpoint the connector actually dials. Registering the origin produces
+    a JSON-decode error on Entitle's side and nothing anywhere else — see that function."""
     access, _sep, secret = (api_token or "").partition(":")
     if not (access and secret):
         raise EntitleRegistrationError(
             "Rancher api_token must be a Rancher API key pair 'access:secret' (e.g. token-xxxxx:yyyyy)")
-    hcl = _generate_rancher_hcl(name=name, url=server_url, verify=verify, private=private)
+    api_url = _rancher_api_url(server_url)
+    hcl = _generate_rancher_hcl(name=name, url=api_url, verify=verify, private=private)
     try:
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             _apply_hcl_sync, hcl,
             {"rancher_access_key": access, "rancher_secret_key": secret})
+        # The registered URL, back to the caller. Entitle's connector reports a wrong
+        # one as a JSON-decode error naming nothing, so the one place an operator can
+        # diff it against Rancher's own API Endpoint is the job result.
+        return {**result, "url": api_url}
     except EntitleRegistrationError as exc:
         # "Didn't find matching connection schema" is Entitle saying the payload
         # matched NONE of the connector's schemas — and it never names the schema it
@@ -1050,7 +1106,7 @@ async def register_rancher(*, name: str, server_url: str, api_token: str,
         raise EntitleRegistrationError(
             f"{exc}\n\nEntitle matched no connection schema for application "
             f"{_cfg('entitle_rancher_app_slug') or 'rancher'!r}. Sent keys: url, "
-            f"access_key, secret_key, verify (url={server_url!r}, verify={bool(verify)}, "
+            f"access_key, secret_key, verify (url={api_url!r}, verify={bool(verify)}, "
             f"agent_token={'yes' if private else 'no'}). Entitle matches on the key SET "
             f"and will not say which key it disliked — compare the list above against "
             f"Integrations → Add Integration → Rancher in your own tenant, which is the "

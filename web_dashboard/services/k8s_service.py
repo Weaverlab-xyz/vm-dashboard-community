@@ -2469,14 +2469,15 @@ async def run_entitle_register(db: Session, *, cluster_id: str, job_id: str,
     job_service.set_completed(db, job_id)
 
 
-async def register_rancher_in_entitle(action: str = "register") -> None:
+async def register_rancher_in_entitle(action: str = "register") -> dict:
     """Register (or deregister) the central Rancher NODE as an Entitle **Rancher**
     integration. Node-scoped (not per-cluster) — the node is the singleton mgmt
     plane. With a public source-restricted server-url, Entitle's cloud can reach
     it directly (``private=False``, no agent token); keep ``entitle_rancher_private``
     for tenants who lock the node behind CIDRs Entitle can't traverse. Writes
     ``entitle_rancher_integration_id`` + ``entitle_rancher_tfstate`` (consumed by
-    deregister). Background task."""
+    deregister). Returns what the caller should show an operator — the registered URL
+    and the new id — or ``{}`` for a deregister. Background task."""
     from . import config_service, entitle_registration_service as ent
 
     if action == "deregister":
@@ -2488,7 +2489,7 @@ async def register_rancher_in_entitle(action: str = "register") -> None:
                 logger.warning("entitle rancher deregister failed (non-fatal): %s", exc)
         config_service.set("entitle_rancher_tfstate", "")
         config_service.set("entitle_rancher_integration_id", "")
-        return
+        return {}
 
     server_url = _cfg("rancher_server_url")
     api_token = _cfg("rancher_api_token")
@@ -2501,8 +2502,13 @@ async def register_rancher_in_entitle(action: str = "register") -> None:
         server_url=server_url, api_token=api_token, verify=verify, private=private)
     config_service.set("entitle_rancher_integration_id", result.get("integration_id") or "")
     config_service.set("entitle_rancher_tfstate", result.get("tf_state_json") or "")
-    logger.info("Rancher node registered as Entitle integration %s (private=%s)",
-                result.get("integration_id"), private)
+    logger.info("Rancher node registered as Entitle integration %s (url=%s, private=%s)",
+                result.get("integration_id"), result.get("url"), private)
+    # Returned (and put in the job result by the caller) because a wrong url is
+    # reported by Entitle's connector as a bare JSON-decode error that names neither
+    # the URL nor Rancher — so this is the only place it can be checked from.
+    return {"entitle_url": result.get("url") or "",
+            "integration_id": result.get("integration_id") or ""}
 
 
 async def apply_entitle_reachability(db, action: str = "register") -> dict:
@@ -2570,16 +2576,17 @@ async def run_rancher_entitle_register(db: Session, *, job_id: str,
     from . import job_service
     from ..api.websocket import broadcast_progress
     job_service.set_running(db, job_id)
+    registered: dict = {}
     if action != "reachability":
         try:
             await broadcast_progress(job_id, 20, f"Entitle Rancher integration: {action}…")
-            await register_rancher_in_entitle(action)
+            registered = await register_rancher_in_entitle(action) or {}
         except Exception as exc:
             job_service.set_failed(db, job_id, str(exc))
             logger.exception("entitle rancher register job failed action=%s", action)
             return
 
-    result: dict = {"action": action}
+    result: dict = {"action": action, **registered}
     await broadcast_progress(job_id, 70, "Updating the node firewall…")
     result.update(await apply_entitle_reachability(db, action))
     job_service.set_completed(db, job_id, result)

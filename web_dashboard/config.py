@@ -256,6 +256,12 @@ class Settings(BaseSettings):
     # tenant's entitle_applications data source.
     entitle_rest_app_slug: str = "rest api"
     entitle_rancher_private: bool = False         # attach the shared Entitle agent token (node unreachable from Entitle's cloud)
+    # Path appended to rancher_server_url to make the connector's `url` — Rancher's
+    # API Endpoint, the string its Account & API Keys screen prints beside the key
+    # pair. NOT cosmetic: the connector parses whatever the url answers as JSON, and
+    # the UI origin answers HTML, which Entitle reports only as a bare
+    # "Expecting value: line 1 column 1 (char 0)". `none` sends the origin unchanged.
+    entitle_rancher_api_path: str = "/v3"
     entitle_rancher_url_key: str = "url"          # (unused — _generate_rancher_hcl hardcodes connection_json keys) retained for compat
     entitle_rancher_token_key: str = "api_token"  # (unused — see above)
     entitle_rancher_integration_id: str = ""      # set by register_rancher_in_entitle

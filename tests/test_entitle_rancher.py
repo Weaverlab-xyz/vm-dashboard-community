@@ -14,15 +14,19 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 
+#: The stub config store, module-level so a test can set a key and put it back.
+_STORE = {
+    "entitle_owner_id": "owner-1",
+    "entitle_workflow_id": "wf-1",
+    "entitle_agent_token_name": "agent-1",
+    "entitle_rancher_app_slug": "rancher",
+    "entitle_api_key": "k",
+}
+
+
 def _install_stubs():
     cfg = types.ModuleType("web_dashboard.services.config_service")
-    store = {
-        "entitle_owner_id": "owner-1",
-        "entitle_workflow_id": "wf-1",
-        "entitle_agent_token_name": "agent-1",
-        "entitle_rancher_app_slug": "rancher",
-        "entitle_api_key": "k",
-    }
+    store = _STORE
     cfg.get = lambda key, default="", workgroup=None: store.get(key, default)
     cfg.get_bool = lambda key, default=False: bool(store.get(key, default))
     sys.modules["web_dashboard.services.config_service"] = cfg
@@ -51,6 +55,40 @@ except Exception as exc:  # pragma: no cover — skip if deps missing
 
 
 URL_SENTINEL = "RANCHER-URL-SENTINEL"   # non-URL literal: avoids CodeQL url-substring query
+HOST_SENTINEL = "RANCHER-HOST-SENTINEL"
+# Built, never written as a literal — same reason as URL_SENTINEL.
+ORIGIN_SENTINEL = f"https://{HOST_SENTINEL}"
+
+
+def test_rancher_url_is_the_api_endpoint():
+    """Entitle's connector dials the url it is given and parses the answer as JSON.
+    Rancher answers its ORIGIN with the UI (HTML), so registering the origin fails
+    inside the connector as a bare 'Expecting value: line 1 column 1 (char 0)' —
+    naming neither Rancher nor the URL. The connector wants Rancher's API Endpoint."""
+    assert ers._rancher_api_url(ORIGIN_SENTINEL) == ORIGIN_SENTINEL + "/v3"
+    # A trailing slash on the stored server-url must not double up.
+    assert ers._rancher_api_url(ORIGIN_SENTINEL + "/") == ORIGIN_SENTINEL + "/v3"
+    # Idempotent: re-registering an already-converted url does not stack a second /v3.
+    assert ers._rancher_api_url(ORIGIN_SENTINEL + "/v3") == ORIGIN_SENTINEL + "/v3"
+    assert ers._rancher_api_url("") == ""
+
+
+def test_rancher_url_keeps_an_operator_pinned_path():
+    """A Rancher behind a path-routing proxy keeps the path it was given."""
+    pinned = ORIGIN_SENTINEL + "/rancher"
+    assert ers._rancher_api_url(pinned) == pinned
+
+
+def test_rancher_api_path_override_can_disable_the_suffix():
+    """The escape hatch for a connector build that appends /v3 itself, where the
+    default would send /v3/v3."""
+    _STORE["entitle_rancher_api_path"] = "none"
+    try:
+        assert ers._rancher_api_url(ORIGIN_SENTINEL) == ORIGIN_SENTINEL
+        _STORE["entitle_rancher_api_path"] = "/v4"
+        assert ers._rancher_api_url(ORIGIN_SENTINEL) == ORIGIN_SENTINEL + "/v4"
+    finally:
+        _STORE.pop("entitle_rancher_api_path", None)
 
 
 def test_generate_rancher_hcl_private():
@@ -99,6 +137,9 @@ def test_register_rancher_rejects_non_pair_token():
 
 
 if __name__ == "__main__":
+    test_rancher_url_is_the_api_endpoint()
+    test_rancher_url_keeps_an_operator_pinned_path()
+    test_rancher_api_path_override_can_disable_the_suffix()
     test_generate_rancher_hcl_private()
     test_rancher_access_key_is_not_named_access_token()
     test_rancher_credential_keys_are_scrubbed_from_state()
