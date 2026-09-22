@@ -1,8 +1,8 @@
 """Credential resolution by REFERENCE, so no workload ever needs a plaintext env var.
 
-Every cloud can hand a function a secret without the value passing through Terraform
-state, the function's describe output, or the dashboard's job metadata — but each
-does it differently, and only two of the three do it for you:
+Every platform can hand a function a secret without the value passing through
+Terraform state, the function's describe output, or the dashboard's job metadata —
+but each does it differently, and only two of the four do it for you:
 
 ===========  ==============================================================
 Azure        ``@Microsoft.KeyVault(SecretUri=...)`` in an app setting. The
@@ -10,11 +10,20 @@ Azure        ``@Microsoft.KeyVault(SecretUri=...)`` in an app setting. The
 GCP          ``secret_environment_variables``. The PLATFORM resolves it too.
 AWS          Nothing. Lambda has no platform-resolved env-var secret, so the
              function reads Secrets Manager itself at cold start.
+Self-hosted  A FILE. OpenFaaS mounts every secret at
+             ``/var/openfaas/secrets/<name>`` and sets no env var at all; a
+             plain Kubernetes Secret volume behaves the same way.
 ===========  ==============================================================
 
-So the rule is one line: **the value env var wins if it is set** (Azure and GCP
-already put it there), **otherwise resolve an id** (AWS). A workload calls
-:func:`resolve` and stops caring which cloud it landed on.
+So the rule is three lines, tried in order: **the value env var wins if it is set**
+(Azure and GCP already put it there), **else read the file a ``_FILE`` var names**
+(self-hosted), **else resolve an id** (AWS). A workload calls :func:`resolve` and
+stops caring which platform it landed on.
+
+The file channel is why nothing in ``auth`` needed to change to run on a cluster we
+do not own: without it the shared secret resolves to ``""``, ``auth.verify`` fails
+CLOSED with a 500, and the function is dead in a way that looks like a deployment
+bug rather than a missing channel.
 
 ``boto3`` is imported lazily, inside the AWS branch only. It is the one non-stdlib
 import in ``fnruntime``, it is reachable only on Lambda — where the runtime ships it —
@@ -116,6 +125,78 @@ def _read_aws(secret_id: str) -> str:
     return value
 
 
+def _read_file(path: str, file_env: str) -> str:
+    """The credential in the file at ``path``.
+
+    ``file_env`` is the name of the ``_FILE`` variable, NOT the value variable, and
+    every message below quotes it. Naming the value variable instead would send the
+    operator to set ``FN_X`` — which supplies the credential as a plaintext env var,
+    the one thing this module exists to avoid.
+
+    A DIRECTORY is accepted and resolved to the single file inside it. That is not
+    convenience: which of the two shapes arrives depends on how the runtime mounted
+    the secret — OpenFaaS names one file per secret, a Kubernetes Secret volume
+    mounted without ``items`` names a directory with one file per key — and an
+    adapter has no way to know which it got. Exactly one file, though: a directory
+    with two keys has no single answer, and picking the first alphabetically would
+    hand out whichever secret happened to sort earlier.
+
+    RAISES rather than returning ``""``. A ``_FILE`` var that is set names a
+    credential the operator meant to supply, so "the path is wrong" and "nothing is
+    configured" are different conditions and must not collapse into the same silent
+    one — the same argument :func:`_refuse_unresolved` makes for Azure's
+    never-resolved references. ``auth.verify`` catches this, fails closed, and logs
+    ``shared_secret_unresolvable``, so the outcome is a 500 that says which setting
+    to look at instead of a 401 nobody can explain.
+    """
+    target = path
+    if os.path.isdir(path):
+        try:
+            names = sorted(n for n in os.listdir(path) if not n.startswith(".."))
+        except OSError as exc:
+            raise RuntimeError(
+                f"{file_env} names the directory {path!r}, which cannot be listed "
+                f"({type(exc).__name__}). Check the volume is mounted.") from exc
+        # Kubernetes projects a Secret volume through a ``..data`` symlink plus one
+        # symlink per key; the ``..``-prefixed entries above are that machinery, not
+        # keys, which is why they are filtered rather than counted.
+        files = [n for n in names if os.path.isfile(os.path.join(path, n))]
+        if len(files) != 1:
+            raise RuntimeError(
+                f"{file_env} names the directory {path!r}, which holds "
+                f"{len(files)} files ({', '.join(files) or 'none'}); a secret "
+                f"directory must hold exactly one, or which file is the credential "
+                f"is a guess. Mount the single key, or point {file_env} at the file.")
+        target = os.path.join(path, files[0])
+    try:
+        with open(target, "r", encoding="utf-8") as handle:
+            value = handle.read()
+    except OSError as exc:
+        raise RuntimeError(
+            f"{file_env} names {target!r}, which could not be read "
+            f"({type(exc).__name__}). On OpenFaaS the secret must be listed in the "
+            f"function's `secrets:` for it to be mounted at all.") from exc
+    # Stripped because every way of writing one of these adds a trailing newline —
+    # `kubectl create secret --from-file`, a heredoc, an editor — and a secret with
+    # a newline on the end compares unequal to the same secret without one, which
+    # presents as a wrong credential rather than a malformed one.
+    value = value.strip()
+    if not value:
+        raise RuntimeError(
+            f"{file_env} names {target!r}, which is empty. An empty credential "
+            f"would be indistinguishable from an unconfigured one.")
+    return value
+
+
+def file_env_for(value_env: str) -> str:
+    """The conventional file variable for ``value_env`` — ``FN_X`` → ``FN_X_FILE``.
+
+    Same convention as :func:`id_env_for`, so the dashboard derives the name when it
+    writes the Function's environment and no per-workload mapping table is needed.
+    """
+    return f"{value_env}_FILE"
+
+
 def id_env_for(value_env: str) -> str:
     """The conventional id variable for ``value_env`` — ``FN_X`` → ``FN_X_SECRET_ID``.
 
@@ -137,14 +218,24 @@ def resolve(value_env: str, *id_envs: str) -> str:
     condition several workloads handle themselves (dry run needs none), and their
     error messages say more about what to do than a generic one could.
 
-    An UNRESOLVED platform reference is the one thing it does raise on — that is not
-    "nothing is set", it is a misconfiguration wearing a credential's clothes. See
-    :data:`_UNRESOLVED_PREFIXES`.
+    Two things it DOES raise on, and they are the same kind of thing: an UNRESOLVED
+    platform reference (see :data:`_UNRESOLVED_PREFIXES`) and a ``_FILE`` var
+    naming a file that is missing, ambiguous or empty (see :func:`_read_file`).
+    Neither is "nothing is set" — both are a misconfiguration wearing a
+    credential's clothes, and returning ``""`` for them would report the operator's
+    mistake as the workload's.
     """
     direct = _env(value_env)
     if direct:
         _refuse_unresolved(value_env, direct)
         return direct
+    # Before the id channel, because a self-hosted runtime has no Secrets Manager to
+    # fall through to and reaching the AWS branch there costs a boto3 import that
+    # cannot succeed — an ImportError in place of the real "no credential mounted".
+    file_env = file_env_for(value_env)
+    file_path = _env(file_env)
+    if file_path:
+        return _read_file(file_path, file_env)
     for name in (*id_envs, id_env_for(value_env)):
         secret_id = _env(name)
         if secret_id:

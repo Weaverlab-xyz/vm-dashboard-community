@@ -30,8 +30,9 @@ class Request:
     query: Mapping[str, str] = field(default_factory=dict)
     body: bytes = b""
     # Which shape this came from — one of: aws_function_url, aws_apigw_v2,
-    # aws_apigw_v1, aws_direct, azure, gcp, unknown. Auth uses it to allow the
-    # secret in the body for direct (scheduled) invokes, which have no headers.
+    # aws_apigw_v1, aws_direct, azure, gcp, openfaas, unknown. Auth uses it to
+    # allow the secret in the body for direct (scheduled) invokes, which have
+    # no headers.
     source: str = "unknown"
 
     def json(self) -> dict:
