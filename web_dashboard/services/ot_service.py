@@ -1700,9 +1700,19 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
         # failed over an adapter, which is the same posture the Purdue rules take.
         if not ot_faas_service.skip_reason(cmeta, bmeta):
             try:
+                # BEFORE the adapter, and against the same host so the worker runs
+                # them in order: the adapter is handed this password as a mounted
+                # secret, and a function holding a credential the HMI has not adopted
+                # yet 401s on its first grant. The image bakes authentication ON, so
+                # until this has run the HMI still carries FUXA's seeded default.
+                rotate_note = await ot_faas_service.queue_fuxa_rotate(
+                    db, parent_id, child_id, cmeta, broker_id=broker_id,
+                    bmeta=bmeta, cloud=cloud)
                 faas_note = await ot_faas_service.queue_deploy(
                     db, parent_id, child_id, cmeta, broker_id=broker_id,
                     bmeta=bmeta, cloud=cloud)
+                if rotate_note:
+                    faas_note = f"{rotate_note}; {faas_note}"
             except Exception as exc:  # noqa: BLE001
                 logger.warning("OT cell %s: adapter deploy failed: %s", vm, exc)
                 faas_note = f"adapter deploy failed ({exc})"

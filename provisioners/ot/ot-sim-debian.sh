@@ -386,6 +386,42 @@ case "$OT_FUXA_IMAGE" in
   *) die "OT_FUXA_IMAGE must carry an explicit version tag (got '$OT_FUXA_IMAGE')" ;;
 esac
 
+# ── The HMI's own authentication ─────────────────────────────────────────────
+# FUXA ships with authentication OFF, and that is not "reduced" — it is absent.
+# With `secureEnabled` false the server short-circuits twice: the API-key middleware
+# returns next() without looking for a token, and verifyGroups hands every anonymous
+# caller adminGroups[0]. So on a stock image ANYONE who can reach :1881 can list,
+# create and delete HMI users and roles with no credential. Network isolation is the
+# only control, and an HMI in that state is not something to show a security buyer.
+#
+# On by default. It is also the precondition for the Entitle JIT adapter meaning
+# anything: a just-in-time account on an HMI that authenticates nobody is theatre.
+OT_FUXA_SECURE="${OT_FUXA_SECURE:-1}"
+# Short, because this is the REVOCATION WINDOW and not just a login lifetime.
+# Deleting a user cuts REST access at once, but FUXA verifies a socket's token once
+# at connect and never re-checks, so an already-open browser session survives until
+# it reconnects. That interval is this value. 15m keeps the honest claim close to
+# the demo's claim; the format is jsonwebtoken's ('15m', '1h', or seconds as a number).
+OT_FUXA_TOKEN_EXPIRES="${OT_FUXA_TOKEN_EXPIRES:-15m}"
+# FUXA's own seeded account, created only when users.fuxap.db does not yet exist.
+# The bake CANNOT usefully change this password: the file it would write ships inside
+# the image, so every cell built from it would share one credential. It is rotated
+# per-cell at wire time instead (examples/playbooks/kubesolo/fuxa-admin-rotate.yml),
+# which is also the only point at which a password can be handed to the adapter.
+OT_FUXA_ADMIN_USER="${OT_FUXA_ADMIN_USER:-admin}"
+case "$OT_FUXA_SECURE" in
+  0|1) ;;
+  *) die "OT_FUXA_SECURE must be 0 or 1 (got '$OT_FUXA_SECURE')" ;;
+esac
+if [ "$OT_FUXA_SECURE" = "1" ] && [ "$OT_RUNTIME" != "kubesolo" ]; then
+  # The settings file lives in FUXA's appdata, which the KubeSolo runtime mounts from
+  # a hostPath this script primes. The docker fallback uses a named volume that only
+  # exists once the container has run, so there is nothing to write into at bake time.
+  die "OT_FUXA_SECURE=1 needs OT_RUNTIME=kubesolo (the docker fallback's appdata is a \
+named volume that does not exist until first run). Use OT_FUXA_SECURE=0 for a docker \
+bake, and know that its HMI applies NO authorization at all."
+fi
+
 # POSIX sh has no arrays: membership is a comma-delimited substring test.
 sim_enabled() {
   case ",$OT_SIMS," in
@@ -807,6 +843,56 @@ docker save "$OT_FUXA_IMAGE" -o "$OT_IMAGE_DIR/fuxa.tar"
 # plus a WARNING about FUXA starting empty). Empty is the correct starting state; the
 # project arrives from the bake-time seed further down, over FUXA's own API. The
 # directory itself is made with the image dir above.
+# Authentication ON, written BEFORE FUXA ever starts.
+#
+# That ordering is the whole trick. The other way to set these is POST /api/settings,
+# which RESTARTS the FUXA runtime — and the restart lands in the middle of the project
+# seed below, whose read-back then 401s and reports a project that seeded fine as "NOT
+# seeded". Writing the file while nothing is running has no ordering problem at all.
+#
+# mysettings.json, not settings.js: FUXA reads both and the JSON one overrides, and it
+# is what FUXA's own UI writes. It will not exist yet on a fresh bake — the image
+# ships no _appdata at all, per the note above — so this usually CREATES it. The
+# read-modify-write is kept anyway: the file is the whole settings document, so an
+# image that did ship one must not have keys (uiPort among them) clobbered out of
+# it by a writer that only knows about three.
+if [ "$OT_FUXA_SECURE" = "1" ]; then
+  log "enabling FUXA authentication (secureEnabled, tokenExpiresIn=$OT_FUXA_TOKEN_EXPIRES)"
+  OT_FUXA_TOKEN_EXPIRES="$OT_FUXA_TOKEN_EXPIRES" python3 - <<'PYEOF' \
+    || die "could not write FUXA's settings — refusing to bake an HMI that authenticates nobody"
+import json
+import os
+
+path = "/var/lib/ot-sim/fuxa/mysettings.json"
+settings = {}
+if os.path.exists(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if isinstance(loaded, dict):
+            settings = loaded
+    except (OSError, ValueError):
+        # An existing file we cannot parse is not a document to preserve; FUXA
+        # falls back to settings.js anyway, so writing a clean one is a repair.
+        settings = {}
+
+settings["secureEnabled"] = True
+settings["tokenExpiresIn"] = os.environ["OT_FUXA_TOKEN_EXPIRES"]
+# A PLACEHOLDER, replaced per-cell on first boot by apply.sh. Baking a real one would
+# give every cell built from this image the same JWT signing key, so a token minted
+# on one plant would validate on another. Same reasoning as the cluster identity the
+# cleanup wipes at the end of this script.
+settings["secretCode"] = "REPLACE_ON_FIRST_BOOT"
+
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(settings, handle, indent=2, sort_keys=True)
+print("[ot-sim] wrote %s (%d keys)" % (path, len(settings)))
+PYEOF
+else
+  log "WARNING: OT_FUXA_SECURE=0 - this HMI will apply NO authorization at all."
+  log "         Anyone who can reach :1881 can create and delete its users."
+fi
+
 # The cell is a single-purpose appliance and this directory is its own state, so a
 # permissive mode beats guessing which UID the pinned FUXA image runs as.
 chmod 0777 /var/lib/ot-sim/fuxa
@@ -1130,6 +1216,36 @@ done < "$IMAGE_DIR/images.txt"
 
 # 3. Apply, then wait on each Deployment, so a boot that only half-worked says so in
 #    `systemctl status ot-sim` instead of in front of a customer.
+# 2b. This cell's own JWT signing key, before the HMI can read it.
+#     The image ships a placeholder, because a real key baked into it would be the
+#     same on every cell built from that image — a token minted on one plant would
+#     then validate on another. Same reasoning as the cluster CA the bake wipes.
+#     Left unset instead, FUXA generates a fresh key per PROCESS, so every restart
+#     silently logs everyone out; a per-cell key that persists is what we want.
+FUXA_SETTINGS=/var/lib/ot-sim/fuxa/mysettings.json
+if [ -f "$FUXA_SETTINGS" ] && grep -q REPLACE_ON_FIRST_BOOT "$FUXA_SETTINGS"; then
+  log "minting this cell's FUXA signing key"
+  FUXA_SETTINGS="$FUXA_SETTINGS" python3 - <<'PY'
+import json
+import os
+import secrets
+
+path = os.environ["FUXA_SETTINGS"]
+with open(path, encoding="utf-8") as handle:
+    settings = json.load(handle)
+if settings.get("secretCode") == "REPLACE_ON_FIRST_BOOT":
+    settings["secretCode"] = secrets.token_urlsafe(48)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(settings, handle, indent=2, sort_keys=True)
+PY
+  # 0666, matching the 0777 on the directory above and for the same reason: the
+  # pinned FUXA image's UID is not known here, and a root-owned 0600 file is one
+  # FUXA cannot read at startup — which presents as authentication silently not
+  # being on. The cell is a single-purpose appliance whose appdata is already
+  # world-readable, so this widens nothing that was narrow.
+  chmod 0666 "$FUXA_SETTINGS" 2>/dev/null || true
+fi
+
 kubectl apply -f /opt/ot-sim/kubesolo/ot-sim.yaml
 for deploy in $(kubectl -n ot-sim get deploy -o name); do
   kubectl -n ot-sim rollout status "$deploy" --timeout=300s
@@ -1234,15 +1350,54 @@ TAGS = [("counter", "Counter", "1"),
         ("running", "Running", "4")]
 
 
+# Set once by _signin() and attached to every call after it. Empty is a valid
+# state: a FUXA with secureEnabled off wants no token and rejects nothing.
+TOKEN = ""
+ADMIN_USER = os.environ.get("FUXA_ADMIN_USER") or "admin"
+# The account FUXA seeds itself with, which is what exists at BAKE time. It is
+# rotated per-cell at wire time, long after this script has run.
+ADMIN_PASSWORD = os.environ.get("FUXA_ADMIN_PASSWORD") or "123456"
+
+
 def _call(path, payload=None, timeout=20):
     body = json.dumps(payload).encode() if payload is not None else None
+    headers = {"Content-Type": "application/json"}
+    if TOKEN:
+        # x-access-token, NOT Authorization: Bearer. No bearer parsing exists
+        # anywhere in the FUXA server, so the wrong header is an unauthenticated
+        # request that 401s while looking correct.
+        headers["x-access-token"] = TOKEN
     req = urllib.request.Request(
-        BASE + path, data=body,
-        headers={"Content-Type": "application/json"},
+        BASE + path, data=body, headers=headers,
         method="POST" if body is not None else "GET")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read().decode().strip()
     return json.loads(raw) if raw[:1] in ("{", "[") else {}
+
+
+def _signin():
+    """A session token, or "" when this FUXA needs none.
+
+    Deliberately non-fatal in both directions. An image baked with
+    OT_FUXA_SECURE=0 has nothing to sign in to and must still seed; one baked with
+    it on must not fail the whole 15-minute bake because the seed could not
+    authenticate — the project step has always been best-effort, and the caller
+    below reports it either way.
+    """
+    global TOKEN
+    try:
+        payload = _call("/api/signin",
+                        {"username": ADMIN_USER, "password": ADMIN_PASSWORD})
+    except Exception as exc:  # noqa: BLE001
+        print("NOTE: FUXA sign-in failed (%s) - continuing unauthenticated" % exc)
+        return ""
+    token = ""
+    if isinstance(payload, dict):
+        token = str((payload.get("data") or {}).get("token") or "")
+    TOKEN = token
+    if token:
+        print("signed in to FUXA as %s" % ADMIN_USER)
+    return token
 
 
 def _wait_for_api(seconds):
@@ -1250,6 +1405,10 @@ def _wait_for_api(seconds):
     last = None
     while time.time() < deadline:
         try:
+            # Sign in on every attempt, not once before the loop: on the first of
+            # them FUXA may not be listening yet, and a token minted before the
+            # runtime finished starting is one it does not know.
+            _signin()
             return _call("/api/project")
         except Exception as exc:  # noqa: BLE001
             last = exc
@@ -1324,12 +1483,56 @@ EOF
 # node's :1881 under either runtime, and the KubeSolo one has no docker left to run
 # the seed with.
 log "seeding the FUXA project (device + holding-register tags, PLC at $FUXA_PLC_ADDRESS)"
+export FUXA_ADMIN_USER="$OT_FUXA_ADMIN_USER"
 if FUXA_PLC_ADDRESS="$FUXA_PLC_ADDRESS" python3 /opt/ot-sim/plc-sim/fuxa_seed.py; then
   log "FUXA project seeded - the cell opens on a wired PLC connection"
 else
   log "WARNING: FUXA project NOT seeded (see the error above). The image is still"
   log "         good: wire the connection by hand once per cell, as described in"
   log "         provisioners/ot/README.md (FUXA project seeding)."
+fi
+
+# Did the authentication actually take effect? Asked directly rather than assumed.
+#
+# This is the one check that matters for OT_FUXA_SECURE, and it is not a formality:
+# settings.js and mysettings.json are both read and the second overrides, so whether
+# a partial file MERGES or is ignored is a property of the pinned FUXA rather than
+# something this script can guarantee. And the failure is silent in the worst
+# direction — an HMI that looks configured and authorizes everyone.
+#
+# The probe is exact: with secureEnabled ON, /api/users requires admin and answers
+# 401 to an anonymous caller. With it OFF, verifyGroups hands that caller
+# adminGroups[0] and the same request returns 200 with the user list. So the status
+# code IS the answer.
+if [ "$OT_RUNTIME" = "kubesolo" ]; then
+  _fuxa_anon_status="$(python3 - <<'PY'
+import urllib.error
+import urllib.request
+
+try:
+    with urllib.request.urlopen("http://127.0.0.1:1881/api/users", timeout=15) as resp:
+        print(resp.status)
+except urllib.error.HTTPError as exc:
+    print(exc.code)
+except Exception:
+    print("0")
+PY
+)"
+  log "anonymous GET /api/users -> HTTP $_fuxa_anon_status"
+  if [ "$OT_FUXA_SECURE" = "1" ]; then
+    case "$_fuxa_anon_status" in
+      401|403) log "FUXA authentication is ON and enforced" ;;
+      200) die "OT_FUXA_SECURE=1 but an ANONYMOUS caller listed FUXA's users. The \
+settings were not applied - check that $OT_FUXA_IMAGE reads _appdata/mysettings.json \
+and that the key is still called secureEnabled. Refusing to bake an HMI that claims \
+authentication it does not have." ;;
+      *) log "WARNING: could not probe FUXA's authentication (HTTP $_fuxa_anon_status)."
+         log "         The image still ships; verify by hand that an anonymous"
+         log "         GET /api/users on a deployed cell is refused." ;;
+    esac
+  elif [ "$_fuxa_anon_status" = "200" ]; then
+    log "NOTE: as expected for OT_FUXA_SECURE=0, this HMI authorizes anonymous callers."
+  fi
 fi
 
 if [ "$OT_RUNTIME" = "docker" ]; then
@@ -2073,6 +2276,24 @@ else
     # Written by the bake's own run of apply.sh, and describing the BUILD VM: its CA
     # and address, both wrong on a cell. Each cell writes its own at boot.
     rm -f /var/lib/ot-sim/kubeconfig-via-tunnel.yaml
+    # And FUXA's signing key, for exactly the reason above one layer down. The bake
+    # RUNS apply.sh to smoke-test the stack, and that mints a real key — so without
+    # this reset the key generated on the build VM would ship inside the image and
+    # every cell built from it would share one, making a token minted on one plant
+    # valid on another. Put the placeholder back so the next first boot mints its own.
+    if [ -f /var/lib/ot-sim/fuxa/mysettings.json ]; then
+      log "resetting FUXA's signing key (each cell mints its own on first boot)"
+      python3 - <<'PY' || log "WARNING: could not reset FUXA's signing key"
+import json
+
+path = "/var/lib/ot-sim/fuxa/mysettings.json"
+with open(path, encoding="utf-8") as handle:
+    settings = json.load(handle)
+settings["secretCode"] = "REPLACE_ON_FIRST_BOOT"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(settings, handle, indent=2, sort_keys=True)
+PY
+    fi
   fi
 fi
 

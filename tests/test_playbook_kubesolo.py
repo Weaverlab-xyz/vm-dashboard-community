@@ -53,6 +53,10 @@ _EXPECTED = {
     # Entitle or what the function talks to — so a new adapter is a new package
     # rather than a new play.
     "openfaas-function-deploy.yml",
+    # Rotates the HMI's seeded admin password per cell. It cannot be done at bake
+    # time — the file would ship inside the image and every cell would share one
+    # credential — and it runs from the BROKER, the only host that can reach the cell.
+    "fuxa-admin-rotate.yml",
 }
 
 # Storage is a FLAT namespace — a run resolves an asset by bare filename, so a name

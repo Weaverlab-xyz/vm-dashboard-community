@@ -61,6 +61,12 @@ class OTFaasError(Exception):
 # storage backend before a run can resolve it by bare filename, which is the same
 # contract every other Config-Management run has.
 FAAS_DEPLOY_PLAYBOOK = "openfaas-function-deploy.yml"
+# Rotates the HMI's seeded admin password. It runs against the BROKER, which is the
+# only host that can reach the cell, and it is what makes the baked
+# `secureEnabled: true` mean something: the image cannot carry a per-cell password
+# (the file would ship inside it and every cell would share one), so FUXA arrives
+# with its own `admin` / `123456` until this has run.
+FUXA_ROTATE_PLAYBOOK = "fuxa-admin-rotate.yml"
 
 FUNCTION_NAME = "ot-entitle-adapter"
 NAMESPACE = "openfaas-fn"
@@ -214,6 +220,28 @@ def _fuxa_env(child_id: str, cmeta: dict) -> dict:
     if _cfg("ot_faas_fuxa_role_mode"):
         env["FN_FUXA_ROLE_MODE"] = _cfg("ot_faas_fuxa_role_mode")
     return env
+
+
+def ensure_fuxa_admin_password(vm_job_id: str) -> str:
+    """This cell's FUXA admin password, minted on first use.
+
+    Minted HERE and not in the play, for the same reason the bearer is: the play is
+    idempotent only because the value it converges on was already decided. A password
+    generated inside the run would differ on every re-run, and the second run would
+    then find neither the new password nor FUXA's default and refuse — correctly, and
+    permanently.
+    """
+    from . import config_service
+
+    key = fuxa_admin_config_key(vm_job_id)
+    existing = (config_service.get(key) or "").strip()
+    if existing:
+        return existing
+    # The alphabet FUXA's own users get, for the same reason: this one is read off a
+    # screen during a demo at least once.
+    value = secrets.token_urlsafe(24)
+    config_service.set(key, value)
+    return value
 
 
 def _fuxa_secrets(child_id: str) -> dict:
@@ -437,6 +465,76 @@ async def queue_deploy(db, parent_id: str, child_id: str, cmeta: dict, *,
             f"{len(package_b64)} b64 bytes)")
 
 
+async def queue_fuxa_rotate(db, parent_id: str, child_id: str, cmeta: dict, *,
+                            broker_id: str, bmeta: dict, cloud: str = "gcp",
+                            created_by: str = "") -> str:
+    """Rotate the cell's HMI admin password, from the broker.
+
+    Queued BEFORE the adapter deploy, because the adapter is given this password as a
+    mounted secret and a function holding a credential the HMI has not adopted yet is
+    one that 401s on its first grant. Both are ``ansible_local`` runs against the same
+    host, so the worker serialises them in order.
+
+    Runs against the BROKER and never the cell: once the Purdue zoning is on, the cell
+    admits the PRA Gateway and the broker and nothing else, so there is no other host
+    a Config-Management run could reach it from.
+    """
+    from . import ansible_run_meta, job_service, storage_service
+
+    if cmeta.get("ot_fuxa_rotate_job_id"):
+        return f"HMI password rotation already queued (job {cmeta['ot_fuxa_rotate_job_id']})"
+    hmi_url = (cmeta.get("ot_hmi_url") or "").strip()
+    if not hmi_url:
+        return ("HMI password rotation skipped: the cell has no recorded HMI URL, so "
+                "there is nothing to point the run at")
+    broker_ip = ((bmeta or {}).get("private_ip") or "").strip()
+    if not broker_ip:
+        return ("HMI password rotation skipped: the DMZ broker reported no private "
+                "address, and it is the only host that can reach the cell")
+
+    ensure_fuxa_admin_password(child_id)
+    parent = job_service.get_job(db, parent_id) if parent_id else None
+    payload = SimpleNamespace(
+        asset=FUXA_ROTATE_PLAYBOOK,
+        target=broker_ip,
+        cloud=cloud,
+        ansible_user="",
+        extra_vars={"fuxa_url": hmi_url,
+                    "fuxa_admin_user": _cfg("ot_faas_fuxa_user") or "admin"},
+        # By reference, like every other credential here: the job row carries the
+        # config key and the runner resolves it at run time.
+        secret_vars={"fuxa_new_password": fuxa_admin_config_key(child_id)},
+        secret_become_source="",
+        secret_ssh_key_source="",
+        managed_account=None,
+        managed_become=None,
+        epml_token_var="",
+    )
+    try:
+        job = job_service.create_job(
+            db,
+            job_type="ansible_local",
+            created_by=(created_by or (parent.created_by if parent else "system")),
+            workgroup="ansible",
+            metadata=ansible_run_meta.run_meta(
+                payload,
+                description=f"Rotate the HMI admin password on {hmi_url}",
+                asset_backend=storage_service.active_backend()),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OT cell: HMI password rotation could not be queued: %s", exc)
+        return f"HMI password rotation could not be queued ({exc})"
+
+    job_service.update_metadata(db, child_id, {
+        "ot_fuxa_rotate_job_id": job.id,
+        "ot_fuxa_admin_key": fuxa_admin_config_key(child_id)})
+    cmeta["ot_fuxa_rotate_job_id"] = job.id
+    cmeta["ot_fuxa_admin_key"] = fuxa_admin_config_key(child_id)
+    return (f"HMI password rotation queued as job {job.id} — the image bakes "
+            f"authentication ON, and until this runs the HMI still has FUXA's "
+            f"seeded default")
+
+
 async def queue_probe(db, child_id: str, cmeta: dict, bmeta: dict,
                       created_by: str = "", cloud: str = "gcp") -> str:
     """Re-run the play's probe only: no package, no secrets, no change.
@@ -560,7 +658,7 @@ async def destroy(vm_job_id: str, cmeta: dict) -> str:
     state = (cmeta or {}).get("ot_faas_entitle_tf_state") or ""
     if not state:
         # Still clear the bearer: a deploy that never reached registration leaves one.
-        config_service.delete(bearer_config_key(vm_job_id))
+        _clear_stash(vm_job_id)
         return ""
     try:
         await entitle.deregister(
@@ -576,8 +674,21 @@ async def destroy(vm_job_id: str, cmeta: dict) -> str:
     # Only now: while the integration existed, the bearer was the credential it
     # authenticates with, and dropping it first would leave a live integration
     # pointing at a function nobody can call.
-    config_service.delete(bearer_config_key(vm_job_id))
+    _clear_stash(vm_job_id)
     return ""
+
+
+def _clear_stash(vm_job_id: str) -> None:
+    """Every per-cell secret this feature minted.
+
+    The HMI admin password belongs here as much as the bearer does: the cell it
+    belonged to is gone, nothing else will ever look at it, and a config store that
+    accumulates one per destroyed demo is a store nobody can audit.
+    """
+    from . import config_service
+
+    for key in (bearer_config_key(vm_job_id), fuxa_admin_config_key(vm_job_id)):
+        config_service.delete(key)
 
 
 def describe(cmeta: dict) -> dict:
