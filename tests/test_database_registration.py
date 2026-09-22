@@ -438,9 +438,11 @@ def test_database_target_returns_before_the_ephemeral_store_gate():
     it — or moves the dispatch below it — every AWS/GCP database run starts 400ing
     unless an unrelated cloud-secrets opt-in is enabled."""
     src = _config_mgmt_src()
-    dispatch = src.find('target_kind in ("k8s", "database")')
+    # One dispatch for every localhost family, so the marker names the whole tuple —
+    # Portainer joined it and this went looking for the two-element spelling.
+    dispatch = src.find('target_kind in ("k8s", "database", "portainer")')
     gate = src.find("requires_ephemeral_store(")
-    assert dispatch != -1, "the k8s/database early return is gone from /run"
+    assert dispatch != -1, "the localhost-family early return is gone from /run"
     assert gate != -1, "requires_ephemeral_store call is gone — did the gate move?"
     assert dispatch < gate, (
         "the ephemeral-store gate now precedes the k8s/database dispatch, so a database "
