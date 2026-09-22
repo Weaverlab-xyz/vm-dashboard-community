@@ -22,7 +22,7 @@ for the operator view; this doc covers the architecture + the two open build-out
 | PostgreSQL DB | `postgresql` | host, port, username, password, [database] | ephemeral |
 | SQL Server DB | `mssql` | server (`host,port`), user, password, [database], [version] | ephemeral (`entitle_`-prefixed, auto-deleted) |
 | MySQL DB | `mysql` | host, port, user, password, [mysql_version] | persistent roles (read/write/admin) — **not** ephemeral |
-| Rancher node | `rancher` | url, **access_key** (not `access_token`), secret_key, verify | ephemeral |
+| Rancher node | `rancher` | url (**the API Endpoint**, `…/v3` — not the UI origin), **access_key** (not `access_token`), secret_key, verify | ephemeral |
 | _(future)_ EKS/AKS/GKE | Kubernetes | per provider | ephemeral |
 
 DB `connection_json` keys differ per engine (Entitle's MySQL / MSSQL connectors

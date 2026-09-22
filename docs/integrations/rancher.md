@@ -436,6 +436,11 @@ where the access/secret pair is the node's `rancher_api_token` (`token-xxxxx:yyy
 split on the `:`, and `verify` follows `rancher_verify_tls` (off by default — the
 node serves a self-signed certificate).
 
+`url` is Rancher's **API Endpoint** — `https://<node ip>/v3`, the string Rancher
+itself prints beside the key pair on *Account & API Keys* — **not** the UI origin.
+The job result names the URL it registered. Override the suffix with
+`entitle_rancher_api_path`; the literal `none` sends the origin unchanged.
+
 > **The key is `access_key`, not `access_token`.** BeyondTrust's own Rancher
 > connector page prints `access_token`; the connector does not accept it. Take the
 > field names from **Integrations → Add Integration → Rancher** in your tenant, not
@@ -563,6 +568,33 @@ The agent reaches the node from inside, so no inbound ranges are opened at all a
 `entitle_source_cidrs` is irrelevant. It is an env/config-only switch today — it
 appears in neither the Settings panel nor `EntitleFeatureConfig`. See the
 [Entitle guide](entitle.md) for enabling resource registration.
+
+### A sync fails with `Expecting value: line 1 column 1 (char 0)`
+
+That is Python's `json.JSONDecodeError`, raised **inside Entitle's connector** — the
+dashboard cannot produce it (every parse on the registration path is guarded, and the
+string appears nowhere in this repo). It means the connector called the URL in the
+integration and the body it got back was not JSON. It names neither the URL, nor the
+status code, nor Rancher, which is why it reads like a broken integration.
+
+The cause is almost always the **URL**: registered as the UI origin
+(`https://<node ip>`) rather than Rancher's API Endpoint (`https://<node ip>/v3`).
+Rancher answers its origin with the web UI — a redirect to the SPA and a body of
+HTML — and `<` is not a JSON document. Deploys before 2026-09-22 registered the
+origin; see [What gets sent](#what-gets-sent).
+
+Read the variants byte-for-byte, because each says exactly what `json.loads` was
+handed and that is the fastest way to identify the body:
+
+| Message | What the body was |
+|---|---|
+| `Expecting value: line 1 column 1 (char 0)` | empty, or a first byte that cannot start JSON — the `<` of HTML, the `h` of a URL, the `t` of `token-…` |
+| `Extra data: line 1 column 5 (char 4)` | a **valid 4-character JSON value followed by more text** — a dotted number (`10.0…`, `1.28…`), a `2026-…` date, or `true`/`null` with junk after it. The connector parsed something and then hit trailing bytes, so it got *further* than the case above |
+
+To fix a live integration: the `url` is inside the integration, so it has to be
+rewritten. Either edit the field on the integration in Entitle and re-sync (fastest,
+no redeploy), or **Deregister** and then **Register in Entitle** from the node row —
+Register is hidden while an integration exists, so it must be in that order.
 
 A node **teardown** deregisters for you before the VM goes away, and clears
 `entitle_rancher_integration_id` either way — so the chip reverts on its own.
