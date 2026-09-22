@@ -55,6 +55,12 @@ _CLOUD_NATIVE_RUNNER = {"aws": "ecs", "azure": "aci", "gcp": "gcp"}
 K8S_TARGET_CLOUDS = ("aws", "azure", "gcp", "local")
 DB_TARGET_CLOUDS = ("aws", "azure", "gcp", "local")
 
+# The Portainer target family has no cloud at all: the play reaches the configured
+# Portainer over its own URL, exactly as the dashboard does, so what decides the
+# runner is reachability rather than a resource's placement. See
+# :func:`resolve_portainer_runner`.
+PORTAINER_RUNNER_KEY = "ansible_runner_portainer"
+
 # Distinct ECS task family so these localhost runs don't share task-def revision
 # history with the SSH VM runner (ansible-config-mgmt) or the k8s runner (k8s-runner).
 _ECS_TASK_FAMILY = "ansible-cloud-run"
@@ -127,6 +133,31 @@ def resolve_runner(cloud: str) -> str:
     return runner
 
 
+def resolve_portainer_runner() -> str:
+    """The runner backend for a ``portainer`` target: ``ansible_runner_portainer``,
+    else the install's ordinary ``ansible_runner``.
+
+    A Portainer play is a localhost play against a REST API, so unlike a cluster or a
+    database there is no cloud to derive a runner from — only the question of what can
+    reach the server. Two things follow, and the second is the one that bites:
+
+    * the default is whatever this install already runs playbooks on, because these
+      plays ran that way as ordinary VM-target runs before this family existed;
+    * a MANAGED node's firewall is fail-closed and admits the dashboard's own egress
+      /32, the Gateway /32s and the adapter's subnet — not a transient runner's
+      address. So an in-cloud runner can be dropped where the local one is admitted.
+      ``ansible_runner_portainer`` exists for that: it lets this one family run
+      somewhere else without moving every other run. If a Portainer play times out,
+      that allow-list (``portainer_allowed_source_cidrs``) is what to look at.
+    """
+    runner = (_cfg(PORTAINER_RUNNER_KEY) or _cfg("ansible_runner") or "local").strip().lower()
+    if runner not in ("local", "ecs", "aci", "gcp"):
+        raise AnsibleCloudRunError(
+            f"{PORTAINER_RUNNER_KEY} / ansible_runner is {runner!r}, which is not an "
+            f"Ansible runner (local/ecs/aci/gcp)")
+    return runner
+
+
 def _run_local_docker_sync(cmd: list) -> tuple:
     """Run the local `docker run` and return ``(exit_code, combined_output)``.
 
@@ -188,7 +219,8 @@ async def _run_local_ansible_localhost(
 
 
 def check_target(kind: str, cloud: str, asset_backend: str, asset: str = "") -> str | None:
-    """Validate a k8s/database Config-Management target against its asset storage.
+    """Validate a k8s/database/portainer Config-Management target against its asset
+    storage.
 
     Returns the error detail for a 400, or ``None`` when the run may proceed. Lives
     here rather than inline in the endpoint because the two conditions interact and
@@ -206,13 +238,16 @@ def check_target(kind: str, cloud: str, asset_backend: str, asset: str = "") -> 
     unit-testable without standing up the app.
     """
     cloud = (cloud or "").strip().lower()
-    allowed = K8S_TARGET_CLOUDS if kind == "k8s" else DB_TARGET_CLOUDS
-    if cloud not in allowed:
-        return (f"cloud {cloud!r} has no Ansible runner for {kind} targets "
-                f"(supported: {'/'.join(allowed)}).")
+    if kind != "portainer":
+        # A Portainer target has no cloud to check — see resolve_portainer_runner.
+        allowed = K8S_TARGET_CLOUDS if kind == "k8s" else DB_TARGET_CLOUDS
+        if cloud not in allowed:
+            return (f"cloud {cloud!r} has no Ansible runner for {kind} targets "
+                    f"(supported: {'/'.join(allowed)}).")
     if asset_backend == "local":
         try:
-            runs_here = resolve_runner(cloud) == "local"
+            runs_here = (resolve_portainer_runner() if kind == "portainer"
+                         else resolve_runner(cloud)) == "local"
         except AnsibleCloudRunError as e:
             # A misconfigured ansible_runner_<cloud>. Report it as a validation error
             # now rather than letting the caller enqueue a job that dies in the worker.
@@ -340,6 +375,11 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
                 k8s_service.resolve_kubeconfig(db, target_id))
             kubeconfig_b64 = base64.b64encode(kubeconfig.encode()).decode()
             scrub_values.extend(_kubeconfig_tokens(kubeconfig))
+        elif target_kind == "portainer":
+            # Nothing to resolve: the connection IS the PORTAINER_* env every runner
+            # already gets below, which is what the sample plays read. Injecting the
+            # URL as a var too would give a play two spellings of one target.
+            pass
         else:
             job_service.set_failed(db, job_id, f"unknown target_kind {target_kind!r}")
             return
@@ -348,7 +388,8 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
         if vars_file:
             conn_vars_b64 = base64.b64encode(json.dumps(vars_file).encode()).decode()
 
-        runner = resolve_runner(cloud)
+        runner = (resolve_portainer_runner() if target_kind == "portainer"
+                  else resolve_runner(cloud))
         image = _cfg("ansible_cloud_image") or "chrweav/ansible-cloud:latest"
 
         # Auto-inject the configured Password Safe OAuth creds as PASSWORD_SAFE_* env so

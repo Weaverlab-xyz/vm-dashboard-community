@@ -1380,6 +1380,12 @@ class Settings(BaseSettings):
     ansible_runner_aws: str = ""               # "" | "local" | "ecs"
     ansible_runner_azure: str = ""             # "" | "local" | "aci"
     ansible_runner_gcp: str = ""               # "" | "local" | "gcp"
+    # Portainer targets have no cloud — the play talks to the one configured
+    # Portainer over its URL — so they get a purpose key rather than a per-cloud one.
+    # Blank → fall back to ansible_runner. It exists because a MANAGED node's
+    # firewall admits the dashboard's own egress and not a transient runner's, so
+    # this family sometimes has to run somewhere else than the rest.
+    ansible_runner_portainer: str = ""         # "" | "local" | "ecs" | "aci" | "gcp"
     # Per-cloud SSH user for Ansible cloud runner targets. Each cloud's stock
     # AMI / image family ships with a different default username, so a single
     # global value would be wrong for at least two of the three. Set the one

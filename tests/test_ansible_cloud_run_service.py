@@ -161,6 +161,64 @@ def test_check_target_reports_a_misconfigured_runner_instead_of_raising():
     assert msg and "must run on an in-cloud runner" in msg
 
 
+# ── The Portainer target family ───────────────────────────────────────────────
+# It has no cloud: the play talks to the ONE configured Portainer over its URL, so
+# what picks the runner is reachability, not a resource's placement.
+
+def test_portainer_defaults_to_the_installs_own_runner():
+    """These plays ran as ordinary VM-target runs before the family existed, so the
+    default has to be the runner they already ran on — anything else would change
+    where a working playbook executes."""
+    CONF.clear()
+    assert acr.resolve_portainer_runner() == "local"
+    CONF["ansible_runner"] = "aci"
+    assert acr.resolve_portainer_runner() == "aci"
+
+
+def test_portainer_takes_a_purpose_override():
+    """A managed node's firewall admits the dashboard's egress /32 and not a transient
+    runner's, so this one family sometimes has to run somewhere else — without moving
+    every other run."""
+    CONF.clear()
+    CONF["ansible_runner"] = "ecs"
+    CONF[acr.PORTAINER_RUNNER_KEY] = "local"
+    assert acr.resolve_portainer_runner() == "local"
+
+
+def test_portainer_local_is_allowed_unlike_a_private_resource():
+    """resolve_runner REFUSES local for aws/azure/gcp because a VPC-private endpoint
+    needs an in-cloud runner. Portainer is the opposite case — the dashboard reaches
+    it, which is how the Containers tab works — so local must stay legal here."""
+    CONF.clear()
+    CONF[acr.PORTAINER_RUNNER_KEY] = "local"
+    assert acr.resolve_portainer_runner() == "local"
+    assert acr.check_target("portainer", "", "local", "play.yml") is None
+
+
+def test_portainer_needs_no_cloud():
+    """An empty cloud is not a validation failure for this kind; for the others it is
+    the first thing checked."""
+    CONF.clear()
+    assert acr.check_target("portainer", "", "s3", "play.yml") is None
+    assert acr.check_target("k8s", "", "s3", "play.yml")
+
+
+def test_portainer_still_refuses_a_local_asset_on_an_in_cloud_runner():
+    """The storage rule is about where the runner executes, and that question survives
+    the target having no cloud."""
+    CONF.clear()
+    CONF["ansible_runner"] = "gcp"
+    msg = acr.check_target("portainer", "", "local", "play.yml")
+    assert msg and "cannot reach" in msg and "play.yml" in msg
+
+
+def test_a_nonsense_runner_is_a_message_not_an_exception():
+    CONF.clear()
+    CONF[acr.PORTAINER_RUNNER_KEY] = "kubernetes"
+    msg = acr.check_target("portainer", "", "local", "play.yml")
+    assert msg and "not an Ansible runner" in msg
+
+
 def test_scrub_redacts_long_values_only():
     out = acr._scrub("pw=supersecret host=db1 pin=42", ["supersecret", "42"])
     assert "supersecret" not in out

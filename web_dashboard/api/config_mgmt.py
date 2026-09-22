@@ -346,23 +346,30 @@ def get_localhost_targets(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Kubernetes clusters + databases selectable as **localhost** Ansible
-    targets (the run reaches out via kubeconfig / DB login vars). Ids + display fields
-    only — never a secret. Parallels ``/cloud-targets`` for VMs, and is served here so
-    the Config-Management page doesn't need the separate k8s / cloud_database feature
-    permissions just to populate its picker.
+    """Kubernetes clusters, databases + Portainer selectable as **localhost** Ansible
+    targets (the run reaches out via kubeconfig / DB login vars / the Portainer REST
+    API). Ids + display fields only — never a secret. Parallels ``/cloud-targets`` for
+    VMs, and is served here so the Config-Management page doesn't need the separate
+    k8s / cloud_database feature permissions just to populate its picker.
 
     Only resources an Ansible runner can actually reach + configure appear: aws/azure/gcp
     (in-cloud runner), plus — for both clusters and databases — those registered with
     cloud="local", which run on the dashboard's local runner. See ``K8S_TARGET_CLOUDS``
     and ``DB_TARGET_CLOUDS`` for the two lists.
 
+    Portainer is config, not a row, and at most one: it is listed when the integration
+    is on and a URL + token are stored, which is exactly when a play against it can
+    work. Deliberately no Portainer call from here — the picker must render on a page
+    load, and an unreachable server would make it hang rather than list.
+
     Response shape:
         {"k8s": [{id, name, cloud, status}, …],
-         "databases": [{id, engine, cloud, status}, …]}
+         "databases": [{id, engine, cloud, status}, …],
+         "portainer": [{key, name, url}]}
     """
     from ..database import K8sCluster, CloudDatabase
     from ..services import ansible_cloud_run_service as acr
+    from ..services import config_service as cs
 
     clusters = []
     for c in db.query(K8sCluster).order_by(K8sCluster.created_at.desc()).all():
@@ -374,7 +381,15 @@ def get_localhost_targets(
         if (d.cloud or "").lower() in acr.DB_TARGET_CLOUDS and d.engine in acr.ANSIBLE_DB_ENGINES:
             databases.append({"id": d.id, "engine": d.engine, "cloud": d.cloud,
                               "status": d.status})
-    return {"k8s": clusters, "databases": databases}
+    portainer = []
+    portainer_url = (cs.get("portainer_url") or "").strip()
+    # get_raw, not get: the token may be stored as a vault reference, and resolving
+    # one here would put a Password Safe round-trip in the path of every page load
+    # just to answer "is a token set".
+    if (cs.get_bool("portainer_enabled", True) and portainer_url
+            and cs.get_raw("portainer_pat").strip()):
+        portainer.append({"key": "server", "name": "Portainer", "url": portainer_url})
+    return {"k8s": clusters, "databases": databases, "portainer": portainer}
 
 
 # ── Playbook / asset run ───────────────────────────────────────────────────────
@@ -420,7 +435,10 @@ class RunRequest(BaseModel):
     # a localhost play whose connection material is auto-injected server-side and which
     # ALWAYS runs on the in-cloud transient runner (see ansible_cloud_run_service). For
     # those, target/cloud/ansible_user/secret_ssh_key_source/managed_account are ignored.
-    target_kind: str = "vm"  # "vm" | "k8s" | "database"
+    # "portainer" is the same localhost shape with no resource behind it: the target is
+    # the ONE configured Portainer, its connection is the PORTAINER_* env every runner
+    # already gets, and target_id is therefore not required.
+    target_kind: str = "vm"  # "vm" | "k8s" | "database" | "portainer"
     target_id: str = ""      # K8sCluster.id / CloudDatabase.id when target_kind != "vm"
     extra_vars: dict = {}
     # Use Secrets-Management secrets in the run WITHOUT ever seeing the value.
@@ -589,6 +607,16 @@ def _resolve_agent_target(payload: "RunRequest", db) -> dict:
             detail=("Kubernetes clusters cannot yet be configured through a remote agent. "
                     "An on-premises cluster still runs on the dashboard's own runner, which "
                     "needs a route to the cluster's API server."))
+
+    if payload.target_kind == "portainer":
+        # Same reason, and the same refusal-by-name: the agent bundle does carry the
+        # PORTAINER_* env, but the Portainer these plays configure is the dashboard's
+        # own connection, which the agent host has no reason to be able to reach.
+        raise HTTPException(
+            status_code=400,
+            detail=("A Portainer run goes to the configured Portainer from the "
+                    "dashboard's own runner, not through a remote agent. Leave the "
+                    "agent unset for this target."))
 
     if payload.target_kind == "database":
         row = (db.query(CloudDatabase)
@@ -762,20 +790,26 @@ async def _run_agent_ansible(payload: "RunRequest", db, current_user):
 
 
 async def _run_cloud_localhost(payload: "RunRequest", db, current_user):
-    """Enqueue a Kubernetes-cluster / cloud-database Config-Management run.
+    """Enqueue a Kubernetes-cluster / cloud-database / Portainer Config-Management run.
 
-    These are localhost plays that reach out via a kubeconfig / DB login vars, so
-    the SSH-oriented request fields are ignored. Connection material is resolved
-    server-side at launch (never here, never stored on the job). The run executes on
-    the in-cloud transient runner, or — for a cloud="local" Kubernetes cluster, which
-    only this host can reach — the local sibling container (jobs_worker →
-    ansible_cloud_run_service.resolve_runner).
+    These are localhost plays that reach out via a kubeconfig / DB login vars / the
+    Portainer REST API, so the SSH-oriented request fields are ignored. Connection
+    material is resolved server-side at launch (never here, never stored on the job).
+    The run executes on the in-cloud transient runner, or — for a cloud="local"
+    Kubernetes cluster, which only this host can reach — the local sibling container
+    (jobs_worker → ansible_cloud_run_service.resolve_runner).
+
+    Portainer is the one family with no resource row behind it: the target is the one
+    configured connection, so there is nothing to look up and nothing to 404 on, and
+    its runner comes from ``resolve_portainer_runner`` rather than from a cloud.
     Returns ``{job_id, status: "queued"}``; the client polls /api/jobs/{id}."""
     from ..services import (k8s_service, cloud_database_service,
                             ansible_cloud_run_service as acr)
 
     kind = payload.target_kind
-    if not payload.target_id:
+    # Portainer is a singleton here — one portainer_url — so there is no id to pick,
+    # and requiring one would invent a second name for "the configured Portainer".
+    if not payload.target_id and kind != "portainer":
         raise HTTPException(status_code=400, detail=f"target_id is required for a {kind} run.")
 
     # A localhost play must be a real playbook — no auto-wrapped script/rpm/deb.
@@ -785,7 +819,25 @@ async def _run_cloud_localhost(payload: "RunRequest", db, current_user):
             detail=f"{kind} targets run a localhost play — supply a .yml/.yaml playbook.")
 
     # Resolve the target row (→ 404) and derive its cloud.
-    if kind == "k8s":
+    if kind == "portainer":
+        # No row: the "target" is the configured connection. Refuse here rather than
+        # letting the play fail on an empty PORTAINER_URL, which reads as a broken
+        # playbook instead of an unconfigured integration.
+        from ..services import config_service as _cs, portainer_runner as _ptr
+        # The runner's OWN view of the connection, not a second derivation of it: this
+        # returns {} for exactly the cases where the play would come up with no
+        # PORTAINER_URL and fail as if it were the playbook's fault.
+        if not _ptr.runner_env():
+            raise HTTPException(
+                status_code=400,
+                detail=("No Portainer connection is available to the runner — these "
+                        "plays reach it over the API with the stored token. Check "
+                        "Portainer is enabled in Settings → Integrations and that a "
+                        "URL and API token are set in Settings → Containers (a "
+                        "managed-node deploy writes both)."))
+        cloud = ""
+        target_label = (_cs.get("portainer_url") or "").strip()
+    elif kind == "k8s":
         try:
             cluster = k8s_service.get_cluster(db, payload.target_id)
         except k8s_service.K8sError as e:
@@ -874,7 +926,9 @@ async def run_playbook(
 
     When target_kind is "k8s" or "database", target_id selects a managed Kubernetes
     cluster / cloud database; the run is a localhost play on the in-cloud runner and
-    the SSH-oriented fields are ignored (see _run_cloud_localhost).
+    the SSH-oriented fields are ignored (see _run_cloud_localhost). target_kind
+    "portainer" is the same localhost path against the one configured Portainer, and
+    takes no target_id.
     """
     # Checked FIRST, and before the k8s/database split, because it is the reachability
     # question rather than the target-family one: an on-prem database bound to an agent is
@@ -882,7 +936,7 @@ async def run_playbook(
     if payload.agent_id:
         return await _run_agent_ansible(payload, db, current_user)
 
-    if payload.target_kind in ("k8s", "database"):
+    if payload.target_kind in ("k8s", "database", "portainer"):
         return await _run_cloud_localhost(payload, db, current_user)
 
     targets = ansible_local_service.get_configured_targets(db)

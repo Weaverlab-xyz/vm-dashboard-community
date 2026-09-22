@@ -17,6 +17,9 @@ So the invariants worth pinning aren't the copy — they're the joins:
   * The picker's option prefixes match what the submit handler and the API parse.
   * A cloud="local" cluster/database — registered rather than provisioned, so it never
     appears in any cloud VM list — is a targetable cloud on the server.
+  * Portainer is a target family with NO resource row and no cloud: one configured
+    connection, listed from config. It joins the same joins, or an install whose only
+    integration is Portainer sees "No targets available" beside runnable playbooks.
   * The "Available Targets" legend lists the same families the picker does, or a
     database-only install renders an empty card next to a working picker.
 
@@ -82,10 +85,10 @@ def test_gate_counts_every_target_family_and_bulk():
         assert ref in body, f"hasAnyTarget ignores {ref}: {body!r}"
 
 
-def test_localhost_targets_are_k8s_clusters_and_databases():
+def test_localhost_targets_are_clusters_databases_and_portainer():
     src = _page()
     body = _getter(src, "hasLocalhostTargets")
-    for ref in ("k8sClusters", "cloudDatabases"):
+    for ref in ("k8sClusters", "cloudDatabases", "portainerTargets"):
         assert ref in body, f"hasLocalhostTargets ignores {ref}: {body!r}"
 
 
@@ -128,8 +131,9 @@ def test_picker_prefixes_round_trip_to_target_kind():
     src = _page()
     assert ":value=\"`k8s:${c.id}`\"" in src, "no k8s option value in the picker"
     assert ":value=\"`db:${d.id}`\"" in src, "no database option value in the picker"
+    assert ":value=\"`portainer:${p.key}`\"" in src, "no Portainer option value in the picker"
     kind = _getter(src, "targetKind")
-    assert "'k8s:'" in kind and "'db:'" in kind, (
+    assert "'k8s:'" in kind and "'db:'" in kind and "'portainer:'" in kind, (
         f"targetKind does not parse the prefixes the picker emits: {kind!r}")
     assert "return 'database'" in kind, "the db: prefix must map to the API's 'database' kind"
     # The submit handler sends the parsed kind + id, not the prefixed string.
@@ -139,8 +143,17 @@ def test_picker_prefixes_round_trip_to_target_kind():
 def test_api_accepts_the_kinds_the_page_sends():
     api = _read("web_dashboard", "api", "config_mgmt.py")
     assert 'target_kind: str = "vm"' in api, "RunRequest lost its target_kind default"
-    assert re.search(r'target_kind in \("k8s", "database"\)', api), (
-        "/run no longer routes k8s/database to the localhost path")
+    assert re.search(r'target_kind in \("k8s", "database", "portainer"\)', api), (
+        "/run no longer routes k8s/database/portainer to the localhost path")
+
+
+def test_the_portainer_family_needs_no_target_id():
+    """Every other localhost family names a row. Portainer is the configured
+    connection — there is at most one — so requiring an id would invent a second name
+    for it, and the picker's own value would become load-bearing."""
+    api = _read("web_dashboard", "api", "config_mgmt.py")
+    assert 'if not payload.target_id and kind != "portainer":' in api, (
+        "a Portainer run is refused for want of a target_id it cannot have")
 
 
 def test_page_reads_the_endpoint_that_serves_localhost_targets():
@@ -175,7 +188,7 @@ def test_available_targets_legend_covers_every_picker_family():
     legend = src[src.index("Available Targets"):]
     legend = legend[:legend.index("Add on-prem targets in")]
     for lst in ("targets", "cloudTargets.aws", "cloudTargets.azure", "cloudTargets.gcp",
-                "k8sClusters", "cloudDatabases"):
+                "k8sClusters", "cloudDatabases", "portainerTargets"):
         assert lst in legend, (
             f"the Available Targets card never lists {lst} — a deployment with only "
             f"that family sees an empty card beside a working picker")

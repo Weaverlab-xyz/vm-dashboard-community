@@ -1,0 +1,264 @@
+# Register a Docker host as a Portainer ENVIRONMENT, end to end: create the Edge
+# environment in Portainer, then install and start the Edge agent on the host.
+#
+# This is the automated form of the Portainer page's "Register Edge environment"
+# action, which creates the environment and hands back a `docker run` to paste. Here
+# the second half happens too, on the target you pick.
+#
+# Why Edge and not a direct agent: a managed Portainer node runs unprivileged with no
+# Docker socket of its own, on a public IP behind a fail-closed firewall. It cannot
+# dial in to a workstation or a LAN Docker host. An Edge agent inverts the direction —
+# it runs ON the host and polls OUT to the node's tunnel port (8000, which the node's
+# firewall already opens), so nothing inbound is required.
+#
+# The Edge key encodes the Portainer URL it was minted against. A managed node takes
+# an EPHEMERAL external IP, so recreating the node invalidates every key issued before
+# the change — which is why this play mints one per run instead of taking a stored
+# key as a parameter, and why the agent id is derived from the URL and the environment
+# name (a re-run rejoins as the same agent rather than registering a duplicate).
+#
+# Target: a VM — the Docker host you want managed. The first play reaches out to the
+# Portainer API from the runner; the second runs ON that host and needs Docker
+# already installed (linux/install-docker.yml does that).
+#
+# OPTIONAL — fetch the PAT from BeyondTrust Password Safe instead of the injected one
+# by setting a SECRET path (folder/title):
+#   portainer_pat_secret: app-secrets/portainer-pat
+#
+# extra_vars:
+#   endpoint_name:  branch-01         # required — the environment name in Portainer
+#   agent_image:    portainer/agent:latest
+#   checkin_interval: 5               # seconds between agent polls
+#   insecure_poll:  true              # the managed node's cert is self-signed
+#   force_rejoin:   false             # recreate the agent container with a fresh key
+- name: Ensure the Portainer Edge environment exists
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    portainer_url: "{{ lookup('ansible.builtin.env', 'PORTAINER_URL') }}"
+    portainer_pat: "{{ lookup('ansible.builtin.env', 'PORTAINER_PAT') }}"
+    # Optional: fetch the PAT from BeyondTrust Password Safe instead of using the
+    # injected one — set a SECRET path (folder/title). Blank = use PORTAINER_PAT.
+    portainer_pat_secret: ""
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true          # set false only for a self-signed Password Safe
+    portainer_verify_ssl: "{{ lookup('ansible.builtin.env', 'PORTAINER_VERIFY_SSL') | default('1', true) }}"
+    endpoint_name: ""
+    checkin_interval: 5
+    endpoint_group_id: 1
+  tasks:
+    # Fetched into its OWN fact, never onto portainer_pat: extra vars outrank set_fact,
+    # so writing back to that name would be silently ignored when the PAT was also
+    # supplied as an extra var.
+    - name: Fetch the Portainer API token from Password Safe
+      ansible.builtin.set_fact:
+        _ps_portainer_pat: "{{ lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
+          api_url=ps_api_url,
+          api_version='3.1',
+          retrieval_type='SECRET',
+          client_id=ps_client_id,
+          client_secret=ps_client_secret,
+          secret_list=portainer_pat_secret,
+          decrypt=True,
+          verify_ca=ps_verify_ca,
+          wantlist=False) }}"
+      no_log: true
+      when: portainer_pat_secret | length > 0
+
+    - name: Resolve the effective token (Password Safe wins when a path was given)
+      ansible.builtin.set_fact:
+        _pat: "{{ _ps_portainer_pat | default(portainer_pat, true) }}"
+      no_log: true
+
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - portainer_url | length > 0
+          - _pat | length > 0
+          - endpoint_name | length > 0
+        fail_msg: >-
+          Set endpoint_name, and make sure a Portainer connection is configured in
+          Settings → Containers or passed as portainer_url / portainer_pat extra vars.
+          portainer_url is also the address the AGENT will dial back to, so it has to
+          be the one the host can reach.
+
+    - name: List environments
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/endpoints"
+        method: GET
+        headers:
+          X-API-Key: "{{ _pat }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: 200
+      register: endpoints
+      no_log: true              # the API token rides the request headers
+
+    - name: Look for an environment of this name
+      ansible.builtin.set_fact:
+        existing_env: "{{ (_matches | first) if (_matches | length > 0) else {} }}"
+      vars:
+        _matches: "{{ endpoints.json | selectattr('Name', 'equalto', endpoint_name) | list }}"
+
+    # POST /api/endpoints is MULTIPART FORM, not JSON: Portainer's handler reads every
+    # field with RetrieveMultiPartFormValue, so a JSON body arrives as a
+    # missing-name validation error that says nothing about the cause. Two more traps
+    # in the same handler — the tag field is spelled "TagIds" (not TagIDs, unlike the
+    # Go struct), and setting TLS at all is rejected for an Edge environment.
+    - name: Create the Edge environment
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/endpoints"
+        method: POST
+        headers:
+          X-API-Key: "{{ _pat }}"
+        body_format: form-multipart
+        body:
+          Name: "{{ endpoint_name }}"
+          EndpointCreationType: "4"          # endpointCreationEnum: Edge agent
+          URL: "{{ portainer_url | regex_replace('/$', '') }}"
+          GroupID: "{{ endpoint_group_id | string }}"
+          EdgeCheckinInterval: "{{ checkin_interval | string }}"
+          TagIds: "[]"                       # parsed as JSON when present, so not ""
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: [200, 201]
+      register: created_env
+      when: existing_env | length == 0
+      no_log: true              # the API token rides the request headers
+
+    # An existing environment's key is only on the single-environment read, so it is
+    # fetched rather than taken from the list above.
+    - name: Read the existing environment
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/endpoints/{{ existing_env.Id }}"
+        method: GET
+        headers:
+          X-API-Key: "{{ _pat }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: 200
+      register: read_env
+      when: existing_env | length > 0
+      no_log: true              # the API token rides the request headers
+
+    - name: Resolve the environment and its Edge key
+      ansible.builtin.set_fact:
+        env_row: >-
+          {{ read_env.json if (existing_env | length > 0) else created_env.json }}
+
+    - name: Confirm there is an Edge key to join with
+      ansible.builtin.assert:
+        that:
+          - (env_row.EdgeKey | default('', true)) | length > 0
+        fail_msg: >-
+          Portainer has environment '{{ endpoint_name }}' (id {{ env_row.Id | default('?') }})
+          but returned no Edge key, so nothing can join it. Delete the environment in
+          Portainer and re-run this play, or copy the join command from Portainer's own
+          environment page.
+
+    # Deterministic, so a re-run rejoins as the SAME agent instead of registering a
+    # second one. Portainer only assigns an EdgeID itself under EnforceEdgeID; left
+    # blank, every agent with a blank id registers as a duplicate of the others.
+    - name: Settle the agent identity
+      ansible.builtin.set_fact:
+        _edge_id: >-
+          {{ env_row.EdgeID | default('', true)
+             if (env_row.EdgeID | default('', true)) | length > 0
+             else ((portainer_url | regex_replace('/$', '')) ~ '/' ~ endpoint_name) | to_uuid }}
+        _edge_key: "{{ env_row.EdgeKey }}"
+        _endpoint_id: "{{ env_row.Id }}"
+        # Carried as FACTS because the second play reads them through
+        # hostvars['localhost'], and a play's `vars:` are not in hostvars at all.
+        _endpoint_name: "{{ endpoint_name }}"
+        _checkin_interval: "{{ checkin_interval }}"
+
+    - name: Environment ready
+      ansible.builtin.debug:
+        msg: >-
+          Environment '{{ endpoint_name }}' is id {{ _endpoint_id }} in Portainer.
+          Joining it from the target host next.
+
+- name: Install the Portainer Edge agent on the host
+  hosts: all
+  become: true
+  gather_facts: false
+  vars:
+    agent_image: portainer/agent:latest
+    container_name: portainer_edge_agent
+    # The managed node serves a SELF-SIGNED certificate on 9443. Without this the
+    # agent's very first poll fails certificate verification and the environment
+    # simply never comes up, with no error anywhere the operator would think to look.
+    insecure_poll: true
+    force_rejoin: false
+  tasks:
+    - name: Check Docker is usable
+      ansible.builtin.command: docker info
+      register: docker_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Confirm Docker is usable
+      ansible.builtin.assert:
+        that:
+          - docker_probe.rc == 0
+        fail_msg: >-
+          Docker is not installed or not reachable on this host, so there is nothing
+          for the Edge agent to run in. Run linux/install-docker.yml against this
+          target first, then re-run this play.
+
+    - name: Look for an existing agent container
+      ansible.builtin.command: docker ps -a --quiet --filter name={{ container_name }}
+      register: agent_container
+      changed_when: false
+      failed_when: false
+
+    - name: Remove the existing agent container
+      ansible.builtin.command: docker rm --force {{ container_name }}
+      when:
+        - agent_container.stdout | length > 0
+        - force_rejoin | bool
+      changed_when: true
+
+    # Shelled out on purpose: the runner image for an SSH target ships
+    # ansible.builtin/posix/windows and the beyondtrust collections, and no Docker
+    # collection at all — a docker_container module would fail at import on every run.
+    - name: Start the Edge agent
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --detach
+          - --name
+          - "{{ container_name }}"
+          - --restart
+          - always
+          - --volume
+          - /var/run/docker.sock:/var/run/docker.sock
+          - --volume
+          - /var/lib/docker/volumes:/var/lib/docker/volumes
+          - --volume
+          - /:/host
+          - --volume
+          - portainer_agent_data:/data
+          - --env
+          - EDGE=1
+          - --env
+          - "EDGE_ID={{ hostvars['localhost']._edge_id }}"
+          - --env
+          - "EDGE_KEY={{ hostvars['localhost']._edge_key }}"
+          - --env
+          - "EDGE_INSECURE_POLL={{ '1' if insecure_poll | bool else '0' }}"
+          - "{{ agent_image }}"
+      when: (agent_container.stdout | length == 0) or (force_rejoin | bool)
+      changed_when: true
+      no_log: true              # the Edge key is a credential for this environment
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: >-
+          Edge agent {{ 'already running' if (agent_container.stdout | length > 0 and not force_rejoin | bool) else 'started' }}
+          on this host, joined to Portainer environment
+          '{{ hostvars['localhost']._endpoint_name }}' (id {{ hostvars['localhost']._endpoint_id }}).
+          It checks in every {{ hostvars['localhost']._checkin_interval }}s, so the
+          environment goes online shortly. Next: portainer-env-access.yml, to give a
+          team access to it.
