@@ -130,6 +130,76 @@ OT_ENTITLE_CHART_DIR=/opt/entitle/charts
 # from the host, which is a different source address and a different answer.
 OT_PROBE_IMAGE="${OT_PROBE_IMAGE:-busybox:1.36}"
 
+# ── The plant's function runtime (broker only) ───────────────────────────────
+# Why a function runtime in the plant at all: an Entitle "REST API" integration is an
+# HTTP server that Entitle drives, and the target it has to reach — the cell's HMI —
+# sits inside the plant boundary. Hosting that server HERE means the Entitle agent
+# already on this broker brokers the calls, so the integration needs no inbound hole
+# and not one new egress destination. The alternative, a cloud function, would need
+# an ingress hole from Entitle's own addresses into the plant zone, which is the
+# claim the whole OT demo is built to make. See docs/profiles/demo/ot-demo-cell.md.
+#
+# `none` bakes the broker every broker was before this section existed: the agent and
+# nothing else.
+#
+# LICENSING, and it is not a footnote. OpenFaaS *Community Edition* limits commercial
+# use to ONE installation per company for no more than 60 days, and forbids
+# installing it for a client or redistributing it. That is fine for an internal demo
+# broker rebuilt inside that window and NOT fine for a customer POV, which is why the
+# dashboard treats the runtime as swappable and Nuclio (Apache-2.0) is the planned
+# answer for anything shipped to a customer. Do not quietly make CE the only path.
+OT_FAAS="$(echo "${OT_FAAS:-openfaas}" | tr '[:upper:]' '[:lower:]')"
+case "$OT_FAAS" in
+  openfaas|none) ;;
+  nuclio|deployment)
+    die "OT_FAAS=$OT_FAAS is a planned runtime that this script cannot bake yet. \
+Use 'openfaas' (read the licensing note in this script first) or 'none'." ;;
+  *) die "OT_FAAS must be 'openfaas' or 'none' (got '$OT_FAAS')" ;;
+esac
+if [ "$OT_ROLE" != "broker" ] && [ "$OT_FAAS" != "none" ]; then
+  die "OT_FAAS applies to OT_ROLE=broker only — the cell is the plant floor and runs \
+simulators, not the adapters that grant access to them. Set OT_FAAS=none."
+fi
+OT_OPENFAAS_CHART_REPO="${OT_OPENFAAS_CHART_REPO:-https://openfaas.github.io/faas-netes/}"
+OT_OPENFAAS_CHART="${OT_OPENFAAS_CHART:-openfaas}"
+OT_OPENFAAS_CHART_VERSION="${OT_OPENFAAS_CHART_VERSION:-14.2.110}"
+# Both images are named here AND in the rendered values, and they have to agree: a
+# values drift is a pod that tries to pull at boot, on a host with no egress, and
+# reports it as ImagePullBackOff — which reads like a blocked firewall rather than
+# "that name is not in the local store".
+OT_OPENFAAS_GATEWAY_IMAGE="${OT_OPENFAAS_GATEWAY_IMAGE:-ghcr.io/openfaas/gateway:0.27.12}"
+OT_OPENFAAS_NETES_IMAGE="${OT_OPENFAAS_NETES_IMAGE:-ghcr.io/openfaas/faas-netes:0.18.12}"
+# of-watchdog is a static binary from a GitHub RELEASE asset, not the API, so pinning
+# it is about reproducibility rather than the 60-requests-an-hour anonymous API limit
+# that bites elsewhere in CI.
+OT_OF_WATCHDOG_VERSION="${OT_OF_WATCHDOG_VERSION:-0.10.7}"
+OT_FAAS_PYTHON_IMAGE="${OT_FAAS_PYTHON_IMAGE:-docker.io/library/python:3.12-slim}"
+# The one image this script BUILDS for the broker. Tagged `:baked` like the cell's
+# simulator image, and for the same reason: it exists only in this host's containerd,
+# so a manifest that says imagePullPolicy:Never is stating a fact.
+OT_FAAS_IMAGE="${OT_FAAS_IMAGE:-ot-faas-python:baked}"
+# Only to extract bin/ctr. The cell gets ctr from Docker's containerd.io package and
+# then purges Docker around it; the broker has no Docker at all, so it takes the one
+# binary out of the upstream release tarball instead — no package, no service, and
+# nothing for KubeSolo's pre-flight check to object to.
+OT_CONTAINERD_VERSION="${OT_CONTAINERD_VERSION:-1.7.24}"
+OT_FAAS_DIR=/opt/ot-faas
+OT_FAAS_IMAGE_DIR=/var/lib/ot-faas/images
+if [ "$OT_FAAS" != "none" ]; then
+  for _img in "$OT_OPENFAAS_GATEWAY_IMAGE" "$OT_OPENFAAS_NETES_IMAGE" \
+              "$OT_FAAS_PYTHON_IMAGE" "$OT_FAAS_IMAGE"; do
+    case "$_img" in
+      *:latest) die "$_img must be pinned to a version tag, not :latest" ;;
+      *:*) ;;
+      *) die "the function-runtime images must carry explicit tags (got '$_img')" ;;
+    esac
+  done
+  case "$OT_OPENFAAS_CHART_VERSION" in
+    "") die "OT_OPENFAAS_CHART_VERSION must be pinned — an unpinned chart can \
+re-enable NATS or Prometheus on its own and quietly outgrow a 2-vCPU broker" ;;
+  esac
+fi
+
 install_k8s_clients() {
   log "installing kubectl and helm — KubeSolo ships neither, and the plays expect both"
   if [ -z "$OT_KUBECTL_VERSION" ]; then
@@ -142,6 +212,30 @@ install_k8s_clients() {
   tar -xzf /tmp/helm.tar.gz -C /tmp
   install -m 0755 "/tmp/linux-$OT_ARCH/helm" /usr/local/bin/helm
   rm -rf /tmp/helm.tar.gz "/tmp/linux-$OT_ARCH"
+}
+
+install_ctr() {
+  # containerd's CLI, and the only way an image gets into a containerd that has no
+  # registry behind it. The cell takes it out of Docker's containerd.io package just
+  # before purging Docker (section 5b); the broker never installs Docker, so it takes
+  # the single binary out of the upstream release tarball. A CLI, not an engine —
+  # nothing is installed as a service and nothing appears on the host that KubeSolo's
+  # "is Docker here?" pre-flight check could object to.
+  if [ -x /usr/local/bin/ctr ]; then
+    log "ctr is already present ($(/usr/local/bin/ctr --version 2>/dev/null | head -n 1))"
+    return 0
+  fi
+  log "installing ctr from containerd $OT_CONTAINERD_VERSION (the binary only)"
+  curl -fsSL -o /tmp/containerd.tar.gz \
+    "https://github.com/containerd/containerd/releases/download/v$OT_CONTAINERD_VERSION/containerd-$OT_CONTAINERD_VERSION-linux-$OT_ARCH.tar.gz" \
+    || die "could not download the containerd $OT_CONTAINERD_VERSION release tarball"
+  # Only bin/ctr. Extracting the whole archive would drop containerd and
+  # containerd-shim into /usr/local/bin, where KubeSolo's own copies belong.
+  tar -xzf /tmp/containerd.tar.gz -C /tmp bin/ctr \
+    || die "the containerd tarball did not contain bin/ctr"
+  install -m 0755 /tmp/bin/ctr /usr/local/bin/ctr
+  rm -rf /tmp/containerd.tar.gz /tmp/bin
+  /usr/local/bin/ctr --version >/dev/null || die "the extracted ctr does not run"
 }
 
 install_kubesolo() {
@@ -233,8 +327,11 @@ apt-get -y -q install ca-certificates curl gnupg python3
 
 # Docker builds the simulators and pulls FUXA, and on the KubeSolo runtime section 5b
 # then purges it, because KubeSolo's installer refuses a host that still has Docker on
-# it. The broker builds nothing, so it never installs Docker in the first place — and
-# therefore has nothing to purge before that check runs.
+# it. The broker never installs Docker in the first place — and therefore has nothing
+# to purge before that check runs. It does build ONE image (the function runtime's, in
+# section 5E), and it uses buildah for it precisely to keep that true: buildah is
+# daemonless, so it leaves no docker0, no second containerd and no service for
+# KubeSolo's pre-flight check to object to, and section 5E purges it afterwards.
 if [ "$OT_ROLE" = "cell" ]; then
 log "installing Docker Engine + compose plugin"
 . /etc/os-release
@@ -1346,7 +1443,594 @@ if [ "$_waited" -ge 36 ]; then
   log "         rather than proving the plant boundary — see ot-demo-cell.md."
 fi
 
-log "the broker is ready: KubeSolo up, chart at $OT_ENTITLE_CHART_DIR/entitle-agent.tgz"
+if [ "$OT_FAAS" = "openfaas" ]; then
+
+# ── 5E. The plant's function runtime (broker only) ───────────────────────────
+# What this gets us: an Entitle "REST API" integration whose HTTP server lives in the
+# plant, so Entitle's own agent — a pod on this same cluster — makes the calls and the
+# integration's base URL is a name that resolves nowhere else. No inbound hole, no new
+# egress destination, and the plant's "two ports to one destination" claim is untouched.
+#
+# The adapter's CODE is deliberately NOT baked. The bake channel is one file (Packer
+# gets a single shell provisioner, so the repo's functions/ tree cannot reach the build
+# VM), which would make a baked adapter a heredoc twin of ~45 KB of security-relevant
+# Python that drifts from the real thing and needs a re-bake per fix. Instead this
+# image is a generic loader: bootstrap.py unpacks a package the dashboard sends at wire
+# time in the Function's `environment:`. So an adapter fix ships in the dashboard image
+# and a broker baked weeks ago still runs it.
+log "baking the plant's function runtime (OpenFaaS CE $OT_OPENFAAS_CHART_VERSION)"
+install_ctr
+mkdir -p "$OT_FAAS_DIR/image" "$OT_FAAS_DIR/kubesolo" "$OT_FAAS_DIR/charts" \
+         "$OT_FAAS_IMAGE_DIR"
+
+log "fetching of-watchdog $OT_OF_WATCHDOG_VERSION"
+case "$OT_ARCH" in
+  amd64) _watchdog_asset="of-watchdog" ;;
+  arm64) _watchdog_asset="of-watchdog-arm64" ;;
+  *) die "no of-watchdog release asset for architecture '$OT_ARCH'" ;;
+esac
+curl -fsSL -o "$OT_FAAS_DIR/image/of-watchdog" \
+  "https://github.com/openfaas/of-watchdog/releases/download/$OT_OF_WATCHDOG_VERSION/$_watchdog_asset" \
+  || die "could not download of-watchdog $OT_OF_WATCHDOG_VERSION for $OT_ARCH"
+chmod 0755 "$OT_FAAS_DIR/image/of-watchdog"
+
+# The ONLY Python this image carries, and it holds no business logic on purpose — see
+# the note above. Keep it boring: every string in it is half of a contract with the
+# dashboard (tests/test_ot_faas_contract.py holds the two halves together).
+cat > "$OT_FAAS_DIR/image/bootstrap.py" <<'PYEOF'
+"""Unpack the function package the dashboard sent, then run it.
+
+Baked by provisioners/ot/ot-sim-debian.sh. The adapter, the fnruntime tree and the
+HTTP server all arrive at wire time as OTFN_PKG_B64 — the deterministic zip built by
+web_dashboard/services/cloud_function_package.py — so this file never has to change
+when an adapter does, and a broker baked weeks ago runs today's adapter.
+
+With no package it serves a sentinel on every path instead. That is what lets the
+BAKE smoke-test the whole chain (gateway, of-watchdog, this loader, cluster DNS) on
+a build VM that still has egress, with no dashboard and no cluster credentials in
+the picture — so the only things left to discover live are the ones that genuinely
+need the plant.
+"""
+import base64
+import hashlib
+import io
+import os
+import runpy
+import sys
+import zipfile
+
+SENTINEL = "ot-faas-selftest-ok"
+UNPACK_DIR = "/tmp/fn"
+PORT = int(os.environ.get("OTFN_PORT") or 5000)
+
+
+def _unpack(encoded, expected_sha):
+    """The package, verified, on disk. Raises rather than running anything unsure.
+
+    The hash is REQUIRED, not optional. This package carries the code that mints
+    credentials, and it travels as base64 inside a single --extra-vars argv element
+    whose kernel limit (MAX_ARG_STRLEN) is a real ceiling — so a truncated payload is
+    a failure mode that actually happens, and a truncated zip can still extract
+    something. Refusing is the only safe reading of "I cannot confirm this".
+    """
+    if not expected_sha:
+        raise SystemExit(
+            "OTFN_PKG_B64 is set but OTFN_PKG_SHA256 is not: refusing to run an "
+            "unverified function package")
+    blob = base64.b64decode(encoded)
+    actual = hashlib.sha256(blob).hexdigest()
+    if actual != expected_sha:
+        raise SystemExit(
+            "the function package does not match OTFN_PKG_SHA256 (got %s, expected "
+            "%s): it was altered or truncated in transit -- refusing to run it"
+            % (actual, expected_sha))
+    os.makedirs(UNPACK_DIR, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+        archive.extractall(UNPACK_DIR)
+    return UNPACK_DIR
+
+
+def _serve_sentinel():
+    """Answer every path with the sentinel, so the bake can prove the chain."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, fmt, *args):
+            pass
+
+        def _reply(self):
+            # The path is echoed because the bake asserts on it: an OpenFaaS gateway
+            # that did not forward the residual path would make every Entitle route
+            # land on the function root, and the adapter would be unroutable.
+            body = ('{"status": "%s", "path": "%s"}' % (SENTINEL, self.path)).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = _reply
+        do_POST = _reply
+
+    sys.stderr.write("no OTFN_PKG_B64: serving the selftest sentinel\n")
+    sys.stderr.flush()
+    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+
+
+def main():
+    encoded = (os.environ.get("OTFN_PKG_B64") or "").strip()
+    if not encoded:
+        _serve_sentinel()
+        return
+    target = _unpack(encoded, (os.environ.get("OTFN_PKG_SHA256") or "").strip())
+    sys.path.insert(0, target)
+    # run_name="__main__" so the shim's own `if __name__ == "__main__"` fires and it
+    # starts its server. Anything else loads the module and exits immediately, which
+    # presents as a pod that never becomes ready.
+    runpy.run_module("openfaas_entry", run_name="__main__")
+
+
+if __name__ == "__main__":
+    main()
+PYEOF
+python3 -c "import ast, sys; ast.parse(open(sys.argv[1], encoding='utf-8').read())" \
+  "$OT_FAAS_DIR/image/bootstrap.py" \
+  || die "the baked bootstrap.py is not valid Python — refusing to build the image"
+
+cat > "$OT_FAAS_DIR/image/Dockerfile" <<EOF
+# The plant's generic function image. Built once at bake; the code it runs arrives
+# later. of-watchdog in mode=http keeps one long-lived Python process and proxies to
+# it, which is what lets the package be unpacked once at start rather than per call.
+FROM $OT_FAAS_PYTHON_IMAGE
+COPY of-watchdog /usr/bin/fwatchdog
+COPY bootstrap.py /app/bootstrap.py
+# Non-root, and the port is above 1024 so it needs no capability. /tmp stays writable
+# because that is where bootstrap.py unpacks the package.
+RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin app
+USER app
+ENV mode=http \\
+    upstream_url=http://127.0.0.1:5000 \\
+    fprocess="python3 /app/bootstrap.py" \\
+    exec_timeout=60s \\
+    read_timeout=65s \\
+    write_timeout=65s
+EXPOSE 8080
+CMD ["fwatchdog"]
+EOF
+
+# buildah, not Docker. KubeSolo's installer refuses a host that still carries Docker,
+# and the cell pays for that with a whole purge dance — apt purge, rm -rf
+# /var/lib/docker, ip link delete docker0, reinstalling iptables by name, then
+# flushing every chain in filter/nat/mangle — because Docker's chains and its FORWARD
+# DROP policy outlive the packages. Repeating all of it for ONE small image build
+# doubles the surface where a broker bake can fail. buildah is daemonless: no
+# docker0, no containerd, no service, nothing for the pre-flight check to see.
+#
+# --storage-driver vfs deliberately: overlay wants kernel overlayfs or fuse-overlayfs
+# and its availability varies by cloud image. vfs is slower and hungrier, which for
+# one small image is a few seconds and a few hundred MB on a build VM, and in exchange
+# it works on any kernel. --isolation chroot for the same reason: no user namespaces
+# required, and this runs as root on a throwaway VM.
+log "installing buildah to build $OT_FAAS_IMAGE (daemonless — no Docker on a broker)"
+apt-get -y -q install buildah \
+  || die "buildah is not installable here; a broker cannot build its function image"
+buildah --storage-driver vfs bud --isolation chroot \
+  -t "$OT_FAAS_IMAGE" "$OT_FAAS_DIR/image" \
+  || die "buildah could not build $OT_FAAS_IMAGE (its output is above)"
+# docker-archive is byte-for-byte what `docker save` writes, so everything downstream
+# of here is the cell's already-proven ctr import path, unchanged.
+buildah --storage-driver vfs push \
+  "$OT_FAAS_IMAGE" "docker-archive:$OT_FAAS_IMAGE_DIR/ot-faas-python.tar:$OT_FAAS_IMAGE" \
+  || die "buildah could not export $OT_FAAS_IMAGE to a docker-archive tarball"
+log "purging buildah and its layer store (~150 MB that would otherwise ship)"
+apt-get -y -q purge buildah >/dev/null 2>&1 || true
+apt-get -y -q autoremove >/dev/null 2>&1 || true
+rm -rf /var/lib/containers /var/cache/buildah
+
+# The upstream images go straight into the containerd the pods will run from, while
+# this VM still has egress. Exported to tarballs as well, and listed in images.txt,
+# because the cleanup in section 6 preserves */containerd but that is a convenience
+# rather than a contract — apply.sh re-imports from these on boot.
+log "loading the runtime's images into KubeSolo's containerd"
+for _pair in \
+  "$OT_OPENFAAS_GATEWAY_IMAGE|openfaas-gateway.tar|pull" \
+  "$OT_OPENFAAS_NETES_IMAGE|openfaas-netes.tar|pull" \
+  "$OT_FAAS_IMAGE|ot-faas-python.tar|import" ; do
+  _img="${_pair%%|*}"
+  _rest="${_pair#*|}"
+  _tarball="${_rest%%|*}"
+  _how="${_rest##*|}"
+  _ref="$(normalize_ref "$_img")"
+  if [ "$_how" = "pull" ]; then
+    ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images pull "$_ref" \
+      || die "could not pull $_ref — the broker bake needs egress to the registry"
+    ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images export \
+      "$OT_FAAS_IMAGE_DIR/$_tarball" "$_ref" \
+      || die "could not export $_ref to $_tarball"
+  else
+    ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images import \
+      "$OT_FAAS_IMAGE_DIR/$_tarball" \
+      || die "ctr could not import $_tarball into KubeSolo's containerd"
+  fi
+  # Proven, not assumed: every manifest below sets imagePullPolicy: Never, so a name
+  # containerd does not hold is a pod that dies ErrImageNeverPull on a host with no
+  # egress — which reads like a blocked firewall instead of a missing local image.
+  if ! ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images ls -q | grep -qx "$_ref"; then
+    die "$_tarball is loaded but containerd does not list $_ref — the pods would never start"
+  fi
+  echo "$_ref $_tarball" >> "$OT_FAAS_IMAGE_DIR/images.txt"
+done
+
+# The chart is baked for the same reason the Entitle chart above is: a Helm repo is a
+# CDN, and a CDN cannot be named honestly in the narrow egress allow-list a plant
+# boundary is built from.
+log "pulling the OpenFaaS chart from $OT_OPENFAAS_CHART_REPO"
+helm pull "$OT_OPENFAAS_CHART" --repo "$OT_OPENFAAS_CHART_REPO" \
+  --version "$OT_OPENFAAS_CHART_VERSION" --destination "$OT_FAAS_DIR/charts" \
+  || die "could not pull $OT_OPENFAAS_CHART $OT_OPENFAAS_CHART_VERSION from $OT_OPENFAAS_CHART_REPO"
+_faas_chart="$(ls -1 "$OT_FAAS_DIR/charts"/openfaas-*.tgz 2>/dev/null | head -n 1)"
+[ -n "$_faas_chart" ] || die "helm pull left no chart archive in $OT_FAAS_DIR/charts"
+cp -f "$_faas_chart" "$OT_FAAS_DIR/charts/openfaas.tgz"
+helm show chart "$OT_FAAS_DIR/charts/openfaas.tgz" > "$OT_FAAS_DIR/charts/CHART.txt" \
+  || die "helm cannot read the chart it just pulled"
+log "baked chart: $(basename "$_faas_chart")"
+
+# Trimmed to the two things that are actually needed. Each `false` below is a pod not
+# running on a 2-vCPU broker that also carries the Entitle agent (1Gi of requests on
+# its own) — and the cost of each is stated, because discovering it in front of a
+# customer is worse than reading it here:
+#
+#   async          drops nats + queue-worker (2 pods). Entitle's calls are synchronous
+#                  request/response; nothing here ever queues.
+#   prometheus     1 pod. Cost: /system/functions reports zero invocations and the UI
+#                  graphs are empty. Say so rather than let someone find it.
+#   alertmanager   1 pod. It only drives CE's scale-from-zero, and we pin one replica.
+#   basicAuthPlugin 1 pod, and only the browser UI's login flow. So the OpenFaaS web
+#                  UI is NOT part of this demo.
+#
+# basic_auth stays TRUE: it gates /system/*, deploys here are `kubectl apply` so
+# nothing needs the credential, and apply.sh mints it from /dev/urandom — which
+# leaves the admin API behind a secret no human holds.
+#
+# These values are not the guarantee. A chart version can rename a key and helm will
+# ignore the old one in silence, so the render is checked below (every image must be
+# one we pre-loaded) and the running result is checked after apply (exactly one pod).
+cat > "$OT_FAAS_DIR/values.yaml" <<EOF
+functionNamespace: openfaas-fn
+# CRD mode, so a function is deployed with kubectl apply: declarative, idempotent,
+# and it needs no gateway credential at deploy time.
+operator:
+  create: true
+async: false
+prometheus:
+  create: false
+alertmanager:
+  create: false
+basicAuthPlugin:
+  enabled: false
+basic_auth: true
+serviceType: ClusterIP
+gateway:
+  replicas: 1
+  image: $OT_OPENFAAS_GATEWAY_IMAGE
+  imagePullPolicy: Never
+faasnetes:
+  image: $OT_OPENFAAS_NETES_IMAGE
+  imagePullPolicy: Never
+operator_image: $OT_OPENFAAS_NETES_IMAGE
+EOF
+
+# Rendered at bake rather than `helm install`ed at boot: a static manifest can be read
+# and diffed on the host, and there is no release state for a half-finished first boot
+# to leave behind. Same shape as the cell's ot-sim.yaml.
+#
+# --include-crds is load-bearing: without it the functions.openfaas.com CRD is absent
+# and the operator crash-loops on a resource type that does not exist.
+log "rendering the chart to a static manifest"
+_rendered="$OT_FAAS_DIR/kubesolo/openfaas.yaml"
+# The chart creates neither namespace, and the labels are not decoration: faas-netes
+# finds function namespaces by the `openfaas: "1"` label.
+cat > "$_rendered" <<'EOF'
+# OpenFaaS on the plant's DMZ broker -- rendered at bake time by
+# provisioners/ot/ot-sim-debian.sh from the pinned chart in /opt/ot-faas/charts.
+# Re-render rather than edit: apply.sh applies this file verbatim on every boot.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openfaas
+  labels:
+    role: openfaas-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openfaas-fn
+  labels:
+    openfaas: "1"
+EOF
+helm template openfaas "$OT_FAAS_DIR/charts/openfaas.tgz" \
+  --namespace openfaas --include-crds -f "$OT_FAAS_DIR/values.yaml" >> "$_rendered" \
+  || die "helm template failed on the pinned OpenFaaS chart"
+grep -q "kind: CustomResourceDefinition" "$_rendered" \
+  || die "the render carries no CRD — --include-crds did not take, and the operator \
+would crash-loop on a resource type that does not exist"
+
+# imagePullPolicy is the one setting whose failure the SMOKE TEST CANNOT CATCH: the
+# build VM has egress, so `Always` pulls fine here and only fails on a cell, at boot,
+# in an egress-less subnet — reported as ImagePullBackOff, which reads like a blocked
+# firewall. So it is normalised here, in the render, and loudly: silently rewriting
+# would hide a values key that did not apply, so the count is logged either way.
+_always="$(grep -c 'imagePullPolicy: *Always' "$_rendered" || true)"
+if [ "${_always:-0}" -gt 0 ]; then
+  log "NOTE: normalising $_always 'imagePullPolicy: Always' to Never in the render."
+  log "      The chart ignored a values key (they get renamed between versions). The"
+  log "      images are all local, so Never is correct — but check the key names in"
+  log "      $OT_FAAS_DIR/values.yaml against chart $OT_OPENFAAS_CHART_VERSION."
+  sed -i 's/imagePullPolicy: *Always/imagePullPolicy: Never/g' "$_rendered"
+fi
+grep -q 'imagePullPolicy: *Always' "$_rendered" \
+  && die "an 'imagePullPolicy: Always' survived normalisation in $_rendered"
+
+# Every image the render names must be one we pre-loaded. This is what catches a
+# component that quietly came back — an async queue, a Prometheus — because the tell
+# is an image nobody exported, and at boot it would be a pod stuck ErrImageNeverPull
+# rather than an obviously-wrong pod count.
+log "checking the render names only pre-loaded images"
+_unexpected=""
+for _img in $(sed -nE 's/^[[:space:]]*image:[[:space:]]*"?([^"[:space:]]+).*/\1/p' \
+              "$_rendered" | sort -u); do
+  _r="$(normalize_ref "$_img")"
+  awk -v want="$_r" '$1 == want { found = 1 } END { exit !found }' \
+    "$OT_FAAS_IMAGE_DIR/images.txt" || _unexpected="$_unexpected $_img"
+done
+if [ -n "$_unexpected" ]; then
+  die "the rendered manifest needs images this bake never loaded:$_unexpected — a \
+chart component is enabled that values.yaml meant to switch off, or an image pin \
+disagrees with the chart's default. Every one of these would be ErrImageNeverPull on \
+a plant host."
+fi
+
+cat > "$OT_FAAS_DIR/kubesolo/apply.sh" <<'EOF'
+#!/bin/sh
+# Bring the plant's function runtime up on KubeSolo. Baked by
+# provisioners/ot/ot-sim-debian.sh, run at boot by ot-faas.service, and safe to re-run
+# by hand: kubectl apply is declarative and an image already in the store is skipped.
+set -eu
+
+KUBESOLO_PATH=/var/lib/kubesolo
+KUBECONFIG=$KUBESOLO_PATH/pki/admin/admin.kubeconfig
+export KUBECONFIG
+FAAS_DIR=/opt/ot-faas
+IMAGE_DIR=/var/lib/ot-faas/images
+CTR="ctr --address $KUBESOLO_PATH/containerd/containerd.sock --namespace k8s.io"
+
+log() { echo "[ot-faas] $*"; }
+
+# 1. Wait for the API AND for a registered node. Deliberately identical to the cell's
+#    applier: `kubectl wait node --all` with no Node object yet is not a wait at all —
+#    it prints "error: no matching resources found" and exits 1 at once, --timeout
+#    unread — and on a first boot the object arrives after the API starts serving. So
+#    wait for existence, THEN for the condition. They are two different waits.
+tries=0
+while [ ! -f "$KUBECONFIG" ] \
+  || ! kubectl get --raw /readyz >/dev/null 2>&1 \
+  || [ -z "$(kubectl get nodes -o name 2>/dev/null)" ]; do
+  tries=$((tries + 1))
+  if [ "$tries" -gt 120 ]; then
+    echo "[ot-faas] ERROR: KubeSolo's API never came up (journalctl -u kubesolo)" >&2
+    exit 1
+  fi
+  sleep 5
+done
+kubectl wait --for=condition=Ready node --all --timeout=300s >/dev/null
+
+# 2. Load the images. There is no registry inside the plant network: these tarballs
+#    ARE the image source, which is why the manifest says imagePullPolicy: Never.
+while read -r ref tarball; do
+  [ -n "${ref:-}" ] || continue
+  if $CTR images ls -q | grep -qx "$ref"; then continue; fi
+  log "importing $ref"
+  # </dev/null so the import cannot consume the image list this loop is reading.
+  $CTR images import "$IMAGE_DIR/$tarball" </dev/null
+done < "$IMAGE_DIR/images.txt"
+
+# 3. The gateway's admin credential. The chart generates this with a Helm HOOK, and
+#    hooks do not run through `helm template` — so without this step the gateway comes
+#    up with no basic-auth secret to mount and never becomes ready. Minted per host and
+#    never printed: deploys here are kubectl apply, so nothing needs to know it, which
+#    leaves /system/* behind a password no human holds.
+kubectl create namespace openfaas --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+if ! kubectl -n openfaas get secret basic-auth >/dev/null 2>&1; then
+  log "minting the gateway's basic-auth secret"
+  _pw="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  kubectl -n openfaas create secret generic basic-auth \
+    --from-literal=basic-auth-user=admin \
+    --from-literal=basic-auth-password="$_pw" >/dev/null
+  unset _pw
+fi
+
+# 4. Apply, then wait, so a boot that only half-worked says so in
+#    `systemctl status ot-faas` instead of in front of a customer.
+kubectl apply -f "$FAAS_DIR/kubesolo/openfaas.yaml"
+kubectl -n openfaas rollout status deploy/gateway --timeout=300s
+
+log "the function runtime is up (kubectl -n openfaas get pods)"
+EOF
+chmod 0755 "$OT_FAAS_DIR/kubesolo/apply.sh"
+
+log "installing the ot-faas systemd unit"
+cat > /etc/systemd/system/ot-faas.service <<'EOF'
+[Unit]
+Description=OpenFaaS on KubeSolo (the plant's function runtime for Entitle adapters)
+After=kubesolo.service
+Requires=kubesolo.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# A first boot mints the cluster's CA and node and imports the baked image tarballs,
+# because there is no registry to pull from; the default 90s start timeout would kill
+# that half way through and leave the broker with no runtime.
+TimeoutStartSec=1200
+ExecStart=/opt/ot-faas/kubesolo/apply.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable ot-faas.service
+
+log "starting the function runtime"
+"$OT_FAAS_DIR/kubesolo/apply.sh" \
+  || die "the function runtime did not come up — refusing to bake a broker whose \
+adapters could never run"
+
+# ── The bake's own smoke test ─────────────────────────────────────────────────
+# This is where the questions get answered, on a VM that still has egress and where a
+# failure costs a bake instead of a demo. Everything below is checkable HERE; what is
+# left for the live run is only what genuinely needs the plant.
+kubectl wait --for condition=established --timeout=120s crd/functions.openfaas.com \
+  || die "the functions.openfaas.com CRD never established — the operator cannot \
+reconcile Function objects, so no adapter could ever be deployed"
+
+# Exactly one pod. A chart upgrade that re-enables NATS or Prometheus is the failure
+# that quietly eats a 2-vCPU broker shared with the Entitle agent, and its first
+# symptom on a cell is pods stuck Pending with the reason only in `kubectl describe`.
+# Better it fails the bake.
+_pods="$(kubectl -n openfaas get pods --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$_pods" != "1" ]; then
+  kubectl -n openfaas get pods -o wide || true
+  die "the openfaas namespace runs $_pods pods, expected exactly 1 (gateway, with the \
+operator as its second CONTAINER). Something values.yaml switches off is enabled — \
+see the trimming note above."
+fi
+
+# Drive the whole chain through a throwaway Function on the baked image with NO
+# package, so bootstrap.py serves its sentinel: gateway routing, of-watchdog, the
+# loader, Python starting, and cluster DNS — all without a dashboard.
+log "deploying a throwaway selftest function"
+cat > /tmp/ot-faas-selftest.yaml <<EOF
+apiVersion: openfaas.com/v1
+kind: Function
+metadata:
+  name: ot-faas-selftest
+  namespace: openfaas-fn
+spec:
+  name: ot-faas-selftest
+  image: $OT_FAAS_IMAGE
+  labels:
+    com.openfaas.scale.min: "1"
+    com.openfaas.scale.max: "1"
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+EOF
+kubectl apply -f /tmp/ot-faas-selftest.yaml \
+  || die "the operator rejected a Function object — check the CRD's apiVersion"
+_waited=0
+while [ "$_waited" -lt 60 ]; do
+  if kubectl -n openfaas-fn get deploy ot-faas-selftest >/dev/null 2>&1; then break; fi
+  _waited=$((_waited + 1))
+  sleep 5
+done
+[ "$_waited" -lt 60 ] \
+  || die "the operator never created a Deployment for the selftest Function — it is \
+running but not reconciling"
+kubectl -n openfaas-fn rollout status deploy/ot-faas-selftest --timeout=300s || {
+  kubectl -n openfaas-fn get pods -o wide || true
+  kubectl -n openfaas-fn describe deploy ot-faas-selftest | tail -n 30 || true
+  kubectl -n openfaas-fn logs "deploy/ot-faas-selftest" --all-containers --tail=40 2>&1 | tail -n 40 || true
+  die "the selftest function never became ready — if this is ErrImageNeverPull then \
+$OT_FAAS_IMAGE is not in containerd, which the import check above should have caught"
+}
+
+# Asked from a POD, never from the host. Whether traffic leaves a pod with the node's
+# address is a property of the CNI, and the caller here will be the Entitle agent —
+# also a pod. The host is a different source and a different answer.
+faas_probe() {
+  _probe_name="$1"
+  _probe_url="$2"
+  kubectl -n openfaas-fn delete pod "$_probe_name" --ignore-not-found >/dev/null 2>&1 || true
+  kubectl -n openfaas-fn run "$_probe_name" --image="$OT_PROBE_IMAGE" \
+    --image-pull-policy=Never --restart=Never \
+    --command -- sh -c "wget -qO- --timeout=20 '$_probe_url' || echo PROBE-FAILED" \
+    >/dev/null 2>&1 || return 1
+  _probe_waited=0
+  while [ "$_probe_waited" -lt 36 ]; do
+    case "$(kubectl -n openfaas-fn get pod "$_probe_name" \
+            -o jsonpath='{.status.phase}' 2>/dev/null)" in
+      Succeeded|Failed) break ;;
+    esac
+    _probe_waited=$((_probe_waited + 1))
+    sleep 5
+  done
+  kubectl -n openfaas-fn logs "$_probe_name" 2>/dev/null
+  kubectl -n openfaas-fn delete pod "$_probe_name" --ignore-not-found >/dev/null 2>&1 || true
+}
+
+log "probing the gateway and the selftest function from inside a pod"
+_gw="http://gateway.openfaas.svc.cluster.local:8080"
+_health="$(faas_probe ot-faas-probe-health "$_gw/healthz")"
+case "$_health" in
+  *PROBE-FAILED*|"") die "the gateway does not answer /healthz from a pod — cluster \
+DNS or the gateway Service. Probe output: ${_health:-<empty>}" ;;
+esac
+
+_root="$(faas_probe ot-faas-probe-root "$_gw/function/ot-faas-selftest")"
+case "$_root" in
+  *ot-faas-selftest-ok*) log "the function answers through the gateway" ;;
+  *) die "the selftest function did not answer through the gateway. Probe output: \
+${_root:-<empty>}" ;;
+esac
+
+# THE routing question, and the reason it is asked here: an Entitle Remote Adapter
+# distinguishes its operations by PATH (/give_access vs /revoke_access). If the
+# gateway does not forward the residual path after /function/<name>, every operation
+# lands on the function root and the adapter is unroutable — a design problem, not a
+# configuration one, so it must surface at bake and not at a customer.
+_sub="$(faas_probe ot-faas-probe-subpath "$_gw/function/ot-faas-selftest/get_assets")"
+case "$_sub" in
+  *'"path": "/get_assets"'*) log "the gateway forwards sub-paths (the adapter is routable)" ;;
+  *ot-faas-selftest-ok*)
+    die "the gateway reached the function but did NOT forward the sub-path: it saw \
+$(echo "$_sub" | sed -n 's/.*\"path\": \"\([^\"]*\)\".*/\1/p'), not /get_assets. An \
+Entitle adapter routes on the path, so every operation would land on the root and be \
+indistinguishable. Probe output: $_sub" ;;
+  *) die "the sub-path probe did not reach the function at all. Probe output: ${_sub:-<empty>}" ;;
+esac
+
+# Deleting the Function must take its Deployment with it — otherwise a revoked adapter
+# leaves a pod running with the last package it was given.
+log "checking the operator reconciles a deletion"
+kubectl delete -f /tmp/ot-faas-selftest.yaml --ignore-not-found >/dev/null
+_waited=0
+while [ "$_waited" -lt 36 ]; do
+  if ! kubectl -n openfaas-fn get deploy ot-faas-selftest >/dev/null 2>&1; then break; fi
+  _waited=$((_waited + 1))
+  sleep 5
+done
+[ "$_waited" -lt 36 ] \
+  || die "the selftest Function was deleted but its Deployment is still there — the \
+operator does not reconcile deletions, so a removed adapter would keep running"
+rm -f /tmp/ot-faas-selftest.yaml
+log "function runtime smoke test passed (CRD, 1 pod, gateway, sub-path routing, GC)"
+
+fi   # OT_FAAS = openfaas
+
+if [ "$OT_FAAS" = "none" ]; then
+  log "the broker is ready: KubeSolo up, chart at $OT_ENTITLE_CHART_DIR/entitle-agent.tgz"
+  log "         (OT_FAAS=none — no function runtime, so this broker cannot host the"
+  log "          Entitle REST adapters; re-bake with OT_FAAS=openfaas if you need them)"
+else
+  log "the broker is ready: KubeSolo up, Entitle chart at \
+$OT_ENTITLE_CHART_DIR/entitle-agent.tgz, OpenFaaS gateway on :8080 in-cluster"
+fi
 
 fi
 
@@ -1371,6 +2055,12 @@ else
     # to it would sit there unscheduled while Kubernetes reported itself healthy.
     log "resetting the cluster's identity (each cell mints its own CA, node and state)"
     systemctl stop ot-sim.service >/dev/null 2>&1 || true
+    # The broker's function runtime, if this image has one. Stopped BEFORE kubesolo
+    # for the same reason its sibling above is: a oneshot unit that is still mid-apply
+    # when the API server goes away leaves half-applied objects in the state directory
+    # this block is about to delete anyway — but it also writes to the containerd store
+    # it must NOT be interrupted in the middle of.
+    systemctl stop ot-faas.service >/dev/null 2>&1 || true
     systemctl stop kubesolo >/dev/null 2>&1 || true
     for _dir in /var/lib/kubesolo/*; do
       [ -e "$_dir" ] || continue
