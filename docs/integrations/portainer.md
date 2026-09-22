@@ -167,6 +167,17 @@ Each mint gets a distinct description (`vm-dashboard-<unix>`) because Portainer
 refuses two tokens with the same description for one user. It **adds** a token rather
 than replacing one — revoke the old ones in Portainer if you want them gone.
 
+On the **managed node**, minting manages the node's ingress as well. A deploy writes
+the allow-list from one egress detection and never revisits it, so by the time you
+mint, the dashboard's own outbound address may have moved — a worker rescheduled
+behind a different SNAT address, a proxy pool picking a different one — and the
+node's rule still names the old one. The mint then fails with a `ConnectTimeout`
+(dropped packets, not a closed port). Rather than report it, the dashboard
+re-detects its egress address, re-applies the ingress rule and mints again; if the
+rule had been deleted outright, re-applying puts it back. Only for a node this
+dashboard deployed — a Portainer you merely point it at has a firewall that is
+yours, and it says so instead of touching anything.
+
 Minting also re-stages the token to the `portainer_access` adapter, if one is deployed
 (see below). **Re-send the token to the adapter** does only that half, for when the
 dashboard's own token is fine and only the function's copy is stale.
@@ -591,6 +602,17 @@ allows a `/32` per gateway, refreshed on every gateway deploy/teardown. Check
 **Settings → Containers → Effective firewall sources**: the gateway should be listed
 under *Web-Jump Gateways*. If it isn't, its egress IP was never recorded — redeploy the
 gateway, or add the IP to `portainer_allowed_source_cidrs`.
+
+**"Cannot reach Portainer: ConnectTimeout"** — the TCP connect got no answer, so the
+packets are being *dropped*: an ingress rule, not a closed port (a closed port
+answers with a reset). On the managed node, **Mint an API token** re-detects the
+dashboard's egress address and re-applies the rule before giving up, so the message
+you are left with says what the rule now allows. Compare that with where the
+dashboard actually egresses from: if it has no stable outbound address (Container
+Apps with no NAT Gateway, a corporate proxy pool), set
+`portainer_dashboard_egress_cidr` to the whole range rather than a single address.
+If the message says the URL is **not a node this dashboard deployed**, the firewall
+in front of that Portainer is yours to open.
 
 **Deploy fails with "the Portainer node's firewall is closed"** — no allowed source
 CIDRs, and the dashboard couldn't auto-detect its own egress IP. Set

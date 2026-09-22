@@ -726,6 +726,219 @@ def test_a_supplied_credential_is_used_and_not_persisted():
     assert _CONFIG["portainer_admin_password"] == "stored-one", _CONFIG
 
 
+# ── The node's ingress is managed on a MINT, not only on a deploy ────────────
+# The deploy writes the allow-list from one egress detection and then never revisits
+# it, so by the time anyone clicks "mint a token" the dashboard's own outbound address
+# may have moved (a worker rescheduled behind a different SNAT address, a corp proxy
+# egressing from a pool) and the node's rule still admits the old one. Every packet is
+# dropped, the mint fails with a ConnectTimeout — and that is the exact failure the
+# mint button exists to REPAIR, so it repairs it instead of reporting it.
+
+_portainer_stub.is_unreachable = lambda exc: bool(getattr(exc, "dropped", False))
+
+#: What the cloud says is deployed, and whether it will answer at all.
+_NODES: list = []
+_LIST_FAILS = [False]
+
+
+async def _fake_list_nodes(cloud, spec, placement):
+    if _LIST_FAILS[0]:
+        raise RuntimeError("compute API unavailable")
+    return list(_NODES)
+
+
+portainer_node_service.managed_node_service.list_nodes = _fake_list_nodes
+
+
+def _dropped():
+    """A PortainerError raised because the SYN went unanswered — a firewall, since a
+    closed port would answer with a reset."""
+    exc = _StubPortainerError("Cannot reach Portainer: ConnectTimeout: the TCP connect "
+                              "got no answer")
+    exc.dropped = True
+    return exc
+
+
+def _stub_mint(drops=0):
+    """Portainer whose sign-in drops the connection the first ``drops`` times."""
+    log = []
+    state = {"drops": drops}
+
+    async def _login(url, username, password, verify=False):
+        if state["drops"] > 0:
+            state["drops"] -= 1
+            log.append(("dropped", url))
+            raise _dropped()
+        log.append(("login", url, username, password, verify))
+        return "jwt-abc"
+
+    async def _create(url, jwt, password, description="vm-dashboard", verify=False):
+        log.append(("token", url, description))
+        return "ptr_minted"
+
+    _portainer_stub.login = _login
+    _portainer_stub.create_access_token = _create
+    return log
+
+
+def _stub_firewall(detect="203.0.113.9", applied=None):
+    """Replace the two cloud-touching steps of the re-admit, and record them.
+
+    Detection writes the same config key the real one persists, so the REAL merge
+    decides what the allow-list looked like either side of it.
+    """
+    seen = {"detected": 0, "applied": []}
+
+    async def _detect():
+        seen["detected"] += 1
+        if detect:
+            _CONFIG["portainer_dashboard_egress_cidr"] = f"{detect}/32"
+        return detect
+
+    async def _refresh(db=None, placement=None):
+        seen["applied"].append(portainer_node_service.firewall_status(db)["merged"])
+        return dict(applied or {"name": "portainer-server-allow-mgmt", "opened": True})
+
+    portainer_node_service._ensure_dashboard_egress_cidr = _detect
+    portainer_node_service.refresh_portainer_firewall = _refresh
+    return seen
+
+
+def _managed_node_config(**extra):
+    cfg = dict(gcp_project_id="proj", gcp_zone="us-central1-a",
+               portainer_url="https://34.10.0.7:9443", portainer_admin_password="pw")
+    cfg.update(extra)
+    _reset(**cfg)
+    _NODES[:] = [{"name": "portainer-server", "external_ip": "34.10.0.7",
+                  "internal_ip": "10.99.1.5", "status": "RUNNING"}]
+    _LIST_FAILS[0] = False
+
+
+def test_a_dropped_mint_re_admits_the_dashboard_egress_and_mints_again():
+    """Telling the operator to REDEPLOY THE NODE to fix a token is the dead end this
+    button replaced — so a stale allow-list must not be able to reinstate it."""
+    _managed_node_config(portainer_dashboard_egress_cidr="198.51.100.2/32")
+    log = _stub_mint(drops=1)
+    seen = _stub_firewall(detect="203.0.113.9")
+
+    out = _await(portainer_node_service.mint_api_token())
+
+    assert out["token_configured"] is True, out
+    assert _CONFIG["portainer_pat"] == "ptr_minted", _CONFIG
+    assert seen["detected"] == 1, seen
+    # The address actually in use now is in the rule that gets applied.
+    assert "203.0.113.9/32" in seen["applied"][0], seen
+    # One drop, one repair, one retry — and the retry signs in again, because a JWT
+    # from a session that could not be used is worth nothing.
+    assert [row[0] for row in log] == ["dropped", "login", "token"], log
+
+
+def test_a_mint_against_someone_elses_portainer_never_touches_the_node_firewall():
+    """A Portainer this dashboard merely points at has a firewall that is the
+    operator's. Rewriting an ingress rule in their cloud on its behalf would be a side
+    effect nobody asked for, aimed at a firewall that is not the one dropping the
+    packets."""
+    _managed_node_config(portainer_url="https://portainer.corp.example:9443")
+    log = _stub_mint(drops=1)
+    seen = _stub_firewall()
+    try:
+        _await(portainer_node_service.mint_api_token())
+    except _StubPortainerError as exc:
+        assert "not a Portainer node this dashboard deployed" in str(exc), str(exc)
+    else:
+        raise AssertionError("a dropped connect to an unmanaged Portainer was swallowed")
+    assert seen == {"detected": 0, "applied": []}, seen
+    assert [row[0] for row in log] == ["dropped"], log
+
+
+def test_a_cloud_that_cannot_be_asked_leaves_the_firewall_alone():
+    """"Cannot confirm" is not "it is ours": a compute API that will not answer must
+    not authorise rewriting an ingress rule."""
+    _managed_node_config()
+    _LIST_FAILS[0] = True
+    _stub_mint(drops=1)
+    seen = _stub_firewall()
+    try:
+        _await(portainer_node_service.mint_api_token())
+    except _StubPortainerError as exc:
+        assert "could not be reached to check" in str(exc), str(exc)
+    else:
+        raise AssertionError("an unconfirmable node still had its ingress rewritten")
+    assert seen["applied"] == [], seen
+
+
+def test_a_mint_still_dropped_after_re_admitting_says_nothing_changed():
+    """The allow-list already named the detected address, so a retry would dial from
+    the same address into the same rule. Say so instead of burning another timeout."""
+    _managed_node_config(portainer_dashboard_egress_cidr="203.0.113.9/32")
+    log = _stub_mint(drops=1)
+    _stub_firewall(detect="203.0.113.9")
+    try:
+        _await(portainer_node_service.mint_api_token())
+    except _StubPortainerError as exc:
+        assert "produced no change" in str(exc), str(exc)
+        # Naming what IS allowed is the whole diagnosis — the operator compares it
+        # with the address their worker actually egresses from.
+        assert "203.0.113.9/32" in str(exc), str(exc)
+    else:
+        raise AssertionError("a mint that never connected reported success")
+    assert [row[0] for row in log] == ["dropped"], "a second connect was made for nothing"
+    assert not _CONFIG.get("portainer_pat"), _CONFIG
+
+
+def test_a_firewall_rule_that_had_to_be_recreated_counts_as_a_change():
+    """A hand-deleted rule computes the same source set it always did, so comparing
+    the sets alone would give up on the very repair that just happened."""
+    _managed_node_config(portainer_dashboard_egress_cidr="203.0.113.9/32")
+    log = _stub_mint(drops=1)
+    _stub_firewall(detect="203.0.113.9",
+                   applied={"name": "portainer-server-allow-mgmt", "opened": True,
+                            "created": True})
+    out = _await(portainer_node_service.mint_api_token())
+    assert out["token_configured"] is True, out
+    assert [row[0] for row in log] == ["dropped", "login", "token"], log
+
+
+def test_a_retry_that_is_dropped_too_says_the_ingress_was_already_widened():
+    """Otherwise the operator reads an identical ConnectTimeout twice and has no way
+    to know the allow-list was widened on their behalf — the one fact that tells them
+    a single /32 is the wrong shape for a host that egresses from a pool."""
+    _managed_node_config(portainer_dashboard_egress_cidr="198.51.100.2/32")
+    log = _stub_mint(drops=2)
+    _stub_firewall(detect="203.0.113.9")
+    try:
+        _await(portainer_node_service.mint_api_token())
+    except _StubPortainerError as exc:
+        assert "ingress was re-applied first" in str(exc), str(exc)
+        assert "203.0.113.9/32" in str(exc), str(exc)
+    else:
+        raise AssertionError("a mint that never connected reported success")
+    assert [row[0] for row in log] == ["dropped", "dropped"], log
+
+
+def test_an_http_failure_is_not_a_firewall_problem():
+    """Bad credentials ANSWER; dropped packets do not. Only the second is the
+    dashboard's to repair, and re-applying ingress over a 401 would hide it."""
+    _managed_node_config()
+    seen = _stub_firewall()
+    calls = []
+
+    async def _login(url, username, password, verify=False):
+        calls.append(url)
+        raise _StubPortainerError("login failed: Invalid JWT token")
+
+    _portainer_stub.login = _login
+    try:
+        _await(portainer_node_service.mint_api_token())
+    except _StubPortainerError as exc:
+        assert "Invalid JWT token" in str(exc), str(exc)
+        assert "firewall" not in str(exc).lower(), str(exc)
+    else:
+        raise AssertionError("a rejected credential was reported as success")
+    assert seen == {"detected": 0, "applied": []}, seen
+    assert len(calls) == 1, calls
+
+
 if __name__ == "__main__":
     _tests = [v for k, v in sorted(globals().items())
               if k.startswith("test_") and callable(v)]

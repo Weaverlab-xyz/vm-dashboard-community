@@ -1481,6 +1481,11 @@ async def mint_portainer_token(
     likely to be failing — holding the old one, with no sign anything is out of step.
     A re-stage failure does not lose the token: it is stored first and the response
     says which half did not happen.
+
+    On a MANAGED node the ingress is managed here as well: a dropped connect (the
+    node's allow-list still naming an egress address the dashboard has since moved
+    off) re-admits the current one and mints again, rather than reporting a
+    ConnectTimeout whose only cure used to be redeploying the node.
     """
     from ..services import portainer_adapter_service as adapter
     from ..services import portainer_node_service, portainer_service
@@ -1488,7 +1493,7 @@ async def mint_portainer_token(
     try:
         minted = await portainer_node_service.mint_api_token(
             username=req.username or "", password=req.password or "",
-            description=req.description or "")
+            description=req.description or "", db=db)
     except portainer_service.PortainerNotConfigured as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except portainer_service.PortainerError as exc:
