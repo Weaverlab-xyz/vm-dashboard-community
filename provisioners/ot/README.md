@@ -134,6 +134,19 @@ that is every bake, at the smoke test. `test_ot_provisioner.py` refuses a 4.x pi
 From 3.0 the server is pure Python, so it installs as a plain wheel. A 2.x pin brings
 the native dependency back and the bake fails at the smoke test.
 
+**Image loads must pass `--local` to `ctr`.** The cell lifts `ctr` out of Docker's
+`containerd.io` package just before purging Docker, so its version is whatever Docker
+ships on the day of the bake — 2.x now. From containerd 2.0 `ctr` routes image
+imports, pulls and exports through the *transfer* service, and KubeSolo's embedded
+containerd does not register the streaming API that needs: the bake stops at
+`unknown service containerd.services.streaming.v1.Streaming` on a socket where
+listing images answers perfectly, which reads like a broken containerd rather than a
+client asking for an API this one never had. `--local` is the pre-2.0 path, and a
+no-op on the containerd 1.7 client the broker pins, where it is already the default.
+`test_ot_kubesolo.py` refuses any of the three without it — including inside the
+`apply.sh` the bake writes, since a cell re-imports from the tarballs on every boot
+with that same client.
+
 The bake smoke-tests **every** workload it assembled — the sims `OT_SIMS` selected plus
 FUXA — and fails the build if any is not running, rather than shipping an image that
 boots dead inside an air-gapped subnet. On the KubeSolo runtime it goes one step

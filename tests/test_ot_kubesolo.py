@@ -253,6 +253,27 @@ def test_apply_writes_a_kubeconfig_that_works_through_the_tunnel():
     assert "tls-server-name" in body
 
 
+def test_every_image_transfer_into_containerd_is_forced_local():
+    """containerd 2.0 made ctr hand image imports, pulls and exports to the TRANSFER
+    service, which is served over containerd.services.streaming.v1.Streaming --- an
+    API KubeSolo's embedded containerd does not register. The cell's client is
+    whatever Docker's containerd.io package ships on the day of the bake (2.x now),
+    so the default path dies with "unknown service ...streaming.v1.Streaming" on a
+    socket where listing images answers perfectly, and the same client re-imports on
+    every boot. --local is the pre-2.0 path, over the content and images services
+    KubeSolo does serve, and a no-op on the 1.7 client the broker pins. Comment lines
+    are dropped first, so prose about the flag cannot satisfy the guard."""
+    code = "\n".join(line for line in _SRC.splitlines()
+                     if not line.lstrip().startswith("#"))
+    calls = re.findall(r"images (import|pull|export)((?:\s+--?\S+)*)", code)
+    assert calls, "nothing moves an image into KubeSolo's containerd"
+    for verb, flags in calls:
+        assert "--local" in flags.split(), (
+            f"an `images {verb}` runs without --local: a 2.x ctr hands it to the "
+            f"transfer service, and KubeSolo serves no streaming API for that — "
+            f"the bake fails, or a cell fails the same way at boot")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

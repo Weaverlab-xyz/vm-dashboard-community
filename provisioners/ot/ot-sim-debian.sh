@@ -961,10 +961,23 @@ normalize_ref() {
 
 log "importing the baked images into KubeSolo's containerd"
 : > "$OT_IMAGE_DIR/images.txt"
+# --local on every import, and it is not decoration. containerd 2.0 changed `ctr
+# images import` to hand the tarball to the TRANSFER service, which is served over
+# containerd.services.streaming.v1.Streaming — an API KubeSolo's embedded containerd
+# does not register. The cell's ctr is whatever Docker's containerd.io package ships
+# on the day of the bake, and that is now 2.x, so the default path dies with "unknown
+# service containerd.services.streaming.v1.Streaming" against a socket where `images
+# ls` answers perfectly: it reads like a broken containerd rather than a client that
+# asked for an API this one does not have. --local is the pre-2.0 path — the client
+# reads the tarball and writes through the content and images services KubeSolo does
+# serve — and it is a no-op on the 1.7 ctr the broker pins, where it already defaults
+# to true. Every `images import` in this script and in the apply.sh it writes carries
+# it, because the cell re-imports at boot with this same client.
 for _pair in "ot-plc-sim:baked|ot-plc-sim.tar" "$OT_FUXA_IMAGE|fuxa.tar"; do
   _ref="$(normalize_ref "${_pair%%|*}")"
   _tarball="${_pair##*|}"
-  ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images import "$OT_IMAGE_DIR/$_tarball" \
+  ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images import --local \
+    "$OT_IMAGE_DIR/$_tarball" \
     || die "ctr could not import $_tarball into KubeSolo's containerd"
   # Proven here rather than assumed: the manifests pull nothing (imagePullPolicy:
   # Never), so a name containerd does not hold is a cell that boots ErrImageNeverPull.
@@ -1210,8 +1223,11 @@ while read -r ref tarball; do
   [ -n "${ref:-}" ] || continue
   if $CTR images ls -q | grep -qx "$ref"; then continue; fi
   log "importing $ref"
+  # --local because a 2.x ctr would otherwise route the tarball through containerd's
+  # transfer service, and KubeSolo does not serve the streaming API that needs; on
+  # the 1.7 client it is already the default. See the bake's own import loop.
   # </dev/null so the import cannot consume the image list this loop is reading.
-  $CTR images import "$IMAGE_DIR/$tarball" </dev/null
+  $CTR images import --local "$IMAGE_DIR/$tarball" </dev/null
 done < "$IMAGE_DIR/images.txt"
 
 # 3. Apply, then wait on each Deployment, so a boot that only half-worked says so in
@@ -1847,13 +1863,20 @@ for _pair in \
   _how="${_rest##*|}"
   _ref="$(normalize_ref "$_img")"
   if [ "$_how" = "pull" ]; then
-    ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images pull "$_ref" \
+    # --local on pull and export for the same reason as on import below: containerd
+    # 2.0 routes all three through the transfer service, which KubeSolo does not
+    # serve. On the 1.7 client this role pins, all three already default to local.
+    ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images pull --local "$_ref" \
       || die "could not pull $_ref — the broker bake needs egress to the registry"
-    ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images export \
+    ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images export --local \
       "$OT_FAAS_IMAGE_DIR/$_tarball" "$_ref" \
       || die "could not export $_ref to $_tarball"
   else
-    ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images import \
+    # --local, exactly as the cell's import loop explains: the transfer service a 2.x
+    # ctr would use by default needs a streaming API KubeSolo does not serve. Harmless
+    # on the 1.7 client this role pins, where local is already the default — and it is
+    # what keeps a bump of OT_CONTAINERD_VERSION to 2.x from breaking the broker.
+    ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images import --local \
       "$OT_FAAS_IMAGE_DIR/$_tarball" \
       || die "ctr could not import $_tarball into KubeSolo's containerd"
   fi
@@ -2036,8 +2059,10 @@ while read -r ref tarball; do
   [ -n "${ref:-}" ] || continue
   if $CTR images ls -q | grep -qx "$ref"; then continue; fi
   log "importing $ref"
+  # --local: a 2.x ctr routes an import through the transfer service, and KubeSolo
+  # serves no streaming API for it. Already the default on the 1.7 client.
   # </dev/null so the import cannot consume the image list this loop is reading.
-  $CTR images import "$IMAGE_DIR/$tarball" </dev/null
+  $CTR images import --local "$IMAGE_DIR/$tarball" </dev/null
 done < "$IMAGE_DIR/images.txt"
 
 # 3. The gateway's admin credential. The chart generates this with a Helm HOOK, and
