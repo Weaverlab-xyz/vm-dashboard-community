@@ -380,13 +380,17 @@ gateway comes back with a new IP, or someone deletes the rule in the cloud conso
 Every caller then reports the same unhelpful thing — *unreachable* — and the only cure
 used to be a redeploy.
 
-**Re-apply the node firewall**, under the node table on the Containers page
-(`POST /api/containers/portainer/node/firewall`), is that step on its own: re-detect
-the dashboard's egress address, recompute the merged set, re-apply the rule. It reports
-what it added and removed, and says so plainly when the result is **closed** — an
-empty merged set is a real outcome here, not an error. Safe to click on a healthy
-node: the per-cloud apply is idempotent, and a rule that had been deleted is simply
-put back.
+**Re-apply the node firewall** (`POST /api/containers/portainer/node/firewall`) is
+that step on its own: re-detect the dashboard's egress address, recompute the merged
+set, re-apply the rule. It reports what it added and removed, and says so plainly when
+the result is **closed** — an empty merged set is a real outcome here, not an error.
+Safe to click on a healthy node: the per-cloud apply is idempotent, and a rule that had
+been deleted is simply put back.
+
+It is in two places, because the two halves of this are in two places: under the node
+table on the **Containers** page, and next to the allow-list readout in **Settings →
+Containers** — where the button is labelled **Re-apply** and the breakdown re-renders
+from the result, so what you are reading afterwards is the rule that now exists.
 
 Minting a token does this for itself on a dropped connect, so reach for the button
 when what is failing is something else — listing environments, an Edge registration,
