@@ -620,6 +620,97 @@ manually (the dashboard can't discover an IP for a host it didn't provision).
 
 ---
 
+## Auth providers (optional, not wired up)
+
+Out of the box the node has **local users only**: the `admin` account the dashboard
+bootstraps, plus whatever Entitle mints for a grant (the ephemeral account's username
+is the requester's Entitle email; the grant screen shows only the password). That is
+enough for the demo. You would only want a real auth provider — Entra via `azuread`,
+or any IdP via `genericoidc` — if grants should land on **real identities** instead of
+per-grant local users.
+
+Nothing in the dashboard configures one today. The notes below are a **spike result**
+(2026-09-22, read from Rancher + `terraform-provider-rancher2` source; **not** exercised
+against a live node), recorded so the next person doesn't re-derive it.
+
+### Enabling a provider is one plain PUT — no browser round-trip
+
+The UI's *Enable* button posts `?action=testAndApply`, which does a real IdP sign-in
+and only then saves the config. **That action is not the only way to enable a provider.**
+`enabled` is an ordinary, updatable field on the `AuthConfig` CRD, and the login screen
+is driven by nothing else: Rancher lists a provider when `authConfig.enabled` is true and
+a provider is registered for its `type`. Writing it directly sticks. This is exactly what
+`rancher2_auth_config_azuread` / `_generic_oidc` do — they never call an action, they
+`PUT` the config with `enabled = true`.
+
+Three details that decide whether the call works:
+
+- **PUT the *subtype* path, not `/v3/authConfigs/<name>`.** Norman marks `type` as
+  `noupdate`, so it is stripped from a PUT to the base collection — and the auth-config
+  store rejects a body with no `type` (*"invalid data for auth store update"*). The
+  subtype store injects it. Use `/v3/azureADConfigs/azuread`,
+  `/v3/genericOIDCConfigs/genericoidc`, `/v3/keyCloakOIDCConfigs/keycloakoidc`.
+- **The PUT merges, it does not replace** (unless you pass `?replace=true`), so a partial
+  body is fine and annotations survive — including `auth.cattle.io/azuread-endpoint-migrated`,
+  which selects the MS Graph flow over the retired Azure AD Graph one.
+- **Password fields go to secrets for you.** `clientSecret` / `applicationSecret` /
+  `privateKey` are moved into `cattle-global-data` by the store on the normal API path —
+  the same as the UI does.
+
+Disabling is the reverse: `POST /v3/<subtype>s/<name>?action=disable`, or a PUT with
+`enabled: false`. Only **one** non-local provider should be enabled at a time (the
+Terraform provider refuses client-side; `local` is always exempt, so the dashboard's
+admin token keeps working either way).
+
+What a direct write does **not** do, that `testAndApply` does:
+
+- It doesn't validate anything. A typo yields a login button that fails when a human
+  clicks it. `POST ?action=configureTest` returns the IdP redirect URL without side
+  effects and is a cheap smoke test; fetching `<issuer>/.well-known/openid-configuration`
+  and a `client_credentials` token request validate the rest.
+- It doesn't bind the external identity to the local `admin` user
+  (`SetPrincipalOnCurrentUser`), and doesn't populate `allowedPrincipalIds`. So either set
+  `accessMode: unrestricted` (anyone in the tenant can sign in, landing as a fresh Rancher
+  user with no roles), or set `accessMode: restricted` and hand-build the principal IDs —
+  `azuread_user://<objectId>`, `azuread_group://<objectId>`, `genericoidc_user://<sub>`.
+  Those need no browser: Graph gives you the object IDs.
+
+### The round-trip itself can't be scripted
+
+If you did want `testAndApply`'s identity binding, it needs an OAuth **authorization
+code** issued for Rancher's own `client_id` and redirect URI. ROPC and client-credentials
+produce tokens, not a code, and Rancher has no path that accepts a raw `id_token`. Forging
+the `/verify-auth-azure` callback is not possible either — the code is the thing you don't
+have. Driving a headless browser would break on MFA/conditional access in a corporate
+tenant. Treat the binding as a one-time human click, or skip it.
+
+### Why it isn't wired into the deploy tail
+
+Automating the Rancher side is the easy half. The blocker is the **IdP side**: the reply
+URL `https://<node>/verify-auth-azure` (or `/verify-auth` for `genericoidc`) must be
+registered on the app registration *exactly*, and Entra allows no wildcard that helps —
+a wildcard reply URL strips the query string, which is where the code arrives.
+
+That collides with the [ephemeral node](#ephemeral-node): on GCP and AWS the public IP
+changes on every recreate, so every recreate would need a tenant write (Graph
+`Application.ReadWrite.All`, plus pruning against the 256-URI cap) — a silent per-deploy
+side effect on a shared object, which is not something the dashboard should be doing.
+
+Two ways to make it worth wiring:
+
+- **Host the node on Azure**, where the public IP is Standard/Static and survives a
+  recreate. One reply URL, registered once by hand, stays valid — and the deploy tail
+  becomes a single best-effort PUT, in the same shape as
+  `rancher_service.complete_first_run_direct`.
+- **Give the node a stable DNS name** on any cloud and register that once.
+
+Either way it wants its **own app registration**, not the shared EKS-federation app
+(`entra_oidc_client_id`): that one is a public client used by `kubectl oidc-login`'s
+device-code flow, and Rancher needs a confidential client — a client secret, plus Graph
+application permissions if you want user/group search.
+
+---
+
 ## Ephemeral node
 
 The node is deliberately **disposable**: its boot disk is deleted with the VM, so
