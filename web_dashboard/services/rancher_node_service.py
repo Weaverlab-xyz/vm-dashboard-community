@@ -739,11 +739,21 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
                 logger.warning("Rancher Web Jump provisioning failed (non-fatal): %s", exc)
 
         # Best-effort auto-register in Entitle (never fails the deploy).
+        entitle: dict = {}
         if config_service.get_bool("entitle_registration_enabled", False):
             job_service.update_progress(db, job_id, 90, "Registering in Entitle")
             try:
                 from . import k8s_service
                 await k8s_service.register_rancher_in_entitle("register")
+                # And RE-APPLY the firewall, because the merge above ran at 10% —
+                # before this integration existed. `_entitle_cidrs` gates on
+                # entitle_rancher_integration_id, so at that point it correctly
+                # answered "no integration, no ranges", and without this second pass
+                # the node stays closed to Entitle until some unrelated lifecycle
+                # event happens to re-merge. Registration never touches the node, so
+                # nothing failed: the first symptom was a connect timeout from
+                # Entitle's cloud, which reads as a broken integration.
+                entitle = await k8s_service.apply_entitle_reachability(db)
             except Exception as exc:
                 logger.warning("Rancher auto Entitle-register failed (continuing): %s", exc)
 
@@ -754,6 +764,11 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             "first_run_completed": bool(fr and fr.get("password_changed")),
             "first_run_note": (fr or {}).get("reason", ""),
         }
+        # The auto-register is best-effort and only logs, so a deploy that registered
+        # an integration Entitle cannot reach has to say so where the operator already
+        # looks. Only the gap is surfaced — a working registration needs no paragraph.
+        if entitle.get("reachability_warning"):
+            completion["entitle_reachability_warning"] = entitle["reachability_warning"]
         # Surface the admin login once, in the job result, when first-run set an
         # AUTO-GENERATED password AND it wasn't vaulted (the operator has no other
         # way to learn it). If it's vaulted for Web-Jump injection, or they set

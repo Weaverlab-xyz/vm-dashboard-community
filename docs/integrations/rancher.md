@@ -453,8 +453,9 @@ application itself is named something other than `Rancher` in your catalog, set
 
 The node row on **Containers → Rancher** carries the state and the controls: an
 `Entitle ✓` chip with the integration id once registered, **Register in Entitle**
-when it isn't, and **Deregister** when it is. Both enqueue a
-`rancher_entitle_register` job.
+when it isn't, **Deregister** when it is, and **Re-apply firewall** — which
+re-applies the node's allow-list for an integration that already exists, without
+touching the integration itself. All three enqueue a `rancher_entitle_register` job.
 
 You need this more often than the auto-register suggests. That registration is
 **best-effort** — it logs a warning and lets the deploy succeed — so a node can be
@@ -470,7 +471,9 @@ unregistered too.
 The same operations over the API:
 
 ```
-POST /api/k8s/rancher/entitle-register   {"action": "register"}   # or "deregister"
+POST /api/k8s/rancher/entitle-register   {"action": "register"}
+POST /api/k8s/rancher/entitle-register   {"action": "deregister"}
+POST /api/k8s/rancher/entitle-register   {"action": "reachability"}   # firewall only
 ```
 
 Note the permission: that route is on the k8s router and requires `k8s:write`, not
@@ -485,7 +488,10 @@ source-restricted firewall, exactly like a Gateway's `/32` is.
 
 **Registering allow-lists Entitle automatically.** The register job re-applies the
 node firewall with Entitle's ranges merged in, and deregistering removes them
-again — they are only ever open while an integration exists. The breakdown in
+again — they are only ever open while an integration exists. The deploy-time
+auto-register re-applies it too, as a *second* pass: the deploy merges the firewall
+near the start and only registers at the end, so the first merge cannot know about
+an integration that does not exist yet. The breakdown in
 **Settings → Kubernetes → Effective firewall allow-list** names them as
 `Entitle egress` so they don't read as unexplained entries.
 
@@ -493,6 +499,40 @@ This matters more than it sounds, because the failure is silent otherwise:
 registration talks to Entitle's **API**, never to your node, so it succeeds whether
 or not the node admits Entitle — and the first symptom is a *grant* that times out,
 which reads like a broken integration rather than a firewall rule.
+
+### A grant times out — `ConnectTimeoutError` on the node's address
+
+Entitle reports it as a connect timeout from its own connector, naming the node's
+public IP and port 443:
+
+```
+HTTPSConnectionPool(host='<node ip>', port=443): Max retries exceeded with url: /
+ (Caused by ConnectTimeoutError(..., 'Connection to <node ip> timed out.'))
+```
+
+Nothing is wrong with the integration — that is a packet that never arrived. Work
+through it in this order:
+
+1. **Is Entitle in the node's allow-list?** Open **Settings → Kubernetes →
+   Effective firewall allow-list**. That readout is the set the rule is *built*
+   from, not a read of the live rule.
+2. **Re-apply it.** Use **Re-apply firewall** on the node row. Deploys before
+   2026-09-22 registered at the tail of the deploy job but merged the firewall
+   *earlier* in the same job — before the integration existed — so the ranges were
+   correctly computed as "none" and the node came up closed to Entitle with nothing
+   saying so. That is the exact shape this button repairs, and it is the only way
+   out of it: **Register is hidden once an integration exists**, and re-registering
+   would strand the live one rather than fix it.
+3. **If the list already holds the three published addresses**, your tenant
+   egresses from somewhere else — they are per-deployment, not per-region (see
+   below). Get your tenant's addresses from BeyondTrust and set
+   `entitle_source_cidrs`, then **Re-apply firewall**.
+4. **If the node isn't reachable from the internet at all**, switch to
+   `entitle_rancher_private` and broker through the agent instead.
+
+A timeout is specifically *not* a TLS problem: `rancher_verify_tls` and the node's
+self-signed certificate are only reached after the connection is established. A
+certificate mismatch shows up as an SSL error, not `ConnectTimeoutError`.
 
 Where the ranges come from, in order:
 

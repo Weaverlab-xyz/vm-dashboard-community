@@ -2240,6 +2240,14 @@ async def run_entitle_agent(db: Session, *, cluster_id: str, job_id: str,
 
 VALID_ENTITLE_CLUSTER_ACTIONS = ("register", "deregister")
 
+#: The Rancher NODE's Entitle actions. A superset of the per-cluster pair, because the
+#: node is the one Entitle target this dashboard also owns the FIREWALL of —
+#: ``reachability`` re-applies that firewall without touching the integration. It is
+#: the only way out of the state a deploy-time auto-register used to leave behind (an
+#: integration Entitle cannot reach), since ``register`` is not idempotent and running
+#: it again would strand the existing integration rather than repair it.
+VALID_ENTITLE_RANCHER_ACTIONS = ("register", "deregister", "reachability")
+
 
 def _kubeconfig_host_ca(kubeconfig: str) -> tuple:
     """(API server URL, CA PEM) for the current-context cluster — or ("",""). """
@@ -2497,58 +2505,83 @@ async def register_rancher_in_entitle(action: str = "register") -> None:
                 result.get("integration_id"), private)
 
 
+async def apply_entitle_reachability(db, action: str = "register") -> dict:
+    """Re-apply the node's firewall so its source set matches the integration that now
+    exists (or no longer does), and report what the operator still has to fix.
+
+    **Every path that creates the integration must call this**, and the deploy tail did
+    not until 2026-09-22. The firewall half is not incidental: a ``private = false``
+    integration is dialled DIRECTLY by Entitle's cloud, and its egress ranges are a
+    source hitting the node's allow-list exactly like a Gateway's /32 — but
+    registration talks to Entitle's *API*, never to the node, so it succeeds whether or
+    not the node admits Entitle. Skip this and the first symptom is a connect TIMEOUT
+    on the Entitle side, which reads like a broken integration rather than a missing
+    firewall rule.
+
+    The deploy path made that trap easy to fall into, because there the ordering does
+    the damage on its own: the merge runs at 10%, long before the 90% auto-register
+    creates the integration :func:`rancher_node_service._entitle_cidrs` gates on, so
+    the ranges were computed as "no integration → none" and the node came up closed to
+    Entitle with nothing saying so.
+
+    Both directions: register ADDS Entitle's ranges, deregister takes them away again.
+    Best-effort — the integration is real either way, and failing the caller here would
+    report a registration that did happen as not having happened — so the outcome is
+    RETURNED (for a job result, an API response) rather than left in a worker log.
+    """
+    from . import config_service, entitle_egress, rancher_node_service
+    out: dict = {}
+    try:
+        fw = await rancher_node_service.refresh_rancher_firewall(db)
+        out["firewall"] = fw.get("skipped") or "updated"
+    except Exception as exc:
+        logger.warning("Rancher firewall refresh after entitle %s failed "
+                       "(continuing): %s", action, exc)
+        out["firewall_warning"] = (
+            f"The node firewall was not re-applied: {exc} Re-apply it from "
+            f"Settings → Kubernetes, or redeploy the node.")
+
+    if action != "deregister" and not config_service.get_bool("entitle_rancher_private", False):
+        gap = entitle_egress.unconfigured_warning()
+        if gap:
+            # The one case where the caller succeeds and the feature still does not
+            # work. Said in the result an operator opens, because nothing downstream
+            # will say it: the integration is live and looks healthy.
+            logger.warning("Rancher entitle %s: %s", action, gap)
+            out["reachability_warning"] = gap
+        else:
+            out["entitle_source_cidrs"] = entitle_egress.cidrs()
+    return out
+
+
 async def run_rancher_entitle_register(db: Session, *, job_id: str,
                                        action: str = "register") -> None:
     """Worker entry for a ``rancher_entitle_register`` job: drive
     :func:`register_rancher_in_entitle` with Job tracking, then re-apply the node's
-    firewall so Entitle can actually reach what it just registered.
+    firewall (:func:`apply_entitle_reachability`) so Entitle can actually reach what it
+    just registered.
 
-    The firewall half is not incidental. A `private = false` integration is dialled
-    DIRECTLY by Entitle's cloud, and its egress ranges are a source hitting the node's
-    allow-list exactly like a Gateway's /32 — but registration talks to Entitle's API,
-    never to the node, so it succeeds whether or not the node admits Entitle. Without
-    this the first symptom is a GRANT that times out, which reads like a broken
-    integration rather than a missing firewall rule.
+    ``action="reachability"`` runs the firewall half ALONE. That is the repair for a
+    node whose integration was created by the deploy tail before that path re-applied
+    the firewall: the integration is fine and only the allow-list is stale, and
+    :func:`register_rancher_in_entitle` is not idempotent, so re-registering would
+    strand the existing integration instead of fixing it.
     """
-    from . import config_service, entitle_egress, job_service
+    from . import job_service
     from ..api.websocket import broadcast_progress
     job_service.set_running(db, job_id)
-    try:
-        await broadcast_progress(job_id, 20, f"Entitle Rancher integration: {action}…")
-        await register_rancher_in_entitle(action)
-    except Exception as exc:
-        job_service.set_failed(db, job_id, str(exc))
-        logger.exception("entitle rancher register job failed action=%s", action)
-        return
+    if action != "reachability":
+        try:
+            await broadcast_progress(job_id, 20, f"Entitle Rancher integration: {action}…")
+            await register_rancher_in_entitle(action)
+        except Exception as exc:
+            job_service.set_failed(db, job_id, str(exc))
+            logger.exception("entitle rancher register job failed action=%s", action)
+            return
 
-    # Both directions: register ADDS Entitle's ranges, deregister takes them away
-    # again. Best-effort — the integration is real either way, and failing the job
-    # here would report a registration that did happen as not having happened — but
-    # the outcome is carried in the result rather than left in the worker's log.
     result: dict = {"action": action}
-    private = config_service.get_bool("entitle_rancher_private", False)
-    try:
-        await broadcast_progress(job_id, 70, "Updating the node firewall…")
-        from . import rancher_node_service
-        fw = await rancher_node_service.refresh_rancher_firewall(db)
-        result["firewall"] = fw.get("skipped") or "updated"
-    except Exception as exc:
-        logger.warning("Rancher firewall refresh after entitle %s failed "
-                       "(continuing): %s", action, exc)
-        result["firewall_warning"] = (
-            f"The node firewall was not re-applied: {exc} Re-apply it from "
-            f"Settings → Kubernetes, or redeploy the node.")
-
-    if action == "register" and not private:
-        gap = entitle_egress.unconfigured_warning()
-        if gap:
-            # The one case where the job completes and the feature still does not
-            # work. Said here, in the result an operator opens, because nothing
-            # downstream will say it: the integration is live and looks healthy.
-            logger.warning("Rancher entitle register: %s", gap)
-            result["reachability_warning"] = gap
-        else:
-            result["entitle_source_cidrs"] = entitle_egress.cidrs()
+    await broadcast_progress(job_id, 70, "Updating the node firewall…")
+    result.update(await apply_entitle_reachability(db, action))
     job_service.set_completed(db, job_id, result)
 
 
