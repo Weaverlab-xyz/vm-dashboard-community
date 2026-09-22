@@ -68,6 +68,16 @@
 
     - name: Rotate the password
       when: fuxa_new_signin.status != 200
+      # On the BLOCK, so every task inside it inherits it and none can be added later
+      # that quietly does not. Three of them handle the password or a session token,
+      # and tests/test_playbook_ps_lookup.py holds this for the whole repo — it reads
+      # top-level tasks, and a block's dump carries its children's text, so the flag
+      # belongs here regardless.
+      #
+      # The two tasks that say something an operator must READ turn it back off
+      # below. A blanket no_log would hide the refusal message, which is the single
+      # most important line this play can print.
+      no_log: true
       block:
         - name: Sign in with FUXA's seeded default
           ansible.builtin.uri:
@@ -91,6 +101,15 @@
               and resetting it from here would lock them out. Nothing was changed.
               Either supply the current password, or rebuild the cell.
           when: fuxa_default_signin.status != 200
+          # Inherited no_log would censor this message. It carries a URL and a
+          # username, never a credential.
+          #
+          # This relies on a task-level no_log overriding the block's, which is
+          # Ansible's documented inheritance but is not exercised by any test here.
+          # If it turns out not to hold, the failure is cosmetic and one-directional
+          # — the refusal still refuses, it just prints "output has been hidden" —
+          # so confirm it on the first live run rather than restructuring blind.
+          no_log: false
 
         # Read-modify-write. `groups` and `info` MUST be carried over: the create and
         # update paths are one upsert, so a field omitted here is a field rewritten -
@@ -167,3 +186,5 @@
             msg: >-
               Rotated the {{ fuxa_admin_user }} password on {{ fuxa_url }} and
               confirmed it by signing in.
+          # Same: the confirmation has to be visible, and it quotes nothing secret.
+          no_log: false
