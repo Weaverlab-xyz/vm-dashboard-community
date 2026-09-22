@@ -1531,6 +1531,8 @@
               <span class="font-medium text-gray-700">Entitle:</span> registered as
               <code x-text="rancherEntitle.integration_id"></code> — users request
               just-in-time Rancher RBAC in Entitle, which mints an ephemeral account per grant.
+              The grant shows only the password — the <strong>username is the requester's
+              Entitle email</strong>.
             </p>
             <p x-show="rancherEntitle.enabled && !rancherEntitle.integration_id" x-cloak
                class="text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">

@@ -422,7 +422,8 @@ the cloud, cleanly) or a proxy exception.
 
 Rancher has a **native** Entitle connector, so — unlike Portainer — there is no
 Cloud Function adapter in the picture. Entitle mints an ephemeral account per
-grant and removes it on revoke.
+grant and removes it on revoke — see [Signing in after a grant](#signing-in-after-a-grant)
+for the half of that the grant screen does not tell you.
 
 If **Entitle resource registration** is enabled
 (`entitle_registration_enabled`), the node auto-registers as an Entitle
@@ -453,6 +454,40 @@ the keys that were sent; diff those against the Add Integration form. If the
 application itself is named something other than `Rancher` in your catalog, set
 `entitle_rancher_app_slug` (lowercased); a wrong name fails differently, as a 404
 `Application not found`.
+
+### Signing in after a grant
+
+**The grant gives you a password and no username. The username is the requester's
+Entitle email address** — Entitle names the ephemeral Rancher user after the email of
+the person who requested, and its grant screen shows only the password. So at
+Rancher's login: username = your Entitle email, password = the one on the grant.
+
+Worth knowing before a demo, because the failure mode is a working grant that looks
+broken: you have a credential, the account exists in Rancher, and there is nothing on
+screen saying what to type in the first box.
+
+### Auth providers (optional)
+
+Nothing above needs one — the ephemeral local account is the whole flow. Wire an auth
+provider only if you want grants to land on **real identities** instead: the requester
+then already exists in Rancher with their own email, rather than getting a per-grant
+local user.
+
+Rancher's auth providers are configured **after** the node is up (Users &
+Authentication → Auth Provider) and are independent of the deploy — the dashboard does
+not configure one today, and neither does `rancher_node_deploy`:
+
+- **Microsoft Entra ID** — reply URL `<rancher url>/verify-auth-azure`. If you have
+  already set up the shared Entra app for EKS federation (`entra_oidc_client_id` /
+  `entra_oidc_issuer_url`), that is a tenant Rancher can point at; add the reply URL.
+- **Generic OIDC** — reply URL `<rancher url>/verify-auth`; takes client id, secret,
+  issuer, Rancher URL, and optional `email` / `groups` claim overrides.
+
+Both **finish with an interactive sign-in**: Rancher redirects you to the IdP and only
+enables the provider once that login succeeds, so this is a one-time manual step per
+node rather than something the deploy job can complete headlessly. Which matters more
+than usual here — **the node is [ephemeral](#ephemeral-node)**, so recreating it wipes
+`/var/lib/rancher` and the auth provider with it, and it has to be redone.
 
 ### Register and deregister by hand
 
