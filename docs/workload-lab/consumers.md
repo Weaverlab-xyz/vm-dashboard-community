@@ -31,7 +31,7 @@ the answer is still *nothing does*.
 | [Certificates](certificates.md) | `examples/playbooks/certificates/ci-fetch-cert.yml`, against `nginx-mtls-endpoint.yml` | a Password Safe OAuth client, injected into the runner |
 | [SPIRE](spiffe.md) | `examples/playbooks/agent/files/mcp_agent.py` | **nothing** — the SVID is re-fetched from the workload API every loop |
 | [Kubernetes](kubernetes.md) | `examples/playbooks/k8s/ci-deploy-with-ps-token.yml`, `ci-read-with-ps-token.yml`, and the agent cell's `--k8s-episode` | the plays: a Password Safe OAuth client. The agent: **nothing** |
-| [Cloud](cloud.md) | `examples/playbooks/cloud/ci-run-with-dynamic-creds.yml` | a Workload Credentials token, in the workload's own environment |
+| [Cloud](cloud.md) | `examples/playbooks/cloud/ci-run-with-dynamic-creds.yml`, and the agent cell's `--cloud-episode` | the play: a Workload Credentials token in the runner's environment. The agent: **nothing** — its own identity token |
 
 The third column is the one to read. "A consumer exists" is a low bar — every vault has
 consumers. What differs between these four is **how much the consumer must already hold to
@@ -137,29 +137,65 @@ this, including what the approval gate does *not* prove.
 
 ---
 
-## The cloud credential is spent, and deliberately not minted
+## The cloud credential has two consumers, and only one of them mints
 
 `examples/playbooks/cloud/ci-run-with-dynamic-creds.yml` uses a credential minted
 beforehand, then asserts the same call is refused once the lease expires — with a **real
 wait**, not a faked clock. A play that faked the clock would prove it can print a failure
 message, not that the credential died.
 
-**It does not mint, and the second reason is the one that matters.** Issuance is metered,
-so a play that minted on every run would bill on every run. More importantly, *the consumer
-retrieving with its own token is the point* — a play that minted on the operator's behalf
-would put the operator in Workload Credentials' audit log, which is the exact property the
-mechanism exists to remove.
+**The play does not mint, and the second reason is the one that matters.** Issuance is
+metered, so a play that minted on every run would bill on every run. More importantly,
+*the consumer retrieving with its own token is the point* — a play that minted on the
+operator's behalf would put the operator in Workload Credentials' audit log, which is the
+exact property the mechanism exists to remove.
 
 Revocation is asymmetric and the play says which case it is in: Azure leases can be
 released early, **AWS leases cannot be revoked at all**, so there the TTL is the only
 control there is.
 
-**The agent cell does not spend this one.** Linking an agent to a `cloud` credential
-(`POST /api/agentcell/agent/{id}/link`) is **accountability only** — that tab's credential
-is returned to nobody by design, so no worker can spend it. The link records a lease whose
-state is worth reporting beside the agent, and `workload_cloud_service.lease_state` keeps
-"expired" and "failed" apart so an expiry reads as the mechanism working rather than as a
-fault.
+### The agent mints, because the agent *is* the consumer
+
+This section said **"the agent cell does not spend this one"** until the worker learned
+to. The sentence it rested on — that tab's credential *"is returned to nobody"* — was
+always about the **dashboard**, and is still true of the dashboard: no route there
+returns a cloud credential, and `api/agentcell`'s docstring records why one was not
+added. It was being read as a statement about the mechanism.
+
+So the two consumers differ in a way worth stating rather than smoothing over: **the play
+reads a credential somebody else wrote into its environment; the worker is the thing the
+credential was issued to.** `mcp_agent.py --cloud-episode` presents this machine's own
+identity token to Workload Credentials, generates against the dynamic secret named by the
+link, and the values never pass through the dashboard. The audit entry is the workload.
+
+Its chain is short, and the shortness is the point: workload identity → Workload
+Credentials → `POST /dynamic/{name}/generate`. **No Password Safe** — the other two
+episodes bootstrap a *retrieval* of something the vault already held, and there is
+nothing held here, because WC mints.
+
+Three consequences the other episodes do not have:
+
+- **No approval, because there is nobody to ask.** `generate` has no gate. The episode
+  returns **0**, **4** or **5** and *never 3* — a 3 would name a human who was never
+  consulted.
+- **It bills.** One issuance per run, and nothing retries. This is the only consumer in
+  this register that costs money when it runs.
+- **Its ending is not a revoke.** The closing beat waits out the real expiry and proves
+  the same call is then refused — exit **4** if it still works. `--cloud-end-with release`
+  is available on Azure and states its own limit: it ends the ability to get *another*
+  token, not the one already issued.
+
+**The scope is not asserted by the dashboard, and cannot be.** The other two episodes
+probe a limit the dashboard chose — a RoleBinding, a certificate profile. Here the
+dynamic secret's definition in WC decides, and neither the dashboard nor the worker can
+read it, so the deny probe is **an assertion the operator makes**
+(`--cloud-deny-probe`, default `iam-list-users` on AWS and `graph-directory-read` on
+Azure). `--cloud-deny-probe none` is allowed and prints that the run proves
+authentication and *not* scope.
+
+The link itself still records a lease state worth reporting beside the agent, and
+`workload_cloud_service.lease_state` keeps "expired" and "failed" apart so an expiry
+reads as the mechanism working rather than as a fault.
 
 ---
 
@@ -185,10 +221,26 @@ The section that keeps this page honest. Each of these is true of a named file o
 
 - **`file` is still the default, because none of the holds-nothing paths has run live.** No
   Workload Credentials tenant, no registered Workload Identity, no federation trust. The
-  strongest claim on this page is implemented and unproven.
+  strongest claim on this page is implemented and unproven — and `--cloud-episode` now
+  puts a **metered** call on that list, which is a sharper thing to have unproven than a
+  read.
+- **The SigV4 signer has never signed a live request.** The cloud episode hand-rolls one
+  rather than shipping the AWS CLI to every agent host, and the part of it with a
+  published AWS test vector — the four-step signing-key derivation — is pinned against
+  that vector. The rest is characterised, not verified. This matters more than it sounds:
+  **a wrong signature fails as HTTP 403, which is exactly what a successful refusal looks
+  like.** Three things keep the two apart — the allowed call runs first, the deny probe
+  requires `AccessDenied` specifically, and a 403 carrying `SignatureDoesNotMatch` or
+  `ExpiredToken` is reported as *refused for the wrong reason* rather than as scope.
+- **The cloud deny probe is the operator's assertion, not the dashboard's.** Every other
+  refusal in this register is the dashboard checking a limit it set. This one checks a
+  limit somebody typed into a link form, about a role in Workload Credentials that
+  neither the dashboard nor the worker can read.
 - **The dashboard's own WC client is Azure-only.** Its Entra auth mode calls IMDS and
-  nothing else, while the worker offers five identity platforms. The worker is ahead of the
-  app — see [Workload Credentials](workload-credentials.md#how-the-dashboard-authenticates).
+  nothing else, while the worker offers five identity platforms — and now calls
+  `generate` on all five, not just the static reads. The worker is further ahead of the
+  app than it was — see
+  [Workload Credentials](workload-credentials.md#how-the-dashboard-authenticates).
 - **Nothing consumes a subordinate CA.** The bundle format is settled and the suite checks
   the passphrase opens the key, but uploading it to a real PRA, minting a client
   certificate beneath it and connecting is untested — as is which PKCS#8 ciphers PRA's PEM
@@ -222,6 +274,11 @@ Cross-cutting, and worth one heading because the same bug has now been written t
 client falls back to them: every task passes, the refusal never refuses, the expiry
 assertion never fires, and the play reports a successful demonstration of a mechanism it
 never touched.
+
+The agent's cloud episode sidesteps this rather than solving it, and the reason is worth
+knowing: it signs every request itself from the values it just minted, so there is no
+credential chain to fall back *to*. A worker host carrying `AWS_ACCESS_KEY_ID` would not
+change a single call the episode makes.
 
 **`failed_when: false`, never `ignore_errors`.** The refusal task has to fail so the *next*
 task can judge why. `ignore_errors` also swallows an unreachable API server, a missing CLI

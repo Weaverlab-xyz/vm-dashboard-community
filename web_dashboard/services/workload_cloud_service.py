@@ -365,6 +365,15 @@ async def _run_issue(db: Session, row: WorkloadCloudCredential, job_id: str) -> 
 
     That is the same rule the Kubernetes tab follows for its bearer token, and it is the
     reason neither tab has an endpoint that hands a credential back.
+
+    **"Returned to nobody" is a statement about THIS DASHBOARD, not about the mechanism**,
+    and the difference matters now that a consumer exists which does exactly what the
+    paragraph above describes: the agent cell's worker calls `generate` itself with its
+    own identity token (`mcp_agent.py --cloud-episode`). It reads a credential this
+    function will not hand over, and that is the design working rather than a hole in
+    it — the issuance lands in WC's audit log under the workload. `agentcell_service`
+    records how long that sentence was misread as a reason no worker could spend a cloud
+    link.
     """
     import asyncio
 

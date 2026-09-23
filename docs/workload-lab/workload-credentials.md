@@ -165,6 +165,15 @@ The older spelling `entra` for this mode still reads as `workload`, so an instal
 configured before it covered more than Azure keeps working untouched. The same
 goes for `wlc_entra_resource`, which is read as the audience when
 `wlc_identity_audience` is unset.
+
+> **The agent cell's worker is ahead of this table, and goes further than reading.**
+> `examples/playbooks/agent/files/mcp_agent.py` offers a fifth platform the dashboard
+> does not — `spire`, a JWT-SVID from the SPIRE agent on its own host, which needs no
+> cloud underneath it at all — and it calls **`generate`**, not just the static reads
+> above. `--cloud-episode` mints a short-lived AWS or Azure credential against a dynamic
+> secret on whichever of those five platforms vouches for the machine. Neither the
+> extra platform nor the mint has run against a live tenant; both need the same manual
+> Pathfinder registration described below.
 Every request then carries that token plus an `X-BT-Service-Name` header naming
 the registration to evaluate it against. Nothing is stored, and there is nothing
 to rotate.

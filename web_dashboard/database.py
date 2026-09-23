@@ -2330,18 +2330,25 @@ class AgentCell(Base):
     # `linked_mechanism` is a Workload Lab tab name; `linked_credential_id` is that tab's
     # own row.
     #
-    # WHETHER THE LINK IS A CAPABILITY DEPENDS ON THE TAB, and conflating the two is the
-    # failure mode here:
-    #   * `cloud` is accountability only -- that tab returns its credential to nobody by
-    #     design, so no worker can spend it;
-    #   * `kubernetes` is a capability. The worker reaches Password Safe holding nothing
-    #     (a workload identity brokered by Workload Credentials), so it can genuinely
-    #     REQUEST that tab's token -- subject to an access policy that can hold the
-    #     request for a human. See `agentcell_service.SPENDABLE_MECHANISMS`.
+    # ALL THREE SHIPPED MECHANISMS ARE CAPABILITIES, and what they differ in is WHICH
+    # AUTHORITY the worker reaches -- which is the distinction that replaced "does this
+    # confer anything at all":
+    #   * `kubernetes` and `certificates` reach PASSWORD SAFE holding nothing (a workload
+    #     identity brokered by Workload Credentials), so the worker can genuinely REQUEST
+    #     that credential -- subject to an access policy that can hold the request for a
+    #     human;
+    #   * `cloud` reaches WORKLOAD CREDENTIALS DIRECTLY and mints. No vault in the chain
+    #     and no approval, because there is nothing standing to release -- and every
+    #     mint is billed. See `agentcell_service.SPENDABLE_MECHANISMS`.
     #
-    # An earlier version of this comment said no worker could spend any of them. That
-    # stopped being true when the worker got `--token-source ps`; see
-    # docs/design/next-demo-cells.md sections 5b and 5d.
+    # This comment has been wrong twice, in two different ways, and both are worth
+    # keeping. It said no worker could spend ANY of them, which stopped being true when
+    # the worker got `--token-source ps`. It then said `cloud` was accountability only
+    # because "that tab returns its credential to nobody" -- a sentence that was always
+    # about the DASHBOARD, is still true of the dashboard, and was being read as a
+    # statement about the mechanism. The worker calling WC itself is exactly what keeps
+    # the dashboard out of that audit trail.
+    # See docs/design/next-demo-cells.md sections 5b, 5d, 5e and 5f.
     linked_mechanism = Column(String(32), nullable=True)
     linked_credential_id = Column(String(36), nullable=True)
     linked_at = Column(DateTime, nullable=True)

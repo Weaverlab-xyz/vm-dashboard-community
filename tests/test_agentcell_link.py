@@ -279,19 +279,33 @@ def test_the_api_is_reachable_and_paired():
 
 # -- the page says it too ------------------------------------------------------
 
-def test_the_page_distinguishes_accountability_from_capability():
-    """This replaces an assertion that the page said a link "is not a consumption".
-    That was true of every tab once and is now true of only one, so the flat claim had
-    to go — but the distinction it protected matters MORE now, not less: a `cloud` link
-    that read as capability, or a `kubernetes` link that read as a mere record, would
-    both mislead."""
+def test_the_page_says_which_authority_each_link_reaches():
+    """The distinction this assertion protects has now moved TWICE, and each move made
+    the previous flat claim false rather than merely incomplete.
+
+    First it was "a link is not a consumption", true of every tab once. Then it was
+    accountability-versus-capability, true while `cloud` conferred nothing. All three
+    confer something now, so what the page has to keep apart is WHICH AUTHORITY the
+    worker reaches — Workload Credentials directly for `cloud`, with no vault and no
+    approval, against Password Safe for the other two. A page that described one as the
+    other would be describing the wrong mechanism, which is the same failure in a new
+    place.
+    """
     doc = _read(_DOC)
-    assert "accountability only" in doc and "a capability" in doc, \
-        "the page does not distinguish a link that confers access from one that does not"
-    assert "returned to nobody" in doc, \
-        "the page never says why the cloud tab's credential cannot reach the worker"
+    assert "Workload Credentials directly" in doc, \
+        "the page does not say the cloud link reaches WC rather than the vault"
+    assert "reaches Password Safe holding nothing" in doc, \
+        "the page no longer states what the kubernetes link reaches"
     assert "cannot authorise its own access" in doc, \
         "the page does not state the beat the kubernetes link exists for"
+    assert "metered issuance" in doc or "one metered" in doc, \
+        "the page never says the cloud link is the one that bills"
+    # The superseded claim may be quoted; it must not be left standing as current. Same
+    # rule the service's own comment block follows.
+    if "returned to nobody" in doc:
+        assert "always about the" in doc.lower(), \
+            ("the page repeats the accountability-only reasoning with nothing marking "
+             "it as superseded")
 
 
 def test_the_page_states_what_the_approval_does_not_gate():

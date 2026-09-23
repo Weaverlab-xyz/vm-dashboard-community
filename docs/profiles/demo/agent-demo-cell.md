@@ -181,11 +181,12 @@ An agent can be **linked** to one Workload Lab credential
 (`POST /api/agentcell/agent/{id}/link`), so that "what does this agent have access to" is
 one lookup rather than a conversation.
 
-**What the link confers depends on the tab, and conflating the two is the failure mode:**
+**All three confer a capability, and they differ in WHICH AUTHORITY the worker reaches —
+which is the distinction that replaced "does this confer anything at all":**
 
 | Link | What it is | Why |
 |---|---|---|
-| `cloud` | **accountability only** | That tab's credential *"is returned to nobody"* by design, so no worker can spend it. The link records a lease whose state is worth reporting beside the agent. |
+| `cloud` | **a capability, and the one that bills** | The worker reaches **Workload Credentials directly** and *mints*: it presents its own identity token and generates against the dynamic secret. No vault in the chain and no approval, because there is nothing standing to release. Every run is one metered issuance. **There is no Request button for it:** that episode is one shot on the host. |
 | `kubernetes` | **a capability** | The worker reaches Password Safe holding nothing, so it can genuinely *request* that tab's token — subject to whatever the access policy requires. |
 | `certificates` | **a capability, and the one nobody can take away** | The same client pair opens both halves — the PKCS#12 passphrase from the managed account and the bundle from Secrets Safe. A CA row is not an identity, so the link names the managed account and the bundle title. **There is no Request-access button for it:** that episode is one shot on the host, not a route this dashboard owns. |
 
@@ -194,13 +195,20 @@ one lookup rather than a conversation.
 > `--token-source ps`: it reaches Password Safe with a workload identity brokered by
 > Workload Credentials, holding nothing at all. The Kubernetes tab's own sentence — *"the
 > consumer is a program with a Password Safe API client"* — describes this worker.
+>
+> **And this page called a `cloud` link "accountability only", on the grounds that the
+> tab's credential is *"returned to nobody"*.** That sentence was always about the
+> **dashboard**, and it is still true of the dashboard — no route there hands a cloud
+> credential to anything. It was being read as a statement about the mechanism. The
+> worker calls Workload Credentials itself, which is exactly what keeps the dashboard
+> out of it: the entry in WC's audit log is the workload.
 
 **One link at a time.** An agent answerable for a cloud lease *and* a cluster token *and*
 a certificate would be the most over-credentialed principal in the estate, which is the arrangement this cell
 argues against. Unlink before relinking, so widening is a decision rather than an
 accumulation.
 
-### What a `cloud` link is good for
+### What a `cloud` link is good for, before you spend it
 
 - **It says the revoke asymmetry out loud at link time.** Azure leases can be released
   early; **AWS leases cannot be revoked at all**, so the TTL is the only control there is.
@@ -208,6 +216,9 @@ accumulation.
   is better than discovering it when you try to revoke in front of a room.
 - **An expired lease reads as the mechanism working**, not as a fault — honouring
   `workload_cloud_service.lease_state`, which exists to keep those two apart.
+- **It names the dynamic secret, and hands back the command.** There is no button, so the
+  link's notes carry the `mcp_agent.py --cloud-episode` line with your values already in
+  it.
 
 ## The second demo: an agent that cannot authorise its own access
 
@@ -374,6 +385,62 @@ what it means that this one does not.
   mTLS endpoint. The probe is exercised against a generated CA and a local server in
   `tests/test_agentcell_cert_episode.py`, and that is all it is.
 
+## The fourth demo: an agent that mints its own cloud credential
+
+The demo aimed at the most common non-human credential there is. Ask anyone how their
+build server reaches AWS and the answer is an access key in a CI secret store: no expiry,
+no revocation, no record of which build read it. **This replaces that key, and the
+replacement is minted by the thing that spends it.**
+
+With a `cloud` link in place, on the host:
+
+```bash
+mcp_agent.py --cloud-episode --cloud-dynamic-name ci-aws
+```
+
+```
+[agent] spiffe://weaverlab.test/agent/mcp-reader · requesting a short-lived cloud credential from dynamic secret ci-aws · 14:02:11
+[agent] holding nothing: this machine's own identity token is what Workload Credentials accepted. No PAT, no Password Safe client pair, and the issuance is recorded against this workload rather than the dashboard · 14:02:12
+[agent] MINTED — one metered issuance. aws lease 7f3c… expires 2026-09-23T15:02:00Z · 14:02:13
+[agent] spiffe://weaverlab.test/agent/mcp-reader · scope proved — authenticated as arn:aws:sts::…:assumed-role/ci-runner/x, and an AWS role scoped to its workload cannot enumerate IAM users (AccessDenied) · 14:02:15
+[agent] spiffe://weaverlab.test/agent/mcp-reader · waiting out the lease — 59m 45s remaining. Nothing can shorten this · 14:02:15
+…
+[agent] spiffe://weaverlab.test/agent/mcp-reader · the credential is dead: the same call now returns 403/ExpiredToken · 15:02:31
+```
+
+**The three beats to name as they go past:**
+
+1. **Nothing was on that host.** No key, no PAT, no client pair. The platform vouched for
+   the machine and Workload Credentials accepted that.
+2. **The refusal is the proof.** That the credential *works* shows only that it exists.
+   That it is *refused* something is the scope.
+3. **Nothing shortened the wait.** On AWS there is no revoke to reach for — STS will not
+   withdraw a credential it has signed. The room watches the clock, and that is the
+   argument for a short TTL rather than an embarrassment.
+
+Exit codes are the punctuation, as everywhere else in this cell: **0** proved scope and
+the ending, **4** a refusal did not refuse — the deny probe succeeded, or the credential
+outlived its expiry — **5** the run was told to skip proving the ending. **3 is never
+returned**, because nobody was asked.
+
+### What this demo does not prove, and you should say so
+
+- **This dashboard did not scope that credential, and could not.** The dynamic secret's
+  definition in Workload Credentials decides what the assumed role may do. The refusal
+  you just watched is an assertion *you* made with `--cloud-deny-probe`; a narrow
+  dynamic secret is what makes the whole thing worth anything, and a secret that assumes
+  an administrator role produces a short-lived skeleton key.
+- **It costs money every time.** This is the only beat in this cell that bills. One run,
+  one issuance.
+- **On Azure, a release is not a kill.** `--cloud-end-with release` deletes the service
+  principal's secret; an access token already issued lives out its own hour. Same shape
+  as the cluster episode's *"the approval gates retrieval, not use"*.
+- **WC authenticates whoever can present an accepted token.** The SPIRE path narrows that
+  to nothing-at-rest; anyone who can attest as this workload can still mint.
+- **None of this has run against a live tenant.** It needs a Workload Identity registered
+  by hand in Pathfinder — a GUI action with no customer API — which is the same
+  prerequisite `--token-source wlc` already has.
+
 ## The refusals, and why each one exists
 
 The cell refuses rather than installing something that would mislead:
@@ -452,6 +519,11 @@ teardown of its own beyond revoking what it issued.
       rather than restarting in a loop.
 - [ ] Deleting the SPIFFE registration entry makes the next line say `unattested`, without
       the worker being touched.
+- [ ] `--cloud-episode` mints **exactly once** and says so; the deny probe you asserted
+      comes back refused with the right error code, and the same call fails after the
+      expiry passes. *(Unproven — it needs a Workload Identity registered by hand in
+      Pathfinder, which is a GUI action with no customer API.)*
+- [ ] No part of a minted cloud credential appears in `journalctl -u mcp-agent`.
 
 ## Troubleshooting
 
@@ -472,10 +544,12 @@ card.
 ## Related
 
 * [Workload Lab](../../workload-lab.md) — the four credential mechanisms this cell was
-  aligned to. Three of them it can hold; one of them it deliberately cannot.
+  aligned to. It can now spend three of them, and attests against the fourth.
 * [What consumes these credentials](../../workload-lab/consumers.md) — the register of
   what spends each one, and where this cell sits in it.
 * [Workload access to Kubernetes](../../workload-lab/kubernetes.md) — the tab whose token
   this cell can genuinely request, holding nothing.
+* [Short-lived cloud credentials](../../workload-lab/cloud.md) — the tab whose credential
+  this cell **mints** for itself, and the only one that bills when it does.
 * [SPIFFE and SPIRE](../../workload-lab/spiffe.md) — the trust domain this worker attests
   itself against every loop.

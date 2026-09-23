@@ -15,8 +15,9 @@ than on preference.
 
 **The fifth tab is not a fifth answer. It is a consumer.** The Agent tab puts a non-human
 principal on a host, attested by the SPIRE tab's trust domain and authorized by a token
-that expires — and it can be made answerable for the Cloud tab's lease or ask for the
-Kubernetes tab's token. Until something holds one of these credentials, the other four
+that expires — and it can hold any one of the other three: mint the Cloud tab's
+credential, ask for the Kubernetes tab's token, or use the Certificate tab's identity.
+Until something holds one of these credentials, the other four
 tabs are a description of a mechanism; the Agent tab is where the mechanism gets stopped
 in front of somebody.
 
@@ -123,8 +124,9 @@ Password Safe holding nothing at all.
 [What consumes these credentials](workload-lab/consumers.md) is the register — which file,
 what it has to hold in order to retrieve, and the cases where the answer is still *nothing
 does*. It is deliberately honest in both directions: the SVID does not authenticate to
-`/mcp`, the Cloud tab's credential is returned to nobody so no worker can spend it, and no
-subordinate CA has ever been uploaded to a live PRA.
+`/mcp`, no endpoint on this dashboard returns a cloud credential — the agent mints its
+own from Workload Credentials, which is what keeps the dashboard out of that audit
+trail — and no subordinate CA has ever been uploaded to a live PRA.
 
 ## Turning it on
 
