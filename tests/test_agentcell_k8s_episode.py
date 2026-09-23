@@ -378,15 +378,35 @@ def test_the_row_does_not_pretend_to_track_the_workers_progress():
         "ROW_STATES" in db, "the column does not say why it holds only two states"
 
 
-def test_an_episode_needs_a_spendable_link():
+def test_an_episode_needs_a_spendable_link_and_the_cloud_refusal_moved_one_guard_down():
+    """The refusal for a cloud link RELOCATED, and where it landed is the assertion.
+
+    It used to be `episode_link_problem` — cloud was not spendable, so the request died
+    at the spendability gate. It is spendable now (the worker mints from Workload
+    Credentials itself), so it passes that gate and must be refused by the NEXT one,
+    `cluster_episode_mechanism_problem`, on the narrower and still-true ground that a
+    cloud credential is not a cluster token.
+
+    Getting the relocation wrong is not a missing refusal; it is the wrong refusal. A
+    cloud link that fell through both guards reaches a Kubernetes lookup that misses and
+    is told "The linked Kubernetes token no longer exists. Unlink and relink." — which
+    accuses a perfectly valid link and sends the operator to undo the one right thing.
+    """
     class NoLink:
         linked_mechanism = ""
     class Cloud:
         linked_mechanism = "cloud"
     assert "not linked" in A.episode_link_problem(NoLink())
-    msg = A.episode_link_problem(Cloud())
-    assert "no worker can spend" in msg, \
-        "a cloud link must not read as something the agent could request"
+    assert A.episode_link_problem(Cloud()) == "", \
+        "a cloud link is spendable now and must pass the spendability gate"
+    msg = A.cluster_episode_mechanism_problem(Cloud())
+    assert "--cloud-episode" in msg, (
+        "the refusal does not name where the cloud episode actually runs — and the "
+        "version that hardcoded the certificate answer pointed at the wrong flag")
+    assert "--cert-episode" not in msg, \
+        "a cloud link is being told about the certificate episode"
+    assert "no longer exists" not in msg, \
+        "the refusal accuses a valid link of having lost its credential"
 
 
 def test_the_request_reason_names_what_is_asking():

@@ -85,7 +85,11 @@ doing so.
 
 ## Proving it works
 
-One consumer play ships with this: `examples/playbooks/cloud/ci-run-with-dynamic-creds.yml`.
+Two consumers ship with this: `examples/playbooks/cloud/ci-run-with-dynamic-creds.yml`,
+and the agent cell's `mcp_agent.py --cloud-episode`. The play is the one to run from the
+dashboard's own runner; the agent is the one that makes the argument, because it mints
+with nothing on its host. See
+[What consumes these credentials](consumers.md#the-agent-mints-because-the-agent-is-the-consumer).
 
 | # | Step | What it proves |
 |---|---|---|
@@ -100,6 +104,27 @@ One consumer play ships with this: `examples/playbooks/cloud/ci-run-with-dynamic
 **Steps 4, 5, 6 and 7 are the ones that prove something.** Step 4 is written as an *asserted
 task inside the play*, and the wait is real rather than simulated — a play that faked the
 clock would prove it can print a failure message, not that the credential died.
+
+### Or the same arc, from an agent that holds nothing
+
+| # | Step | What it proves |
+|---|---|---|
+| 1 | Link an agent to this identity on **Workload Lab → Agent** | which dynamic secret that worker may draw from — and nothing is minted yet |
+| 2 | `mcp_agent.py --cloud-episode` on the host | a credential exists that did not a second ago, minted against the **machine's own identity**. Nothing on that host held anything |
+| 3 | The allowed call | it authenticates, and names the role the dynamic secret assumed |
+| 4 | The refusal you asserted | **scope** — that the credential *works* shows only that it exists |
+| 5 | The episode waits out the expiry and re-probes | **refused.** Nothing revoked, nobody rotated |
+
+Same rule as step 4 above, one level over: the wait is real, capped by
+`--cloud-max-wait`. Exit **0** proved scope and the ending; **4** means a refusal did not
+refuse — the deny probe succeeded, or the credential still worked after its expiry
+passed; **5** means the ending was **not proved**, whether because the run was told to
+skip it or because it could not be watched (the lease outlasts `--cloud-max-wait`, or
+the provider returned no readable expiry). The two are kept apart deliberately: 4 is a
+finding about the credential and 5 is a fact about the run, and reporting a lease that
+was never re-tested as 4 would invent a scope problem.
+
+**One run is one billed issuance**, and the episode says so on the way out.
 
 ### Two traps the play encodes
 
@@ -143,15 +168,22 @@ indefinitely.
 
 ## What is not built
 
-- **Federated trust for the demonstrated workload.** WC *does* accept an OIDC trust
+- **The Pathfinder registration, which is the last manual step.** WC accepts an OIDC trust
   relationship: a **Workload Identity** registered in Pathfinder (GitHub Actions, Azure Entra
   ID, or a Custom IDP with explicit claim conditions) lets a workload present an attested
   token — a GitHub Actions OIDC token, an Entra identity token, in principle a SPIFFE
-  JWT-SVID — and hold nothing. The dashboard now authenticates that way for its **own** calls.
-  What is not built is doing it *for the identity this tab registers*: the row still names a
-  dynamic secret, and a consumer that wants credentials with nothing held needs its own
-  registration, made by hand in Pathfinder. Registration is a GUI action with no customer API,
-  so this tab cannot create one on an operator's behalf — it could only tell them what to
-  type.
+  JWT-SVID — and hold nothing. The dashboard authenticates that way for its own calls, and
+  **the consumer now exists too**: `mcp_agent.py --cloud-episode` presents exactly such a
+  token on any of five identity platforms, `spire` among them. What is still not built is
+  the **registration**. It is a GUI action with no customer API, so this tab cannot create
+  one on an operator's behalf — it can only tell them what to type. That is the same
+  prerequisite `--token-source wlc` and `ps` already have, not a new one.
 - **Per-identity TTL enforcement.** The request is passed through and the provider decides.
-- **Reading a credential back.** No endpoint returns one, by design — see the boundaries above.
+- **Reading a credential back *from this dashboard*.** No endpoint here returns one, by
+  design, and `api/agentcell` records why no cloud-mint route was added beside
+  `/k8s-request`. The agent reads one **from Workload Credentials directly**, which is
+  not a hole in that rule — it is the rule working. The issuance lands in WC's audit log
+  under the workload instead of under this application.
+- **Nothing has signed a live AWS request.** The agent episode hand-rolls SigV4 rather
+  than putting the AWS CLI on every agent host, and only its signing-key derivation is
+  pinned to a published AWS vector.

@@ -55,21 +55,43 @@ def _code(path):
 
 # -- what can be linked, and what the refusals say -----------------------------
 
-def test_linkable_and_spendable_are_different_sets():
-    """The distinction this change introduces, and the one that must not blur.
+def test_cloud_became_spendable_and_the_reversal_is_recorded():
+    """The third time a mechanism crossed from accountability to capability, and the one
+    whose superseded claim was not wrong — it was about something else.
 
-    `cloud` is linkable and NOT spendable — that tab returns its credential to nobody, so
-    the link is accountability. `kubernetes` is both: the worker reaches Password Safe
-    holding nothing, so it can genuinely request that token. A link that confers
-    capability and one that confers only accountability must not read the same way back.
+    The comment used to say the Cloud tab's credential "is returned to nobody by design,
+    so nothing here can spend it". **That was always a statement about the DASHBOARD**,
+    and it is still true of the dashboard: no route here returns a cloud credential. It
+    was being read as a statement about the mechanism. The worker calls `generate` on the
+    dynamic secret itself, which is exactly what preserves the dashboard's abstinence —
+    the thing in Workload Credentials' audit log is now the worker.
+
+    So all three are spendable today. The two sets STILL have different names, for the
+    reason `EPISODE_MECHANISMS` gives: the next mechanism will be linkable before it is
+    spendable, which is the order all three of these arrived in.
     """
     assert A.LINKABLE_MECHANISMS == ("cloud", "kubernetes", "certificates"), \
         "the linkable set changed; the refusals below and the docs must change with it"
-    assert A.SPENDABLE_MECHANISMS == ("kubernetes", "certificates")
-    assert "cloud" not in A.SPENDABLE_MECHANISMS, \
-        "cloud became spendable — that tab's credential is returned to nobody"
+    assert set(A.SPENDABLE_MECHANISMS) == set(A.LINKABLE_MECHANISMS)
     for tab in A.LINKABLE_MECHANISMS:
         assert A.link_problem(tab) == ""
+    svc = _read(os.path.join(_ROOT, "web_dashboard", "services",
+                             "agentcell_service.py"))
+    assert "SPENDABLE_MECHANISMS = (" in svc and "LINKABLE_MECHANISMS = (" in svc, \
+        ("one set is now derived from the other. They coincide today by coincidence, "
+         "not by definition, and deriving deletes the distinction at the moment it "
+         "stopped being visible")
+    # Same rule the other two reversals follow: the superseded sentence may be quoted,
+    # but never left standing as the last word. The phrase appears twice — once in the
+    # list of what each tab's original refusal was, once in the correction — so the
+    # check is that the correction comes AFTER the first quotation, not that it sits
+    # within some window of it.
+    if "returned to nobody" in svc:
+        assert "ALWAYS ABOUT THE DASHBOARD" in svc, \
+            ("the service states the superseded conclusion with nothing marking it as "
+             "superseded — an operator reading it would believe it")
+        assert svc.index("ALWAYS ABOUT THE DASHBOARD") > svc.index("returned to nobody"), \
+            "the correction is filed above the claim it corrects"
 
 
 def test_the_stale_unreachable_reasoning_is_gone():
@@ -151,13 +173,31 @@ def test_an_unlinked_agent_is_accepted():
 
 # -- the notes lead with what the link is not ----------------------------------
 
-def test_the_notes_say_the_worker_gets_nothing():
-    notes = A.link_notes("aws", revocable=False)
+def test_the_notes_lead_with_the_capability_and_name_the_meter():
+    """This test used to assert the opposite, and the inversion is the change.
+
+    When the link was accountability only, the thing most likely to be misread was a
+    governance record reading as a capability — so the first note said "it does not give
+    the worker the credential". It does now. The two things an operator will not think
+    to ask about are that it BILLS and that this dashboard does not decide what the
+    credential may do, so both have to be said without being asked.
+    """
+    notes = A.link_notes("aws", revocable=False, dynamic_name="ci-aws")
     assert notes, "linking says nothing back"
     first = notes[0].lower()
-    assert "does not give" in first or "not give the worker" in first, (
-        "the first note does not lead with the fact that the worker gets no credential — "
-        "which is the one thing most likely to be misread")
+    assert "mint" in first, \
+        "the first note does not say the agent can now mint its own credential"
+    assert "audit log" in first, \
+        "the first note does not say where the issuance is recorded, which is the point"
+    joined = " ".join(notes).lower()
+    assert "billed" in joined or "bills" in joined, (
+        "the notes never say this link costs money to spend — it is the only one in the "
+        "cell that does, and a worker looping on it is a cost problem first")
+    assert "ci-aws" in " ".join(notes), "the notes do not name the dynamic secret"
+    assert "does not decide" in joined or "cannot widen" in joined, (
+        "the notes imply this dashboard scopes the credential. It does not — the "
+        "dynamic secret's own definition does, and that is the honest difference from "
+        "the Kubernetes and Certificate tabs")
 
 
 def test_a_non_revocable_cloud_says_so_plainly():
@@ -168,11 +208,20 @@ def test_a_non_revocable_cloud_says_so_plainly():
 
 
 def test_a_revocable_cloud_does_not_overclaim():
+    """The overclaim moved rather than went away.
+
+    It used to be that a revoke changed nothing about the agent, because nothing
+    consumed the credential. Now something does — and the new overclaim available is
+    assuming a release stops a credential already in use. It does not: releasing the
+    lease deletes the service principal's secret, and an access token already issued
+    lives out its own hour. The same shape as the cluster episode's "the approval gates
+    retrieval, not use", and it has to be said at link time rather than discovered.
+    """
     notes = " ".join(A.link_notes("azure", revocable=True)).lower()
     assert "cannot be revoked" not in notes
-    assert "not, yet, in the agent" in notes or "not in the agent" in notes, (
-        "the revocable note implies the agent's behaviour changes on revoke, which it "
-        "does not — nothing consumes the credential")
+    assert "another" in notes and "already issued" in notes, (
+        "the revocable note implies a release stops a credential already in use. It "
+        "ends the ability to get another one; it does not withdraw the current one")
 
 
 # -- an expired lease is the mechanism working ---------------------------------
@@ -230,19 +279,33 @@ def test_the_api_is_reachable_and_paired():
 
 # -- the page says it too ------------------------------------------------------
 
-def test_the_page_distinguishes_accountability_from_capability():
-    """This replaces an assertion that the page said a link "is not a consumption".
-    That was true of every tab once and is now true of only one, so the flat claim had
-    to go — but the distinction it protected matters MORE now, not less: a `cloud` link
-    that read as capability, or a `kubernetes` link that read as a mere record, would
-    both mislead."""
+def test_the_page_says_which_authority_each_link_reaches():
+    """The distinction this assertion protects has now moved TWICE, and each move made
+    the previous flat claim false rather than merely incomplete.
+
+    First it was "a link is not a consumption", true of every tab once. Then it was
+    accountability-versus-capability, true while `cloud` conferred nothing. All three
+    confer something now, so what the page has to keep apart is WHICH AUTHORITY the
+    worker reaches — Workload Credentials directly for `cloud`, with no vault and no
+    approval, against Password Safe for the other two. A page that described one as the
+    other would be describing the wrong mechanism, which is the same failure in a new
+    place.
+    """
     doc = _read(_DOC)
-    assert "accountability only" in doc and "a capability" in doc, \
-        "the page does not distinguish a link that confers access from one that does not"
-    assert "returned to nobody" in doc, \
-        "the page never says why the cloud tab's credential cannot reach the worker"
+    assert "Workload Credentials directly" in doc, \
+        "the page does not say the cloud link reaches WC rather than the vault"
+    assert "reaches Password Safe holding nothing" in doc, \
+        "the page no longer states what the kubernetes link reaches"
     assert "cannot authorise its own access" in doc, \
         "the page does not state the beat the kubernetes link exists for"
+    assert "metered issuance" in doc or "one metered" in doc, \
+        "the page never says the cloud link is the one that bills"
+    # The superseded claim may be quoted; it must not be left standing as current. Same
+    # rule the service's own comment block follows.
+    if "returned to nobody" in doc:
+        assert "always about the" in doc.lower(), \
+            ("the page repeats the accountability-only reasoning with nothing marking "
+             "it as superseded")
 
 
 def test_the_page_states_what_the_approval_does_not_gate():
@@ -301,25 +364,48 @@ def test_the_link_form_carries_the_fields_the_route_takes():
     route takes its blanks and returns notes promising an empty account and an empty
     bundle."""
     tab = _read(_TAB)
-    for field in ("account_name", "bundle_title", "expect_cn"):
+    for field in ("account_name", "bundle_title", "expect_cn",
+                  "cloud_scope", "cloud_deny_probe"):
         assert f'x-model="linkForm.{field}"' in tab, (
             f"the link modal has no field for {field!r}, which the link route accepts "
-            f"and the certificate notes render")
+            f"and the notes render")
     assert "linkReady()" in tab,         "the Link button does not require the identity a CA row cannot supply"
+    # The whole form is posted, so a field bound in the template and not DECLARED on
+    # the request model is silently dropped by pydantic — and the note it was meant to
+    # shape comes back generic, which reads as the feature working.
+    from web_dashboard.models.agentcell import AgentCellLinkRequest
+    declared = set(AgentCellLinkRequest.model_fields)
+    bound = set(re.findall(r'x-model="linkForm\.([a-z_]+)"', tab))
+    assert bound <= declared, (
+        f"the link modal binds {sorted(bound - declared)}, which AgentCellLinkRequest "
+        f"does not declare — pydantic will discard them without an error")
 
 
 # -- the episode the dashboard does NOT own ------------------------------------
 
 def test_spendable_is_not_the_episode_gate():
-    """The one that shipped broken. `certificates` is spendable and has no episode route
-    here, so a panel gated on spendability offered a Request-access button whose handler
-    posts at /k8s-request -- which looks the credential up in the TOKEN table, misses,
-    and refuses a perfectly valid link as one whose credential no longer exists."""
-    assert "certificates" in A.SPENDABLE_MECHANISMS
-    assert "certificates" not in A.EPISODE_MECHANISMS, (
-        "certificates now claims a dashboard episode route — if one was added, the tab "
-        "must dispatch on row.linked_mechanism rather than share /k8s-request")
+    """The one that shipped broken, and it now has TWO live instances rather than one.
+
+    `certificates` is spendable with no episode route here, so a panel gated on
+    spendability offered a Request-access button whose handler posts at /k8s-request --
+    which looks the credential up in the TOKEN table, misses, and refuses a perfectly
+    valid link as one whose credential no longer exists. `cloud` joined it: it is
+    spendable now and its episode also runs on the host. Two instances is what turns
+    "named rather than derived" from a precaution into a rule.
+    """
+    host_side = {"certificates", "cloud"}
+    assert host_side <= set(A.SPENDABLE_MECHANISMS)
+    assert not (host_side & set(A.EPISODE_MECHANISMS)), (
+        f"{sorted(host_side & set(A.EPISODE_MECHANISMS))} now claims a dashboard "
+        "episode route — if one was added, the tab must dispatch on "
+        "row.linked_mechanism rather than share /k8s-request")
     assert set(A.EPISODE_MECHANISMS).issubset(set(A.SPENDABLE_MECHANISMS)),         "an episode is offered for a mechanism no worker can spend"
+    # Every host-side episode has to be able to say WHERE it runs, or the refusal falls
+    # back to naming the wrong flag — which is what the certificate answer did to a
+    # cloud link before `HOST_EPISODE_FLAGS` existed.
+    assert host_side <= set(A.HOST_EPISODE_FLAGS), (
+        "a spendable mechanism with no dashboard route has no entry in "
+        "HOST_EPISODE_FLAGS, so its refusal cannot name the run")
 
 
 def test_the_cluster_route_refuses_a_certificate_link_by_name():
@@ -357,6 +443,55 @@ def test_the_tab_says_where_the_certificate_episode_runs():
     panel = panel[1][:1600]
     assert "--cert-episode" in panel,         "the tab does not name the run that spends a certificate link"
     assert "CRL" in panel or "revoking this certificate will not stop" in panel.lower(),         "the tab does not say that revoking the certificate stops nothing"
+
+
+def test_the_cluster_route_refuses_a_cloud_link_by_name():
+    """The certificate refusal's twin, and the reason `HOST_EPISODE_FLAGS` is a table.
+
+    The first version of that refusal hardcoded the certificate answer, so a CLOUD link
+    asking for cluster access was told about `--cert-episode` — a correct-sounding
+    sentence pointing at the wrong flag, which is worse than a generic one.
+    """
+    row = type("Row", (), {"linked_mechanism": "cloud", "episode_state": ""})()
+    msg = A.cluster_episode_mechanism_problem(row)
+    assert msg, "a cloud link is accepted for a cluster-access request"
+    assert "--cloud-episode" in msg, \
+        "the refusal does not say where the cloud episode actually runs"
+    assert "--cert-episode" not in msg, \
+        "a cloud link is being told about the certificate episode"
+    assert "no longer exists" not in msg and "Unlink" not in msg, \
+        "the refusal still points the operator at undoing a valid link"
+
+
+def test_the_tab_says_where_the_cloud_episode_runs():
+    """Second capability with no button, second panel that has to say why. And two
+    things a certificate panel never had to carry: the mint is BILLED, and the ending
+    is not a revoke."""
+    tab = _read(_TAB)
+    panel = tab.split("Cloud credential", 1)
+    assert len(panel) == 2, "the tab never mentions the cloud episode"
+    panel = panel[1][:2000]
+    assert "--cloud-episode" in panel, \
+        "the tab does not name the run that spends a cloud link"
+    assert "metered" in panel or "bills" in panel, \
+        "the tab does not say this is the one link that costs money to spend"
+    assert "not a revoke" in panel or "cannot be withdrawn" in panel, \
+        "the tab implies the credential can be pulled back; on AWS nothing can"
+
+
+def test_the_page_says_which_authority_each_capability_reaches():
+    """The distinction that replaced accountability-versus-capability. A single
+    "reaches Password Safe holding nothing" over a cloud link describes the wrong
+    mechanism — there is no vault in that chain at all."""
+    tab = _read(_TAB)
+    assert "capabilityNote(" in tab, \
+        "the capability sentence is still one flat string for three mechanisms"
+    note = tab.split("capabilityNote(row) {", 1)[1][:900]
+    assert "Workload Credentials" in note and "Password Safe" in note, \
+        "the capability note does not distinguish the two authorities"
+    assert "billed" in note or "metered" in note, \
+        "the cloud branch of the capability note does not mention the meter"
+
 
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

@@ -363,6 +363,35 @@ def test_the_cloud_tab_never_touches_the_dashboards_own_lease():
         "the cloud tab reaches no Workload Credentials client at all")
 
 
+def test_the_agent_cell_mints_no_cloud_credential_of_its_own():
+    """The twin of the test above, one level up, and the property that makes the cloud
+    link spendable in the first place.
+
+    An agent linked to a cloud credential mints it ON THE HOST. A route here that called
+    `generate` on the worker's behalf would be easy, would demo faster, and would put
+    the issuance in Workload Credentials' audit log as THIS DASHBOARD rather than as the
+    workload — the exact thing `workload_cloud_service._run_issue`'s docstring says the
+    design removes. It would also spend money on a button press.
+
+    And the reverse: the worker must not reach for the dashboard's own credential store.
+    `wlc_{cloud}_secret_name` names the lease THIS APPLICATION runs on, which has nothing
+    to do with what a demo workload should be issued.
+    """
+    api = _code(("web_dashboard", "api", "agentcell.py"))
+    for banned in ("generate(", "workload_credential_lease", "cloud-request",
+                   "cloud_request"):
+        assert banned not in api, (
+            f"api/agentcell references {banned!r} — this module records the link and "
+            f"reports the lease state. Minting here moves the audit entry off the "
+            f"workload and onto the dashboard, and bills for it.")
+    worker = _code(("examples", "playbooks", "agent", "files", "mcp_agent.py"))
+    for banned in ("workload_credential_lease", "wlc_aws_secret_name",
+                   "wlc_azure_secret_name"):
+        assert banned not in worker, (
+            f"the worker references {banned!r} — that is the DASHBOARD's own credential "
+            f"store, not anything a demo workload should be issued from")
+
+
 def test_the_cloud_tab_never_claims_an_aws_revoke():
     """The single most important honesty in this tab.
 

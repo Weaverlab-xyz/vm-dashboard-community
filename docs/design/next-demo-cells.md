@@ -502,6 +502,12 @@ access, and a response that read the same for both would mislead either way. The
 refusal text and the `AgentCell` comment that said no worker could spend any of them are
 corrected rather than left as fossils.
 
+> **Superseded as a description of today.** `cloud` was the accountability side of that
+> split and is not any more — see [§5f](#5f-the-fourth-control-surface-and-the-first-one-that-costs-money).
+> The two sets still have separate names, and the reason is in this paragraph: they
+> answer different questions, and the next mechanism will be linkable before it is
+> spendable, which is the order all three arrived in.
+
 The row records the **request** — id, state, timestamps, result — and never the
 credential. `test_workload_lab_governance`'s no-credential-on-row rule now covers
 `AgentCell` too, rather than relying on that being obvious.
@@ -691,6 +697,93 @@ The worker also checks the downloaded bytes are DER before treating them as a PK
 names PEM specifically when it sees it: PEM is a perfectly good file secret and a
 perfectly useless one here, and `openssl` would otherwise complain about the passphrase —
 sending somebody to debug the wrong half of a two-half identity.
+
+## 5f. The fourth control surface, and the first one that costs money
+
+§5e's arc gains a row, and it is the one nobody can argue with:
+
+| Episode | Credential | How you take it away |
+|---|---|---|
+| the loop | its MCP PAT | **revoke it** — the worker stops mid-poll |
+| cluster access | a Workload Lab token | **gated at retrieval**; once released it lives out its TTL |
+| certificate use | a PKCS#12 identity | **neither** |
+| a cloud credential | a short-lived AWS or Azure lease | **it expires, and on AWS nothing can shorten that** |
+
+That last cell is not a gap. STS will not withdraw a credential it has already signed —
+`workload_cloud_service` refuses an AWS revoke at the click for exactly that reason — so
+the episode's closing beat is a **real wait for real expiry**, and the room watches the
+clock. Azure can release early, and its own limit is worth naming beside it: the release
+ends the ability to get *another* token, not one already issued. Same shape as §5d's
+"the approval gates retrieval, not use", which is the third time that distinction has
+mattered.
+
+### The consumer correction, for the fourth time — and this one was a misreading
+
+The pattern is becoming the interesting thing about this document. Each of the three
+previous cells shipped with a refusal explaining why the next mechanism could not be
+spent, and each refusal turned out to be wrong in a different way: §5b's overstated a
+barrier that `--token-source ps` had already removed, §5d's was imprecise about which
+half of a certificate identity was out of reach.
+
+**This one was not wrong at all. It was about something else.** The refusal rested on
+`workload_cloud_service`'s own sentence — the minted credential *"is returned to
+nobody"* — and that sentence is still true, because it is about **the dashboard**. No
+route here returns a cloud credential, and none was added. It was being read as a
+statement about the *mechanism*, and the two are opposite: the worker calling Workload
+Credentials itself is precisely what keeps the dashboard out of the chain, so the
+abstinence the sentence describes is what makes the link spendable.
+
+Worth recording as its own failure mode, because it is subtler than a stale claim: **a
+true sentence, filed under the wrong subject, functioned as a refusal for three
+releases.**
+
+### What is different about this one
+
+Three things the other three episodes do not have, each of which needed saying in the
+product rather than only here:
+
+- **No Password Safe and no human.** WC *mints*; there is nothing standing for a vault
+  to release or a person to gate. So `--cloud-episode` **never returns 3** — the exit
+  code the other two use for "never approved" — because a 3 would name somebody who was
+  never asked.
+- **It bills.** One `generate` per run, nothing retries, and the episode says so on the
+  way out. First path in this cell where running the demo twice costs twice.
+- **The dashboard does not own the scope, and cannot.** The Kubernetes tab picks a
+  RoleBinding and the Certificate tab picks a profile. Here the dynamic secret's
+  definition in WC decides, and neither the dashboard nor the worker can read it — so
+  the deny probe is **an assertion the operator makes**, and `--cloud-deny-probe none`
+  prints that the run proves authentication and not scope.
+
+### The signer, and why it is hand-rolled
+
+The worker is stdlib-only by rule — it runs on somebody else's VM, and every dependency
+is something the install play has to put there. The AWS CLI is a ~60 MB install per
+agent host; the shipped cloud *play* can use it because it runs on the dashboard's
+runner image, which is a different machine with a different budget.
+
+The cost of that choice is a real risk and it is designed around rather than waved at:
+**a wrong SigV4 signature fails as HTTP 403, which is exactly what a successful refusal
+looks like.** Three defences, all needed:
+
+1. the allowed call runs **first**, so a broken signer ends the run saying the allowed
+   call failed rather than being read as scope;
+2. the deny beat requires `AccessDenied` **specifically** — a 403 carrying
+   `SignatureDoesNotMatch` or `ExpiredToken` is reported as *refused for the wrong
+   reason*, a fourth outcome the sibling probe summaries did not need;
+3. the signing-key derivation, the one part with a published AWS test vector, is pinned
+   to it.
+
+### Still unproven
+
+No Workload Credentials tenant, no registered Workload Identity, no federation trust —
+the same three absences §5b records, now covering a **metered** call rather than a read,
+which is a sharper thing to have unverified. No `generate` from this worker has reached
+a live site, and no request this signer produced has reached AWS.
+
+The registration remains the last manual step and there is no way around it: it is a
+GUI action in Pathfinder with no customer API, so nothing here can create one on an
+operator's behalf. That is not new to this episode — `--token-source wlc` needs the same
+one — but it is now the gate on a demo rather than on a convenience.
 
 ## 6. What is deliberately not proposed
 

@@ -158,9 +158,24 @@ startup is the smaller surface.
 **The selector is the unix UID, not a path.** A path selector attests whatever happens to
 live at that path, so anything able to write there inherits the identity.
 
-**The worker is given no route it does not need** — no cloud credentials, no kubeconfig,
-no SSH. It talks to `/mcp` and the local SPIRE socket. The cell's argument is that a
-non-human principal should hold the least it can and spend it visibly.
+**The worker holds no credential at rest it does not need** — no cloud key, no
+kubeconfig, no SSH. On the default loop it talks only to `/mcp` and the local SPIRE
+socket. The cell's argument is that a non-human principal should hold the least it can
+and spend it visibly.
+
+**The episodes need egress, and "holds nothing" is not "reaches nothing".** An earlier
+version of this paragraph said the worker is given *no route* it does not need, which
+was a claim about the network and stopped being true when the episodes landed. What it
+reaches, and only while an episode runs:
+
+| Episode | Outbound |
+|---|---|
+| `--k8s-episode`, `--cert-episode` | the Password Safe API, and the cluster or mTLS endpoint under test |
+| `--cloud-episode` | Workload Credentials, then `sts.amazonaws.com` and `iam.amazonaws.com`, **or** `login.microsoftonline.com`, `management.azure.com` and `graph.microsoft.com` |
+
+All three also reach whatever issues this machine's identity token — the metadata
+service, or the local SPIRE agent on `--identity-platform spire`, which reaches nothing
+off the host at all.
 
 ## Not yet run against live infrastructure
 
@@ -169,3 +184,12 @@ non-human principal should hold the least it can and spend it visibly.
 > release, and whether the MCP SSE client negotiates cleanly through the dashboard's
 > ingress. Validate both before demoing. `python3 files/mcp_agent.py --selftest` checks the
 > argument wiring and touches nothing.
+>
+> **`--cloud-episode` is the least proven of the four modes and the only one that costs
+> money.** It needs a Workload Identity registered by hand in Pathfinder — the same
+> prerequisite `--token-source wlc` has — and no `generate` call from here has reached a
+> live tenant. Its SigV4 signer is hand-rolled so that no cloud CLI has to be installed
+> on an agent host; only the signing-key derivation is pinned to a published AWS vector,
+> and a wrong signature fails as a 403 that looks like the refusal the episode is trying
+> to demonstrate. Read `cloud_probe_summary`'s four outcomes before trusting a green
+> run.
