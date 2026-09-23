@@ -340,6 +340,32 @@ def test_an_empty_value_is_allowed():
     tp.validate_edit("aws", {"marker": ""}, [])
 
 
+def test_a_proxmox_tag_is_a_bare_label():
+    """Proxmox stores tags as one semicolon-joined field with no values at all. A value
+    is refused rather than dropped: dropping one means the edit did something other than
+    what was asked, silently."""
+    tp.validate_edit("proxmox", {"prod": ""}, [])
+    msg = _refused("proxmox", {"env": "prod"})
+    assert msg and "bare label" in msg
+
+
+def test_the_proxmox_charset_excludes_its_own_separator():
+    """A semicolon in a tag would split into two tags on write and come back as two —
+    the single most likely way an edit silently means something else."""
+    assert _refused("proxmox", {"a;b": ""})
+
+
+def test_the_proxmox_charset_refuses_what_a_shell_or_a_path_needs():
+    for bad in ("; rm -rf /", "../../etc", "http://x", "$(id)", "a b", "a/b", "-lead"):
+        assert _refused("proxmox", {bad: ""}), bad
+
+
+def test_the_proxmox_charset_accepts_what_proxmox_accepts():
+    """pve-tag-id: a letter, digit or underscore first, then those plus - + ."""
+    tp.validate_edit("proxmox", {"prod": "", "web-tier": "", "env.prod": "",
+                                 "a+b": "", "_x": "", "9y": ""}, [])
+
+
 def test_an_unknown_cloud_is_refused_rather_than_waved_through():
     assert _refused("nope", {"a": "b"})
 

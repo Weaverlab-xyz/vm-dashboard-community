@@ -351,6 +351,93 @@ def test_no_new_permission_scope_was_invented_for_tags():
     assert "tags" not in PERMISSION_SCOPES
 
 
+# ── 5. Proxmox: two paths, one guard ─────────────────────────────────────────
+
+def test_the_proxmox_route_exists_alongside_the_clouds():
+    from web_dashboard.main import app
+    assert "/api/proxmox/instances/tags" in {r.path for r in app.routes}
+
+
+def test_both_proxmox_paths_run_the_same_guard():
+    """The agent-brokered half does NOT go through apply_tag_edit — it queues jobs — so
+    the guard is shared explicitly. A guard only one of two paths runs is no guard."""
+    import inspect
+    from web_dashboard.api import proxmox
+    src = inspect.getsource(proxmox.edit_vm_tags)
+    assert "assert_edit_allowed" in src
+    # …and the agent branch is taken AFTER it, never before.
+    assert src.index("assert_edit_allowed") < src.index("_queue_tag_jobs")
+
+
+def test_the_agent_path_reports_queued_not_updated():
+    """An agent-bound write has not happened when the request returns. Calling it
+    `updated` would claim a change the page could then render as done."""
+    import inspect
+    from web_dashboard.api import proxmox
+    src = inspect.getsource(proxmox._queue_tag_jobs)
+    assert '"updated": []' in src and '"queued": queued' in src
+
+
+def test_the_desired_set_is_computed_in_one_place():
+    """Both paths need the FINAL tag list, because Proxmox replaces the whole field.
+    Two implementations is how they come to disagree about what an edit means."""
+    from web_dashboard.api.proxmox import _desired_tags
+    assert _desired_tags(["a", "b"], {"c": ""}, ["a"]) == ["b", "c"]
+    assert _desired_tags(["a"], {"a": ""}, []) == ["a"], "an existing tag is not doubled"
+    assert _desired_tags(["a"], {}, ["a"]) == [], "removing the last tag is legitimate"
+    assert _desired_tags([], {"z": "", "y": ""}, []) == ["z", "y"], "order preserved"
+
+
+def test_a_proxmox_tag_may_not_carry_a_value():
+    """A Proxmox tag is a bare label. Refused rather than silently dropped, because a
+    dropped value is an edit that did something other than what was asked."""
+    from web_dashboard.api import tag_batch as tb
+    try:
+        tb.assert_edit_allowed("proxmox", {"env": "prod"}, [])
+    except HTTPException as exc:
+        assert exc.status_code == 409
+        assert "bare label" in str(exc.detail)
+    else:
+        raise AssertionError("a valued Proxmox tag was accepted")
+
+
+def test_the_protected_keys_apply_to_proxmox_too():
+    from web_dashboard.api import tag_batch as tb
+    try:
+        tb.assert_edit_allowed("proxmox", {"workgroup": ""}, [])
+    except HTTPException as exc:
+        assert exc.status_code == 409
+    else:
+        raise AssertionError("workgroup was editable on proxmox")
+
+
+def test_the_agent_verb_is_refused_for_a_tagless_hypervisor():
+    """vSphere/Nutanix/XCP-ng store tags in three different models, none of which the
+    dashboard reads. Said before a job exists, not after a round trip."""
+    import inspect
+    from web_dashboard.api import hypervisor_deps
+    src = inspect.getsource(hypervisor_deps.agent_tag_job)
+    assert 'conn.kind != "proxmox"' in src
+    assert "501" in src
+
+
+def test_the_agent_job_carries_the_complete_desired_set():
+    """Not a delta. Proxmox replaces the whole field, so a delta would have to be
+    re-derived agent-side against a read the agent would then have to trust."""
+    import inspect
+    from web_dashboard.api import hypervisor_deps
+    src = inspect.getsource(hypervisor_deps.agent_tag_job)
+    assert '"tags": list(tags)' in src
+
+
+def test_a_tag_the_agent_would_refuse_is_caught_before_a_job_row_exists():
+    """An operator typo should read as a sentence, not as a failed job on /jobs."""
+    import inspect
+    from web_dashboard.api import hypervisor_deps
+    src = inspect.getsource(hypervisor_deps.agent_tag_job)
+    assert src.index("tags_refusal") < src.index("create_job")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

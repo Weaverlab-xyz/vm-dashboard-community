@@ -158,15 +158,21 @@ def sync_now(db: Session, conn: HypervisorConnection, *, created_by: str = "",
                   trigger=trigger), ""
 
 
-# The verbs after which the cached row is a lie. Every one of them moves a VM's power
-# state, which is the only thing on this page an operator watches change.
+# The verbs after which the cached row is a lie. Most of them move a VM's power state,
+# which is the thing on this page an operator watches change.
+#
+# `set_tags` is here for the same reason though it touches no power state: `tags` IS a
+# cached column (see VM_KEYS in agent_hypervisor_meta), so without a resync the page
+# would keep showing the tags the VM had before the edit — and the next edit would be
+# computed against them and put the old ones back.
 #
 # `snapshot` is the one WRITE verb deliberately absent: it creates something the
 # inventory cache does not store a single column of, so re-reading a whole vCenter for
 # it would be minutes of work with nothing to show for it.
 # tests/test_power_resync.py pins that split, so a verb added to WRITE_VERBS later has
 # to be classified here rather than silently defaulting to "no resync".
-RESYNC_VERBS = ("power_on", "power_off", "power_reset", "restart", "shutdown", "reboot")
+RESYNC_VERBS = ("power_on", "power_off", "power_reset", "restart", "shutdown",
+                "reboot", "set_tags")
 
 
 def sync_after_power(db: Session, job: Job):

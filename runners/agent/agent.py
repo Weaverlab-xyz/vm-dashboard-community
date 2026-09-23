@@ -3373,6 +3373,60 @@ _SNAPSHOT_IMPL = {"proxmox": _snapshot_proxmox, "vsphere": _snapshot_vsphere,
                   "xcpng": _snapshot_xcpng, "nutanix": _snapshot_nutanix}
 
 
+# Proxmox's own pve-tag-id charset. Re-declared here rather than shared with the
+# dashboard's copy for the reason every check in this file is: the dashboard's pass
+# stops an operator typo, THIS one stops a compromised dashboard, and a check imported
+# from the thing it defends against defends nothing.
+_TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_+.-]{0,59}$")
+_MAX_TAGS = 32
+
+
+def _set_tags_proxmox(conn, payload, policy, emit, checkins=None):
+    """Replace a guest's tag set. `tags` is the COMPLETE desired list, not a delta.
+
+    Proxmox holds tags as one semicolon-joined config field and a PUT replaces it, so
+    the dashboard computes the final set and this writes it. An empty list is a real
+    instruction — "remove the last tag" — so it is sent, not treated as missing.
+    """
+    host, port = _conn_endpoint(conn, 8006)
+    _check_endpoint(policy, host, port)
+    node = payload.get("target_scope") or ""
+    vm_type = payload.get("target_type") or "qemu"
+    vmid = payload.get("target_id") or ""
+    if not (node and vmid):
+        raise PolicyRefusal("set_tags needs target_scope (node) and target_id")
+
+    tags = payload.get("tags")
+    if not isinstance(tags, (list, tuple)):
+        raise PolicyRefusal("set_tags needs a `tags` list")
+    if len(tags) > _MAX_TAGS:
+        raise PolicyRefusal(f"{len(tags)} tags; this agent accepts at most {_MAX_TAGS}")
+    for tag in tags:
+        # Refused, never sanitised: a repaired tag is a different tag, and silently
+        # writing one the operator did not ask for is worse than refusing the job.
+        if not isinstance(tag, str) or not _TAG_RE.match(tag):
+            raise PolicyRefusal(
+                f"{tag!r} is not a valid Proxmox tag — letters, digits, underscore, "
+                f"hyphen, plus and dot, starting with a letter, digit or underscore")
+
+    user = str(conn.get("username") or "root@pam")
+    header = {"Authorization":
+              f"PVEAPIToken={user}!{conn.get('token_id')}={_secret_for(conn, checkins)}"}
+    joined = ";".join(tags)
+    _hv_request(conn, "PUT",
+                f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{vmid}/config",
+                headers=header, body={"tags": joined})
+    emit(f"tags set on {vm_type}/{vmid} on {node}: {joined or '(none)'}")
+    return {"verb": "set_tags", "target_id": vmid, "ok": True}
+
+
+# Proxmox only. vSphere tags are a separate Automation API with its own category
+# objects, Nutanix uses categories, and XCP-ng calls them `other_config` — three
+# different models, none of which the dashboard reads yet, so none of them is guessed
+# at here. An unlisted kind is refused by name in `_run_verb`.
+_SET_TAGS_IMPL = {"proxmox": _set_tags_proxmox}
+
+
 # The two the agent cannot speak to itself. `esxi` is a distinct kind from `vsphere`
 # on purpose: the same product, but a bare host serves SOAP only while vCenter serves
 # the Automation REST API the agent uses directly, and conflating them is how someone
@@ -4192,6 +4246,10 @@ def _kind_matches(declared: str, asked: str) -> bool:
 def _run_verb(conn, payload, policy, emit, verb, kind, job_id, checkins):
     # Hyper-V and bare ESXi have no in-agent transport; they go to the sibling runner.
     if kind in _SIBLING_KINDS:
+        if verb == "set_tags":
+            raise PolicyRefusal(
+                f"{kind} has no tag concept: Hyper-V and bare ESXi store nothing the "
+                f"dashboard could set here.")
         if verb == "snapshot":
             raise PolicyRefusal(
                 f"snapshot is not available for {kind!r} through the sibling runner")
@@ -4218,6 +4276,12 @@ def _run_verb(conn, payload, policy, emit, verb, kind, job_id, checkins):
         if impl is None:
             raise PolicyRefusal(f"no snapshot support for {kind!r} in this agent build")
         return impl(conn, payload, policy, emit, _snapshot_name(job_id), checkins)
+
+    if verb == "set_tags":
+        impl = _SET_TAGS_IMPL.get(kind)
+        if impl is None:
+            raise PolicyRefusal(f"no tag support for {kind!r} in this agent build")
+        return impl(conn, payload, policy, emit, checkins)
 
     impl = _POWER_IMPL.get(kind)
     if impl is None or (verb not in _POWER and kind != "workstation"):

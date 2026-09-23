@@ -19,7 +19,9 @@ from ..services import proxmox_service
 from ..services.proxmox_service import ProxmoxError
 from ..services import hypervisor_view_service
 from ..services import tag_policy
-from .hypervisor_deps import (agent_power_job, conn_in_task, conn_or_error,
+from . import tag_batch
+from .hypervisor_deps import (agent_power_job, agent_tag_job, conn_in_task,
+                              conn_or_error,
                               queue_power_batch)
 
 # Every route in this module was `get_current_user` only -- including deploy,
@@ -155,6 +157,136 @@ async def get_resources(
         vm["tags"] = tag_policy.normalise(vm.get("tags"), "proxmox")
         out.append(vm)
     return out
+
+
+# ── Tags ──────────────────────────────────────────────────────────────────────
+
+class TagTarget(BaseModel):
+    vmid: int
+    node: str
+    vm_type: str = "qemu"
+
+
+class TagEditRequest(BaseModel):
+    """One edit, applied to every target. The per-VM editor posts a list of one."""
+    targets: List[TagTarget]
+    add: dict = {}
+    remove: List[str] = []
+    connection_id: str = ""
+
+
+def _desired_tags(current: list, add: dict, remove: list) -> list:
+    """The tag set a guest should end up with. Order preserved, no duplicates.
+
+    Proxmox replaces the whole field on write, so every path needs the FINAL set rather
+    than a delta — and computing it in one place is what stops the direct and the
+    agent-brokered paths disagreeing about what an edit means.
+    """
+    dropped = {str(k) for k in (remove or [])}
+    out = [t for t in current if t not in dropped]
+    for key in (add or {}):
+        if str(key) not in out:
+            out.append(str(key))
+    return out
+
+
+@router.post("/instances/tags", summary="Add or remove tags across a selection")
+async def edit_vm_tags(
+    payload: TagEditRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("proxmox", "write")),
+):
+    """Apply one tag edit to one or many Proxmox guests.
+
+    Same path as the four clouds' route so one editor serves every provider, but the
+    OUTCOME differs by connection and the response says which happened:
+
+    * a connection the dashboard dials directly is written now, and `updated` carries the
+      new chips;
+    * an agent-bound one cannot be dialled — that is the reason it is bound to an agent —
+      so each write is queued as an `agent_hypervisor` job and comes back under `queued`
+      with a job id. Reporting those as `updated` would claim a change that has not
+      happened yet, and the page says "queued" for exactly that reason.
+
+    A Proxmox tag is a bare label: `add` is read for its KEYS only, and `tag_policy`
+    refuses a value rather than silently dropping one.
+    """
+    conn = conn_or_error(db, "proxmox", payload.connection_id)
+
+    # The same whole-request guard both paths run — a protected key, an illegal key, an
+    # empty edit. Shared rather than repeated, because a guard only one path runs is no
+    # guard: /costs and POV teardown select on keys this refuses.
+    add, remove = tag_batch.assert_edit_allowed("proxmox", payload.add, payload.remove)
+
+    if getattr(conn, "agent_id", None):
+        return await _queue_tag_jobs(db, conn, payload, add, remove, current_user)
+
+    async def _apply(target: TagTarget):
+        before, after = await proxmox_service.update_tags(
+            conn, target.node, target.vmid, target.vm_type, add, remove)
+        # Lists in, dicts out: tag_batch compares and audits dicts, and a Proxmox tag
+        # carries no value, so each maps to an empty one — which is what
+        # tag_policy.normalise renders as a bare chip.
+        return {t: "" for t in before}, {t: "" for t in after}
+
+    return await tag_batch.apply_tag_edit(
+        db, cloud="proxmox", targets=payload.targets, add=add, remove=remove,
+        apply_one=_apply, label_of=lambda t: f"{t.node}/{t.vmid}",
+        created_by=current_user.username)
+
+
+async def _queue_tag_jobs(db: Session, conn, payload: TagEditRequest,
+                          add: dict, remove: list, current_user: User) -> dict:
+    """The agent-brokered half: one job per guest, nothing written here.
+
+    Deliberately NOT routed through `tag_batch.apply_tag_edit`. That helper's contract is
+    `(before, after)` per VM and it audits on the difference — both of which would be a
+    lie for a write that has not happened yet. The agent's own completion is what makes
+    it true, and `set_tags` is in RESYNC_VERBS so the cache is re-read afterwards.
+    """
+    if len(payload.targets) > tag_batch.TAG_MAX_TARGETS:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{len(payload.targets)} VMs selected; the limit for one tag edit "
+                    f"is {tag_batch.TAG_MAX_TARGETS}."))
+
+    # The cache is the only reading of "current" available — the dashboard cannot dial
+    # this host. That is also why `set_tags` triggers a resync: an edit computed against
+    # a stale cache is how a tag someone else added gets silently removed.
+    by_key = {}
+    for row in hypervisor_view_service.synced_rows(db, conn):
+        by_key[(str(row.get("node") or ""), str(row.get("vmid")))] = row
+
+    queued, failed = [], []
+    for target in payload.targets:
+        label = f"{target.node}/{target.vmid}"
+        row = by_key.get((str(target.node), str(target.vmid)))
+        if row is None:
+            failed.append({"name": label,
+                           "error": "not in the last synced inventory for this "
+                                    "connection — run Sync Now and try again"})
+            continue
+        current = [c["key"] for c in tag_policy.normalise(row.get("tags"), "proxmox")]
+        desired = _desired_tags(current, add, remove)
+        if desired == current:
+            continue
+        try:
+            job = agent_tag_job(
+                db, conn, tags=desired, target_id=str(target.vmid),
+                target_scope=target.node, target_type=target.vm_type,
+                created_by=current_user.username,
+                description=f"set tags on {label}")
+        except HTTPException as exc:
+            # An offline agent or a missing grant is the same for every target, but it is
+            # reported per VM rather than raised: a selection of twenty should not lose
+            # nineteen queued jobs because the twentieth was not in the inventory.
+            failed.append({"name": label, "error": str(exc.detail)})
+            continue
+        queued.append({"name": label, "job_id": job.id, "tags": desired})
+
+    return {"cloud": "proxmox", "count": 0, "updated": [], "unchanged": [],
+            "failed": failed, "queued": queued,
+            "agent": True, "connection": conn.name}
 
 
 @router.get("/templates")

@@ -298,6 +298,17 @@ _RULES = {
             "key_rule": "lowercase letters, digits, hyphen and underscore only, "
                         "starting with a letter",
             "val_rule": "lowercase letters, digits, hyphen and underscore only"},
+    # Proxmox tags carry NO VALUE — they are bare labels, joined with ';' in one config
+    # field. `val_max: 0` is how that is said here, and `validate_edit` turns it into a
+    # sentence rather than a length complaint. The charset is Proxmox's own
+    # (pve-tag-id): a letter, digit or underscore first, then those plus - + .
+    "proxmox": {"key_max": 60, "val_max": 0, "max_tags": 64,
+                "key_re": re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_+.-]*$"),
+                "val_re": re.compile(r"^$"),
+                "noun": "tag",
+                "key_rule": "letters, digits, underscore, hyphen, plus and dot, "
+                            "starting with a letter, digit or underscore",
+                "val_rule": "no value at all — a Proxmox tag is a bare label"},
     "oci": {"key_max": 100, "val_max": 256, "max_tags": 64,
             "key_re": re.compile(r"^[^\s]+$"),
             "val_re": re.compile(r"^.*$"),
@@ -339,6 +350,9 @@ def validate_edit(cloud: str, add: dict, remove: list, existing: dict = None) ->
             raise TagPolicyError(
                 f"{noun} key '{k[:40]}…' is {len(k)} characters; "
                 f"{cloud} allows {rules['key_max']}")
+        if rules["val_max"] == 0 and v:
+            raise TagPolicyError(
+                f"'{k}={v}' — a {cloud} {noun} is a bare label and carries no value")
         if len(v) > rules["val_max"]:
             raise TagPolicyError(
                 f"the value for '{k}' is {len(v)} characters; "

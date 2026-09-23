@@ -87,7 +87,13 @@ job_types:
 #   - name: dc1-vcenter
 #     verbs: [inventory_sync]                                  # read-only
 #   - name: lab-proxmox
-#     verbs: [inventory_sync, power_on, power_off, shutdown, reboot, snapshot]
+#     verbs: [inventory_sync, power_on, power_off, shutdown, reboot, snapshot, set_tags]
+#
+#   # `set_tags` lets the dashboard write this guest's TAGS — Proxmox only, and the one
+#   # verb that carries a value somebody typed. Every tag is checked against Proxmox's
+#   # own charset (letters, digits, _ - + .) by this agent before the call, not only by
+#   # the dashboard, so it can express no path, URL or shell character. Leave it out and
+#   # tag editing is refused for this connection with a message naming this line.
 #
 #   # VMware Workstation on THIS host. `allow_loopback` is what lets the agent reach
 #   # vmrest on 127.0.0.1 — see below.

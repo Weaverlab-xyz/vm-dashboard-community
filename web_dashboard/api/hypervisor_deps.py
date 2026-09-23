@@ -137,6 +137,84 @@ def agent_power_job(db: Session, conn, *, op: str, target_id: str,
     return job
 
 
+def agent_tag_job(db: Session, conn, *, tags: list, target_id: str,
+                  target_scope: str = "", target_type: str = "vm",
+                  created_by: str = "", description: str = ""):
+    """Enqueue a tag write for an AGENT-BOUND connection, or return None.
+
+    The sibling of :func:`agent_power_job`, and separate from it for the same reason the
+    verbs are separate: this one carries a payload field, and the refusals that matter
+    are about that field rather than about an op-to-verb map. `set_tags` is not in
+    ``PAGE_OPS`` at all — it is not a page op, there is nothing per-kind to resolve, and
+    putting it there would oblige every kind to name a button it does not have.
+
+    ``tags`` is the COMPLETE desired set. The caller has already read the current tags
+    and applied the operator's add/remove; the agent writes exactly what it is given.
+
+    Returns None for a connection the dashboard can dial, so the caller keeps its direct
+    path unchanged.
+    """
+    if not getattr(conn, "agent_id", None):
+        return None
+
+    from ..database import RemoteAgent
+    from ..services import agent_hypervisor_meta, agent_service, job_service
+
+    # Before the agent lookup and before any job row: a tag the agent would refuse is an
+    # operator typo, and it should read as one rather than as a failed job on /jobs.
+    refusal = agent_hypervisor_meta.tags_refusal(tags)
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
+
+    # Only Proxmox has an implementation. Said here by name, because the alternative is
+    # a job that reaches the agent and comes back "no tag support for 'vsphere'" — true,
+    # but after a queue, a lease and a round trip.
+    if conn.kind != "proxmox":
+        raise HTTPException(
+            status_code=501,
+            detail=(f"Tag editing is not available on an agent-bound {conn.kind} "
+                    f"connection. Only Proxmox stores tags the dashboard can write."))
+
+    agent = db.query(RemoteAgent).filter(RemoteAgent.id == conn.agent_id).first()
+    if agent is None:
+        raise HTTPException(status_code=409,
+                            detail="The agent this connection is bound to no longer exists.")
+    if agent_service.status_of(agent) != "online":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Agent '{agent.name}' is offline, so {conn.name} cannot be reached.")
+    if "agent_hypervisor" not in agent_service.allowed_job_types(agent):
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Agent '{agent.name}' is not granted the agent_hypervisor job "
+                    f"type. Grant it on the Agents page."))
+    for problem in hcs.dashboard_secret_blockers(db, conn.id, agent):
+        raise HTTPException(status_code=409, detail=problem)
+
+    meta = agent_hypervisor_meta.normalize({
+        "verb": "set_tags", "connection_ref": conn.agent_connection_name or "",
+        "connection_id": conn.id, "kind": conn.kind,
+        "target_id": target_id, "target_scope": target_scope,
+        "target_type": target_type, "tags": list(tags),
+    })
+    # normalize() DROPS a token that fails the charset rather than raising. It cannot
+    # have dropped one here — tags_refusal above already refused the whole request — but
+    # a silent difference between what was asked for and what is about to be written is
+    # exactly the failure this feature must not have, so it is checked rather than
+    # assumed.
+    if meta["tags"] != [str(t) for t in tags]:
+        raise HTTPException(
+            status_code=400,
+            detail="Some tags were not accepted; nothing was queued.")
+
+    meta["description"] = description or f"set_tags via agent '{agent.name}'"
+    job = job_service.create_job(
+        db, job_type="agent_hypervisor", created_by=created_by,
+        metadata=meta, agent_id=agent.id)
+    job_service.set_cloud_resource_id(db, job.id, conn.id)
+    return job
+
+
 def conn_in_task(db: Session, kind: str, connection_id: str):
     """Re-resolve a connection inside a background task's own session.
 

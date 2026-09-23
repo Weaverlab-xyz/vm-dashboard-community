@@ -418,6 +418,54 @@ def _power_op_sync(conn, node: str, vmid: int, vm_type: str, op: str) -> dict:
     return {"task": upid, "status": "OK"}
 
 
+def _update_tags_sync(conn, node: str, vmid: int, vm_type: str,
+                      add: dict, remove: list) -> tuple:
+    """Apply a tag edit to one Proxmox guest. Returns ``(before, after)`` as LISTS.
+
+    Read-modify-write, because Proxmox holds tags as ONE semicolon-joined config field
+    and a config PUT replaces it wholesale — sending only the edited tags would delete
+    every other one.
+
+    Lists rather than dicts: a Proxmox tag is a bare label with no value, which is why
+    `tag_policy`'s proxmox rules set `val_max: 0`. The add/remove shape is still a dict
+    on the way in so one editor serves every provider; only the keys are used.
+
+    Order is preserved and de-duplicated, because Proxmox itself reorders on write and a
+    caller diffing the two would otherwise see a change that did not happen.
+    """
+    pve = _client(conn)
+    endpoint = pve.nodes(node).qemu(vmid) if vm_type == "qemu" else pve.nodes(node).lxc(vmid)
+    cfg = endpoint.config.get() or {}
+    before = [t.strip() for t in str(cfg.get("tags") or "").split(";") if t.strip()]
+
+    dropped = {str(k) for k in (remove or [])}
+    after = [t for t in before if t not in dropped]
+    for key in (add or {}):
+        if str(key) not in after:
+            after.append(str(key))
+
+    if after != before:
+        # `put`, matching `_deploy_from_template_sync`'s config write. An empty string is
+        # how Proxmox is told "no tags" — which is a legitimate edit, so it is sent
+        # rather than skipped.
+        endpoint.config.put(tags=";".join(after))
+        logger.info("Proxmox: tags on %s/%s -> %s", node, vmid, ";".join(after) or "(none)")
+    return before, after
+
+
+async def update_tags(conn, node: str, vmid: int, vm_type: str,
+                      add: dict, remove: list) -> tuple:
+    """Merge a tag edit into a Proxmox guest. Returns ``(before, after)`` as lists."""
+    if vm_type not in ("qemu", "lxc"):
+        raise ProxmoxError(f"Invalid vm_type '{vm_type}'. Must be 'qemu' or 'lxc'.")
+    try:
+        return await _to_thread(_update_tags_sync, conn, node, vmid, vm_type, add, remove)
+    except ProxmoxError:
+        raise
+    except Exception as e:
+        raise ProxmoxError(f"Updating tags on {node}/{vmid} failed: {e}") from e
+
+
 # ── VM config / detail ────────────────────────────────────────────────────────
 
 def _get_config_sync(conn, node: str, vmid: int, vm_type: str) -> dict:

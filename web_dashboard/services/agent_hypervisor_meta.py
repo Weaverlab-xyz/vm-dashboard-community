@@ -35,13 +35,15 @@ HYPERVISOR_META_KEYS = (
     "page_size",       # int, clamped
     "cursor",          # str — opaque, agent-issued, echoed back
     "timeout_s",       # int, clamped
+    "tags",            # list[str] — the COMPLETE desired tag set for `set_tags`, each
+                       #       token charset-constrained to pve-tag-id. See _TAG_RE.
 )
 
 # Phase 4 ships ONE read-only verb. Shipping the *shape* before granting any *power* is
 # the point of splitting this from the write-verb phase.
 READ_VERBS = ("inventory_sync",)
 WRITE_VERBS = ("power_on", "power_off", "power_reset", "restart", "shutdown",
-               "reboot", "snapshot")
+               "reboot", "snapshot", "set_tags")
 VALID_VERBS = READ_VERBS + WRITE_VERBS
 
 # `shutdown` and `reboot` are the GRACEFUL pair, added because the five verbs before
@@ -76,6 +78,65 @@ VALID_VERBS = READ_VERBS + WRITE_VERBS
 # no `snapshot_name` key. The job id also makes the snapshot traceable back to the
 # job row that made it, which an operator-typed name would not be.
 SNAPSHOT_NAME_PREFIX = "dash-"
+
+# `set_tags` is the first verb to carry a field an OPERATOR TYPED, and that deserves
+# stating plainly rather than being discovered later.
+#
+# Everything else that crosses this boundary is an enum, a clamped int, or an id the
+# hypervisor itself issued. `snapshot` was allowed only once its name could be DERIVED
+# (above), precisely to avoid this. So why is this different?
+#
+# Because a tag is not a name in the dangerous sense. The rule this module keeps is that
+# no field can carry a command, a script, a URL, a path or a credential — and
+# :data:`_TAG_RE` is Proxmox's own `pve-tag-id` charset, which can express none of those:
+# no slash, no space, no quote, no dot-dot, no colon, no scheme. A token that does not
+# match is REFUSED, at both ends, rather than repaired. `target_scope` — a Proxmox node
+# name — already crosses on the same terms.
+#
+# `tags` carries the COMPLETE desired set, not a delta. The dashboard reads the current
+# tags, applies the operator's add/remove, and sends the result; the agent writes exactly
+# what it is given. Proxmox's config endpoint replaces the whole field anyway, so a delta
+# would have to be re-derived agent-side against a read the agent would then have to
+# trust — and two places computing the same set is how they come to disagree.
+#
+# An EMPTY list is therefore a legitimate instruction ("remove the last tag"), which is
+# why an invalid token cannot be handled by emptying the field the way a bad `target_id`
+# is. It is refused instead. See :func:`valid_tags`.
+#
+# The count is bounded by MAX_TAGS, which is defined further down with the INBOUND
+# inventory sanitiser rather than duplicated here — deliberately the same number in both
+# directions, because a tag set the dashboard can write but not read back is a trap: the
+# page would show fewer tags than the VM carries and the next edit would delete the rest.
+# (An earlier draft of this did declare its own, which Python silently shadowed with the
+# one below — the bug being that it read as 64 and behaved as 32.)
+_TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_+.-]{0,59}$")
+
+
+def valid_tags(tags) -> bool:
+    """True when every token is a legal tag. The gate both ends refuse on.
+
+    Checked by the dashboard before a job row exists — so an operator typo is a sentence,
+    not a failed job — and again by the agent on arrival, because the two passes defend
+    different things: the first stops a typo, the second stops a compromised dashboard.
+    """
+    if not isinstance(tags, (list, tuple)):
+        return False
+    if len(tags) > MAX_TAGS:
+        return False
+    return all(isinstance(t, str) and _TAG_RE.match(t) for t in tags)
+
+
+def tags_refusal(tags) -> str:
+    """Why this tag list is refused, naming the offending token, or "" when it is fine."""
+    if not isinstance(tags, (list, tuple)):
+        return "tags must be a list"
+    if len(tags) > MAX_TAGS:
+        return f"{len(tags)} tags; the limit is {MAX_TAGS}"
+    for t in tags:
+        if not isinstance(t, str) or not _TAG_RE.match(t):
+            return (f"{t!r} is not a valid tag — letters, digits, underscore, hyphen, "
+                    f"plus and dot, starting with a letter, digit or underscore")
+    return ""
 
 
 def snapshot_name(job_id: str) -> str:
@@ -281,6 +342,7 @@ _DEFAULTS = {
     "page_size": 250,
     "cursor": "",
     "timeout_s": 120,
+    "tags": [],
 }
 
 # Opaque ids and cursors are echoed between two systems and end up in log lines and a
@@ -339,6 +401,18 @@ def normalize(meta: dict) -> dict:
 
     out["page_size"] = _clamp(out.get("page_size"), _DEFAULTS["page_size"], 1, MAX_PAGE_SIZE)
     out["timeout_s"] = _clamp(out.get("timeout_s"), _DEFAULTS["timeout_s"], 1, MAX_TIMEOUT_S)
+
+    # Invalid tokens are DROPPED here, and that is not the loud path — `valid_tags` is,
+    # and both the enqueue and the agent check it first, so a token only reaches this
+    # line from a dashboard that skipped the gate. Dropping is the right answer there:
+    # it is the one outcome in which a token a compromised dashboard invented never
+    # reaches the hypervisor. It cannot be the *only* answer, because an empty list is a
+    # legitimate instruction, which is why the loud gate exists at all.
+    raw_tags = out.get("tags")
+    if not isinstance(raw_tags, (list, tuple)):
+        raw_tags = []
+    out["tags"] = [t for t in (str(x).strip() for x in raw_tags)
+                   if _TAG_RE.match(t)][:MAX_TAGS]
     return out
 
 

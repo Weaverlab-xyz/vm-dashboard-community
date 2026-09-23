@@ -62,6 +62,12 @@ def test_the_allowlist_did_not_grow_for_the_credential_fetch():
     assert set(ahm.HYPERVISOR_META_KEYS) == {
         "verb", "connection_ref", "connection_id", "kind", "target_id",
         "target_scope", "target_type", "page_size", "cursor", "timeout_s",
+        # `tags` joined for set_tags. It is not credential-shaped and carries nothing
+        # fetchable — the claim above is about a CREDENTIAL field, which this is not.
+        # What it does carry is the first operator-typed value to cross this boundary,
+        # so it is constrained to Proxmox's own tag charset and refused rather than
+        # repaired; the two tests below are what hold that.
+        "tags",
     }
 
 
@@ -90,6 +96,58 @@ def test_the_verbs_needing_operator_supplied_input_are_absent():
     indistinguishable from a config file, and a config file is one step from a script."""
     for verb in ("clone", "deploy", "delete", "console", "exec", "migrate"):
         assert verb not in ahm.VALID_VERBS
+
+
+def test_the_tags_field_cannot_carry_anything_executable():
+    """`tags` is the one field an operator types into, so the charset is the boundary.
+
+    The key-name heuristic in `test_no_field_can_carry_executable_content` cannot see
+    this — `tags` trips none of its words — so the VALUES are checked directly here.
+    Every one of these is a real escape an unconstrained string field would allow.
+    """
+    # Built rather than written as literals: a backslash and a newline in a source
+    # literal are the two things an editing tool eats a level of, and a silently
+    # de-escaped case here would assert nothing while still passing.
+    backslash = chr(92)
+    newline = chr(10)
+    for bad in ("; rm -rf /", "../../etc/passwd", "http://evil/x", "$(id)", "`id`",
+                "a b", "a;b", "a|b", "a/b", "a" + backslash + "b", "a'b", 'a"b',
+                "a" + newline + "b", "-lead", ".lead", "+lead", "", "x" * 61):
+        assert not ahm.valid_tags([bad]), f"{bad!r} was accepted as a tag"
+
+
+def test_a_refused_tag_is_named_and_never_repaired():
+    """Repairing one would write a DIFFERENT tag than the operator asked for, silently."""
+    reason = ahm.tags_refusal(["ok", "not ok"])
+    assert "not ok" in reason
+    assert ahm.tags_refusal(["ok", "also-ok"]) == ""
+
+
+def test_a_legal_tag_set_survives_normalisation_unchanged():
+    """Including the EMPTY one: removing the last tag is a real instruction, which is
+    why an invalid list cannot be handled by emptying the field."""
+    for good in ([], ["prod"], ["a", "b-c", "d.e", "f+g", "_h", "9i"]):
+        assert ahm.valid_tags(good)
+        assert ahm.normalize({"verb": "set_tags", "tags": good})["tags"] == good
+
+
+def test_the_tag_count_is_bounded_by_the_same_cap_in_both_directions():
+    """A set the dashboard can WRITE but not READ BACK is a trap: the page would show
+    fewer tags than the VM carries, and the next edit would delete the rest."""
+    assert not ahm.valid_tags(["t%d" % i for i in range(ahm.MAX_TAGS + 1)])
+    assert ahm.valid_tags(["t%d" % i for i in range(ahm.MAX_TAGS)])
+
+
+def test_set_tags_is_a_write_verb_and_is_resynced():
+    """It changes `tags`, which IS a cached column — so unlike `snapshot` it has to
+    trigger an inventory resync or the page keeps showing the pre-edit tags."""
+    import importlib.util as _ilu
+    _p = os.path.join(_ROOT, "web_dashboard", "services", "hypervisor_sync_service.py")
+    with open(_p, encoding="utf-8") as fh:
+        src = fh.read()
+    assert "set_tags" in ahm.WRITE_VERBS
+    block = src[src.index("RESYNC_VERBS ="):]
+    assert "set_tags" in block[:block.index(")")], "set_tags is not in RESYNC_VERBS"
 
 
 def test_snapshot_is_allowed_but_carries_no_name_field():

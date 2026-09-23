@@ -64,6 +64,39 @@ def _dedupe(targets: list) -> list:
     return out
 
 
+def assert_edit_allowed(cloud: str, add: dict, remove: list) -> tuple:
+    """The whole-request guard, shared by every path that writes a tag.
+
+    Its own function because the agent-brokered Proxmox path does NOT go through
+    :func:`apply_tag_edit` — it queues jobs rather than writing — and a guard that only
+    one of the two callers ran would be no guard at all. Returns the coerced
+    ``(add, remove)`` so both callers work on the same normalised pair.
+    """
+    add = {str(k): ("" if v is None else str(v)) for k, v in (add or {}).items()}
+    remove = [str(k) for k in (remove or [])]
+
+    if not add and not remove:
+        raise HTTPException(status_code=400,
+                            detail="Nothing to change — name a tag to add or remove.")
+
+    # `assert_editable` covers both sides of the edit: removing `managed-by` is exactly
+    # as damaging as overwriting it, and an earlier draft that checked only `add` would
+    # have allowed the worse of the two.
+    try:
+        tag_policy.assert_editable(list(add) + remove)
+        # No `existing` here: the per-resource cap depends on tags not read yet, so only
+        # a grossly oversized request is caught. The provider enforces the real cap and
+        # its refusal arrives as that VM's `failed` entry — better than reading every VM
+        # twice to pre-empt a limit almost nobody hits.
+        tag_policy.validate_edit(cloud, add, remove)
+    except tag_policy.TagPolicyError as exc:
+        # 409, not 400: the request is well-formed and the operator is allowed to edit
+        # tags — this particular key is spoken for. 400 would read as "you typed it
+        # wrong", which sends them to fix the wrong thing.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return add, remove
+
+
 async def apply_tag_edit(
     db: Session, *, cloud: str, targets: list, add: dict, remove: list,
     apply_one: Callable, label_of: Callable, created_by: str = "",
@@ -78,29 +111,7 @@ async def apply_tag_edit(
     protected key, an illegal key for this provider, nothing selected, too many selected
     — so none of those can half-apply. A failure that belongs to one VM never raises.
     """
-    add = {str(k): ("" if v is None else str(v)) for k, v in (add or {}).items()}
-    remove = [str(k) for k in (remove or [])]
-
-    if not add and not remove:
-        raise HTTPException(status_code=400,
-                            detail="Nothing to change — name a tag to add or remove.")
-
-    # The guard, before anything is read or written. `assert_editable` covers both sides
-    # of the edit: removing `managed-by` is exactly as damaging as overwriting it, and an
-    # earlier draft that checked only `add` would have allowed the worse of the two.
-    try:
-        tag_policy.assert_editable(list(add) + remove)
-        # No `existing` here: the per-resource cap depends on tags this has not read yet,
-        # so only a grossly oversized request is caught. The provider enforces the real
-        # cap and its refusal arrives as that VM's `failed` entry — which is honest, and
-        # better than reading every VM twice to pre-empt a limit almost nobody hits.
-        tag_policy.validate_edit(cloud, add, remove)
-    except tag_policy.TagPolicyError as exc:
-        # 409, not 400: the request is well-formed and the operator is allowed to edit
-        # tags — this particular key is spoken for. 400 would read as "you typed it
-        # wrong", which sends them to fix the wrong thing.
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
+    add, remove = assert_edit_allowed(cloud, add, remove)
     targets = _dedupe(list(targets or []))
     if not targets:
         raise HTTPException(status_code=400, detail="No VMs selected.")

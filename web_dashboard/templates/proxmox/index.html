@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 {% from "partials/tag_chips.html" import tag_chips %}
+{% from "partials/tag_editor.html" import tag_editor %}
 {% block title %}Proxmox VE{% endblock %}
 
 {% block content %}
@@ -186,6 +187,8 @@
       </span>
       <div class="flex items-center gap-2">
         {{ bulk_power_buttons(['start', 'shutdown', 'stop', 'reboot']) }}
+        <button @click="openTagEditorSelected()"
+                class="px-2.5 py-1 text-xs font-medium rounded-lg bg-white border border-blue-300 text-blue-700 hover:bg-blue-50">Edit tags</button>
         <button x-show="$store.auth.isAdmin" @click="openBulkAssign()"
                 class="text-xs px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium">
           Assign workgroup
@@ -286,6 +289,10 @@
                       <span x-text="pending.has(vm.node + '-' + vm.vmid) ? '…' : 'Start'"></span>
                     </button>
                   </template>
+                  <button @click="openTagEditor([vm])"
+                          class="text-xs px-2.5 py-1 rounded border border-blue-300
+                                 text-blue-700 hover:bg-blue-50 font-medium transition"
+                          title="Add or remove tags on this guest">Tags</button>
                   <template x-if="vm.is_running">
                     <button @click="powerOp(vm, 'shutdown')" :disabled="pending.has(vm.node + '-' + vm.vmid)"
                             class="text-xs px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-600
@@ -553,6 +560,8 @@
        :class="toastType === 'error' ? 'bg-red-600' : 'bg-gray-900'" x-text="toast">
   </div>
 
+  {{ tag_editor("tag", valued=False) }}
+
 </div>
 
 <script>
@@ -596,6 +605,10 @@ function proxmoxDashboard() {
     ...bulkPowerState(),
     bulkPowerUrl: '/api/proxmox/power/bulk',
 
+    // Tag editor: state and behaviour from window.tagEditState() (static/js/app.js).
+    ...tagEditState(),
+    tagEditUrl: '/api/proxmox/instances/tags',
+
     // An agent-bound connection can only be sent the verbs the agent implements for
     // this product. Mirrors agent_hypervisor_meta.PAGE_OPS['proxmox'], which is also what
     // refuses the rest with a 501 — this is only so the operator sees why a button is
@@ -638,6 +651,18 @@ function proxmoxDashboard() {
     // address a VM differently from the button beside it.
     _bulkPowerTarget(vm) {
       return { node: vm.node, vmid: vm.vmid, vm_type: vm.type, name: vm.name };
+    },
+
+    // Tag-editor seams. `vm_type` matters here as it does for power: a tag lives on the
+    // guest's config, and qemu and lxc are different endpoints.
+    _tagTarget(vm) {
+      return { node: vm.node, vmid: vm.vmid, vm_type: vm.type };
+    },
+
+    // Must equal the route's `label_of`, which is how a per-VM result is matched back
+    // to its row. A VMID alone is not unique across nodes in a cluster.
+    _tagLabel(vm) {
+      return `${vm.node}/${vm.vmid}`;
     },
 
     // Proxmox reports a boolean, and this page's rows offer nothing for a third state,
