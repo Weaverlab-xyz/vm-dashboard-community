@@ -177,13 +177,19 @@ Three consequences the other episodes do not have:
 
 - **No approval, because there is nobody to ask.** `generate` has no gate. The episode
   returns **0**, **4** or **5** and *never 3* — a 3 would name a human who was never
-  consulted.
+  consulted. **4** is reserved for a refusal that did not refuse; an ending that merely
+  could not be observed is **5**, because reporting it as 4 would claim a scope finding
+  about a credential nobody re-tested.
 - **It bills.** One issuance per run, and nothing retries. This is the only consumer in
   this register that costs money when it runs.
 - **Its ending is not a revoke.** The closing beat waits out the real expiry and proves
-  the same call is then refused — exit **4** if it still works. `--cloud-end-with release`
-  is available on Azure and states its own limit: it ends the ability to get *another*
-  token, not the one already issued.
+  the same call is then refused — exit **4** if it still works, **5** if the lease is
+  longer than `--cloud-max-wait` and the ending was never watched.
+  `--cloud-end-with release` is available on Azure and states its own limit: it ends the
+  ability to get *another* token, not the one already issued. Asked for on AWS it is
+  **downgraded to the expiry, loudly** — the cloud is only known after the mint, and
+  throwing away a credential that has already been billed to punish a flag proves
+  nothing.
 
 **The scope is not asserted by the dashboard, and cannot be.** The other two episodes
 probe a limit the dashboard chose — a RoleBinding, a certificate profile. Here the

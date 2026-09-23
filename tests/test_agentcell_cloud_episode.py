@@ -85,8 +85,16 @@ def _worker():
     return m
 
 
+@contextlib.contextmanager
 def _serve_wlc(*, payload=None, status=200, body=b'{"error":"nope"}'):
-    """``(base, seen)`` — a stand-in Workload Credentials and what reached it."""
+    """``(base, seen)`` — a stand-in Workload Credentials and what reached it.
+
+    A CONTEXT MANAGER, because the version that just returned the base URL leaked a
+    listening socket and a thread per test. Thirty of those, plus the rest of the suite
+    running alongside, produced a `WinError 10053` mid-request on a test about the WC
+    path grammar — which reads as that path being wrong rather than as socket
+    exhaustion. A flake that accuses the wrong thing is worse than a slow teardown.
+    """
     seen = []
 
     class _H(http.server.BaseHTTPRequestHandler):
@@ -122,8 +130,14 @@ def _serve_wlc(*, payload=None, status=200, body=b'{"error":"nope"}'):
             pass
 
     srv = http.server.HTTPServer(("127.0.0.1", 0), _H)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return f"http://127.0.0.1:{srv.server_address[1]}", seen
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_address[1]}", seen
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=5)
 
 
 def _cloud_args(**over):
@@ -198,11 +212,11 @@ def test_the_generate_path_matches_the_providers_grammar():
     not disagree. The dynamic path gets the stronger check from the start.
     """
     m = _worker()
-    base, seen = _serve_wlc(payload={"secret": {"accessKeyId": "ASIAIOSFODNN7EXAMPLE",
-                                                "secretAccessKey": "s",
-                                                "sessionToken": "t"}})
-    m.generate_wlc_credential(base_url=base, site_id="SITE", service_name="svc",
-                              dynamic_name="ci-aws", identity_token="tok")
+    with _serve_wlc(payload={"secret": {"accessKeyId": "ASIAIOSFODNN7EXAMPLE",
+                                        "secretAccessKey": "s",
+                                        "sessionToken": "t"}}) as (base, seen):
+        m.generate_wlc_credential(base_url=base, site_id="SITE", service_name="svc",
+                                  dynamic_name="ci-aws", identity_token="tok")
     assert seen[0]["path"] == WLC.build_secrets_path("SITE", "/dynamic/ci-aws/generate"), (
         f"the worker posted to {seen[0]['path']!r}, the dashboard builds "
         f"{WLC.build_secrets_path('SITE', '/dynamic/ci-aws/generate')!r}")
@@ -214,11 +228,11 @@ def test_the_generate_call_names_its_workload_identity():
     which registered Workload Identity it is meant to satisfy. Without the version header
     it fails looking like an auth problem."""
     m = _worker()
-    base, seen = _serve_wlc(payload={"secret": {"clientId": "c", "clientSecret": "s",
-                                                "tenantId": "t"}})
-    m.generate_wlc_credential(base_url=base, site_id="SITE", service_name="mcp-agent",
-                              dynamic_name="ci-azure", identity_token="the-token",
-                              folder="lab")
+    with _serve_wlc(payload={"secret": {"clientId": "c", "clientSecret": "s",
+                                        "tenantId": "t"}}) as (base, seen):
+        m.generate_wlc_credential(base_url=base, site_id="SITE",
+                                  service_name="mcp-agent", dynamic_name="ci-azure",
+                                  identity_token="the-token", folder="lab")
     got = seen[0]
     assert got["service"] == "mcp-agent"
     assert got["api_version"] == m.WLC_API_VERSION
@@ -304,9 +318,10 @@ def test_revoke_does_not_swallow_a_provider_refusal():
     swallows `lease_not_revocable` because its callers "revoke unconditionally and let
     the provider decide". Here the refusal IS the finding."""
     m = _worker()
-    base, _ = _serve_wlc(status=400, body=b'{"error":"lease_not_revocable"}')
-    released, detail = m.revoke_wlc_lease(base_url=base, site_id="S", service_name="svc",
-                                          lease_id="L1", identity_token="tok")
+    with _serve_wlc(status=400, body=b'{"error":"lease_not_revocable"}') as (base, _):
+        released, detail = m.revoke_wlc_lease(
+            base_url=base, site_id="S", service_name="svc",
+            lease_id="L1", identity_token="tok")
     assert released is False, "a refused revoke was reported as a release"
     assert "not_revocable" in detail or "will not withdraw" in detail, \
         f"the detail does not say why the release failed: {detail!r}"
@@ -467,7 +482,9 @@ def test_no_expiry_means_the_ending_cannot_be_proved():
                              "expires_at": "", "expires_epoch": 0.0, "cloud": "aws"},
                   probes=[_ALIVE])
     code, out = _run(m, _cloud_args())
-    assert code == 4, f"an unobservable ending exited {code}\n{out}"
+    # 5, not 4. Nothing refused wrongly — the ending could not be watched. Reporting 4
+    # would invent a scope finding about a credential that was never re-tested.
+    assert code == 5, f"an unobservable ending exited {code}\n{out}"
     assert "no readable expiry" in out
 
 
@@ -482,7 +499,7 @@ def test_a_lease_longer_than_the_wait_is_refused_rather_than_slept_through():
                              "cloud": "aws"},
                   probes=[_ALIVE])
     code, out = _run(m, _cloud_args(cloud_max_wait=60))
-    assert code == 4
+    assert code == 5, f"a lease too long to wait out exited {code}\n{out}"
     assert "--cloud-max-wait" in out and "TTL" in out
 
 
@@ -562,6 +579,160 @@ def test_no_prove_ending_exits_5_and_names_the_flag():
     assert "ONE issuance" in out, "a refused run was still billed and must say so"
 
 
+def test_a_deny_probe_from_the_wrong_cloud_is_refused():
+    """`--cloud-deny-probe` offers both clouds' probes, because argparse cannot know
+    which cloud the mint will return. Neither probe function acts on the value beyond
+    `none` — each runs its own cloud's call — so a mismatched choice would run one call
+    and label it with the OTHER one's sentence, printing `scope proved … cannot read
+    the Entra directory` about a run that tested `iam:ListUsers`. An assertion
+    attributed to a probe that never ran is worse than no assertion at all.
+    """
+    m = _worker()
+    aws = {"values": dict(_AWS_VALUES), "lease_id": "L", "expires_at": "x",
+           "expires_epoch": 1.0, "cloud": "aws"}
+    args = _cloud_args(cloud_deny_probe="graph-directory-read")
+    try:
+        m._cloud_probe(args, aws)
+    except SystemExit as exc:
+        assert "not an aws probe" in str(exc)
+        assert "iam-list-users" in str(exc), "the refusal does not name the right probe"
+    else:
+        raise AssertionError("an Azure deny probe was accepted against an AWS mint")
+    # The two that must still pass: the cloud's own probe, and `none`.
+    for ok in ("iam-list-users", "none", "auto"):
+        m._cloud_probe(_cloud_args(cloud_deny_probe=ok), aws)
+
+
+def test_a_transport_failure_is_fatal_with_the_bill_named():
+    """`k8s_probe`'s rule, and it matters more here. By the time a probe runs a
+    credential has been minted and BILLED, so a `URLError` escaping as a traceback would
+    end the process having spent money and never mentioned it."""
+    m = _worker()
+    # Port 1 on loopback refuses immediately — a transport failure, not an HTTP one.
+    try:
+        m._arm_get("http://127.0.0.1:1/subscriptions/x", "tok", timeout=2)
+    except SystemExit as exc:
+        assert "could not be reached" in str(exc)
+        assert "billed" in str(exc), \
+            "the fatal message does not say a credential was already paid for"
+    else:
+        raise AssertionError("an unreachable endpoint returned a result")
+
+
+def test_the_billing_note_survives_a_probe_that_raises():
+    """The `finally` is the only place the run says it was billed, so the first probe
+    has to be INSIDE the try. It was not, and a transport failure there ended the
+    process having charged the operator without telling them."""
+    m = _worker()
+    _stub_episode(m)
+
+    def _boom(args, mint):
+        raise SystemExit("[agent] FATAL: sts.amazonaws.com could not be reached")
+
+    m._cloud_probe = _boom
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        try:
+            m.run_cloud_episode(_cloud_args())
+        except SystemExit:
+            pass
+    assert "ONE issuance" in buf.getvalue(), \
+        "a probe that raised skipped the note saying the mint had been billed"
+
+
+# -- the probes themselves, against HTTP rather than a hand-built result dict --
+
+def test_the_aws_probe_reads_a_refusal_apart_from_a_broken_signature():
+    """Every episode test above stubs `_cloud_probe` wholesale, so without this the
+    branch logic here has no test at all — and inverting one would still leave the file
+    green while reporting a broken credential as proof of scope."""
+    m = _worker()
+    calls = []
+
+    def fake(*, host, service, region, action, version, values, verify=True,
+             timeout=15):
+        calls.append(action)
+        return _AWS_RESPONSES.pop(0)
+
+    m._aws_query_call = fake
+    ok = {"status": 200, "code": "", "arn": "arn:aws:sts::1:assumed-role/ci/x",
+          "body": ""}
+
+    # Refused for the right reason.
+    _AWS_RESPONSES[:] = [ok, {"status": 403, "code": "AccessDenied", "arn": "",
+                              "body": ""}]
+    r = m.aws_cloud_probe(values=dict(_AWS_VALUES), deny_probe="iam-list-users")
+    assert r["proved"] and r["authenticated"] and not r.get("broken")
+    assert calls == ["GetCallerIdentity", "ListUsers"], \
+        "the allowed call did not run first — a broken signer would read as scope"
+
+    # Refused for the WRONG reason: a bad signature is a 403 too.
+    _AWS_RESPONSES[:] = [ok, {"status": 403, "code": "SignatureDoesNotMatch", "arn": "",
+                              "body": ""}]
+    r = m.aws_cloud_probe(values=dict(_AWS_VALUES), deny_probe="iam-list-users")
+    assert r.get("broken") and not r["proved"], \
+        "a bad signature was reported as proof of scope"
+
+    # Not refused at all.
+    _AWS_RESPONSES[:] = [ok, {"status": 200, "code": "", "arn": "", "body": ""}]
+    assert not m.aws_cloud_probe(values=dict(_AWS_VALUES),
+                                 deny_probe="iam-list-users")["proved"]
+
+    # The allowed call itself failed: nothing below it means anything.
+    _AWS_RESPONSES[:] = [{"status": 403, "code": "ExpiredToken", "arn": "", "body": ""}]
+    r = m.aws_cloud_probe(values=dict(_AWS_VALUES), deny_probe="iam-list-users")
+    assert not r.get("authenticated") and not r["proved"]
+    assert "deny_status" not in r, "the deny probe ran on a credential that never worked"
+
+
+def test_the_azure_probe_tells_a_missing_role_from_a_bad_token():
+    """A Graph 403 with `Authorization_RequestDenied` is the role being absent, which is
+    the refusal. A 401 is the token being wrong, which proves nothing — and an Entra
+    that will not issue a Graph token at all is neither."""
+    m = _worker()
+    tokens, gets = [], []
+
+    def fake_token(*, values, scope, verify=True, timeout=15):
+        tokens.append(scope)
+        return _AZ_TOKENS.pop(0)
+
+    def fake_get(url, token, verify=True, timeout=15):
+        gets.append(url)
+        return _AZ_GETS.pop(0)
+
+    m._entra_token = fake_token
+    m._arm_get = fake_get
+    sub = {"status": 200, "code": "", "data": {"displayName": "lab-sub"}, "body": ""}
+
+    _AZ_TOKENS[:] = [("arm-tok", ""), ("graph-tok", "")]
+    _AZ_GETS[:] = [sub, {"status": 403, "code": "Authorization_RequestDenied",
+                         "data": {}, "body": ""}]
+    r = m.azure_cloud_probe(values=dict(_AZURE_VALUES), scope="sub-1",
+                            deny_probe="graph-directory-read")
+    assert r["proved"] and r["identity"] == "lab-sub"
+    assert tokens == ["https://management.azure.com/.default",
+                      "https://graph.microsoft.com/.default"], \
+        "the Graph beat reused the ARM token rather than asking for its own"
+
+    _AZ_TOKENS[:] = [("arm-tok", ""), ("graph-tok", "")]
+    _AZ_GETS[:] = [sub, {"status": 401, "code": "InvalidAuthenticationToken",
+                         "data": {}, "body": ""}]
+    r = m.azure_cloud_probe(values=dict(_AZURE_VALUES), scope="sub-1",
+                            deny_probe="graph-directory-read")
+    assert r.get("broken") and not r["proved"], \
+        "a 401 was read as authorisation; it says the token is wrong, not the scope"
+
+    _AZ_TOKENS[:] = [("", "invalid_client")]
+    r = m.azure_cloud_probe(values=dict(_AZURE_VALUES), scope="sub-1",
+                            deny_probe="graph-directory-read")
+    assert not r.get("authenticated") and r["allow_code"] == "invalid_client"
+
+
+_AWS_RESPONSES: list = []
+_AZ_TOKENS: list = []
+_AZ_GETS: list = []
+
+
 def test_deny_probe_none_says_it_proves_only_authentication():
     """`--cloud-deny-probe none` is allowed, because this worker cannot read the dynamic
     secret's role and an operator may have no limit to assert. What it must not do is
@@ -580,7 +751,8 @@ def test_exit_3_is_never_returned():
     body = _code(_WORKER).split("def run_cloud_episode(", 1)[1].split("\ndef ", 1)[0]
     assert "return 3" not in body, "the cloud episode returns 3, which claims an approval"
     doc = _read(_WORKER).split("def run_cloud_episode(", 1)[1].split('"""')[1]
-    assert "3 is never returned" in doc, "the docstring does not say why 3 is absent"
+    assert "never returned" in doc and "never asked" in doc, \
+        "the docstring does not say that 3 is absent, or why"
 
 
 def test_the_episode_never_reaches_password_safe():

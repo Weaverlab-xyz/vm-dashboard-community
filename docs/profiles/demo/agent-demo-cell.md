@@ -419,9 +419,10 @@ mcp_agent.py --cloud-episode --cloud-dynamic-name ci-aws
    argument for a short TTL rather than an embarrassment.
 
 Exit codes are the punctuation, as everywhere else in this cell: **0** proved scope and
-the ending, **4** a refusal did not refuse — the deny probe succeeded, or the credential
-outlived its expiry — **5** the run was told to skip proving the ending. **3 is never
-returned**, because nobody was asked.
+the ending; **4** a refusal did not refuse — the deny probe succeeded, or the credential
+still worked after its expiry passed; **5** the ending was not proved, either because
+the run was told to skip it or because it could not be watched. **3 is never returned**,
+because nobody was asked.
 
 ### What this demo does not prove, and you should say so
 

@@ -1405,6 +1405,11 @@ def _aws_query_call(*, host: str, service: str, region: str, action: str,
 
     Never raises on an HTTP error: a refusal IS the expected outcome of half the calls
     here, so the status and the provider's error code are data rather than exceptions.
+
+    **A TRANSPORT failure is a different thing and does raise**, following `k8s_probe`'s
+    rule rather than letting a `URLError` out as a traceback. The distinction matters
+    more here than there: by the time a probe runs, a credential has been minted and
+    billed, so the one outcome to avoid is a stack trace that never mentions either.
     """
     import ssl
     import urllib.error
@@ -1427,6 +1432,11 @@ def _aws_query_call(*, host: str, service: str, region: str, action: str,
     except urllib.error.HTTPError as exc:
         text = (exc.read() or b"").decode("utf-8", "replace")
         status = exc.code
+    except Exception as exc:                            # noqa: BLE001 — see the docstring
+        raise SystemExit(
+            f"[agent] FATAL: {host} could not be reached ({type(exc).__name__}). The "
+            "credential was already minted and billed, and it is live until it expires "
+            "— check this host's egress to that endpoint.") from None
     return {"status": status, "code": _xml_field(text, "Code"),
             "arn": _xml_field(text, "Arn"), "body": scrub(text)[:400]}
 
@@ -1509,6 +1519,14 @@ def _entra_token(*, values: dict, scope: str, verify: bool = True,
         except ValueError:
             code = f"http_{exc.code}"
         return "", code
+    except Exception as exc:                            # noqa: BLE001
+        # Transport, not authorisation. Returning "" here would make an unreachable
+        # Entra look like a principal with no roles, which is the refusal the Graph
+        # beat exists to detect — a network problem reported as proof of scope.
+        raise SystemExit(
+            f"[agent] FATAL: login.microsoftonline.com could not be reached "
+            f"({type(exc).__name__}). The credential was already minted and billed, "
+            "and it is live until its lease expires.") from None
     return payload.get("access_token") or "", ""
 
 
@@ -1531,6 +1549,11 @@ def _arm_get(url: str, token: str, verify: bool = True, timeout: int = 15) -> di
     except urllib.error.HTTPError as exc:
         text = (exc.read() or b"").decode("utf-8", "replace")
         status = exc.code
+    except Exception as exc:                            # noqa: BLE001
+        raise SystemExit(
+            f"[agent] FATAL: {url.split('/')[2]} could not be reached "
+            f"({type(exc).__name__}). The credential was already minted and billed, "
+            "and it is live until its lease expires.") from None
     code, data = "", {}
     try:
         parsed = json.loads(text)
@@ -1977,11 +2000,27 @@ def run_cert_episode(args) -> int:
 
 
 def _cloud_probe(args, minted: dict) -> dict:
-    """Dispatch to the right probe for the cloud the PAYLOAD declared."""
+    """Dispatch to the right probe for the cloud the PAYLOAD declared.
+
+    **The deny probe has to belong to that cloud, and the check is not pedantry.**
+    ``--cloud-deny-probe`` offers the union of both clouds' probes, because argparse
+    cannot know which cloud the mint will return. Neither probe function acts on the
+    value beyond ``none`` -- each runs its own cloud's call -- so a mismatched choice
+    runs one call and labels it with the OTHER one's sentence. The episode would then
+    print `scope proved ... an ARM-scoped service principal cannot read the Entra
+    directory` about a run that tested `iam:ListUsers`, and exit 0. An assertion
+    attributed to a probe that never ran is worse than no assertion.
+    """
     cloud = minted["cloud"]
     deny = args.cloud_deny_probe
     if deny == "auto":
         deny = _DEFAULT_DENY_PROBE[cloud]
+    elif deny != "none" and deny != _DEFAULT_DENY_PROBE[cloud]:
+        raise SystemExit(
+            f"[agent] FATAL: --cloud-deny-probe {deny} is not an {cloud} probe, and "
+            f"{cloud} is what the dynamic secret returned. Use "
+            f"{_DEFAULT_DENY_PROBE[cloud]}, or `none` to run no refusal at all — a run "
+            f"labelled with a probe it did not make would claim a limit nobody tested.")
     if cloud == "aws":
         return aws_cloud_probe(values=minted["values"], deny_probe=deny,
                                region=args.cloud_region,
@@ -2012,10 +2051,19 @@ def run_cloud_episode(args) -> int:
     **This is the first episode in this cell that costs money when it runs.** Exactly one
     `generate`, and nothing retries it.
 
-    Exit codes: 0 proved the scope and the ending, 4 a refusal did not refuse (either the
-    deny probe succeeded, or the credential still worked after it should have stopped),
-    5 the run was asked to skip proving the ending. **3 is never returned** — there is no
-    approval on this path, and a 3 here would name a human who was never asked.
+    Exit codes:
+
+      * **0** — the scope and the ending were both proved (or no refusal was asked for
+        and the ending was still proved; see `--cloud-deny-probe none`).
+      * **4** — A REFUSAL DID NOT REFUSE: the deny probe succeeded, or the credential
+        still worked after it should have stopped. Reserved for exactly that, because
+        it is the outcome a reader will act on.
+      * **5** — the ending was NOT PROVED. Either the run was told to skip it, or it
+        could not be observed: the lease outlasts ``--cloud-max-wait``, or the provider
+        returned no readable expiry. Deliberately not 4 — nothing refused wrongly in
+        any of those, and saying so would invent a scope finding.
+      * **3** — **never returned.** There is no approval on this path, and a 3 here
+        would name a human who was never asked.
     """
     missing = [n for n, v in (("--cloud-dynamic-name", args.cloud_dynamic_name),
                               ("--wlc-base-url", args.wlc_base_url),
@@ -2070,10 +2118,14 @@ def run_cloud_episode(args) -> int:
               f"workaround: on {cloud} the TTL is the only control there is, which is "
               f"why a short one matters more here, not less · {_now()}", flush=True)
 
-    result = _cloud_probe(args, minted)
-    print(f"[agent] {spiffe_id} · {cloud_probe_summary(result)} · {_now()}", flush=True)
-
+    # EVERYTHING AFTER THE MINT GOES INSIDE THE TRY, including the first probe. The
+    # `finally` below is the only place the run says it was billed, and the mint has
+    # already happened by here — so a probe that raises outside it would end the process
+    # having spent money and never mentioned it.
     try:
+        result = _cloud_probe(args, minted)
+        print(f"[agent] {spiffe_id} · {cloud_probe_summary(result)} · {_now()}",
+              flush=True)
         if problem:
             print(f"[agent] {spiffe_id} · REFUSING: {problem} · {_now()}", flush=True)
             return 5
@@ -2093,7 +2145,12 @@ def run_cloud_episode(args) -> int:
                   "as the cluster episode's 'the approval gates retrieval, not use'.",
                   flush=True)
         elif not _wait_out_the_lease(minted, args.cloud_max_wait, spiffe_id):
-            return 4
+            # 5, NOT 4. Nothing failed to refuse here — the ending simply could not be
+            # observed, which is what 5 already means. Returning 4 would report "the
+            # credential outlived its expiry" about a credential that was never
+            # re-tested, and a CI job reading the code would act on a scope finding
+            # that does not exist.
+            return 5
 
         # THE BEAT THAT PROVES IT. Re-run the ALLOW probe only — the deny probe already
         # said what it had to say, and running it again against a dead credential would

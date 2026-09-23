@@ -116,9 +116,13 @@ clock would prove it can print a failure message, not that the credential died.
 | 5 | The episode waits out the expiry and re-probes | **refused.** Nothing revoked, nobody rotated |
 
 Same rule as step 4 above, one level over: the wait is real, capped by
-`--cloud-max-wait`. Exit **0** proved scope and the ending, **4** means a refusal did not
-refuse — either the deny probe succeeded or the credential outlived its expiry — and
-**5** means the run was told to skip proving the ending.
+`--cloud-max-wait`. Exit **0** proved scope and the ending; **4** means a refusal did not
+refuse — the deny probe succeeded, or the credential still worked after its expiry
+passed; **5** means the ending was **not proved**, whether because the run was told to
+skip it or because it could not be watched (the lease outlasts `--cloud-max-wait`, or
+the provider returned no readable expiry). The two are kept apart deliberately: 4 is a
+finding about the credential and 5 is a fact about the run, and reporting a lease that
+was never re-tested as 4 would invent a scope problem.
 
 **One run is one billed issuance**, and the episode says so on the way out.
 
