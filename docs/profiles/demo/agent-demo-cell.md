@@ -401,7 +401,7 @@ mcp_agent.py --cloud-episode --cloud-dynamic-name ci-aws
 ```
 [agent] spiffe://weaverlab.test/agent/mcp-reader · requesting a short-lived cloud credential from dynamic secret ci-aws · 14:02:11
 [agent] holding nothing: this machine's own identity token is what Workload Credentials accepted. No PAT, no Password Safe client pair, and the issuance is recorded against this workload rather than the dashboard · 14:02:12
-[agent] MINTED — one metered issuance. aws lease 7f3c… expires 2026-09-23T15:02:00Z · 14:02:13
+[agent] MINTED — one metered issuance. The aws credential expires 2026-09-23T15:02:00+00:00; it can be revoked or inspected · 14:02:13
 [agent] spiffe://weaverlab.test/agent/mcp-reader · scope proved — authenticated as arn:aws:sts::…:assumed-role/ci-runner/x, and an AWS role scoped to its workload cannot enumerate IAM users (AccessDenied) · 14:02:15
 [agent] spiffe://weaverlab.test/agent/mcp-reader · waiting out the lease — 59m 45s remaining. Nothing can shorten this · 14:02:15
 …
@@ -414,6 +414,10 @@ mcp_agent.py --cloud-episode --cloud-dynamic-name ci-aws
    the machine and Workload Credentials accepted that.
 2. **The refusal is the proof.** That the credential *works* shows only that it exists.
    That it is *refused* something is the scope.
+   *(The lease id is deliberately absent from that line. It is a correlation handle to a
+   live credential, and this journal gets tailed, screenshotted and pasted into tickets —
+   so the line says whether one came back, which is what decides if the issuance can be
+   revoked at all, and leaves the handle itself to Workload Credentials' own audit log.)*
 3. **Nothing shortened the wait.** On AWS there is no revoke to reach for — STS will not
    withdraw a credential it has signed. The room watches the clock, and that is the
    argument for a short TTL rather than an embarrassment.

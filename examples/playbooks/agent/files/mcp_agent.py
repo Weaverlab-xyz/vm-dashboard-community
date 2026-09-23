@@ -1104,6 +1104,28 @@ def _parse_expiry_epoch(value) -> float:
     return parsed.timestamp()
 
 
+def _iso_from_epoch(epoch: float) -> str:
+    """An expiry to print, rebuilt from the parsed epoch rather than echoed.
+
+    Two reasons, and the second one is why this function exists at all rather than the
+    provider's own string being printed.
+
+    **It is the value the episode will actually wait on.** `_wait_out_the_lease` counts
+    down from `expires_epoch`; printing the raw string means that if the two ever
+    disagree — an unparseable format, a timezone the parser drops — the line shows the
+    one that is not being used, and the wait looks wrong rather than the parse.
+
+    **And a float cannot carry a credential.** The raw string is read out of the
+    generate response's credential envelope, so it arrives tainted, and CodeQL's
+    clear-text-logging query is right to follow it to a `print` that an operator tails,
+    screenshots and pastes into tickets. Going through the epoch is a real sanitiser
+    rather than a way of hiding the flow from the query.
+    """
+    if not epoch:
+        return ""
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+
+
 def parse_generated_payload(payload) -> dict:
     """Normalise a ``generate`` response. A MIRROR of
     ``services/workload_credentials_service.parse_generated``, never an import.
@@ -2090,9 +2112,23 @@ def run_cloud_episode(args) -> int:
           "Credentials accepted. No PAT, no Password Safe client pair, and the "
           f"issuance is recorded against this workload rather than the dashboard · "
           f"{_now()}", flush=True)
-    print(f"[agent] MINTED — one metered issuance. {cloud} lease "
-          f"{minted['lease_id'] or '(none returned)'} expires "
-          f"{minted['expires_at'] or '(no expiry reported)'} · {_now()}", flush=True)
+    # THE LEASE ID IS NOT PRINTED, and that is this dashboard's own position rather than
+    # a scanner's. `workload_credentials_service.generate` puts it plainly: "a lease id
+    # is a correlation handle to a LIVE credential. The lease id belongs in the lease row
+    # and in Workload Credentials' own audit log" — and it deliberately logs the request
+    # rather than the result for that reason. This worker's stdout is a wider sink than
+    # that comment was written about: an operator tails it, screenshots it in a demo and
+    # pastes it into a ticket.
+    #
+    # What an operator actually needs from this line is whether a lease id came back AT
+    # ALL, because without one the issuance cannot be revoked or inspected and the TTL is
+    # the only control left. That is a boolean fact, and it is the one printed.
+    handle = ("it can be revoked or inspected" if minted["lease_id"] else
+              "NO lease id came back, so this issuance can be neither revoked nor "
+              "inspected — its expiry is the only control there is")
+    print(f"[agent] MINTED — one metered issuance. The {cloud} credential expires "
+          f"{_iso_from_epoch(minted['expires_epoch']) or '(no readable expiry)'}; "
+          f"{handle} · {_now()}", flush=True)
 
     # AFTER the mint, deliberately. The refusal has to name a credential that exists,
     # because an operator who sees it has already been billed and needs to know that.

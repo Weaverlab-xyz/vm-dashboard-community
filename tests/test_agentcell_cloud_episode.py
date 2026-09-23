@@ -388,6 +388,61 @@ def test_exactly_one_issuance_per_episode():
     assert "ONE issuance" in out, "the episode does not say it was billed"
 
 
+def test_the_lease_id_is_never_printed():
+    """This dashboard's own position, not a scanner's.
+
+    `workload_credentials_service.generate` states it: *"a lease id is a correlation
+    handle to a LIVE credential. The lease id belongs in the lease row and in Workload
+    Credentials' own audit log"* — which is why it logs the request and not the result.
+    The worker's stdout is a wider sink than that comment was written about: an operator
+    tails it, screenshots it in a demo and pastes it into a ticket.
+
+    What the line has to carry instead is whether a lease id came back at all, because
+    without one the issuance can be neither revoked nor inspected.
+    """
+    m = _worker()
+    _stub_episode(m, minted={"values": dict(_AWS_VALUES),
+                             "lease_id": "lease-7f3c-correlates-to-a-live-credential",
+                             "expires_at": "2020-01-01T00:00:00Z",
+                             "expires_epoch": 1577836800.0, "cloud": "aws"},
+                  probes=[_ALIVE, _DEAD])
+    code, out = _run(m, _cloud_args())
+    assert code == 0, out
+    assert "lease-7f3c" not in out, "the lease id reached stdout"
+    assert "revoked or inspected" in out, \
+        "the line does not say whether this issuance can be revoked at all"
+
+    m2 = _worker()
+    _stub_episode(m2, minted={"values": dict(_AWS_VALUES), "lease_id": "",
+                              "expires_at": "2020-01-01T00:00:00Z",
+                              "expires_epoch": 1577836800.0, "cloud": "aws"},
+                  probes=[_ALIVE, _DEAD])
+    _, out2 = _run(m2, _cloud_args())
+    assert "NO lease id" in out2, \
+        "an issuance with no lease id does not say that its TTL is the only control"
+
+
+def test_the_printed_expiry_is_the_one_the_wait_uses():
+    """Rebuilt from `expires_epoch`, never echoed from the provider's raw string.
+
+    If the two disagree — an unparseable format, a dropped timezone — printing the raw
+    string shows the value that is NOT being waited on, so the wait looks wrong rather
+    than the parse. Going through a float is also what keeps a string read out of the
+    credential envelope away from a sink an operator pastes into tickets.
+    """
+    m = _worker()
+    _stub_episode(m, minted={"values": dict(_AWS_VALUES), "lease_id": "L",
+                             # A raw string the parser could not read, deliberately
+                             # disagreeing with the epoch beside it.
+                             "expires_at": "whenever-o'clock",
+                             "expires_epoch": 1577836800.0, "cloud": "aws"},
+                  probes=[_ALIVE, _DEAD])
+    _, out = _run(m, _cloud_args())
+    assert "whenever-o'clock" not in out, \
+        "the provider's raw expiry was echoed instead of the parsed one"
+    assert "2020-01-01" in out, "the printed expiry is not the epoch the wait counts down"
+
+
 def test_no_credential_value_reaches_stdout():
     """`scrub` cannot save this one. An AWS secret access key is forty unmarked
     base64-ish characters with nothing to anchor a pattern on, so the rule is that values
