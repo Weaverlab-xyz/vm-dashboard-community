@@ -14,6 +14,16 @@ implementation: two ways of minting the same kind of token is two things to keep
 and the one that drifts is the one nobody is looking at. What this module cannot reuse is
 ``create_token`` itself, which mints for ``current_user`` — the whole point here is to
 mint against a DIFFERENT, narrower user, which is also why the admin refusal exists.
+
+**THERE IS DELIBERATELY NO CLOUD-MINT ROUTE HERE, and a reader will look for one next to
+``/k8s-request``.** An agent linked to a ``cloud`` credential mints it itself, on the
+host, with ``mcp_agent.py --cloud-episode``. Adding a route that called
+``workload_credentials_service.generate`` on the worker's behalf would be easy, would
+demo faster, and would destroy the property the whole mechanism exists for: the issuance
+would land in Workload Credentials' audit log as *this dashboard* rather than as the
+workload — the exact thing ``workload_cloud_service._run_issue``'s docstring says the
+design removes. It would also spend money on a button. So the dashboard records the
+link, reports the lease state, and mints nothing.
 """
 import logging
 from datetime import datetime
@@ -302,17 +312,26 @@ def build_options(
     credentials: dict = {m: [] for m in agentcell_service.LINKABLE_MECHANISMS}
     if wcs.enabled():
         for row in wcs.list_rows(db):
+            # An identity mid-teardown will not mint again -- `start_decommission` says
+            # that is precisely what retiring guarantees -- so a link to one promises a
+            # credential the agent cannot get. Same shape as the unrotated-token and
+            # unbuilt-CA refusals below and beside.
+            retiring = (row.status or "") in ("retiring", "deleted")
             credentials["cloud"].append({
                 "id": row.id, "name": row.name or "", "cloud": row.cloud or "",
                 "detail": (row.dynamic_name or ""),
                 "state": wcs.lease_state(row),
-                "linkable": True, "why": "",
+                "linkable": not retiring,
+                "why": ("" if not retiring else
+                        "This identity is being retired, which stops it minting "
+                        "another credential. Register a new one on the Cloud tab."),
             })
     else:
         missing.append(
-            "Workload Credentials is off, so the Cloud tab's leases cannot be listed "
-            "here. That link is accountability only — nothing a worker can spend — so "
-            "this does not block the demo.")
+            "Workload Credentials is off, so the Cloud tab's identities cannot be "
+            "listed here — and that link is the fourth demo, in which the agent mints "
+            "its own short-lived cloud credential. Without it, that demo is "
+            "unavailable; the other three are unaffected.")
     if wks.enabled():
         for row in wks.list_rows(db):
             rotated = bool(getattr(row, "rotated", False))
@@ -420,12 +439,15 @@ def link_agent(
 ):
     """Make an agent answerable for one Workload Lab credential.
 
-    **What the link confers depends on the tab**, and the response says which rather than
-    letting the operator assume:
+    **All three confer a capability now, and they differ in the failure mode the notes
+    have to pre-empt** — so the response leads with a different sentence per tab rather
+    than letting the operator assume:
 
-      * ``cloud`` gives the worker **nothing** — that tab returns its credential to
-        nobody by design, so the link is accountability and the notes lead with that. A
-        governance record reading as a capability is the failure mode there.
+      * ``cloud`` is the one that **mints**, and the two things nobody thinks to ask are
+        that it BILLS and that this dashboard does not decide what the credential may
+        do. It reaches Workload Credentials directly — no vault, no approval — and like
+        ``certificates`` it has **no episode route here**: the run is
+        ``mcp_agent.py --cloud-episode`` on the host.
       * ``kubernetes`` is a **capability**: the worker reaches Password Safe holding
         nothing, so it can request that token. The notes lead with what the approval
         does and does not gate, because assuming it gates use is the failure mode here.
@@ -490,9 +512,31 @@ def link_agent(
         if not wl_row:
             raise HTTPException(status_code=404,
                                 detail="No such Workload Lab cloud credential.")
+        # The third refusal of the same shape as its two siblings above: an identity
+        # that cannot produce a credential must not be linked to an agent that will be
+        # told it can mint one. `start_decommission` is explicit that what retiring
+        # guarantees is exactly this -- "this identity will not mint another credential".
+        if (wl_row.status or "") in ("retiring", "deleted"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{wl_row.name} is being retired, so it will not mint another "
+                       "credential — the agent would have nothing to ask for. Register "
+                       "a new identity on the Cloud tab.")
         summary = agentcell_service.link_summary(mechanism, wcs.lease_state(wl_row))
-        notes = agentcell_service.link_notes(wl_row.cloud or "",
-                                             wcs.revocable(wl_row.cloud or ""))
+        notes = agentcell_service.link_notes(
+            wl_row.cloud or "", wcs.revocable(wl_row.cloud or ""),
+            dynamic_name=wl_row.dynamic_name or "",
+            folder=wl_row.dynamic_folder or "")
+        # There is no button for this episode, so the link hands over the command. The
+        # two payload fields are identifiers and neither is stored — the same rule the
+        # certificate link's three fields follow.
+        notes.append(
+            "There is no Request button for this one — it is a run on the host: "
+            "`" + agentcell_service.cloud_episode_command(
+                wl_row.cloud or "", wl_row.dynamic_name or "",
+                wl_row.dynamic_folder or "", payload.cloud_scope or "",
+                payload.cloud_deny_probe or "") + "`. `journalctl -u mcp-agent` is the "
+            "record; this dashboard neither opens nor watches it.")
 
     row.linked_mechanism = mechanism
     row.linked_credential_id = wl_row.id
