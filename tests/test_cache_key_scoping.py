@@ -47,6 +47,7 @@ SCOPED_CACHES = {
     "oci_network_opts":   "region",
     "oci_instances":      "region",
     "ps_db_candidates":   "workgroup",
+    "ps_attributes":      "workgroup",
     # Assets on a share reached through a remote agent. The dimension is which SHARE, and
     # it takes three values to say so: two dashboards could point at the same agent, or
     # one agent at two shares, or one share at two subdirectories. An unscoped key would

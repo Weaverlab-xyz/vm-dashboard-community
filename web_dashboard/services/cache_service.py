@@ -70,6 +70,13 @@ TTL = {
     # runs on an hourly-plus schedule and nothing here changes faster than that.
     # Keyed on the workgroup filter — see SCOPED_CACHES in tests/test_cache_key_scoping.py.
     "ps_db_candidates":    300,   # 5 min
+    # Password Safe assets + managed systems + the attributes of the objects that matched
+    # an inventory row (api/inventory._attach_ps_attributes). 15 min, not 5: attributes
+    # change on human timescales — somebody edits one in the console — and the fetch is a
+    # per-object call, so it is the most expensive read in this table by a wide margin.
+    # Keyed on the workgroup filter, like ps_db_candidates — see SCOPED_CACHES in
+    # tests/test_cache_key_scoping.py.
+    "ps_attributes":       900,   # 15 min
     # Asset listing on a share reached through a remote agent. Not a cloud API call but a
     # full agent job round trip — the agent polls every 5s, so an uncached listing costs
     # five to fifteen seconds. storage_service.list_all_assets fans out over every

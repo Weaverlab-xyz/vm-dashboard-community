@@ -15,6 +15,7 @@ Password Safe API access plus account-management (functional accounts)
 permission — without it these calls return 401/403 and callers log a warning
 (everything here is best-effort from the caller's perspective).
 """
+import asyncio
 import logging
 
 import httpx
@@ -373,6 +374,170 @@ async def read_config_inventory(tenant=None) -> dict:
             await _sign_out(client)
     out["reachable"] = True
     out["detail"] = ""
+    return out
+
+
+# How many objects may have their attributes read in one pass, and how many of those
+# reads may be in flight at once. Attributes are a PER-OBJECT call, so without a cap one
+# page load is one call per record in the tenant. The cap is applied after matching, so it
+# bounds the objects actually on screen rather than the estate; 8-wide because Password
+# Safe is one appliance and this is a background warm, not a race.
+ATTR_MAX_FETCH = 200
+_ATTR_CONCURRENCY = 8
+
+
+async def _object_attributes(client, sem, kind_path: str, object_id: str) -> dict:
+    """One object's attributes, through ``_probe`` so a 404 is a state and not a failure.
+
+    The per-object attribute path is NOT in any table in the researched API docs
+    (``docs/integrations/password-safe.md``), so whether this Password Safe version serves
+    it is genuinely unknown until it is called. ``_probe`` is what makes that safe to find
+    out from a page load.
+    """
+    async with sem:
+        return await _probe(client, f"{kind_path}/{object_id}/Attributes",
+                            id_keys=("AttributeID", "ID"))
+
+
+async def _assets_by_workgroup(client, workgroup_id=None) -> dict:
+    """Every asset, gathered one workgroup at a time, in one ``_probe``-shaped envelope.
+
+    There is no flat ``Assets`` collection — it 404s — so the fan-out is not an
+    optimisation to undo later, it is the only way to read them. Bounded by the number of
+    workgroups, which is an operator-scale number.
+
+    A single workgroup that fails costs that workgroup, not the read: one unreadable
+    workgroup in a tenant with six is a permissions gap worth reporting, not a reason to
+    show nothing. The envelope is ``unavailable`` only when EVERY workgroup refused,
+    because that is the case that means "this version does not serve assets".
+    """
+    if workgroup_id is not None:
+        return await _probe(client, f"Workgroups/{workgroup_id}/Assets",
+                            paged=True, id_keys=("AssetID", "ID"))
+
+    try:
+        workgroups = await _get_all(client, "Workgroups")
+    except Exception:  # noqa: BLE001
+        logger.warning("Password Safe: could not list workgroups for the asset read",
+                       exc_info=True)
+        return {"state": PROBE_ERROR, "rows": [],
+                "detail": "the workgroup list could not be read"}
+
+    rows, states, details = [], [], []
+    for group in workgroups:
+        gid = group.get("ID") or group.get("WorkgroupID") or group.get("OrganizationID")
+        if gid in (None, ""):
+            continue
+        probe = await _probe(client, f"Workgroups/{gid}/Assets",
+                             paged=True, id_keys=("AssetID", "ID"))
+        states.append(probe["state"])
+        if probe["state"] == PROBE_OK:
+            rows.extend(probe["rows"])
+        elif probe["detail"]:
+            details.append(f"{group.get('Name') or gid}: {probe['detail']}")
+
+    if not states:
+        return {"state": PROBE_OK, "rows": [], "detail": ""}
+    if all(st != PROBE_OK for st in states):
+        # Every one refused the same way — report that rather than "no assets", which
+        # would read as an empty tenant.
+        return {"state": states[0], "rows": [], "detail": "; ".join(details[:3])}
+    return {"state": PROBE_OK, "rows": rows, "detail": "; ".join(details[:3])}
+
+
+async def read_attribute_inventory(*, workgroup: str = "", wanted=None,
+                                   tenant=None) -> dict:
+    """Assets, managed systems, and the attributes of the objects the caller asked for.
+
+    Returns **raw** rows plus per-collection ``_probe`` envelopes — shaping and matching
+    belong to ``ps_attribute_catalog``, which is pure, so the I/O half and the logic half
+    stay testable apart. The same split ``read_database_inventory`` keeps.
+
+    ``wanted`` is the set of ``"<kind>:<id>"`` refs whose attributes to read, which the
+    caller derives by matching FIRST. That ordering is the whole performance story: an
+    estate of 800 records and 60 inventory VMs does 60 attribute reads, not 800.
+    Passing ``None`` reads none — a caller that has not matched yet gets the objects and
+    can come back, rather than accidentally fetching the tenant.
+
+    One signed-in pass for all of it, like ``read_config_inventory``: doing it per
+    collection would be a Token + SignAppIn + Signout for each.
+    """
+    out = {"assets": {"state": PROBE_ERROR, "rows": [], "detail": ""},
+           "managed_systems": {"state": PROBE_ERROR, "rows": [], "detail": ""},
+           "attribute_types": {"state": PROBE_ERROR, "rows": [], "detail": ""},
+           "attributes": {}, "truncated": False, "reachable": False, "detail": ""}
+
+    async with _list_client(tenant) as client:
+        try:
+            await _sign_in(client, tenant)
+        except Exception:  # noqa: BLE001
+            # Logged whole, never carried outward — it can quote a tenant response body.
+            logger.warning("Password Safe: sign-in for the attribute read failed",
+                           exc_info=True)
+            out["detail"] = "could not sign in to Password Safe"
+            return out
+        try:
+            params = {}
+            workgroup_id = None
+            if (workgroup or "").strip():
+                try:
+                    workgroup_id = await _workgroup_id(client, workgroup)
+                    params["workgroupID"] = workgroup_id
+                except Exception:  # noqa: BLE001
+                    logger.warning("Password Safe: workgroup %r did not resolve",
+                                   workgroup, exc_info=True)
+
+            # Assets are read PER WORKGROUP. Verified against a live tenant 2026-09-23:
+            # `GET Assets` answers **404** — there is no flat collection — while
+            # `GET Workgroups/{id}/Assets` answers 200. The researched capability table in
+            # docs/integrations/password-safe.md only ever listed the workgroup-scoped
+            # POST, and the GET turns out to match it.
+            out["assets"] = await _assets_by_workgroup(client, workgroup_id)
+            out["managed_systems"] = await _probe(
+                client, "ManagedSystems", paged=True,
+                id_keys=("ManagedSystemID", "SystemId", "SystemID"))
+            # The VOCABULARY — `Criticality`, `Business Unit`, `Geography`. An attribute
+            # row carries only its AttributeTypeID, so without this every chip would show
+            # the value with no idea what it is a value OF, which is also the half a
+            # Smart Rule keys on. One unpaged call. (Live 2026-09-23: 200.)
+            out["attribute_types"] = await _probe(client, "AttributeTypes",
+                                                  id_keys=("AttributeTypeID", "ID"))
+
+            # Re-applied client-side for the same reason read_database_inventory does it:
+            # whether v3 honours workgroupID on a collection varies by version, and a
+            # filter that silently does nothing is worse than one that costs bandwidth.
+            if workgroup_id is not None:
+                for key in ("assets", "managed_systems"):
+                    out[key]["rows"] = [
+                        r for r in out[key]["rows"]
+                        if str(r.get("WorkgroupID") or r.get("WorkgroupId") or "")
+                        == str(workgroup_id)]
+
+            refs = sorted(wanted or ())
+            if len(refs) > ATTR_MAX_FETCH:
+                # Sorted, so the SAME objects are read each pass. A shuffling subset would
+                # make chips appear and vanish between refreshes, which reads as a bug.
+                refs = refs[:ATTR_MAX_FETCH]
+                out["truncated"] = True
+
+            sem = asyncio.Semaphore(_ATTR_CONCURRENCY)
+            tasks = []
+            for ref in refs:
+                kind, _, object_id = str(ref).partition(":")
+                if not object_id:
+                    continue
+                path = "Assets" if kind == "asset" else "ManagedSystems"
+                tasks.append((ref, _object_attributes(client, sem, path, object_id)))
+            if tasks:
+                results = await asyncio.gather(*(t for _r, t in tasks))
+                for (ref, _t), probe in zip(tasks, results):
+                    # One object's 403 costs that object, never the other 199 — which is
+                    # why each carries its own state rather than one flag for the batch.
+                    out["attributes"][ref] = probe
+        finally:
+            await _sign_out(client)
+
+    out["reachable"] = True
     return out
 
 

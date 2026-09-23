@@ -73,6 +73,132 @@ async def _attach_cloud_tags(items: list) -> None:
                 item["tags"] = chips
 
 
+# ── Password Safe attributes ─────────────────────────────────────────────────
+
+def _ps_workgroup() -> str:
+    """The workgroup filter Password Safe reads are scoped to, or "" for all."""
+    from ..services import config_service
+    return (config_service.get("passwordsafe_workgroup") or "").strip()
+
+
+def _ps_enabled() -> bool:
+    from ..config import settings
+    from ..services import config_service
+    return config_service.get_bool("password_safe_enabled",
+                                   settings.password_safe_enabled)
+
+
+async def _ps_snapshot(workgroup: str) -> dict:
+    """Assets, managed systems and the attributes of everything that matched — cached.
+
+    Computed against the WHOLE inventory, not one caller's filtered view, and that is
+    deliberate on two counts. It makes the payload caller-independent, so a workgroup-keyed
+    cache is correct rather than a leak; and the orphan list is only meaningful against
+    every row — "matches no VM" cannot be answered from a subset.
+
+    Matching runs BEFORE the attribute reads and decides which of them happen. That
+    ordering is the performance story: 800 records and 60 VMs is 60 attribute calls.
+    """
+    from ..database import SessionLocal
+    from ..services import ps_api_service, ps_attribute_catalog as pac
+
+    session = SessionLocal()
+    try:
+        rows = inventory_service.collect(session)
+    finally:
+        session.close()
+
+    # Pass 1: the objects, so there is something to match against.
+    first = await ps_api_service.read_attribute_inventory(workgroup=workgroup)
+    index = pac.build_index(first["assets"]["rows"], first["managed_systems"]["rows"])
+
+    wanted, shared = set(), {}
+    for row in rows:
+        refs, _basis = pac.match_refs(row, index)
+        for ref in refs:
+            wanted.add(ref)
+            shared[ref] = shared.get(ref, 0) + 1
+
+    # Pass 2: attributes, for the matched objects only. A second sign-in, which is the
+    # cost of matching in between — and far cheaper than reading the whole tenant.
+    second = await ps_api_service.read_attribute_inventory(
+        workgroup=workgroup, wanted=wanted) if wanted else first
+
+    attributes = {}
+    for ref, probe in (second.get("attributes") or {}).items():
+        # A per-object failure leaves that ref absent, which `match` reports as
+        # `not_fetched` — never as "no attributes", which would be a claim.
+        if probe.get("state") == ps_api_service.PROBE_OK:
+            attributes[ref] = probe.get("rows") or []
+
+    return {
+        "index": index,
+        "attributes": attributes,
+        "types": pac.type_names(first["attribute_types"]["rows"]),
+        "shared": shared,
+        "orphans": pac.unmatched(index, wanted),
+        "assets_state": first["assets"]["state"],
+        "assets_detail": first["assets"]["detail"],
+        "systems_state": first["managed_systems"]["state"],
+        "systems_detail": first["managed_systems"]["detail"],
+        "truncated": bool(second.get("truncated")),
+        "reachable": bool(first.get("reachable")),
+        "detail": first.get("detail", ""),
+    }
+
+
+async def _attach_ps_attributes(items: list, *, is_admin: bool) -> dict:
+    """Give each row its Password Safe attributes. Returns the page-level envelope.
+
+    Best-effort, like `_attach_cloud_tags`: Password Safe being unreachable must cost the
+    attributes column and nothing else on a page that is otherwise a database read.
+
+    The envelope carries the states an empty cell cannot distinguish — off, unconfigured,
+    unavailable on this version, permission denied — because all four look identical on a
+    row and only some of them are worth acting on.
+    """
+    from ..services import ps_api_service, ps_attribute_catalog as pac
+
+    if not _ps_enabled():
+        return {"state": "off"}
+    if not ps_api_service.configured():
+        return {"state": "unconfigured",
+                "detail": "Password Safe is enabled but has no API credentials yet."}
+
+    try:
+        snap, _cached_at = await cache_service.get_or_refresh(
+            cache_service.key_param("ps_attributes", workgroup=_ps_workgroup() or "*"),
+            cache_service.TTL["ps_attributes"],
+            lambda: _ps_snapshot(_ps_workgroup()))
+    except Exception:  # noqa: BLE001
+        logger.warning("inventory: could not read Password Safe attributes", exc_info=True)
+        return {"state": "error",
+                "detail": "the Password Safe read failed; see the dashboard log"}
+
+    if not snap.get("reachable"):
+        return {"state": "error", "detail": snap.get("detail", "")}
+
+    for item in items:
+        item["ps"] = pac.match(item, snap["index"], snap["attributes"],
+                               snap["shared"], snap.get("types"))
+
+    envelope = {
+        "state": "ok",
+        "assets": {"state": snap["assets_state"], "detail": snap["assets_detail"]},
+        "managed_systems": {"state": snap["systems_state"],
+                            "detail": snap["systems_detail"]},
+        "truncated": snap["truncated"],
+        "cap": ps_api_service.ATTR_MAX_FETCH,
+    }
+    # Admin-only. /inventory is workgroup-filtered rather than admin-gated, and an orphan
+    # is by definition a record the row filter cannot vet — listing one to a non-admin
+    # discloses a machine they are not entitled to see on the page above it. A matched
+    # row's attributes carry no such problem: that row is already visible to them.
+    if is_admin:
+        envelope["orphans"] = snap["orphans"]
+    return envelope
+
+
 @router.get("")
 async def list_inventory(
     provider: Optional[str] = Query(None, description=(
@@ -114,6 +240,8 @@ async def list_inventory(
     # work proportional to the page, not to the estate.
     items = [dict(i) for i in items]
     await _attach_cloud_tags(items)
+    ps_envelope = await _attach_ps_attributes(
+        items, is_admin=bool(getattr(current_user, "is_admin", False)))
 
     # Auto-delete state travels with the listing so /inventory's Expires badge and the
     # dashboard's "expiring soon" warning read ONE threshold instead of hardcoding two
@@ -131,4 +259,4 @@ async def list_inventory(
         "deleting": expiry_reaper.status()["deleting"],
     }
     return {"items": items, "count": len(items), "cached_at": cached_at,
-            "expiry": expiry}
+            "expiry": expiry, "password_safe": ps_envelope}

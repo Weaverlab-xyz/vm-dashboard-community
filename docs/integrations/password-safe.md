@@ -895,8 +895,43 @@ The practical consequence: **the engine of a Password Safe POC — an authentica
 scan and the Smart Rules that act on its results — cannot be built by this dashboard.** What
 it can do is verify the work and re-run a rule, which is what `pov_ps_config` does.
 
-Absence from the documentation is not proof of absence from the product, and this was not
-checked against a live tenant. The `_probe` helper in `ps_api_service` is built for that
-uncertainty: a `404` is reported as "this Password Safe version does not serve that
-endpoint" rather than as a failure, so a tenant that *does* serve one of these shows up as
-readable instead of broken.
+Absence from the documentation is not proof of absence from the product, and most of the
+table above was not checked against a live tenant. The `_probe` helper in `ps_api_service`
+is built for that uncertainty: a `404` is reported as "this Password Safe version does not
+serve that endpoint" rather than as a failure, so a tenant that *does* serve one of these
+shows up as readable instead of broken.
+
+### Assets and attributes — verified live, 2026-09-23
+
+Building the `/inventory` attributes column settled four of these against a real tenant.
+All four were guesses before, and two of them were wrong:
+
+| Call | Result | Note |
+|---|---|---|
+| `GET Assets` | **404** | There is **no flat asset collection.** |
+| `GET Workgroups/{id}/Assets` | 200 | Assets are **workgroup-scoped on read**, matching the POST. Reading them all means one call per workgroup. |
+| `GET AttributeTypes` | 200 | The vocabulary — `Criticality`, `Business Unit`, `Geography`, `Status`, `Operating System`, `Retire Date`, `Workgroup`, `Manufacturer`. |
+| `GET Attributes` | **404** | No flat attribute collection either. |
+| `GET Assets/{id}/Attributes` | 200 | Per object, which is why the read is capped and only matched objects are fetched. |
+| `GET ManagedSystems/{id}/Attributes` | 200 | Exists, and is commonly empty. |
+
+**An attribute's shape is easy to read backwards**, and doing so produces chips that look
+broken. A row is:
+
+```json
+{"AttributeID": 10000, "AttributeTypeID": 10000, "ShortName": "Online",
+ "LongName": "Online", "ValueInt": 0, "ChildAttributes": []}
+```
+
+`ShortName` is the **value**; the *type* is the category it was chosen from. So
+`AttributeTypeID 10000` + `ShortName "Online"` renders as **`Status = Online`** — not
+`Online = ""`. The type is also the half `SmartRules/FilterAssetAttribute` keys on, so
+losing it loses the point. `ps_attribute_catalog.to_chips` takes the `AttributeTypes` map
+for exactly this.
+
+**An asset's address is not guaranteed usable.** In the tenant checked, 33 of 35 assets
+carried a routable `IPAddress`; the other two carried an IPv6 **link-local** (`fe80::…`),
+which cannot identify a host. Separately, every managed system this dashboard onboards
+through a cloud-native plugin carries the `127.0.0.1` placeholder with a packed locator in
+`DnsName` — so it has **no usable address at all**, and is matched by the
+`ps_managed_system_id` recorded on its deploy job instead. See `ps_attribute_catalog`.
