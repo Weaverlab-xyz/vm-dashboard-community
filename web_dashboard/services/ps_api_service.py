@@ -541,6 +541,86 @@ async def read_attribute_inventory(*, workgroup: str = "", wanted=None,
     return out
 
 
+async def read_attribute_vocabulary(tenant=None) -> dict:
+    """Every attribute TYPE and the values it offers, in one signed-in pass.
+
+    Returns ``{"state", "types", "values_by_type", "detail"}`` raw — shaping is
+    ``ps_attribute_catalog.build_vocabulary``.
+
+    An attribute is not free text: a type owns a fixed set of values and assigning one
+    means naming its ``AttributeID``. So this IS the editor's picker, and reading it is
+    not optional the way a nice-to-have enrichment would be.
+
+    One call per type. That is an operator-scale number (eight in the tenant this was
+    built against) and it is the only way to get the values — there is no flat
+    ``Attributes`` collection; it 404s.
+    """
+    out = {"state": PROBE_ERROR, "types": [], "values_by_type": {}, "detail": ""}
+    async with _list_client(tenant) as client:
+        try:
+            await _sign_in(client, tenant)
+        except Exception:  # noqa: BLE001
+            logger.warning("Password Safe: sign-in for the vocabulary read failed",
+                           exc_info=True)
+            out["detail"] = "could not sign in to Password Safe"
+            return out
+        try:
+            probe = await _probe(client, "AttributeTypes",
+                                 id_keys=("AttributeTypeID", "ID"))
+            out["state"], out["detail"] = probe["state"], probe["detail"]
+            out["types"] = probe["rows"]
+            for row in probe["rows"]:
+                type_id = row.get("AttributeTypeID")
+                if type_id in (None, ""):
+                    continue
+                values = await _probe(client, f"AttributeTypes/{type_id}/Attributes",
+                                      id_keys=("AttributeID", "ID"))
+                # A type whose values cannot be read contributes an empty list rather
+                # than failing the whole vocabulary: seven usable pickers beat none.
+                out["values_by_type"][str(type_id)] = values["rows"]
+        finally:
+            await _sign_out(client)
+    return out
+
+
+async def set_asset_attribute(asset_id, attribute_id, *, assign: bool,
+                              tenant=None) -> None:
+    """Assign or remove ONE attribute on ONE asset. Raises :class:`PSApiError`.
+
+    ``POST Assets/{assetID}/Attributes/{attributeID}`` to assign,
+    ``DELETE`` the same path to remove — the BeyondInsight convention, and the shape the
+    capability table's "Attributes and attribute types — POST" refers to.
+
+    Deliberately one object per call rather than a batch: there is no batch endpoint, and
+    a caller that wants many gets a per-object outcome out of it, which is what lets a
+    partial apply be reported honestly instead of as one failure.
+    """
+    try:
+        aid = int(asset_id)
+        attr = int(attribute_id)
+    except (TypeError, ValueError):
+        raise PSApiError("an asset id and an attribute id are numbers") from None
+
+    async with _client(tenant) as client:
+        await _sign_in(client, tenant)
+        try:
+            path = f"Assets/{aid}/Attributes/{attr}"
+            resp = await (client.post(path) if assign else client.delete(path))
+            # 200/201 assign, 200/204 remove. A DELETE of something already absent
+            # answers 404, and that is not a failure — the caller asked for it gone and
+            # it is gone. Treating it as one would make a retry after a partial apply
+            # report errors for the targets that had already succeeded.
+            if resp.status_code in (200, 201, 204):
+                return
+            if not assign and resp.status_code == 404:
+                return
+            raise PSApiError(
+                f"Password Safe refused the attribute change "
+                f"({resp.status_code})")
+        finally:
+            await _sign_out(client)
+
+
 async def process_smart_rule(rule_id, tenant=None, *, queue: bool = True) -> dict:
     """``POST SmartRules/{id}/Process`` — the one runbook action the API does expose.
 

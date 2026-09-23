@@ -929,6 +929,18 @@ broken. A row is:
 losing it loses the point. `ps_attribute_catalog.to_chips` takes the `AttributeTypes` map
 for exactly this.
 
+**Writing an attribute — verified live the same day.** `POST` and `DELETE` on
+`Assets/{assetID}/Attributes/{attributeID}` both work; a `DELETE` of an attribute the
+asset does not carry answers **404**, which the dashboard treats as success (the caller
+asked for it gone and it is gone, so a retry after a partial apply does not report errors
+for the targets that already succeeded).
+
+An attribute is **assigned, not typed**: a type owns a fixed set of values, each with its
+own `AttributeID`, so `GET AttributeTypes/{id}/Attributes` is the picker and there is no
+free text anywhere in the write path. Some types are `IsReadOnly: true` — `Criticality`
+is, in the tenant checked — and the dashboard refuses those by name rather than letting
+Password Safe refuse them once per target in a bulk apply.
+
 **An asset's address is not guaranteed usable.** In the tenant checked, 33 of 35 assets
 carried a routable `IPAddress`; the other two carried an IPv6 **link-local** (`fe80::…`),
 which cannot identify a host. Separately, every managed system this dashboard onboards
