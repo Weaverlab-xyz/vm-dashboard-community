@@ -25,6 +25,7 @@ from ..database import (CertLab, CloudDatabase, CloudFunction,
                         WorkloadK8sToken)
 from . import config_mgmt_route_service as cmr
 from . import expiry_policy, hypervisor_view_service
+from . import tag_policy
 
 logger = logging.getLogger(__name__)
 
@@ -516,7 +517,29 @@ def _hv_item(conn, row, workgroup: Optional[str], ips: list,
         # Absent on a connection that does not sync guest details, and the run form's
         # transport picker is what covers that.
         "guest_os": getattr(row, "guest_os", "") or "",
+        # The hypervisor's own tags, as render-ready chips. Only the SYNCED rows can
+        # carry these: every other item on this page is projected from a Job row, which
+        # records what the dashboard asked for and never what the provider holds now.
+        # So the column is legitimately sparse here, and the filter treats an empty
+        # chip list as "no tags", not as "unknown".
+        "tags": tag_policy.normalise(_row_tags(row), kind),
     }
+
+
+def _row_tags(row):
+    """The cache row's tags, whether it arrived as an ORM row or a plain dict.
+
+    ``_hv_item`` is exercised against stand-ins as well as ORM rows — see the getattr
+    above it — and ``hypervisor_sync_service.list_vms`` hands back dicts with the JSON
+    already decoded, while the ORM row holds the raw JSON text.
+    """
+    raw = row.get("tags") if isinstance(row, dict) else getattr(row, "tags", None)
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw or "[]")
+        except ValueError:
+            return []
+    return raw
 
 
 def _hypervisor_items(db: Session, claimed: set) -> list:

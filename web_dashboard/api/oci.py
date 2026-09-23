@@ -45,6 +45,7 @@ from ..services import (
 )
 from .auth import require_permission
 from ..services import vm_suspend_policy
+from ..services import tag_policy
 from . import unmanaged
 from .power_batch import queue_power_batch
 
@@ -352,6 +353,9 @@ async def _build_oci_instances(db, compartment: str) -> list:
         inst["deployed_by"] = meta.get("deployed_by")
         inst["workgroup"] = meta.get("workgroup") or inst.get("workgroup")
         inst["suspend_warning"] = meta.get("suspend_warning")
+        # OCI calls them freeform tags; `_instance_to_dict` already carries the raw
+        # dict, which unmanaged discovery reads. This is the render-ready form.
+        inst["tags"] = tag_policy.normalise(inst.get("tags"), "oci")
     full = OCIInstanceListResponse(instances=instances, compartment_ocid=compartment, region=_region())
     await cache_service.set(_cache_key("oci_instances", compartment), full.model_dump(), ttl=60)
     return instances
@@ -371,6 +375,16 @@ async def _oci_instances_unfiltered(db, compartment: str) -> list:
     if cached:
         return (cached.get("data") or {}).get("instances") or []
     return await _build_oci_instances(db, compartment)
+
+
+async def cached_tags_by_name() -> dict:
+    """``{lowercased display name: freeform-tag chips}`` from the instance cache.
+    **Never fetches.** See api/aws.py::cached_tags_by_name for why this is cache-only.
+    """
+    cached = await cache_service.get(_cache_key("oci_instances", _compartment()))
+    rows = ((cached or {}).get("data") or {}).get("instances") or []
+    return {(r.get("display_name") or "").lower(): r.get("tags") or []
+            for r in rows if r.get("display_name")}
 
 
 # ── Instances this dashboard did not deploy ──────────────────────────────────

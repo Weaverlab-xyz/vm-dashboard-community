@@ -1,0 +1,43 @@
+{#
+  Tag / label / attribute chips for one row.
+
+  `expr` is the Alpine expression naming the chip ARRAY on the row — the shape
+  services/tag_policy.normalise() returns: [{key, value, cls, tone, title}]. The server
+  has already classified, coloured and sorted them, so this is presentation only.
+
+  Usage:
+    {% from "partials/tag_chips.html" import tag_chips %}
+    {{ tag_chips("inst.tags") }}
+    {{ tag_chips("vm.tags", limit=2) }}
+
+  Two repo-specific constraints this markup is shaped around, both of which have shipped
+  as bugs here before:
+
+  * tests/test_templates_parse.py requires any helper called INSIDE an x-for expression
+    to be defined in the same template file. So the x-for iterates a plain array
+    expression and the global helpers (tagChipClass / tagChipText, static/js/app.js) are
+    called only from :class / x-text bindings, which that test does not scan — the same
+    way statusBadge is already used across pages.
+  * The overflow indicator uses a native `title`, never a popover. A popover inside a
+    table cell with overflow-hidden renders CLIPPED: invisible, but still hit-testable,
+    so it looks like nothing happened. A title attribute cannot be clipped.
+
+  A row with no tags renders nothing at all — no empty container, so it costs no vertical
+  space in a dense table.
+#}
+{% macro tag_chips(expr, limit=3) %}
+<span x-show="({{ expr }} || []).length" x-cloak class="inline-flex flex-wrap items-center gap-1">
+  <template x-for="chip in ({{ expr }} || []).slice(0, {{ limit }})" :key="chip.key">
+    <span class="inline-flex items-center gap-0.5 text-xs px-1.5 py-0.5 rounded max-w-[16rem] truncate"
+          :class="tagChipClass(chip)"
+          :title="chip.title">
+      <span x-show="chip.cls === 'system'" aria-hidden="true" class="opacity-60">&#128274;</span>
+      <span x-text="tagChipText(chip)"></span>
+    </span>
+  </template>
+  <span x-show="({{ expr }} || []).length > {{ limit }}"
+        class="inline-block text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 cursor-help"
+        :title="({{ expr }} || []).slice({{ limit }}).map(c => tagChipText(c)).join('\n')"
+        x-text="'+' + (({{ expr }} || []).length - {{ limit }})"></span>
+</span>
+{% endmacro %}

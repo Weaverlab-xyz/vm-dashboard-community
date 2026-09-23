@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
+{% from "partials/tag_chips.html" import tag_chips %}
 {% block title %}Proxmox VE{% endblock %}
 
 {% block content %}
@@ -252,11 +253,7 @@
                 <button @click="openDetail(vm)"
                         class="text-sm font-medium text-blue-600 hover:text-blue-800 text-left"
                         x-text="vm.name || '—'"></button>
-                <div x-show="vm.tags" class="mt-0.5">
-                  <template x-for="tag in (vm.tags || '').split(';').filter(t => t.trim())" :key="tag">
-                    <span class="inline-block text-xs bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded mr-1" x-text="tag.trim()"></span>
-                  </template>
-                </div>
+                <div class="mt-0.5">{{ tag_chips("vm.tags") }}</div>
               </td>
               <td class="px-4 py-3">
                 <span class="inline-block text-xs font-medium px-2 py-0.5 rounded-full"
@@ -732,7 +729,7 @@ function proxmoxDashboard() {
         list = list.filter(r =>
           (r.name || '').toLowerCase().includes(q) ||
           String(r.vmid).includes(q) ||
-          (r.tags || '').toLowerCase().includes(q)
+          tagMatch(r.tags, q)
         );
       }
       return list;

@@ -667,6 +667,54 @@ function statusBadge(status) {
     return map[status] || 'bg-gray-100 text-gray-600';
 }
 
+// Colours for a `user`-class tag chip, indexed by the `tone` the server computed in
+// services/tag_policy.tone_of. The hash lives in Python so one tag key is one colour on
+// every page; this is a pure lookup table and MUST stay the same length as
+// tag_policy.TONE_COUNT — tests/test_tag_policy.py pins the two together.
+//
+// Blue, green, red, yellow, amber and gray are deliberately absent: this estate already
+// spends them on job state (statusBadge above), power state and expiry. Indigo is the
+// workgroup pill. A tag that borrowed any of them would read as a status.
+window.TAG_TONES = [
+    'bg-teal-50 text-teal-700',
+    'bg-violet-50 text-violet-700',
+    'bg-sky-50 text-sky-700',
+    'bg-orange-50 text-orange-700',
+    'bg-fuchsia-50 text-fuchsia-700',
+    'bg-cyan-50 text-cyan-700',
+];
+
+// One tag chip's colour, from the authority class the server assigned it.
+//   system   — grey, and rendered with a lock: the dashboard depends on this key.
+//   identity — indigo, matching the workgroup pill the cloud pages already show.
+//   user     — the operator's own, coloured by key.
+window.tagChipClass = function (chip) {
+    if (!chip) return 'bg-gray-100 text-gray-600';
+    if (chip.cls === 'system') return 'bg-gray-100 text-gray-500';
+    if (chip.cls === 'identity') return 'bg-indigo-50 text-indigo-700';
+    // A tone the server did not set (or one past the end of this table, i.e. the two
+    // drifted) falls back to a legible neutral rather than rendering an unstyled chip.
+    const tone = window.TAG_TONES[chip.tone];
+    return tone || 'bg-gray-100 text-gray-600';
+};
+
+// "key=value", or just "key" for a tag that genuinely has no value (a Proxmox tag, a
+// vSphere category). Rendering "prod=" for one would invent a value it never had.
+window.tagChipText = function (chip) {
+    if (!chip) return '';
+    return (chip.value === null || chip.value === undefined)
+        ? chip.key : chip.key + '=' + chip.value;
+};
+
+// Does this row match a free-text tag query? Accepts "key" or "key=value", both
+// substring-matched, so typing `env` finds every environment and `env=prod` narrows it.
+// Used by each page's existing filter helper — see templates/aws/index.html.
+window.tagMatch = function (chips, query) {
+    const q = (query || '').trim().toLowerCase();
+    if (!q) return true;
+    return (chips || []).some(c => window.tagChipText(c).toLowerCase().includes(q));
+};
+
 // Display name for a PERMISSION_SCOPES key. The keys are persisted in user/group
 // permission JSON (and bootstrap_entitle_groups.py turns them into Entitle group names),
 // so a scope whose display name has drifted from its key gets an entry here rather than

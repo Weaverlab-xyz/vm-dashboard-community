@@ -18,6 +18,7 @@ from ..services import job_service, workgroup_service, workgroup_override_servic
 from ..services import proxmox_service
 from ..services.proxmox_service import ProxmoxError
 from ..services import hypervisor_view_service
+from ..services import tag_policy
 from .hypervisor_deps import (agent_power_job, conn_in_task, conn_or_error,
                               queue_power_batch)
 
@@ -146,6 +147,12 @@ async def get_resources(
         if accessible is not None:
             if wg is None or wg not in accessible:
                 continue
+        # After the visibility filter, so a row the caller may not see costs nothing.
+        # Live gives a semicolon-joined string, the synced cache gives a JSON list;
+        # normalising here rather than in either producer keeps both contracts intact
+        # (tests/test_hypervisor_view.py pins the projector against the live shape) and
+        # gives the page the same chip list every cloud VM listing binds to.
+        vm["tags"] = tag_policy.normalise(vm.get("tags"), "proxmox")
         out.append(vm)
     return out
 
