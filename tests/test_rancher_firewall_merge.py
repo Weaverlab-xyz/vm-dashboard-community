@@ -475,6 +475,32 @@ def _run_check(domain, external_ip, resolved):
         socket.getaddrinfo = real
 
 
+# ── asserting on the DNS pre-flight message ──────────────────────────────────
+# These parse the hostnames and addresses OUT of the message and compare them by
+# EQUALITY, rather than asking whether the message contains a given substring.
+# Two reasons, and they happen to agree:
+#
+#   * containment is too weak. Asking whether the message merely CONTAINS the
+#     domain also passes on one that only ever mentions a longer name the domain
+#     happens to be a prefix of -- which would tell the operator nothing about
+#     the record they actually have to create.
+#   * CodeQL reads a hostname literal on either side of `in` as an incomplete URL
+#     sanitization check, wherever it appears. Equality is the form it asks for.
+#
+# Pinning the WHOLE set also catches the message naming some other host as well
+# as the right one, which a per-item check would wave through.
+_HOST_RE = re.compile(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+_ADDR_RE = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
+
+
+def _hosts_named(msg):
+    return set(_HOST_RE.findall(msg))
+
+
+def _addrs_named(msg):
+    return set(_ADDR_RE.findall(msg))
+
+
 def test_acme_dns_ok_when_record_points_at_the_node():
     assert _run_check("rancher.example.com", "40.78.191.25", ["40.78.191.25"]) == ""
 
@@ -483,17 +509,17 @@ def test_acme_dns_names_the_record_to_create_when_unresolvable():
     msg = _run_check("rancher.example.com", "40.78.191.25", OSError("NXDOMAIN"))
     assert "does not resolve" in msg
     # The message has to carry BOTH halves of the record the operator must create,
-    # or it is just another "it didn't work". Matched as whole TOKENS rather than
-    # substrings: a plain containment check also passes on a message that only
-    # mentions notrancher.example.com, which would not tell the operator anything.
-    tokens = re.findall(r"[\w.-]+", msg)
-    assert "rancher.example.com" in tokens
-    assert "40.78.191.25" in tokens
+    # or it is just another "it didn't work".
+    assert _hosts_named(msg) == {"rancher.example.com"}
+    assert _addrs_named(msg) == {"40.78.191.25"}
 
 
 def test_acme_dns_rejects_a_record_pointing_elsewhere():
     msg = _run_check("rancher.example.com", "40.78.191.25", ["203.0.113.9"])
-    assert "203.0.113.9" in msg and "40.78.191.25" in msg
+    # Both addresses, so the operator can see what the record says versus where
+    # the node actually is -- naming only one of them explains nothing.
+    assert _addrs_named(msg) == {"203.0.113.9", "40.78.191.25"}
+    assert _hosts_named(msg) == {"rancher.example.com"}
     assert "does not resolve" not in msg
 
 
