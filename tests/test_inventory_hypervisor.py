@@ -101,6 +101,55 @@ def _hv_items(db):
     return [i for i in svc.collect(db) if i["id"].startswith("hv:")]
 
 
+# ── Addresses: `ips` was added beside `ip`, and must not have disturbed it ───
+
+def test_the_connection_address_and_the_executor_still_read_the_raw_list():
+    """`ips` is a FILTERED, canonicalised list for matching Password Safe records. `ip`
+    and `agent_id` must keep reading the raw cache list.
+
+    The hazard is specific: if a link-local address happened to be first in the cache,
+    filtering it out of the list that feeds `routes.executor_for` would silently change
+    which agent executes a Config-Management run against that VM. So the raw first
+    element stays the connection address even when the match list drops it.
+    """
+    db = SessionLocal()
+    try:
+        _reset(db)
+        conn = _conn(db, _agent(db), kind="workstation", name="my-ws")
+        _vm(db, conn, vm_id="AB12", name="win11-lab",
+            ips=["169.254.1.5", "10.0.0.5"])
+        item = _hv_items(db)[0]
+        assert item["ip"] == "169.254.1.5", "the raw first address is the connection one"
+        assert item["ips"] == ["10.0.0.5"], "the match list drops the link-local"
+    finally:
+        db.close()
+
+
+def test_every_synced_address_is_offered_for_matching_not_just_the_first():
+    """A multi-NIC guest is known to Password Safe by whichever address discovery saw."""
+    db = SessionLocal()
+    try:
+        _reset(db)
+        conn = _conn(db, _agent(db), kind="vsphere", name="vc")
+        _vm(db, conn, vm_id="vm-1", name="web01", ips=["10.0.0.5", "10.1.0.9"])
+        assert _hv_items(db)[0]["ips"] == ["10.0.0.5", "10.1.0.9"]
+    finally:
+        db.close()
+
+
+def test_a_synced_vm_has_no_recorded_password_safe_id():
+    """The dashboard did not onboard these, so there is nothing to record — they match
+    on address alone, and the field must be present rather than missing."""
+    db = SessionLocal()
+    try:
+        _reset(db)
+        conn = _conn(db, _agent(db), kind="vsphere", name="vc")
+        _vm(db, conn, vm_id="vm-1", name="web01", ips=["10.0.0.5"])
+        assert _hv_items(db)[0]["ps_system_id"] == ""
+    finally:
+        db.close()
+
+
 # ── The source at all ─────────────────────────────────────────────────────────
 
 def test_a_synced_vm_appears_on_the_inventory():

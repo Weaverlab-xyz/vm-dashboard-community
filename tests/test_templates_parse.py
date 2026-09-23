@@ -143,20 +143,25 @@ def test_inventory_column_count_matches_both_colspans():
     assert thead, "inventory/list.html has no <thead>"
 
     env = Environment()
-    for flag in (True, False):
-        # Render only the fragments that carry the count, so this needs no base template
-        # or Alpine runtime.
-        n_th = len(re.findall(
-            r"<th\b",
-            env.from_string(thead.group(0)).render(resource_expiry_enabled=flag)))
-        colspans = {
-            int(env.from_string("{{ " + expr + " }}").render(resource_expiry_enabled=flag))
-            for expr in re.findall(r'colspan="\{\{([^}]+)\}\}"', src)
-        }
-        # Any literal colspans in the table must match too.
-        colspans |= {int(v) for v in re.findall(r'colspan="(\d+)"', src)}
-        assert colspans == {n_th}, (
-            f"resource_expiry_enabled={flag}: {n_th} <th> but colspan(s) {sorted(colspans)}")
+    # TWO Jinja-gated columns now — Expires and Password Safe — so the combinations are a
+    # 2x2 MATRIX, not a pair. Rendering one flag and leaving the other undefined would
+    # have Jinja resolve it to falsey, so the test would quietly check a single
+    # combination and pass while three others were misaligned.
+    for expiry in (True, False):
+        for ps in (True, False):
+            flags = {"resource_expiry_enabled": expiry, "password_safe_enabled": ps}
+            # Render only the fragments that carry the count, so this needs no base
+            # template or Alpine runtime.
+            n_th = len(re.findall(
+                r"<th\b", env.from_string(thead.group(0)).render(**flags)))
+            colspans = {
+                int(env.from_string("{{ " + expr + " }}").render(**flags))
+                for expr in re.findall(r'colspan="\{\{([^}]+)\}\}"', src)
+            }
+            # Any literal colspans in the table must match too.
+            colspans |= {int(v) for v in re.findall(r'colspan="(\d+)"', src)}
+            assert colspans == {n_th}, (
+                f"{flags}: {n_th} <th> but colspan(s) {sorted(colspans)}")
 
 
 def test_pov_ladder_colspan_matches_the_managed_table():

@@ -93,6 +93,18 @@
            projected from a Job row, which records what the dashboard asked for rather
            than what the provider holds now. So this hides itself on an estate with no
            tagged rows instead of offering an always-empty filter. -->
+      {% if password_safe_enabled %}
+      <div class="flex items-center gap-2" x-show="psAttrKeys().length">
+        <label class="text-sm font-medium text-gray-600">Attribute:</label>
+        <select x-model="filterPsAttr"
+                class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-blue-500">
+          <option value="">All</option>
+          <template x-for="a in psAttrKeys()" :key="a">
+            <option :value="a" x-text="a"></option>
+          </template>
+        </select>
+      </div>
+      {% endif %}
       <div class="flex items-center gap-2" x-show="tagKeys().length">
         <label class="text-sm font-medium text-gray-600">Tag:</label>
         <select x-model="filterTag"
@@ -105,6 +117,32 @@
       </div>
     </div>
   </div>
+
+  {% if password_safe_enabled %}
+  {# Password Safe records nothing here corresponds to — usually a decommissioned host
+     whose record was never cleaned up. ADMIN-ONLY, and the server decides: /inventory is
+     workgroup-filtered rather than admin-gated, and an orphan is by definition a record
+     the row filter cannot vet, so listing one would disclose a machine the caller is not
+     entitled to see on the page above. The API simply omits the key for a non-admin. #}
+  <div x-show="(ps.orphans || []).length" x-cloak class="mb-6">
+    <details class="bg-white rounded-xl border border-gray-200 shadow-sm">
+      <summary class="px-4 py-3 text-sm text-gray-700 cursor-pointer select-none">
+        <span class="font-medium" x-text="(ps.orphans || []).length"></span>
+        Password Safe record(s) match nothing in this inventory
+        <span class="text-gray-400 font-normal">— often a host that was decommissioned without removing it</span>
+      </summary>
+      <div class="border-t border-gray-100 px-4 py-3 space-y-1 max-h-64 overflow-y-auto">
+        <template x-for="o in (ps.orphans || [])" :key="o.kind + o.object_id">
+          <p class="text-xs text-gray-600">
+            <span class="font-medium" x-text="o.name || ('#' + o.object_id)"></span>
+            <span class="text-gray-400" x-text="' · ' + (o.kind === 'asset' ? 'asset' : 'managed system')"></span>
+            <span class="text-gray-400 font-mono" x-text="(o.addresses || []).length ? ' · ' + o.addresses.join(', ') : ' · no address'"></span>
+          </p>
+        </template>
+      </div>
+    </details>
+  </div>
+  {% endif %}
 
   <!-- Bulk Config Management -->
   <div x-show="selected.length > 0" x-cloak
@@ -177,6 +215,19 @@
           <th class="px-4 py-3 font-semibold text-gray-600">State</th>
           <th class="px-4 py-3 font-semibold text-gray-600">Workgroup</th>
           <th class="px-4 py-3 font-semibold text-gray-600">Tags</th>
+          {% if password_safe_enabled %}
+          <th class="px-4 py-3 font-semibold text-gray-600">
+            Password Safe
+            {# One note for the whole column, not one per row: an unreadable endpoint or a
+               permission gap is a TENANT fact and repeating it on forty rows buries it. #}
+            <span x-show="ps.state && ps.state !== 'ok'" x-cloak
+                  class="ml-1 font-normal text-amber-600 cursor-help"
+                  :title="ps.detail || psStateNote()" x-text="psStateNote()"></span>
+            <span x-show="ps.truncated" x-cloak
+                  class="ml-1 font-normal text-amber-600 cursor-help"
+                  :title="'Only the first ' + ps.cap + ' matched records had their attributes read.'">capped</span>
+          </th>
+          {% endif %}
           <th class="px-4 py-3 font-semibold text-gray-600">Deployed By</th>
           <th class="px-4 py-3 font-semibold text-gray-600">Created</th>
           {% if resource_expiry_enabled %}
@@ -189,10 +240,10 @@
         {# Both colspans must track the Expires column or the loading/empty rows
            misalign — the easiest thing in this table to get wrong. #}
         <tr x-show="loading">
-          <td colspan="{{ 12 if resource_expiry_enabled else 11 }}" class="px-4 py-10 text-center text-gray-400">Loading…</td>
+          <td colspan="{{ (11 + (1 if resource_expiry_enabled else 0) + (1 if password_safe_enabled else 0)) }}" class="px-4 py-10 text-center text-gray-400">Loading…</td>
         </tr>
         <tr x-show="!loading && filtered().length === 0">
-          <td colspan="{{ 12 if resource_expiry_enabled else 11 }}" class="px-4 py-10 text-center text-gray-400">No deployed resources found.</td>
+          <td colspan="{{ (11 + (1 if resource_expiry_enabled else 0) + (1 if password_safe_enabled else 0)) }}" class="px-4 py-10 text-center text-gray-400">No deployed resources found.</td>
         </tr>
         <template x-for="r in filtered()" :key="r.id">
           <tr class="group hover:bg-gray-50 transition" :class="isSelected(r) ? 'bg-blue-50' : ''">
@@ -214,6 +265,27 @@
               {{ tag_chips("r.tags", limit=3) }}
               <span x-show="!(r.tags || []).length" class="text-gray-300">–</span>
             </td>
+            {% if password_safe_enabled %}
+            <td class="px-4 py-3 max-w-[260px]">
+              <template x-if="(r.ps || {}).state === 'ok'">
+                <span :title="psBasisNote(r.ps)">{{ tag_chips("r.ps.attributes", limit=3) }}</span>
+              </template>
+              {# "has none" and "we did not look" render identically as a blank cell, and
+                 only one of them is worth acting on — so neither is blank. #}
+              <span x-show="(r.ps || {}).state === 'none'" x-cloak
+                    class="text-xs text-gray-400 italic" :title="psBasisNote(r.ps)">none</span>
+              <span x-show="(r.ps || {}).state === 'not_fetched'" x-cloak
+                    class="text-xs text-gray-400 cursor-help"
+                    :title="'matched, but its attributes were not read this pass'">…</span>
+              <span x-show="(r.ps || {}).state === 'ambiguous'" x-cloak
+                    class="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 cursor-help"
+                    :title="r.ps.detail"
+                    x-text="r.ps.objects.length + ' records'"></span>
+              <span x-show="!r.ps || r.ps.state === 'unmatched'" x-cloak
+                    class="text-gray-300 cursor-help"
+                    :title="(r.ps && r.ps.detail) || 'no Password Safe record matches this resource'">–</span>
+            </td>
+            {% endif %}
             <td class="px-4 py-3 text-gray-500" x-text="r.deployed_by || '–'"></td>
             <td class="px-4 py-3 text-gray-500 text-xs" x-text="timeAgo(r.created_at)"></td>
             {% if resource_expiry_enabled %}
@@ -299,6 +371,8 @@
       filterState: '',
       filterWorkgroup: '',
       filterTag: '',
+      filterPsAttr: '',
+      ps: {},            // the page-level Password Safe envelope
 
       // Bulk Config-Management run
       selected: [],          // inventory ids
@@ -336,6 +410,7 @@
         try {
           const resp = await API.get('/api/inventory');
           this.items = (resp && resp.items) || [];
+          this.ps = (resp && resp.password_safe) || {};
           // The listing carries the warn threshold + mode so the badge and the
           // dashboard's warning read one number; /status adds arming + the floors.
           if (resp && resp.expiry) this.ttl = { ...this.ttl, ...resp.expiry };
@@ -499,6 +574,33 @@
         return [...new Set(this.items.map(i => i.workgroup).filter(Boolean))].sort();
       },
 
+      // Distinct Password Safe ATTRIBUTE keys — the type names (Criticality, Business
+      // Unit, Geography), which is the half a Smart Rule filters on.
+      psAttrKeys() {
+        const keys = new Set();
+        for (const i of this.items)
+          for (const c of ((i.ps || {}).attributes || [])) keys.add(c.key);
+        return [...keys].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+      },
+
+      // One note for the column header when the tenant-level read did not fully work.
+      // Each reads differently on purpose: "not configured" is a settings job, "no API"
+      // is a version fact, and "denied" is a Password Safe role.
+      psStateNote() {
+        return ({ unconfigured: 'not configured', unavailable: 'no API',
+                  forbidden: 'denied', error: 'unavailable' })[this.ps.state] || '';
+      },
+
+      // How this row's match was made, so an exact join is distinguishable from an
+      // address one without reading code.
+      psBasisNote(ps) {
+        if (!ps || !ps.objects || !ps.objects.length) return '';
+        const names = ps.objects.map(o => o.name || (o.kind + ' ' + o.object_id)).join(', ');
+        const how = ps.basis === 'id' ? 'matched by recorded system id' : 'matched by address';
+        const shared = ps.shared_with ? ' — also matched by ' + ps.shared_with + ' other resource(s)' : '';
+        return names + ' (' + how + ')' + shared;
+      },
+
       // Distinct tag KEYS across every row that has any.
       tagKeys() {
         const keys = new Set();
@@ -513,7 +615,9 @@
           (!this.filterRegion || i.region === this.filterRegion) &&
           (!this.filterState || i.state === this.filterState) &&
           (!this.filterWorkgroup || i.workgroup === this.filterWorkgroup) &&
-          (!this.filterTag || (i.tags || []).some(c => c.key === this.filterTag)));
+          (!this.filterTag || (i.tags || []).some(c => c.key === this.filterTag)) &&
+          (!this.filterPsAttr ||
+           (((i.ps || {}).attributes) || []).some(c => c.key === this.filterPsAttr)));
       },
 
       // Every kind inventory_service.collect() can emit. A missing entry is not an

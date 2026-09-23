@@ -25,6 +25,7 @@ from ..database import (CertLab, CloudDatabase, CloudFunction,
                         WorkloadK8sToken)
 from . import config_mgmt_route_service as cmr
 from . import expiry_policy, hypervisor_view_service
+from . import ps_attribute_catalog, vm_suspend_policy
 from . import tag_policy
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,19 @@ def _vm_item(job) -> dict:
         # deploy job records no address — Proxmox/Nutanix store node/vmid instead, and
         # those VMs are configured through their hypervisor GROUP, not individually.
         "ip": meta.get("public_ip") or meta.get("private_ip") or "",
+        # EVERY usable address, for matching against records in another product — as
+        # opposed to `ip` above, which names the ONE address Ansible connects on and must
+        # keep meaning exactly that. `wired_address` leads because it is the address this
+        # VM's wire-up actually wrote into PRA, Entitle and Password Safe, and it
+        # reconstructs itself for rows written before the field existed.
+        "ips": ps_attribute_catalog.addr_list(
+            vm_suspend_policy.wired_address(job.job_type, meta),
+            meta.get("private_ip"), meta.get("public_ip")),
+        # The exact Password Safe managed system this VM was onboarded into, recorded by
+        # ps_vm_hook at registration. An exact key beats an address: the plugin-onboarded
+        # systems carry a 127.0.0.1 placeholder and a packed locator, so they have no
+        # usable address at all and this is the only thing that finds them.
+        "ps_system_id": str(meta.get("ps_managed_system_id") or ""),
         "detail_href": href,
     }
 
@@ -487,6 +501,15 @@ def _hv_item(conn, row, workgroup: Optional[str], ips: list,
         "source": expiry_policy.SYNCED_HYPERVISOR_SOURCE,
         "job_id": None,
         "ip": ips[0] if ips else "",
+        # The whole list, not `ips[0]`. A multi-NIC guest is known to Password Safe by
+        # whichever address its discovery saw, which need not be the first one here.
+        # Filtered and canonicalised — but note `ip` and `agent_id` below deliberately
+        # keep reading the RAW list: if a link-local happened to be ips[0], dropping it
+        # here would silently change which agent executes a Config-Management run.
+        "ips": ps_attribute_catalog.addr_list(ips),
+        # Synced hypervisor VMs are not onboarded by the dashboard, so there is no
+        # recorded system id for them — they match on address alone.
+        "ps_system_id": "",
         "detail_href": _HV_PAGES.get(kind, "/connections"),
         # Which agent, if any, can reach this VM — and which connection it was synced from.
         # `_target_spec` needs both: a VM behind an agent-bound connection is on a network

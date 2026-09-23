@@ -95,6 +95,48 @@ def test_vm_item_carries_its_expiry():
     assert it["expires_at"] == exp.isoformat()
 
 
+# ── Addresses: `ips` was ADDED beside `ip`, which must not have moved ────────
+
+def test_the_ansible_connection_address_is_unchanged():
+    """`ip` is what Ansible connects on and what `_target_spec` resolves an executor
+    from. Adding `ips` for Password Safe matching must not have altered which single
+    address it names — public first, private second, as it has always been."""
+    it = svc._vm_item(_job(metadata_dict={"public_ip": "1.2.3.4", "private_ip": "10.0.0.4"}))
+    assert it["ip"] == "1.2.3.4"
+    it = svc._vm_item(_job(metadata_dict={"private_ip": "10.0.0.4"}))
+    assert it["ip"] == "10.0.0.4"
+    assert svc._vm_item(_job(metadata_dict={}))["ip"] == ""
+
+
+def test_ips_carries_every_usable_address_not_just_the_one_ansible_uses():
+    """Password Safe knows a host by whichever address its onboarding or discovery saw,
+    which is often the private one — the opposite of `ip`'s preference."""
+    it = svc._vm_item(_job(metadata_dict={"public_ip": "1.2.3.4", "private_ip": "10.0.0.4"}))
+    assert set(it["ips"]) == {"1.2.3.4", "10.0.0.4"}
+
+
+def test_the_wired_address_leads_the_match_list():
+    """It is the address the wire-up actually wrote into Password Safe, so it is the one
+    most likely to match. Recorded, not inferred."""
+    it = svc._vm_item(_job(metadata_dict={"wired_address": "10.0.0.9",
+                                          "public_ip": "1.2.3.4", "private_ip": "10.0.0.4"}))
+    assert it["ips"][0] == "10.0.0.9"
+
+
+def test_a_placeholder_address_never_reaches_the_match_list():
+    """127.0.0.1 is on every plugin-onboarded managed system; matching on it would show
+    one VM another VM's attributes."""
+    it = svc._vm_item(_job(metadata_dict={"private_ip": "127.0.0.1"}))
+    assert it["ips"] == []
+
+
+def test_the_recorded_password_safe_system_id_is_carried():
+    """The exact join key, written by ps_vm_hook at onboarding."""
+    it = svc._vm_item(_job(metadata_dict={"ps_managed_system_id": 42}))
+    assert it["ps_system_id"] == "42"
+    assert svc._vm_item(_job(metadata_dict={}))["ps_system_id"] == ""
+
+
 def test_vm_item_region_fallbacks():
     cases = {
         "azure_deploy":   ("location", "azure", "/azure#vms"),
