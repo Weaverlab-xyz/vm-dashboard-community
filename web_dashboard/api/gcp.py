@@ -36,6 +36,7 @@ from .auth import require_admin, require_permission
 from ..services import vm_suspend_policy
 from ..services import tag_policy
 from . import unmanaged
+from . import tag_batch
 from .power_batch import queue_power_batch
 
 logger = logging.getLogger(__name__)
@@ -1012,6 +1013,54 @@ async def cached_tags_by_name() -> dict:
     rows = ((cached or {}).get("data") or {}).get("instances") or []
     return {(r.get("instance_name") or "").lower(): r.get("tags") or []
             for r in rows if r.get("instance_name")}
+
+
+# ── Tags (GCE calls them labels) ──────────────────────────────────────────────
+
+class TagTarget(BaseModel):
+    instance_name: str
+    zone: str = ""
+
+
+class TagEditRequest(BaseModel):
+    """One edit, applied to every target. The per-VM editor posts a list of one."""
+    targets: List[TagTarget]
+    add: dict = {}
+    remove: List[str] = []
+
+
+@router.post("/instances/tags", summary="Add or remove labels across a selection")
+async def edit_instance_labels(
+    payload: TagEditRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("gcp", "write")),
+):
+    """Apply one label edit to one or many GCE instances.
+
+    GCE labels are lowercase-only and reject a colon; `tag_policy.validate_edit` refuses
+    an illegal key up front with a sentence naming the rule, so an operator who typed
+    `Env=Prod` learns why rather than collecting a provider 400 per VM.
+    """
+    project_id = _gcp_project()
+    if not project_id:
+        raise HTTPException(status_code=400,
+                            detail="GCP project ID not configured — run the setup wizard.")
+
+    # The zone is part of a GCE instance's identity, not an attribute of it. A target
+    # that omits it falls back to the configured zone, exactly as the power path does.
+    async def _apply(target: TagTarget):
+        return await gcp_service.update_tags(project_id, target.zone or _gcp_zone(),
+                                             target.instance_name,
+                                             payload.add, payload.remove)
+
+    result = await tag_batch.apply_tag_edit(
+        db, cloud="gcp", targets=payload.targets,
+        add=payload.add, remove=payload.remove,
+        apply_one=_apply, label_of=lambda t: t.instance_name,
+        created_by=current_user.username)
+
+    await cache_service.invalidate(instances_cache_key(project_id))
+    return result
 
 
 # ── Power (start / suspend) ──────────────────────────────────────────────────

@@ -47,6 +47,7 @@ from .auth import require_permission
 from ..services import vm_suspend_policy
 from ..services import tag_policy
 from . import unmanaged
+from . import tag_batch
 from .power_batch import queue_power_batch
 
 logger = logging.getLogger(__name__)
@@ -583,6 +584,49 @@ async def _fan_out_batch(
         names=names,
     )
 
+
+
+# ── Tags (OCI calls them freeform tags) ───────────────────────────────────────
+
+class TagTarget(BaseModel):
+    instance_ocid: str
+
+
+class TagEditRequest(BaseModel):
+    """One edit, applied to every target. The per-VM editor posts a list of one."""
+    targets: List[TagTarget]
+    add: dict = {}
+    remove: List[str] = []
+
+
+@router.post("/instances/tags", summary="Add or remove freeform tags across a selection")
+async def edit_instance_tags(
+    payload: TagEditRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("oci", "write")),
+):
+    """Apply one freeform-tag edit to one or many OCI instances.
+
+    Only freeform tags. Defined tags live in a tenancy namespace with its own
+    permissions and nothing in this dashboard writes them — see
+    `oci_service._update_tags_sync`.
+
+    The OCID travels in the BODY rather than the path for the reason `BulkPowerRequest`
+    records: this module binds an OCID with a greedy `:path` converter, which would
+    swallow a `/tags` suffix whole.
+    """
+    async def _apply(target: TagTarget):
+        return await oci_service.update_tags(target.instance_ocid,
+                                             payload.add, payload.remove)
+
+    result = await tag_batch.apply_tag_edit(
+        db, cloud="oci", targets=payload.targets,
+        add=payload.add, remove=payload.remove,
+        apply_one=_apply, label_of=lambda t: t.instance_ocid,
+        created_by=current_user.username)
+
+    await cache_service.invalidate(_cache_key("oci_instances", _compartment()))
+    return result
 
 
 # ── Power (start / suspend) ──────────────────────────────────────────────────

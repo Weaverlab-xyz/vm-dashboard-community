@@ -2280,6 +2280,53 @@ async def set_workgroup_tag(region: str, instance_id: str, workgroup: str) -> No
         raise AWSError("AWS credentials not configured.")
 
 
+def _update_tags_sync(region: str, instance_id: str, add: dict, remove: list) -> tuple:
+    """Apply an operator's tag edit to one instance. Returns ``(before, after)``.
+
+    Reads first so the caller can audit what actually changed rather than what was
+    requested — ``create_tags`` is an upsert, so "add" silently covers an overwrite and
+    the old value would otherwise be unrecoverable.
+
+    Deletes before it adds. The two never overlap (the route rejects a key present in
+    both), but ordering it this way means a key that somehow appears in each ends up
+    SET rather than absent, which is the recoverable direction to be wrong in.
+
+    ``after`` is computed rather than re-read: EC2 tags are eventually consistent, so a
+    second describe can legitimately return the pre-write state and would report the
+    edit as having silently failed.
+    """
+    ec2 = _get_ec2(region)
+    resp = ec2.describe_instances(InstanceIds=[instance_id])
+    reservations = resp.get("Reservations") or []
+    instances = (reservations[0].get("Instances") or []) if reservations else []
+    if not instances:
+        raise AWSError(f"No such instance in {region}: {instance_id}")
+    before = {t["Key"]: t["Value"] for t in instances[0].get("Tags", [])}
+
+    if remove:
+        ec2.delete_tags(Resources=[instance_id],
+                        Tags=[{"Key": k} for k in remove])
+    if add:
+        ec2.create_tags(Resources=[instance_id],
+                        Tags=[{"Key": k, "Value": v} for k, v in add.items()])
+
+    after = {k: v for k, v in before.items() if k not in set(remove or [])}
+    after.update(add or {})
+    return before, after
+
+
+async def update_tags(region: str, instance_id: str, add: dict, remove: list) -> tuple:
+    """Merge an operator's tag edit into an EC2 instance. Returns ``(before, after)``."""
+    try:
+        return await _to_thread(_update_tags_sync, region, instance_id, add, remove)
+    except AWSError:
+        raise
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to update tags on {instance_id}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
 def _set_desktop_pool_tag_sync(region: str, instance_id: str, pool_name: str) -> None:
     ec2 = _get_ec2(region)
     ec2.create_tags(

@@ -46,6 +46,7 @@ from .auth import require_admin, require_permission
 from ..services import vm_suspend_policy
 from ..services import tag_policy
 from . import unmanaged
+from . import tag_batch
 from .power_batch import queue_power_batch
 
 from pydantic import BaseModel
@@ -976,6 +977,78 @@ async def reassign_instance_workgroup(
 
     await cache_service.invalidate(instances_cache_key())
     return {"instance_id": instance_id, "workgroup": canonical, "job_id": job.id if job else None}
+
+
+# ── Tags ──────────────────────────────────────────────────────────────────────
+
+class TagTarget(BaseModel):
+    instance_id: str
+
+
+class TagEditRequest(BaseModel):
+    """One edit, applied to every target. The per-VM editor posts a list of one."""
+    targets: List[TagTarget]
+    add: dict = {}
+    remove: List[str] = []
+
+
+def _instance_regions(db: Session, instance_ids: set) -> dict:
+    """``{instance_id: region}`` from the deploy jobs, for the ids asked about.
+
+    Resolved per instance rather than from ``aws_region`` config, unlike the older
+    reassign route beside this: deploys have been region-scoped since multi-region
+    landed, so a VM in us-west-2 on an install defaulting to us-east-2 would otherwise
+    get an ``InvalidInstanceID.NotFound`` for a tag edit that is perfectly valid. The
+    same resolution ``_fetch_instances`` does.
+    """
+    default_region = _aws_region()
+    out = {}
+    for job in db.query(Job).filter(Job.job_type == "ec2_deploy").all():
+        meta = job.metadata_dict
+        iid = meta.get("instance_id")
+        if iid and iid in instance_ids:
+            out[iid] = meta.get("region") or default_region
+    return out
+
+
+@router.post("/instances/tags", summary="Add or remove tags across a selection")
+async def edit_instance_tags(
+    payload: TagEditRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("aws", "write")),
+):
+    """Apply one tag edit to one or many EC2 instances.
+
+    Gated on the existing `aws:write`, deliberately not on a new `tags` scope:
+    api/auth.py records that adding a scope silently revokes it for everyone, because
+    nothing is stored against a key nobody has been granted yet.
+    """
+    regions = _instance_regions(db, {t.instance_id for t in payload.targets})
+
+    async def _apply(target: TagTarget):
+        region = regions.get(target.instance_id)
+        if not region:
+            # No deploy job means this dashboard did not create it. Refused for the same
+            # reason unmanaged_vms.assert_not_unmanaged refuses a destroy: the listing
+            # this edit is launched from only ever shows VMs we deployed, so reaching
+            # here means an API caller aimed at somebody else's instance.
+            raise HTTPException(
+                status_code=404,
+                detail=f"{target.instance_id} is not an instance this dashboard deployed")
+        return await aws_service.update_tags(region, target.instance_id,
+                                             payload.add, payload.remove)
+
+    result = await tag_batch.apply_tag_edit(
+        db, cloud="aws", targets=payload.targets,
+        add=payload.add, remove=payload.remove,
+        apply_one=_apply, label_of=lambda t: t.instance_id,
+        created_by=current_user.username)
+
+    # The listing cache holds the old chips for up to its TTL otherwise. Process-local,
+    # so a sibling gunicorn worker can still serve the previous tags for that minute —
+    # the same staleness every other mutation here has, and not worth a shared bus.
+    await cache_service.invalidate(instances_cache_key())
+    return result
 
 
 # ── Terminate ─────────────────────────────────────────────────────────────────

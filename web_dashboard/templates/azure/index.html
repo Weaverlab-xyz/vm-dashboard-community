@@ -2,6 +2,7 @@
 {% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 {% from "partials/secret_picker.html" import secret_picker %}
 {% from "partials/tag_chips.html" import tag_chips %}
+{% from "partials/tag_editor.html" import tag_editor %}
 {% block title %}Azure{% endblock %}
 
 {% block content %}
@@ -282,6 +283,8 @@
         </span>
         <div class="flex items-center gap-2">
           {{ bulk_power_buttons(['start', 'stop'], {'stop': 'Suspend'}) }}
+          <button @click="openTagEditorSelected()"
+                  class="px-2.5 py-1 text-xs font-medium rounded-lg bg-white border border-blue-300 text-blue-700 hover:bg-blue-50">Edit tags</button>
           <button @click="clearSelection()" class="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
         </div>
       </div>
@@ -361,6 +364,9 @@
                   <span x-show="!pendingPower.has(vm.name)">Suspend</span>
                   <span x-show="pendingPower.has(vm.name)" x-cloak>Suspending…</span>
                 </button>
+                <button @click="openTagEditor([vm])"
+                        class="text-blue-600 hover:text-blue-800 font-medium text-xs"
+                        title="Add or remove tags on this VM">Tags</button>
                 <button @click="openCreateImageModal(vm)"
                         class="text-green-600 hover:text-green-800 font-medium text-xs">Save Image</button>
                 <button @click="confirmDestroyVM(vm)"
@@ -1565,6 +1571,8 @@
   </div>
   {% endif %}
 
+  {{ tag_editor("tag") }}
+
 </div>
 {% endblock %}
 
@@ -1599,6 +1607,8 @@ function azureDashboard() {
     selectedVmIds: [],
     selectAll: false,
     ...bulkPowerState(),
+    ...tagEditState(),
+    tagEditUrl: '/api/azure/instances/tags',
     bulkPowerUrl: '/api/azure/power/bulk',
     // A deallocate is not a power cut. The shared sentence talks about unsaved work
     // being lost; what actually happens is the compute bill stops and the disks stay.
@@ -2585,6 +2595,18 @@ function azureDashboard() {
     // endpoint and the deploy job both key on.
     _bulkPowerTarget(vm) {
       return { vm_name: vm.name };
+    },
+
+    // Tag-editor seams. Separate from the bulk-power ones above because the
+    // route's payload is its own: see window.tagEditState in app.js.
+    _tagTarget(vm) {
+      return { vm_name: vm.name };
+    },
+
+    // What the tag route calls this VM back, so a per-VM result can be matched
+    // to the row it came from. Must equal the route's `label_of`.
+    _tagLabel(vm) {
+      return String(vm.name || '');
     },
 
     // Azure's `state` is the display_status of the PowerState/* code, so the values are

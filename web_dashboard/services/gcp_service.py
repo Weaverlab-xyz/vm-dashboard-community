@@ -1186,6 +1186,49 @@ def _set_workgroup_label_sync(project_id: str, zone: str, instance_name: str, wo
         pass
 
 
+def _update_labels_sync(project_id: str, zone: str, instance_name: str,
+                        add: dict, remove: list) -> tuple:
+    """Apply an operator's label edit to one instance. Returns ``(before, after)``.
+
+    Carries ``label_fingerprint`` for the same reason ``_set_workgroup_label_sync``
+    does: Compute Engine uses it for optimistic concurrency, and a set_labels without
+    it — or with a stale one — is rejected rather than silently clobbering a concurrent
+    edit. Read and write are therefore one fingerprint apart, which is the point.
+    """
+    _require_compute()
+    from google.cloud import compute_v1
+
+    creds = _gcp_creds()
+    client = compute_v1.InstancesClient(credentials=creds)
+    info = client.get(project=project_id, zone=zone, instance=instance_name)
+    before = dict(info.labels) if info.labels else {}
+    after = {k: v for k, v in before.items() if k not in set(remove or [])}
+    after.update(add or {})
+    if after == before:
+        return before, after
+    req = compute_v1.InstancesSetLabelsRequest(
+        labels=after, label_fingerprint=info.label_fingerprint)
+    op = client.set_labels(project=project_id, zone=zone, instance=instance_name,
+                          instances_set_labels_request_resource=req)
+    # Unlike the workgroup writer beside this, a failure here is NOT swallowed: that one
+    # is a best-effort side effect of an admin reassign whose real record is the Job row,
+    # while this IS the operator's edit and reporting success for a rejected fingerprint
+    # would show the new chips until the next refresh silently put the old ones back.
+    op.result(timeout=30)
+    return before, after
+
+
+async def update_tags(project_id: str, zone: str, instance_name: str,
+                      add: dict, remove: list) -> tuple:
+    """Merge an operator's label edit into a GCE instance. Returns ``(before, after)``.
+
+    Named ``update_tags`` rather than ``update_labels`` so the four clouds present one
+    name to the route layer — GCE's ``tags`` are network tags and are not this.
+    """
+    return await _to_thread(_update_labels_sync, project_id, zone, instance_name,
+                            add, remove)
+
+
 async def set_workgroup_label(project_id: str, zone: str, instance_name: str, workgroup: str) -> None:
     """Rewrite the `workgroup` label on a GCE instance (preserves other labels).
     Used by the admin reassign endpoint."""

@@ -931,6 +931,40 @@ def _list_all_instances_sync(compartment_id: str) -> list[dict]:
     return results
 
 
+def _update_tags_sync(instance_ocid: str, add: dict, remove: list) -> tuple:
+    """Apply an operator's freeform-tag edit to one instance. Returns ``(before, after)``.
+
+    Read-modify-write: ``UpdateInstanceDetails(freeform_tags=...)`` REPLACES the whole
+    map, so sending only the edited keys would drop every other tag — including the
+    ``managed-by`` the dashboard's own discovery and /costs select on.
+
+    Only ``freeform_tags`` is touched. ``defined_tags`` live in a tenancy-level namespace
+    with its own permissions, nothing in this dashboard writes them, and a caller who
+    named one would otherwise get a confusing partial success.
+    """
+    import oci
+    compute = oci.core.ComputeClient(_oci_config())
+    inst = compute.get_instance(instance_ocid).data
+    before = dict(getattr(inst, "freeform_tags", None) or {})
+    after = {k: v for k, v in before.items() if k not in set(remove or [])}
+    after.update(add or {})
+    if after != before:
+        compute.update_instance(
+            instance_ocid,
+            oci.core.models.UpdateInstanceDetails(freeform_tags=after))
+    return before, after
+
+
+async def update_tags(instance_ocid: str, add: dict, remove: list) -> tuple:
+    """Merge an operator's tag edit into an OCI instance. Returns ``(before, after)``."""
+    try:
+        return await _to_thread(_update_tags_sync, instance_ocid, add, remove)
+    except OCIError:
+        raise
+    except Exception as e:
+        raise OCIError(f"Failed to update tags on {instance_ocid}: {e}") from e
+
+
 async def list_all_instances(compartment_id: str = "") -> list[dict]:
     """Every non-terminated OCI instance in the compartment, dashboard-deployed or not."""
     return await _to_thread(_list_all_instances_sync, compartment_id or _compartment())

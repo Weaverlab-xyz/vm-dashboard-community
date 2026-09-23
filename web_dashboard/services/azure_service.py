@@ -1730,6 +1730,35 @@ def _set_tag_sync(cred, sub_id: str, rg: str, vm_name: str, key: str, value: str
     compute.virtual_machines.begin_update(rg, vm_name, {"tags": tags}).result()
 
 
+def _update_tags_sync(cred, sub_id: str, rg: str, vm_name: str,
+                      add: dict, remove: list) -> tuple:
+    """Apply an operator's tag edit to one VM. Returns ``(before, after)``.
+
+    Read-modify-write, because an Azure VM update replaces the whole tag collection —
+    sending only the edited keys would delete every other tag on the resource. Same
+    reason ``_set_workgroup_tag_sync`` and ``_set_tag_sync`` above read first.
+    """
+    compute = _get_compute(cred, sub_id)
+    vm = compute.virtual_machines.get(rg, vm_name)
+    before = dict(vm.tags or {})
+    after = {k: v for k, v in before.items() if k not in set(remove or [])}
+    after.update(add or {})
+    if after != before:
+        compute.virtual_machines.begin_update(rg, vm_name, {"tags": after}).result()
+    return before, after
+
+
+async def update_tags(rg: str, vm_name: str, add: dict, remove: list) -> tuple:
+    """Merge an operator's tag edit into an Azure VM. Returns ``(before, after)``."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(_update_tags_sync, cred, sub_id, rg, vm_name, add, remove)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to update tags on {vm_name}: {e}") from e
+
+
 async def set_desktop_pool_tag(rg: str, vm_name: str, pool_name: str) -> None:
     """Tag an Azure VM as a member of a virtual-desktop pool (VDI Phase 1) so the
     pool's live state is recoverable from the cloud. Tag key is
