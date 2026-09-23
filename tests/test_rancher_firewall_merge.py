@@ -53,11 +53,13 @@ def _cfg_set(key, value):
 _APPLIED = {}
 
 
-async def _fake_ensure_rancher_firewall(project_id, network, tag, source_cidrs, name):
+async def _fake_ensure_rancher_firewall(project_id, network, tag, source_cidrs, name,
+                                        *, acme_open=False):
     _APPLIED["called"] = True
     _APPLIED["source_cidrs"] = list(source_cidrs)
     _APPLIED["name"] = name
-    return {"name": name, "opened": bool(source_cidrs)}
+    _APPLIED["acme_open"] = acme_open
+    return {"name": name, "opened": bool(source_cidrs), "acme_open": acme_open}
 
 
 # ── database stub: K8sCluster + a fake query returning our rows ───────────────
@@ -399,6 +401,95 @@ def test_generate_admin_password_strong_and_distinct():
     assert len(a) >= 12 and a != b
     assert any(c.islower() for c in a) and any(c.isupper() for c in a)
     assert any(c.isdigit() for c in a) and any(c in string.punctuation for c in a)
+
+
+# ── ACME: the port-80 opening is separate from the source set ─────────────────
+# A TLS-inspecting proxy verifies the ORIGIN certificate, so a self-signed node is
+# unreachable from a browser whatever the allow-list says. The fix is a real
+# certificate, and its HTTP-01 challenge cannot be source-restricted -- Let's
+# Encrypt validates from addresses it does not publish. What must NOT happen is
+# that widening for the challenge also widens 443, so these pin the two apart.
+
+def test_acme_off_by_default_leaves_port_80_closed():
+    _reset(rancher_allowed_source_cidrs="203.0.113.4/32")
+    _run_refresh(rows=[])
+    assert _APPLIED["acme_open"] is False
+
+
+def test_acme_domain_opens_http01_without_touching_the_source_set():
+    _reset(rancher_allowed_source_cidrs="203.0.113.4/32",
+           rancher_acme_domain="rancher.example.com")
+    _run_refresh(rows=[])
+    assert _APPLIED["acme_open"] is True
+    # 0.0.0.0/0 must NOT have leaked into the set that governs 443.
+    assert _APPLIED["source_cidrs"] == ["203.0.113.4/32"]
+
+
+def test_acme_open_does_not_defeat_fail_closed():
+    # An empty merged set still closes the management ports. ACME opening 80 for a
+    # challenge is not "the node is reachable" -- `opened` stays False.
+    _reset(rancher_acme_domain="rancher.example.com")
+    res = _run_refresh(rows=[])
+    assert _APPLIED["source_cidrs"] == []
+    assert res["opened"] is False
+    assert _APPLIED["acme_open"] is True
+
+
+def test_acme_domain_is_normalised_and_reported_in_status():
+    _reset(rancher_acme_domain="  Rancher.Example.COM  ")
+    assert svc._acme_domain() == "rancher.example.com"
+    status = svc.firewall_status(_FakeDB([]))
+    assert status["acme_domain"] == "rancher.example.com"
+    assert status["acme_http01_open"] is True
+
+
+def test_container_args_carry_acme_domain_only_when_set():
+    _reset()
+    assert svc._container_args() == ()
+    _reset(rancher_acme_domain="rancher.example.com")
+    assert svc._container_args() == ("--acme-domain", "rancher.example.com")
+
+
+# ── the DNS pre-flight: a wrong A record must fail LOUDLY, before the wait ────
+
+def _run_check(domain, external_ip, resolved):
+    """Run check_acme_dns with name resolution stubbed to return ``resolved``.
+
+    ``socket.getaddrinfo`` is what ``loop.getaddrinfo`` delegates to in an
+    executor, so stubbing it there leaves the real async path under test.
+    """
+    import socket
+    mns = svc.managed_node_service
+
+    def _fake(host, port, *a, **k):
+        if isinstance(resolved, Exception):
+            raise resolved
+        return [(socket.AF_INET, None, None, None, (ip, 0)) for ip in resolved]
+
+    real = socket.getaddrinfo
+    socket.getaddrinfo = _fake
+    try:
+        return asyncio.run(mns.check_acme_dns(mns.RANCHER, domain, external_ip))
+    finally:
+        socket.getaddrinfo = real
+
+
+def test_acme_dns_ok_when_record_points_at_the_node():
+    assert _run_check("rancher.example.com", "40.78.191.25", ["40.78.191.25"]) == ""
+
+
+def test_acme_dns_names_the_record_to_create_when_unresolvable():
+    msg = _run_check("rancher.example.com", "40.78.191.25", OSError("NXDOMAIN"))
+    assert "does not resolve" in msg
+    # The message has to carry BOTH halves of the record the operator must create,
+    # or it is just another "it didn't work".
+    assert "rancher.example.com" in msg and "40.78.191.25" in msg
+
+
+def test_acme_dns_rejects_a_record_pointing_elsewhere():
+    msg = _run_check("rancher.example.com", "40.78.191.25", ["203.0.113.9"])
+    assert "203.0.113.9" in msg and "40.78.191.25" in msg
+    assert "does not resolve" not in msg
 
 
 if __name__ == "__main__":

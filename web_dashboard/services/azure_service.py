@@ -2623,6 +2623,10 @@ _NODE_DATA_DEVICE = f"/dev/disk/azure/scsi1/lun{_NODE_DATA_LUN}"
 #: default deny.
 _NODE_RULE_NAME = "allow-mgmt"
 _NODE_RULE_PRIORITY = 300
+# Port 80 from anywhere, for the node's built-in Let's Encrypt HTTP-01 challenge.
+# Separate from the rule above so the management ports stay source-restricted.
+_NODE_ACME_RULE_NAME = "allow-acme-http01"
+_NODE_ACME_RULE_PRIORITY = 310
 
 
 def container_node_cloud_init(docker_cmd: str, *, data_device: str = "",
@@ -2659,7 +2663,8 @@ def container_node_cloud_init(docker_cmd: str, *, data_device: str = "",
 
 
 def _ensure_node_nsg_sync(cred, sub_id: str, rg: str, location: str, name: str,
-                          ports: list, source_cidrs: list) -> dict:
+                          ports: list, source_cidrs: list,
+                          acme_open: bool = False) -> dict:
     """Converge the node's NSG on ``source_cidrs`` for ``ports``.
 
     Fail-closed is DELETING the allow rule rather than writing an empty one: an NSG
@@ -2677,10 +2682,11 @@ def _ensure_node_nsg_sync(cred, sub_id: str, rg: str, location: str, name: str,
     try:
         network.network_security_groups.get(rg, name)
     except Exception:
-        if not source_cidrs:
+        if not source_cidrs and not acme_open:
             # Nothing to open and nothing to close. Creating the group here would leave
             # litter behind on an install that never finishes a deploy.
-            return {"name": name, "id": "", "opened": False, "created": False}
+            return {"name": name, "id": "", "opened": False, "created": False,
+                    "acme_open": False}
         network.network_security_groups.begin_create_or_update(
             rg, name, {"location": location, "tags": tags}).result()
         created = True
@@ -2703,17 +2709,44 @@ def _ensure_node_nsg_sync(cred, sub_id: str, rg: str, location: str, name: str,
         except Exception as exc:  # noqa: BLE001 — already absent is the desired state
             logger.info("node NSG %s: no allow rule to remove (%s)", name, exc)
 
+    # The ACME challenge rule is its own rule at its own priority so that the
+    # source-restricted rule above keeps owning 443 unchanged. Priority is BELOW it
+    # (higher number = evaluated later); they do not overlap, but keeping the
+    # restricted rule first means a future deny never sits between them by accident.
+    if acme_open:
+        network.security_rules.begin_create_or_update(rg, name, _NODE_ACME_RULE_NAME, {
+            "protocol": "Tcp",
+            "source_address_prefix": "Internet",
+            "source_port_range": "*",
+            "destination_address_prefix": "*",
+            "destination_port_range": "80",
+            "access": "Allow",
+            "direction": "Inbound",
+            "priority": _NODE_ACME_RULE_PRIORITY,
+            "description": "vm-dashboard managed node: Let's Encrypt HTTP-01 challenge",
+        }).result()
+    else:
+        try:
+            network.security_rules.begin_delete(rg, name, _NODE_ACME_RULE_NAME).result()
+        except Exception as exc:  # noqa: BLE001 — already absent is the desired state
+            logger.debug("node NSG %s: no ACME rule to remove (%s)", name, exc)
+
     nsg = network.network_security_groups.get(rg, name)
-    return {"name": name, "id": nsg.id, "opened": bool(source_cidrs), "created": created}
+    return {"name": name, "id": nsg.id, "opened": bool(source_cidrs), "created": created,
+            "acme_open": bool(acme_open)}
 
 
 async def ensure_node_nsg(rg: str, location: str, *, name: str, ports: list,
-                          source_cidrs: list) -> dict:
-    """Converge a managed node's inbound NSG rule. Fail-closed on an empty set."""
+                          source_cidrs: list, acme_open: bool = False) -> dict:
+    """Converge a managed node's inbound NSG rule. Fail-closed on an empty set.
+
+    ``acme_open`` adds a second rule opening port 80 to the Internet for an ACME
+    HTTP-01 challenge, leaving the source-restricted rule's hold on 443 intact.
+    """
     try:
         cred, sub_id = await _ensure_creds()
         return await _to_thread(_ensure_node_nsg_sync, cred, sub_id, rg, location,
-                                name, list(ports), list(source_cidrs))
+                                name, list(ports), list(source_cidrs), acme_open)
     except AzureError:
         raise
     except Exception as e:

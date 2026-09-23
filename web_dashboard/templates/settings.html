@@ -5350,6 +5350,14 @@
                      placeholder="auto-detected on deploy (e.g. 198.51.100.7/32)">
               <p class="text-[11px] text-gray-400 mt-1">The dashboard reaches the node over its <strong>public IP</strong> to bootstrap it, so its own egress must be allowed. Auto-detected + saved on deploy. Corp proxies (Cloudflare WARP) egress from a <strong>pool</strong> of IPs — set the pool's CIDR (e.g. <code>104.28.182.0/24</code>) and it is kept as long as the detected IP falls inside it. Bare IP → <code>/32</code>.</p>
             </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Public certificate domain <span class="text-gray-400 normal-case">(optional — Let's Encrypt)</span></label>
+              <input type="text" x-model="panelCfg.rancher_acme_domain"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="rancher.example.com — blank = self-signed">
+              <p class="text-[11px] text-gray-400 mt-1">Set this when a <strong>TLS-inspecting proxy</strong> (Cloudflare Gateway, Zscaler) sits between you and the node: it verifies the <em>origin</em> certificate and kills the handshake on a self-signed one, so the UI is unreachable from a browser no matter what the firewall allows — and <code>-k</code> / "ignore certificate" cannot help, because the rejection happens upstream of you. Rancher's built-in ACME client then serves a real, <strong>auto-renewing</strong> certificate. Unlike the runner transport, this fixes your <strong>browser</strong> too.</p>
+              <p class="text-[11px] text-amber-600 mt-1">Two conditions: an <strong>A record for this name must already point at the node's external IP</strong> (checked at deploy — the job fails fast naming the record if not), and <strong>port 80 is opened to <code>0.0.0.0/0</code></strong> for the HTTP-01 challenge, permanently, since renewal re-validates. That is a separate rule — <strong>443 stays source-restricted</strong>. The node is then reached <em>by name</em>, not by IP. Let's Encrypt allows 5 certificates per name per week and the node does not persist ACME state, so avoid repeated redeploys.</p>
+            </div>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">API transport</label>
@@ -5406,6 +5414,13 @@
                 </div>
                 <p class="text-gray-400 mt-1" x-show="!(rancherFirewall.cluster_egress_ips && rancherFirewall.cluster_egress_ips.length) && !rancherFirewall.dashboard_egress_ip && !(rancherFirewall.gateway_cidrs && rancherFirewall.gateway_cidrs.length) && !(rancherFirewall.manual_cidrs && rancherFirewall.manual_cidrs.length)">
                   No sources yet — provision a cluster, enable the Web Jump, or add a CIDR above.
+                </p>
+                <!-- The list above governs 443 only once ACME is on. Saying so here is
+                     the difference between an accurate readout and one that implies the
+                     node is source-restricted on every port. -->
+                <p class="text-amber-600 mt-1" x-show="rancherFirewall.acme_http01_open">
+                  Plus <span class="font-mono">tcp 80</span> from <span class="font-mono">0.0.0.0/0</span> — the Let's Encrypt HTTP-01 challenge for
+                  <span class="font-mono" x-text="rancherFirewall.acme_domain"></span>. The sources above still govern <span class="font-mono">443</span>.
                 </p>
               </div>
             </template>
