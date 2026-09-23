@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 {% from "partials/secret_picker.html" import secret_picker %}
+{% from "partials/tag_chips.html" import tag_chips %}
 
 {% block title %}GCP{% endblock %}
 
@@ -235,7 +236,15 @@
   <!-- ── Compute Instances ──────────────────────────────────────────────── -->
   <div x-show="activeTab === 'instances'">
     <div class="flex items-center justify-between mb-3">
-      <div class="flex items-center gap-2" x-show="regions().length > 1">
+      <div class="flex items-center gap-2" x-show="instances.length">
+        <input type="text" x-model="filterTag" placeholder="Filter by label…"
+               title="Matches a label key or key=value, e.g. env or env=prod"
+               class="text-xs border border-gray-300 rounded px-2 py-1 w-36
+                      focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <span class="text-xs text-gray-400"
+              x-text="filteredInstances().length + ' of ' + instances.length"></span>
+      </div>
+      <div class="flex items-center gap-2 ml-3" x-show="regions().length > 1">
         <label class="text-xs text-gray-500">Region:</label>
         <select x-model="filterRegion"
                 class="text-xs border border-gray-300 rounded px-2 py-1 focus:ring-2 focus:ring-blue-500">
@@ -244,8 +253,6 @@
             <option :value="r" x-text="r"></option>
           </template>
         </select>
-        <span class="text-xs text-gray-400"
-              x-text="filteredInstances().length + ' of ' + instances.length"></span>
       </div>
       <button @click="loadInstances(true)"
               class="ml-auto text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1 transition">
@@ -308,6 +315,7 @@
                 <span class="text-xs text-gray-400 font-mono" x-text="inst.machine_type"></span>
                 <span class="text-xs text-gray-400" x-text="inst.zone"></span>
               </div>
+              <div class="mt-1">{{ tag_chips("inst.tags") }}</div>
               <div class="flex flex-wrap gap-x-4 gap-y-0.5 mt-0.5">
                 <span class="text-xs text-gray-500" x-text="inst.private_ip ? '🔒 ' + inst.private_ip : '—'"></span>
                 <span x-show="inst.public_ip" class="text-xs text-blue-600" x-text="'🌐 ' + inst.public_ip"></span>
@@ -1601,6 +1609,7 @@ function gcpDashboard() {
           + 'disks keep billing, and it can be started again later.',
     },
     filterRegion:    '',
+    filterTag:       '',
     credError:       '',
     toast:           '',
     toastType:       'success',
@@ -2163,7 +2172,9 @@ function gcpDashboard() {
     },
 
     filteredInstances() {
-      return this.instances.filter(i => !this.filterRegion || i.region === this.filterRegion);
+      return this.instances.filter(i =>
+        (!this.filterRegion || i.region === this.filterRegion) &&
+        tagMatch(i.tags, this.filterTag));
     },
 
     async loadInstances(bust = false) {

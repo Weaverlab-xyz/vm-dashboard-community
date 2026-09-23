@@ -44,6 +44,7 @@ from ..services import aws_service, deploy_batch, job_service, cache_service, cl
 from ..services.aws_service import AWSError
 from .auth import require_admin, require_permission
 from ..services import vm_suspend_policy
+from ..services import tag_policy
 from . import unmanaged
 from .power_batch import queue_power_batch
 
@@ -355,6 +356,11 @@ async def _fetch_instances(db: Session) -> list:
             "job_id": job.id if job else None,
             "deployed_by": job.created_by if job else None,
             "suspend_warning": warn or None,
+            # The raw EC2 Tags dict is already on `live` and is spread in above; this
+            # OVERWRITES it with the render-ready chip list the page binds to. It has
+            # to be an overwrite rather than an addition: `tags` on the response model
+            # is a list, and the spread would hand pydantic a dict.
+            "tags": tag_policy.normalise(live.get("tags"), "aws"),
         })
     return result
 
@@ -380,6 +386,20 @@ async def _fetch_instances_fresh() -> list:
         return await _fetch_instances(s)
     finally:
         s.close()
+
+async def cached_tags_by_name() -> dict:
+    """``{lowercased instance name: tag chips}`` from the instance cache. **Never fetches.**
+
+    For /inventory's Tags column. That page is a cheap DB aggregation and must stay one,
+    so this reads the cache this module's listing already fills and returns ``{}`` on a
+    miss — a cold worker shows no tags rather than turning /inventory into four cloud
+    fan-outs. The startup warmer fills it per process.
+    """
+    cached = await cache_service.get(instances_cache_key())
+    rows = (cached or {}).get("data") or []
+    return {(r.get("name") or "").lower(): r.get("tags") or []
+            for r in rows if r.get("name")}
+
 
 # ── VMs this dashboard did not deploy ────────────────────────────────────────
 

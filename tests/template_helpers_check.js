@@ -40,6 +40,34 @@ function extractFn(file, name) {
   return eval('(' + src.slice(start, end + 1) + ')');
 }
 
+// Third sibling of extract()/extractFn(), for the `window.name = function (...) {}`
+// form. app.js writes its newer globals that way, so neither the method-shaped anchor
+// nor the `function name()` one can see them.
+function extractWindowAssigned(file, name) {
+  const src = fs.readFileSync(T + file, 'utf8');
+  const re = new RegExp(String.raw`\nwindow\.` + name + String.raw`\s*=\s*function\s*\([^)]*\)\s*\{`);
+  const m = re.exec(src);
+  if (!m) throw new Error(file + ': window.' + name + ' = function not found');
+  const start = m.index + m[0].indexOf('function');
+  let depth = 0, end = -1;
+  for (let j = src.indexOf('{', start); j < src.length; j++) {
+    if (src[j] === '{') depth++;
+    else if (src[j] === '}') { depth--; if (depth === 0) { end = j; break; } }
+  }
+  return eval('(' + src.slice(start, end + 1) + ')');
+}
+
+// The tag helpers, hoisted to real globals BEFORE any page helper is exercised.
+// Every cloud page's filter now calls the bare global `tagMatch`, exactly as it does in
+// the browser (app.js defines it on window, and an unqualified call finds it there) —
+// the same arrangement as `global.timeUntil` further down. Without this, every
+// filteredInstances/filteredVms assertion below dies on a ReferenceError rather than
+// testing anything, which is how this first reached CI.
+global.window = global.window || {};
+global.window.tagChipText = extractWindowAssigned('../static/js/app.js', 'tagChipText');
+global.tagChipText = global.window.tagChipText;
+global.tagMatch = extractWindowAssigned('../static/js/app.js', 'tagMatch');
+
 let fail = 0;
 const ok = (n, c) => { console.log((c ? 'ok   ' : 'FAIL ') + n); if (!c) fail++; };
 
@@ -65,6 +93,74 @@ for (const [file, fn, arr, field] of [
      build(file, fn, {[arr]:rows, [key]:''})[fn]().length === 4);
   ok(file+' '+fn+'() filters to r1',
      build(file, fn, {[arr]:rows, [key]:'r1'})[fn]().length === 2);
+}
+
+// ── The tag filter on each VM listing ────────────────────────────────────────
+//
+// Every cloud page folds `tagMatch` into the filter helper it already had, so these run
+// against the real merged predicate rather than against tagMatch alone — a page that
+// wires the region filter and the tag filter together with the wrong operator still
+// passes a test of tagMatch on its own.
+const TAGGED = (extra) => [
+  Object.assign({tags: [{key:'env', value:'prod'}, {key:'owner', value:'cw'}]}, extra),
+  Object.assign({tags: [{key:'env', value:'dev'}]}, extra),
+  // A valueless tag, which is what a Proxmox tag and a vSphere category are, and an
+  // untagged row — the two shapes most likely to throw rather than simply not match.
+  Object.assign({tags: [{key:'bare', value:null}]}, extra),
+  Object.assign({tags: []}, extra),
+  Object.assign({}, extra),
+];
+
+for (const [file, fn, arr] of [
+  ['aws/index.html','filteredInstances','instances'],
+  ['gcp/index.html','filteredInstances','instances'],
+  ['azure/index.html','filteredVms','vms'],
+  ['oci/index.html','filteredInstances','instances'],
+]) {
+  const st = (tag) => build(file, fn, {[arr]: TAGGED({region:'r1', location:'r1'}),
+                                       filterRegion:'', filterLocation:'', filterTag: tag});
+  ok(file+' '+fn+'() unset tag filter returns all', st('')[fn]().length === 5);
+  ok(file+' '+fn+'() matches a bare key', st('env')[fn]().length === 2);
+  ok(file+' '+fn+'() matches key=value', st('env=prod')[fn]().length === 1);
+  ok(file+' '+fn+'() key=wrongvalue matches nothing', st('env=nope')[fn]().length === 0);
+  ok(file+' '+fn+'() matches a valueless tag by key', st('bare')[fn]().length === 1);
+  ok(file+' '+fn+'() is case-insensitive', st('ENV=PROD')[fn]().length === 1);
+  ok(file+' '+fn+'() drops untagged rows when a tag is set', st('env')[fn]().every(r => r.tags));
+}
+
+// The region and tag filters must AND, not replace one another — the whole reason these
+// run through the page's own helper.
+{
+  const rows = [{region:'r1', tags:[{key:'env', value:'prod'}]},
+                {region:'r2', tags:[{key:'env', value:'prod'}]},
+                {region:'r1', tags:[{key:'env', value:'dev'}]}];
+  const f = (r, t) => build('aws/index.html','filteredInstances',
+    {instances: rows, filterRegion: r, filterTag: t}).filteredInstances();
+  ok('aws filteredInstances() ANDs region and tag', f('r1','env=prod').length === 1);
+  ok('aws filteredInstances() region alone still works', f('r1','').length === 2);
+  ok('aws filteredInstances() tag alone still works', f('','env=prod').length === 2);
+}
+
+// Inventory filters on the tag KEY from a dropdown, not on free text: an estate has a
+// handful of keys and thousands of values.
+{
+  const rows = [{cloud:'aws', kind:'vm', tags:[{key:'pci', value:'yes'}]},
+                {cloud:'proxmox', kind:'vm', tags:[{key:'pci', value:null}]},
+                {cloud:'gcp', kind:'vm', tags:[{key:'env', value:'prod'}]},
+                {cloud:'workstation', kind:'vm'}];
+  const base = {items: rows, filterProvider:'', filterKind:'', filterRegion:'',
+                filterState:'', filterWorkgroup:'', filterTag:''};
+  const f = (t) => build('inventory/list.html','filtered',
+    Object.assign({}, base, {filterTag: t})).filtered();
+  ok('inventory filtered() unset tag returns all', f('').length === 4);
+  ok('inventory filtered() one key spans providers', f('pci').length === 2);
+  ok('inventory filtered() narrows to one row', f('env').length === 1);
+  ok('inventory filtered() an untagged row is excluded', f('pci').every(r => r.tags));
+  ok('inventory tagKeys() is distinct and sorted',
+     JSON.stringify(build('inventory/list.html','tagKeys',{items: rows}).tagKeys())
+     === JSON.stringify(['env','pci']));
+  ok('inventory tagKeys() is empty when nothing is tagged',
+     build('inventory/list.html','tagKeys',{items:[{cloud:'aws'}]}).tagKeys().length === 0);
 }
 
 for (const [file, fn, arr, field] of [

@@ -34,6 +34,7 @@ from ..services import cache_service, cloud_stats, deploy_batch, job_service, re
 from ..services import gcp_service
 from .auth import require_admin, require_permission
 from ..services import vm_suspend_policy
+from ..services import tag_policy
 from . import unmanaged
 from .power_batch import queue_power_batch
 
@@ -380,6 +381,9 @@ async def _build_gcp_instances(db, project_id: str) -> list:
             inst["workgroup"] = meta.get("workgroup") or inst.get("workgroup")
             inst["suspend_warning"] = meta.get("suspend_warning")
             inst["region"] = inst.get("region") or region
+            # GCE calls them labels. The service hands over the raw dict; the page
+            # binds to the classified chip list.
+            inst["tags"] = tag_policy.normalise(inst.get("tags"), "gcp")
             instances.append(inst)
 
     full = GCPInstanceListResponse(instances=instances, project_id=project_id, zone=_gcp_zone())
@@ -995,6 +999,19 @@ def destroy_instance(
 
 
 
+
+
+async def cached_tags_by_name() -> dict:
+    """``{lowercased instance name: label chips}`` from the instance cache. **Never fetches.**
+    See api/aws.py::cached_tags_by_name for why this is cache-only.
+    """
+    project_id = _gcp_project()
+    if not project_id:
+        return {}
+    cached = await cache_service.get(instances_cache_key(project_id))
+    rows = ((cached or {}).get("data") or {}).get("instances") or []
+    return {(r.get("instance_name") or "").lower(): r.get("tags") or []
+            for r in rows if r.get("instance_name")}
 
 
 # ── Power (start / suspend) ──────────────────────────────────────────────────

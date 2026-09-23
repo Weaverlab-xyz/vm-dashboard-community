@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
+{% from "partials/tag_chips.html" import tag_chips %}
 
 {% block title %}OCI{% endblock %}
 
@@ -142,6 +143,14 @@
   <!-- ── Instances ──────────────────────────────────────────────────────── -->
   <div x-show="activeTab === 'instances'">
     <div x-show="instancesLoading" class="text-sm text-gray-400">Loading instances…</div>
+    <div x-show="!instancesLoading && instances.length" class="flex items-center gap-2 mb-3">
+      <input type="text" x-model="filterTag" placeholder="Filter by tag…"
+             title="Matches a freeform-tag key or key=value, e.g. env or env=prod"
+             class="text-xs border border-gray-300 rounded px-2 py-1 w-40
+                    focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <span class="text-xs text-gray-400"
+            x-text="filteredInstances().length + ' of ' + instances.length"></span>
+    </div>
     <!-- Bulk power. A card list has no header row, so select-all sits in the toolbar.
          No workgroup buttons: an OCI instance carries its workgroup as a freeform tag,
          and workgroup_override_service rejects cloud providers — `oci:write` plus the
@@ -164,7 +173,7 @@
     </div>
 
     <div x-show="!instancesLoading" class="space-y-3">
-      <template x-for="inst in instances" :key="inst.ocid">
+      <template x-for="inst in filteredInstances()" :key="inst.ocid">
         <div class="bg-white rounded-xl border border-gray-200 p-4 flex items-center justify-between gap-4">
           <!-- A TERMINATED instance is not selectable: it can neither start nor stop. -->
           <input type="checkbox" :value="_vmKey(inst)" x-model="selectedVmIds"
@@ -172,6 +181,7 @@
                  class="h-4 w-4 rounded border-gray-300 flex-shrink-0">
           <div class="min-w-0 flex-1">
             <p class="text-sm font-medium text-gray-900 truncate" x-text="inst.display_name"></p>
+            <div class="mt-0.5">{{ tag_chips("inst.tags") }}</div>
             <p class="text-xs text-gray-500 mt-0.5">
               <span class="font-mono" x-text="inst.shape"></span>
               <span x-show="inst.ocpus" x-text="' · ' + inst.ocpus + ' OCPU / ' + inst.memory_gb + ' GB'"></span>
@@ -823,6 +833,7 @@ function ociDashboard() {
 
     images: [],
     instances: [],
+    filterTag: '',
     imageFilter: 'all',
     networkOpts: { availability_domains: [], shapes: [], subnets: [], region: '', free_tier: {}, ssh_key_configured: false },
     availableWorkgroups: [],
@@ -964,10 +975,16 @@ function ociDashboard() {
       this.selectAll = false;
     },
 
+    // Distinct-value filter over the freeform tags. This page had no client-side
+    // filter at all before tags; it now has one, and select-all follows it.
+    filteredInstances() {
+      return this.instances.filter(i => tagMatch(i.tags, this.filterTag));
+    },
+
     toggleSelectAll(checked) {
       this.selectAll = checked;
       this.selectedVmIds = checked
-        ? this.instances
+        ? this.filteredInstances()
             .filter(i => i.lifecycle_state !== 'TERMINATED')
             .map(i => this._vmKey(i))
         : [];
@@ -975,10 +992,9 @@ function ociDashboard() {
 
     // ── Bulk power seams ───────────────────────────────────────────────────
     _bulkPowerRows() {
-      // This page renders `instances` directly with no client-side filter, so there is
-      // no filtered collection to prefer — but the seam still exists so the mixin never
-      // has to know which pages filter.
-      return this.instances;
+      // The FILTERED set, not every instance: selecting everything, then narrowing the
+      // filter, then pressing a power button must act on what is on screen.
+      return this.filteredInstances();
     },
 
     // The projection calls it `ocid`; the endpoint's field is `instance_ocid`. Keeping
