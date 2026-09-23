@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 {% from "partials/secret_picker.html" import secret_picker %}
+{% from "partials/tag_chips.html" import tag_chips %}
 {% block title %}Azure{% endblock %}
 
 {% block content %}
@@ -249,11 +250,15 @@
     <div class="bg-white shadow-sm rounded-lg border border-gray-200 overflow-hidden">
       <!-- List filter. Separate from the header location <select>, which scopes
            the deploy form / network options rather than this table. -->
-      <div x-show="!vmsLoading && vmLocations().length > 1"
+      <div x-show="!vmsLoading && vms.length"
            class="flex items-center justify-between px-4 py-2 border-b border-gray-100">
         <div class="flex items-center gap-2">
-          <label class="text-xs text-gray-500">Location:</label>
-          <select x-model="filterLocation"
+          <input type="text" x-model="filterTag" placeholder="Filter by tag…"
+                 title="Matches a tag key or key=value, e.g. env or env=prod"
+                 class="text-xs border border-gray-300 rounded px-2 py-1 w-36
+                        focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <label class="text-xs text-gray-500" x-show="vmLocations().length > 1">Location:</label>
+          <select x-model="filterLocation" x-show="vmLocations().length > 1"
                   class="text-xs border border-gray-300 rounded px-2 py-1 focus:ring-2 focus:ring-blue-500">
             <option value="">All</option>
             <template x-for="loc in vmLocations()" :key="loc">
@@ -306,7 +311,10 @@
                 <input type="checkbox" :value="_vmKey(vm)" x-model="selectedVmIds"
                        class="h-4 w-4 rounded border-gray-300">
               </td>
-              <td class="px-4 py-3 text-sm font-medium text-gray-900" x-text="vm.name"></td>
+              <td class="px-4 py-3 text-sm font-medium text-gray-900">
+                <div x-text="vm.name"></div>
+                <div class="mt-0.5">{{ tag_chips("vm.tags") }}</div>
+              </td>
               <td class="px-4 py-3">
                 <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
                       :class="{
@@ -1600,6 +1608,7 @@ function azureDashboard() {
           + 'is why this does not do one.',
     },
     filterLocation: '',
+    filterTag: '',
     networkOpts: { locations: ['{{ default_location }}'], vm_sizes: [], subnets: [], nsgs: [], ssh_keys: [] },
     networkOptsWarnings: [],
     privateImagesWarnings: [],
@@ -1889,7 +1898,9 @@ function azureDashboard() {
     },
 
     filteredVms() {
-      return this.vms.filter(v => !this.filterLocation || v.location === this.filterLocation);
+      return this.vms.filter(v =>
+        (!this.filterLocation || v.location === this.filterLocation) &&
+        tagMatch(v.tags, this.filterTag));
     },
 
     async loadVMs(bust = false) {

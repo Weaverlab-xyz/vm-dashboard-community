@@ -6,6 +6,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from ..services.vm_naming import MAX_DEPLOY_COUNT
+from .tags import TagChip
 
 
 # ── Azure Image (Gallery image or standalone Managed Image) ──────────────────
@@ -51,6 +52,10 @@ class AzureVMInfo(BaseModel):
     # on whether the private address is PINNED, neither of which the row's other fields
     # reveal. A warning, never a refusal.
     suspend_warning: Optional[str] = None
+    # Tags as the page renders them, already classified and coloured by
+    # services/tag_policy.normalise. The raw provider dict stays in the service
+    # layer, where unmanaged-VM discovery and the workgroup lookup read it.
+    tags: List[TagChip] = []
 
 
 # ── Network options (form dropdowns) ─────────────────────────────────────────

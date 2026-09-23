@@ -664,6 +664,66 @@ in [image-management.md](image-management.md).
 
 ---
 
+## Tags and labels
+
+Every cloud VM listing shows the resource's own tags as chips under its name, and each
+page has a **Filter by tag** box that matches a key (`env`) or a key and value
+(`env=prod`). Filtering narrows select-all and bulk power with it, so a power button
+always acts on what is on screen.
+
+Each platform names the idea differently and the dashboard keeps that vocabulary — the
+chip's tooltip tells you which word applies:
+
+| Platform | What it calls them | Shape |
+|---|---|---|
+| AWS, Azure | tags | key/value |
+| GCP | labels | key/value, **lowercase only**, no colons |
+| OCI | freeform tags | key/value |
+| Proxmox | tags | bare labels, no values |
+| Password Safe | attributes | not surfaced yet |
+| PRA | tag | not surfaced yet |
+
+Chips are coloured by **who owns the tag**, not by which cloud it came from:
+
+- **Grey with a padlock** — the dashboard wrote it and something depends on it.
+  `managed-by` is how `/costs` attributes spend and how unmanaged-VM discovery tells
+  its own VMs from yours; `povEnvironment` is what POV teardown selects on;
+  `dashboard:desktop_pool` is how a virtual-desktop pool finds its seats. Editing one of
+  these in the cloud console will break the thing named in the tooltip.
+- **Indigo** — `workgroup`, which decides who can see the resource. Change it through the
+  reassign action, which validates the workgroup exists, not by hand.
+- **Everything else** — your own, coloured per key. The same key is the same colour on
+  every page and every cloud, so `env` looks the same on `/aws` and `/proxmox`.
+
+A VM with more than three tags shows the first three and a `+N` chip; hover it for the
+rest.
+
+### Filtering the whole estate on one tag
+
+The `/inventory` page has its own **Tags** column and a **Tag** dropdown listing
+every key in the estate, so one selection narrows every provider at once. That is the page
+to use for "show me everything tagged `pci`" across clouds and hypervisors together.
+
+Its cloud rows are built from deploy jobs, which record what the dashboard *asked for*
+rather than what the provider holds now, so their tags are joined in from the per-cloud
+instance caches those consoles already fill. The join is **cache-only** — it never makes a
+cloud call, because /inventory is a cheap database aggregation and must stay one. The
+practical effect: for the first minute after a restart, before the caches warm, cloud rows
+may show no tags. Hypervisor rows are unaffected; they carry their tags natively.
+
+**Where tags do not appear yet.** Among the hypervisors only Proxmox reports tags today —
+vSphere tags, Nutanix categories and XCP-ng tags need reads the remote agent does not
+perform yet, and Hyper-V has no native tag concept. Databases, Kubernetes clusters and
+cloud functions show no tags on Inventory. Password Safe attributes and PRA jump-item tags
+are not read at all yet.
+
+Tags are **read-only** in this release. Adding and removing them from the dashboard is
+the next phase; `workgroup`, `managed-by` and the other load-bearing keys above will stay
+refused there, because a resource that loses one goes on costing money with nothing able
+to find it.
+
+---
+
 ## Lifecycle & troubleshooting
 
 - **Destroy** (`DELETE /api/{cloud}/instances|vms/{id}`) removes the instance, deregisters

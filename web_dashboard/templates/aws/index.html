@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 {% from "partials/secret_picker.html" import secret_picker %}
+{% from "partials/tag_chips.html" import tag_chips %}
 {% block title %}AWS{% endblock %}
 
 {% block content %}
@@ -333,6 +334,10 @@
             </template>
           </select>
         </div>
+        <input type="text" x-model="filterTag" placeholder="Filter by tag…"
+               title="Matches a tag key or key=value, e.g. env or env=prod"
+               class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 w-40
+                      focus:outline-none focus:ring-2 focus:ring-blue-500">
         <span x-show="cachedAtInstances" class="text-xs text-gray-400"
               x-text="'Updated ' + timeAgo(cachedAtInstances)"></span>
         <span class="text-sm text-gray-400"
@@ -411,7 +416,10 @@
                   <span x-text="inst.state"></span>
                 </span>
               </td>
-              <td class="px-4 py-3 font-medium text-gray-800" x-text="inst.name"></td>
+              <td class="px-4 py-3 font-medium text-gray-800">
+                <div x-text="inst.name"></div>
+                <div class="mt-0.5">{{ tag_chips("inst.tags") }}</div>
+              </td>
               <td class="px-4 py-3 font-mono text-xs text-gray-500" x-text="inst.instance_id"></td>
               <td class="px-4 py-3 text-gray-500 text-xs" x-text="inst.instance_type"></td>
               <td class="px-4 py-3 text-gray-500 text-xs" x-text="inst.region || '–'"></td>
@@ -1932,6 +1940,7 @@
       // Instances
       instances: [],
       filterRegion: '',
+      filterTag: '',
       loadingInstances: true,
       cachedAtInstances: null,
       cachedAtAmis: null,
@@ -2239,7 +2248,8 @@
 
       filteredInstances() {
         return this.instances.filter(i =>
-          !this.filterRegion || i.region === this.filterRegion);
+          (!this.filterRegion || i.region === this.filterRegion) &&
+          tagMatch(i.tags, this.filterTag));
       },
 
       async loadDefaultRegion() {

@@ -44,6 +44,7 @@ from ..services import (azure_service, azure_listing, deploy_batch, job_service,
 from ..services.azure_service import AzureError
 from .auth import require_admin, require_permission
 from ..services import vm_suspend_policy
+from ..services import tag_policy
 from . import unmanaged
 from .power_batch import queue_power_batch
 
@@ -647,9 +648,22 @@ async def _fetch_vms(db: Session) -> list:
             "job_id": meta["id"] if meta else None,
             "deployed_by": meta["created_by"] if meta else "unknown",
             "suspend_warning": (meta or {}).get("suspend_warning"),
+            # Overwrites the raw tag dict `**vm` spread in — the response model takes
+            # the chip list, not the provider shape. See api/aws.py for the why.
+            "tags": tag_policy.normalise(vm.get("tags"), "azure"),
         })
     return result
 
+
+
+async def cached_tags_by_name() -> dict:
+    """``{lowercased VM name: tag chips}`` from the VM cache. **Never fetches.**
+    See api/aws.py::cached_tags_by_name for why this is cache-only.
+    """
+    cached = await cache_service.get(cache_service.key_global("azure_vms"))
+    rows = (cached or {}).get("data") or []
+    return {(r.get("name") or "").lower(): r.get("tags") or []
+            for r in rows if r.get("name")}
 
 
 # ── VMs this dashboard did not deploy ────────────────────────────────────────

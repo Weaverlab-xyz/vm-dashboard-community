@@ -134,7 +134,13 @@ def _proxmox(row: dict) -> dict:
         "cpu_cores": row.get("vcpus"),
         # mem_total is bytes on this page; the cache holds MiB.
         "mem_total": (row.get("mem_mib") or 0) * 1024 * 1024 if row.get("mem_mib") else None,
-        "tags": "",
+        # The cache has carried these all along (hypervisor_vm_cache.tags, written by
+        # hypervisor_sync_service._upsert) and this projector threw them away, so every
+        # AGENT-BOUND Proxmox connection rendered the page's tag chips as nothing while
+        # a directly-reachable one showed them. The shapes differ — the cache holds a
+        # JSON list, the live path a semicolon-joined string — and api/proxmox.py runs
+        # both through tag_policy.normalise, which is what that absorbs.
+        "tags": row.get("tags") or [],
         "template": False,
     }
 

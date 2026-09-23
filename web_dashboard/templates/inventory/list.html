@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/tag_chips.html" import tag_chips %}
 {% block title %}Inventory{% endblock %}
 
 {% block content %}
@@ -88,6 +89,20 @@
           </template>
         </select>
       </div>
+      <!-- Only the SYNCED hypervisor rows carry tags: every other item here is
+           projected from a Job row, which records what the dashboard asked for rather
+           than what the provider holds now. So this hides itself on an estate with no
+           tagged rows instead of offering an always-empty filter. -->
+      <div class="flex items-center gap-2" x-show="tagKeys().length">
+        <label class="text-sm font-medium text-gray-600">Tag:</label>
+        <select x-model="filterTag"
+                class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-blue-500">
+          <option value="">All</option>
+          <template x-for="t in tagKeys()" :key="t">
+            <option :value="t" x-text="t"></option>
+          </template>
+        </select>
+      </div>
     </div>
   </div>
 
@@ -161,6 +176,7 @@
           <th class="px-4 py-3 font-semibold text-gray-600">Region</th>
           <th class="px-4 py-3 font-semibold text-gray-600">State</th>
           <th class="px-4 py-3 font-semibold text-gray-600">Workgroup</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">Tags</th>
           <th class="px-4 py-3 font-semibold text-gray-600">Deployed By</th>
           <th class="px-4 py-3 font-semibold text-gray-600">Created</th>
           {% if resource_expiry_enabled %}
@@ -173,10 +189,10 @@
         {# Both colspans must track the Expires column or the loading/empty rows
            misalign — the easiest thing in this table to get wrong. #}
         <tr x-show="loading">
-          <td colspan="{{ 11 if resource_expiry_enabled else 10 }}" class="px-4 py-10 text-center text-gray-400">Loading…</td>
+          <td colspan="{{ 12 if resource_expiry_enabled else 11 }}" class="px-4 py-10 text-center text-gray-400">Loading…</td>
         </tr>
         <tr x-show="!loading && filtered().length === 0">
-          <td colspan="{{ 11 if resource_expiry_enabled else 10 }}" class="px-4 py-10 text-center text-gray-400">No deployed resources found.</td>
+          <td colspan="{{ 12 if resource_expiry_enabled else 11 }}" class="px-4 py-10 text-center text-gray-400">No deployed resources found.</td>
         </tr>
         <template x-for="r in filtered()" :key="r.id">
           <tr class="group hover:bg-gray-50 transition" :class="isSelected(r) ? 'bg-blue-50' : ''">
@@ -194,6 +210,10 @@
                     :class="stateBadge(r.state)" x-text="r.state"></span>
             </td>
             <td class="px-4 py-3 text-gray-500" x-text="r.workgroup || '–'"></td>
+            <td class="px-4 py-3 max-w-[260px]">
+              {{ tag_chips("r.tags", limit=3) }}
+              <span x-show="!(r.tags || []).length" class="text-gray-300">–</span>
+            </td>
             <td class="px-4 py-3 text-gray-500" x-text="r.deployed_by || '–'"></td>
             <td class="px-4 py-3 text-gray-500 text-xs" x-text="timeAgo(r.created_at)"></td>
             {% if resource_expiry_enabled %}
@@ -278,6 +298,7 @@
       filterRegion: '',
       filterState: '',
       filterWorkgroup: '',
+      filterTag: '',
 
       // Bulk Config-Management run
       selected: [],          // inventory ids
@@ -478,13 +499,21 @@
         return [...new Set(this.items.map(i => i.workgroup).filter(Boolean))].sort();
       },
 
+      // Distinct tag KEYS across every row that has any.
+      tagKeys() {
+        const keys = new Set();
+        for (const i of this.items) for (const c of (i.tags || [])) keys.add(c.key);
+        return [...keys].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+      },
+
       filtered() {
         return this.items.filter(i =>
           (!this.filterProvider || i.cloud === this.filterProvider) &&
           (!this.filterKind || i.kind === this.filterKind) &&
           (!this.filterRegion || i.region === this.filterRegion) &&
           (!this.filterState || i.state === this.filterState) &&
-          (!this.filterWorkgroup || i.workgroup === this.filterWorkgroup));
+          (!this.filterWorkgroup || i.workgroup === this.filterWorkgroup) &&
+          (!this.filterTag || (i.tags || []).some(c => c.key === this.filterTag)));
       },
 
       // Every kind inventory_service.collect() can emit. A missing entry is not an

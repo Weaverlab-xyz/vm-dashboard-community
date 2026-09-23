@@ -1085,6 +1085,11 @@ def _describe_instances_sync(project_id: str, zone: str, instance_names: list[st
                 "self_link":     info.self_link,
                 "creation_timestamp": info.creation_timestamp or "",
                 "workgroup":     labels.get("workgroup") or None,
+                # The whole label dict, not just the workgroup read out of it. The
+                # aggregated listing below (_list_all_instances_sync) has always
+                # carried it; this path dropped it, so the managed GCE listing was the
+                # only cloud VM listing with no labels to show.
+                "tags":          labels,
             })
         except Exception as exc:
             logger.warning("Could not describe GCE instance %s: %s", name, exc)
