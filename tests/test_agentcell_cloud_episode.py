@@ -486,19 +486,47 @@ def test_a_lease_longer_than_the_wait_is_refused_rather_than_slept_through():
     assert "--cloud-max-wait" in out and "TTL" in out
 
 
-def test_release_is_refused_on_a_cloud_that_cannot_revoke():
-    """Refused at the door rather than attempted: `revoke_lease` on AWS comes back
-    `lease_not_revocable`, and a run that reported a release would tell a room a live
-    credential had been withdrawn."""
+def test_a_release_asked_for_on_aws_is_downgraded_loudly_not_silently():
+    """Two things have to be true at once here, and only one of them is obvious.
+
+    An AWS lease cannot be released — `revoke_lease` comes back `lease_not_revocable`,
+    and a run that reported a release would tell a room a live credential had been
+    withdrawn. So the release must not happen.
+
+    But this is only discoverable AFTER the mint, because the cloud is derived from the
+    payload rather than taken as a flag — and by then the issuance has been billed.
+    Exiting would throw away a credential somebody paid for to punish a flag. So the
+    episode ends with the expiry instead and **says so**; what it must never do is
+    switch endings quietly.
+    """
     m = _worker()
-    _stub_episode(m, probes=[_ALIVE, _DEAD])
-    try:
-        _run(m, _cloud_args(cloud_end_with="release"))
-    except SystemExit as exc:
-        assert "cannot be released" in str(exc)
-        assert "TTL is the only control" in str(exc)
-    else:
-        raise AssertionError("a release was accepted on AWS")
+    log = _stub_episode(m, probes=[_ALIVE, _DEAD])
+    code, out = _run(m, _cloud_args(cloud_end_with="release"))
+    assert code == 0, out
+    assert log["revoke"] == 0, "a release was attempted against AWS"
+    assert "CANNOT be released" in out, "the downgrade is silent"
+    assert "Ending with the expiry instead" in out, \
+        "the run does not say which ending it actually used"
+    assert "TTL is the only control" in out, \
+        "the downgrade reads as a workaround rather than as the provider's limit"
+
+
+def test_no_deny_probe_is_not_a_failed_refusal():
+    """`--cloud-deny-probe none` is a supported choice: this worker cannot read the
+    dynamic secret's role, so an operator may have no limit to assert.
+
+    Exit 4 means "something that should have refused did not". Returning it for a probe
+    that was never run would report that about nothing — and `cloud_probe_summary`
+    already says, in the run's own output, that it proves authentication and not scope.
+    """
+    m = _worker()
+    quiet = {"cloud": "aws", "authenticated": True, "proved": False,
+             "deny_probe": "none", "identity": "arn:aws:sts::1:assumed-role/ci/x"}
+    _stub_episode(m, probes=[quiet, _DEAD])
+    code, out = _run(m, _cloud_args(cloud_deny_probe="none"))
+    assert code == 0, f"a run with no refusal asked for exited {code}\n{out}"
+    assert "ALL this run proves" in out, \
+        "the run passed without saying it proved authentication and not scope"
 
 
 def test_the_azure_release_reprobes_with_a_fresh_token():

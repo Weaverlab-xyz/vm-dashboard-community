@@ -2053,13 +2053,22 @@ def run_cloud_episode(args) -> int:
     # Azure only, and only when asked for. The default on BOTH clouds is to wait out the
     # expiry: it is the one ending that exists everywhere, and having the demo end the
     # same way on both is worth more than the thirty seconds a release saves.
+    #
+    # DOWNGRADED RATHER THAN REFUSED, and only because of where this can be checked. The
+    # cloud is derived from the minted PAYLOAD -- deliberately, so a flag can never
+    # disagree with what came back -- which means this is the earliest point it is known,
+    # and by now the issuance has happened and been billed. Exiting here would throw away
+    # a credential somebody paid for in order to punish a flag, and prove nothing with
+    # it. So it says loudly what it is doing instead; the one thing it must not do is
+    # switch endings quietly.
     end_with = args.cloud_end_with
     if end_with == "release" and not cloud_revocable(cloud):
-        raise SystemExit(
-            f"[agent] FATAL: --cloud-end-with release, but an {cloud} lease cannot be "
-            "released — STS will not withdraw a credential it has already signed. On "
-            f"{cloud} the TTL is the only control there is, which is why a short one "
-            "matters more here, not less. Use --cloud-end-with expiry.")
+        end_with = "expiry"
+        print(f"[agent] {spiffe_id} · --cloud-end-with release was asked for, and an "
+              f"{cloud} lease CANNOT be released — STS will not withdraw a credential it "
+              f"has already signed. Ending with the expiry instead. This is not a "
+              f"workaround: on {cloud} the TTL is the only control there is, which is "
+              f"why a short one matters more here, not less · {_now()}", flush=True)
 
     result = _cloud_probe(args, minted)
     print(f"[agent] {spiffe_id} · {cloud_probe_summary(result)} · {_now()}", flush=True)
@@ -2104,7 +2113,13 @@ def run_cloud_episode(args) -> int:
               "credential was allowed to do — the dynamic secret's own definition in "
               "Workload Credentials decides that, and this worker cannot read it.",
               flush=True)
-    return 0 if result.get("proved") else 4
+    # `proved` is False under `--cloud-deny-probe none`, and that is not a failure: no
+    # refusal was asked for, so none failing to refuse is not an outcome. Returning 4
+    # there would report the one thing 4 means -- something that should have refused did
+    # not -- about a probe that was never run. `cloud_probe_summary` has already said
+    # the run proves authentication and not scope, which is the honest report of it.
+    return 0 if (result.get("proved")
+                 or result.get("deny_probe") == "none") else 4
 
 
 def _wait_out_the_lease(minted: dict, max_wait: int, spiffe_id: str) -> bool:
