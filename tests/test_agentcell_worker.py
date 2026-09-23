@@ -242,6 +242,9 @@ def test_the_wlc_path_matches_the_providers_grammar():
         "the static-secret path dropped its /static/ endpoint segment. "
         "workload_credentials_service.read_static builds /site/{id}/secrets/static/{name} "
         "and that is the path a live site answered")
+    assert '/secrets/dynamic/{quote(dynamic_name)}/generate' in code, (
+        "the dynamic-secret path no longer mirrors workload_credentials_service."
+        "generate's /dynamic/{name}/generate")
 
 
 def test_the_worker_refuses_wlc_mode_with_missing_configuration():

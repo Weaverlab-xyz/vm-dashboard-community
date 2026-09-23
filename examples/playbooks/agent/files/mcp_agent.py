@@ -80,6 +80,18 @@ that asks for access to a cluster and cannot proceed until somebody says yes.
 Exit codes are that demo's punctuation: 0 proved the scope, 3 was never approved, 4 means
 a refusal did not refuse -- the one outcome that would otherwise look like success.
 
+AND ONE THAT MINTS RATHER THAN RETRIEVES. ``--cloud-episode`` asks Workload Credentials
+for a short-lived AWS or Azure credential against a **dynamic secret**, proves it is
+scoped, and then proves it ends. It is the only mode here with no Password Safe in the
+chain, no human in the loop, and a **price**: WC bills per issuance, so one run is one
+charge and nothing retries.
+
+Its ending is the interesting part and it is not a revoke. An AWS lease cannot be
+withdrawn -- STS will not take back a credential it has signed -- so the closing beat is
+a real wait for real expiry and a re-probe. The cloud play ships the same rule for the
+same reason: a run that faked the clock would prove it can print a failure message, not
+that the credential died. ``3`` is never returned by this mode, because nobody was asked.
+
 EXITS NON-ZERO ON 401, DELIBERATELY. The revoke is the demo's closing beat, so the
 worker must visibly stop rather than log a warning and keep polling -- systemd then
 shows a failed unit, which is the thing to point at.
@@ -148,6 +160,12 @@ TOKEN_RE = re.compile(r"vmcli_[0-9a-fA-F]{8,}")
 # error body is not this worker's decision, so anything credential-shaped is removed on
 # the way out rather than trusted not to appear.
 JWT_SCRUB_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*")
+# An AWS access key ID, which AWS's own error bodies quote back at you. Only the ID:
+# a secret access key is forty unmarked base64-ish characters with nothing to anchor a
+# pattern on, so it CANNOT be scrubbed and must never reach a string that gets printed.
+# That is a structural rule rather than a regex, and a test on captured stdout is what
+# enforces it — see tests/test_agentcell_cloud_episode.
+AWS_KEY_RE = re.compile(r"\b(?:ASIA|AKIA)[0-9A-Z]{16}\b")
 
 
 def scrub(text: str) -> str:
@@ -157,9 +175,14 @@ def scrub(text: str) -> str:
     cluster probes hand a ServiceAccount token to an API server the same way. What either
     puts in an error repr is not this worker's decision, so the values are removed on the
     way OUT, at the one place error text becomes a log line.
+
+    **This function is a backstop, not the defence.** It can only remove what has a
+    shape; an AWS secret access key has none. The cloud episode's rule is that credential
+    values never reach a printed string in the first place.
     """
     out = TOKEN_RE.sub("vmcli_<redacted>", text or "")
-    return JWT_SCRUB_RE.sub("<jwt redacted>", out)
+    out = JWT_SCRUB_RE.sub("<jwt redacted>", out)
+    return AWS_KEY_RE.sub("<aws key id redacted>", out)
 
 
 def token_label(label: str) -> str:
@@ -1006,6 +1029,634 @@ def cert_probe_summary(result: dict) -> str:
             "not seeing the certificate this agent presented")
 
 
+# ── The cloud half: a dynamic secret, minted by the thing that spends it ─────
+#
+# THE ONE EPISODE HERE THAT NEVER TOUCHES PASSWORD SAFE, and the difference is the whole
+# argument. The other two reach the vault: WC hands over the Password Safe client pair
+# and the vault releases a credential it has always held. Here Workload Credentials is
+# not a bootstrap for anything -- it MINTS, against a dynamic secret, and the credential
+# did not exist a second before this worker asked for it.
+#
+# What that buys over a key in a CI secret store is the three properties
+# docs/workload-lab/cloud.md names as the ones nobody chose: it expires, the issuance is
+# recorded against THIS workload, and nothing sits on the host between runs.
+#
+# WHAT IT DOES NOT BUY IS SCOPE. `services/workload_cloud_service` states it plainly --
+# "THE SCOPE IS NOT DEFINED HERE" -- because the dynamic secret's own definition in WC
+# decides which role is assumed and what it may do. The dashboard cannot widen or narrow
+# it and neither can this worker. So unlike `PROBES` above, whose allow/deny pair is
+# derived from a profile the dashboard chose, the deny probe here is an ASSERTION THE
+# OPERATOR MAKES about a role this code cannot see. `cloud_probe_summary` says so.
+#
+# AND IT COSTS MONEY. WC bills per issuance. One `generate` per run of this episode, and
+# nothing retries it -- a worker looping on this is a cost problem before it is an audit
+# one.
+
+# Which clouds can release a lease before it expires. Restated rather than imported,
+# because this file takes no dashboard dependency; pinned equal to
+# `services/workload_cloud_service._REVOCABLE_CLOUDS` by test.
+#
+# AWS is absent and that is a provider fact: STS will not withdraw a credential it has
+# already signed, so there the TTL is the only control there is.
+_REVOCABLE_CLOUDS = frozenset({"azure"})
+
+# What a mint hands back per cloud, as field NAMES. The cloud is DERIVED from this shape
+# rather than taken as a flag -- a flag could disagree with the payload, and a run that
+# signed an Azure secret as an AWS key would fail as a signature error, which is the one
+# failure this episode must never confuse with a refusal.
+_CREDENTIAL_SHAPE = {
+    "aws": ("access_key_id", "secret_access_key", "session_token"),
+    "azure": ("client_id", "client_secret", "tenant_id"),
+}
+
+
+def cloud_revocable(cloud: str) -> bool:
+    """Whether this cloud's leases can be released early. See `_REVOCABLE_CLOUDS`."""
+    return (cloud or "").strip().lower() in _REVOCABLE_CLOUDS
+
+
+def _wlc_first(mapping: dict, *names: str):
+    """First present, non-empty value among ``names``. Mirrors
+    ``workload_credentials_service._first``."""
+    for name in names:
+        val = mapping.get(name)
+        if val not in (None, ""):
+            return val
+    return None
+
+
+def _parse_expiry_epoch(value) -> float:
+    """A lease expiry as a UNIX epoch, or 0.0 if unreadable.
+
+    The same ISO forms ``workload_credentials_service.parse_expiration`` accepts,
+    including a trailing ``Z``. Returns 0.0 rather than raising, and the caller treats
+    that as "no expiry to wait for" -- which is a refusal, not a pass, because an episode
+    whose closing beat is expiry cannot prove anything without knowing when that is.
+    """
+    if value in (None, ""):
+        return 0.0
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def parse_generated_payload(payload) -> dict:
+    """Normalise a ``generate`` response. A MIRROR of
+    ``services/workload_credentials_service.parse_generated``, never an import.
+
+    Restated for the same reason `read_wlc_secret` restates the path grammar: this file
+    runs on somebody else's VM and takes no dashboard dependency. A test pins the two
+    against a shared fixture table, which is what keeps a mirror from drifting into a
+    guess.
+
+    Both of the upstream tolerances are reproduced deliberately, because they come from
+    BeyondTrust's own GitHub Action rather than from taste: field names arrive in
+    **camelCase or PascalCase**, and ``leaseId``/``expiration`` may sit on the ``secret``
+    object or at the response root. The published docs disagree with each other on both.
+
+    Returns ``{"values", "lease_id", "expires_at", "expires_epoch", "cloud"}``.
+    """
+    if not isinstance(payload, dict):
+        raise SystemExit("[agent] FATAL: Workload Credentials returned "
+                         f"{type(payload).__name__} from generate, expected a JSON object.")
+
+    secret = payload.get("secret")
+    if not isinstance(secret, dict):
+        # Some shapes put the credential at the root. Accept that, but only when it looks
+        # like a credential -- otherwise the refusal below says far more than a dict of
+        # metadata masquerading as one would.
+        secret = payload if any(
+            k in payload for k in ("accessKeyId", "AccessKeyId", "clientId", "ClientId")
+        ) else {}
+
+    lease_id = (_wlc_first(secret, "leaseId", "LeaseId")
+                or _wlc_first(payload, "leaseId", "LeaseId"))
+    expiration = (_wlc_first(secret, "expiration", "Expiration")
+                  or _wlc_first(payload, "expiration", "Expiration"))
+
+    access_key = _wlc_first(secret, "accessKeyId", "AccessKeyId")
+    client_id = _wlc_first(secret, "clientId", "ClientId")
+
+    if access_key:
+        cloud = "aws"
+        values = {
+            "access_key_id": access_key,
+            "secret_access_key": _wlc_first(secret, "secretAccessKey", "SecretAccessKey"),
+            "session_token": _wlc_first(secret, "sessionToken", "SessionToken"),
+        }
+        optional = ()
+    elif client_id:
+        cloud = "azure"
+        values = {
+            "client_id": client_id,
+            "client_secret": _wlc_first(secret, "clientSecret", "ClientSecret"),
+            "tenant_id": _wlc_first(secret, "tenantId", "TenantId"),
+            "key_id": _wlc_first(secret, "keyId", "KeyId"),
+        }
+        # key_id only correlates a revoke; absence is not a failure.
+        optional = ("key_id",)
+    else:
+        # KEYS ONLY, never values -- the same rule the upstream refusal follows, and the
+        # one that makes this message safe to print.
+        raise SystemExit("[agent] FATAL: the generate response contained no recognised "
+                         f"credential fields (saw: {', '.join(sorted(secret)) or 'nothing'}).")
+
+    absent = [k for k, v in values.items() if v in (None, "") and k not in optional]
+    if absent:
+        raise SystemExit("[agent] FATAL: the generate response is missing "
+                         + ", ".join(absent))
+
+    return {"values": values, "lease_id": str(lease_id) if lease_id else "",
+            "expires_at": str(expiration or ""),
+            "expires_epoch": _parse_expiry_epoch(expiration), "cloud": cloud}
+
+
+def generate_wlc_credential(*, base_url: str, site_id: str, service_name: str,
+                            dynamic_name: str, identity_token: str,
+                            folder: str = "") -> dict:
+    """Mint one credential from a dynamic secret. **THIS IS THE METERED CALL.**
+
+    The same chain `read_wlc_secret` documents -- the platform vouches for this machine,
+    WC accepts that in place of a PAT, ``X-BT-Service-Name`` says which registered
+    Workload Identity it satisfies -- pointed at ``/dynamic/{name}/generate`` instead of
+    a static read. So the host still holds nothing, and what comes back is a credential
+    with an expiry rather than a copy of a standing one.
+
+    Exactly one caller, called exactly once per episode, and nothing retries it. A retry
+    here is a second charge for one demonstration; if WC is unreachable the honest answer
+    is to fail and say so.
+    """
+    import urllib.error
+    from urllib.parse import quote, urlencode
+
+    path = (f"/site/{quote(site_id)}/secrets/dynamic/{quote(dynamic_name)}/generate")
+    url = base_url.rstrip("/") + path
+    if folder:
+        url += "?" + urlencode({"folder": folder})
+    try:
+        payload = _post_json(url, {
+            "Authorization": f"Bearer {identity_token}",
+            "X-BT-Service-Name": service_name,
+            "bt-secrets-api-version": WLC_API_VERSION,
+        }, body={})
+    except urllib.error.HTTPError as exc:
+        # The status and the secret's NAME. The body is scrubbed and truncated rather
+        # than trusted: it is a provider's error text, and the habit of assuming one
+        # carries nothing sensitive is how a credential ends up in a log line.
+        detail = scrub((exc.read() or b"").decode("utf-8", "replace"))[:300]
+        raise SystemExit(
+            f"[agent] FATAL: Workload Credentials refused to mint from dynamic secret "
+            f"{dynamic_name!r} ({exc.code}). {detail}") from None
+    return parse_generated_payload(payload)
+
+
+def revoke_wlc_lease(*, base_url: str, site_id: str, service_name: str,
+                     lease_id: str, identity_token: str) -> tuple:
+    """Release a lease early. Returns ``(released, detail)``.
+
+    **It does NOT swallow ``lease_not_revocable``, and that is the deliberate divergence
+    from ``workload_credentials_service.revoke_lease``.** The dashboard's client swallows
+    that refusal because its callers "revoke unconditionally and let the provider
+    decide", which is right for housekeeping. Here the refusal IS the finding: an
+    episode that reported a release AWS never performed would tell a room a live
+    credential had been withdrawn.
+    """
+    import urllib.error
+    from urllib.parse import quote
+
+    if not lease_id:
+        return False, "no lease id was returned, so there is nothing to release"
+    url = (base_url.rstrip("/")
+           + f"/site/{quote(site_id)}/secrets/leases/id/{quote(lease_id)}")
+    try:
+        _request(url, {"Authorization": f"Bearer {identity_token}",
+                       "X-BT-Service-Name": service_name,
+                       "bt-secrets-api-version": WLC_API_VERSION}, method="DELETE")
+    except urllib.error.HTTPError as exc:
+        detail = scrub((exc.read() or b"").decode("utf-8", "replace"))[:300]
+        if "not_revocable" in detail:
+            return False, ("the provider refuses to revoke this lease — STS will not "
+                           "withdraw a credential it has already signed, so the TTL is "
+                           "the only control there is")
+        return False, f"the release failed ({exc.code}). {detail}"
+    return True, "the lease was released"
+
+
+# ── Proving a cloud credential is SCOPED, not merely that it authenticated ───
+#
+# The same two beats `PROBES` above runs against a cluster, and for the same stated
+# reason: docs/workload-lab/kubernetes.md is explicit that THE REFUSALS are the steps
+# that prove something. One call the credential must be able to make, one it must be
+# refused — and the refusal written as an assertion rather than a runbook step, because
+# a step gets skipped and an assertion does not.
+#
+# NO `aws` OR `az` SHELL-OUT, and this is the same rule `_request` states for HTTP
+# libraries: every dependency is something the install play has to put on somebody
+# else's VM. `openssl` and `spire-agent` survive that test because both are already on
+# the host by construction; the AWS CLI is a ~60 MB install on every agent host and the
+# Azure CLI brings a Python of its own. The shipped cloud PLAY can use them because it
+# runs on the dashboard's runner image, which is a different machine with a different
+# budget. So: a hand-rolled SigV4 signer for AWS, plain OAuth2 for Azure, stdlib only.
+#
+# THE ORDER IS THE SIGNER'S SAFETY NET. A hand-rolled signature that is wrong fails as
+# HTTP 403, which is exactly what a successful refusal looks like. Three defences, and
+# all three are needed:
+#
+#   1. the ALLOW beat runs first, so a broken signer ends the episode saying the
+#      allowed call failed rather than being read as a proof of scope;
+#   2. the deny beat requires a SPECIFIC error code, not merely a 403 — see
+#      `AWS_BROKEN_CODES`, which are the 403s that mean the credential or the signature
+#      is wrong;
+#   3. the signer is pinned to AWS's published test vectors by test.
+
+# A refusal that proves scope.
+AWS_DENY_CODES = ("AccessDenied", "UnauthorizedOperation", "AccessDeniedException")
+# A refusal that proves the credential or the signature is broken. Reported as its own
+# outcome: it is a 403 like the one above and means the opposite thing.
+AWS_BROKEN_CODES = ("ExpiredToken", "ExpiredTokenException", "InvalidClientTokenId",
+                    "SignatureDoesNotMatch", "TokenRefreshRequired",
+                    "IncompleteSignature", "InvalidSignatureException")
+# The Azure equivalents. A Graph 403 with this code is the role being absent, which is
+# the refusal; a 401 is the token being wrong, which proves nothing.
+AZURE_DENY_CODES = ("Authorization_RequestDenied", "AuthorizationFailed",
+                    "InsufficientPrivileges")
+
+# The deny probes on offer. Each is an ASSERTION ABOUT THE DYNAMIC SECRET'S ROLE that
+# the operator is choosing to make -- this worker cannot read that role's policy, so it
+# cannot pick for them. The defaults are the broadest safe bet per cloud.
+CLOUD_DENY_PROBES = {
+    # An ARM-scoped dynamic secret has no IAM write. `iam:ListUsers` is a read, so a
+    # refusal here is a scope statement rather than a lucky guard-rail.
+    "iam-list-users": "an AWS role scoped to its workload cannot enumerate IAM users",
+    # The Azure analogue of "`view` omits Secrets by design": a service principal issued
+    # for ARM has no Graph application permissions unless somebody granted them. The
+    # token still ISSUES -- it just carries no roles -- so the failure lands at the API
+    # with a crisp code instead of at the token endpoint with a vague one.
+    "graph-directory-read": ("an ARM-scoped service principal cannot read the Entra "
+                             "directory"),
+    "none": "",
+}
+_DEFAULT_DENY_PROBE = {"aws": "iam-list-users", "azure": "graph-directory-read"}
+
+
+def _sigv4_signing_key(secret_key: str, date: str, region: str, service: str) -> bytes:
+    """The four-step derived key. Split out because it is the ONE part of this signer
+    with a published AWS test vector, and pinning it is worth a function.
+
+    ``20120215``/``us-east-1``/``iam`` against the documented example secret derives
+    ``f4780e2d…db404d``; ``tests/test_agentcell_cloud_episode`` asserts exactly that.
+    """
+    import hashlib
+    import hmac
+
+    def _sign(key: bytes, msg: str) -> bytes:
+        return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+    k_date = _sign(("AWS4" + secret_key).encode("utf-8"), date)
+    return _sign(_sign(_sign(k_date, region), service), "aws4_request")
+
+
+def _sigv4_canonical(*, method: str, host: str, stamp: str, body: bytes,
+                     session_token: str = "") -> tuple:
+    """The canonical request and its signed-header list. Returns ``(text, headers)``.
+
+    Split out so a test can assert the exact bytes rather than only the signature they
+    produce: a canonical request that is subtly wrong signs perfectly and is rejected as
+    ``SignatureDoesNotMatch``, which on this path looks exactly like a refusal.
+    """
+    import hashlib
+
+    signed = "content-type;host;x-amz-date"
+    canonical_headers = ("content-type:application/x-www-form-urlencoded; charset=utf-8\n"
+                         f"host:{host}\n"
+                         f"x-amz-date:{stamp}\n")
+    if session_token:
+        # The security token is part of the SIGNATURE, not an extra sent beside it.
+        signed = "content-type;host;x-amz-date;x-amz-security-token"
+        canonical_headers += f"x-amz-security-token:{session_token}\n"
+    text = "\n".join([method, "/", "", canonical_headers, signed,
+                      hashlib.sha256(body).hexdigest()])
+    return text, signed
+
+
+def _sigv4_headers(*, method: str, host: str, region: str, service: str, body: bytes,
+                   values: dict, now=None) -> dict:
+    """AWS Signature Version 4, by hand, for one query-protocol POST.
+
+    Short because that is all SigV4 is: a canonical request, a string to sign, a
+    four-step derived key, and a header. Nothing here is clever and nothing here should
+    be — a signer that is subtly wrong is rejected as ``SignatureDoesNotMatch``, which on
+    this path is a 403 that looks exactly like the refusal the episode is trying to
+    prove. Hence `AWS_BROKEN_CODES`, hence the allow beat running first, and hence the
+    two halves above being separately testable.
+
+    **Only the shape this episode needs**: a query-protocol POST to ``/`` with a body
+    that is always present, no query string, and the three (or four) headers AWS
+    requires in the signature.
+    """
+    import hashlib
+    import hmac
+
+    stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%SZ")
+    date = stamp[:8]
+    token = values.get("session_token") or ""
+
+    canonical_request, signed_headers = _sigv4_canonical(
+        method=method, host=host, stamp=stamp, body=body, session_token=token)
+    scope = f"{date}/{region}/{service}/aws4_request"
+    to_sign = "\n".join(["AWS4-HMAC-SHA256", stamp, scope,
+                         hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()])
+    signing_key = _sigv4_signing_key(values["secret_access_key"], date, region, service)
+    signature = hmac.new(signing_key, to_sign.encode("utf-8"),
+                         hashlib.sha256).hexdigest()
+
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+        "Host": host,
+        "X-Amz-Date": stamp,
+        "Authorization": (f"AWS4-HMAC-SHA256 Credential={values['access_key_id']}/{scope}, "
+                          f"SignedHeaders={signed_headers}, Signature={signature}"),
+    }
+    if token:
+        headers["X-Amz-Security-Token"] = token
+    return headers
+
+
+def _xml_field(text: str, tag: str) -> str:
+    """One element's text out of an AWS query-protocol response.
+
+    A regex rather than an XML parser, and rather than asking for JSON with an Accept
+    header: the query protocol's honouring of that header is not something this repo can
+    verify against a live endpoint, and a probe that silently got XML while expecting
+    JSON would report "no error code" on a perfectly good refusal.
+    """
+    found = re.search(rf"<{tag}>([^<]+)</{tag}>", text or "")
+    return found.group(1).strip() if found else ""
+
+
+def _aws_query_call(*, host: str, service: str, region: str, action: str,
+                    version: str, values: dict, verify: bool = True,
+                    timeout: int = 15) -> dict:
+    """One signed query-protocol call. Returns ``{status, code, arn, body}``.
+
+    Never raises on an HTTP error: a refusal IS the expected outcome of half the calls
+    here, so the status and the provider's error code are data rather than exceptions.
+    """
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    body = f"Action={action}&Version={version}".encode("utf-8")
+    headers = _sigv4_headers(method="POST", host=host, region=region, service=service,
+                             body=body, values=values)
+    ctx = None
+    if not verify:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(f"https://{host}/", headers=headers, data=body,
+                                 method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:  # noqa: S310
+            text = resp.read().decode("utf-8", "replace")
+            status = resp.status
+    except urllib.error.HTTPError as exc:
+        text = (exc.read() or b"").decode("utf-8", "replace")
+        status = exc.code
+    return {"status": status, "code": _xml_field(text, "Code"),
+            "arn": _xml_field(text, "Arn"), "body": scrub(text)[:400]}
+
+
+def aws_cloud_probe(*, values: dict, deny_probe: str, region: str = "us-east-1",
+                    verify: bool = True) -> dict:
+    """One allow beat and one deny beat against AWS.
+
+    **The allow beat is `sts:GetCallerIdentity`, and it proves less than it looks like it
+    does.** IAM cannot deny that call, so a 200 proves the credential authenticates and
+    names the role the dynamic secret assumed -- the same ARN
+    `examples/playbooks/cloud/ci-run-with-dynamic-creds.yml` prints -- and proves nothing
+    whatsoever about scope. It runs first anyway, because that is what tells a broken
+    signer apart from a real refusal.
+    """
+    result = {"cloud": "aws", "deny_probe": deny_probe, "proved": False,
+              "says": CLOUD_DENY_PROBES.get(deny_probe, "")}
+    allow = _aws_query_call(host="sts.amazonaws.com", service="sts", region=region,
+                            action="GetCallerIdentity", version="2011-06-15",
+                            values=values, verify=verify)
+    result["allow_status"] = allow["status"]
+    result["allow_code"] = allow["code"]
+    result["identity"] = allow["arn"]
+    if allow["status"] != 200:
+        return result
+    result["authenticated"] = True
+    if deny_probe == "none":
+        return result
+
+    deny = _aws_query_call(host="iam.amazonaws.com", service="iam", region=region,
+                           action="ListUsers", version="2010-05-08", values=values,
+                           verify=verify)
+    result["deny_status"] = deny["status"]
+    result["deny_code"] = deny["code"]
+    if deny["status"] == 200:
+        return result
+    if deny["code"] in AWS_BROKEN_CODES:
+        result["broken"] = True
+        return result
+    result["proved"] = deny["code"] in AWS_DENY_CODES
+    return result
+
+
+def _entra_token(*, values: dict, scope: str, verify: bool = True,
+                 timeout: int = 15) -> tuple:
+    """A client-credentials access token for one resource. Returns ``(token, error)``.
+
+    Fresh every call, and never cached. That matters exactly once -- after a lease is
+    released -- where reusing a token issued before the release would prove the release
+    did nothing, which is both wrong and indistinguishable from the truth.
+    """
+    import ssl
+    import urllib.error
+    import urllib.request
+    from urllib.parse import urlencode
+
+    url = (f"https://login.microsoftonline.com/{values['tenant_id']}"
+           "/oauth2/v2.0/token")
+    form = urlencode({"grant_type": "client_credentials",
+                      "client_id": values["client_id"],
+                      "client_secret": values["client_secret"],
+                      "scope": scope}).encode("utf-8")
+    ctx = None
+    if not verify:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(
+        url, data=form, method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:  # noqa: S310
+            payload = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        text = (exc.read() or b"").decode("utf-8", "replace")
+        # The error CODE, never the description: Entra's description echoes the request
+        # back, and the request carries the client secret.
+        try:
+            code = (json.loads(text).get("error") or "") or f"http_{exc.code}"
+        except ValueError:
+            code = f"http_{exc.code}"
+        return "", code
+    return payload.get("access_token") or "", ""
+
+
+def _arm_get(url: str, token: str, verify: bool = True, timeout: int = 15) -> dict:
+    """One bearer GET against an Azure endpoint. Returns ``{status, code, body}``."""
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    ctx = None
+    if not verify:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:  # noqa: S310
+            text = resp.read().decode("utf-8", "replace")
+            status = resp.status
+    except urllib.error.HTTPError as exc:
+        text = (exc.read() or b"").decode("utf-8", "replace")
+        status = exc.code
+    code, data = "", {}
+    try:
+        parsed = json.loads(text)
+        data = parsed if isinstance(parsed, dict) else {}
+        err = data.get("error") or {}
+        code = err.get("code") if isinstance(err, dict) else str(err)
+    except ValueError:
+        pass
+    # `data` is the PARSED body and `body` is a scrubbed, truncated copy for a message.
+    # Parsing the truncated one is how a caller ends up reporting "no display name" on a
+    # response that had one — it was simply cut off at 400 characters.
+    return {"status": status, "code": code or "", "data": data,
+            "body": scrub(text)[:400]}
+
+
+def azure_cloud_probe(*, values: dict, scope: str, deny_probe: str,
+                      verify: bool = True) -> dict:
+    """One allow beat and one deny beat against Azure.
+
+    Two deny probes were considered and rejected, and the reasons are worth keeping:
+    reading **another subscription** returns 404 ``SubscriptionNotFound`` for one you
+    cannot see, which is indistinguishable from a typo; and anything **write-shaped** --
+    even a validate-only deployment -- is still a call that can change state, which is
+    not a thing to run in somebody's tenant to make a point.
+    """
+    result = {"cloud": "azure", "deny_probe": deny_probe, "proved": False,
+              "says": CLOUD_DENY_PROBES.get(deny_probe, "")}
+    token, error = _entra_token(values=values, scope="https://management.azure.com/.default",
+                                verify=verify)
+    if not token:
+        result["allow_status"] = 0
+        result["allow_code"] = error or "no_token"
+        return result
+    allow = _arm_get(
+        f"https://management.azure.com/subscriptions/{scope}?api-version=2022-12-01",
+        token, verify=verify)
+    result["allow_status"] = allow["status"]
+    result["allow_code"] = allow["code"]
+    if allow["status"] != 200:
+        return result
+    result["identity"] = allow["data"].get("displayName") or ""
+    result["authenticated"] = True
+    if deny_probe == "none":
+        return result
+
+    graph, graph_error = _entra_token(values=values,
+                                      scope="https://graph.microsoft.com/.default",
+                                      verify=verify)
+    if not graph:
+        # No token at all is not a refusal by Graph — it is Entra declining to issue,
+        # which says nothing about what this principal may read.
+        result["deny_status"] = 0
+        result["deny_code"] = graph_error or "no_token"
+        result["broken"] = True
+        return result
+    deny = _arm_get("https://graph.microsoft.com/v1.0/users?$top=1", graph, verify=verify)
+    result["deny_status"] = deny["status"]
+    result["deny_code"] = deny["code"]
+    if deny["status"] == 200:
+        return result
+    if deny["status"] == 401:
+        # The token is the problem, not the authorisation. Same category as AWS's
+        # `SignatureDoesNotMatch`: a refusal that refused for the wrong reason.
+        result["broken"] = True
+        return result
+    result["proved"] = (deny["status"] == 403
+                        and deny["code"] in AZURE_DENY_CODES)
+    return result
+
+
+def cloud_probe_summary(result: dict) -> str:
+    """One line, and FOUR outcomes rather than the three its siblings have.
+
+    The fourth is the one this family did not need before: a refusal that refused for the
+    wrong reason. `probe_summary` can assume a 403 from an API server means authorisation,
+    because nothing else about that request is being computed here. A hand-rolled
+    signature can be wrong, and when it is, AWS says 403 — so "it failed" and "it was
+    refused" stop being the same sentence.
+    """
+    cloud = result.get("cloud", "cloud")
+    if not result.get("authenticated"):
+        return (f"the allowed {cloud} call returned "
+                f"{result.get('allow_status')}/{result.get('allow_code') or 'no code'} — "
+                "the credential may be wrong, already expired, or unreachable, so "
+                "anything below it proves nothing")
+    who = result.get("identity") or "an unnamed principal"
+    if result.get("deny_probe") == "none":
+        return (f"the credential authenticated as {who} — and that is ALL this run "
+                "proves. No deny probe was asked for, so nothing here says the "
+                "credential is scoped")
+    if result.get("broken"):
+        return (f"authenticated as {who}, but the refusal refused for the WRONG REASON "
+                f"({result.get('deny_code') or result.get('deny_status')}) — that is a "
+                "broken credential or a bad signature, not a scoped one, and it proves "
+                "nothing")
+    if result.get("proved"):
+        return (f"scope proved — authenticated as {who}, and "
+                f"{result.get('says') or 'the asserted limit held'} "
+                f"({result.get('deny_code')})")
+    return (f"THE REFUSAL DID NOT REFUSE: authenticated as {who}, and "
+            f"{result.get('deny_probe')} returned {result.get('deny_status')}"
+            f"/{result.get('deny_code') or 'no error'} rather than a denial. This "
+            "credential is broader than the dynamic secret's definition was assumed to "
+            "be, which is the one outcome this probe exists to catch")
+
+
+def cloud_ending_problem(prove_ending: bool, cloud: str) -> str:
+    """Refuse a run that would print a proved-looking line without proving the ending.
+
+    The pure analogue of `approval_problem`, one level over. That function exists because
+    an ungated fetch prints a line indistinguishable from an approved one; this one
+    exists because a run that mints, proves the scope and stops prints a line
+    indistinguishable from a full run — on a demo whose entire argument is that the
+    credential dies.
+    """
+    if prove_ending:
+        return ""
+    cost = ("a real wait of up to an hour, because STS caps a role-chained credential "
+            "there and will not withdraw one it has signed"
+            if not cloud_revocable(cloud)
+            else "a release and a re-probe, which is quick")
+    return (f"--no-prove-ending was passed, so this run stops after proving the scope "
+            f"and never shows the credential dying — which is the argument. Proving the "
+            f"ending on {cloud} costs {cost}.")
+
+
 def fetch_spiffe_id(socket_path: str) -> str:
     """The worker's own SPIFFE ID, from the SPIRE agent's workload API.
 
@@ -1325,6 +1976,172 @@ def run_cert_episode(args) -> int:
     return 0 if result.get("proved") else 4
 
 
+def _cloud_probe(args, minted: dict) -> dict:
+    """Dispatch to the right probe for the cloud the PAYLOAD declared."""
+    cloud = minted["cloud"]
+    deny = args.cloud_deny_probe
+    if deny == "auto":
+        deny = _DEFAULT_DENY_PROBE[cloud]
+    if cloud == "aws":
+        return aws_cloud_probe(values=minted["values"], deny_probe=deny,
+                               region=args.cloud_region,
+                               verify=not args.cloud_insecure)
+    return azure_cloud_probe(values=minted["values"], scope=args.cloud_scope,
+                             deny_probe=deny, verify=not args.cloud_insecure)
+
+
+def run_cloud_episode(args) -> int:
+    """One cloud-credential episode, and the FOURTH control surface this cell shows.
+
+    The arc, now four long, and each one ends differently:
+
+      * the **PAT** is revocable — pull it and the loop stops mid-poll;
+      * the **cluster token** is gated at retrieval — a person decides, and once
+        released it lives out its TTL;
+      * a **certificate** is neither: nothing on that path checks a CRL, so it stops
+        when it expires and not when somebody takes it away;
+      * a **cloud credential** did not exist until this worker asked. It expires, and on
+        AWS **nothing can shorten that** — STS will not withdraw a credential it has
+        already signed.
+
+    That last one is why this episode's closing beat is a real wait rather than a revoke.
+    `examples/playbooks/cloud/ci-run-with-dynamic-creds.yml` makes the same call for the
+    same reason: a run that faked the clock would prove it can print a failure message,
+    not that the credential died.
+
+    **This is the first episode in this cell that costs money when it runs.** Exactly one
+    `generate`, and nothing retries it.
+
+    Exit codes: 0 proved the scope and the ending, 4 a refusal did not refuse (either the
+    deny probe succeeded, or the credential still worked after it should have stopped),
+    5 the run was asked to skip proving the ending. **3 is never returned** — there is no
+    approval on this path, and a 3 here would name a human who was never asked.
+    """
+    missing = [n for n, v in (("--cloud-dynamic-name", args.cloud_dynamic_name),
+                              ("--wlc-base-url", args.wlc_base_url),
+                              ("--wlc-site-id", args.wlc_site_id),
+                              ("--wlc-service-name", args.wlc_service_name),
+                              ("--wlc-resource", args.wlc_resource)) if not v]
+    if missing:
+        raise SystemExit("[agent] FATAL: --cloud-episode needs " + ", ".join(missing))
+
+    spiffe_id = fetch_spiffe_id(args.spiffe_socket)
+    print(f"[agent] {spiffe_id} · requesting a short-lived cloud credential from dynamic "
+          f"secret {args.cloud_dynamic_name} · {_now()}", flush=True)
+
+    identity = fetch_identity_token(args.wlc_resource, args.identity_platform,
+                                    args.wlc_client_id, args.identity_token_file,
+                                    args.spiffe_socket)
+    wlc = dict(base_url=args.wlc_base_url, site_id=args.wlc_site_id,
+               service_name=args.wlc_service_name, identity_token=identity)
+    minted = generate_wlc_credential(
+        dynamic_name=args.cloud_dynamic_name,
+        folder=args.cloud_dynamic_folder or args.wlc_folder, **wlc)
+    cloud = minted["cloud"]
+    print("[agent] holding nothing: this machine's own identity token is what Workload "
+          "Credentials accepted. No PAT, no Password Safe client pair, and the "
+          f"issuance is recorded against this workload rather than the dashboard · "
+          f"{_now()}", flush=True)
+    print(f"[agent] MINTED — one metered issuance. {cloud} lease "
+          f"{minted['lease_id'] or '(none returned)'} expires "
+          f"{minted['expires_at'] or '(no expiry reported)'} · {_now()}", flush=True)
+
+    # AFTER the mint, deliberately. The refusal has to name a credential that exists,
+    # because an operator who sees it has already been billed and needs to know that.
+    problem = cloud_ending_problem(args.prove_ending, cloud)
+
+    # Azure only, and only when asked for. The default on BOTH clouds is to wait out the
+    # expiry: it is the one ending that exists everywhere, and having the demo end the
+    # same way on both is worth more than the thirty seconds a release saves.
+    end_with = args.cloud_end_with
+    if end_with == "release" and not cloud_revocable(cloud):
+        raise SystemExit(
+            f"[agent] FATAL: --cloud-end-with release, but an {cloud} lease cannot be "
+            "released — STS will not withdraw a credential it has already signed. On "
+            f"{cloud} the TTL is the only control there is, which is why a short one "
+            "matters more here, not less. Use --cloud-end-with expiry.")
+
+    result = _cloud_probe(args, minted)
+    print(f"[agent] {spiffe_id} · {cloud_probe_summary(result)} · {_now()}", flush=True)
+
+    try:
+        if problem:
+            print(f"[agent] {spiffe_id} · REFUSING: {problem} · {_now()}", flush=True)
+            return 5
+        if not result.get("authenticated"):
+            # 1, not 4. A credential that never worked cannot be shown to stop working,
+            # so there is no refusal here that failed to refuse — there is a broken run,
+            # and the summary above has already said which half broke.
+            return 1
+        if end_with == "release":
+            released, detail = revoke_wlc_lease(lease_id=minted["lease_id"], **wlc)
+            print(f"[agent] {spiffe_id} · {detail} · {_now()}", flush=True)
+            if not released:
+                return 4
+            print("[agent] note: the release killed the ability to get ANOTHER token, "
+                  "not the one already issued — an ARM access token lives out its own "
+                  "hour whatever happens to the service principal behind it. Same shape "
+                  "as the cluster episode's 'the approval gates retrieval, not use'.",
+                  flush=True)
+        elif not _wait_out_the_lease(minted, args.cloud_max_wait, spiffe_id):
+            return 4
+
+        # THE BEAT THAT PROVES IT. Re-run the ALLOW probe only — the deny probe already
+        # said what it had to say, and running it again against a dead credential would
+        # produce a refusal for the wrong reason that looks like the right one.
+        after = _cloud_probe(argparse.Namespace(**{**vars(args),
+                                                   "cloud_deny_probe": "none"}), minted)
+        if after.get("authenticated"):
+            print(f"[agent] {spiffe_id} · THE CREDENTIAL STILL WORKS after it should "
+                  f"have stopped — {cloud_probe_summary(after)} · {_now()}", flush=True)
+            return 4
+        print(f"[agent] {spiffe_id} · the credential is dead: the same call now returns "
+              f"{after.get('allow_status')}/{after.get('allow_code') or 'no code'} · "
+              f"{_now()}", flush=True)
+    finally:
+        print(f"[agent] this episode billed ONE issuance against {args.cloud_dynamic_name}. "
+              "Nothing was left on this host, and nothing here could widen what that "
+              "credential was allowed to do — the dynamic secret's own definition in "
+              "Workload Credentials decides that, and this worker cannot read it.",
+              flush=True)
+    return 0 if result.get("proved") else 4
+
+
+def _wait_out_the_lease(minted: dict, max_wait: int, spiffe_id: str) -> bool:
+    """Hold until the provider's expiry passes. False if it cannot be waited out.
+
+    The expiry comes from the PROVIDER'S payload, never from a requested TTL: AWS clamps
+    a role-chained credential at an hour, so a wait computed from the ask would re-probe
+    a credential that is still alive and report a failure that is really impatience.
+
+    A countdown line every minute, for the reason `_waiting` prints one in the cluster
+    episode — a silent process is indistinguishable from a hung one, and this wait is
+    long enough for somebody to give up on it.
+    """
+    margin = 30
+    deadline = minted["expires_epoch"]
+    if not deadline:
+        print(f"[agent] {spiffe_id} · the provider returned no readable expiry, so this "
+              "run cannot show the credential dying. That is the only control there "
+              f"was, and it is now unobservable · {_now()}", flush=True)
+        return False
+    remaining = (deadline + margin) - time.time()
+    if remaining > max_wait:
+        print(f"[agent] {spiffe_id} · the lease has {int(remaining // 60)}m left, longer "
+              f"than --cloud-max-wait ({max_wait}s). Shorten the dynamic secret's TTL — "
+              "on a cloud whose credential cannot be revoked, a short TTL is the whole "
+              f"control · {_now()}", flush=True)
+        return False
+    while True:
+        remaining = (deadline + margin) - time.time()
+        if remaining <= 0:
+            return True
+        print(f"[agent] {spiffe_id} · waiting out the lease — {int(remaining // 60)}m "
+              f"{int(remaining % 60)}s remaining. Nothing can shorten this · {_now()}",
+              flush=True)
+        time.sleep(min(60, remaining))
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--url", default=os.environ.get("AGENT_MCP_URL", ""),
@@ -1433,7 +2250,60 @@ def main(argv=None) -> int:
     ap.add_argument("--cert-max-wait", type=int, default=1800)
     ap.add_argument("--cert-insecure", action="store_true",
                     help="skip endpoint certificate verification (lab endpoints).")
-    # Applies to BOTH episodes. #912's page already claims the agent "cannot authorise
+    # ── One cloud-credential episode ─────────────────────────────────────────
+    # The only episode that MINTS rather than retrieves, the only one with no human in
+    # the loop, and the only one that costs money. All three follow from the same fact:
+    # Workload Credentials issues against a dynamic secret, so there is nothing standing
+    # for a person to gate and nothing already held for a vault to release.
+    ap.add_argument("--cloud-episode", action="store_true",
+                    help="mint one short-lived AWS or Azure credential against this "
+                         "machine's own identity, prove it is scoped, and prove it "
+                         "ends. ONE METERED ISSUANCE. Exits when done.")
+    ap.add_argument("--cloud-dynamic-name",
+                    default=os.environ.get("AGENT_CLOUD_DYNAMIC_NAME", ""),
+                    help="the Workload Credentials dynamic secret to mint from. A NAME, "
+                         "not a credential — and the thing that decides the scope of "
+                         "everything this episode receives.")
+    ap.add_argument("--cloud-dynamic-folder",
+                    default=os.environ.get("AGENT_CLOUD_DYNAMIC_FOLDER", ""),
+                    help="falls back to --wlc-folder when unset.")
+    ap.add_argument("--cloud-deny-probe", default=os.environ.get(
+                        "AGENT_CLOUD_DENY_PROBE", "auto"),
+                    choices=("auto",) + tuple(CLOUD_DENY_PROBES),
+                    help="which call the credential must be REFUSED. This worker cannot "
+                         "read the dynamic secret's role, so this is an assertion you "
+                         "are making about it. 'none' runs no refusal at all and says "
+                         "out loud that the run then proves authentication, not scope.")
+    ap.add_argument("--cloud-scope", default=os.environ.get("AGENT_CLOUD_SCOPE", ""),
+                    help="Azure: the subscription id the credential must be able to "
+                         "read. Required there; ignored on AWS.")
+    ap.add_argument("--cloud-region", default=os.environ.get("AGENT_CLOUD_REGION",
+                                                             "us-east-1"),
+                    help="AWS: the region the STS and IAM calls are signed for.")
+    # Default `expiry` on BOTH clouds rather than `auto`. A release is available on
+    # Azure and is quicker, but the ending that exists everywhere is the one worth
+    # making the default -- a demo that ends differently depending on the cloud is a
+    # demo somebody has to remember two versions of.
+    ap.add_argument("--cloud-end-with", choices=("expiry", "release"),
+                    default=os.environ.get("AGENT_CLOUD_END_WITH", "expiry"),
+                    help="how the episode shows the credential stopping. 'expiry' waits "
+                         "out the provider's own expiry and re-probes — a real wait, "
+                         "never a faked clock. 'release' is Azure only and is refused "
+                         "on a cloud whose leases cannot be revoked.")
+    ap.add_argument("--cloud-max-wait", type=int,
+                    default=int(os.environ.get("AGENT_CLOUD_MAX_WAIT", "4200") or 4200),
+                    help="seconds this will wait for an expiry. AWS caps a role-chained "
+                         "credential at an hour, so the default allows for one.")
+    ap.add_argument("--cloud-insecure", action="store_true",
+                    help="skip certificate verification on the cloud endpoints (a lab "
+                         "behind an intercepting proxy).")
+    ap.add_argument("--no-prove-ending", dest="prove_ending",
+                    action="store_false", default=True,
+                    help="mint and prove the scope, but stop without showing the "
+                         "credential die. Off by default — that run prints a line "
+                         "indistinguishable from a full one, on a demo whose whole "
+                         "argument is that the credential ends.")
+    # Applies to BOTH Password Safe episodes. #912's page already claims the agent "cannot authorise
     # its own access"; on an auto-releasing policy that was silently untrue there too, so
     # this is a correctness fix to an existing claim rather than a new rule for one
     # episode. Default on: the ungated case is the one that needs saying out loud.
@@ -1454,12 +2324,17 @@ def main(argv=None) -> int:
                           "token_source": args.token_source,
                           "token_label": token_label(args.token_label),
                           "identity_platform": args.identity_platform,
-                          "detected_platform": detect_platform() or "none"}))
+                          "detected_platform": detect_platform() or "none",
+                          "cloud_episode": args.cloud_episode,
+                          "cloud_end_with": args.cloud_end_with,
+                          "cloud_deny_probe": args.cloud_deny_probe}))
         return 0
     if args.k8s_episode:
         return run_k8s_episode(args)
     if args.cert_episode:
         return run_cert_episode(args)
+    if args.cloud_episode:
+        return run_cloud_episode(args)
 
     if not args.url:
         raise SystemExit("[agent] FATAL: --url (or AGENT_MCP_URL) is required.")
