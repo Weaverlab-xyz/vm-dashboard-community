@@ -16,6 +16,7 @@ needed. Runs under pytest, or standalone:
 """
 import asyncio
 import logging
+import re
 import os
 import sys
 import types
@@ -482,8 +483,12 @@ def test_acme_dns_names_the_record_to_create_when_unresolvable():
     msg = _run_check("rancher.example.com", "40.78.191.25", OSError("NXDOMAIN"))
     assert "does not resolve" in msg
     # The message has to carry BOTH halves of the record the operator must create,
-    # or it is just another "it didn't work".
-    assert "rancher.example.com" in msg and "40.78.191.25" in msg
+    # or it is just another "it didn't work". Matched as whole TOKENS rather than
+    # substrings: a plain containment check also passes on a message that only
+    # mentions notrancher.example.com, which would not tell the operator anything.
+    tokens = re.findall(r"[\w.-]+", msg)
+    assert "rancher.example.com" in tokens
+    assert "40.78.191.25" in tokens
 
 
 def test_acme_dns_rejects_a_record_pointing_elsewhere():
