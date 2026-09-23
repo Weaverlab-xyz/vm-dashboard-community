@@ -20,15 +20,26 @@
      * THE TOKEN IS SHOWN ONCE. Same contract as api/tokens.create_token — the row keeps
        the id, the name and the expiry, never the secret. The modal that shows it is
        therefore the only chance, and it says so.
-     * A LINK IS NOT ALWAYS A CAPABILITY. `cloud` is accountability only, because that
-       tab's credential is returned to nobody by design; `kubernetes` and `certificates`
-       genuinely let the worker request the credential. Rendering the two kinds alike is
-       this feature's headline failure mode in one direction and the Kubernetes tab's in
-       the other, so the picker states which it is BEFORE the link is made, not after.
+     * A LINK IS NOT ALWAYS A CAPABILITY, and all three shipped tabs happen to be one
+       today. `cloud` used to be accountability only; it is a capability now, because
+       the worker mints from Workload Credentials itself (`--cloud-episode`) rather than
+       being handed anything by this dashboard. `linkKind` stays a THREE-state read
+       anyway: the question is answered server-side, and a reader whose /options call
+       403'd must not have the page guess on their behalf. Rendering the two kinds alike
+       is this feature's headline failure mode in one direction and the Kubernetes tab's
+       in the other, so the picker states which it is BEFORE the link is made.
+     * THE THREE CAPABILITIES REACH DIFFERENT AUTHORITIES, which is the distinction that
+       replaced the old one. `kubernetes` and `certificates` reach PASSWORD SAFE holding
+       nothing, so retrieval is a recorded request that can require approval. `cloud`
+       reaches WORKLOAD CREDENTIALS directly and there is no vault in the chain, because
+       WC mints rather than releases — so no approval exists to wait on, and the
+       issuance is BILLED. A page that said "reaches Password Safe holding nothing" over
+       a cloud link would be describing the wrong mechanism.
      * A CAPABILITY IS NOT ALWAYS AN EPISODE THIS DASHBOARD CAN OPEN, and conflating the
-       two is what made the Request-access button lie. `certificates` is spendable and
-       has NO episode route here — that episode is one shot on the host,
-       `mcp_agent.py --cert-episode` — so a button gated on `spendable` posted a
+       two is what made the Request-access button lie. TWO of the three are spendable
+       with NO episode route here — both are one shot on the host,
+       `mcp_agent.py --cert-episode` and `--cloud-episode` — so a button gated on
+       `spendable` posted a
        certificate link at /k8s-request, which looked it up in the token table, missed,
        and refused it as "the linked Kubernetes token no longer exists. Unlink and
        relink." A valid link, accused of having lost its credential, with the remedy
@@ -233,13 +244,17 @@
             <strong>Accountability only.</strong> That tab's credential is returned to
             nobody by design, so nothing here can spend it.
           </p>
-          <!-- "credential" rather than "token", because this sentence renders for a
-               certificate link too and that one is a passphrase plus a bundle. -->
-          <p x-show="linkKind(row) === 'capability'" x-cloak class="text-gray-500 mt-0.5">
-            <strong>A capability.</strong> The worker reaches Password Safe holding nothing,
-            so it can genuinely <em>request</em> this credential &mdash; subject to whatever
-            the access policy requires.
-          </p>
+          <!-- WHICH AUTHORITY, not just "a capability". The old single sentence said the
+               worker "reaches Password Safe holding nothing", which is true of two of
+               the three and describes the wrong mechanism over a cloud link — there is
+               no vault in that chain at all. "credential" rather than "token" throughout,
+               because a certificate link is a passphrase plus a bundle. -->
+          <template x-if="linkKind(row) === 'capability'">
+            <p x-cloak class="text-gray-500 mt-0.5">
+              <strong>A capability.</strong>
+              <span x-text="capabilityNote(row)"></span>
+            </p>
+          </template>
         </div>
 
         <!-- ── The cluster-access episode ────────────────────────────────── -->
@@ -307,6 +322,38 @@
             that path consults a CRL or OCSP &mdash; it stops when the certificate
             <em>expires</em>, not when somebody takes it away. That is the third shape, and
             it is what makes a revocable token and an approval gate worth having.
+          </p>
+        </div>
+
+        <!-- ── The cloud episode, which also happens ELSEWHERE ───────────── -->
+        <!-- The second panel of this shape, and the reason `EPISODE_MECHANISMS` is
+             named rather than derived from `spendable`. Same contract as the
+             certificate panel above: no button, no row field, and the sentence says
+             why rather than leaving a capability looking like a dead end. -->
+        <div x-show="row.linked_mechanism === 'cloud'" x-cloak
+             class="border border-gray-200 rounded px-2 py-1.5 text-xs mb-2">
+          <p class="text-gray-700">
+            <span class="font-medium">Cloud credential</span>
+            <span class="text-gray-500"> &mdash; a run you make on the host, not a button here</span>
+          </p>
+          <p class="text-gray-500 mt-0.5">
+            The worker mints it itself: it presents this machine's own identity token to
+            Workload Credentials and generates against the dynamic secret, so the
+            issuance is recorded against the workload and nothing passes through this
+            dashboard. Run <code>mcp_agent.py --cloud-episode</code> with the dynamic
+            secret from the link; <code>journalctl -u mcp-agent -f</code> is the record.
+          </p>
+          <p class="text-gray-500 mt-0.5">
+            <strong>Every run is one metered issuance.</strong> Workload Credentials
+            bills per mint, so this is the only link in this cell that costs money to
+            spend &mdash; and a worker looping on it is a cost problem before it is an
+            audit one.
+          </p>
+          <p class="text-gray-500 mt-0.5">
+            <strong>Its ending is not a revoke.</strong> An AWS lease cannot be withdrawn
+            at all, so the episode waits out the real expiry and proves the same call is
+            then refused. Azure can release early, which ends the ability to get
+            <em>another</em> token &mdash; not the one already issued.
           </p>
         </div>
 
@@ -597,6 +644,54 @@
              x-text="blockedChoice()"></p>
         </div>
 
+        <!-- ── What the cloud episode should assert ───────────────────────── -->
+        <!-- Same contract as the certificate fields below: identifiers, not credentials,
+             and NONE OF THEM IS STORED. They shape the notes the link hands back, which
+             is where the runnable command comes from.
+
+             The deny probe is the interesting one. This dashboard cannot read the
+             dynamic secret's role — `workload_cloud_service` says so at the top, "THE
+             SCOPE IS NOT DEFINED HERE" — so what the credential must be refused is an
+             assertion the OPERATOR makes, and the field exists to make that a choice
+             rather than a default nobody saw. -->
+        <div x-show="linkForm.mechanism === 'cloud'" x-cloak class="space-y-3">
+          <div x-show="cloudOf(linkForm.credential_id) === 'azure'">
+            <label class="block text-xs font-medium text-gray-700 mb-1">Subscription</label>
+            <input x-model="linkForm.cloud_scope" type="text"
+                   placeholder="00000000-0000-0000-0000-000000000000"
+                   class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+            <p class="text-xs text-gray-500 mt-1">
+              The subscription the credential must be able to read &mdash; what
+              <code>--cloud-scope</code> takes. Azure only: on AWS the allowed call is
+              <code>sts:GetCallerIdentity</code>, which needs no scope and cannot be
+              denied.
+            </p>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">
+              Refusal to assert <span class="font-normal text-gray-400">(optional)</span>
+            </label>
+            <select x-model="linkForm.cloud_deny_probe"
+                    class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+              <option value="">Let the episode choose for this cloud</option>
+              <option value="iam-list-users">AWS &mdash; cannot enumerate IAM users</option>
+              <option value="graph-directory-read">Azure &mdash; cannot read the Entra directory</option>
+              <option value="none">No refusal &mdash; proves authentication only</option>
+            </select>
+            <p class="text-xs text-gray-500 mt-1">
+              <strong>The refusal is what proves anything.</strong> That the credential
+              works shows only that it exists; that it is <em>refused</em> something is
+              the scope. This dashboard cannot see the dynamic secret's role, so this is
+              your assertion about it &mdash; and <code>none</code> makes the episode say
+              out loud that the run proves authentication and not scope.
+            </p>
+          </div>
+          <p class="text-xs text-gray-500">
+            <strong>Neither is stored here.</strong> The row records the mechanism and
+            the identity's id; these two shape the command the link hands back.
+          </p>
+        </div>
+
         <!-- ── Which identity on that CA ──────────────────────────────────── -->
         <!-- A CA row is not an identity. It carries one managed account per identity and
              this dashboard does not track them individually, so the link has to NAME the
@@ -735,11 +830,12 @@ function workloadAgentTab() {
 
     linkOpen: false,
     linkRow: null,
-    // Kept in step with blankLinkForm(). The last three are certificates-only and name
-    // WHICH identity on the chosen CA — a CA row carries many and this dashboard tracks
-    // none of them individually, so the link has to say.
+    // Kept in step with blankLinkForm(). `account_name`/`bundle_title`/`expect_cn` are
+    // certificates-only and name WHICH identity on the chosen CA — a CA row carries
+    // many and this dashboard tracks none of them individually, so the link has to say.
+    // The last two are cloud-only and say what the episode should assert.
     linkForm: { mechanism: '', credential_id: '', account_name: '', bundle_title: '',
-                expect_cn: '' },
+                expect_cn: '', cloud_scope: '', cloud_deny_probe: '' },
 
     episodeOpenModal: false,
     episodeRow: null,
@@ -860,6 +956,23 @@ function workloadAgentTab() {
       return this.spendable(row) ? 'capability' : 'accountability';
     },
 
+    // WHICH AUTHORITY the worker reaches, per mechanism. Split out of the template
+    // because there are two answers now and the single sentence that used to sit there
+    // — "reaches Password Safe holding nothing" — describes the wrong mechanism over a
+    // cloud link: there is no vault in that chain at all. The data moved here; neither
+    // `spendable` nor `linkKind` needed a logic change, which is the point of both
+    // being server-answered.
+    capabilityNote(row) {
+      if ((row || {}).linked_mechanism === 'cloud') {
+        return 'The worker mints this one itself — it presents its own identity token '
+             + 'to Workload Credentials and generates against the dynamic secret, so '
+             + 'the issuance is recorded against the workload rather than this '
+             + 'dashboard. No vault and no approval, and every mint is billed.';
+      }
+      return 'The worker reaches Password Safe holding nothing, so it can genuinely '
+           + 'request this credential — subject to whatever the access policy requires.';
+    },
+
     // The linked row's own name, resolved from the other tabs' listings. Falls back to
     // the mechanism alone rather than printing a bare uuid at somebody.
     credentialLabel(row) {
@@ -891,10 +1004,14 @@ function workloadAgentTab() {
 
     mechanisms() {
       return [
+        // The only one that MINTS, and the note leads with the two things nobody
+        // thinks to ask: it bills, and this dashboard does not decide the scope.
         { key: 'cloud', label: 'Cloud — a short-lived AWS or Azure credential',
-          note: 'Accountability only. That tab returns its credential to nobody, so no '
-                + 'worker can spend it; the link records a lease worth reporting beside '
-                + 'the agent.' },
+          note: 'A capability, and the one that bills. The worker mints it itself '
+                + 'against its own identity — no vault, no approval — so every run is '
+                + 'one metered issuance. The dynamic secret decides what that '
+                + 'credential may do; this dashboard cannot widen or narrow it. That '
+                + 'episode runs on the host, not from here.' },
         { key: 'kubernetes', label: 'Kubernetes — a bound ServiceAccount token',
           note: 'A capability. The worker reaches Password Safe holding nothing, so it '
                 + 'can genuinely request this token — and wait if the policy says so.' },
@@ -929,7 +1046,24 @@ function workloadAgentTab() {
       if (this.linkForm.mechanism === 'certificates') {
         return !!(this.linkForm.account_name && this.linkForm.bundle_title);
       }
+      // Azure needs a subscription and AWS does not, which is why this asks the CHOSEN
+      // ROW's cloud rather than the mechanism. The Azure allow beat is a read of one
+      // subscription; without it the episode has no call it can prove works, and the
+      // run would fail at the first probe looking like a bad credential.
+      if (this.linkForm.mechanism === 'cloud'
+          && this.cloudOf(this.linkForm.credential_id) === 'azure') {
+        return !!this.linkForm.cloud_scope;
+      }
       return true;
+    },
+
+    // The chosen row's cloud, from the listing /options already returned. "" when
+    // nothing is chosen yet or /options never loaded — and both callers treat "" as
+    // "not Azure", which is the forgiving direction: the route accepts a blank scope
+    // and the episode's own refusal names the flag.
+    cloudOf(credentialId) {
+      const hit = (this.choices() || []).find(c => c.id === credentialId);
+      return (hit || {}).cloud || '';
     },
 
     // One initialiser for the link form, because two that drift apart is how a field
@@ -937,7 +1071,7 @@ function workloadAgentTab() {
     // exists for above.
     blankLinkForm() {
       return { mechanism: '', credential_id: '', account_name: '', bundle_title: '',
-               expect_cn: '' };
+               expect_cn: '', cloud_scope: '', cloud_deny_probe: '' };
     },
 
     blankForm() {
@@ -1031,8 +1165,13 @@ function workloadAgentTab() {
         const out = await API.post('/api/agentcell/agent/' + this.linkRow.id + '/link',
                                    this.linkForm);
         this.linkOpen = false;
-        // The notes carry the distinction the row then keeps: what the link is NOT on
-        // cloud, and what the approval does not gate on kubernetes.
+        // The notes carry the limit each mechanism is most likely to be assumed past:
+        // what the mint COSTS and who scopes it on cloud, what the approval does not
+        // gate on kubernetes, and what revoking cannot do on certificates.
+        //
+        // The whole form is posted, so every field bound above must also be DECLARED on
+        // AgentCellLinkRequest — a bound-but-undeclared field is silently dropped by
+        // pydantic and the note it was meant to shape simply comes back generic.
         this.notify([out.summary].concat(out.notes || []).join('\n\n'));
         await this.load();
       } catch (e) {

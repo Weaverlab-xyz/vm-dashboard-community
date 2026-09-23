@@ -51,13 +51,22 @@ class AgentCellCreateResponse(BaseModel):
 class AgentCellLinkRequest(BaseModel):
     """Make an agent answerable for one Workload Lab credential.
 
-    **Whether this is a consumption depends on the tab.** ``cloud`` gives the worker
-    nothing — that tab returns its credential to nobody. ``kubernetes`` lets the agent
-    *request* the token, because the worker reaches Password Safe holding nothing. See
-    ``services/agentcell_service.LINKABLE_MECHANISMS`` and ``SPENDABLE_MECHANISMS``.
+    **All three shipped tabs are consumptions now**, and the distinction that replaced
+    "does this confer anything" is WHICH AUTHORITY THE WORKER REACHES:
+
+      * ``kubernetes`` and ``certificates`` reach **Password Safe**, bootstrapped by
+        Workload Credentials — the credential already existed and the vault releases it,
+        so the retrieval is a recorded request that can require approval.
+      * ``cloud`` reaches **Workload Credentials directly**, and there is no vault in the
+        chain because there is nothing standing to release: WC *mints*. So there is no
+        approval to wait on, and the issuance is **billed**.
+
+    See ``services/agentcell_service.LINKABLE_MECHANISMS`` and ``SPENDABLE_MECHANISMS``,
+    which coincide today and are still named separately.
     """
-    mechanism: str = Field(min_length=1,
-                           description="a Workload Lab tab name: 'cloud' or 'kubernetes'")
+    mechanism: str = Field(
+        min_length=1,
+        description="a Workload Lab tab name: 'cloud', 'kubernetes' or 'certificates'")
     credential_id: str = Field(min_length=1, description="that tab's own row id")
     # Certificates only. A CA row carries many identities -- one managed account per
     # identity -- and the dashboard does not track them individually, so the link names
@@ -71,6 +80,16 @@ class AgentCellLinkRequest(BaseModel):
         default="", description="the bundle's Secrets Safe title, e.g. cert/<sys>/<acct>")
     expect_cn: str = Field(
         default="", description="the subject the mTLS endpoint should echo")
+    # Cloud only, and on the same principle as the three above: identifiers, not
+    # credentials. Neither is stored on the row — they shape the notes the link hands
+    # back, so an operator leaves with the command they are actually going to run.
+    cloud_scope: str = Field(
+        default="", description="Azure: the subscription the credential must be able "
+                                "to read. Ignored on AWS.")
+    cloud_deny_probe: str = Field(
+        default="", description="which call the credential must be REFUSED. An "
+                                "assertion about the dynamic secret's role, which "
+                                "neither this dashboard nor the worker can read.")
 
 
 class AgentCellEpisodeRequest(BaseModel):

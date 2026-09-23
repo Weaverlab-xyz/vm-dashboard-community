@@ -192,17 +192,41 @@ def pat_name_for(cell_name: str) -> str:
 # route of decodes the body to text and so corrupts a PKCS#12 rather than refusing it; see
 # `secrets_backend_service._read_bt_file_secret`, which refuses binary for that reason.
 #
-# `cloud` remains linkable but NOT spendable -- its credential is returned to nobody by
-# design, so the link records a lease whose STATE is worth reporting beside the agent and
-# nothing more. See `link_notes`.
+# `cloud` FOLLOWED, and its correction is subtler than the other two -- worth recording
+# because the superseded claim was not wrong, it was about something else. This comment
+# used to say the Cloud tab's credential "is returned to nobody by design, so nothing
+# here can spend it". THAT SENTENCE WAS ALWAYS ABOUT THE DASHBOARD, and it is still true
+# of the dashboard: no route here returns a cloud credential, and `_run_issue`'s
+# docstring gives the reason -- "a consumer that needs the values calls Workload
+# Credentials itself with its own token, which is what puts the consumer in WC's audit
+# log rather than this dashboard". It was being read as a statement about the MECHANISM.
 #
-# See docs/design/next-demo-cells.md sections 5b, 5d and 5e.
+# The worker calls `generate` on the dynamic secret directly, against the same identity
+# token it already presents for the other two links (`--cloud-episode`, see
+# examples/playbooks/agent/files/mcp_agent.py). So the dashboard's abstinence is
+# preserved -- and preserving it is precisely what makes the link spendable, because the
+# thing in WC's audit log is now the worker.
+#
+# Three differences from the other two, all of which the notes have to carry:
+#   * NO PASSWORD SAFE and no approval. WC issues; there is nothing standing to gate.
+#   * IT IS METERED. This is the only link in the cell that costs money to spend.
+#   * THE SCOPE IS NOT OURS. `workload_cloud_service` states it plainly -- the dynamic
+#     secret's own definition decides, and this dashboard "cannot widen or narrow it".
+#     The other two tabs choose a RoleBinding and a profile; this one names a secret.
+#
+# See docs/design/next-demo-cells.md sections 5b, 5d, 5e and 5f.
 LINKABLE_MECHANISMS = ("cloud", "kubernetes", "certificates")
 
 # Mechanisms a worker can actually SPEND, as opposed to merely be answerable for. The
 # distinction is load-bearing: a link that confers capability and one that confers only
 # accountability must not read the same way back to an operator.
-SPENDABLE_MECHANISMS = ("kubernetes", "certificates")
+#
+# IT COINCIDES WITH `LINKABLE_MECHANISMS` TODAY AND IS STILL NAMED SEPARATELY, for the
+# reason `EPISODE_MECHANISMS` gives below: the two answer different questions, and the
+# next mechanism added will almost certainly be linkable before it is spendable -- that
+# is the order all three of these arrived in. Deriving one from the other now would
+# delete the distinction at exactly the moment it stopped being visible.
+SPENDABLE_MECHANISMS = ("cloud", "kubernetes", "certificates")
 
 # Named here so the refusal can list them without claiming they are coming.
 _UNWIRED_MECHANISMS = ("spire",)
@@ -243,28 +267,67 @@ def already_linked_problem(row) -> str:
             "against, so widening one is a decision rather than a default.")
 
 
-def link_notes(cloud: str, revocable: bool) -> list:
+def link_notes(cloud: str, revocable: bool, dynamic_name: str = "",
+               folder: str = "") -> list:
     """What to say back when an agent is linked to a cloud credential.
 
-    Leads with what the link is NOT, because the honest risk here is that a governance
-    record reads as a capability. Then the revoke asymmetry, surfaced at link time rather
-    than discovered when somebody tries to revoke in front of an audience.
+    The opposite risk to the version this replaces. That one led with what the link was
+    NOT, because a governance record reading as a capability was the danger. It IS a
+    capability now, so the dangers are the two an operator will not think to ask about:
+    **it bills**, and **this dashboard does not decide what the credential may do**.
+
+    The revoke asymmetry stays last and stays blunt, surfaced at link time rather than
+    discovered when somebody tries to revoke in front of an audience.
     """
+    where = f"`{dynamic_name}`" if dynamic_name else "its dynamic secret"
+    if folder:
+        where += f" in `{folder}`"
     notes = [
-        "This records what the agent is answerable for. **It does not give the worker "
-        "the credential** — the Cloud tab's credential is returned to nobody, by design, "
-        "so nothing here can spend it.",
+        f"This agent can now **mint** a short-lived {cloud} credential itself. It "
+        f"presents its own identity token to Workload Credentials and generates against "
+        f"{where} — the values never pass through this dashboard, which is what puts "
+        "the **worker** in Workload Credentials' audit log rather than this application.",
+        "**Every mint is billed.** `mcp_agent.py --cloud-episode` mints exactly once per "
+        "run and nothing retries it. This is the only link in this cell that costs money "
+        "to spend, so a worker looping on it is a cost problem before it is an audit one.",
+        f"**This dashboard does not decide what that credential may do** — {where}'s own "
+        "definition in Workload Credentials does, and nothing here can widen or narrow "
+        "it. The episode asserts a limit you name; it cannot discover one.",
     ]
     if revocable:
         notes.append(
-            f"{cloud} leases can be released early, so revoking one is observable in the "
-            "lab's own record — though not, yet, in the agent's behaviour.")
+            f"{cloud} leases can be released early, and the episode will do it on "
+            "request. Say what that does and does not kill: it ends the ability to get "
+            "**another** token, not one already issued — an access token lives out its "
+            "own hour whatever happens to the principal behind it.")
     else:
         notes.append(
             f"{cloud} leases **cannot be revoked at all** — the TTL is the only control "
             "there is. That is the provider's limit, not this dashboard's, and it is "
-            "worth saying out loud before somebody promises a revoke.")
+            "worth saying out loud before somebody promises a revoke. It is also why "
+            "the episode's closing beat is a real wait for real expiry.")
     return notes
+
+
+def cloud_episode_command(cloud: str, dynamic_name: str, folder: str = "",
+                          scope: str = "", deny_probe: str = "") -> str:
+    """The run an operator leaves this page to make, with their own values in it.
+
+    A command rather than a prose instruction, because this episode has no button and
+    the alternative is somebody reconstructing five flags from a feature guide in front
+    of a room. The ``--wlc-*`` flags are omitted deliberately: they are already on the
+    installed unit from the token source, and repeating them here invites a second,
+    divergent copy.
+    """
+    parts = ["mcp_agent.py --cloud-episode",
+             f"--cloud-dynamic-name {dynamic_name or '<dynamic-secret>'}"]
+    if folder:
+        parts.append(f"--cloud-dynamic-folder {folder}")
+    if (cloud or "").strip().lower() == "azure":
+        parts.append(f"--cloud-scope {scope or '<subscription-id>'}")
+    if deny_probe:
+        parts.append(f"--cloud-deny-probe {deny_probe}")
+    return " ".join(parts)
 
 
 def k8s_link_notes(profile: str, account_name: str, namespace: str) -> list:
@@ -349,27 +412,38 @@ def episode_link_problem(row) -> str:
                 "Kubernetes token first — the link is what says which identity it may "
                 "ask for.")
     if mechanism not in SPENDABLE_MECHANISMS:
+        # Generic rather than naming a tab. Every shipped mechanism is spendable today,
+        # so this branch is currently unreachable -- and the version that hardcoded "that
+        # tab returns its credential to nobody" is exactly the sentence that went stale
+        # when `cloud` became spendable. A guard that has to be rewritten every time the
+        # set changes is a guard that will one day say something false.
         return (f"This agent is answerable for a {mechanism} credential, which no worker "
-                "can spend — that tab returns its credential to nobody. Only "
-                f"{', '.join(SPENDABLE_MECHANISMS)} can be requested.")
+                f"can spend. Only {', '.join(SPENDABLE_MECHANISMS)} can be requested.")
     return ""
 
 
 # Which spendable mechanisms the DASHBOARD can open an episode for. Spendable is not the
-# same question and must not be used as this gate: `certificates` is spendable and has no
-# episode route here, because that episode is one shot on the host
-# (`mcp_agent.py --cert-episode`, see examples/playbooks/agent/files/mcp_agent.py) which
-# the dashboard neither opens nor watches -- the same arrangement as the two install
-# playbooks. So the set is named rather than derived.
+# same question and must not be used as this gate: TWO of the three are spendable with no
+# episode route here, because both of those episodes are one shot on the host
+# (`mcp_agent.py --cert-episode` and `--cloud-episode`, see
+# examples/playbooks/agent/files/mcp_agent.py) which the dashboard neither opens nor
+# watches -- the same arrangement as the two install playbooks. So the set is named
+# rather than derived, and it now has two instances rather than one arguing for that.
 EPISODE_MECHANISMS = ("kubernetes",)
+
+# Where a host-side episode actually runs, per mechanism. A table rather than a hardcoded
+# sentence because there are two of them now, and the first version of the refusal below
+# told an operator with a CLOUD link about the CERTIFICATE episode -- correct-sounding,
+# and pointing at the wrong flag on the wrong page.
+HOST_EPISODE_FLAGS = {"certificates": "--cert-episode", "cloud": "--cloud-episode"}
 
 
 def cluster_episode_mechanism_problem(row) -> str:
     """Refuse a CLUSTER-access episode on an agent whose link is not a cluster token.
 
-    Without this the request passes `episode_link_problem` -- `certificates` IS
-    spendable -- and falls through to a Kubernetes lookup that misses, so the answer is
-    "The linked Kubernetes token no longer exists. Unlink and relink.": a refusal that
+    Without this the request passes `episode_link_problem` -- `certificates` and `cloud`
+    ARE spendable -- and falls through to a Kubernetes lookup that misses, so the answer
+    is "The linked Kubernetes token no longer exists. Unlink and relink.": a refusal that
     accuses a perfectly valid link of having lost its credential, and sends the operator
     to undo the one thing that was right. Naming the mechanism instead costs nothing and
     points at where that episode actually runs.
@@ -377,11 +451,13 @@ def cluster_episode_mechanism_problem(row) -> str:
     mechanism = (getattr(row, "linked_mechanism", "") or "").strip().lower()
     if not mechanism or mechanism in EPISODE_MECHANISMS:
         return ""
+    flag = HOST_EPISODE_FLAGS.get(mechanism, "")
+    where = (f"The {mechanism} episode is a run on the host — `mcp_agent.py {flag}` — "
+             "which this dashboard neither opens nor watches; "
+             "`journalctl -u mcp-agent` is the record. " if flag else "")
     return (f"This agent is answerable for a {mechanism} credential, not a cluster "
-            "token, so there is no cluster-access request to open. The certificate "
-            "episode is a run on the host — `mcp_agent.py --cert-episode` — which this "
-            "dashboard neither opens nor watches; `journalctl -u mcp-agent` is the "
-            "record. The link itself is fine; leave it alone.")
+            f"token, so there is no cluster-access request to open. {where}"
+            "The link itself is fine; leave it alone.")
 
 
 def episode_duration_problem(minutes) -> int:
