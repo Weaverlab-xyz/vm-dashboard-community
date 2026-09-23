@@ -229,9 +229,19 @@ def test_the_wlc_request_names_its_workload_identity():
 
 
 def test_the_wlc_path_matches_the_providers_grammar():
+    """The WHOLE path, not two substrings of it.
+
+    This test used to assert only that ``/site/`` and ``/secrets/`` appeared somewhere in
+    the file, which every candidate path satisfies -- and that is how the worker shipped
+    reading ``/secrets/{name}`` where the live API answers ``/secrets/static/{name}``,
+    under a docstring claiming the two grammars could not disagree. A substring check
+    against a path bug is not a check.
+    """
     code = _code(_WORKER)
-    assert "/site/" in code and "/secrets/" in code, \
-        "the secrets path no longer mirrors the provider's BuildPath"
+    assert '/secrets/static/{quote(secret_name)}' in code, (
+        "the static-secret path dropped its /static/ endpoint segment. "
+        "workload_credentials_service.read_static builds /site/{id}/secrets/static/{name} "
+        "and that is the path a live site answered")
 
 
 def test_the_worker_refuses_wlc_mode_with_missing_configuration():

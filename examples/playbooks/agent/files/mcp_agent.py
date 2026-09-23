@@ -405,13 +405,23 @@ def read_wlc_secret(*, base_url: str, site_id: str, service_name: str,
     ``services/workload_credentials_service.build_secrets_path`` cannot disagree about
     where a secret lives.
 
+    **The endpoint for a static secret is ``/static/{name}``, and leaving that segment out
+    was a real bug rather than a shorthand.** This function built ``/secrets/{name}`` while
+    ``workload_credentials_service.read_static`` builds ``/secrets/static/{name}`` -- the
+    path a live site actually answered, recorded in
+    ``tests/test_workload_credentials.test_the_live_read_response_yields_just_the_secret_map``.
+    So every ``--token-source wlc`` and ``ps`` run would have 404'd, and the docstring
+    above asserted the two could not disagree while they did. The test that was meant to
+    catch it only checked that ``/site/`` and ``/secrets/`` appeared somewhere in the file,
+    which any of the three paths satisfies; it now asserts the whole path.
+
     The identity token is passed in rather than fetched here: the ``ps`` source reads two
     secrets, and one token should serve both rather than making the metadata service
     answer twice for the same machine.
     """
     from urllib.parse import quote, urlencode
 
-    path = f"/site/{quote(site_id)}/secrets/{quote(secret_name)}"
+    path = f"/site/{quote(site_id)}/secrets/static/{quote(secret_name)}"
     url = base_url.rstrip("/") + path
     if folder:
         url += "?" + urlencode({"folder": folder})
