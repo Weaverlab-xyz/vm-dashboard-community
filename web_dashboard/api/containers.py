@@ -1112,7 +1112,8 @@ def deploy_rancher_node(
             status_code=400,
             detail="Set a Rancher bootstrap password in Settings → Kubernetes before deploying.")
     # Only carry fields the operator actually set, so blanks fall back to config.
-    meta: dict = {"cloud": cloud, "web_jump_enabled": bool(req.web_jump_enabled)}
+    meta: dict = {"cloud": cloud, "web_jump_enabled": bool(req.web_jump_enabled),
+                  "recreate": bool(req.recreate)}
     if req.region:
         if not region_catalog.validate(cloud, req.region):
             raise HTTPException(

@@ -536,6 +536,21 @@ Both are enforced, not assumed:
   does not persist ACME state (`/var/lib/rancher` is not on a durable disk), so
   **every redeploy issues a fresh certificate**. Five redeploys in a week and
   issuance is refused until the window rolls. Avoid redeploy loops once ACME is on.
+* **Changing the domain on a LIVE node requires replacing it.** A deploy reuses a
+  running node, and a container's arguments are fixed when it is created, so the
+  change cannot otherwise take effect. The deploy detects this and **fails** rather
+  than reporting a success that changed nothing; tick *Replace the node if its
+  container arguments changed* to apply it. Replacing wipes Rancher's state --
+  users, settings and imported clusters, which must be re-imported -- because that
+  state lives inside the container with no volume behind it.
+* **On Azure the node keeps its address while a certificate domain is set.** The
+  Standard/Static public IP is normally deleted with the VM; with ACME configured
+  the teardown leaves it, so a replace, a teardown or a sweep does not move the
+  address your A record points at. It costs a few dollars a month while nothing is
+  attached. Clearing `rancher_acme_domain` restores the old behaviour, so the next
+  teardown releases the address -- and the record goes stale. **GCP and AWS keep
+  their ephemeral addresses**, so there the record must be re-pointed after any
+  recreate.
 * A `.app`, `.dev` or other HSTS-preloaded domain is fine. Browsers force HTTPS on
   those names, but Let's Encrypt's validator is not a browser and ignores preload,
   so HTTP-01 still works.
