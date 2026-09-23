@@ -119,6 +119,136 @@
   </div>
 
   {% if password_safe_enabled %}
+  {# ── Attribute editor ────────────────────────────────────────────────────────
+     A PICKER, not a key/value box. An attribute type owns a fixed set of values and
+     assigning one names its AttributeID, so there is nothing to type and a typo is not
+     expressible — the opposite of the cloud tag editor, deliberately. #}
+  <div x-show="psEdit.open" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+       @keydown.escape.window="closePsEditor()">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+      <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+        <div>
+          <h3 class="text-base font-semibold text-gray-800">Password Safe attributes</h3>
+          <p class="text-xs text-gray-500 mt-0.5">
+            <span x-text="psEdit.rows.length"></span> asset(s)
+          </p>
+        </div>
+        <button @click="closePsEditor()" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+      </div>
+
+      <div class="px-5 py-4 space-y-4">
+        <div x-show="psEdit.error" x-cloak
+             class="border border-red-200 bg-red-50 rounded-lg px-3 py-2 text-xs text-red-800"
+             x-text="psEdit.error"></div>
+
+        <div x-show="!psEdit.rows.length" x-cloak class="text-xs text-gray-500">
+          None of the selected rows has a Password Safe <strong>asset</strong>. Attributes
+          live on assets — a resource matched only to a managed system has nothing to
+          write to.
+        </div>
+
+        <template x-if="psEdit.rows.length">
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Attribute type</label>
+              <select x-model="psEdit.typeId" @change="psEdit.attributeId = ''"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <option value="">— choose —</option>
+                <template x-for="t in psWritableTypes()" :key="t.type_id">
+                  <option :value="t.type_id" x-text="t.name"></option>
+                </template>
+              </select>
+              {# Read-only types are NAMED rather than silently missing: an operator
+                 looking for Criticality should learn why, not wonder. #}
+              <p x-show="psVocab.some(t => t.read_only)" x-cloak class="text-xs text-gray-400 mt-1">
+                Read-only in this Password Safe, so not offered:
+                <span x-text="psVocab.filter(t => t.read_only).map(t => t.name).join(', ')"></span>
+              </p>
+            </div>
+
+            <div x-show="psEdit.typeId" x-cloak>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Value</label>
+              <select x-model="psEdit.attributeId"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <option value="">— choose —</option>
+                <template x-for="v in psValuesOfType()" :key="v.attribute_id">
+                  <option :value="v.attribute_id" x-text="v.value"></option>
+                </template>
+              </select>
+            </div>
+
+            <label class="flex items-center gap-2 text-xs text-gray-600">
+              <input type="checkbox" :checked="!psEdit.assign"
+                     @change="psEdit.assign = !$event.target.checked"
+                     class="h-3.5 w-3.5 rounded border-gray-300">
+              Remove this attribute instead of assigning it
+            </label>
+          </div>
+        </template>
+
+        <template x-if="psEdit.result">
+          <div class="space-y-2 border-t border-gray-100 pt-3">
+            <p x-show="psEdit.result.count" class="text-xs text-green-700">
+              <span x-text="psEdit.result.assigned ? 'Applied' : 'Removed'"></span>
+              <strong x-text="psEdit.result.type + ' = ' + psEdit.result.value"></strong>
+              on <span x-text="psEdit.result.count"></span> asset(s).
+            </p>
+            {# Named, never counted — a bulk apply is N independent calls. #}
+            <div x-show="psEdit.result.failed.length" x-cloak
+                 class="border border-amber-200 bg-amber-50 rounded-lg px-3 py-2 space-y-1">
+              <p class="text-xs font-medium text-amber-900">
+                <span x-text="psEdit.result.failed.length"></span> could not be changed:
+              </p>
+              <template x-for="f in psEdit.result.failed" :key="f.name">
+                <p class="text-xs text-amber-800">
+                  <span class="font-medium" x-text="'asset ' + f.name"></span> — <span x-text="f.error"></span>
+                </p>
+              </template>
+            </div>
+
+            {# The Smart Rule re-run: a SEPARATE action, deliberately. Applying an
+               attribute and watching a rule act on it are two steps an operator wants to
+               see in order, and firing per target in a bulk apply would be both
+               surprising and expensive. #}
+            <div class="border-t border-gray-100 pt-3 space-y-2">
+              <label class="block text-xs font-medium text-gray-600">Re-run a Smart Rule</label>
+              <div class="flex gap-2">
+                <select x-model="psRuleId" @focus="loadPsRules()"
+                        class="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                  <option value="">— choose a rule —</option>
+                  <template x-for="r in psRules" :key="r.id">
+                    <option :value="r.id"
+                            x-text="r.title + (r.last_processed ? ' · last ' + r.last_processed.slice(0,16) : '')"></option>
+                  </template>
+                </select>
+                <button @click="processPsRule()" :disabled="!psRuleId || psRuleBusy"
+                        class="px-3 py-1.5 text-sm rounded-lg border border-gray-300 text-gray-700
+                               hover:bg-gray-50 disabled:opacity-40">
+                  <span x-show="!psRuleBusy">Re-run</span>
+                  <span x-show="psRuleBusy" x-cloak>…</span>
+                </button>
+              </div>
+              <p x-show="psRuleNote" x-cloak class="text-xs text-gray-500" x-text="psRuleNote"></p>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <div class="px-5 py-3 border-t border-gray-100 flex justify-end gap-2">
+        <button @click="closePsEditor()"
+                class="px-3 py-1.5 text-sm rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50">Close</button>
+        <button @click="submitPsEdit()"
+                :disabled="psEdit.busy || !psEdit.attributeId || !psEdit.rows.length"
+                class="px-3 py-1.5 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40">
+          <span x-show="psEdit.busy" x-cloak>Applying…</span>
+          <span x-show="!psEdit.busy"
+                x-text="(psEdit.assign ? 'Apply to ' : 'Remove from ') + psEdit.rows.length"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   {# Password Safe records nothing here corresponds to — usually a decommissioned host
      whose record was never cleaned up. ADMIN-ONLY, and the server decides: /inventory is
      workgroup-filtered rather than admin-gated, and an orphan is by definition a record
@@ -158,7 +288,19 @@
           locked while this selection is active.
         </p>
       </div>
-      <button @click="clearSelection()" class="text-xs text-blue-700 hover:underline shrink-0">Clear</button>
+      <div class="flex items-center gap-3 shrink-0">
+        {% if password_safe_enabled %}
+        {# Counts only the rows that HAVE an asset, so the button never promises more
+           than it can do — a selection of ten where three match an asset says three. #}
+        <button x-show="psEditableRows().length" x-cloak
+                @click="openPsEditor(psEditableRows())"
+                class="px-2.5 py-1 text-xs font-medium rounded-lg bg-white border
+                       border-blue-300 text-blue-700 hover:bg-blue-50">
+          Edit attributes on <span x-text="psEditableRows().length"></span>
+        </button>
+        {% endif %}
+        <button @click="clearSelection()" class="text-xs text-blue-700 hover:underline">Clear</button>
+      </div>
     </div>
 
     <div class="flex flex-wrap items-end gap-3">
@@ -299,7 +441,15 @@
               </button>
             </td>
             {% endif %}
-            <td class="px-4 py-3 text-right">
+            <td class="px-4 py-3 text-right whitespace-nowrap">
+              {% if password_safe_enabled %}
+              {# Only where there is an ASSET. A row matched to a managed system alone
+                 has nothing to write to, and offering the control would be a promise
+                 the page cannot keep. #}
+              <button x-show="psAssetOf(r)" x-cloak @click="openPsEditor([r])"
+                      class="text-blue-500 hover:underline text-xs font-medium mr-3"
+                      :title="'Edit Password Safe attributes on ' + (psAssetOf(r) || {}).name">Attributes</button>
+              {% endif %}
               <a :href="r.detail_href"
                  class="text-blue-500 hover:underline text-xs font-medium" x-text="'Open →'"></a>
             </td>
@@ -372,6 +522,12 @@
       filterWorkgroup: '',
       filterTag: '',
       filterPsAttr: '',
+      // The attribute editor. Only rows matched to an ASSET can be written — attributes
+      // live on assets, and a row matched only to a managed system has none.
+      psEdit: { open: false, rows: [], typeId: '', attributeId: '',
+                assign: true, busy: false, error: '', result: null },
+      psVocab: [],       // attribute types + their values; the picker itself
+      psRules: [], psRuleId: '', psRuleBusy: false, psRuleNote: '',
       ps: {},            // the page-level Password Safe envelope
 
       // Bulk Config-Management run
@@ -572,6 +728,82 @@
 
       workgroups() {
         return [...new Set(this.items.map(i => i.workgroup).filter(Boolean))].sort();
+      },
+
+      // The asset behind a row, or null. Attributes live on assets: a row matched only
+      // to a managed system (which is how everything this dashboard onboarded matches)
+      // has nothing to write to, and the editor must say so rather than fail on apply.
+      psAssetOf(r) {
+        return (((r || {}).ps || {}).objects || []).find(o => o.kind === 'asset') || null;
+      },
+
+      psEditableRows() {
+        return this.filtered().filter(r => this.selected.includes(r.id) && this.psAssetOf(r));
+      },
+
+      // Only types this Password Safe will actually accept. A read-only one is kept in
+      // the payload so the reason can be shown, but it is not offered as a choice.
+      psWritableTypes() { return this.psVocab.filter(t => !t.read_only); },
+
+      psValuesOfType() {
+        const t = this.psVocab.find(x => x.type_id === this.psEdit.typeId);
+        return t ? t.values : [];
+      },
+
+      async openPsEditor(rows) {
+        this.psEdit = { open: true, rows: (rows || []).filter(r => this.psAssetOf(r)),
+                        typeId: '', attributeId: '', assign: true,
+                        busy: false, error: '', result: null };
+        if (!this.psVocab.length) {
+          try {
+            const resp = await API.get('/api/password-safe/attribute-vocabulary');
+            this.psVocab = (resp && resp.types) || [];
+          } catch (e) { this.psEdit.error = (e && e.message) || String(e); }
+        }
+      },
+
+      closePsEditor() { this.psEdit.open = false; },
+
+      async submitPsEdit() {
+        if (this.psEdit.busy || !this.psEdit.attributeId || !this.psEdit.rows.length) return;
+        this.psEdit.busy = true; this.psEdit.error = '';
+        try {
+          const resp = await API.post('/api/password-safe/asset-attributes', {
+            asset_ids: this.psEdit.rows.map(r => parseInt(this.psAssetOf(r).object_id, 10)),
+            attribute_id: parseInt(this.psEdit.attributeId, 10),
+            assign: this.psEdit.assign,
+          });
+          this.psEdit.result = resp;
+          // Reload rather than patching the chips locally: unlike a cloud tag write, the
+          // authority here is another product, and the attribute may have been changed
+          // by a Smart Rule between the apply and now. A refetch is also cheap — the
+          // snapshot is cached — and it is the only thing that can show that.
+          await this.load();
+        } catch (e) {
+          // A whole-request refusal: a read-only type, or an id this tenant does not
+          // have. The server's message names which and why, so show it verbatim.
+          this.psEdit.error = (e && e.message) || String(e);
+        } finally { this.psEdit.busy = false; }
+      },
+
+      async loadPsRules() {
+        if (this.psRules.length) return;
+        try {
+          const resp = await API.get('/api/password-safe/smart-rules');
+          this.psRules = (resp && resp.rules) || [];
+        } catch (e) { this.psRuleNote = (e && e.message) || String(e); }
+      },
+
+      async processPsRule() {
+        if (!this.psRuleId || this.psRuleBusy) return;
+        this.psRuleBusy = true; this.psRuleNote = '';
+        try {
+          await API.post(`/api/password-safe/smart-rules/${this.psRuleId}/process`, {});
+          // Queued, not finished: Password Safe processes asynchronously, so claiming
+          // it had run would be a claim this page cannot make.
+          this.psRuleNote = 'Queued — Password Safe processes it in the background.';
+        } catch (e) { this.psRuleNote = (e && e.message) || String(e); }
+        finally { this.psRuleBusy = false; }
       },
 
       // Distinct Password Safe ATTRIBUTE keys — the type names (Criticality, Business

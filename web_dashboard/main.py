@@ -1310,6 +1310,16 @@ except ImportError as exc:
     logger.warning("API router 'inventory' not loaded: %s", exc)
 
 try:
+    # Writing Password Safe attributes, and re-running the Smart Rules they feed.
+    # Always registered, gated inside: every route calls `_require_ready()`, which
+    # answers 404 while `password_safe_enabled` is off. Registering conditionally would
+    # need a restart to pick the flag up, which the setup wizard does not do.
+    from .api import ps_attributes  # noqa: E402
+    app.include_router(ps_attributes.router)
+except ImportError as exc:
+    logger.warning("API router 'ps_attributes' not loaded: %s", exc)
+
+try:
     # The dashboard home page's one aggregate read. Always-on and NOT feature-gated: it
     # answers for whichever tiles this install has, and a tile with nothing collected
     # reports unavailable rather than 404ing the whole page.

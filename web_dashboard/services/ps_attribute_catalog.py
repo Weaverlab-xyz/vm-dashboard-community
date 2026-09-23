@@ -395,3 +395,86 @@ def unmatched(index, matched_refs, cap=100) -> list:
         if len(out) >= cap:
             break
     return out
+
+
+# ── the vocabulary (Phase 2: assigning) ──────────────────────────────────────
+#
+# An attribute is NOT free text. A type — `Criticality`, `Business Unit`, `Geography` —
+# owns a fixed set of values, each with its own AttributeID, and assigning one to an asset
+# means naming that id. So the editor is a PICKER over this vocabulary, not a key/value
+# box like the cloud tag editor: there is no way to invent a value, and a typo is not
+# expressible. That is why nothing here needs a charset guard the way the Proxmox tag
+# verb did.
+
+VOCABULARY_KEYS = ("type_id", "name", "read_only", "values")
+VOCABULARY_VALUE_KEYS = ("attribute_id", "value")
+
+
+def build_vocabulary(types, values_by_type) -> list:
+    """``AttributeTypes`` plus each one's values, as a closed, render-ready shape.
+
+    ``read_only`` is carried from the tenant rather than inferred. Some types genuinely
+    are — ``Criticality`` is ``IsReadOnly: true`` in the tenant this was built against —
+    and offering a picker that Password Safe will refuse is a promise the page cannot
+    keep. :func:`assert_assignable` is the half that enforces it.
+    """
+    out = []
+    for row in types or []:
+        if not isinstance(row, dict):
+            continue
+        type_id = row.get("AttributeTypeID")
+        name = _clean_text(row.get("Name"))
+        if type_id in (None, "") or not name:
+            continue
+        values = []
+        for value_row in (values_by_type or {}).get(str(type_id), []) or []:
+            if not isinstance(value_row, dict):
+                continue
+            attribute_id = value_row.get("AttributeID")
+            label = _clean_text(value_row.get("ShortName") or value_row.get("LongName"))
+            if attribute_id in (None, "") or not label:
+                continue
+            values.append({"attribute_id": str(attribute_id), "value": label})
+        out.append({"type_id": str(type_id), "name": name,
+                    "read_only": bool(row.get("IsReadOnly")),
+                    "values": values[:MAX_ATTRIBUTES]})
+    out.sort(key=lambda t: t["name"].lower())
+    return out
+
+
+def find_value(vocabulary, attribute_id):
+    """``(type, value)`` for one attribute id, or ``(None, None)``.
+
+    The lookup the write path validates against: an id the vocabulary does not contain is
+    refused rather than forwarded, so a caller cannot assign something this tenant has
+    never heard of and read the provider's error back as the explanation.
+    """
+    wanted = str(attribute_id or "").strip()
+    for type_row in vocabulary or []:
+        for value in type_row.get("values", []):
+            if value["attribute_id"] == wanted:
+                return type_row, value
+    return None, None
+
+
+def assert_assignable(vocabulary, attribute_id) -> tuple:
+    """``(type, value)`` for an assignable attribute, or raise :class:`ValueError`.
+
+    Two refusals, both naming the reason, because both are things an operator can act on:
+
+      * an id this tenant does not have — usually a stale page, or a vocabulary edited in
+        the console since the picker was loaded;
+      * a type the tenant marks READ-ONLY. Password Safe would refuse it anyway; catching
+        it here turns a provider error into a sentence, and stops a bulk apply from
+        failing identically on every target.
+    """
+    type_row, value = find_value(vocabulary, attribute_id)
+    if type_row is None:
+        raise ValueError(
+            f"attribute {attribute_id!r} is not in this Password Safe's vocabulary — "
+            f"reload the page if it was added or removed in the console")
+    if type_row["read_only"]:
+        raise ValueError(
+            f"'{type_row['name']}' is read-only in this Password Safe, so "
+            f"'{value['value']}' cannot be assigned from here — change it in the console")
+    return type_row, value
