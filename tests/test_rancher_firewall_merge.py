@@ -153,6 +153,15 @@ def _run_refresh(rows=None):
     return asyncio.run(svc.refresh_rancher_firewall(_FakeDB(rows or [])))
 
 
+def _service_src():
+    """The rancher_node_service source, for assertions about wiring that cannot be
+    reached without a cloud account."""
+    import os as _os
+    path = _os.path.join(_ROOT, "web_dashboard", "services", "rancher_node_service.py")
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
 def test_merge_dedup_and_sorted():
     _reset(rancher_allowed_source_cidrs="203.0.113.4/32, 10.0.0.0/24",
            rancher_ui_web_jump_enabled="1", rancher_ui_jumpoint_egress_ip="9.9.9.9")
@@ -521,6 +530,71 @@ def test_acme_dns_rejects_a_record_pointing_elsewhere():
     assert _addrs_named(msg) == {"203.0.113.9", "40.78.191.25"}
     assert _hosts_named(msg) == {"rancher.example.com"}
     assert "does not resolve" not in msg
+
+
+# ── container-argument drift: a reused node must not silently ignore a change ─
+# A deploy REUSES a running node, and a container's arguments are fixed at first
+# boot. Without a check, setting the certificate domain on a live node would
+# re-apply the firewall, re-pin server-url, report success, and leave the node
+# serving its old self-signed certificate.
+
+def test_no_drift_when_the_args_match_what_the_node_was_launched_with():
+    _reset(rancher_acme_domain="rancher.example.com",
+           rancher_node_container_args="--acme-domain rancher.example.com")
+    assert svc._container_args_changed() is False
+
+
+def test_drift_when_a_certificate_domain_is_added_to_a_live_node():
+    # The node was launched with no arguments; a domain has since been set.
+    _reset(rancher_acme_domain="rancher.example.com", rancher_node_container_args="")
+    assert svc._container_args_changed() is True
+
+
+def test_drift_when_the_certificate_domain_is_removed():
+    # Going back to self-signed is just as much a change the container cannot pick
+    # up on its own -- the direction does not matter.
+    _reset(rancher_node_container_args="--acme-domain rancher.example.com")
+    assert svc._container_args_changed() is True
+
+
+def test_drift_when_the_domain_is_pointed_at_a_different_name():
+    _reset(rancher_acme_domain="rancher2.example.com",
+           rancher_node_container_args="--acme-domain rancher.example.com")
+    assert svc._container_args_changed() is True
+
+
+def test_a_fresh_install_with_no_domain_reports_no_drift():
+    # Nothing configured and nothing recorded: the common case must not start
+    # demanding that every deploy replace the node.
+    _reset()
+    assert svc._container_args_changed() is False
+
+
+def test_the_fingerprint_is_cleared_on_teardown():
+    """A fingerprint outliving its node would make the next FRESH create look like
+    drift, and refuse a deploy that has nothing to preserve."""
+    src = _service_src()
+    body = src[src.index("async def run_teardown("):]
+    assert "_CONTAINER_ARGS_KEY" in body
+
+
+def test_the_deploy_refuses_a_silent_noop_and_takes_consent_to_replace():
+    """The drift check is only worth anything if the DEPLOY consults it: the whole
+    failure being fixed is a redeploy that reports success and changes nothing."""
+    src = _service_src()
+    body = src[src.index("async def run_deploy("):]
+    assert "_container_args_changed()" in body      # it is consulted
+    assert 'meta.get("recreate")' in body           # and replacing needs consent
+    assert "set_failed" in body                     # otherwise the job FAILS, not warns
+
+
+def test_the_azure_teardown_keeps_the_address_when_a_certificate_domain_is_set():
+    """An A record at the operator's registrar points at this address and nothing
+    here can update it, so releasing it silently breaks the next deploy's ACME."""
+    src = _service_src()
+    body = src[src.index("async def _stop_node("):]
+    body = body[:body.index("\nasync def ", 1)]
+    assert "keep_public_ip=bool(_acme_domain())" in body
 
 
 if __name__ == "__main__":

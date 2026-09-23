@@ -3218,20 +3218,37 @@ async def list_vm_container_nodes(rg: str, purpose: str) -> list:
         raise AzureError(f"Failed to list {purpose} nodes: {e}") from e
 
 
-def _stop_vm_container_node_sync(cred, sub_id: str, rg: str, name: str) -> None:
+def _stop_vm_container_node_sync(cred, sub_id: str, rg: str, name: str,
+                                 keep_public_ip: bool = False) -> None:
     """Delete the node VM and the per-node resources it owns.
 
     Order matters: the NIC holds the public IP and the NSG, so both stay undeletable
     until the VM and then the NIC are gone. Each step is independently best-effort so a
     resource that somebody already removed by hand cannot strand the rest.
+
+    ``keep_public_ip`` leaves the Standard/Static public IP behind. The address is a
+    property of THAT resource, not of the VM, and the create path is a
+    create-or-update on the same deterministic name -- so keeping it means the node
+    comes back on the same address after a full delete/recreate, not merely after a
+    stop. That matters once DNS points at it: a certificate is issued for a name, the
+    name resolves to one address, and an address that moves silently invalidates both.
+    The cost is a few dollars a month for a reserved address with nothing attached,
+    which is the cheaper half of the trade the moment a DNS record depends on it.
     """
     compute = _get_compute(cred, sub_id)
     network = _get_network(cred, sub_id)
-    for what, fn in (
+    steps = [
         ("vm", lambda: compute.virtual_machines.begin_delete(rg, name).result()),
         ("nic", lambda: network.network_interfaces.begin_delete(rg, f"{name}-nic").result()),
-        ("public IP", lambda: network.public_ip_addresses.begin_delete(rg, f"{name}-pip").result()),
-    ):
+    ]
+    if keep_public_ip:
+        logger.info("node %s: keeping its public IP %s-pip (a DNS record points at it)",
+                    name, name)
+    else:
+        steps.append(
+            ("public IP",
+             lambda: network.public_ip_addresses.begin_delete(rg, f"{name}-pip").result()))
+    for what, fn in steps:
         try:
             fn()
         except Exception as exc:  # noqa: BLE001
@@ -3239,11 +3256,13 @@ def _stop_vm_container_node_sync(cred, sub_id: str, rg: str, name: str) -> None:
                            name, what, exc)
 
 
-async def stop_vm_container_node(rg: str, name: str) -> None:
-    """Delete the node VM plus its NIC and public IP."""
+async def stop_vm_container_node(rg: str, name: str, *,
+                                 keep_public_ip: bool = False) -> None:
+    """Delete the node VM plus its NIC, and its public IP unless ``keep_public_ip``."""
     try:
         cred, sub_id = await _ensure_creds()
-        await _to_thread(_stop_vm_container_node_sync, cred, sub_id, rg, name)
+        await _to_thread(_stop_vm_container_node_sync, cred, sub_id, rg, name,
+                         keep_public_ip)
     except AzureError:
         raise
     except Exception as e:

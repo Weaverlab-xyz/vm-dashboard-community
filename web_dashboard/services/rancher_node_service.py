@@ -86,6 +86,35 @@ def _container_args() -> tuple:
     return ("--acme-domain", domain) if domain else ()
 
 
+_CONTAINER_ARGS_KEY = "rancher_node_container_args"
+
+
+def _launched_container_args() -> str:
+    """The container arguments the LIVE node was actually launched with.
+
+    Recorded in config at create time rather than read back off the instance,
+    because the three clouds store the launch differently (a konlet declaration in
+    GCE metadata, cloud-init user-data on AWS and Azure) and the only thing any
+    caller needs is whether it still matches. A node that is gone re-records on its
+    next create, so the two cannot drift apart for long.
+    """
+    return (config_service.get(_CONTAINER_ARGS_KEY) or "").strip()
+
+
+def _container_args_changed() -> bool:
+    """Whether the configured container arguments differ from the running node's.
+
+    A deploy REUSES a live node, and a container's arguments are fixed when it is
+    created -- cloud-init and the konlet declaration both run once, at first boot.
+    So changing something that becomes an argument (today, the certificate domain)
+    and redeploying would otherwise do nothing at all: the firewall would be
+    re-applied, server-url re-pinned, the job would report success, and the node
+    would go on serving its old certificate. Silent, and indistinguishable from the
+    setting not working.
+    """
+    return " ".join(_container_args()) != _launched_container_args()
+
+
 def _allowed_cidrs() -> list[str]:
     """MANUAL firewall source ranges (CSV), fail-closed. Empty CSV → [] unless the
     node cloud's allow_open is ticked.
@@ -541,7 +570,16 @@ async def _stop_node(cloud: str, p: dict, *, name: str, zone: str,
     if cloud == "azure":
         # The VM delete takes the NIC and the public IP with it; the NSG can only go
         # once the NIC that references it is gone, which is why it is last.
-        await azure_service.stop_vm_container_node(p["resource_group"], name)
+        #
+        # EXCEPT when a certificate domain is configured. Then an A record at the
+        # operator's registrar points at this address, and nothing here can update it
+        # -- so releasing the address turns every later deploy into a DNS edit the
+        # operator has to remember, and an ACME order that fails until they do. The
+        # Standard/Static IP is a separate resource on a deterministic name and the
+        # launch path is a create-or-update, so keeping it means the node returns on
+        # the same address even across a full delete/recreate.
+        await azure_service.stop_vm_container_node(
+            p["resource_group"], name, keep_public_ip=bool(_acme_domain()))
         if delete_firewall:
             await azure_service.delete_node_nsg(p["resource_group"],
                                                 _firewall_name(name))
@@ -667,6 +705,42 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
 
         job_service.update_progress(db, job_id, 30, "Launching the node VM")
         res = await _launch_node(cloud, p, bootstrap_password)
+
+        # A reused node keeps the container it booted with. If its arguments have
+        # changed since, the only way to apply them is to replace the node -- and
+        # that wipes Rancher's state, which lives inside the container with no
+        # volume behind it. So the operator says whether that is acceptable; the
+        # deploy does not decide for them, and it does not quietly no-op either.
+        if res.get("reused") and _container_args_changed():
+            if not meta.get("recreate"):
+                job_service.set_failed(
+                    db, job_id,
+                    f"The Rancher node is already running, and a node's container "
+                    f"arguments are fixed when it is created — so this deploy would "
+                    f"reuse it and your change would have no effect. Configured now: "
+                    f"{' '.join(_container_args()) or '(none)'}; the live node was "
+                    f"launched with: {_launched_container_args() or '(none)'}. "
+                    f"Redeploy with \"Replace the node\" to apply it. That REPLACES the "
+                    f"node: Rancher's state is inside the container, so its users, "
+                    f"settings and imported clusters go with it and the clusters must "
+                    f"be re-imported."
+                    + (f" The node keeps its address ({res.get('external_ip') or 'unchanged'}) "
+                       f"because a certificate domain is set, so your DNS record does not "
+                       f"need changing." if _acme_domain() and cloud == "azure" else ""))
+                return
+            job_service.update_progress(
+                db, job_id, 35, "Replacing the node to apply its new container arguments")
+            logger.info("Rancher node: container args changed (%r → %r) — replacing",
+                        _launched_container_args(), " ".join(_container_args()))
+            await _stop_node(cloud, p, name=res.get("name") or p["name"],
+                             zone=res.get("zone") or p["zone"])
+            res = await _launch_node(cloud, p, bootstrap_password)
+
+        # Record what this node was actually launched with, so the next deploy can
+        # tell reuse-is-fine from reuse-would-silently-ignore-you.
+        if not res.get("reused"):
+            config_service.set(_CONTAINER_ARGS_KEY, " ".join(_container_args()))
+
         external_ip = res.get("external_ip") or ""
         url = res.get("url") or ""
         if not external_ip:
@@ -945,6 +1019,10 @@ async def run_teardown(db, *, job_id: str, meta: dict) -> None:
                     "rancher_ui_web_jump_id", "rancher_ui_web_jump_tfstate",
                     "rancher_ui_vault_account_id",
                     "rancher_ui_jumpoint_egress_ip",
+                    # Describes a node that no longer exists. Left behind, it would
+                    # make the next deploy compare against a dead node's arguments
+                    # and refuse a fresh create that has nothing to preserve.
+                    _CONTAINER_ARGS_KEY,
                     "entitle_rancher_integration_id", "entitle_rancher_tfstate"):
             config_service.set(key, "")
         # An AUTO-GENERATED admin password belongs to the torn-down node instance —

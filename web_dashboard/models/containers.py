@@ -248,6 +248,14 @@ class RancherDeployRequest(BaseModel):
     jump_group: Optional[str] = None         # PRA Jump Group name
     jumpoint_name: Optional[str] = None      # PRA Jumpoint name
     vault_account_group_id: Optional[int] = None  # PRA Vault account group for the admin credential
+    # Replace a live node whose container was launched with different arguments (the
+    # certificate domain is the one that changes them today). A deploy REUSES a
+    # running node, and the container's arguments are fixed at first boot, so without
+    # this such a change cannot take effect. Off by default because the replacement
+    # wipes Rancher's state -- it lives inside the container, with no volume -- so
+    # imported clusters must be re-imported. The deploy refuses and says so rather
+    # than assuming consent; this is that consent.
+    recreate: bool = False                   # replace the node if its container arguments changed
 
 
 class RancherImportRequest(BaseModel):

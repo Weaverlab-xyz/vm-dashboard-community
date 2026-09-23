@@ -1381,6 +1381,23 @@
           </p>
         </div>
 
+        <!-- Replacing a live node. Only surfaced once one exists, because on an empty
+             estate the deploy creates a node and the choice cannot arise. -->
+        <div x-show="rancherNodes.length" x-cloak
+             class="bg-white rounded-xl border border-gray-200 p-3 mb-3 text-sm">
+          <label class="flex items-center gap-2 font-medium text-gray-700">
+            <input type="checkbox" x-model="deployForm.recreate" class="rounded border-gray-300">
+            Replace the node if its container arguments changed
+          </label>
+          <p class="text-[11px] text-gray-400 mt-1 ml-6">
+            A deploy <strong>reuses</strong> a running node, and a container's arguments are fixed when it is
+            created — so changing the <strong>certificate domain</strong> cannot take effect without replacing it.
+            Leave this off and the deploy will refuse rather than silently ignore the change.
+            <span class="text-amber-600">Replacing wipes Rancher's state</span> (it lives inside the container):
+            users, settings and imported clusters go, and the clusters must be re-imported. On Azure with a
+            certificate domain set the node keeps its address, so DNS needs no change.
+          </p>
+        </div>
         <!-- PRA access (chosen at deploy/redeploy, like DB/VM deploys) -->
         <div x-show="praOpts.configured" x-cloak
              class="bg-white rounded-xl border border-gray-200 p-3 mb-3 text-sm">
@@ -2079,7 +2096,7 @@ function containersDashboard() {
     // (which is the node's current cloud, as the server saw it) so switching the cloud
     // dropdown cannot leave the previous cloud's regions selectable.
     rancherRegions: [],
-    deployForm: { cloud: 'gcp', region: '', zone: '', web_jump_enabled: false, jump_group: '', jumpoint_name: '', vault_account_group_id: null },
+    deployForm: { cloud: 'gcp', region: '', zone: '', recreate: false, web_jump_enabled: false, jump_group: '', jumpoint_name: '', vault_account_group_id: null },
     rancherActionPending: null,
     // Entitle registration state for the node row. Seeded with the shape GET /rancher
     // returns so every x-show on the row reads a defined field before the first fetch
@@ -2624,7 +2641,8 @@ function containersDashboard() {
     async deployRancher() {
       this.rancherDeploying = true;
       try {
-        const body = { web_jump_enabled: this.deployForm.web_jump_enabled };
+        const body = { web_jump_enabled: this.deployForm.web_jump_enabled,
+                       recreate: this.deployForm.recreate };
         if (this.deployForm.cloud) body.cloud = this.deployForm.cloud;
         if (this.deployForm.region) body.region = this.deployForm.region;
         if (this.deployForm.cloud === 'gcp' && (this.deployForm.zone || '').trim()) body.zone = this.deployForm.zone.trim();
