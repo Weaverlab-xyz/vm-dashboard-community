@@ -753,8 +753,12 @@ action `tags.update` — who, which resource, and what changed. Nothing is recor
 that failed or that was already in the requested state.
 
 Editing needs the cloud's existing **write** permission (`aws:write` and friends); there is
-no separate tag permission. Tag editing is **cloud only** for now — Proxmox reports tags but
-writing them on an agent-bound connection needs an agent release.
+no separate tag permission.
+
+**Proxmox can be edited too** — see [Agent-brokered hypervisors](remote-agents/hypervisors.md#the-verbs)
+for the one difference that matters: a connection the dashboard dials directly is written
+immediately, while an agent-bound one is *queued* as a job. The other hypervisors report
+no tags to edit.
 
 ---
 

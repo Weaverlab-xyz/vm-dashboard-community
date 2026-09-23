@@ -16,7 +16,7 @@
   in the page), and the staged/removable lists are plain STATE rather than getters —
   `...tagEditState()` spreads, and a spread evaluates a getter once and copies the value.
 #}
-{% macro tag_editor(noun="tag") %}
+{% macro tag_editor(noun="tag", valued=True) %}
 <div x-show="tagEdit.open" x-cloak
      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
      @keydown.escape.window="closeTagEditor()">
@@ -50,10 +50,14 @@
                  @keydown.enter.prevent="tagEditStageAdd()"
                  class="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-sm
                         focus:outline-none focus:ring-2 focus:ring-blue-500">
+          {# A Proxmox tag is a bare label — no value exists to type, and the server
+             refuses one rather than dropping it, so the input must not be offered. #}
+          {% if valued %}
           <input type="text" x-model="tagEdit.addValue" placeholder="value"
                  @keydown.enter.prevent="tagEditStageAdd()"
                  class="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-sm
                         focus:outline-none focus:ring-2 focus:ring-blue-500">
+          {% endif %}
           <button @click="tagEditStageAdd()" :disabled="!tagEdit.addKey.trim()"
                   class="px-3 py-1.5 text-sm rounded-lg bg-blue-600 text-white
                          hover:bg-blue-700 disabled:opacity-40">Add</button>
@@ -100,6 +104,21 @@
           <p x-show="tagEdit.result.updated.length" class="text-xs text-green-700">
             Updated <span x-text="tagEdit.result.updated.length"></span>.
           </p>
+          {# An agent-bound connection cannot be written directly, so the edit is a JOB.
+             Saying "updated" here would claim a change that has not happened yet. #}
+          <div x-show="tagEdit.result.queued && tagEdit.result.queued.length" x-cloak
+               class="border border-blue-200 bg-blue-50 rounded-lg px-3 py-2 space-y-1">
+            <p class="text-xs font-medium text-blue-900">
+              Queued <span x-text="tagEdit.result.queued.length"></span> for agent —
+              this connection is reached through one, so the change lands when the job runs.
+            </p>
+            <template x-for="q in (tagEdit.result.queued || [])" :key="q.job_id">
+              <p class="text-xs text-blue-800">
+                <span class="font-medium" x-text="q.name"></span> —
+                <a :href="'/jobs/' + q.job_id" class="underline hover:text-blue-950">view job</a>
+              </p>
+            </template>
+          </div>
           {# Named, never counted — the same rule the bulk power toast follows. #}
           <div x-show="tagEdit.result.failed.length" x-cloak
                class="border border-amber-200 bg-amber-50 rounded-lg px-3 py-2 space-y-1">

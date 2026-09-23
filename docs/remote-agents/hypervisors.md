@@ -76,6 +76,31 @@ override per connection with `options.sync_interval_minutes`). `power_on`, `powe
 `power_reset`, `shutdown`, `reboot` and `restart` are on-demand, issued by the existing
 power buttons on the hypervisor pages when the resolved connection is agent-bound.
 
+`set_tags` writes a guest's tags, and is **Proxmox only** — it is the one product here
+whose tags the dashboard reads, and vSphere, Nutanix and XCP-ng each model them
+differently. It is also the first verb to carry a value an operator typed, so two things
+are true of it that are not true of the others:
+
+* Every tag is checked against Proxmox's own `pve-tag-id` charset — letters, digits,
+  underscore, hyphen, plus and dot, starting with a letter, digit or underscore — by the
+  dashboard before a job row exists, **and again by the agent** before the call. A token
+  that fails is refused by name, never repaired: a repaired tag is a different tag.
+  Nothing matching that charset can express a path, a URL, a shell metacharacter or a
+  space, which is what keeps the payload allowlist's promise intact.
+* The job carries the **complete desired tag set**, not a delta. Proxmox stores tags in
+  one config field and replaces it wholesale, so the dashboard reads the current set,
+  applies your add/remove, and sends the result. An empty list is therefore a real
+  instruction — "remove the last tag" — not a missing field.
+
+`set_tags` also queues an `inventory_sync` on completion, like the power verbs and unlike
+`snapshot`, because `tags` is a column the cache stores: without it the page would keep
+showing the pre-edit tags and the *next* edit would be computed against them.
+
+**It needs a re-pulled agent and a policy line.** Add `set_tags` to that connection's
+`verbs:` list in your `policy.yaml`. An agent that predates the verb refuses it out loud —
+`policy.yaml` cannot grant a verb that did not exist when it was written, so the refusal
+names the file and the line to add rather than failing silently.
+
 A sync that comes back with **no VMs at all** is not applied to a connection that already
 has some. A zero-VM pass is how a *deleted* VM stops being listed — the sync removes every
 row it did not just write — and it is also exactly what an agent hands back when it could

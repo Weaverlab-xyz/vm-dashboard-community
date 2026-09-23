@@ -1003,6 +1003,12 @@ _NOT_IN_SIBLING = {
     # restart, "like powering the computer down, then back up again", which is already
     # what `power_reset` runs. There is no second script to give `reboot`.
     "reboot",
+    # Neither product HAS the concept. A Hyper-V VM and a bare ESXi host store nothing
+    # the dashboard's tag editor could write — vSphere tags live in vCenter, which is
+    # the `vsphere` kind and a different transport. The agent refuses `set_tags` for
+    # both by name before it ever reaches the runner, so the message says that rather
+    # than "unknown verb", which would read as a version mismatch.
+    "set_tags",
 }
 
 
