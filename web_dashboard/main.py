@@ -121,6 +121,12 @@ async def lifespan(app: FastAPI):
     warmers.append(
         asyncio.create_task(_spend_sweeper_loop(), name="spend_sweeper_loop")
     )
+    # Change windows. Unlike the three above this one answers to NO flag — it is what
+    # stops a job whose window closed from running late, and that guard is not optional.
+    # It no-ops (and writes no job row) while nothing is scheduled.
+    warmers.append(
+        asyncio.create_task(_schedule_sweeper_loop(), name="schedule_sweeper_loop")
+    )
     # POV reconcile — always launched; no-ops while POV environments are off or masked,
     # so turning the feature on activates the next pass without a restart.
     warmers.append(
@@ -339,6 +345,35 @@ async def _suspend_sweeper_loop() -> None:
         return suspend_sweeper.interval_seconds()
 
     await _sweeper_loop("suspend sweep enqueue", work, interval, fallback=600)
+
+
+# ── Change-window / scheduler sweeper loop ───────────────────────────────────
+
+async def _schedule_sweeper_loop() -> None:
+    """Enqueue one change-window sweep per interval.
+
+    Same shape and the same reasoning as :func:`_expiry_sweeper_loop`: this ONLY
+    enqueues, and ``jobs_worker._claim_one``'s rowcount decides which of the two app
+    workers and three worker replicas actually runs the pass.
+
+    Unlike the other five this one is NOT gated on a feature flag, and that is
+    deliberate. It is the backstop that stops a job whose change window closed from
+    running hours late, so an install where it was switched off would be one where
+    booking a change is actively more dangerous than running it by hand. The cost of
+    leaving it on is two indexed queries per pass — ``schedule_sweeper.has_work``
+    returns False and writes no job row at all on an install that has never scheduled
+    anything.
+    """
+    def work(db):
+        from .services import schedule_sweeper
+        schedule_sweeper.enqueue_sweep_if_due(db)
+
+    # Re-read live, so a Settings change lands on the next pass without a restart.
+    def interval():
+        from .services import schedule_sweeper
+        return schedule_sweeper.interval_seconds()
+
+    await _sweeper_loop("schedule sweep enqueue", work, interval, fallback=300)
 
 
 async def _expiry_sweeper_loop() -> None:
@@ -908,6 +943,8 @@ from .api import spend as spend_api  # noqa: E402
 from .api import preflight as preflight_api  # noqa: E402
 from .api import budgets as budgets_api  # noqa: E402
 from .api import suspend as suspend_api  # noqa: E402
+from .api import change_windows as change_windows_api  # noqa: E402
+from .api import schedules as schedules_api  # noqa: E402
 from .api import docs_pages  # noqa: E402
 from .api import workgroups as workgroups_api  # noqa: E402
 from .api import roles as roles_api  # noqa: E402
@@ -1013,6 +1050,11 @@ app.include_router(spend_api.router)
 app.include_router(preflight_api.router)
 app.include_router(budgets_api.router)
 app.include_router(suspend_api.router)
+# Change windows + the approval gate. Ungated by any feature flag: the scheduler
+# columns ship on every install, so the surface that explains and manages a booked
+# change must be reachable wherever one can be booked.
+app.include_router(change_windows_api.router)
+app.include_router(schedules_api.router)
 app.include_router(docs_pages.router)
 # Remote on-prem agents. Gated: this is the only router that accepts requests from
 # outside the dashboard's own trust domain, so it must be off unless asked for.
@@ -1510,6 +1552,14 @@ async def containers_page(request: Request):
 @app.get("/jobs", response_class=HTMLResponse, include_in_schema=False)
 async def jobs_page(request: Request):
     return templates.TemplateResponse("jobs/list.html", {"request": request})
+
+
+@app.get("/schedules", response_class=HTMLResponse, include_in_schema=False)
+async def schedules_page(request: Request):
+    """Recurring change schedules. Like /jobs and /audit, the shell renders for anyone
+    who reaches the URL and the API it reads scopes what they actually see — a page that
+    404s for the wrong user is an existence oracle, and one that renders empty is not."""
+    return templates.TemplateResponse("schedules/index.html", {"request": request})
 
 
 @app.get("/audit", response_class=HTMLResponse, include_in_schema=False)

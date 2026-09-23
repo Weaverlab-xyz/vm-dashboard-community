@@ -6,12 +6,13 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import User, get_db
 from ..models.job import JobResponse, JobListResponse
-from ..services import agent_job_meta, job_service, terraform
+from ..services import agent_job_meta, change_window_service, job_service, terraform
 from .auth import get_current_user, can_audit_jobs, require_admin
 
 logger = logging.getLogger(__name__)
@@ -19,7 +20,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
 
-def _job_to_response(job) -> JobResponse:
+def _job_to_response(job, *, window_names: Optional[dict] = None) -> JobResponse:
+    """Project one Job row for the API.
+
+    ``window_names`` is an optional ``{change_window_id: name}`` map so the list endpoint
+    can resolve every window in ONE query instead of one per row. Omitted by the single-
+    job endpoints, where a lazy lookup is a single row anyway.
+    """
     return JobResponse(
         id=job.id,
         job_type=job.job_type,
@@ -36,6 +43,13 @@ def _job_to_response(job) -> JobResponse:
         created_by=job.created_by,
         error_message=job.error_message,
         duration_seconds=job.duration_seconds,
+        schedule_state=job_service.schedule_state(job),
+        scheduled_for=job.scheduled_for,
+        window_ends_at=job.window_ends_at,
+        change_window_name=(window_names or {}).get(job.change_window_id),
+        approval_required=bool(job.approval_required),
+        approved_at=job.approved_at,
+        approved_by=job.approved_by,
     )
 
 
@@ -51,6 +65,8 @@ def list_jobs(
                            "(job_service.ROUTINE_JOB_TYPES). Excluded by default."),
     dead_lettered: bool = Query(
         False, description="Only jobs that used every retry and failed anyway."),
+    scheduled: bool = Query(
+        False, description="Only jobs waiting for a change window or an approval."),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -79,9 +95,12 @@ def list_jobs(
         batch_id=batch_id,
         include_routine=include_routine,
         dead_lettered=dead_lettered,
+        scheduled=scheduled,
     )
+    # Resolved ONCE for the page, not per row — otherwise a 100-job page is 100 queries.
+    window_names = change_window_service.names_for(db, jobs)
     return JobListResponse(
-        jobs=[_job_to_response(j) for j in jobs],
+        jobs=[_job_to_response(j, window_names=window_names) for j in jobs],
         total=total,
         page=page,
         page_size=page_size,
@@ -356,6 +375,92 @@ async def force_unlock_job_state(
                    current_user.username, broken.get("Who", ""),
                    broken.get("Created", ""))
     return {"message": "State lock released", "state_job_id": state_job_id, **result}
+
+
+class RescheduleRequest(BaseModel):
+    """Move a booked change. Blank everything = run it as soon as there is capacity."""
+    run_at: str = ""
+    run_timezone: str = ""
+    change_window_id: str = ""
+
+
+@router.post("/{job_id}/reschedule")
+def reschedule_job(
+    job_id: str,
+    payload: RescheduleRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Move a scheduled change to a different time or window — or release it to run now.
+
+    Gated on OWNERSHIP, not on ``change_windows``, and the distinction matters: moving
+    your own change is the same authority as raising it in the first place, whereas
+    approving one is deliberately somebody else's. An admin can move anyone's.
+
+    **Re-approval is required after a move.** A change approved for 02:00 Saturday is not
+    thereby approved for 14:00 Tuesday — the approver signed off on a specific time in a
+    specific window. Clearing the approval here is what stops a reschedule from being a
+    way around the gate, and it is the one line in this endpoint worth not deleting.
+
+    A missed change is rescheduled by the same call, which is the intended recovery
+    path: ``cancelled`` with ``missed_window_at`` set is terminal for the RUN, not for
+    the intent, so the row is revived rather than making the operator rebuild the job
+    from scratch.
+    """
+    job = job_service.get_job(db, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.created_by != current_user.username and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if job.status == "running":
+        raise HTTPException(status_code=409,
+                            detail="this change has already started")
+    if job.status in ("completed", "failed"):
+        raise HTTPException(status_code=409,
+                            detail=f"this change is {job.status} and cannot be moved")
+
+    from ..services.suspend_schedule import ScheduleError
+    try:
+        scheduled_for, window_ends_at, window_id = change_window_service.resolve(
+            db, run_at=payload.run_at, run_timezone=payload.run_timezone,
+            change_window_id=payload.change_window_id)
+    except ScheduleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    job.scheduled_for = scheduled_for
+    job.window_ends_at = window_ends_at
+    job.change_window_id = window_id
+    # Reviving a missed change: clear the terminal marks so the claim query can see it
+    # again. Left set, the row would stay `cancelled` and the reschedule would appear to
+    # work while nothing ever ran.
+    job.missed_window_at = None
+    job.completed_at = None
+    job.error_message = None
+    # Status is PRESERVED for a job that is still active, never recomputed. `queued`
+    # does not only mean "an agent owns this" — it is also how a child row a PARENT job
+    # drives is kept out of the runner's claim query (see job_service.create_job).
+    # Rewriting such a row to `pending` because it has no agent_id would hand it to the
+    # worker while its parent is still driving it, and it would execute twice.
+    #
+    # Only a revived missed change needs a status chosen, and that row was `cancelled`.
+    # A parent-driven child cannot reach that state: the sweeper only reaps rows with a
+    # `window_ends_at`, and a parent sets none.
+    if job.status not in ("queued", "pending"):
+        job.status = "queued" if job.agent_id else "pending"
+    # See the docstring: the approver signed off on a time, not on the job.
+    if job.approval_required:
+        job.approved_at = None
+        job.approved_by = None
+    db.commit()
+    job_service.log_audit(
+        db, current_user.username, "change_rescheduled",
+        details={"job_id": job.id, "job_type": job.job_type,
+                 "scheduled_for": scheduled_for.isoformat() if scheduled_for else "now",
+                 "change_window_id": window_id or ""})
+    return {"job_id": job.id, "status": job.status,
+            "scheduled_for": job.scheduled_for,
+            "window_ends_at": job.window_ends_at,
+            "schedule_state": job_service.schedule_state(job)}
 
 
 @router.delete("/{job_id}")

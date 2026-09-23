@@ -286,13 +286,20 @@ def enqueue_sweep_if_due(db: Session, *, min_gap_seconds: Optional[int] = None) 
 _PRUNE_BATCH = 500
 
 
-def prune_sweep_history(db: Session) -> int:
+def prune_sweep_history(db: Session, *, job_type: str = SWEEP_JOB_TYPE) -> int:
     """Drop *completed* sweep rows past the retention window, and their Live Output.
 
     Returns rows deleted. Never raises — losing a prune must not fail the pass that
     called it.
 
-    **``Job.job_type == SWEEP_JOB_TYPE`` is the load-bearing filter in this function, and
+    ``job_type`` exists because there is now more than one timer-driven sweep that writes
+    a row whether or not it had work: ``schedule_sweeper`` calls this with its own type at
+    the end of each pass. It is a NARROWING parameter, never a widening one — the caller
+    must name one sweep type, and the filter below stays mandatory. See the next paragraph
+    for why that distinction is not pedantry. Anything added here must also be in
+    ``job_service.ROUTINE_JOB_TYPES``, or /jobs would keep showing rows this deletes.
+
+    **``Job.job_type == <a sweep type>`` is the load-bearing filter in this function, and
     the reason this is not a general "prune old jobs" helper.** A cloud VM has no inventory
     table: its deploy Job row IS its record of existence, which is why ``job:<id>`` is
     already its inventory id and why ``expires_at`` rides on that row. Deleting job rows by
@@ -316,7 +323,7 @@ def prune_sweep_history(db: Session) -> int:
     try:
         ids = [r[0] for r in (
             db.query(Job.id)
-            .filter(Job.job_type == SWEEP_JOB_TYPE,
+            .filter(Job.job_type == job_type,
                     Job.status == "completed",
                     Job.created_at < cutoff)
             .limit(_PRUNE_BATCH)
@@ -328,10 +335,10 @@ def prune_sweep_history(db: Session) -> int:
         n = db.query(Job).filter(Job.id.in_(ids)).delete(synchronize_session=False)
         db.commit()
         logger.info("pruned %d completed %s row(s) older than %d day(s)",
-                    n, SWEEP_JOB_TYPE, days)
+                    n, job_type, days)
         return int(n or 0)
     except Exception:                                  # noqa: BLE001
-        logger.warning("could not prune %s history", SWEEP_JOB_TYPE, exc_info=True)
+        logger.warning("could not prune %s history", job_type, exc_info=True)
         db.rollback()
         return 0
 

@@ -41,6 +41,16 @@
                class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
         Show routine sweeps
       </label>
+
+      <!-- The change-window queue: work that has not started and is waiting on a clock
+           or on a person. A separate filter rather than a status, because a scheduled
+           job IS `pending` and must keep showing under that status everywhere else. -->
+      <label class="flex items-center gap-2 text-sm text-gray-600 cursor-pointer"
+             title="Changes booked into a change window, or waiting for approval.">
+        <input type="checkbox" x-model="scheduledOnly" @change="page=1; loadJobs()"
+               class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+        Scheduled only
+      </label>
     </div>
 
     <!-- Batch rollup — shown when filtered to one bulk run -->
@@ -93,6 +103,14 @@
             <td class="px-4 py-3">
               <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
                     :class="statusBadge(job.status)" x-text="job.status"></span>
+              <!-- A scheduled job is genuinely `pending`, which on its own reads as "the
+                   worker is about to pick this up" — misleading for something booked for
+                   Saturday. The second badge says which kind of waiting this is. -->
+              <span x-show="job.schedule_state" x-cloak
+                    class="mt-1 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                    :class="scheduleBadge(job.schedule_state)"
+                    :title="scheduleTitle(job)"
+                    x-text="scheduleLabel(job.schedule_state)"></span>
             </td>
             <td class="px-4 py-3 font-medium text-gray-800">
               <span x-text="jobLabel(job)"></span>
@@ -164,10 +182,15 @@
       // straight here, and so the URL stays shareable/bookmarkable.
       filterBatch: '',
       batchSummary: null,
+      // The change-window queue. Seeded from ?scheduled=1 so the Settings page and a
+      // notification can link straight to "what is waiting for a window or a person".
+      scheduledOnly: false,
 
       async init() {
         requireAuth();
-        this.filterBatch = new URLSearchParams(window.location.search).get('batch_id') || '';
+        const params = new URLSearchParams(window.location.search);
+        this.filterBatch = params.get('batch_id') || '';
+        this.scheduledOnly = params.get('scheduled') === '1';
         await this.loadJobs();
         // Poll every 5s for running job updates
         // 5s is right for a list someone is watching a job on, and wasted otherwise —
@@ -184,6 +207,7 @@
           if (this.filterStatus) url += `&status=${this.filterStatus}`;
           if (this.filterBatch) url += `&batch_id=${encodeURIComponent(this.filterBatch)}`;
           if (this.includeRoutine) url += '&include_routine=true';
+          if (this.scheduledOnly) url += '&scheduled=true';
           const resp = await API.get(url);
           if (!resp) return;
           this.jobs = resp.jobs || [];
@@ -267,6 +291,7 @@
       },
 
       statusBadge, timeAgo, formatDuration,
+      scheduleBadge, scheduleLabel, scheduleTitle,
     };
   }
 </script>

@@ -1577,7 +1577,10 @@ class Settings(BaseSettings):
     notifications_enabled: bool = False
     notify_dry_run: bool = True
     notify_event_types: str = ("resource.expiring,resource.reaped,job.failed,"
-                               "cost.budget_exceeded,secret.stale,config.drift")
+                               "cost.budget_exceeded,secret.stale,config.drift,"
+                               # A change that silently did not happen. Nothing else
+                               # reports it — the job did not fail, it was never run.
+                               "job.window_missed,job.awaiting_approval")
     notify_min_severity: str = "warning"           # info | warning | critical
     notify_base_url: str = ""                      # absolute origin for deep links
     notify_http_timeout_s: int = 10

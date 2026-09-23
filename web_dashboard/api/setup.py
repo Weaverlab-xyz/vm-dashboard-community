@@ -1775,6 +1775,36 @@ class WorkerFeatureConfig(BaseModel):
     worker_drain_timeout_s: int = 20
 
 
+class ChangeWindowsFeatureConfig(BaseModel):
+    """Change-window policy. Config-only (see ``_CONFIG_ONLY_FEATURES``): the scheduler
+    columns ship on every install and a job with no schedule is unaffected by any of
+    this, so an enable toggle would be a switch with one position. `enabled` is carried
+    only because every panel model has it.
+
+    The WINDOWS themselves are rows in ``change_windows``, not keys here — a window has
+    a name people pick it by, and a set of named records does not fit a flat config
+    model. They are managed through ``/api/change-windows``, which the same panel hosts.
+    Only the three genuine policy settings live here.
+
+    ``change_window_grace_minutes`` is annotated plain `int`, never Optional[int]:
+    _read_feature keys off `info.annotation is int`, so an Optional would read back as
+    "" for an unset key and 422 the whole panel on save — the regression
+    tests/test_setup_feature_roundtrip.py exists to pin.
+    """
+    enabled: bool = False
+    # Off by default. Turning it on affects only changes booked from that moment: the
+    # requirement is STORED on each job at creation, so this can neither freeze changes
+    # already queued nor release ones already waiting on an approver.
+    change_approval_required: bool = False
+    # Off by default, and that default is the point of the gate — an approval the
+    # requester can grant themselves is not one. On only makes sense for a single-
+    # operator install.
+    change_approval_allow_self: bool = False
+    # How long a change booked for a bare time (rather than a named window) stays
+    # eligible before it counts as missed. Named windows use their own length.
+    change_window_grace_minutes: int = 60
+
+
 class MultiRegionFeatureConfig(BaseModel):
     """Config-only panel that hosts the per-region config-set editors for AWS, GCP
     and Azure. The region maps themselves live under ``<cloud>_region_configs`` and
@@ -2063,6 +2093,7 @@ _FEATURE_MODELS = {
     "spire_lab": SpireLabFeatureConfig,
     "workload_credentials": WorkloadCredentialsFeatureConfig,
     "worker":         WorkerFeatureConfig,
+    "change_windows": ChangeWindowsFeatureConfig,
 }
 
 # Features whose panel carries config but NOT an enable toggle — their on/off
@@ -2071,9 +2102,12 @@ _FEATURE_MODELS = {
 #
 # "worker" is here because the job worker has no off position at all: it is the process
 # that runs every queued job, so an enable toggle could only ever mislead.
+# "change_windows" is here for the same reason as "worker": the scheduler is always
+# present, a job with no schedule behaves exactly as it always did, and an enable toggle
+# would be a switch with one position.
 _CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc", "worker",
                          "cert_lab", "spire_lab",
-                         "workload_credentials"}
+                         "workload_credentials", "change_windows"}
 
 _SECRET_FEATURE_KEYS = frozenset({
     "pscli_client_secret", "bt_client_secret", "epml_pat",

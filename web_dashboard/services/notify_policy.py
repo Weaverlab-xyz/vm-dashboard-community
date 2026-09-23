@@ -57,6 +57,21 @@ EVENT_SEVERITY = {
     # a tamper-evident log that stopped verifying is either corruption or
     # someone editing history, and both want a human today.
     "audit.chain_broken":    "critical",
+    # A change booked into a window that closed before the job could start. Warning
+    # rather than info because NOTHING ELSE reports it: the job did not fail, so
+    # `job.failed` never fires, and the row simply sits `cancelled` — a change an
+    # operator believes is scheduled has quietly not happened, and they will find out
+    # from the thing it was supposed to fix.
+    "job.window_missed":     "warning",
+    # A scheduled change is waiting for a second person.
+    #
+    # Warning rather than info, and the reason is a deadline rather than a severity
+    # judgement: an approval request that nobody sees expires. The change sits until its
+    # window closes and is then marked missed, so "nobody read the notification" and "the
+    # change did not happen" are the same outcome. `info` would be below
+    # `notify_min_severity`'s default floor of `warning`, which means this event would
+    # ship switched on and silently never deliver — the worst of both.
+    "job.awaiting_approval": "warning",
     "notification.test":     "info",
 }
 
@@ -66,7 +81,8 @@ EVENT_SEVERITY = {
 DEFAULT_EVENT_TYPES = (
     "resource.expiring,resource.reaped,job.failed,"
     "cost.budget_exceeded,secret.stale,config.drift,audit.chain_broken,"
-    "vm.spend_warn,vm.spend_capped,vm.spend_unpriced,job.dead_lettered"
+    "vm.spend_warn,vm.spend_capped,vm.spend_unpriced,job.dead_lettered,"
+    "job.window_missed,job.awaiting_approval"
 )
 
 SEVERITY_ORDER = ("info", "warning", "critical")

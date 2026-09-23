@@ -39,7 +39,41 @@ ACTIVE_STATUSES = ("queued", "pending", "running")
 # disagree.
 #
 # Display and retention only — nothing authorizes off this tuple.
-ROUTINE_JOB_TYPES = ("expiry_sweep",)
+ROUTINE_JOB_TYPES = ("expiry_sweep", "schedule_sweep")
+
+
+def claimable_now(now: Optional[datetime] = None) -> list:
+    """The time-and-approval clauses BOTH claim queries must apply, in one place.
+
+    There are two claim queries in this tree and they are near-copies of each other:
+    ``jobs_worker._claim_one`` (``status='pending'``, the local runner) and
+    ``agent_service.lease_one`` (``status='queued' AND agent_id=:id``, a remote agent).
+    A config-management run against an on-prem target goes through the SECOND one, so a
+    scheduling rule applied to only the first would be silently unenforced for exactly
+    the targets a change window matters most for.
+
+    The copies have already drifted once, which is why this returns a list instead of
+    being written out twice: ``retry_after`` is honoured by ``_claim_one`` and was never
+    added to ``lease_one``, so an agent-bound job that failed transiently is re-leased
+    immediately instead of waiting out its backoff. Routing both through here fixes that
+    in passing and makes the next clause impossible to add to only one of them.
+
+    Returns SQLAlchemy clauses to splat into a ``.filter(...)``. Each is written so that
+    NULL — what every row that predates the scheduler carries — PASSES:
+
+    * ``retry_after``   NULL = never failed, claimable now
+    * ``scheduled_for`` NULL = run as soon as there is capacity
+    * ``approval_required`` NULL/False = no gate. Spelled ``isnot(True)`` rather than
+      ``== False`` because the column was added as a bare BOOLEAN with no DEFAULT (see
+      database.py), so existing rows are NULL and ``== False`` would exclude all of them
+      — which would wedge the entire queue on the first deploy.
+    """
+    now = now or datetime.utcnow()
+    return [
+        (Job.retry_after.is_(None)) | (Job.retry_after <= now),
+        (Job.scheduled_for.is_(None)) | (Job.scheduled_for <= now),
+        (Job.approval_required.isnot(True)) | (Job.approved_at.isnot(None)),
+    ]
 
 
 def create_job(
@@ -53,6 +87,11 @@ def create_job(
     status: str = "pending",
     expires_at: Optional[datetime] = None,
     agent_id: Optional[str] = None,
+    scheduled_for: Optional[datetime] = None,
+    window_ends_at: Optional[datetime] = None,
+    change_window_id: Optional[str] = None,
+    job_schedule_id: Optional[str] = None,
+    approval_required: bool = False,
 ) -> Job:
     """Create a new job record, ``pending`` by default.
 
@@ -79,7 +118,20 @@ def create_job(
     VM deploy row passes through — single deploys, count fan-outs and bulk children
     alike — so stamping here means no provider can be forgotten and a fifth cloud is
     covered the day it's added. See expiry_policy.default_expiry_for, which returns
-    None on a set-membership test for every job type that isn't a VM deploy."""
+    None on a set-membership test for every job type that isn't a VM deploy.
+
+    ``scheduled_for`` holds the row out of BOTH claim queries until that instant (naive
+    UTC), and ``window_ends_at`` is the far edge of its change window: if the job has not
+    been claimed by then, ``schedule_sweeper`` marks it missed rather than letting it run
+    late. Leave both None — as ~175 call sites do — and the job runs as soon as there is
+    capacity, exactly as before. Scheduling is therefore available to EVERY job type the
+    moment it passes through here, which is the point of putting it in this funnel rather
+    than in one router.
+
+    ``approval_required`` holds the row out of the claim queries a second way, until
+    someone with ``change_windows:use`` sets ``approved_at``. Stored on the row rather
+    than re-read from policy, so flipping the setting can neither freeze jobs already
+    queued nor release changes nobody approved."""
     if agent_id:
         status = "queued"
     job = Job(
@@ -93,6 +145,11 @@ def create_job(
         created_by=created_by,
         batch_id=batch_id or None,
         agent_id=agent_id or None,
+        scheduled_for=scheduled_for,
+        window_ends_at=window_ends_at,
+        change_window_id=change_window_id or None,
+        job_schedule_id=job_schedule_id or None,
+        approval_required=bool(approval_required) or None,
     )
     if metadata:
         job.metadata_dict = metadata
@@ -103,7 +160,14 @@ def create_job(
         # top-level import would make job_service depend on it at import time.
         from . import expiry_policy
         try:
-            job.expires_at = expiry_policy.default_expiry_for(job_type, workgroup=workgroup)
+            # The auto-delete clock starts when the VM will EXIST, not when the row was
+            # written. For an immediate job those are the same instant and this passes
+            # None, which is what default_expiry_for already means by "now". For a
+            # SCHEDULED deploy they are not: a VM booked for next Saturday under a 24h
+            # default would otherwise be stamped to expire on Sunday of THIS week — born
+            # already expired, and reaped by the first sweep after it finally deployed.
+            job.expires_at = expiry_policy.default_expiry_for(
+                job_type, workgroup=workgroup, now=scheduled_for)
         except Exception:  # noqa: BLE001 — a timer must never block a deploy
             job.expires_at = None
     db.add(job)
@@ -430,6 +494,65 @@ def set_cancelled(db: Session, job_id: str) -> Optional[Job]:
     return job
 
 
+def set_missed_window(db: Session, job_id: str, reason: str) -> Optional[Job]:
+    """Terminate a job whose change window closed before it was ever claimed.
+
+    ``cancelled``, not ``failed``, and the distinction is not cosmetic. Nothing went
+    wrong — the job never ran — so ``failed`` would put a perfectly healthy change into
+    the failed-jobs panel on the dashboard AND into the dead-letter tail, which is the
+    query ``status='failed' AND attempts > 0`` and means "used every retry and failed
+    anyway". Neither is true here. ``cancelled`` already reads as "did not happen, on
+    purpose", is already terminal, and is already rendered on every page.
+
+    ``missed_window_at`` is what separates this from a human pressing Cancel; the reason
+    goes in ``error_message`` because that is the one field the job detail page already
+    surfaces for a non-successful job.
+
+    Only ever applied to a row that has NOT started. The window governs when work may
+    BEGIN; a job already running when its window closes is left alone to finish, because
+    interrupting a terraform apply or a half-applied playbook is how you get orphaned
+    cloud resources and a host in an unknown state. That overrun is recorded and shown,
+    not acted on -- see ``schedule_state``.
+    """
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if job and job.status in ("queued", "pending"):
+        now = datetime.utcnow()
+        job.status = "cancelled"
+        job.missed_window_at = now
+        job.completed_at = now
+        job.error_message = reason
+        db.commit()
+        db.refresh(job)
+    return job
+
+
+def schedule_state(job) -> str:
+    """How a job's scheduling stands, as ONE string both job pages render from.
+
+    Derived here rather than in each template because the list and the detail page would
+    otherwise each reimplement "is this scheduled or just pending?", and the two would
+    disagree the first time one of them was edited. Returns "" for the overwhelming
+    majority of rows, which carry no schedule at all.
+
+    Note the deliberate ordering: ``missed`` is checked before ``scheduled``, because a
+    missed job still has a ``scheduled_for`` in the past and would otherwise read as
+    merely waiting.
+    """
+    if getattr(job, "missed_window_at", None):
+        return "missed"
+    if job.status in ("queued", "pending"):
+        if getattr(job, "approval_required", None) and not getattr(job, "approved_at", None):
+            return "awaiting_approval"
+        scheduled_for = getattr(job, "scheduled_for", None)
+        if scheduled_for and scheduled_for > datetime.utcnow():
+            return "scheduled"
+        return ""
+    ends = getattr(job, "window_ends_at", None)
+    if ends and job.completed_at and job.completed_at > ends:
+        return "overran"
+    return ""
+
+
 def get_job(db: Session, job_id: str) -> Optional[Job]:
     """Fetch a single job by ID."""
     return db.query(Job).filter(Job.id == job_id).first()
@@ -445,6 +568,7 @@ def list_jobs(
     batch_id: Optional[str] = None,
     include_routine: bool = True,
     dead_lettered: bool = False,
+    scheduled: bool = False,
 ) -> tuple[List[Job], int]:
     """
     List jobs with optional filters.
@@ -460,10 +584,22 @@ def list_jobs(
     a QUERY, not a status: ``failed`` with ``attempts > 0``. Adding a fourth status would
     have meant auditing 108 comparisons against ``"failed"`` in this tree, and the first one
     missed is a job some page quietly stops showing.
+
+    ``scheduled=True`` is the change-window queue: jobs that have not started and are
+    waiting on a clock or on a person. A QUERY again, for the same reason — a scheduled
+    job is an ordinary ``pending`` row, so it must keep appearing under its real status
+    everywhere else. Note this deliberately includes a job whose ``scheduled_for`` has
+    already passed but which has not been claimed yet: from an operator's point of view
+    it is still a booked change, and hiding it the moment its window opened would make
+    it vanish for the seconds before a worker picks it up.
     """
     query = db.query(Job)
     if dead_lettered:
         query = query.filter(Job.status == "failed", Job.attempts > 0)
+    if scheduled:
+        query = query.filter(
+            Job.status.in_(("queued", "pending")),
+            (Job.scheduled_for.isnot(None)) | (Job.approval_required.is_(True)))
     if not include_routine:
         query = query.filter(~and_(Job.job_type.in_(ROUTINE_JOB_TYPES),
                                    Job.status == "completed"))

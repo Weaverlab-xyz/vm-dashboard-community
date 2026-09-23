@@ -175,6 +175,17 @@ Treat these playbooks accordingly. Starters live in
 
 ---
 
+## Running inside a change window
+
+A run does not have to start now. The **When to run** control on the run form can book it
+for a specific time, or for the next occurrence of a named change window — and a booked run
+that misses its window is marked missed rather than run late. Bulk runs book as a unit, so
+a batch is never split across a window boundary.
+
+Nothing about the run itself changes: the job row is identical, the same validation happens
+at submit time, and credentials are still resolved at execution time rather than stored. See
+[Change Windows](change-windows.md).
+
 ## Bulk runs from the inventory
 
 The Config Management page runs one asset against one target. To apply a playbook

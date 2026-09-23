@@ -667,6 +667,68 @@ function statusBadge(status) {
     return map[status] || 'bg-gray-100 text-gray-600';
 }
 
+// ── Change-window badges ─────────────────────────────────────────────────────
+//
+// `schedule_state` is computed SERVER-side (job_service.schedule_state) and arrives on
+// every JobResponse. These three are pure lookups over that one string, shared by the
+// jobs list and the job detail page so the two cannot describe one job differently.
+//
+// Blank for the overwhelming majority of jobs, which carry no schedule at all.
+
+function scheduleBadge(state) {
+    const map = {
+        // Blue, not yellow: a booked change is healthy and on plan, and colouring it
+        // like `pending` would defeat the point of showing a second badge at all.
+        scheduled:         'bg-indigo-50 text-indigo-700',
+        awaiting_approval: 'bg-amber-100 text-amber-800',
+        // Red. A missed change is the one state here that needs somebody today: it did
+        // not run, nothing failed, and nothing else in the UI reports it.
+        missed:            'bg-red-100 text-red-800',
+        overran:           'bg-orange-50 text-orange-700',
+    };
+    return map[state] || 'bg-gray-100 text-gray-600';
+}
+
+function scheduleLabel(state) {
+    const map = {
+        scheduled:         'scheduled',
+        awaiting_approval: 'needs approval',
+        missed:            'missed window',
+        overran:           'overran window',
+    };
+    return map[state] || state || '';
+}
+
+// The hover text, which is where the actual times live. Timestamps are stored and
+// returned as naive UTC, so they are labelled UTC rather than silently rendered as if
+// they were local — a change window read an hour wrong is the failure this whole
+// feature exists to prevent.
+function scheduleTitle(job) {
+    if (!job || !job.schedule_state) return '';
+    const when = (v) => String(v || '').replace('T', ' ').slice(0, 16);
+    const win = job.change_window_name ? ` in "${job.change_window_name}"` : '';
+    switch (job.schedule_state) {
+        case 'scheduled':
+            return `Runs at ${when(job.scheduled_for)} UTC${win}`
+                 + (job.window_ends_at
+                     ? `, and is marked missed if it has not started by `
+                       + `${when(job.window_ends_at)} UTC`
+                     : '');
+        case 'awaiting_approval':
+            return 'Waiting for someone with the change-approval permission. '
+                 + (job.scheduled_for
+                     ? `Booked for ${when(job.scheduled_for)} UTC${win}.` : '');
+        case 'missed':
+            return `Its window closed at ${when(job.window_ends_at)} UTC before it `
+                 + 'could start. It was not run outside the window.';
+        case 'overran':
+            return `Started inside its window but was still running at `
+                 + `${when(job.window_ends_at)} UTC. Running work is never interrupted.`;
+        default:
+            return '';
+    }
+}
+
 // Colours for a `user`-class tag chip, indexed by the `tone` the server computed in
 // services/tag_policy.tone_of. The hash lives in Python so one tag key is one colour on
 // every page; this is a pure lookup table and MUST stay the same length as
@@ -884,6 +946,7 @@ function permissionScopeLabel(scope) {
         notifications:  'Notifications',
         epml:           'EPM for Linux',
         ot:             'OT Demo Cell',
+        change_windows: 'Change Windows',
     };
     return map[scope] || String(scope || '').replace(/_/g, ' ');
 }
