@@ -141,7 +141,16 @@ async def set_asset_attributes(
         except Exception as exc:  # noqa: BLE001 — one asset must not end the run
             logger.warning("Password Safe attribute change failed for asset %s",
                            asset_id, exc_info=True)
-            failed.append({"name": str(asset_id), "error": str(exc)})
+            # Only OUR message reaches the browser. `PSApiError` is raised by
+            # `set_asset_attribute` with a fixed string and a numeric status code, which
+            # is the part an operator can act on. Anything else — an httpx transport
+            # error, a bug — carries a message this module did not write and must not
+            # forward (CodeQL py/stack-trace-exposure); it stays in the log above, which
+            # is where someone debugging it should be looking anyway.
+            failed.append({
+                "name": str(asset_id),
+                "error": (str(exc) if isinstance(exc, ps_api_service.PSApiError)
+                          else "the attribute change failed — see the dashboard log")})
             continue
         updated.append({"name": str(asset_id),
                         "type": type_row["name"], "value": value["value"]})

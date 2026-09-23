@@ -64,15 +64,24 @@ _VOCAB = pac.build_vocabulary(_TYPES, _VALUES)
 
 
 class _Writer:
-    """Stands in for set_asset_attribute, recording every call."""
+    """Stands in for set_asset_attribute, recording every call.
 
-    def __init__(self, fail_on=()):
-        self.calls, self.fail_on = [], set(fail_on)
+    ``fail_on`` raises the error the real service raises — a ``PSApiError`` carrying a
+    status code. ``crash_on`` raises something this module did NOT write, which is the
+    case the redaction below exists for.
+    """
+
+    def __init__(self, fail_on=(), crash_on=()):
+        self.calls = []
+        self.fail_on, self.crash_on = set(fail_on), set(crash_on)
 
     async def __call__(self, asset_id, attribute_id, *, assign, tenant=None):
         self.calls.append((int(asset_id), int(attribute_id), assign))
         if int(asset_id) in self.fail_on:
-            raise RuntimeError("Password Safe refused the attribute change (403)")
+            raise api.ps_api_service.PSApiError(
+                "Password Safe refused the attribute change (403)")
+        if int(asset_id) in self.crash_on:
+            raise RuntimeError("connect to 10.0.0.9:443 failed; /srv/app/ps.py line 88")
 
 
 class _User:
@@ -190,6 +199,30 @@ def test_one_failure_does_not_end_the_batch_and_is_named():
     assert [u["name"] for u in out["updated"]] == ["64", "66"]
     assert [f["name"] for f in out["failed"]] == ["65"]
     assert "403" in out["failed"][0]["error"]
+
+
+def test_an_unexpected_error_is_redacted_rather_than_forwarded():
+    """The route catches broadly so one asset cannot end the run — which means it can
+    catch an exception it did not write, whose message may name an internal host, a file
+    path or a stack frame. Only `PSApiError` (our own fixed string plus a status code)
+    reaches the browser; everything else is replaced and kept in the log.
+
+    CodeQL py/stack-trace-exposure flagged exactly this on #944.
+    """
+    out, _w = _post([64], 21, writer=_Writer(crash_on=[64]))
+    error = out["failed"][0]["error"]
+    for leaked in ("10.0.0.9", "/srv/app", "line 88", "RuntimeError"):
+        assert leaked not in error, f"{leaked!r} reached the response"
+    assert "see the dashboard log" in error
+
+
+def test_a_redacted_failure_is_still_named_and_still_fails():
+    """Redaction must not turn a failure into a silent success: the asset is still
+    reported as failed, by name, and is not counted among the updated."""
+    out, _w = _post([64, 65], 21, writer=_Writer(crash_on=[64]))
+    assert [f["name"] for f in out["failed"]] == ["64"]
+    assert [u["name"] for u in out["updated"]] == ["65"]
+    assert out["count"] == 1
 
 
 # ── 4. the audit trail ───────────────────────────────────────────────────────
