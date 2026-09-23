@@ -19,6 +19,7 @@ their own job lifecycle and their own bootstrap logic, because those genuinely
 differ: Rancher runs privileged and mints an API token from a bootstrap password;
 Portainer runs unprivileged and must be handed a bcrypt admin hash at boot.
 """
+import asyncio
 import ipaddress
 import logging
 from dataclasses import dataclass
@@ -98,6 +99,12 @@ class NodeSpec:
     @property
     def ready_timeout_key(self) -> str:
         return f"{self.feature}_ready_timeout_s"
+
+    @property
+    def acme_domain_key(self) -> str:
+        """FQDN the node should get a publicly trusted certificate for, or "" for
+        the self-signed default -- see :func:`acme_domain`."""
+        return f"{self.feature}_acme_domain"
 
     # -- per-cloud placement keys ---------------------------------------------
     def infra_key(self, cloud: str, knob: str) -> str:
@@ -182,6 +189,30 @@ def allowed_cidrs(spec: NodeSpec, cloud: str) -> list:
         logger.debug("%s is empty - relying on auto-discovered sources",
                      spec.manual_cidrs_key)
     return cidrs
+
+
+def acme_domain(spec: NodeSpec) -> str:
+    """The FQDN this node should serve a publicly trusted certificate for, or "".
+
+    Empty is the default and keeps the node on its self-signed certificate. Setting
+    it switches the container to its built-in ACME client (Let's Encrypt, HTTP-01),
+    which is the only way a TLS-inspecting corporate proxy will let a browser reach
+    the node at all: such a proxy verifies the ORIGIN certificate itself, so a
+    self-signed one is rejected before any handshake completes and no amount of
+    client-side "ignore the certificate" helps.
+
+    Two consequences the callers have to honour, both of which are why this is a
+    domain and not a boolean:
+
+    * The node must be addressed BY THIS NAME. A certificate cannot cover a bare IP,
+      and connecting to an IP literal sends no SNI for a proxy to match on -- so
+      ``server_url`` and the readiness probe follow this value, not the address.
+    * HTTP-01 is validated over plain HTTP from unpredictable addresses, so port 80
+      has to be open to the world while the source-restricted rule still governs 443
+      (see ``acme_open`` in :func:`apply_ingress`). That exposure is permanent, not
+      just for issuance: renewal re-validates roughly every 60 days.
+    """
+    return (config_service.get(spec.acme_domain_key) or "").strip().lower()
 
 
 def jumpoint_cidrs(spec: NodeSpec, db=None) -> list:
@@ -351,6 +382,38 @@ async def ensure_dashboard_egress_cidr(spec: NodeSpec, detect=None) -> str:
 
 
 # -- the container command (AWS + Azure; GCP has konlet instead) -------------
+
+async def check_acme_dns(spec: NodeSpec, domain: str, external_ip: str) -> str:
+    """Return "" when ``domain`` resolves to ``external_ip``, else why it does not.
+
+    The A record is the one part of this that nothing in the dashboard can create --
+    it lives at the operator's registrar -- and getting it wrong fails INVISIBLY:
+    the node boots, the container starts, and the ACME order then fails somewhere
+    inside the container while the deploy sits burning its readiness budget on a
+    name that was never pointed anywhere. The deploy then reports a timeout, which
+    sends the operator to look at machine sizes and firewalls.
+
+    So this is checked once, up front, against the address the node actually got,
+    and the message names the record to create. Resolution failures are reported
+    rather than raised: a brand-new record may not have propagated yet, and that is
+    a different sentence to "it points at the wrong host".
+    """
+    import socket
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.getaddrinfo(domain, None, family=socket.AF_INET)
+    except Exception as exc:
+        return (f"{domain} does not resolve ({exc}). Create an A record for {domain} "
+                f"pointing at {external_ip}, then redeploy. A record added in the last "
+                f"few minutes may simply not have propagated yet.")
+    addrs = sorted({i[4][0] for i in infos})
+    if external_ip in addrs:
+        return ""
+    return (f"{domain} resolves to {', '.join(addrs)}, but the {spec.label} node is at "
+            f"{external_ip}. Let's Encrypt validates by connecting to whatever the name "
+            f"resolves to, so issuance would hand the challenge to the wrong host. Point "
+            f"the A record at {external_ip} and redeploy.")
+
 
 def docker_run_command(image: str, *, name: str, ports=(), env=None, args=(),
                        privileged: bool = False, volumes=()) -> str:
@@ -638,7 +701,7 @@ def resolve_placement(cloud: str, spec: NodeSpec, region=None, zone=None) -> dic
 # -- per-cloud host primitives -----------------------------------------------
 
 async def apply_ingress(cloud: str, spec: NodeSpec, placement: dict,
-                        source_cidrs: list) -> dict:
+                        source_cidrs: list, *, acme_open: bool = False) -> dict:
     """Make the node's ingress rule match ``source_cidrs`` exactly, and return
     ``{"name", "opened", ...}``.
 
@@ -647,13 +710,22 @@ async def apply_ingress(cloud: str, spec: NodeSpec, placement: dict,
     firewall rule, AWS revokes every ingress permission (an in-use security group
     cannot be deleted), Azure deletes the NSG rule -- but ``opened`` is False either
     way, and callers key off that.
+
+    ``acme_open`` additionally opens port 80 to ``0.0.0.0/0``, which is what the
+    node's built-in ACME client needs: Let's Encrypt validates HTTP-01 from a set of
+    addresses it does not publish and may change, so the challenge cannot be
+    source-restricted. It is deliberately a SEPARATE opening rather than "0.0.0.0/0"
+    joining the source set, because the source set governs 443 too and the whole
+    point is that the management interface stays restricted while only the challenge
+    path is public. Turning it back off revokes it on every cloud, so it tracks
+    :func:`acme_domain` rather than latching.
     """
     if cloud == "gcp":
         from . import gcp_service
         if spec is RANCHER:
             return await gcp_service.ensure_rancher_firewall(
                 placement["project_id"], placement["network"], placement["network_tag"],
-                source_cidrs, placement["firewall_name"])
+                source_cidrs, placement["firewall_name"], acme_open=acme_open)
         return await gcp_service.ensure_portainer_firewall(
             placement["project_id"], placement["network"], placement["network_tag"],
             source_cidrs, placement["firewall_name"])
@@ -662,13 +734,13 @@ async def apply_ingress(cloud: str, spec: NodeSpec, placement: dict,
         return await aws_service.ensure_node_security_group(
             placement["region"], vpc_id=placement["vpc_id"],
             name=placement["firewall_name"], ports=list(spec.ports),
-            source_cidrs=source_cidrs)
+            source_cidrs=source_cidrs, acme_open=acme_open)
     if cloud == "azure":
         from . import azure_service
         return await azure_service.ensure_node_nsg(
             placement["resource_group"], placement["region"],
             name=placement["firewall_name"], ports=list(spec.ports),
-            source_cidrs=source_cidrs)
+            source_cidrs=source_cidrs, acme_open=acme_open)
     raise unsupported(cloud, spec, "ingress rules")
 
 

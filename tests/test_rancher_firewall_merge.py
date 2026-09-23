@@ -16,6 +16,7 @@ needed. Runs under pytest, or standalone:
 """
 import asyncio
 import logging
+import re
 import os
 import sys
 import types
@@ -53,11 +54,13 @@ def _cfg_set(key, value):
 _APPLIED = {}
 
 
-async def _fake_ensure_rancher_firewall(project_id, network, tag, source_cidrs, name):
+async def _fake_ensure_rancher_firewall(project_id, network, tag, source_cidrs, name,
+                                        *, acme_open=False):
     _APPLIED["called"] = True
     _APPLIED["source_cidrs"] = list(source_cidrs)
     _APPLIED["name"] = name
-    return {"name": name, "opened": bool(source_cidrs)}
+    _APPLIED["acme_open"] = acme_open
+    return {"name": name, "opened": bool(source_cidrs), "acme_open": acme_open}
 
 
 # ── database stub: K8sCluster + a fake query returning our rows ───────────────
@@ -399,6 +402,125 @@ def test_generate_admin_password_strong_and_distinct():
     assert len(a) >= 12 and a != b
     assert any(c.islower() for c in a) and any(c.isupper() for c in a)
     assert any(c.isdigit() for c in a) and any(c in string.punctuation for c in a)
+
+
+# ── ACME: the port-80 opening is separate from the source set ─────────────────
+# A TLS-inspecting proxy verifies the ORIGIN certificate, so a self-signed node is
+# unreachable from a browser whatever the allow-list says. The fix is a real
+# certificate, and its HTTP-01 challenge cannot be source-restricted -- Let's
+# Encrypt validates from addresses it does not publish. What must NOT happen is
+# that widening for the challenge also widens 443, so these pin the two apart.
+
+def test_acme_off_by_default_leaves_port_80_closed():
+    _reset(rancher_allowed_source_cidrs="203.0.113.4/32")
+    _run_refresh(rows=[])
+    assert _APPLIED["acme_open"] is False
+
+
+def test_acme_domain_opens_http01_without_touching_the_source_set():
+    _reset(rancher_allowed_source_cidrs="203.0.113.4/32",
+           rancher_acme_domain="rancher.example.com")
+    _run_refresh(rows=[])
+    assert _APPLIED["acme_open"] is True
+    # 0.0.0.0/0 must NOT have leaked into the set that governs 443.
+    assert _APPLIED["source_cidrs"] == ["203.0.113.4/32"]
+
+
+def test_acme_open_does_not_defeat_fail_closed():
+    # An empty merged set still closes the management ports. ACME opening 80 for a
+    # challenge is not "the node is reachable" -- `opened` stays False.
+    _reset(rancher_acme_domain="rancher.example.com")
+    res = _run_refresh(rows=[])
+    assert _APPLIED["source_cidrs"] == []
+    assert res["opened"] is False
+    assert _APPLIED["acme_open"] is True
+
+
+def test_acme_domain_is_normalised_and_reported_in_status():
+    _reset(rancher_acme_domain="  Rancher.Example.COM  ")
+    assert svc._acme_domain() == "rancher.example.com"
+    status = svc.firewall_status(_FakeDB([]))
+    assert status["acme_domain"] == "rancher.example.com"
+    assert status["acme_http01_open"] is True
+
+
+def test_container_args_carry_acme_domain_only_when_set():
+    _reset()
+    assert svc._container_args() == ()
+    _reset(rancher_acme_domain="rancher.example.com")
+    assert svc._container_args() == ("--acme-domain", "rancher.example.com")
+
+
+# ── the DNS pre-flight: a wrong A record must fail LOUDLY, before the wait ────
+
+def _run_check(domain, external_ip, resolved):
+    """Run check_acme_dns with name resolution stubbed to return ``resolved``.
+
+    ``socket.getaddrinfo`` is what ``loop.getaddrinfo`` delegates to in an
+    executor, so stubbing it there leaves the real async path under test.
+    """
+    import socket
+    mns = svc.managed_node_service
+
+    def _fake(host, port, *a, **k):
+        if isinstance(resolved, Exception):
+            raise resolved
+        return [(socket.AF_INET, None, None, None, (ip, 0)) for ip in resolved]
+
+    real = socket.getaddrinfo
+    socket.getaddrinfo = _fake
+    try:
+        return asyncio.run(mns.check_acme_dns(mns.RANCHER, domain, external_ip))
+    finally:
+        socket.getaddrinfo = real
+
+
+# ── asserting on the DNS pre-flight message ──────────────────────────────────
+# These parse the hostnames and addresses OUT of the message and compare them by
+# EQUALITY, rather than asking whether the message contains a given substring.
+# Two reasons, and they happen to agree:
+#
+#   * containment is too weak. Asking whether the message merely CONTAINS the
+#     domain also passes on one that only ever mentions a longer name the domain
+#     happens to be a prefix of -- which would tell the operator nothing about
+#     the record they actually have to create.
+#   * CodeQL reads a hostname literal on either side of `in` as an incomplete URL
+#     sanitization check, wherever it appears. Equality is the form it asks for.
+#
+# Pinning the WHOLE set also catches the message naming some other host as well
+# as the right one, which a per-item check would wave through.
+_HOST_RE = re.compile(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+_ADDR_RE = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
+
+
+def _hosts_named(msg):
+    return set(_HOST_RE.findall(msg))
+
+
+def _addrs_named(msg):
+    return set(_ADDR_RE.findall(msg))
+
+
+def test_acme_dns_ok_when_record_points_at_the_node():
+    assert _run_check("rancher.example.com", "40.78.191.25", ["40.78.191.25"]) == ""
+
+
+def test_acme_dns_names_the_record_to_create_when_unresolvable():
+    msg = _run_check("rancher.example.com", "40.78.191.25", OSError("NXDOMAIN"))
+    assert "does not resolve" in msg
+    # The message has to carry BOTH halves of the record the operator must create,
+    # or it is just another "it didn't work".
+    assert _hosts_named(msg) == {"rancher.example.com"}
+    assert _addrs_named(msg) == {"40.78.191.25"}
+
+
+def test_acme_dns_rejects_a_record_pointing_elsewhere():
+    msg = _run_check("rancher.example.com", "40.78.191.25", ["203.0.113.9"])
+    # Both addresses, so the operator can see what the record says versus where
+    # the node actually is -- naming only one of them explains nothing.
+    assert _addrs_named(msg) == {"203.0.113.9", "40.78.191.25"}
+    assert _hosts_named(msg) == {"rancher.example.com"}
+    assert "does not resolve" not in msg
 
 
 if __name__ == "__main__":

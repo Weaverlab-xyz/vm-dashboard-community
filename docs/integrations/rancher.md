@@ -398,12 +398,30 @@ but the HTTPS handshake is being terminated in transit"* (the readiness probe
 falls back to plain-HTTP `/ping` to detect exactly this), while `curl -k` to the
 node dies after ClientHello.
 
-Two ways out:
+**`runner` fixes the dashboard, not your browser.** The two failures look
+identical but are not the same problem. The runner transport moves the
+*dashboard's* API calls off the inspected path; a human opening the Rancher UI is
+still on it, and still gets a dead handshake. Only a certificate the proxy will
+accept — or a proxy exception — fixes browser access. Pick accordingly:
 
-1. **Proxy exception** — add a *Do Not Inspect* rule for the node's IP (or your
-   GCP ranges) in the proxy policy. Zero dashboard changes, but the node's IP is
-   ephemeral, and you may not control corp policy.
-2. **`rancher_api_transport = runner`** — the dashboard executes every Rancher
+| Route | Fixes the deploy | Fixes your browser | Cost |
+|---|---|---|---|
+| `rancher_acme_domain` | yes | **yes** | a DNS record; port 80 public |
+| `rancher_api_transport = runner` | yes | no | an in-cloud runner per API call |
+| Proxy *Do Not Inspect* rule | yes | yes | you must control corp policy |
+
+Three ways out:
+
+1. **`rancher_acme_domain` — a publicly trusted certificate.** Rancher's built-in
+   ACME client gets a Let's Encrypt certificate for a name you own and renews it
+   itself, so the proxy verifies the origin successfully and inspects normally.
+   This is the only option that also fixes the UI in a browser. See
+   [Public certificate](#public-certificate-lets-encrypt) below.
+2. **Proxy exception** — add a *Do Not Inspect* rule for the node's IP in the
+   proxy policy. Zero dashboard changes, but you may not control corp policy, and
+   on GCP/AWS the node's IP is ephemeral so the rule rots on the next recreate.
+   (On Azure the node's Standard public IP is Static and survives a recreate.)
+3. **`rancher_api_transport = runner`** — the dashboard executes every Rancher
    API call (readiness, bootstrap, server-url pin, cluster import/delete) as
    `curl` inside a **one-shot in-cloud job**, which egresses from the cloud with
    no inspecting proxy in the path — the same corp-CA-dodging pattern as the
@@ -477,6 +495,62 @@ UI too, use the [PRA Web Jump](#pra-web-jump-optional) (the Gateway egresses fro
 the cloud, cleanly) or a proxy exception.
 
 ---
+
+## Public certificate (Let's Encrypt)
+
+Set **`rancher_acme_domain`** (Settings → Kubernetes → *Public certificate
+domain*) to an FQDN you control and the node serves a publicly trusted,
+auto-renewing Let's Encrypt certificate instead of its self-signed one, using
+Rancher's own built-in ACME client. Leave it blank for the self-signed default.
+
+This is the fix for a TLS-inspecting proxy, and unlike the runner transport it
+fixes **browser** access too.
+
+### Preconditions
+
+Both are enforced, not assumed:
+
+1. **An A record for the name must already point at the node's external IP.**
+   Nothing here can create it — it lives at your registrar. The deploy resolves
+   the name and **fails fast** if it is missing or points elsewhere, naming the
+   record to create. Without that check the container's ACME order fails silently
+   inside the node and the deploy reports a readiness timeout, which reads like a
+   slow image pull.
+2. **Port 80 is opened to `0.0.0.0/0`** for the HTTP-01 challenge. Let's Encrypt
+   validates from addresses it does not publish, so this cannot be
+   source-restricted. It is a **separate rule** (`<node>-acme` on GCP,
+   `allow-acme-http01` in the NSG on Azure, an extra permission on the AWS
+   security group) — **443 stays source-restricted** to the merged allow-list.
+   The opening is permanent, because renewal re-validates roughly every 60 days.
+   Clearing `rancher_acme_domain` revokes it on every cloud.
+
+### Consequences
+
+* **The node is addressed by name, not by IP.** A certificate cannot cover a bare
+  IP, and connecting to an IP literal sends no SNI for a proxy to match on. So
+  `rancher_server_url` becomes `https://<your-domain>` and the readiness probe
+  follows it. Re-pointing server-url means **agents on already-imported clusters
+  keep dialling the old address** until re-imported — do this before importing
+  clusters, or plan the re-import.
+* **Let's Encrypt allows 5 certificates per exact name per week,** and the node
+  does not persist ACME state (`/var/lib/rancher` is not on a durable disk), so
+  **every redeploy issues a fresh certificate**. Five redeploys in a week and
+  issuance is refused until the window rolls. Avoid redeploy loops once ACME is on.
+* A `.app`, `.dev` or other HSTS-preloaded domain is fine. Browsers force HTTPS on
+  those names, but Let's Encrypt's validator is not a browser and ignores preload,
+  so HTTP-01 still works.
+
+### Setup
+
+1. Create the A record: `rancher.example.com` → the node's external IP (shown on
+   Containers → Kubernetes). On Azure that address is Static and survives a
+   recreate; on GCP and AWS it is ephemeral, so re-check it after one.
+2. Set *Public certificate domain* to `rancher.example.com` and save.
+3. Redeploy the node. The firewall step opens port 80, the DNS pre-flight runs,
+   and Rancher obtains the certificate during startup — first boot takes somewhat
+   longer than a self-signed one, so raise `rancher_ready_timeout_s` if it is tight.
+4. Open `https://rancher.example.com`. Reaching it **by name** is the point;
+   the IP will still fail behind an inspecting proxy.
 
 ## Entitle registration
 
@@ -862,6 +936,7 @@ apply immediately.
 | `rancher_allowed_source_cidrs` | `""` | *Additive* manual CIDRs (tcp 80/443); the dashboard's own egress, provisioned clusters + the Web-Jump Gateway are auto-added. Empty + nothing auto-discovered = closed |
 | `rancher_dashboard_egress_cidr` | (runtime) | The dashboard's own public egress IP/CIDR, auto-detected + persisted on deploy so the worker can reach the node's public IP. Behind a corp proxy pool set the pool's CIDR — a stored CIDR containing the detected IP is kept, not clobbered. Bare IP → `/32` |
 | `rancher_dashboard_egress_recent` | (runtime) | Bounded CSV of recently-detected egress `/32`s, admitted alongside the current one so a host with no stable outbound address does not lock the deploy out mid-job |
+| `rancher_acme_domain` | _(blank)_ | FQDN for a publicly trusted, auto-renewing Let's Encrypt certificate via Rancher's built-in ACME client; blank = self-signed. Requires an A record already pointing at the node and opens tcp 80 to `0.0.0.0/0` for HTTP-01 (443 stays source-restricted) ([details](#public-certificate-lets-encrypt)) |
 | `rancher_ready_timeout_s` | `360` | Seconds the deploy waits for Rancher to serve after boot; raise for slow disks / large images |
 | `rancher_api_transport` | `direct` | `direct` \| `runner` — run the Rancher API calls as curl in a one-shot job **in the node's own cloud** when this network's TLS inspection blocks the node's self-signed cert ([details](#corp-tls-inspection-api-transport)) |
 | `rancher_internal_url` | (runtime) | `https://<node internal IP>` captured at deploy — what the runner transport dials |

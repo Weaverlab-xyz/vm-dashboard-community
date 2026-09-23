@@ -1641,6 +1641,7 @@ def _current_node_ingress(sg: dict, ports) -> set:
 
 def _ensure_node_security_group_sync(
     region: str, vpc_id: str, name: str, ports: list, source_cidrs: list,
+    acme_open: bool = False,
 ) -> dict:
     """Make the node's security group allow exactly ``source_cidrs`` on ``ports``.
 
@@ -1655,7 +1656,7 @@ def _ensure_node_security_group_sync(
     created = False
     sg_id = _find_security_group_id_sync(region, vpc_id, name)
     if not sg_id:
-        if not source_cidrs:
+        if not source_cidrs and not acme_open:
             # Nothing to open and nothing to close. Creating an empty group here would
             # leave litter behind on an install that never finishes a deploy.
             return {"name": name, "id": "", "opened": False, "created": False}
@@ -1675,6 +1676,12 @@ def _ensure_node_security_group_sync(
     sg = ec2.describe_security_groups(GroupIds=[sg_id])["SecurityGroups"][0]
     have = _current_node_ingress(sg, ports)
     want = {(int(p), c) for p in ports for c in source_cidrs}
+    # An ACME HTTP-01 challenge arrives from addresses Let's Encrypt does not publish,
+    # so port 80 has to be open to the world while the source set keeps governing 443.
+    # Folding it into `want` means the existing diff both adds it and, once ACME is
+    # turned off, revokes it -- no separate lifecycle to get wrong.
+    if acme_open:
+        want.add((80, "0.0.0.0/0"))
 
     to_add, to_remove = want - have, have - want
     if to_add:
@@ -1683,17 +1690,23 @@ def _ensure_node_security_group_sync(
     if to_remove:
         ec2.revoke_security_group_ingress(
             GroupId=sg_id, IpPermissions=_node_ingress_permissions(to_remove))
-    return {"name": name, "id": sg_id, "opened": bool(source_cidrs), "created": created}
+    return {"name": name, "id": sg_id, "opened": bool(source_cidrs), "created": created,
+            "acme_open": bool(acme_open)}
 
 
 async def ensure_node_security_group(
     region: str, *, vpc_id: str, name: str, ports: list, source_cidrs: list,
+    acme_open: bool = False,
 ) -> dict:
-    """Converge a managed node's ingress on ``source_cidrs``. Fail-closed on empty."""
+    """Converge a managed node's ingress on ``source_cidrs``. Fail-closed on empty.
+
+    ``acme_open`` additionally allows port 80 from anywhere for an ACME HTTP-01
+    challenge, without widening the source set that governs the management ports.
+    """
     try:
         return await _to_thread(
             _ensure_node_security_group_sync, region, vpc_id, name,
-            list(ports), list(source_cidrs),
+            list(ports), list(source_cidrs), acme_open,
         )
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to apply ingress for {name}: {e}") from e

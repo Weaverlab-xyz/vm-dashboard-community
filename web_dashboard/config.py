@@ -240,6 +240,7 @@ class Settings(BaseSettings):
     # can't bypass a proxy-side block. "runner" executes each call as curl in a
     # one-shot GCP Cloud Run job targeting the node's INTERNAL IP via the VPC
     # connector (reuses the k8s runner's gcp_region / gcp_ansible_vpc_connector).
+    rancher_acme_domain: str = ""             # the node serves a publicly trusted Let's Encrypt certificate for this FQDN instead of its self-signed one, via Rancher's built-in ACME client (auto-renewing). "" = self-signed. REQUIRED when a TLS-inspecting proxy (e.g. Cloudflare Gateway) sits in front of you: such a proxy verifies the ORIGIN cert and kills the handshake on a self-signed one, which no client-side "ignore cert" can bypass. Two preconditions, both enforced at deploy: an A record for this name must already point at the node's external IP, and port 80 is opened to 0.0.0.0/0 for the HTTP-01 challenge (a SEPARATE rule -- 443 stays source-restricted). The node is then addressed BY NAME (server_url follows this), because a cert cannot cover a bare IP and an IP literal sends no SNI. Note Let's Encrypt allows 5 certs per exact name per week and the node does not persist ACME state, so each redeploy re-issues.
     rancher_api_transport: str = "direct"     # direct | runner
     rancher_internal_url: str = ""            # https://<node internal IP> (runtime-set at deploy; what the runner dials)
     rancher_runner_source_cidr: str = ""      # the VPC connector's /28 — auto-added to the node firewall when transport=runner (GCE ingress rules apply to internal traffic too)

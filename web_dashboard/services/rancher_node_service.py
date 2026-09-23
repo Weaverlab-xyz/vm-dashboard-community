@@ -67,6 +67,25 @@ def _node_params(region=None, zone=None, cloud=None) -> dict:
         cloud or _node_cloud(), _SPEC, region=region, zone=zone)
 
 
+def _acme_domain() -> str:
+    """FQDN to get a Let's Encrypt certificate for, or "" for the self-signed
+    default -- see :func:`managed_node_service.acme_domain`."""
+    return managed_node_service.acme_domain(_SPEC)
+
+
+def _container_args() -> tuple:
+    """Extra arguments for the Rancher container.
+
+    ``--acme-domain`` is Rancher's own Let's Encrypt client: it replaces the
+    self-signed certificate it would otherwise generate, and it renews on its own,
+    which is why this is one argument rather than a certificate to mint, mount and
+    rotate here. It needs port 80 reachable from the internet (HTTP-01) and the name
+    already pointed at this node -- both enforced by the caller.
+    """
+    domain = _acme_domain()
+    return ("--acme-domain", domain) if domain else ()
+
+
 def _allowed_cidrs() -> list[str]:
     """MANUAL firewall source ranges (CSV), fail-closed. Empty CSV → [] unless the
     node cloud's allow_open is ticked.
@@ -238,7 +257,8 @@ async def refresh_rancher_firewall(db, placement=None) -> dict:
     elif "0.0.0.0/0" in merged:
         logger.warning("Rancher node firewall opening 0.0.0.0/0 — node reachable from anywhere "
                        "(%s or a manual CSV entry)", _SPEC.allow_open_key(cloud))
-    return await managed_node_service.apply_ingress(cloud, _SPEC, p, merged)
+    return await managed_node_service.apply_ingress(
+        cloud, _SPEC, p, merged, acme_open=bool(_acme_domain()))
 
 
 def firewall_status(db) -> dict:
@@ -269,6 +289,11 @@ def firewall_status(db) -> dict:
         "entitle_cidrs": entitle,
         "merged": merged,
         "cloud": _node_cloud(),
+        # Port 80 is open to the WORLD whenever ACME is on, independently of the
+        # merged set above. The readout has to say so, or the panel reads as though
+        # the node were source-restricted on every port when it is not.
+        "acme_domain": _acme_domain(),
+        "acme_http01_open": bool(_acme_domain()),
         "ports": list(_SPEC.ports),
         "allow_open": config_service.get_bool(_SPEC.allow_open_key(_node_cloud()), False),
         "opened": bool(merged),
@@ -367,7 +392,8 @@ async def _launch_node(cloud: str, p: dict, bootstrap_password: str) -> dict:
             network=p["network"], subnetwork=p["subnetwork"],
             machine_type=p["machine_type"],
             boot_disk_gb=p["boot_disk_gb"], network_tag=p["network_tag"],
-            create_external_ip=True, region=p["region"])
+            create_external_ip=True, region=p["region"],
+            container_args=_container_args())
     if cloud == "aws":
         return await _launch_node_aws(p, bootstrap_password)
     if cloud == "azure":
@@ -418,7 +444,7 @@ async def _launch_node_aws(p: dict, bootstrap_password: str) -> dict:
         managed_node_service.docker_run_command(
             p["image"], name=_SPEC.feature, ports=_SPEC.ports,
             env={"CATTLE_BOOTSTRAP_PASSWORD": bootstrap_password},
-            privileged=True))
+            privileged=True, args=_container_args()))
     inst = await aws_service.run_ec2_container_node(
         region, ami_id=ami_id, instance_type=p["instance_type"],
         subnet_id=p["subnet_id"], security_group_ids=[await _node_security_group_id(p)],
@@ -443,7 +469,7 @@ async def _launch_node_azure(p: dict, bootstrap_password: str) -> dict:
         managed_node_service.docker_run_command(
             p["image"], name=_SPEC.feature, ports=_SPEC.ports,
             env={"CATTLE_BOOTSTRAP_PASSWORD": bootstrap_password},
-            privileged=True))
+            privileged=True, args=_container_args()))
     res = await azure_service.run_vm_container_node(
         p["resource_group"], p["region"], subnet_id=p["subnet_id"], name=p["name"],
         vm_size=p["vm_size"], admin_password=_azure_vm_password(),
@@ -646,6 +672,28 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
         if not external_ip:
             job_service.set_failed(db, job_id, "Rancher VM has no external IP — cannot reach it.")
             return
+
+        # A certificate cannot cover a bare IP, and an IP literal sends no SNI, so
+        # with ACME on the node is addressed BY NAME from here on — server-url, the
+        # readiness probe and the operator's browser all follow the same URL.
+        #
+        # The A record is the one piece the dashboard cannot create, and a missing or
+        # stale one fails silently inside the container: the deploy would sit through
+        # its whole readiness budget and then report a timeout, which reads as a slow
+        # image pull. Checked once, here, against the address the node actually got.
+        acme_domain = _acme_domain()
+        if acme_domain:
+            job_service.update_progress(db, job_id, 45, f"Checking DNS for {acme_domain}")
+            problem = await managed_node_service.check_acme_dns(
+                _SPEC, acme_domain, external_ip)
+            if problem:
+                job_service.set_failed(
+                    db, job_id,
+                    f"Rancher is set to get a Let's Encrypt certificate for {acme_domain} "
+                    f"(rancher_acme_domain), but {problem} Clear rancher_acme_domain to go "
+                    f"back to the self-signed certificate.")
+                return
+            url = f"https://{acme_domain}"
         # Persist the ACTUAL deployed cloud + zone so teardown + bare redeploys stay
         # sticky to the (possibly relocated / auto-picked) placement.
         managed_node_service.set_node_cloud(_SPEC, cloud)
@@ -690,13 +738,24 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
                 # handshake never completes from here — a TLS-inspecting corp proxy
                 # (e.g. Cloudflare Gateway) rejecting the node's self-signed cert.
                 # Nothing on the node/firewall side will fix that path.
+                # The runner transport only rescues the DASHBOARD's calls; a human's
+                # browser is on the same blocked path and stays blocked. ACME is the
+                # fix that covers both, so name it first when it isn't already on.
+                fix = (f"Set rancher_acme_domain in Settings → Kubernetes to a name you "
+                       f"point at {external_ip}: the node then serves a publicly trusted "
+                       f"Let's Encrypt certificate, which the proxy accepts — and unlike "
+                       f"the runner transport that fixes your BROWSER too. "
+                       if not acme_domain else
+                       f"The certificate for {acme_domain} may not have been issued — check "
+                       f"that port 80 is reachable from the internet for the HTTP-01 challenge. ")
                 job_service.set_failed(
                     db, job_id,
                     f"Rancher IS up at {url} (plain-HTTP /ping answers) but the HTTPS handshake "
                     f"is being terminated in transit — this network TLS-inspects and rejects the "
-                    f"node's self-signed certificate. Set rancher_api_transport=runner in "
-                    f"Settings → Kubernetes (runs the API calls from an in-cloud runner) and "
-                    f"redeploy, or add a Do-Not-Inspect rule for the node in your proxy.")
+                    f"node's certificate. {fix}"
+                    f"Alternatively set rancher_api_transport=runner (runs the dashboard's API "
+                    f"calls from an in-cloud runner) and redeploy, or add a Do-Not-Inspect rule "
+                    f"for the node in your proxy.")
                 return
             if ready != "ready":
                 # Name the causes for the transport actually used — the two paths fail

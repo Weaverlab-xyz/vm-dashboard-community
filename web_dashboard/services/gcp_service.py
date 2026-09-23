@@ -2438,7 +2438,8 @@ _RANCHER_LABEL = "rancher"
 _RANCHER_TOO_SMALL = {"e2-micro", "e2-small", "f1-micro", "g1-small", "e2-highcpu-2"}
 
 
-def _rancher_container_spec_yaml(container_image: str, bootstrap_password: str) -> str:
+def _rancher_container_spec_yaml(container_image: str, bootstrap_password: str,
+                                 container_args: tuple = ()) -> str:
     """Generate the gce-container-declaration konlet YAML for the Rancher server.
 
     ``securityContext.privileged: true`` mirrors the single-node docker install's
@@ -2447,20 +2448,50 @@ def _rancher_container_spec_yaml(container_image: str, bootstrap_password: str) 
     bootstrap password is injected as ``CATTLE_BOOTSTRAP_PASSWORD`` (Rancher 2.6+
     first-run admin password)."""
     import yaml
-    spec = {
-        "spec": {
-            "containers": [{
-                "name": "rancher",
-                "image": container_image,
-                "env": [{"name": "CATTLE_BOOTSTRAP_PASSWORD", "value": bootstrap_password}],
-                "securityContext": {"privileged": True},
-                "stdin": False,
-                "tty": False,
-            }],
-            "restartPolicy": "Always",
-        }
+    container = {
+        "name": "rancher",
+        "image": container_image,
+        "env": [{"name": "CATTLE_BOOTSTRAP_PASSWORD", "value": bootstrap_password}],
+        "securityContext": {"privileged": True},
+        "stdin": False,
+        "tty": False,
     }
+    # konlet's "args" are the container's ARGS, not its entrypoint -- the same
+    # position docker gives everything after the image name, which is where
+    # --acme-domain goes. Omitted entirely when empty so the declaration stays
+    # byte-identical for nodes that do not use it.
+    if container_args:
+        container["args"] = [str(a) for a in container_args]
+    spec = {"spec": {"containers": [container], "restartPolicy": "Always"}}
     return yaml.safe_dump(spec, default_flow_style=False)
+
+
+def _ensure_acme_firewall_sync(client, compute_v1, NotFound, project_id: str,
+                               network: str, tag: str, name: str, wanted: bool) -> None:
+    """Get-or-create/delete the port-80-from-anywhere rule an ACME HTTP-01 challenge
+    needs. Idempotent and self-removing, so it tracks the ACME setting rather than
+    latching open once someone tries a certificate."""
+    if not wanted:
+        try:
+            client.delete(project=project_id, firewall=name).result(timeout=60)
+            logger.info("ACME challenge firewall '%s' deleted (ACME is off)", name)
+        except NotFound:
+            pass
+        return
+
+    fw = compute_v1.Firewall()
+    fw.name = name
+    fw.network = network if "/" in network else f"global/networks/{network or 'default'}"
+    fw.direction = "INGRESS"
+    fw.allowed = [compute_v1.Allowed(I_p_protocol="tcp", ports=["80"])]
+    fw.source_ranges = ["0.0.0.0/0"]
+    fw.target_tags = [tag]
+    try:
+        client.get(project=project_id, firewall=name)
+        client.patch(project=project_id, firewall=name, firewall_resource=fw).result(timeout=60)
+    except NotFound:
+        client.insert(project=project_id, firewall_resource=fw).result(timeout=60)
+    logger.info("ACME challenge firewall '%s' in place (tcp 80 from 0.0.0.0/0, tag=%s)", name, tag)
 
 
 def _ensure_rancher_firewall_sync(
@@ -2469,6 +2500,7 @@ def _ensure_rancher_firewall_sync(
     tag: str,
     source_cidrs: list[str],
     name: str,
+    acme_open: bool = False,
 ) -> dict:
     """Get-or-create/patch a source-restricted INGRESS firewall (tcp 80/443)
     scoped to the Rancher VM's network ``tag``. Idempotent: patches source_ranges
@@ -2485,6 +2517,14 @@ def _ensure_rancher_firewall_sync(
     creds = _gcp_creds()
     client = compute_v1.FirewallsClient(credentials=creds)
 
+    # The ACME challenge is its own rule: Let's Encrypt validates HTTP-01 from
+    # addresses it does not publish, so port 80 cannot be source-restricted — but 443
+    # still must be, and one rule cannot carry two source sets. Converged before the
+    # fail-closed return below so that turning ACME off removes it even on a node
+    # whose management rule is being closed at the same time.
+    _ensure_acme_firewall_sync(client, compute_v1, NotFound, project_id,
+                               network, tag, f"{name}-acme", acme_open)
+
     if not source_cidrs:
         # Fail closed — ensure no rule is left open.
         try:
@@ -2493,7 +2533,7 @@ def _ensure_rancher_firewall_sync(
             logger.warning("Rancher firewall '%s' deleted — no allowed source CIDRs (node is unreachable)", name)
         except NotFound:
             pass
-        return {"name": name, "opened": False}
+        return {"name": name, "opened": False, "acme_open": bool(acme_open)}
 
     fw = compute_v1.Firewall()
     fw.name = name
@@ -2514,21 +2554,28 @@ def _ensure_rancher_firewall_sync(
         created = True
     logger.info("Rancher firewall '%s' %s (tcp 80/443, sources=%s, tag=%s)",
                 name, "created" if created else "updated", source_cidrs, tag)
-    return {"name": name, "opened": True, "created": created}
+    return {"name": name, "opened": True, "created": created,
+            "acme_open": bool(acme_open)}
 
 
 def _delete_rancher_firewall_sync(project_id: str, name: str) -> None:
-    """Delete the Rancher ingress firewall rule (quiet no-op if absent)."""
+    """Delete the Rancher ingress firewall rules (quiet no-op if absent).
+
+    Both of them: the ACME challenge rule is a sibling of the management rule, and
+    leaving it behind would keep port 80 open to the world against a network tag that
+    a later node reuses.
+    """
     _require_compute()
     from google.cloud import compute_v1
     from google.api_core.exceptions import NotFound
     creds = _gcp_creds()
     client = compute_v1.FirewallsClient(credentials=creds)
-    try:
-        op = client.delete(project=project_id, firewall=name)
-        op.result(timeout=60)
-    except NotFound:
-        pass
+    for fw_name in (name, f"{name}-acme"):
+        try:
+            op = client.delete(project=project_id, firewall=fw_name)
+            op.result(timeout=60)
+        except NotFound:
+            pass
 
 
 def _external_ip_of(info) -> str:
@@ -2648,6 +2695,7 @@ def _run_gce_rancher_sync(
     cos_image_family: str = "cos-stable",
     create_external_ip: bool = True,
     region: str = "",
+    container_args: tuple = (),
 ) -> dict:
     """Launch (or reuse) a COS GCE instance running the Rancher server container.
     Idempotent on existence: a RUNNING same-named VM is returned as-is; a stopped
@@ -2738,7 +2786,8 @@ def _run_gce_rancher_sync(
         )]
     instance.network_interfaces = [nic]
 
-    container_yaml = _rancher_container_spec_yaml(container_image, bootstrap_password)
+    container_yaml = _rancher_container_spec_yaml(container_image, bootstrap_password,
+                                                  container_args)
     instance.metadata = compute_v1.Metadata(items=[
         compute_v1.Items(key="gce-container-declaration", value=container_yaml),
         compute_v1.Items(key="google-logging-enabled", value="true"),
@@ -2792,6 +2841,7 @@ async def run_gce_rancher(
     network_tag: str = "rancher",
     create_external_ip: bool = True,
     region: str = "",
+    container_args: tuple = (),
 ) -> dict:
     """Async wrapper for _run_gce_rancher_sync."""
     try:
@@ -2799,7 +2849,7 @@ async def run_gce_rancher(
             _run_gce_rancher_sync,
             project_id, zone, name, container_image, bootstrap_password,
             network, subnetwork, machine_type, boot_disk_gb, network_tag,
-            "cos-stable", create_external_ip, region,
+            "cos-stable", create_external_ip, region, container_args,
         )
     except GCPError:
         raise
@@ -2808,11 +2858,13 @@ async def run_gce_rancher(
 
 
 async def ensure_rancher_firewall(project_id: str, network: str, tag: str,
-                                  source_cidrs: list[str], name: str) -> dict:
+                                  source_cidrs: list[str], name: str,
+                                  *, acme_open: bool = False) -> dict:
     """Async wrapper for _ensure_rancher_firewall_sync."""
     try:
         return await _to_thread(
-            _ensure_rancher_firewall_sync, project_id, network, tag, source_cidrs, name)
+            _ensure_rancher_firewall_sync, project_id, network, tag, source_cidrs, name,
+            acme_open)
     except GCPError:
         raise
     except Exception as e:

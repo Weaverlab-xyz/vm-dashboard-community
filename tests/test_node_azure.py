@@ -201,11 +201,17 @@ def test_the_nsg_itself_survives_being_closed():
 
 def test_an_empty_source_set_creates_nothing_on_a_first_run():
     """Creating the group for a deploy that never opens it leaves litter on an install
-    that failed before it got anywhere."""
+    that failed before it got anywhere.
+
+    Matched as a pattern rather than an exact line: the guard also has to account for
+    the ACME challenge rule, which is a reason to create the group even when the
+    source set is empty. What must not drift is that SOME nothing-to-do case still
+    returns early without creating anything.
+    """
     src = _service_src("azure_service")
     body = src[src.index("def _ensure_node_nsg_sync("):]
     body = body[:body.index("\nasync def ")]
-    assert "if not source_cidrs:" in body and '"created": False' in body
+    assert re.search(r"if not source_cidrs\b.*:", body) and '"created": False' in body
 
 
 def test_the_nsg_is_attached_to_the_nic_at_creation():
