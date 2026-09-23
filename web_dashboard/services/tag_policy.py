@@ -38,6 +38,7 @@ Matching is CASE-INSENSITIVE on the key, because the estate genuinely contains b
 ``purpose`` and ``Purpose``, both ``workgroup`` and ``Workgroup``, and — after a GCP label
 round trip — both ``managed-by`` and ``managed_by``.
 """
+import re
 import zlib
 from typing import Optional
 
@@ -257,3 +258,104 @@ def assert_editable(keys) -> None:
         reason = PROTECTED_KEYS.get(canon)
         if reason:
             raise TagPolicyError(f"'{key}' cannot be edited here: {reason}")
+
+
+# ── per-cloud legality ───────────────────────────────────────────────────────
+
+# What each provider will actually accept, checked BEFORE the call so an operator gets a
+# sentence naming the rule instead of a provider 400 quoted back at them. Under-strict is
+# the wrong direction here — a rule tighter than the cloud's refuses a tag the console
+# would have taken — so each entry states only what is documented and verifiable.
+#
+# `key_re` is anchored and applied to the RAW key: case matters on AWS/Azure/OCI and is
+# forbidden on GCP, which is the single most common way a tag edit is rejected.
+_RULES = {
+    # Keys beginning `aws:` are provider-reserved and DescribeTags rejects them.
+    "aws": {"key_max": 128, "val_max": 256, "max_tags": 50,
+            "key_re": re.compile(r"^(?!aws:)[\w\s+\-=._:/@]+$", re.I),
+            "val_re": re.compile(r"^[\w\s+\-=._:/@]*$", re.I),
+            "noun": "tag",
+            "key_rule": "letters, digits, spaces and + - = . _ : / @, and may not start "
+                        "with the reserved prefix aws:",
+            "val_rule": "letters, digits, spaces and + - = . _ : / @"},
+    # The excluded set includes a BACKSLASH, which inside a character class has to be
+    # doubled — a single one escapes the character after it and silently stops excluding
+    # anything. Built by concatenation so the doubling survives an editing tool that eats
+    # one level of escaping, and asserted below so it cannot regress unnoticed.
+    "azure": {"key_max": 512, "val_max": 256, "max_tags": 50,
+              "key_re": re.compile("^[^<>%&" + chr(92) * 2 + "?/]+$"),
+              "val_re": re.compile("^[^<>%&" + chr(92) * 2 + "?/]*$"),
+              "noun": "tag",
+              "key_rule": "anything except < > % & ? / and backslash",
+              "val_rule": "anything except < > % & ? / and backslash"},
+    # The strict one, and the reason this function exists. GCE rejects an uppercase
+    # letter outright, which is why vdesktop_service keeps a second spelling of its
+    # pool key (`dashboard_desktop_pool`) for GCP alone.
+    "gcp": {"key_max": 63, "val_max": 63, "max_tags": 64,
+            "key_re": re.compile(r"^[a-z][a-z0-9_-]*$"),
+            "val_re": re.compile(r"^[a-z0-9_-]*$"),
+            "noun": "label",
+            "key_rule": "lowercase letters, digits, hyphen and underscore only, "
+                        "starting with a letter",
+            "val_rule": "lowercase letters, digits, hyphen and underscore only"},
+    "oci": {"key_max": 100, "val_max": 256, "max_tags": 64,
+            "key_re": re.compile(r"^[^\s]+$"),
+            "val_re": re.compile(r"^.*$"),
+            "noun": "freeform tag",
+            "key_rule": "any characters except whitespace",
+            "val_rule": "any characters"},
+}
+
+
+def validate_edit(cloud: str, add: dict, remove: list, existing: dict = None) -> None:
+    """Refuse an edit this provider would reject, naming the rule. Raises TagPolicyError.
+
+    Runs after :func:`assert_editable` and before any cloud call. Deliberately separate
+    from it: that one answers "may this key be touched at all", which is the dashboard's
+    own rule and identical everywhere; this one answers "will the provider take it",
+    which differs per cloud and carries no security weight.
+
+    ``existing`` is the resource's current tags when the caller has them, used only for
+    the per-resource cap — omit it and the cap is checked against the additions alone.
+    """
+    rules = _RULES.get((cloud or "").lower())
+    if rules is None:
+        raise TagPolicyError(f"unknown cloud '{cloud}'")
+    noun = rules["noun"]
+
+    overlap = sorted(set(add or {}) & set(remove or []))
+    if overlap:
+        # Not a provider rule — an instruction that contradicts itself. Refusing beats
+        # picking an order, because the two orders give opposite results and the
+        # operator would have no way to tell which one ran.
+        raise TagPolicyError(
+            f"{', '.join(overlap)}: cannot add and remove the same {noun} in one edit")
+
+    for key, value in (add or {}).items():
+        k, v = str(key), "" if value is None else str(value)
+        if not k.strip():
+            raise TagPolicyError(f"a {noun} key cannot be blank")
+        if len(k) > rules["key_max"]:
+            raise TagPolicyError(
+                f"{noun} key '{k[:40]}…' is {len(k)} characters; "
+                f"{cloud} allows {rules['key_max']}")
+        if len(v) > rules["val_max"]:
+            raise TagPolicyError(
+                f"the value for '{k}' is {len(v)} characters; "
+                f"{cloud} allows {rules['val_max']}")
+        if not rules["key_re"].match(k):
+            raise TagPolicyError(
+                f"'{k}' is not a valid {cloud} {noun} key — {rules['key_rule']}")
+        if not rules["val_re"].match(v):
+            raise TagPolicyError(
+                f"the value for '{k}' is not valid on {cloud} — {rules['val_rule']}")
+
+    if add:
+        after = dict(existing or {})
+        for k in (remove or []):
+            after.pop(k, None)
+        after.update(add)
+        if len(after) > rules["max_tags"]:
+            raise TagPolicyError(
+                f"that would leave {len(after)} {noun}s on the resource; "
+                f"{cloud} allows {rules['max_tags']}")

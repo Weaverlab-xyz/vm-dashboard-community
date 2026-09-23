@@ -715,6 +715,140 @@ window.tagMatch = function (chips, query) {
     return (chips || []).some(c => window.tagChipText(c).toLowerCase().includes(q));
 };
 
+// ── Reusable tag editor ───────────────────────────────────────────────────────
+//
+// Spread into a cloud VM page component (`...tagEditState()`) and render with the
+// `tag_editor` Jinja macro (templates/partials/tag_editor.html).
+//
+// Deliberately NOT part of bulkPowerState, and deliberately not an entry in the
+// `bulk_power_buttons` ops list: tests/test_cloud_power.py asserts that the toolbar's
+// ops EQUAL the router's BULK_OPS and that every toolbar op also exists as a per-row
+// power button. Editing tags is neither a power op nor a job, so it gets its own
+// button in each page's toolbar chrome and its own route.
+//
+// One target or fifty is the same request — the per-row pencil opens the editor on a
+// list of one — because a second single-VM path is a second place for the server's
+// protected-key guard to be forgotten.
+//
+// The page supplies three seams:
+//   tagEditUrl        '/api/<cloud>/instances/tags'
+//   _tagTarget(vm)    the per-VM identifier object the route's `targets` takes
+//   _tagLabel(vm)     what to call the VM in the editor and its results
+// and reuses `_bulkPowerRows()`, `_vmKey(vm)` and `selectedVmIds`, which every cloud
+// page already defines for bulk power.
+window.tagEditState = function () {
+    return {
+        tagEdit: {
+            open: false,
+            rows: [],        // the VM row objects being edited
+            addKey: '',
+            addValue: '',
+            pendingAdd: {},  // key -> value, staged locally until Apply
+            pendingRemove: [],
+            removable: [],   // computed on open + after each apply; see _tagEditRemovable
+            busy: false,
+            error: '',
+            result: null,
+        },
+
+        // Every USER-class tag key across the selection. System and identity chips are
+        // excluded because the server refuses them — offering a control that is going to
+        // 409 is a promise the page cannot keep. The union, not the intersection: a key
+        // present on only some of the selection is still removable, and the VMs that
+        // never had it come back as `unchanged` rather than as failures.
+        _tagEditRemovable() {
+            const seen = new Map();
+            for (const row of this.tagEdit.rows) {
+                for (const chip of (row.tags || [])) {
+                    if (chip.cls !== 'user') continue;
+                    if (!seen.has(chip.key)) seen.set(chip.key, chip);
+                }
+            }
+            return [...seen.values()].sort((a, b) => a.key.localeCompare(b.key));
+        },
+
+        openTagEditor(rows) {
+            const list = (rows || []).filter(Boolean);
+            this.tagEdit = {
+                open: true, rows: list, addKey: '', addValue: '',
+                pendingAdd: {}, pendingRemove: [], removable: [],
+                busy: false, error: '', result: null,
+            };
+            this.tagEdit.removable = this._tagEditRemovable();
+        },
+
+        // The bulk entry point: whatever is ticked, resolved through the same filtered
+        // rows bulk power uses, so the editor acts on what is on screen.
+        openTagEditorSelected() {
+            const chosen = new Set((this.selectedVmIds || []).map(String));
+            this.openTagEditor((this._bulkPowerRows() || [])
+                .filter(vm => chosen.has(String(this._vmKey(vm)))));
+        },
+
+        tagEditStageAdd() {
+            const k = (this.tagEdit.addKey || '').trim();
+            if (!k) return;
+            this.tagEdit.pendingAdd[k] = (this.tagEdit.addValue || '').trim();
+            // Staging a key that was also staged for removal would be a self-
+            // contradicting request, which the server refuses outright — so the two
+            // lists are kept disjoint here instead of letting it round-trip to a 409.
+            this.tagEdit.pendingRemove = this.tagEdit.pendingRemove.filter(r => r !== k);
+            this.tagEdit.addKey = '';
+            this.tagEdit.addValue = '';
+        },
+
+        tagEditUnstageAdd(key) { delete this.tagEdit.pendingAdd[key]; },
+
+        tagEditToggleRemove(key) {
+            const i = this.tagEdit.pendingRemove.indexOf(key);
+            if (i >= 0) { this.tagEdit.pendingRemove.splice(i, 1); return; }
+            this.tagEdit.pendingRemove.push(key);
+            delete this.tagEdit.pendingAdd[key];
+        },
+
+        tagEditPendingCount() {
+            return Object.keys(this.tagEdit.pendingAdd).length
+                 + this.tagEdit.pendingRemove.length;
+        },
+
+        async submitTagEdit() {
+            if (this.tagEdit.busy || !this.tagEditPendingCount()) return;
+            this.tagEdit.busy = true;
+            this.tagEdit.error = '';
+            try {
+                const resp = await API.post(this.tagEditUrl, {
+                    targets: this.tagEdit.rows.map(vm => this._tagTarget(vm)),
+                    add: this.tagEdit.pendingAdd,
+                    remove: this.tagEdit.pendingRemove,
+                });
+                this.tagEdit.result = resp;
+                // Write the new chips straight onto the rows rather than refetching:
+                // the listing cache was just invalidated on this worker, but a sibling
+                // worker can still answer with the old tags for up to a minute, and a
+                // refetch that landed there would silently undo what the operator just
+                // watched succeed.
+                const byName = new Map((resp.updated || []).map(u => [u.name, u.tags]));
+                for (const row of this.tagEdit.rows) {
+                    const tags = byName.get(this._tagLabel(row));
+                    if (tags) row.tags = tags;
+                }
+                this.tagEdit.pendingAdd = {};
+                this.tagEdit.pendingRemove = [];
+                // The rows now carry their new chips, so what is removable has changed.
+                this.tagEdit.removable = this._tagEditRemovable();
+            } catch (e) {
+                // A whole-request refusal — a protected key, an illegal key for this
+                // cloud. It names the key and the reason, so show it verbatim.
+                this.tagEdit.error = (e && e.message) ? e.message : String(e);
+            } finally {
+                this.tagEdit.busy = false;
+            }
+        },
+
+        closeTagEditor() { this.tagEdit.open = false; },
+    };
+};
+
 // Display name for a PERMISSION_SCOPES key. The keys are persisted in user/group
 // permission JSON (and bootstrap_entitle_groups.py turns them into Entitle group names),
 // so a scope whose display name has drifted from its key gets an entry here rather than

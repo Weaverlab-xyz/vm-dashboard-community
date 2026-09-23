@@ -717,10 +717,44 @@ perform yet, and Hyper-V has no native tag concept. Databases, Kubernetes cluste
 cloud functions show no tags on Inventory. Password Safe attributes and PRA jump-item tags
 are not read at all yet.
 
-Tags are **read-only** in this release. Adding and removing them from the dashboard is
-the next phase; `workgroup`, `managed-by` and the other load-bearing keys above will stay
-refused there, because a resource that loses one goes on costing money with nothing able
-to find it.
+### Editing tags
+
+The four cloud VM pages can add and remove tags: **Tags** on a row edits that one VM,
+and **Edit tags** on the bulk toolbar applies one change to everything selected. Both open
+the same editor and both go through the same route, so one VM or fifty behaves identically.
+The cap is fifty, the same as a bulk power operation.
+
+Changes apply immediately — there is no job to watch. Each VM succeeds or fails on its own
+and failures are listed **by name with the provider's reason**, because "3 failed" means
+checking all fifty. A VM that already had exactly the change asked for is reported as
+*already had it* rather than as a success.
+
+**The dashboard's own keys are refused, and the message says why.** The editor never offers
+them for removal, and the server refuses them independently — the UI hiding a control is a
+promise about one page, while the refusal covers the REST API and the MCP server too:
+
+```
+'managed-by' cannot be edited here: it is how /costs attributes this resource
+and how the dashboard tells its own VMs from discovered ones
+```
+
+`workgroup` is refused with a pointer to the reassign action, which validates the workgroup
+exists and will not hand a resource to a team you are not in. The full list is the grey
+padlocked chips: `managed-by`, `povEnvironment`, `dashboard:desktop_pool`, `clouddb-id`
+and the rest.
+
+**Provider rules are checked before anything is written**, so a whole batch is refused with
+one sentence instead of collecting fifty identical provider errors. This matters most on
+GCP, whose labels are lowercase-only and reject a colon — `Env=Prod` is valid on AWS and
+rejected on GCE, and the message says so.
+
+Every change is written to the [audit log](audit-log.md), one entry per VM, under the
+action `tags.update` — who, which resource, and what changed. Nothing is recorded for a VM
+that failed or that was already in the requested state.
+
+Editing needs the cloud's existing **write** permission (`aws:write` and friends); there is
+no separate tag permission. Tag editing is **cloud only** for now — Proxmox reports tags but
+writing them on an agent-bound connection needs an agent release.
 
 ---
 

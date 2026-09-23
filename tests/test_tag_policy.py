@@ -252,6 +252,104 @@ def test_an_empty_batch_is_allowed():
     tp.assert_editable(None)
 
 
+# ── per-cloud legality (validate_edit) ───────────────────────────────────────
+
+def test_a_plain_edit_is_allowed_on_every_cloud():
+    for cloud in ("aws", "azure", "gcp", "oci"):
+        tp.validate_edit(cloud, {"env": "prod"}, ["old"])   # must not raise
+
+
+def _refused(cloud, add, remove=(), existing=None):
+    try:
+        tp.validate_edit(cloud, add, list(remove), existing)
+    except tp.TagPolicyError as exc:
+        return str(exc)
+    return ""
+
+
+def test_gcp_refuses_an_uppercase_key_and_says_why():
+    """The rule that actually bites. GCE rejects it outright, and an operator who typed
+    `Env=Prod` on the AWS page first has no reason to expect that."""
+    msg = _refused("gcp", {"Env": "prod"})
+    assert msg and "lowercase" in msg
+
+
+def test_gcp_refuses_an_uppercase_VALUE_too():
+    assert _refused("gcp", {"env": "Prod"})
+
+
+def test_gcp_refuses_a_colon_which_is_legal_on_aws():
+    """`dashboard:desktop_pool` is why vdesktop_service keeps a second spelling for GCP."""
+    assert _refused("gcp", {"dashboard:pool": "a"})
+    tp.validate_edit("aws", {"dashboard:pool": "a"}, [])
+
+
+def test_gcp_refuses_a_key_starting_with_a_digit():
+    assert _refused("gcp", {"1env": "a"})
+
+
+def test_aws_refuses_its_own_reserved_prefix():
+    """`aws:` is provider-reserved; the API rejects it, so catching it here turns a
+    per-VM 400 into one sentence before anything is written."""
+    assert "aws:" in _refused("aws", {"aws:cloudformation": "x"})
+
+
+def test_azure_refuses_the_characters_it_forbids():
+    for bad in ("a<b", "a>b", "a%b", "a&b", "a?b", "a/b"):
+        assert _refused("azure", {bad: "v"}), bad
+
+
+def test_azure_refuses_a_backslash():
+    """A regression guard with teeth: inside a character class a backslash has to be
+    DOUBLED, and a single one silently escapes the next character instead of excluding
+    anything — which is exactly what a tool that eats one level of escaping produces."""
+    assert _refused("azure", {"a" + chr(92) + "b": "v"})
+    assert _refused("azure", {"a": chr(92)})
+
+
+def test_oci_refuses_whitespace_in_a_key_but_allows_it_in_a_value():
+    assert _refused("oci", {"a b": "v"})
+    tp.validate_edit("oci", {"a": "some value"}, [])
+
+
+def test_a_key_may_not_be_added_and_removed_in_one_edit():
+    """The two orders give opposite results, so there is no right one to pick."""
+    msg = _refused("aws", {"env": "prod"}, ["env"])
+    assert "env" in msg
+
+
+def test_a_blank_key_is_refused():
+    assert _refused("aws", {"   ": "v"})
+
+
+def test_an_over_long_key_or_value_is_refused_with_the_limit():
+    assert "128" in _refused("aws", {"k" * 129: "v"})
+    assert "256" in _refused("aws", {"k": "v" * 257})
+
+
+def test_the_per_resource_cap_counts_what_would_REMAIN():
+    """Not just the additions: the cap is a property of the resource afterwards."""
+    fifty = {f"k{i}": "v" for i in range(50)}
+    assert _refused("aws", {"new": "v"}, (), fifty)
+    # …and removing one first makes room, which is the whole reason `remove` is read here.
+    tp.validate_edit("aws", {"new": "v"}, ["k0"], fifty)
+
+
+def test_an_empty_value_is_allowed():
+    """A valueless tag is a real thing on every one of these providers."""
+    tp.validate_edit("aws", {"marker": ""}, [])
+
+
+def test_an_unknown_cloud_is_refused_rather_than_waved_through():
+    assert _refused("nope", {"a": "b"})
+
+
+def test_a_removal_alone_needs_no_key_validation():
+    """Removing a key the provider would no longer accept must stay possible — that is
+    how an operator cleans up a tag applied before a rule changed."""
+    tp.validate_edit("gcp", {}, ["Legacy:Key"])
+
+
 # ── the coverage scan ────────────────────────────────────────────────────────
 
 # Modules that write a tag this dashboard later SELECTS on, and the constant in each

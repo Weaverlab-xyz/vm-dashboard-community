@@ -46,6 +46,7 @@ from .auth import require_admin, require_permission
 from ..services import vm_suspend_policy
 from ..services import tag_policy
 from . import unmanaged
+from . import tag_batch
 from .power_batch import queue_power_batch
 
 router = APIRouter(prefix="/api/azure", tags=["azure"])
@@ -1156,6 +1157,55 @@ async def reassign_vm_workgroup(
 
     await cache_service.invalidate(cache_service.key_global("azure_vms"))
     return {"vm_name": vm_name, "workgroup": canonical, "job_id": job.id if job else None}
+
+
+# ── Tags ──────────────────────────────────────────────────────────────────────
+
+class TagTarget(BaseModel):
+    vm_name: str
+
+
+class TagEditRequest(BaseModel):
+    """One edit, applied to every target. The per-VM editor posts a list of one."""
+    targets: List[TagTarget]
+    add: dict = {}
+    remove: List[str] = []
+
+
+@router.post("/instances/tags", summary="Add or remove tags across a selection")
+async def edit_vm_tags(
+    payload: TagEditRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("azure", "write")),
+):
+    """Apply one tag edit to one or many Azure VMs.
+
+    The route is `/instances/tags` on all four clouds even though this module's listing
+    is `/vms` — a shared editor that had to know each cloud's noun for the same object
+    is a lookup table waiting to disagree with itself.
+    """
+    # The resource group is per VM and only the deploy job knows it; `_rg()` config is
+    # the fallback the listing uses for a job that predates the field.
+    job_meta = _deploy_job_meta(db)
+
+    async def _apply(target: TagTarget):
+        meta = job_meta.get(target.vm_name)
+        if meta is None or meta.get("destroyed"):
+            raise HTTPException(
+                status_code=404,
+                detail=f"{target.vm_name} is not a VM this dashboard deployed")
+        return await azure_service.update_tags(meta["resource_group"] or _rg(),
+                                               target.vm_name,
+                                               payload.add, payload.remove)
+
+    result = await tag_batch.apply_tag_edit(
+        db, cloud="azure", targets=payload.targets,
+        add=payload.add, remove=payload.remove,
+        apply_one=_apply, label_of=lambda t: t.vm_name,
+        created_by=current_user.username)
+
+    await cache_service.invalidate(cache_service.key_global("azure_vms"))
+    return result
 
 
 # ── Terminate ─────────────────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
 {% from "partials/tag_chips.html" import tag_chips %}
+{% from "partials/tag_editor.html" import tag_editor %}
 
 {% block title %}OCI{% endblock %}
 
@@ -168,6 +169,8 @@
       </label>
       <div class="flex items-center gap-2" x-show="selectedVmIds.length > 0" x-cloak>
         {{ bulk_power_buttons(['start', 'stop'], {'stop': 'Suspend'}) }}
+        <button @click="openTagEditorSelected()"
+                class="px-2.5 py-1 text-xs font-medium rounded-lg bg-white border border-blue-300 text-blue-700 hover:bg-blue-50">Edit tags</button>
         <button @click="clearSelection()" class="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
       </div>
     </div>
@@ -193,6 +196,9 @@
             <span class="text-xs px-2 py-0.5 rounded-full"
                   :class="(inst.lifecycle_state === 'RUNNING') ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-600'"
                   x-text="inst.lifecycle_state"></span>
+            <button @click="openTagEditor([inst])"
+                    class="text-xs text-blue-600 hover:text-blue-800 font-medium"
+                    title="Add or remove freeform tags on this instance">Tags</button>
             {#- Power, which this page has never had. The agent-side verb is SOFTSTOP,
                 which asks the guest before pulling the cord — so "Suspend" here is a
                 graceful stop, not a power cut. -#}
@@ -793,6 +799,8 @@
       </div>
     </div>
   </div>
+
+  {{ tag_editor("tag") }}
 </div>
 
 <script>
@@ -819,6 +827,8 @@ function ociDashboard() {
     selectedVmIds: [],
     selectAll: false,
     ...bulkPowerState(),
+    ...tagEditState(),
+    tagEditUrl: '/api/oci/instances/tags',
     bulkPowerUrl: '/api/oci/power/bulk',
     // OCI's stop verb is SOFTSTOP, which asks the guest before pulling the cord — so
     // this really is a graceful stop, and the shared "the guests are not asked"
@@ -1001,6 +1011,18 @@ function ociDashboard() {
     // both names straight is the whole job of this seam.
     _bulkPowerTarget(inst) {
       return { instance_ocid: inst.ocid };
+    },
+
+    // Tag-editor seams. Separate from the bulk-power ones above because the
+    // route's payload is its own: see window.tagEditState in app.js.
+    _tagTarget(vm) {
+      return { instance_ocid: vm.ocid };
+    },
+
+    // What the tag route calls this VM back, so a per-VM result can be matched
+    // to the row it came from. Must equal the route's `label_of`.
+    _tagLabel(vm) {
+      return String(vm.display_name || '');
     },
 
     // `lifecycle_state` is an enum. PROVISIONING/STARTING/STOPPING are 'other', so both

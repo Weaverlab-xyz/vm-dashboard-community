@@ -1,0 +1,137 @@
+{#
+  The tag editor modal. One per cloud VM page.
+
+  Requires the page's Alpine component to spread `window.tagEditState()` and to define
+  the three seams that mixin documents: `tagEditUrl`, `_tagTarget(vm)`, `_tagLabel(vm)`.
+  Opened by `openTagEditor([vm])` from a row, or `openTagEditorSelected()` from the
+  toolbar — one target or fifty is the same request.
+
+  Usage:
+    {% from "partials/tag_editor.html" import tag_editor %}
+    {{ tag_editor("label") }}          {# the noun this cloud uses: tag / label #}
+
+  Same two constraints `tag_chips.html` is built around, for the same reasons:
+  every `x-for` iterates a plain expression (never a helper call, which
+  tests/test_templates_parse.py would reject for a helper defined in app.js rather than
+  in the page), and the staged/removable lists are plain STATE rather than getters —
+  `...tagEditState()` spreads, and a spread evaluates a getter once and copies the value.
+#}
+{% macro tag_editor(noun="tag") %}
+<div x-show="tagEdit.open" x-cloak
+     class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+     @keydown.escape.window="closeTagEditor()">
+  <div class="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+
+    <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+      <div>
+        <h3 class="text-base font-semibold text-gray-800">Edit {{ noun }}s</h3>
+        <p class="text-xs text-gray-500 mt-0.5">
+          <span x-show="tagEdit.rows.length === 1" x-text="tagEdit.rows.length && _tagLabel(tagEdit.rows[0])"></span>
+          <span x-show="tagEdit.rows.length !== 1"
+                x-text="tagEdit.rows.length + ' selected'"></span>
+        </p>
+      </div>
+      <button @click="closeTagEditor()" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+    </div>
+
+    <div class="px-5 py-4 space-y-4">
+
+      {# A whole-request refusal: a protected key, or one this cloud will not accept.
+         Rendered verbatim because the server's message names the key AND the reason. #}
+      <div x-show="tagEdit.error" x-cloak
+           class="border border-red-200 bg-red-50 rounded-lg px-3 py-2 text-xs text-red-800"
+           x-text="tagEdit.error"></div>
+
+      {# ── Add ─────────────────────────────────────────────────────────────── #}
+      <div>
+        <label class="block text-xs font-medium text-gray-600 mb-1">Add a {{ noun }}</label>
+        <div class="flex gap-2">
+          <input type="text" x-model="tagEdit.addKey" placeholder="key"
+                 @keydown.enter.prevent="tagEditStageAdd()"
+                 class="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-sm
+                        focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <input type="text" x-model="tagEdit.addValue" placeholder="value"
+                 @keydown.enter.prevent="tagEditStageAdd()"
+                 class="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-sm
+                        focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <button @click="tagEditStageAdd()" :disabled="!tagEdit.addKey.trim()"
+                  class="px-3 py-1.5 text-sm rounded-lg bg-blue-600 text-white
+                         hover:bg-blue-700 disabled:opacity-40">Add</button>
+        </div>
+        <div x-show="Object.keys(tagEdit.pendingAdd).length" x-cloak
+             class="flex flex-wrap gap-1 mt-2">
+          <template x-for="[k, v] in Object.entries(tagEdit.pendingAdd)" :key="k">
+            <span class="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded
+                         bg-blue-50 text-blue-700">
+              <span x-text="v ? k + '=' + v : k"></span>
+              <button @click="tagEditUnstageAdd(k)" class="hover:text-blue-900">&times;</button>
+            </span>
+          </template>
+        </div>
+      </div>
+
+      {# ── Remove ──────────────────────────────────────────────────────────── #}
+      <div x-show="tagEdit.removable.length" x-cloak>
+        <label class="block text-xs font-medium text-gray-600 mb-1">
+          Remove
+          <span class="font-normal text-gray-400"
+                x-show="tagEdit.rows.length > 1">— across the selection; a VM without one is left alone</span>
+        </label>
+        <div class="flex flex-wrap gap-1">
+          <template x-for="chip in tagEdit.removable" :key="chip.key">
+            <button @click="tagEditToggleRemove(chip.key)"
+                    :class="tagEdit.pendingRemove.includes(chip.key)
+                            ? 'bg-red-100 text-red-700 line-through'
+                            : tagChipClass(chip)"
+                    class="text-xs px-1.5 py-0.5 rounded"
+                    x-text="tagChipText(chip)"></button>
+          </template>
+        </div>
+      </div>
+      {# The dashboard's own keys are absent from that list on purpose. The server
+         refuses them, so a control here would be a promise the page cannot keep. #}
+      <p x-show="!tagEdit.removable.length" x-cloak class="text-xs text-gray-400">
+        Nothing removable — the {{ noun }}s on this selection are the dashboard's own.
+      </p>
+
+      {# ── Results ─────────────────────────────────────────────────────────── #}
+      <template x-if="tagEdit.result">
+        <div class="space-y-2 border-t border-gray-100 pt-3">
+          <p x-show="tagEdit.result.updated.length" class="text-xs text-green-700">
+            Updated <span x-text="tagEdit.result.updated.length"></span>.
+          </p>
+          {# Named, never counted — the same rule the bulk power toast follows. #}
+          <div x-show="tagEdit.result.failed.length" x-cloak
+               class="border border-amber-200 bg-amber-50 rounded-lg px-3 py-2 space-y-1">
+            <p class="text-xs font-medium text-amber-900">
+              <span x-text="tagEdit.result.failed.length"></span> could not be updated:
+            </p>
+            <template x-for="f in tagEdit.result.failed" :key="f.name">
+              <p class="text-xs text-amber-800">
+                <span class="font-medium" x-text="f.name"></span> — <span x-text="f.error"></span>
+              </p>
+            </template>
+          </div>
+          {# Not a failure and not a success: the edit was already true of these. #}
+          <p x-show="tagEdit.result.unchanged.length" x-cloak class="text-xs text-gray-500">
+            <span x-text="tagEdit.result.unchanged.length"></span> already had it.
+          </p>
+        </div>
+      </template>
+    </div>
+
+    <div class="px-5 py-3 border-t border-gray-100 flex justify-end gap-2">
+      <button @click="closeTagEditor()"
+              class="px-3 py-1.5 text-sm rounded-lg border border-gray-300 text-gray-600
+                     hover:bg-gray-50">Close</button>
+      <button @click="submitTagEdit()"
+              :disabled="tagEdit.busy || !tagEditPendingCount()"
+              class="px-3 py-1.5 text-sm rounded-lg bg-blue-600 text-white
+                     hover:bg-blue-700 disabled:opacity-40">
+        <span x-show="tagEdit.busy" x-cloak>Applying…</span>
+        <span x-show="!tagEdit.busy">Apply to <span x-text="tagEdit.rows.length"></span></span>
+      </button>
+    </div>
+  </div>
+</div>
+{% endmacro %}
