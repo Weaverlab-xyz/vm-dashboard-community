@@ -8,6 +8,11 @@ end-to-end against both a MySQL and a SQL Server managed database on GCP. Phase 
 the modular function lifecycle + a catalog of standalone workloads. Phase 2 = using those functions as
 Entitle REST integrations (see §7).
 
+Phase 2 status: the dashboard **already creates the adapter functions** Entitle calls,
+and that creation path (`clouddb_adapter_pair`) is proven on cloud databases. The
+last step, Entitle granting access through an adapter against a real tenant, is close
+but **not yet proven**. §7 lists what is left.
+
 ## 1. Why
 
 The dashboard already reaches private, non-internet-facing resources on all three
@@ -290,7 +295,7 @@ Standalone-useful first; Phase-2-enabling second.
 | `echo_diag` | Echoes the normalized request (redacted) + cloud/region/network placement; TCP/DNS probes each caller-supplied `{host,port}` | Pre-flight check **and this feature's own end-to-end verifier** |
 | `entitle_webhook_echo` | Validates the Entitle Give/Revoke payload shape and returns the success envelope; failure injection via `?fail=` | The contract test every real workload implements |
 | `cred_expiry_watch` | TLS handshake sweep → issuer/`not_after`/days remaining; on-demand or scheduled | Scheduled-invoke plumbing + the function→dashboard callback direction |
-| `db_grant` | Ephemeral DB account create/drop against the private DB | **The Phase 2 pilot** |
+| `db_grant` | Ephemeral DB account create/drop against the private DB | **The Phase 2 pilot.** Deployed and paired automatically for cloud databases |
 | `local_account_broker` *(AWS)* | SSM-driven ephemeral OS account + authorized key | SSH ephemeral-accounts executor for hosts Entitle's agent can't reach |
 | `ps_dbops` *(GCP)* | The "bt-dbops" service: changes and verifies Cloud SQL credentials for the Password Safe plugin's `cloud-run` channel | None — a different contract (§9.1) |
 | `inventory_reporter` | Reports what it can see from inside the network, POSTing back to the dashboard | Reverse callback channel for revocation reconciliation |
@@ -299,19 +304,32 @@ Standalone-useful first; Phase-2-enabling second.
 
 Entitle POSTs Give/Revoke to the function URL with the shared secret as a header.
 The function performs the grant against the target and returns the success
-envelope. Four integrations are planned:
+envelope. All four integrations are built. None is yet proven end to end with
+Entitle:
 
-1. **Ephemeral MySQL / MSSQL DB accounts** — the pilot. **Built** (see §9).
-2. **Azure machine identity** — Entitle calls a function that performs the ARM
+1. **Ephemeral MySQL / MSSQL DB accounts** — the pilot. **Built** (see §9), and the
+   dashboard creates the adapter itself: `clouddb_adapter_pair` stages the admin
+   credential, deploys a VPC/VNet-attached `db_grant` beside the database and
+   registers it as a REST integration. **Proven on cloud databases.** Entitle end to end
+   is still to be proven.
+2. **Azure machine identity** — **Built** (`azure_role_grant`). Entitle calls a function that performs the ARM
    `roleAssignments/write` against the service principal with an `endDateTime`.
    Note the token-cache invalidation requirement after a grant
    (`cloud-identity-jit.md` §5.2); `azure_service.invalidate_credentials()` exists.
-3. **Portainer** — needs `/api/users`, `/api/teams`, `/api/team_memberships` added
-   to `portainer_service.py` first.
-4. **Dashboard user identity** — the one exception: the dashboard **is** the target
+3. **Portainer** — **Built** (`portainer_access`), deployed from the node's
+   **Just-in-time access (Entitle)** card; grants through team membership.
+4. **Dashboard user identity** — **Built**. The one exception: the dashboard **is** the target
    system, so Entitle calls `/api/entitle/rest/*` on the dashboard directly, with no
    function hop. Replaces the Entra-group indirection with direct grants on
    `User.session_permissions_dict`, working for local and OIDC users alike.
+
+**Left to prove Entitle end to end:**
+
+- An approved request that reaches a paired `db_grant` creates the account, and the
+  matching revoke or expiry drops it (`give_access` → `revoke_access`, then
+  `delete_actor`).
+- The tenant's application slug (`entitle_rest_app_slug`) is confirmed. See the ⚠️
+  under *Registering an adapter*.
 
 ## 9. db_grant — ephemeral database accounts
 

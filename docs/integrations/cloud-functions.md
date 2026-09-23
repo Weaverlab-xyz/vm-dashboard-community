@@ -25,7 +25,7 @@ publish yourself.
 | **Diagnose serverless networking** | `echo_diag` reports what the function can actually reach — resolving DNS and TCP separately, so "broken" becomes "DNS" or "security group" |
 | **Certificate expiry watch** | `cred_expiry_watch` runs a TLS handshake sweep *from inside the VPC*, so it sees internal-only endpoints |
 | **An endpoint for external systems** | Something outside your network needs to trigger an action inside it, synchronously — the case a one-shot container cannot serve |
-| **Entitle REST integrations (Phase 2)** | Entitle POSTs Give/Revoke Access to the function, which performs the grant against a private target |
+| **Entitle REST integrations (Phase 2)** | Entitle POSTs Give/Revoke Access to the function, which performs the grant against a private target. The dashboard **deploys these adapter functions for you** — see [status](#phase-2--entitle-rest-integrations) |
 
 The dashboard already reaches private resources for its own work by running one-shot
 containers inside the target cloud (ECS / ACI / Cloud Run jobs). **Reach is not what
@@ -109,7 +109,7 @@ catalog** — adding a module makes it deployable, no registry to edit.
 
 ### Wiring an Entitle REST integration
 
-Both adapters implement the [Remote Adapter contract](https://docs.beyondtrust.com/entitle/docs/open-api-definition).
+Every adapter implements the [Remote Adapter contract](https://docs.beyondtrust.com/entitle/docs/open-api-definition).
 **The verb is the path**, and Entitle lets you configure each path separately, so
 point them at the routes below (or leave the defaults, which match):
 
@@ -728,6 +728,28 @@ Use `entitle_webhook_echo` to validate the whole path — network, front door, s
 timeouts, retries — before any grant logic exists. It reports exactly which fields it
 recognised in the payload, which is how the schema gets pinned against a real tenant.
 
-Planned integrations: ephemeral MySQL/SQL Server database accounts, Azure machine
-identity, Portainer access, and dashboard user identity. See the
+### Status
+
+The dashboard already creates the functions Entitle needs — none of these is planned
+work any more. The creation path is proven on cloud databases. The last step, Entitle
+granting access through a function against a real tenant, is close but not yet proven.
+
+| Integration | Where it runs | Status |
+|---|---|---|
+| Ephemeral MySQL / SQL Server accounts (`db_grant`) | function paired with the database — [Pairing](#pairing-never-deploy-a-db_grant-adapter-by-hand) | **Function creation proven on cloud databases.** `clouddb_adapter_pair` stages the credential, deploys the VPC/VNet-attached adapter and registers it. Entitle end-to-end: **not yet proven** |
+| Portainer access (`portainer_access`) | function, from the node's **Just-in-time access (Entitle)** card | Built; Entitle end-to-end not yet proven |
+| Azure machine identity (`azure_role_grant`) | function | Built; Entitle end-to-end not yet proven |
+| Dashboard permissions | the dashboard itself (`/api/entitle/rest/*`), no function | Built — see [entitle-dashboard-permissions.md](entitle-dashboard-permissions.md) |
+
+Two things remain before Entitle counts as proven:
+
+1. An approved Entitle request that reaches a paired `db_grant` adapter creates the
+   account, and the matching revoke or expiry drops it.
+2. The tenant-specific application slug (`entitle_rest_app_slug`, default
+   `"rest api"`) is confirmed. A wrong value fails the registration at apply with a
+   404 *Application not found* — see the
+   [design doc](../design/cloud-functions.md#registering-an-adapter).
+
+Until then, `entitle_webhook_echo` and a dry-run `db_grant` (`FN_DB_DRY_RUN=1`) are
+how you check the Entitle side without touching a real database. See the
 [design doc](../design/cloud-functions.md#7-phase-2--entitle-rest-integrations).
