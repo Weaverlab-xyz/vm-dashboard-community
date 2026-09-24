@@ -227,6 +227,30 @@ deny contains msg if {
 Policies are versioned in-repo and reviewed like code. To cap by size *class* rather
 than an exact list, replace the exact-match check with a prefix/regex rule.
 
+**Name the package after the file.** `admission.no_gpu_in_dev` must live in
+`no_gpu_in_dev.rego`. The Settings list of active rules reads *filenames*, but a
+decision only ever reports a *package* — so if the two disagree, the rule shows up as
+active and silently never evaluates. Nothing in OPA warns about this.
+
+### Check it before you ship it
+
+The gate is **fail-closed**, and OPA loads the policy directory as a single bundle.
+So a syntax error in one file does not disable one rule — it makes every gated action
+return 403 until someone fixes it. Two ways to catch that first:
+
+```bash
+opa check terraform/policy/admission/          # parses; catches syntax errors
+python tests/test_opa_policies.py              # evaluates; catches behaviour
+```
+
+`tests/test_opa_policies.py` runs each shipped policy against the real binary and
+asserts the verdict both ways — that it fires on input it should refuse, and stays
+quiet on input it should not. It skips when no `opa` is on `PATH`, so it costs nothing
+locally; CI installs one and runs it as the `opa` job. If you add a policy **to this
+repo**, add it to that file's `PROVOCATIONS` table — the test fails until you do,
+which is what stops a policy shipping unexecuted. Policies you mount from outside the
+repo (`ADMISSION_POLICY_DIR`) are yours to test, and `opa check` is the quick version.
+
 ## What this is not
 
 - **Not** post-apply compliance scanning — this blocks *before* a deploy; it doesn't
