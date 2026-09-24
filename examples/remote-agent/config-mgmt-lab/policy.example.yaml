@@ -1,0 +1,92 @@
+# policy.yaml — a Config-Management-ONLY delegate agent, for ONE network segment.
+#
+# Copy this to `policy.yaml` on the agent host and change the two CIDRs to that
+# segment's range. One copy per segment: the ranges are what make each agent
+# structurally incapable of touching another segment, so they are never shared and
+# never widened to cover both.
+#
+# This agent runs playbooks against the hosts on its own segment and does nothing else:
+# it discovers nothing, brokers no hypervisor, serves no file share and runs no Gateway.
+# For the fuller menu of what an agent CAN be granted, see ../policy.example.yaml.
+#
+# This file is the security boundary and it is YOURS. No dashboard API can read, write or
+# override it. Mounted read-only; the agent re-reads it only at start, so edits need a
+# `docker compose restart agent`. A missing or malformed file is fatal — the agent exits
+# non-zero and runs nothing rather than starting with a weaker rule than you wrote.
+
+# ── The discovery grant, which this agent never uses ──────────────────────────
+# `targets:` is mandatory and must be non-empty: the loader refuses a policy that grants
+# nothing, on the grounds that an operator who wrote no targets has made a mistake rather
+# than a decision. But it grants a port PROBE, and a probe is only ever performed by the
+# `agent_discover` job type — which is NOT in `job_types:` below. So this block is inert
+# here, and it is written narrow (this segment, SSH only) so that it stays inert even if
+# somebody later adds agent_discover without re-reading this comment.
+#
+# Do NOT widen this expecting it to affect Config Management. It cannot: `ansible.targets`
+# further down is a separate list with no fallback to this one.
+targets:
+  - cidr: 10.20.10.0/24
+    ports: [22]
+
+# ── What may never be touched ────────────────────────────────────────────────
+# Loopback and link-local are re-added by the agent even if removed here, so listing them
+# is documentation rather than enforcement. Add the hosts on this segment that must never
+# be reconfigured — the segment gateway is the obvious first entry.
+deny:
+  - 169.254.0.0/16
+  - 127.0.0.0/8
+  # - 10.20.10.1/32     # the segment's firewall / gateway interface
+  # - 10.20.10.10/32    # e.g. the domain controller
+
+# ── What the agent will run ──────────────────────────────────────────────────
+# A closed list, and deliberately a list of one. Every other job type is refused before
+# its payload is even read, however correctly the dashboard signed it.
+#
+# This is the agent's half of the grant. The dashboard's half is `allowed_job_types` on
+# the agent's record, and it must ALSO be narrowed to this one type — see README.md,
+# because an EMPTY list there means "all types", not "none".
+job_types:
+  - agent_ansible
+
+# ── Config Management ────────────────────────────────────────────────────────
+# READ THIS DIFFERENTLY FROM `targets:` ABOVE. That grants a port probe. This grants a
+# playbook, running as root, on the hosts named here.
+#
+# Pull the runner image on this host before enrolling — the agent will not pull it, and a
+# missing image fails every run with a message that reads like a policy problem:
+#
+#   docker pull chrweav/ansible-winrm:latest
+#
+# Only `vm_image` is named. `db_image` is deliberately absent: there are no database
+# targets on this segment, and a run of a kind with no image is refused by name, which is
+# a better outcome than one that half-works. Add it if that changes.
+ansible:
+  enabled: true
+  vm_image: chrweav/ansible-winrm:latest
+
+  # Where a playbook may be applied. ITS OWN LIST — not the `targets:` one above.
+  # Port 22 only, for Linux targets over SSH. Add 5985/5986 only if this segment holds
+  # Windows hosts you intend to configure; granting them otherwise is a wider grant for
+  # no benefit.
+  #
+  # Mind the space after the dash. `-cidr: 10.20.10.0/24` is valid YAML for a key NAMED
+  # `-cidr`, not a list entry, and the agent refuses it by name at startup.
+  targets:
+    - cidr: 10.20.10.0/24
+      ports: [22]
+
+  # Ceiling on one run, after which the container is stopped. Guards against a playbook
+  # that hangs waiting on something that will never answer.
+  max_runtime_minutes: 20
+
+  # Which Docker network the one-shot runner joins. `bridge` masquerades its traffic to
+  # this agent host's own address — which is ON the target segment, so the hosts see it
+  # as a local peer. `none` is refused: it makes every task fail as "unreachable", which
+  # reads as a firewall or credential problem for a long time.
+  network: bridge
+
+# ── No `limits:` block, deliberately ─────────────────────────────────────────
+# The only two keys the agent reads there — `max_hosts` and `max_concurrency` — bound a
+# DISCOVERY SCAN, and this agent does not discover. Writing them here would look like a
+# ceiling on Config Management and be read as one. The real ceiling on a run is
+# `ansible.max_runtime_minutes` above.

@@ -92,7 +92,7 @@ an address range and the agent that executes runs against it:
 
 | Range | Executes on |
 |---|---|
-| `192.168.235.0/24` | `lab-runner` (a VM on that segment) |
+| `10.20.10.0/24` | `lab-runner` (a VM on that segment) |
 
 Runs for an address in that range go to `lab-runner`. Everything else still goes to the
 discovering agent. Matching is longest-prefix-first, so a `/32` overrides a `/24`, and one
@@ -115,6 +115,11 @@ explains which route decided, and the job description records it as `… via <ag
 
 To undo it, clear **Active** on the route — runs go straight back to the discovering agent,
 with no re-sync. Delete it if you do not want the record of the decision kept.
+
+**A worked build of exactly this shape**, for two lab segments behind separate firewalls,
+is in [`examples/remote-agent/config-mgmt-lab/`](../../examples/remote-agent/config-mgmt-lab/README.md):
+two Config-Management-only `policy.yaml` files, a compose file with the Docker socket the
+runner needs, and the dashboard-side steps in order.
 
 ### Before a VM appears as a target: it needs an address
 
