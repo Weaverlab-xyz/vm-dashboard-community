@@ -177,6 +177,19 @@ function remoteAgentsPage(slugs, initial) {
       // so arriving at /connections?add=1 does not rewrite the URL out from under the
       // query string the Connections form is about to read.
       if (push) window.history.replaceState(null, '', '#' + slug);
+      // Tell the panel being shown that it is visible again, so it can reload anything
+      // that has gone stale while another tab was up. This container still owns only
+      // which tab is showing — it names the slug and nothing about what any panel does
+      // with it, and a panel that does not care simply has no listener.
+      //
+      // Why it is needed: the Agents panel polls on its own 15s timer, but Connections
+      // and Config Routes fetch their AGENT PICKER exactly once, in init(). Enrol an
+      // agent and switch tabs without reloading the page and the picker predates it —
+      // which reads as "that agent is not eligible for this", not "this list is stale".
+      //
+      // `push` is false only on the initial select, which is precisely when every panel's
+      // own x-init has just loaded. Dispatching there too would double every page load.
+      if (push) window.dispatchEvent(new CustomEvent('agents-tab-shown', {detail: slug}));
     },
   };
 }

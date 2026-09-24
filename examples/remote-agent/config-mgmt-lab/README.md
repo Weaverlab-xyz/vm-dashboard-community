@@ -77,8 +77,15 @@ Edit `policy.yaml` and set both CIDRs to **this** segment's range — the inert 
 one and the load-bearing `ansible.targets` one. They are separate lists by design, with
 no fallback between them.
 
-Then edit `.env`: the dashboard URL, the enrolment code from step 2, and
-`DOCKER_SOCKET_GID` (`stat -c %g $XDG_RUNTIME_DIR/docker.sock`).
+Then edit `.env`: the dashboard URL, the enrolment code from step 2, and the socket. On
+**rootless** Docker leave `DOCKER_SOCKET` unset and use `stat -c %g
+$XDG_RUNTIME_DIR/docker.sock` for the gid. On a host running the system `docker.service`,
+set `DOCKER_SOCKET=/var/run/docker.sock` and take the gid from that path instead — it is
+usually the `docker` group.
+
+**Run `docker compose` from this directory.** `./policy.yaml` resolves against the project
+directory, so invoking it with `-f` from elsewhere can aim the mount at a path that does
+not exist.
 
 Pull the runner image yourself. **The agent will not pull it**, and a missing image fails
 every run with a message that reads like a policy problem:
@@ -181,6 +188,8 @@ is reconfigured — the agent leases the job and logs precisely what it *would* 
 |---|---|
 | Agent exits non-zero at start, `bad cidr` | A target list is not a network. Check for a missing space after the dash — `-cidr:` is a key name, not a list entry. |
 | Agent crash-loops on `Permission denied` reading its policy | SELinux. The `,Z` suffix is on the mount in `docker-compose.yml`; if you rewrote it, put it back. |
+| `up` refuses: host path does not exist | Working as designed. Either you ran compose from another directory so `./policy.yaml` missed, or `DOCKER_SOCKET` names a socket this host does not have. Both used to be created as empty directories and mounted. |
+| Agent crash-loops on `Is a directory` | An older copy of this kit, or a hand-shortened mount. A previous run created the bind source as a directory — delete it, then use the long-form mounts. |
 | Every run fails seconds in, Engine errors | `DOCKER_SOCKET_GID` unset or wrong. uid 10001 vs a mode-0660 socket = `EACCES` on a socket that is plainly mounted. |
 | Run refused at enqueue, "not granted the Config-Management job type" | Step 3 narrowed the agent to something that excludes `agent_ansible`. |
 | Run refused at enqueue naming a *different* agent | The route is missing or its CIDR does not cover the host's address. Use the `resolve` call above. |
