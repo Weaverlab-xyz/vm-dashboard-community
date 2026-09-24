@@ -173,6 +173,45 @@ When you report a finding, please mention:
   if you have one — helps us tell "dashboard bug" from "this hypervisor
   rejects the call we make".
 
+### Database: the suite is SQLite, production is PostgreSQL
+
+Almost every file in `tests/` runs on SQLite. That is deliberate — it needs no service
+and the application code is dialect-neutral by design — but it leaves one gap you need
+to know about if you touch the schema.
+
+`database.init_db()` applies its `_migrations` list one statement at a time, each in its
+own savepoint, and swallows the failure. That is correct: on every boot after the first,
+"column already exists" is the expected outcome. The edge is that a statement which is
+**malformed for PostgreSQL** is swallowed identically — nothing raises, nothing logs, the
+column never appears, and SQLite (more permissive about literals and types) keeps the
+suite green. The symptom surfaces much later as `column ... does not exist` on one page.
+
+`ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT 0` was a live instance of this:
+PostgreSQL will not coerce `0` to a boolean default and rejected the whole statement, so
+the column was never added on any install that predated it.
+
+Two things catch this now, and a schema change should keep both green:
+
+- `tests/test_rbac_migration.py` — static, runs everywhere, no database needed.
+- `tests/test_postgres_migrations.py` — runs the real statements against a real
+  PostgreSQL. It **skips unless `DATABASE_URL` points at one**, so it costs nothing
+  locally; CI runs it in a separate `postgres` job with a service container.
+
+To run it yourself:
+
+```bash
+docker run -d --name pgtest -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test \
+  -e POSTGRES_DB=testdb -p 5432:5432 postgres:16-alpine
+DATABASE_URL=postgresql://test:test@localhost:5432/testdb \
+  python tests/test_postgres_migrations.py
+```
+
+Note that a **fresh** database proves nothing here: `create_all` builds every table from
+the models with all columns present, so the `ALTER` statements are no-ops. The test
+therefore simulates an *upgrade* — it drops every migration-added column and requires
+`init_db()` to put them all back. If you add a migration, that is the path it must
+survive.
+
 ### Local Filesystem / UNC storage backend
 
 The Local backend on `/storage` is a contributor-testing focus area for
