@@ -109,11 +109,19 @@ and writes an `<action>:denied` entry to the **tamper-evident audit log**
 (see [`/api/audit/verify`](secrets-management.md)). No job is created and no cloud
 resource is touched.
 
-## `needs_approval` is enforced
+## `needs_approval` can be enforced
 
-A rule may contribute `needs_approval` instead of `deny`. That verdict used to be
-advisory — logged and admitted — because community had no approval gate. It now has
-one, so the verdict is acted on:
+A rule may contribute `needs_approval` instead of `deny`. That verdict was advisory —
+logged and admitted — because community had no approval gate. It now has one, so the
+verdict *can* be acted on.
+
+**It is off by default**, and that default is deliberate rather than timid: this page
+used to describe the verdict as available-and-advisory, so a custom rule may well be
+using it as a soft signal today. Switching it on under you would turn actions that
+run now into 403s with the policy unchanged.
+
+Turn it on with **Settings → Action Guardrails → Act on a policy's `needs_approval`
+verdict**. With it on:
 
 - On a surface that can create an approval-gated job (the cloud deploy forms), the job
   is created **awaiting approval**: it is not claimed by the worker until somebody
@@ -127,6 +135,14 @@ one, so the verdict is acted on:
 
 The requirement is audited as `<action>:needs_approval`, distinct from
 `<action>:denied` — the change was admitted, just not yet runnable.
+
+With the setting **off**, a `needs_approval` verdict is logged and the action proceeds,
+exactly as before. Nothing is audited, because nothing was gated.
+
+This is separate from the change-window approval gate
+([Change Windows → Requiring approval](change-windows.md#requiring-approval)), which
+governs a change an operator *booked*. This one governs a verdict a *policy* reached,
+and you may reasonably want either without the other.
 
 ## Fails closed
 

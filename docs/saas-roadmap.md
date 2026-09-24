@@ -123,7 +123,8 @@ the next things queued for QA.
 > a second user holding `change_windows:use` before the worker will claim it; the
 > requester cannot approve their own, rescheduling clears the approval, and the
 > decision is recorded in the audit trail. An Action-Guardrails policy emitting
-> `needs_approval` now produces such a job rather than being logged and admitted.
+> `needs_approval` can produce such a job rather than being logged and admitted,
+> behind an opt-in setting (off by default, so upgrading changes nothing).
 >
 > **What SaaS still adds:** the gate on a defined set of high-blast-radius actions
 > executing *immediately* — community's gate is on booked changes and on what policy

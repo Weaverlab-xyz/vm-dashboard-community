@@ -1703,6 +1703,13 @@ class AdmissionControlFeatureConfig(BaseModel):
     admission_allowed_regions: str = ""
     admission_denied_instance_types: str = ""
     admission_prod_window: str = ""
+    # Whether a policy's `needs_approval` verdict is acted on or merely logged.
+    # FALSE by default, and deliberately so: enforcing it changes the outcome of an
+    # action that previously proceeded, and the guardrails doc described the verdict
+    # as advisory — so a custom rule may well be relying on that. Plain `bool`, never
+    # Optional[bool]: _read_feature keys off the annotation, and an Optional would read
+    # back as "" for an unset key and 422 the whole panel on save.
+    admission_enforce_needs_approval: bool = False
 
 
 class ResourceExpiryFeatureConfig(BaseModel):

@@ -186,6 +186,9 @@ class Settings(BaseSettings):
     admission_allowed_regions: str = ""        # allow-list; empty = no region restriction
     admission_denied_instance_types: str = ""  # block-list of sizes/classes
     admission_prod_window: str = ""            # frozen weekdays, e.g. sat,sun
+    # Act on a policy's needs_approval verdict rather than logging it. Off by
+    # default: turning it on changes the outcome of actions that previously ran.
+    admission_enforce_needs_approval: bool = False
     # Secret hygiene: flag stored secrets not changed in more than this many days
     # (age from AppConfig.updated_at). 0 = disabled (no staleness flagging).
     secret_max_age_days: int = 0

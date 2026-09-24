@@ -748,6 +748,29 @@
               Custom rules: drop a <code>.rego</code> into <code>terraform/policy/admission/</code>.
             </p>
           </div>
+
+          <label class="flex items-start gap-2 pt-1">
+            <input type="checkbox" x-model="panelCfg.admission_enforce_needs_approval"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-gray-700">
+              Act on a policy's <span class="font-mono">needs_approval</span> verdict
+              <span class="block text-[11px] text-gray-500">
+                Off, a rule that returns <span class="font-mono">needs_approval</span> is
+                logged and the action proceeds — the long-standing behaviour. On, the
+                action is either created as a job <strong>awaiting approval</strong>
+                (on a surface that can express that, such as the cloud deploy forms) or
+                <strong>refused</strong>. See
+                <a href="/docs/change-windows" class="text-blue-600 underline">Change
+                Windows</a> for who may approve.
+              </span>
+              <span class="block text-[11px] text-amber-700 mt-1">
+                Turning this on changes the outcome of actions that run today. If you
+                have a custom rule using <span class="font-mono">needs_approval</span>
+                as a soft signal, it becomes a hard gate.
+              </span>
+            </span>
+          </label>
+
           <p class="text-[11px] text-amber-600">
             Requires the bundled OPA binary (in the image). With the gate on but OPA missing,
             gated deploys <strong>fail closed</strong> (403) rather than slipping through.

@@ -129,6 +129,19 @@ def gated_actions() -> set[str]:
     return set(_csv_or_json_list("admission_gated_actions"))
 
 
+def _enforce_approval() -> bool:
+    """Whether a policy's ``needs_approval`` verdict is acted on, or just logged.
+
+    Default FALSE, and the default is the whole point: enforcing it changes what
+    happens to an action that previously proceeded. See the branch in :func:`enforce`.
+
+    Independent of the change-window approval gate (``change_approval_required``),
+    which governs a change an operator BOOKED. This one governs a verdict a POLICY
+    reached, and an operator may reasonably want one without the other.
+    """
+    return config_service.get_bool("admission_enforce_needs_approval", False)
+
+
 def _limits() -> dict:
     """Config-driven caps exposed to policies as ``input.limits`` so the common
     rules are settable from Settings without editing Rego."""
@@ -359,10 +372,24 @@ def enforce(action: str, *, request: dict, actor=None, db=None, now=None,
             detail={"error": "policy", "reasons": result["reasons"]},
         )
     if result["decision"] == "needs_approval":
-        # Community HAS an approval gate now (Job.approval_required, the /jobs approve
-        # endpoint, the `change_windows:use` permission), so this verdict is enforced
-        # rather than logged — but only a seam that can act on it may proceed.
+        # Community HAS an approval gate (Job.approval_required, the /jobs approve
+        # endpoint, the `change_windows:use` permission), so this verdict CAN be
+        # enforced rather than logged — behind a flag, and OFF by default.
         #
+        # Off by default because enforcing it is a breaking change on upgrade, and the
+        # docs invited exactly the policy it would break. No shipped rule emits
+        # `needs_approval`, but the guardrails doc described the verdict as available
+        # and advisory, so an operator may well have written a custom rule using it as
+        # a soft signal. Flipping the meaning under them would turn actions that
+        # worked yesterday into 403s, with the policy unchanged. An operator who wants
+        # the gate turns it on knowing what it does.
+        if not _enforce_approval():
+            logger.info(
+                "admission action=%s needs_approval (advisory; enforcement is off — "
+                "see admission_enforce_needs_approval) reasons=%s",
+                action, result["approval_reasons"])
+            return {}
+
         # `approvable=True` says "I will pass what you return into create_job". A seam
         # that does not opt in is REFUSED, deliberately: the alternative is admitting an
         # action a policy said needs a second person, which is the one outcome nobody
