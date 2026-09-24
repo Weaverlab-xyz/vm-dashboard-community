@@ -1074,9 +1074,22 @@ async def deploy_instance(
 def destroy_instance(
     instance_ocid: str,
     current_user: User = Depends(require_permission("oci", "delete")),
+    # Query parameters, not a request body: this is a DELETE, and a body on DELETE is
+    # legal but poorly supported by intermediaries — and `API.del()` in app.js takes a
+    # path only. Blank on all three means "destroy now", which is every existing caller.
+    run_at: str = Query("", description="YYYY-MM-DDTHH:MM, local to run_timezone"),
+    run_timezone: str = Query("", description="IANA name; blank = UTC"),
+    change_window_id: str = Query("", description="Book into a named change window"),
     db: Session = Depends(get_db),
 ):
     """Terminate an OCI compute instance. Runs in background."""
+    # Resolved before the admission gate so a workgroup-constrained destroy can
+    # ACCEPT the window the gate offers. Without this the refusal is a dead end:
+    # the operator is told to book it and has no way to.
+    _sched = change_window_service.schedule_kwargs(
+        db, run_at=run_at, run_timezone=run_timezone,
+        change_window_id=change_window_id)
+
     if not _configured():
         raise HTTPException(status_code=400, detail="OCI not configured — run the setup wizard.")
 
@@ -1094,6 +1107,7 @@ def destroy_instance(
                  "workgroup": deploy_job.workgroup if deploy_job else None,
                  "has_deploy_job": deploy_job is not None},
         actor=current_user, db=db,
+        scheduled=_sched,
     )
 
     job = job_service.create_job(
@@ -1102,6 +1116,7 @@ def destroy_instance(
         # down; None when the instance has no deploy job, which is admin-only above.
         workgroup=deploy_job.workgroup if deploy_job else None,
         metadata={"instance_ocid": instance_ocid, "deploy_job_id": deploy_job.id if deploy_job else None},
+        **_sched,
     )
     job_service.log_audit(db, current_user.username, "oci_destroy", details={"instance_ocid": instance_ocid})
     return {"job_id": job.id, "status": "pending", "message": "Terminating instance…"}

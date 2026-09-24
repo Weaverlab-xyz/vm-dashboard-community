@@ -1711,7 +1711,15 @@ function ociDashboard() {
         this.notify('Termination started (job ' + r.job_id + ').');
         setTimeout(() => this.loadInstances(true), 1500);
       } catch (e) {
-        this.notify('Terminate failed: ' + (e.message || e), 'error');
+        // See the same handler on the AWS and Azure pages: a required change window
+        // refuses this, and the refusal carries the next occurrence.
+        const booked = await bookInstead(e, async (id) => {
+          const r2 = await API.del('/api/oci/instances/'
+            + encodeURIComponent(inst.ocid) + '?change_window_id=' + id);
+          this.notify('Termination scheduled (job ' + r2.job_id + ').');
+          setTimeout(() => this.loadInstances(true), 1500);
+        });
+        if (!booked) this.notify('Terminate failed: ' + (e.message || e), 'error');
       }
     },
   };

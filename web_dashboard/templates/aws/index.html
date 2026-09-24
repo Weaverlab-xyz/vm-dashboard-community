@@ -2880,11 +2880,21 @@
         this.pendingDestroy = new Set([...this.pendingDestroy, inst.instance_id]);
 
         try {
-          const resp = await API.del(`/api/aws/instances/${inst.instance_id}`);
+          const url = `/api/aws/instances/${inst.instance_id}`;
+          const resp = await API.del(url);
           toast(`Destroy queued for ${name}`, 'success');
           setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
         } catch (e) {
-          toast('Destroy failed: ' + e.message, 'error');
+          // A workgroup that may only be changed inside its window refuses this and
+          // says when the next one opens. Offer to book it rather than leaving the
+          // operator with a refusal and no form that can act on it.
+          const booked = await bookInstead(e, async (id) => {
+            const r = await API.del(
+              `/api/aws/instances/${inst.instance_id}?change_window_id=${id}`);
+            toast(`Destroy scheduled for ${name}`, 'success');
+            setTimeout(() => window.location.href = '/jobs/' + r.job_id, 400);
+          });
+          if (!booked) toast('Destroy failed: ' + e.message, 'error');
           const s = new Set(this.pendingDestroy);
           s.delete(inst.instance_id);
           this.pendingDestroy = s;

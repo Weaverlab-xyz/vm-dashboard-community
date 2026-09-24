@@ -420,6 +420,32 @@ window.afterDeploy = function (resp, opts) {
 // Nothing here is a getter, matching the note on bulkPowerState below:
 // tests/template_helpers_check.js extracts helpers by the literal `name(args) {`
 // shape and cannot see one.
+// Turn a change-window refusal into one click.
+//
+// `admission_service` refuses an action against a workgroup that may only be changed
+// inside its window, and attaches the next occurrence as `detail.schedule` — which
+// API.request lifts onto the Error as `e.schedule`. Without this helper the operator
+// reads "the next window opens Saturday 02:00" and has to go and find a form that can
+// book it; for a destroy there was no such form at all, so the refusal was a dead end.
+//
+// `retry(changeWindowId)` re-issues the ORIGINAL request with the window attached.
+// Returns true if it booked (the caller should treat that as success), false if this
+// error was not a bookable refusal (the caller should report it as before).
+window.bookInstead = async function (e, retry) {
+    const offer = e && e.schedule;
+    if (!offer || !offer.change_window_id) return false;
+    const when = String(offer.next_start || '').replace('T', ' ').slice(0, 16);
+    const ok = confirm(
+        (e.message || 'That change is outside the allowed window.')
+        + '
+
+Schedule it for the next "' + offer.window_name + '" window'
+        + (when ? ' (' + when + ' UTC)' : '') + ' instead?');
+    if (!ok) return false;
+    await retry(offer.change_window_id);
+    return true;
+};
+
 window.scheduleState = function () {
     return {
         // 'now' is the default and must stay so. In that mode schedulePayload()

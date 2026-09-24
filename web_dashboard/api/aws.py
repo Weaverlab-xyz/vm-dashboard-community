@@ -15,7 +15,7 @@ import logging
 import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -1102,6 +1102,12 @@ async def edit_instance_tags(
 @router.delete("/instances/{instance_id}", response_model=DestroyResponse)
 def destroy_instance(
     instance_id: str,
+    # Query parameters, not a request body: this is a DELETE, and a body on DELETE is
+    # legal but poorly supported by intermediaries — and `API.del()` in app.js takes a
+    # path only. Blank on all three means "destroy now", which is every existing caller.
+    run_at: str = Query("", description="YYYY-MM-DDTHH:MM, local to run_timezone"),
+    run_timezone: str = Query("", description="IANA name; blank = UTC"),
+    change_window_id: str = Query("", description="Book into a named change window"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("aws", "delete")),
 ):
@@ -1109,6 +1115,13 @@ def destroy_instance(
     Terminate a dashboard-deployed EC2 instance via the AWS API.
     Only instances tracked in the dashboard DB can be terminated here.
     """
+    # Resolved before the admission gate so a workgroup-constrained destroy can
+    # ACCEPT the window the gate offers. Without this the refusal is a dead end:
+    # the operator is told to book it and has no way to.
+    _sched = change_window_service.schedule_kwargs(
+        db, run_at=run_at, run_timezone=run_timezone,
+        change_window_id=change_window_id)
+
     deploy_job = _find_deploy_job(db, "ec2_deploy", "instance_id", instance_id)
     if not deploy_job:
         raise HTTPException(
@@ -1131,6 +1144,7 @@ def destroy_instance(
         request={"region": region, "name": instance_id,
                  "workgroup": deploy_job.workgroup, "has_deploy_job": True},
         actor=current_user, db=db,
+        scheduled=_sched,
     )
 
     destroy_job = job_service.create_job(
@@ -1145,6 +1159,7 @@ def destroy_instance(
             "deploy_job_id": deploy_job.id,
             "region": region,
         },
+        **_sched,
     )
 
     job_service.log_audit(

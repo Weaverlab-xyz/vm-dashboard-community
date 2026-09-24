@@ -189,6 +189,94 @@ def test_a_persisted_request_body_excludes_the_booking():
         "booking:\n  " + "\n  ".join(offenders))
 
 
+# ── Destroys ─────────────────────────────────────────────────────────────────
+
+def test_every_cloud_destroy_accepts_a_booking():
+    """A teardown is the operation a change window most needs to cover.
+
+    `prod_window.rego` already makes that argument — it is the one guardrail policy
+    that deliberately applies to teardowns, because "no changes on a Sunday" which let
+    the destroys through would be half a freeze. And because destroys are gated
+    actions, a workgroup with a required window REFUSES one; without a way to book it,
+    that refusal is a dead end with no form that can act on it.
+
+    All four are worker-claimed, so a booking needs no new machinery — only the three
+    parameters. They are query parameters rather than a body because these are DELETE
+    routes.
+    """
+    import ast
+
+    # The ENDPOINT per router, named rather than discovered by job type. Azure has two
+    # functions creating `azure_destroy` — the route and a fallback helper for VMs with
+    # no deploy job — and only the route takes request parameters. The helper is
+    # checked separately below.
+    endpoints = {
+        "aws.py": "destroy_instance",
+        "azure.py": "destroy_vm",
+        "gcp.py": "destroy_instance",
+        "oci.py": "destroy_instance",
+    }
+    missing = []
+    for name, fn_name in endpoints.items():
+        src = _read(os.path.join(_API, name))
+        fns = [n for n in ast.walk(ast.parse(src))
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and n.name == fn_name]
+        if not fns:
+            missing.append(f"{name}: no {fn_name}")
+            continue
+        fn = fns[0]
+        params = {a.arg for a in fn.args.args} | {a.arg for a in fn.args.kwonlyargs}
+        for needed in ("run_at", "run_timezone", "change_window_id"):
+            if needed not in params:
+                missing.append(f"{name}:{fn_name} has no {needed}")
+        body = ast.unparse(fn)
+        if "schedule_kwargs(" not in body:
+            missing.append(f"{name}:{fn_name} never resolves the booking")
+        if "scheduled=_sched" not in body:
+            missing.append(
+                f"{name}:{fn_name} does not tell the admission gate about the booking, "
+                f"so a workgroup-constrained destroy cannot accept its own offer")
+    assert not missing, "\n  " + "\n  ".join(missing)
+
+
+def test_the_azure_fallback_destroy_is_bookable_too():
+    """`_destroy_without_deploy_job` handles VMs with no deploy job — VDI seats and
+    cloud-recovered ones — and `destroy_vm` returns through it EARLY, before the
+    admission gate. So it needs the booking handed to it explicitly, or a scheduled
+    destroy of one of those VMs would silently run immediately."""
+    import ast
+
+    src = _read(os.path.join(_API, "azure.py"))
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name == "_destroy_without_deploy_job")
+    params = {a.arg for a in fn.args.args} | {a.arg for a in fn.args.kwonlyargs}
+    assert "sched" in params, (
+        "the fallback destroy takes no booking, so a scheduled destroy of a VDI seat "
+        "or a recovered VM would run immediately")
+    assert "sched" in ast.unparse(fn), "the booking is accepted and then ignored"
+
+
+def test_the_refusal_offer_can_be_acted_on_in_the_ui():
+    """`bookInstead` is what turns a change-window refusal into one click.
+
+    Without it the operator reads "the next window opens Saturday 02:00" on a destroy
+    and has nowhere to go: there is no destroy form to re-submit from.
+    """
+    app_js = _read(os.path.join(_ROOT, "web_dashboard", "static", "js", "app.js"))
+    assert "window.bookInstead" in app_js, "the shared offer handler is gone"
+
+    missing = []
+    for page in ("aws", "azure", "oci"):
+        src = _read(os.path.join(_ROOT, "web_dashboard", "templates", page, "index.html"))
+        if "bookInstead(" not in src:
+            missing.append(page)
+    assert not missing, (
+        "these pages can refuse a destroy but never offer to book it: "
+        + ", ".join(missing))
+
+
 def _run():
     tests = [(n, o) for n, o in sorted(globals().items())
              if n.startswith("test_") and callable(o)]

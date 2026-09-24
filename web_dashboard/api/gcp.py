@@ -995,9 +995,22 @@ def destroy_instance(
     instance_name: str,
     zone: str = Query("", description="Zone the instance is in; defaults to configured zone"),
     current_user: User = Depends(require_permission("gcp", "delete")),
+    # Query parameters, not a request body: this is a DELETE, and a body on DELETE is
+    # legal but poorly supported by intermediaries — and `API.del()` in app.js takes a
+    # path only. Blank on all three means "destroy now", which is every existing caller.
+    run_at: str = Query("", description="YYYY-MM-DDTHH:MM, local to run_timezone"),
+    run_timezone: str = Query("", description="IANA name; blank = UTC"),
+    change_window_id: str = Query("", description="Book into a named change window"),
     db: Session = Depends(get_db),
 ):
     """Terminate a GCE instance. Runs in background."""
+    # Resolved before the admission gate so a workgroup-constrained destroy can
+    # ACCEPT the window the gate offers. Without this the refusal is a dead end:
+    # the operator is told to book it and has no way to.
+    _sched = change_window_service.schedule_kwargs(
+        db, run_at=run_at, run_timezone=run_timezone,
+        change_window_id=change_window_id)
+
     project_id = _gcp_project()
     if not project_id:
         raise HTTPException(status_code=400, detail="GCP project ID not configured.")
@@ -1017,6 +1030,7 @@ def destroy_instance(
                  "workgroup": deploy_job.workgroup if deploy_job else None,
                  "has_deploy_job": deploy_job is not None},
         actor=current_user, db=db,
+        scheduled=_sched,
     )
 
     job = job_service.create_job(
@@ -1034,6 +1048,7 @@ def destroy_instance(
             # A destroy aimed at the wrong project is the worst version of this bug.
             "project_id": project_id,
         },
+        **_sched,
     )
     job_service.log_audit(
         db, current_user.username, "gce_destroy",

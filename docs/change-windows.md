@@ -43,6 +43,7 @@ work to stop at the boundary, make the window long enough for the work, or split
 | Packer image builds | the build request |
 | Image export / capture / AMI copy | the request |
 | Bulk power — AWS, Azure, GCP, OCI | **Schedule** on the selection toolbar |
+| Cloud VM destroys — AWS, Azure, GCP, OCI | offered when a window refuses one; or `?run_at=` on the API |
 
 Any job type can be *held* for a window — that lives in the job queue itself, not in a
 form — so a surface without a picker yet can still be booked through the API by passing
@@ -69,6 +70,25 @@ A booked job appears on **Jobs** with a second badge next to its status. It is s
 > job type in the dashboard can be held for a window. What is per-page is only the
 > **picker**; a page gets it by rendering one shared partial and spreading one helper,
 > and nothing in the queue changes when it does.
+
+### Destroys
+
+A teardown is the operation a change window most needs to cover — the guardrails make
+the same argument, which is why the change-freeze policy is the one that deliberately
+applies to teardowns as well as deploys.
+
+You do not pre-book a destroy from a picker; you press Destroy, and if the workgroup
+has a required window the dashboard refuses and offers:
+
+> `prod` may only be changed during Prod Weekend (Sat 02:00–06:00 (UTC), 4h). The next
+> window opens 2026-09-26 02:00 UTC.
+>
+> **Schedule it for the next "Prod Weekend" window instead?**
+
+Accept, and the teardown is queued for that window. The API takes the same three
+values as query parameters (`?run_at=`, `?run_timezone=`, `?change_window_id=`) if you
+want to book one directly — query parameters rather than a body because these are
+`DELETE` routes.
 
 ### Scheduling power operations
 

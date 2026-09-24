@@ -16,7 +16,7 @@ import logging
 import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -1254,6 +1254,12 @@ async def edit_vm_tags(
 @router.delete("/vms/{vm_name}")
 async def destroy_vm(
     vm_name: str,
+    # Query parameters, not a request body: this is a DELETE, and a body on DELETE is
+    # legal but poorly supported by intermediaries — and `API.del()` in app.js takes a
+    # path only. Blank on all three means "destroy now", which is every existing caller.
+    run_at: str = Query("", description="YYYY-MM-DDTHH:MM, local to run_timezone"),
+    run_timezone: str = Query("", description="IANA name; blank = UTC"),
+    change_window_id: str = Query("", description="Book into a named change window"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("azure", "delete")),
 ):
@@ -1264,13 +1270,21 @@ async def destroy_vm(
     ``azure_deploy`` job) and cloud-recovered VMs ("deployed by: unknown") have no
     such job — for those we FALL BACK: confirm the VM still exists in Azure and
     terminate it anyway, so the Azure-tab Destroy button isn't a dead 404."""
+    # Resolved before the admission gate so a workgroup-constrained destroy can
+    # ACCEPT the window the gate offers. Without this the refusal is a dead end:
+    # the operator is told to book it and has no way to.
+    _sched = change_window_service.schedule_kwargs(
+        db, run_at=run_at, run_timezone=run_timezone,
+        change_window_id=change_window_id)
+
     deploy_job = _find_deploy_job(db, "azure_deploy", "vm_name", vm_name)
 
     if not deploy_job:
         # No deploy job means no workgroup to check against, so this path is
         # admin-only by construction — the listing hides these from non-admins too.
         _assert_can_act(current_user, None, f"VM '{vm_name}'")
-        return await _destroy_without_deploy_job(vm_name, db, current_user)
+        return await _destroy_without_deploy_job(vm_name, db, current_user,
+                                                sched=_sched)
 
     # Resolve the resource group here and persist it: the runner rebuilds the call from
     # metadata, and re-deriving it there would read whatever `azure_resource_group` is
@@ -1286,6 +1300,7 @@ async def destroy_vm(
         request={"region": deploy_job.metadata_dict.get("location", ""), "name": vm_name,
                  "workgroup": deploy_job.workgroup, "has_deploy_job": True},
         actor=current_user, db=db,
+        scheduled=_sched,
     )
 
     destroy_job = job_service.create_job(
@@ -1296,6 +1311,7 @@ async def destroy_vm(
         # down; without it the destroy job belongs to no workgroup at all.
         workgroup=deploy_job.workgroup,
         metadata={"vm_name": vm_name, "deploy_job_id": deploy_job.id, "resource_group": rg},
+        **_sched,
     )
 
     job_service.log_audit(
@@ -1471,7 +1487,7 @@ router.add_api_route("/power/stop", _power_endpoint("stop"), methods=["POST"],
 
 
 async def _destroy_without_deploy_job(
-    vm_name: str, db: Session, current_user: User,
+    vm_name: str, db: Session, current_user: User, *, sched: dict = None,
 ) -> dict:
     """Fallback destroy for VMs that have no completed ``azure_deploy`` job — VDI
     pool seats and cloud-recovered ("unknown") VMs.
@@ -1561,6 +1577,7 @@ async def _destroy_without_deploy_job(
         job_type="azure_destroy",
         created_by=current_user.username,
         metadata={"vm_name": vm_name, "resource_group": rg, "deploy_job_id": None},
+        **(sched or {}),
     )
     job_service.log_audit(
         db, current_user.username, "azure_destroy",

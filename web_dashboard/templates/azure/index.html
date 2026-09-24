@@ -2673,7 +2673,14 @@ function azureDashboard() {
         toast(`VM "${vm.name}" termination queued`, 'success');
         window.location.href = `/jobs/${result.job_id}`;
       } catch (e) {
-        toast(e.message || 'Destroy failed', 'error');
+        // A workgroup with a required change window refuses this and says when the
+        // next one opens; offer to book it rather than leaving a dead end.
+        const booked = await bookInstead(e, async (id) => {
+          const r = await API.del(`/api/azure/vms/${vm.name}?change_window_id=${id}`);
+          toast(`VM "${vm.name}" termination scheduled`, 'success');
+          window.location.href = `/jobs/${r.job_id}`;
+        });
+        if (!booked) toast(e.message || 'Destroy failed', 'error');
       }
     },
 
