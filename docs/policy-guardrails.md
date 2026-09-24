@@ -115,6 +115,23 @@ A rule may contribute `needs_approval` instead of `deny`. That verdict was advis
 logged and admitted — because community had no approval gate. It now has one, so the
 verdict *can* be acted on.
 
+A rule emits it exactly as it emits `deny`, under a different name:
+
+```rego
+package admission.large_instances
+
+import rego.v1
+
+needs_approval contains msg if {
+	startswith(input.request.instance_type, "x1e.")
+	msg := sprintf("%s is large enough to want a second pair of eyes", [input.request.instance_type])
+}
+```
+
+If any rule denies, that wins — `deny` outranks `needs_approval`, so a change that is
+both too large *and* in a closed region is refused outright rather than queued for
+someone to approve.
+
 **It is off by default**, and that default is deliberate rather than timid: this page
 used to describe the verdict as available-and-advisory, so a custom rule may well be
 using it as a soft signal today. Switching it on under you would turn actions that
