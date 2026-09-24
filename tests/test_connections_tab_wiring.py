@@ -301,6 +301,56 @@ def test_the_discovery_hand_off_still_targets_a_real_route():
         "the Connections panel no longer reads the query string the hand-off sends"
 
 
+# ── Panels reload when their tab is shown ────────────────────────────────────
+#
+# Observed live: an agent enrolled on the Agents tab was absent from the Config Routes
+# picker, because that picker is fetched once in init() and the page had been open since
+# before the enrolment. The operator reads that as "this agent is not eligible for a
+# route" — a statement about the agent — when it is a statement about the list. The
+# Agents panel never had the bug: it polls on a 15s timer.
+
+_PICKER_PANELS = (("_connections.html", "connections"),
+                  ("_config_routes.html", "config-routes"))
+
+
+def test_the_container_announces_the_tab_it_just_showed():
+    index = _read(*_TPL, "agents", "index.html")
+    assert "agents-tab-shown" in index, \
+        "the tab container no longer dispatches agents-tab-shown; every panel that " \
+        "reloads on it is now silently stale again"
+    # Only on a real tab change. `push` is false exactly once, on the initial select, and
+    # that is when every panel's own x-init has just loaded — dispatching there too would
+    # double every page load.
+    assert re.search(r"if \(push\) window\.dispatchEvent", index), \
+        "the dispatch is no longer gated on `push`, so page load now fetches each panel twice"
+
+
+def test_every_panel_with_a_once_loaded_agent_picker_listens_for_it():
+    """THE ASSERTION THAT MATTERS: a panel added later gets caught by this, not by an
+    operator wondering why their new agent is missing from a dropdown."""
+    for filename, slug in _PICKER_PANELS:
+        panel = _read(*_TPL, "agents", filename)
+        assert "data.agents" in panel, \
+            f"{filename} no longer loads an agent picker — drop it from _PICKER_PANELS " \
+            f"rather than leaving an assertion that passes for the wrong reason"
+        assert "@agents-tab-shown.window" in panel, \
+            f"{filename} holds an agent picker but does not reload when its tab is shown"
+        assert f"$event.detail === '{slug}'" in panel, \
+            f"{filename} listens for the wrong tab slug, so it reloads on someone else's tab"
+
+
+def test_the_listener_calls_something_the_panel_actually_defines():
+    """A typo'd handler is silent — Alpine logs to the console and the picker stays stale,
+    which is indistinguishable from having no listener at all."""
+    for filename, _slug in _PICKER_PANELS:
+        panel = _read(*_TPL, "agents", filename)
+        handler = re.search(r"@agents-tab-shown\.window=\"[^\"]*?(\w+)\(\)\"", panel)
+        assert handler, f"{filename}: could not read a method call out of the listener"
+        name = handler.group(1)
+        assert re.search(rf"\basync {name}\(\)|\b{name}\(\)\s*{{", panel), \
+            f"{filename} calls {name}() on tab show but defines no such method"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]

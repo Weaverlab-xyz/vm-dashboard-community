@@ -18,7 +18,10 @@
    factory it names live in this one file, which is what tests/test_template_scripts.py and
    tests/test_templates_parse.py check of any template carrying an x-data. #}
 
-<div x-data="connectionsPage()" x-init="init()">
+<!-- Same staleness as the Config Routes tab, and the same fix: this form's agent picker is
+     fetched once in init(), so reload it when the tab is shown again. -->
+<div x-data="connectionsPage()" x-init="init()"
+     @agents-tab-shown.window="if ($event.detail === 'connections') refresh()">
 
   <div class="flex justify-end mb-3 sm:mb-1">
     <button x-show="!noAccess" @click="openAdd()"
