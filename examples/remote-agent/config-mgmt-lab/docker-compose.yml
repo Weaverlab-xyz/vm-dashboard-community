@@ -1,0 +1,88 @@
+# A Config-Management-only delegate agent, for ONE network segment.
+#
+# Run this on a small Linux VM that sits INSIDE the segment whose hosts you want to
+# configure — one per segment. Every segment uses this same file unchanged; what differs
+# is the CIDR in the policy.yaml beside it and the values in .env.
+#
+#   cp policy.example.yaml policy.yaml && $EDITOR policy.yaml   # set this segment's CIDR
+#   cp .env.example .env && $EDITOR .env
+#   docker pull chrweav/ansible-winrm:latest  # the agent will NOT pull this for you
+#   docker compose up -d
+#
+# See README.md for the dashboard-side half, which is three steps and none of them
+# optional.
+#
+# ── Why this file mounts the Docker socket and examples/remote-agent/docker-compose.yml
+# ── does not ─────────────────────────────────────────────────────────────────────────
+# A Config-Management run does not execute inside the agent. The agent fetches a sealed
+# bundle and launches a ONE-SHOT SIBLING CONTAINER from the image named in policy.yaml,
+# streams its output back, and reaps it. That needs the Engine API.
+#
+# THE DOCKER SOCKET IS ROOT ON THIS HOST. A process that can call the Engine can start a
+# privileged container and own the machine. That is true of anything holding the socket,
+# not just this agent, and it is the reason `.env.example` defaults to the ROOTLESS
+# socket. On a dedicated lab VM the root socket is a defensible shortcut; it is still a
+# conscious choice, so it is an edit rather than a default.
+#
+# What the socket does NOT loosen: every hardening flag below stays on. The socket is the
+# capability here, not the container flags.
+
+services:
+  agent:
+    image: chrweav/dashboard-agent:latest
+    container_name: dashboard-agent
+    restart: unless-stopped
+
+    # ── Hardening. None of this is optional. ──────────────────────────────────
+    user: "10001:10001"
+    read_only: true                    # the state volume below is the only writable path
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 200
+    tmpfs:
+      - /tmp:noexec,nosuid,nodev,size=16m
+
+    # This image runs as uid 10001 and a Docker socket is mode 0660, so without the
+    # socket's GROUP every Engine call gets EACCES — on a socket that is plainly right
+    # there in the mount list. Set it to the gid of whichever socket you mounted:
+    #   stat -c %g $XDG_RUNTIME_DIR/docker.sock
+    group_add:
+      - "${DOCKER_SOCKET_GID:?set DOCKER_SOCKET_GID — stat -c %g the socket in .env}"
+
+    environment:
+      # Must be https. The agent refuses to send signed requests over plaintext.
+      DASHBOARD_URL: ${DASHBOARD_URL:?set DASHBOARD_URL, e.g. https://agents.example.com}
+      # Single-use, expires in 15 minutes, and only needed on FIRST start — after that the
+      # Ed25519 identity in the state volume is what authenticates. Blank it afterwards.
+      AGENT_ENROLLMENT_CODE: ${AGENT_ENROLLMENT_CODE:-}
+      AGENT_POLL_INTERVAL: "5"
+      # Where the agent looks for the Engine. Named explicitly so that removing the mount
+      # below is enough to disarm it — the agent launches nothing without this.
+      AGENT_DOCKER_SOCKET: /var/run/docker.sock
+      # "audit" logs every job it WOULD run and executes nothing. Worth a first pass if
+      # you want to see the routing land before anything is reconfigured.
+      AGENT_MODE: ${AGENT_MODE:-normal}
+
+    volumes:
+      # The Ed25519 private key. Losing this means re-enrolling, which is cheap — but do
+      # not make it a tmpfs, or the agent re-enrols on every restart and you accumulate
+      # dead rows on the Agents page.
+      - agent_state:/var/lib/dashboard-agent
+
+      # `,Z` is the SELinux relabel. On Fedora/RHEL/Rocky/Alma it is the difference
+      # between an agent that runs and one that crash-loops on `Permission denied`
+      # reading its own policy file, whatever the mode bits say. Docker and Podman ignore
+      # it where SELinux is absent, so leave it on either way.
+      - ./policy.yaml:/etc/dashboard-agent/policy.yaml:ro,Z
+
+      # The ROOTLESS socket by default. Swap the source for /var/run/docker.sock only if
+      # you have decided to hand this container the root socket.
+      - ${XDG_RUNTIME_DIR:-/run/user/1000}/docker.sock:/var/run/docker.sock
+
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+volumes:
+  agent_state:
