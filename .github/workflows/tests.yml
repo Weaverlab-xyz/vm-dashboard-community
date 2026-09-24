@@ -208,13 +208,27 @@ jobs:
           # reopening exactly the blind spot it exists to close.
           OPA_REQUIRED: "1"
         run: |
-          shopt -s nullglob
-          files=(tests/test_opa_*.py)
+          # Select by CONTENT, not by filename. A `tests/test_opa_*.py` glob only finds
+          # files somebody remembered to name that way, and it had already missed one:
+          # tests/test_destroy_guardrails.py shells OPA for three `test_rego_*`
+          # assertions covering the teardown-exemption asymmetry, and they ran NOWHERE
+          # — the `tests` job has no binary, so they printed "(skipped: no opa binary)"
+          # and passed vacuously, and this job's glob did not match the filename.
+          #
+          # Matching on how a file REACHES the binary cannot rot the same way: a test
+          # that shells OPA has to name one of these to run it at all, so it selects
+          # itself. Both spellings are matched because a file may take the override or
+          # fall back to PATH. tests/test_admission_service.py stubs the module rather
+          # than executing it, references neither, and is correctly left behind.
+          mapfile -t files < <(grep -lE 'OPA_BINARY|which\("opa"\)' tests/test_*.py | sort)
           if [ ${#files[@]} -eq 0 ]; then
-            echo "::error::no tests/test_opa_*.py files found — this job would"\
-                 "pass without testing anything"
+            echo "::error::no test file references OPA_BINARY or which(\"opa\") — this"\
+                 "job would pass without testing anything. If the way tests reach the"\
+                 "binary changed, update this selector rather than deleting the check."
             exit 1
           fi
+          echo "OPA-dependent test files (${#files[@]}):"
+          printf '  %s\n' "${files[@]}"
           fail=0
           for f in "${files[@]}"; do
             echo "::group::$f"

@@ -202,6 +202,19 @@ def test_the_action_names_follow_the_deploy_convention():
 
 _OPA = os.environ.get("OPA_BINARY") or shutil.which("opa")
 
+# The three `test_rego_*` tests below skip when there is no binary, which is right
+# locally and was silently WRONG in CI: they are the only coverage the teardown
+# exemptions have, and until the `opa` job learned to select this file they ran
+# nowhere at all — the `tests` job has no binary, so they printed "(skipped)" and
+# passed. Adding the file to that job is not enough on its own; without this, a
+# half-failed install would put them straight back to passing vacuously.
+if not _OPA and os.environ.get("OPA_REQUIRED") == "1":
+    raise SystemExit(
+        "OPA_REQUIRED=1 but no opa binary was found. The `opa` CI job is meant to have "
+        "installed one — check the install step rather than relaxing this; these Rego "
+        "tests are the only thing asserting destroys stay exempt from the create caps."
+    )
+
 
 def _decide(action, request, limits, weekday="mon"):
     doc = {"action": action, "actor": {"username": "a", "is_admin": False},

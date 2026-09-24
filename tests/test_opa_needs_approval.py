@@ -21,8 +21,9 @@ putting them in the shipped directory would also (rightly) fail
 `test_opa_policies.py`'s coverage assertion.
 
 **Skips unless OPA is on PATH.** CI installs it — see the `opa` job in
-.github/workflows/tests.yml, whose `tests/test_opa_*.py` glob is why this file is
-named as it is. `OPA_REQUIRED=1` turns the skip into a failure there.
+.github/workflows/tests.yml, which finds this file by grepping for `OPA_BINARY`
+rather than by filename, so a real-engine test is picked up wherever it lives.
+`OPA_REQUIRED=1` turns the skip into a failure there.
 
 Run: python tests/test_opa_needs_approval.py   (or under pytest)
 """
