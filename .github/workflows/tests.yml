@@ -141,3 +141,87 @@ jobs:
             echo "::error::One or more PostgreSQL test files failed"
           fi
           exit $fail
+
+  # ── Open Policy Agent ───────────────────────────────────────────────────────
+  #
+  # The image bundles an `opa` binary that `services/_opa.py` shells for the admission
+  # guardrails; CI did not have one, so nothing had ever executed the shipped Rego. The
+  # admission tests all stub `_opa` — correct for testing the decision logic, which
+  # needs no subprocess, but it means the `.rego` files under terraform/policy/admission
+  # reached production unexecuted.
+  #
+  # That is a bad gap specifically because `admission_service.enforce` is FAIL-CLOSED:
+  # any OPA error denies. A syntax error, a package renamed out of step with its
+  # filename, or a field Python stopped sending does not degrade into a permissive
+  # rule — it 403s every gated action, and the first report comes from an operator
+  # whose estate has stopped deploying. No amount of Python-side unit testing can see
+  # it, because the failure lives between two languages and a subprocess.
+  #
+  # Its own job rather than a step in `tests` so the version pin, the install, and the
+  # "did it actually run" guard stay in one readable place, and so a download blip
+  # fails this job rather than the whole suite.
+  opa:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"  # matches the Dockerfile base image
+          cache: pip
+          cache-dependency-path: web_dashboard/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r web_dashboard/requirements.txt
+
+      # Read the version out of the Dockerfile rather than repeating it. A second copy
+      # of the pin would drift, and the drift would be the quiet kind: CI proving the
+      # policies work under a version the image does not ship.
+      - name: Install OPA (version pinned by the Dockerfile)
+        run: |
+          OPA_VERSION=$(sed -n 's/^ARG OPA_VERSION=//p' Dockerfile)
+          if [ -z "$OPA_VERSION" ]; then
+            echo "::error::could not read ARG OPA_VERSION from the Dockerfile — the"\
+                 "line moved or changed shape. Fix this rather than hardcoding a"\
+                 "version here; a second pin is how CI and the image drift apart."
+            exit 1
+          fi
+          echo "Installing OPA $OPA_VERSION (from Dockerfile)"
+          # --retry-all-errors for the same reason the Dockerfile uses it: this
+          # endpoint drops connections mid-transfer, which curl will not otherwise
+          # retry. See the Dockerfile's OPA block.
+          curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+            "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_linux_amd64_static" \
+            -o /usr/local/bin/opa
+          chmod +x /usr/local/bin/opa
+          opa version   # proof the binary arrived intact, as in the Dockerfile
+
+      - name: Run policy tests against the real engine
+        env:
+          JWT_SECRET_KEY: ci-opa-policy-tests
+          # Turns the file's skip-when-absent into a hard failure. Without it a
+          # half-failed install would make the tests skip and this job pass green,
+          # reopening exactly the blind spot it exists to close.
+          OPA_REQUIRED: "1"
+        run: |
+          shopt -s nullglob
+          files=(tests/test_opa_*.py)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::no tests/test_opa_*.py files found — this job would"\
+                 "pass without testing anything"
+            exit 1
+          fi
+          fail=0
+          for f in "${files[@]}"; do
+            echo "::group::$f"
+            python "$f" || fail=1
+            echo "::endgroup::"
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::One or more OPA policy test files failed"
+          fi
+          exit $fail
