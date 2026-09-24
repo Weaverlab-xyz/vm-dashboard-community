@@ -3,6 +3,8 @@ import re
 from typing import Optional
 from pydantic import BaseModel, field_validator, model_validator
 
+from .schedule import ScheduleRequestMixin
+
 # Shell environment-variable names: a letter or underscore, then letters/digits/
 # underscores. Enforced so a user-supplied name can't break out of the HCL
 # environment_vars array or the PKR_VAR_ mapping.
@@ -51,7 +53,7 @@ class ProvisionerEnvVar(BaseModel):
         return v
 
 
-class AWSPackerBuildRequest(BaseModel):
+class AWSPackerBuildRequest(ScheduleRequestMixin, BaseModel):
     image_name: str
     # Exactly one source: a literal AMI id, or an OS family the build resolves to
     # the newest public AMI at build time (aws_service.AMI_FAMILIES — the EC2
@@ -79,7 +81,7 @@ class AWSPackerBuildRequest(BaseModel):
         return self
 
 
-class AzurePackerBuildRequest(BaseModel):
+class AzurePackerBuildRequest(ScheduleRequestMixin, BaseModel):
     image_name: str
     image_publisher: str = "Canonical"
     image_offer: str = "0001-com-ubuntu-server-jammy"
@@ -106,7 +108,7 @@ class AzurePackerBuildRequest(BaseModel):
     bt_epml_source: Optional[str] = None       # "beyondtrust" (default) | "storage" — where BT_EPML_URL points
 
 
-class GCPPackerBuildRequest(BaseModel):
+class GCPPackerBuildRequest(ScheduleRequestMixin, BaseModel):
     image_name: str
     # Exactly one source, the GCE counterpart of the AWS split: an image *family*
     # the builder resolves to its newest image (debian-12, rocky-linux-9, …), or
@@ -181,7 +183,7 @@ class GCPPackerBuildRequest(BaseModel):
         return self
 
 
-class OCIPackerBuildRequest(BaseModel):
+class OCIPackerBuildRequest(ScheduleRequestMixin, BaseModel):
     """One OCI custom-image build (oracle-oci builder).
 
     Unlike the other three clouds, the builder needs the *whole* placement told to

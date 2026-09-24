@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
+{% from "partials/schedule_picker.html" import schedule_picker %}
 {% from "partials/secret_picker.html" import secret_picker %}
 {% from "partials/tag_chips.html" import tag_chips %}
 {% from "partials/tag_editor.html" import tag_editor %}
@@ -287,7 +288,7 @@
         </span>
       </label>
       <div class="flex items-center gap-2" x-show="selectedVmIds.length > 0" x-cloak>
-        {{ bulk_power_buttons(['start', 'stop'], {'stop': 'Suspend'}) }}
+        {{ bulk_power_buttons(['start', 'stop'], {'stop': 'Suspend'}, schedulable=true) }}
         <button @click="openTagEditorSelected()"
                 class="px-2.5 py-1 text-xs font-medium rounded-lg bg-white border border-blue-300 text-blue-700 hover:bg-blue-50">Edit labels</button>
         <button @click="clearSelection()" class="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
@@ -591,6 +592,8 @@
         </div>
         {% endif %}
 
+        {{ schedule_picker() }}
+
         <!-- Deploy error -->
         <div x-show="deployError" x-transition
              class="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-red-700 text-sm"
@@ -603,13 +606,13 @@
           Cancel
         </button>
         <button @click="submitDeploy()"
-                :disabled="deploying || !deployForm.instance_name"
+                :disabled="deploying || !deployForm.instance_name || !scheduleReady()"
                 class="flex items-center gap-2 px-5 py-2 bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition">
           <svg x-show="deploying" class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
           </svg>
-          <span x-text="deploying ? 'Deploying…' : 'Deploy'"></span>
+          <span x-text="scheduleVerb(deploying ? 'Deploying…' : '', 'Deploy')"></span>
         </button>
       </div>
     </div>
@@ -1593,6 +1596,10 @@ function gcpDashboard() {
   return {
     ...secretPickerState(),
     ...deployNameState(),
+    // Change-window booking for the deploy form. See
+    // partials/schedule_picker.html; the schedulePayload() spread in the
+    // deploy submit is what makes it do anything.
+    ...scheduleState(),
     // State
     activeTab:       'public',
     projectId:       '',
@@ -1773,6 +1780,7 @@ function gcpDashboard() {
     },
 
     async init() {
+      this.loadChangeWindows();
       this.loadSecretBackends();
       // Deep links (the home page's OT tile lands on /gcp#ot). switchToOT, not a
       // bare activeTab write, so the tab's lazy data load runs. The ot branch is
@@ -2406,6 +2414,7 @@ function gcpDashboard() {
           register_in_entitle: this.deployForm.register_in_entitle,
           register_in_passwordsafe: this.deployForm.register_in_passwordsafe,
           ssh_key_secret_override: this.deployForm.ssh_key_secret_override || null,
+          ...this.schedulePayload(),
         };
         const res = await API.post('/api/gcp/deploy', body);
         this.deployModal = false;

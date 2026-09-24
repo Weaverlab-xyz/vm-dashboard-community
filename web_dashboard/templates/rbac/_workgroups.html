@@ -59,6 +59,7 @@
             <th class="pb-2 pr-4">Display Name</th>
             <th class="pb-2 pr-4">Description</th>
             <th class="pb-2 pr-4">Local VM Path</th>
+            <th class="pb-2 pr-4 font-medium">Change window</th>
             <th class="pb-2 pr-4">Members</th>
             <th class="pb-2"></th>
           </tr>
@@ -76,6 +77,22 @@
               <td class="py-2.5 pr-4 font-medium text-gray-800" x-text="w.display_name"></td>
               <td class="py-2.5 pr-4 text-xs text-gray-500" x-text="w.description || '—'"></td>
               <td class="py-2.5 pr-4 font-mono text-xs text-gray-500" x-text="w.local_vm_path || '—'"></td>
+              <td class="py-2.5 pr-4 text-xs">
+                <!-- Only a REQUIRED window is worth a badge: a window merely selected
+                     constrains nothing, and showing it would read as enforcement. -->
+                <span x-show="!w.require_change_window" class="text-gray-400">—</span>
+                <span x-show="w.require_change_window && w.change_window_name" x-cloak
+                      class="inline-flex items-center px-2 py-0.5 rounded font-medium
+                             bg-indigo-50 text-indigo-700"
+                      x-text="w.change_window_name"></span>
+                <span x-show="w.require_change_window && !w.change_window_name" x-cloak
+                      class="inline-flex items-center px-2 py-0.5 rounded font-medium
+                             bg-red-100 text-red-800"
+                      title="This workgroup requires a window that no longer exists, so
+                             every gated change against it is refused. Pick another.">
+                  misconfigured
+                </span>
+              </td>
               <td class="py-2.5 pr-4 text-xs text-gray-700" x-text="w.member_count"></td>
               <td class="py-2.5 text-right">
                 <button @click="openEdit(w)"
@@ -135,6 +152,43 @@
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-200"/>
         </div>
 
+        <!-- Required change window. Edit-only: constraining a workgroup that has no
+             resources yet is noise on the create form, and it is a decision an
+             administrator usually makes later. -->
+        <div x-show="modalMode === 'edit'" x-cloak
+             class="border-t border-gray-200 pt-3 space-y-2">
+          <label class="block text-xs font-medium text-gray-600">
+            Change window (optional)
+          </label>
+          <select x-model="form.change_window_id"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">No window</option>
+            <template x-for="w in changeWindows" :key="w.id">
+              <option :value="w.id" x-text="w.name"></option>
+            </template>
+          </select>
+
+          <label class="flex items-start gap-2">
+            <input type="checkbox" x-model="form.require_change_window"
+                   :disabled="!form.change_window_id"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 disabled:opacity-40"/>
+            <span class="text-xs text-gray-600">
+              Require it — refuse any change to this workgroup outside the window
+              <span class="block text-[11px] text-gray-500">
+                Deploys, destroys and other gated actions are refused outside the
+                window and offered a booking instead. Which actions count is the
+                <strong>gated actions</strong> list in Settings → Action Guardrails;
+                power operations are not on it by default.
+              </span>
+              <span x-show="form.require_change_window && !form.change_window_id"
+                    x-cloak class="block text-[11px] text-red-600">
+                Pick a window first — requiring one with none chosen would refuse every
+                change with nothing to book it into.
+              </span>
+            </span>
+          </label>
+        </div>
+
         <div x-show="modalMode === 'create'" class="flex items-center gap-2">
           <input type="checkbox" id="wg_is_default" x-model="form.is_default"
                  class="rounded border-gray-300 text-blue-600 focus:ring-blue-200"/>
@@ -167,7 +221,12 @@ function workgroupsPage() {
     toastType: 'success',
     modalOpen: false,
     modalMode: 'create',
-    form: {name: '', display_name: '', description: '', local_vm_path: '', is_default: false},
+    form: {name: '', display_name: '', description: '', local_vm_path: '', is_default: false,
+           change_window_id: '', require_change_window: false},
+    // Every window, not just enabled ones: a workgroup may already point at a
+    // retired window, and dropping it from the list would silently clear the
+    // selection on the next save.
+    changeWindows: [],
 
     async init() {
       requireAuth();
@@ -179,6 +238,13 @@ function workgroupsPage() {
       try {
         const r = await API.get('/api/workgroups');
         this.workgroups = r;
+        try {
+          const cw = await API.get('/api/change-windows');
+          this.changeWindows = (cw && cw.windows) || [];
+        } catch (e) {
+          // A missing list must not break workgroup administration.
+          this.changeWindows = [];
+        }
       } catch (e) {
         this.flash('Failed to load workgroups: ' + (e.message || e), 'error');
       } finally {
@@ -188,7 +254,8 @@ function workgroupsPage() {
 
     openCreate() {
       this.modalMode = 'create';
-      this.form = {name: '', display_name: '', description: '', local_vm_path: '', is_default: false};
+      this.form = {name: '', display_name: '', description: '', local_vm_path: '', is_default: false,
+                   change_window_id: '', require_change_window: false};
       this.modalOpen = true;
     },
 
@@ -199,6 +266,8 @@ function workgroupsPage() {
         display_name: w.display_name,
         description: w.description || '',
         local_vm_path: w.local_vm_path || '',
+        change_window_id: w.change_window_id || '',
+        require_change_window: !!w.require_change_window,
         is_default: w.is_default,
       };
       this.modalOpen = true;
@@ -220,6 +289,12 @@ function workgroupsPage() {
             display_name: this.form.display_name.trim(),
             description: this.form.description.trim() || null,
             local_vm_path: this.form.local_vm_path.trim() || null,
+            change_window_id: this.form.change_window_id || '',
+            // Never send true without a window — the server refuses it, and the
+            // checkbox is disabled, but a stale tick from switching the select back
+            // to "No window" would otherwise reach it.
+            require_change_window: !!(this.form.require_change_window
+                                      && this.form.change_window_id),
           });
           this.flash('Workgroup updated.', 'success');
         }

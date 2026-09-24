@@ -2,6 +2,8 @@
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
+from .schedule import ScheduleRequestMixin
+
 from ..services.vm_naming import MAX_DEPLOY_COUNT
 from .tags import TagChip
 
@@ -59,7 +61,7 @@ class GCPNetworkOptions(BaseModel):
     cached_at: Optional[str] = None
 
 
-class GCPDeployRequest(BaseModel):
+class GCPDeployRequest(ScheduleRequestMixin, BaseModel):
     image_self_link: str
     image_name: str = ""        # For display/tracking only
     instance_name: str
@@ -101,7 +103,7 @@ class GCPBulkDeployItem(BaseModel):
     instance_name: str
 
 
-class GCPBulkDeployRequest(BaseModel):
+class GCPBulkDeployRequest(ScheduleRequestMixin, BaseModel):
     items: List[GCPBulkDeployItem]
     machine_type: str = "e2-medium"
     zone: str = ""
@@ -143,7 +145,7 @@ class GCPBulkDeployResponse(BaseModel):
     batch_id: Optional[str] = None
 
 
-class GCPCreateImageRequest(BaseModel):
+class GCPCreateImageRequest(ScheduleRequestMixin, BaseModel):
     image_name: str
     description: str = ""
 

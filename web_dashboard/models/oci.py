@@ -2,6 +2,8 @@
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
+from .schedule import ScheduleRequestMixin
+
 from ..services.vm_naming import MAX_DEPLOY_COUNT
 from .tags import TagChip
 
@@ -83,7 +85,7 @@ class OCINetworkOptions(BaseModel):
     image_ocid: str = ""
 
 
-class OCIDeployRequest(BaseModel):
+class OCIDeployRequest(ScheduleRequestMixin, BaseModel):
     image_ocid: str
     image_name: str = ""              # display/tracking only
     instance_name: str
@@ -138,7 +140,7 @@ class OCIBulkDeployItem(BaseModel):
     instance_name: str
 
 
-class OCIBulkDeployRequest(BaseModel):
+class OCIBulkDeployRequest(ScheduleRequestMixin, BaseModel):
     items: List[OCIBulkDeployItem]
     shape: str = "VM.Standard.E2.1.Micro"
     ocpus: Optional[float] = None

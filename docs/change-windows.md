@@ -33,7 +33,23 @@ work to stop at the boundary, make the window long enough for the work, or split
 
 ## Scheduling one job
 
-On the Config Management run form, **When to run** offers three modes:
+**Where you can book one**
+
+| Surface | How |
+|---|---|
+| Config Management runs | **When to run** on the run form (single and bulk) |
+| Cloud VM deploys — AWS, Azure, GCP, OCI | **When to run** in the deploy dialog |
+| Image promotion | the promote request |
+| Packer image builds | the build request |
+| Image export / capture / AMI copy | the request |
+| Bulk power — AWS, Azure, GCP, OCI | **Schedule** on the selection toolbar |
+| Cloud VM destroys — AWS, Azure, GCP, OCI | offered when a window refuses one; or `?run_at=` on the API |
+
+Any job type can be *held* for a window — that lives in the job queue itself, not in a
+form — so a surface without a picker yet can still be booked through the API by passing
+`run_at` / `run_timezone` / `change_window_id`.
+
+On each of those forms, **When to run** offers three modes:
 
 | Mode | What it does |
 |---|---|
@@ -49,11 +65,55 @@ to prevent, so the unit is never left for you to assume.
 A booked job appears on **Jobs** with a second badge next to its status. It is still
 `pending`, because that is what it is; the badge says which kind of waiting it is.
 
-> The **engine** is not specific to Config Management. Scheduling lives in the job queue
-> itself — one column on the job row and one clause in the query that hands work out — so
-> every job type in the dashboard can be held for a window. What is specific to Config
-> Management today is the **picker on the run form**; other pages get it as they are wired
-> up, and nothing needs to change in the queue when they are.
+> The **engine** is not specific to any page. Scheduling lives in the job queue itself —
+> two columns on the job row and one clause in the query that hands work out — so every
+> job type in the dashboard can be held for a window. What is per-page is only the
+> **picker**; a page gets it by rendering one shared partial and spreading one helper,
+> and nothing in the queue changes when it does.
+
+### Destroys
+
+A teardown is the operation a change window most needs to cover — the guardrails make
+the same argument, which is why the change-freeze policy is the one that deliberately
+applies to teardowns as well as deploys.
+
+You do not pre-book a destroy from a picker; you press Destroy, and if the workgroup
+has a required window the dashboard refuses and offers:
+
+> `prod` may only be changed during Prod Weekend (Sat 02:00–06:00 (UTC), 4h). The next
+> window opens 2026-09-26 02:00 UTC.
+>
+> **Schedule it for the next "Prod Weekend" window instead?**
+
+Accept, and the teardown is queued for that window. The API takes the same three
+values as query parameters (`?run_at=`, `?run_timezone=`, `?change_window_id=`) if you
+want to book one directly — query parameters rather than a body because these are
+`DELETE` routes.
+
+### Scheduling power operations
+
+The **Schedule** tick on the cloud selection toolbar books the whole selection for a
+time. It has its own time field, separate from the deploy dialog's — a mode left set by
+a dialog you cancelled must not silently book the next power operation.
+
+Two things to know:
+
+* **Only the cloud pages offer it.** An on-premises power operation against a *direct*
+  connection runs in the dashboard process rather than through the job queue, so a
+  booking there would create a scheduled-looking job and power the machine off
+  immediately. The toolbar does not offer the control on those pages, and the server
+  refuses the combination outright if one is ever wired by mistake.
+* **For a recurring power schedule, use Repeat instead** — open the resulting job and
+  repeat it in a window. And for plain business hours, the
+  [suspend schedule](cloud-vms.md) is the better tool: it understands per-VM
+  eligibility, which a generic power booking does not.
+
+### Bulk deploys book as a unit
+
+A deploy of several VMs creates one parent job and one child per VM. The **parent**
+carries the booking; the children are driven by it and never claimed on their own. So a
+batch is never split across a window boundary — either the whole batch runs in the
+window or none of it does.
 
 ---
 
@@ -116,6 +176,56 @@ Two reasons, and the message says which:
 
 ---
 
+## Requiring a window for a whole workgroup
+
+Everything above is a **choice**: the operator picks Now, and Now is what happens. A
+workgroup-level window is a **constraint** — it cannot be bypassed by clicking Run now.
+
+**RBAC → Workgroups → Edit → Change window**, then tick **Require it**.
+
+With that set, any *gated* change against a resource in that workgroup is refused outside
+the window, with the reason and the next occurrence:
+
+```
+403  prod may only be changed during Prod Weekend
+     (Sat 02:00–06:00 (UTC), 4h). The next window opens 2026-09-26 02:00 UTC.
+```
+
+and the form offers to book it instead. **Accepting that offer is admitted** — booking
+into the named window, or picking any time that falls inside it, satisfies the
+requirement. A booking *outside* it does not; a booking is not a bypass.
+
+### Which actions it covers
+
+The same list as the guardrails: **Settings → Action Guardrails → Gated actions**. One
+list, not two — if an action is worth gating on policy, it is the kind of action a
+change window is about. Two consequences worth knowing:
+
+* **Nothing is constrained until that list has entries.** A workgroup can require a
+  window and still allow everything, if no action is gated.
+* **Power operations are not on it by default**, so a window does not block start/stop
+  unless an administrator adds them. That is usually right — powering a VM off is
+  reversible, and the [suspend schedule](cloud-vms.md) is the better tool for it.
+
+You do **not** need to enable the policy engine. `admission_control_enabled` switches
+*OPA* on; a maintenance window is enforced in the dashboard and needs no Rego.
+
+### How it fails
+
+* **Required, with a window that was deleted** → every gated change is refused, saying
+  so. An administrator picks another. Failing closed here is deliberate: somebody asked
+  for these changes to be gated, and a broken gate is not an open one.
+* **Required, with no window picked** → refused at the point of saving the workgroup,
+  not at deploy time. Storing that state would block every change with nothing to book
+  into.
+* **The dashboard cannot tell whether a window is required** (a schema problem) → the
+  change is **admitted**, and a warning is logged. The opposite direction on purpose:
+  the overwhelmingly likely cause is an install that never used the feature, and 403ing
+  every deploy on that estate would be far worse than not enforcing a constraint nobody
+  configured.
+
+---
+
 ## Requiring approval
 
 **Settings → Change Windows → Require approval for scheduled changes.**
@@ -156,10 +266,24 @@ Things worth knowing:
 * **It does not fire for the window it was created in.** You just ran the job; that is
   where the schedule came from. It starts at the next occurrence.
 * **Exactly one job per occurrence**, however many times the sweep runs during it.
-* **Not every job type can repeat.** Only those whose saved parameters are *references*
-  rather than values — Config Management runs qualify, because their credentials are
-  resolved at run time and never stored on the job. The Repeat control is hidden with a
-  reason for the rest.
+* **Not every job type can repeat**, and what a repeat stores is filtered.
+
+  A schedule replays a job's saved parameters weeks later, so it may only carry keys
+  that are *references* the runner reads — never a secret, never a one-shot handle, and
+  never a result. The allowlist is per **key**, not per job type, because a job's stored
+  metadata is the *post-run* one: every runner merges its output back into it. So a
+  filter is what keeps an Ansible run's output, an export's registered image id, or an
+  EPM-L sync's pre-signed package URLs out of the schedules table.
+
+  Repeatable today: Config Management runs, power operations, image exports, image
+  promotions, and the EPM for Linux package sync.
+
+  Not repeatable, and each for a specific reason: **cloud VM deploys** (their saved
+  state carries live teardown handles, so a replay would tear down the *first* VM's PRA
+  jump), **destroys** (the target is gone after the first run), **Packer builds** (a
+  provisioner environment variable may hold a literal value rather than a reference),
+  and **cluster/database provisioning** (the job points at one specific row created
+  alongside it). The Repeat control is hidden with the reason for these.
 * **A schedule runs as the person who created it.** If that account is deleted or
   deactivated, the schedule disables itself and says so rather than running as nobody.
 * **Three consecutive failures disable it**, with the reason recorded. A recurring change

@@ -186,8 +186,17 @@ def update(
     display_name: Optional[str] = None,
     description: Optional[str] = None,
     local_vm_path: Optional[str] = None,
+    change_window_id: Optional[str] = None,
+    require_change_window: Optional[bool] = None,
 ) -> Workgroup:
-    """Update mutable fields. `name` is immutable in v1."""
+    """Update mutable fields. `name` is immutable in v1.
+
+    ``change_window_id`` / ``require_change_window`` constrain every gated change
+    against this workgroup to a maintenance window — see
+    ``admission_service._enforce_change_window``. Each is ``None`` for "leave alone",
+    so an existing caller that passes neither is unaffected. Passing an empty string
+    for the window clears it.
+    """
     wg = get(db, name)
     if not wg:
         raise WorkgroupError(f"Workgroup '{name}' not found.")
@@ -199,6 +208,21 @@ def update(
         wg.description = description.strip() or None
     if local_vm_path is not None:
         wg.local_vm_path = local_vm_path.strip() or None
+    if change_window_id is not None:
+        wg.change_window_id = change_window_id.strip() or None
+    if require_change_window is not None:
+        # `or None` so False is stored as NULL, matching the column's "NULL means as
+        # today" contract and keeping an un-constrained workgroup indistinguishable
+        # from one that predates the feature.
+        wg.require_change_window = bool(require_change_window) or None
+    # Refuse the half-configured state outright rather than storing something whose
+    # behaviour nobody can predict from the row: `admission_service` fails CLOSED on a
+    # workgroup that requires a window it cannot resolve, so "required, but no window"
+    # would silently block every change against it.
+    if wg.require_change_window is True and not wg.change_window_id:
+        raise WorkgroupError(
+            "Pick a change window before requiring one — otherwise every change "
+            "against this workgroup would be refused with nothing to book it into.")
     db.commit()
     db.refresh(wg)
     return wg

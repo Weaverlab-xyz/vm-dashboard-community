@@ -500,40 +500,20 @@ class RunRequest(BaseModel):
 def _schedule_kwargs(payload: "RunRequest", db) -> dict:
     """The scheduling arguments for ``create_job``, or ``{}`` for an immediate run.
 
-    Returning an empty dict rather than a dict of Nones is deliberate: splatted into
-    ``create_job`` it is then byte-for-byte the call that was there before, so a run with
-    no schedule cannot be affected by this feature at all.
-
-    Resolved ONCE, here, for all three execution paths (agent / cloud-localhost / VM).
-    Each of those ends at its own ``create_job``, and a scheduling rule applied to two of
-    the three would be a change window that silently did not apply to on-premises targets
-    -- which are the ones most likely to have one.
-
-    **Approval applies to SCHEDULED changes only.** An immediate run is an operator doing
-    something now and is unchanged; requiring approval for those would gate every button
-    in the application, which is a different and much larger feature. The gate here is
-    "a change booked for later needs a second person before it fires".
+    A thin adapter over ``change_window_service.schedule_kwargs``, kept because this
+    module's three execution paths (agent / cloud-localhost / VM) each call it with the
+    same ``RunRequest`` and unpacking the three fields at each of those call sites
+    would be the duplication this function removes. Everything that matters — the empty
+    dict for an immediate run, the 400 on a bad time — lives in the shared helper, which
+    every other run form now calls directly.
     """
     from ..services import change_window_service
-    from ..services.suspend_schedule import ScheduleError
-    try:
-        scheduled_for, window_ends_at, window_id = change_window_service.resolve(
-            db,
-            run_at=payload.run_at,
-            run_timezone=payload.run_timezone,
-            change_window_id=payload.change_window_id,
-        )
-    except ScheduleError as exc:
-        # A 400 on the form now, rather than a change that quietly never runs.
-        raise HTTPException(status_code=400, detail=str(exc))
-    if scheduled_for is None:
-        return {}
-    return {
-        "scheduled_for": scheduled_for,
-        "window_ends_at": window_ends_at,
-        "change_window_id": window_id,
-        "approval_required": change_window_service.approval_required_default(),
-    }
+    return change_window_service.schedule_kwargs(
+        db,
+        run_at=payload.run_at,
+        run_timezone=payload.run_timezone,
+        change_window_id=payload.change_window_id,
+    )
 
 
 def _cfg(key: str) -> str:

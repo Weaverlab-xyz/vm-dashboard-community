@@ -30,7 +30,7 @@ from ..models.image_registry import (
     PromoteImageRequest,
     RegisterImageRequest,
 )
-from ..services import image_registry_service, job_service
+from ..services import change_window_service, image_registry_service, job_service
 from ..services.image_registry_service import ImageRegistryError, VALID_CLOUDS
 from .auth import get_current_user, require_permission
 
@@ -162,6 +162,15 @@ def promote_image(
     if not image:
         raise HTTPException(status_code=404, detail=f"Image {image_id} not found.")
 
+    # Resolved ONCE for all four cloud branches below, and before any of them, so a
+    # bad time is a 400 on the form rather than a promotion that quietly never runs.
+    # `{}` for an immediate promote, which leaves each create_job call byte-for-byte
+    # what it was. The `?manual=1` paths never reach a create_job, so they are
+    # unaffected — a CLI walkthrough has nothing to schedule.
+    _sched = change_window_service.schedule_kwargs(
+        db, run_at=payload.run_at, run_timezone=payload.run_timezone,
+        change_window_id=payload.change_window_id)
+
     if payload.target_cloud == "aws" and not manual:
         if not payload.target_region:
             raise HTTPException(
@@ -189,6 +198,7 @@ def promote_image(
                 "target_cloud":  "aws",
                 "target_region": payload.target_region,
             },
+            **_sched,
         )
         # Mark the promotion as "running" on the image right away so the
         # /images page reflects the in-flight state.
@@ -232,6 +242,7 @@ def promote_image(
                 "target_resource_group": target_rg,
                 "target_region":         payload.target_region,
             },
+            **_sched,
         )
         image_registry_service.record_promotion(
             db, image_id, "azure",
@@ -267,6 +278,7 @@ def promote_image(
                 "target_cloud":  "gcp",
                 "target_region": payload.target_region,
             },
+            **_sched,
         )
         image_registry_service.record_promotion(
             db, image_id, "gcp",
@@ -302,6 +314,7 @@ def promote_image(
                 "target_cloud":  "oci",
                 "target_region": payload.target_region,
             },
+            **_sched,
         )
         image_registry_service.record_promotion(
             db, image_id, "oci",

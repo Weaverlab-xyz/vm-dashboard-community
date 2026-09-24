@@ -30,7 +30,8 @@ from ..models.gcp import (
     GCPNetworkOptions,
     GCPSSHKeyDetail,
 )
-from ..services import cache_service, cloud_stats, deploy_batch, job_service, region_catalog, workgroup_service
+from ..models.schedule import SCHEDULE_FIELDS, ScheduleRequestMixin
+from ..services import change_window_service, cache_service, cloud_stats, deploy_batch, job_service, region_catalog, workgroup_service
 from ..services import gcp_service
 from .auth import require_admin, require_permission
 from ..services import vm_suspend_policy
@@ -583,6 +584,14 @@ async def _fan_out_batch(
     apart is invisible to a static walk. Nested defs don't help either; ast.walk
     descends into them.
     """
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **payload.schedule_fields())
+
     names = deploy_batch.expand_names(payload.instance_name, payload.count, "gcp")
     deploy_batch.reject_name_collisions(db, "gce_deploy", names)
     # Policy gate every VM in the batch before creating a single row — a denial partway
@@ -622,7 +631,7 @@ async def _fan_out_batch(
                 "image_name":      payload.image_name,
                 "workgroup":       payload.workgroup,
                 "bulk":            True,
-                "req":             child_req.model_dump(),
+                "req":             child_req.model_dump(exclude=SCHEDULE_FIELDS),
             },
         )
         job_service.set_cloud_resource_id(db, job.id, name)
@@ -633,7 +642,7 @@ async def _fan_out_batch(
                      "workgroup": payload.workgroup, "bulk": True},
         )
         children.append({"job_id": job.id, "instance_name": name,
-                         "req": child_req.model_dump()})
+                         "req": child_req.model_dump(exclude=SCHEDULE_FIELDS)})
 
     # One parent for the batch — this is the row the runner claims, and it drives the
     # queued children above behind a single shared Jumpoint.
@@ -650,6 +659,7 @@ async def _fan_out_batch(
             "workgroup":  payload.workgroup,
             "children":   children,
         },
+        **_sched,
     )
     return GCPDeployResponse(
         job_id=parent.id,
@@ -679,6 +689,14 @@ async def bulk_deploy_instances(
     ``GCPDeployRequest`` per child from ``children[].req``, so a per-child image is
     simply a different value in a field it already reads.
     """
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     if not req.items:
         raise HTTPException(status_code=400, detail="At least one image is required.")
 
@@ -754,7 +772,7 @@ async def bulk_deploy_instances(
                 "image_name":      item.image_name,
                 "workgroup":       workgroup,
                 "bulk":            True,
-                "req":             child_req.model_dump(),
+                "req":             child_req.model_dump(exclude=SCHEDULE_FIELDS),
             },
         )
         job_service.set_cloud_resource_id(db, job.id, item.instance_name)
@@ -765,7 +783,7 @@ async def bulk_deploy_instances(
                      "workgroup": workgroup, "bulk": True},
         )
         children.append({"job_id": job.id, "instance_name": item.instance_name,
-                         "req": child_req.model_dump()})
+                         "req": child_req.model_dump(exclude=SCHEDULE_FIELDS)})
         results.append(GCPBulkDeployJobResult(
             image_self_link=item.image_self_link,
             instance_name=item.instance_name,
@@ -784,6 +802,7 @@ async def bulk_deploy_instances(
             "workgroup":  workgroup,
             "children":   children,
         },
+        **_sched,
     )
     return GCPBulkDeployResponse(jobs=results, count=len(results), batch_id=batch_id)
 
@@ -796,6 +815,14 @@ async def deploy_instance(
 ):
     """Deploy one or more GCE instances from an image. Runs in background; returns the
     job ID immediately. ``count > 1`` fans out into a batch (see ``_fan_out_batch``)."""
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **payload.schedule_fields())
+
     project_id = _gcp_project()
     if not project_id:
         raise HTTPException(status_code=400, detail="GCP project ID not configured — run the setup wizard.")
@@ -815,13 +842,25 @@ async def deploy_instance(
     # region must come from the *requested* zone so the allowed-regions guardrail
     # checks where the VM actually lands, not the global default region.
     from ..services import admission_service
-    admission_service.enforce(
+    _gate = admission_service.enforce(
         "gcp:gce:deploy",
         request={"region": region, "zone": zone,
                  "instance_type": payload.machine_type, "image": payload.image_self_link,
-                 "name": payload.instance_name, "count": 1, "batch": False},
+                 "name": payload.instance_name, "count": 1, "batch": False,
+                 "workgroup": workgroup},
         actor=current_user, db=db,
+        # The booking, so the gate admits a change that ACCEPTS the
+        # window it would otherwise refuse for.
+        scheduled=_sched,
+        # This seam hands the verdict to create_job below, so a policy that says a
+        # change needs a second person produces a job awaiting approval rather than
+        # a refusal. See admission_service.enforce.
+        approvable=True,
     )
+    # Merged rather than splatted separately: both dicts can carry
+    # `approval_required`, and `f(**a, **b)` with a shared key is a TypeError. OR
+    # semantics, because either reason to require approval is sufficient.
+    _sched = {**_sched, **_gate} if _gate else _sched
 
     await _validate_gcp_ssh_override(project_id, payload)
 
@@ -841,8 +880,9 @@ async def deploy_instance(
             "workgroup":        workgroup,
             # Full request so the runner can rebuild the deploy call. Only secret
             # *references* live on it, resolved at deploy time.
-            "req":              payload.model_dump(),
+            "req":              payload.model_dump(exclude=SCHEDULE_FIELDS),
         },
+        **_sched,
     )
     job_service.set_cloud_resource_id(db, job.id, payload.instance_name)
     job_service.log_audit(
@@ -916,6 +956,11 @@ def create_image_from_instance(
     db: Session = Depends(get_db),
 ):
     """Capture a GCE instance as a custom image. Runs in background."""
+    # `{}` for an immediate run, so the create_job below is unchanged when nobody
+    # books a window. Resolved before it, so a bad time is a 400 rather than an
+    # image job that quietly never starts.
+    _sched = change_window_service.schedule_kwargs(db, **payload.schedule_fields())
+
     project_id = _gcp_project()
     if not project_id:
         raise HTTPException(status_code=400, detail="GCP project ID not configured.")
@@ -935,6 +980,7 @@ def create_image_from_instance(
             "project_id": project_id,
             "zone": zone,
         },
+        **_sched,
     )
     return GCPDeployResponse(
         job_id=job.id, status="pending",
@@ -949,9 +995,22 @@ def destroy_instance(
     instance_name: str,
     zone: str = Query("", description="Zone the instance is in; defaults to configured zone"),
     current_user: User = Depends(require_permission("gcp", "delete")),
+    # Query parameters, not a request body: this is a DELETE, and a body on DELETE is
+    # legal but poorly supported by intermediaries — and `API.del()` in app.js takes a
+    # path only. Blank on all three means "destroy now", which is every existing caller.
+    run_at: str = Query("", description="YYYY-MM-DDTHH:MM, local to run_timezone"),
+    run_timezone: str = Query("", description="IANA name; blank = UTC"),
+    change_window_id: str = Query("", description="Book into a named change window"),
     db: Session = Depends(get_db),
 ):
     """Terminate a GCE instance. Runs in background."""
+    # Resolved before the admission gate so a workgroup-constrained destroy can
+    # ACCEPT the window the gate offers. Without this the refusal is a dead end:
+    # the operator is told to book it and has no way to.
+    _sched = change_window_service.schedule_kwargs(
+        db, run_at=run_at, run_timezone=run_timezone,
+        change_window_id=change_window_id)
+
     project_id = _gcp_project()
     if not project_id:
         raise HTTPException(status_code=400, detail="GCP project ID not configured.")
@@ -971,6 +1030,7 @@ def destroy_instance(
                  "workgroup": deploy_job.workgroup if deploy_job else None,
                  "has_deploy_job": deploy_job is not None},
         actor=current_user, db=db,
+        scheduled=_sched,
     )
 
     job = job_service.create_job(
@@ -988,6 +1048,7 @@ def destroy_instance(
             # A destroy aimed at the wrong project is the worst version of this bug.
             "project_id": project_id,
         },
+        **_sched,
     )
     job_service.log_audit(
         db, current_user.username, "gce_destroy",
@@ -1086,7 +1147,7 @@ class PowerOpRequest(BaseModel):
 
 
 async def _queue_one(db, current_user, *, op: str, payload: PowerOpRequest,
-                     batch_id=None) -> dict:
+                     batch_id=None, sched=None) -> dict:
     """Queue ONE GCE power op. The only path that does, single or bulk.
 
     Returns ``{"job_id", "status", "task", "warning"}``. ``task`` is always None: a
@@ -1137,6 +1198,7 @@ async def _queue_one(db, current_user, *, op: str, payload: PowerOpRequest,
         metadata={"action": op, "instance_name": payload.instance_name, "zone": resolved_zone,
                   "project_id": project_id,
                   "deploy_job_id": deploy_job.id if deploy_job else None},
+        **(sched or {}),
     )
     job_service.log_audit(db, current_user.username, "gce_power",
                           details={"action": op, "instance_name": payload.instance_name, "zone": resolved_zone})
@@ -1163,7 +1225,7 @@ def _power_endpoint(op: str):
 BULK_OPS = ("start", "stop")
 
 
-class BulkPowerRequest(BaseModel):
+class BulkPowerRequest(ScheduleRequestMixin, BaseModel):
     """One op, many VMs. `targets` carries the same payload the single route takes.
 
     The op is a FIELD and the identifiers are in the BODY, matching every other
@@ -1188,13 +1250,21 @@ async def bulk_power(
     is a worker job, so there is nothing for this process to run.
     """
     op = payload.op.strip().lower()
+    # One booking for the whole batch — a selection split across a window boundary
+    # would be the worst of both outcomes. `{}` for an immediate op, leaving each
+    # create_job exactly as it was.
+    _sched = change_window_service.schedule_kwargs(db, **payload.schedule_fields())
     return await queue_power_batch(
         db, kind="gcp", op=payload.op, targets=payload.targets,
         allowed_ops=BULK_OPS,
         queue_one=lambda target, batch_id: _queue_one(
-            db, current_user, op=op, payload=target, batch_id=batch_id),
+            db, current_user, op=op, payload=target, batch_id=batch_id,
+            sched=_sched),
         label_of=lambda target: target.instance_name,
-        created_by=current_user.username)
+        created_by=current_user.username,
+        # Tells the batch helper this is a booking, so its guard can refuse a path
+        # whose power op would run in-process NOW instead of via the worker.
+        scheduled=bool(_sched))
 
 
 router.add_api_route("/power/start", _power_endpoint("start"), methods=["POST"],
@@ -1205,7 +1275,7 @@ router.add_api_route("/power/stop", _power_endpoint("stop"), methods=["POST"],
 
 # ── Export custom image to portable VHD on hub backend ───────────────────────
 
-class ExportImageRequest(BaseModel):
+class ExportImageRequest(ScheduleRequestMixin, BaseModel):
     image_name: str  # Registry name to record the exported image under
 
 
@@ -1225,6 +1295,11 @@ def export_custom_image(
     """Manually export a custom GCE image to VHD on the hub backend and
     register it in the image registry. Useful when the auto-export during
     build was skipped or failed."""
+    # `{}` for an immediate run, so the create_job below is unchanged when nobody
+    # books a window. Resolved before it, so a bad time is a 400 rather than an
+    # image job that quietly never starts.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     project_id = _gcp_project()
     if not project_id:
         raise HTTPException(status_code=400, detail="GCP project ID not configured.")
@@ -1235,6 +1310,7 @@ def export_custom_image(
         created_by=current_user.username,
         metadata={"image_name": image_name, "registry_name": req.image_name,
                   "project_id": project_id, "created_by": current_user.username},
+        **_sched,
     )
     job_service.log_audit(
         db, current_user.username, "gcp_export_image",

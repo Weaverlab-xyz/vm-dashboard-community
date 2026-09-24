@@ -5,6 +5,8 @@ Mirrors web_dashboard/models/aws.py structure.
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
+from .schedule import ScheduleRequestMixin
+
 from ..services.vm_naming import MAX_DEPLOY_COUNT
 from .tags import TagChip
 
@@ -93,7 +95,7 @@ class AzureNetworkOptions(BaseModel):
 
 # ── Deploy request / response ─────────────────────────────────────────────────
 
-class AzureDeployRequest(BaseModel):
+class AzureDeployRequest(ScheduleRequestMixin, BaseModel):
     image_id: str              # Full ARM resource ID of the image
     vm_name: str
     vm_size: str = "Standard_B2s"
@@ -151,7 +153,7 @@ class AzureBulkDeployItem(BaseModel):
     trusted_launch: Optional[bool] = None
 
 
-class AzureBulkDeployRequest(BaseModel):
+class AzureBulkDeployRequest(ScheduleRequestMixin, BaseModel):
     items: List[AzureBulkDeployItem]
     # Batch-level default for items that don't carry their own image. Relaxed from a
     # required field so per-item images are expressible; the endpoint still rejects a
@@ -204,7 +206,7 @@ class AzureBulkDeployResponse(BaseModel):
 
 # ── Image capture ─────────────────────────────────────────────────────────────
 
-class AzureCreateImageRequest(BaseModel):
+class AzureCreateImageRequest(ScheduleRequestMixin, BaseModel):
     name: str
     description: str = ""
     generalize: bool = False   # True = deallocate+generalize (VM unusable after)

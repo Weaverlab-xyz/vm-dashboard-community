@@ -219,6 +219,18 @@ def test_toast_carries_the_request_access_link():
     _run_node("toast_request_access_check.js", "toast deep-link checks")
 
 
+def test_api_errors_carry_their_policy_reasons():
+    """A guardrail refusal must reach the operator with its reason, and a
+    change-window refusal with its offer.
+
+    `API.request` understood only a string `detail` or `detail.message`, but the
+    admission gate answers `{error, reasons: [...]}` — so every policy denial in the
+    product surfaced as a bare `HTTP 403` and the operator was never told which rule
+    refused them. Same class of bug as the toast deep link above: produced,
+    serialised, and dropped one hop before the screen."""
+    _run_node("api_error_reasons_check.js", "API error reason checks")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]

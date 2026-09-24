@@ -39,9 +39,34 @@ def _read(*parts):
 
 
 def _load(*parts):
+    """Load one module by path, with sibling relative imports resolvable.
+
+    Loading by path rather than importing `web_dashboard.models.packer` is the point
+    of this harness: it proves the module stands up on pydantic alone, without
+    dragging in the app. But a bare `spec_from_file_location` gives the module no
+    package, so a relative import of a SIBLING model (`from .schedule import …`)
+    raises "attempted relative import with no known parent package".
+
+    So the parent packages are registered as empty namespace modules whose `__path__`
+    points at the real directories. A relative import then finds the real sibling
+    file, and `web_dashboard/__init__.py` is still never executed — which is the
+    property that keeps this test dependency-light.
+    """
+    import types
+
+    pkg_parts = parts[:-1]
+    for i in range(1, len(pkg_parts) + 1):
+        name = ".".join(pkg_parts[:i])
+        if name not in sys.modules:
+            stub = types.ModuleType(name)
+            stub.__path__ = [os.path.join(_ROOT, *pkg_parts[:i])]
+            sys.modules[name] = stub
+
     path = os.path.join(_ROOT, *parts)
-    spec = importlib.util.spec_from_file_location(parts[-1][:-3] + "_probe", path)
+    full_name = ".".join(pkg_parts + (parts[-1][:-3],))
+    spec = importlib.util.spec_from_file_location(full_name, path)
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[full_name] = mod
     spec.loader.exec_module(mod)
     return mod
 

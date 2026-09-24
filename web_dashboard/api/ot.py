@@ -278,7 +278,8 @@ def deploy_cell(
         request={"region": region, "zone": zone,
                  "instance_type": payload.machine_type,
                  "image": payload.image_self_link,
-                 "name": payload.instance_name, "count": 1, "batch": False},
+                 "name": payload.instance_name, "count": 1, "batch": False,
+                 "workgroup": workgroup},
         actor=current_user, db=db,
     )
 
@@ -356,7 +357,8 @@ def deploy_cell(
             request={"region": region, "zone": zone,
                      "instance_type": payload.broker_machine_type,
                      "image": payload.broker_image_self_link,
-                     "name": broker_name, "count": 1, "batch": False},
+                     "name": broker_name, "count": 1, "batch": False,
+                     "workgroup": workgroup},
             actor=current_user, db=db,
         )
         broker_req = GCPDeployRequest(
@@ -476,7 +478,8 @@ def deploy_cell_aws(
         "aws:ec2:deploy",
         request={"region": region, "instance_type": payload.instance_type,
                  "image": payload.ami_id, "name": payload.instance_name,
-                 "count": 1, "batch": False},
+                 "count": 1, "batch": False,
+                 "workgroup": workgroup},
         actor=current_user, db=db,
     )
 
@@ -534,7 +537,8 @@ def deploy_cell_aws(
             "aws:ec2:deploy",
             request={"region": region, "instance_type": payload.broker_instance_type,
                      "image": payload.broker_ami_id, "name": broker_name,
-                     "count": 1, "batch": False},
+                     "count": 1, "batch": False,
+                     "workgroup": workgroup},
             actor=current_user, db=db,
         )
         broker = job_service.create_job(
@@ -640,7 +644,8 @@ async def deploy_cell_azure(
         "azure:vm:deploy",
         request={"region": loc, "instance_type": payload.vm_size,
                  "image": payload.image_id, "name": payload.vm_name,
-                 "count": 1, "batch": False},
+                 "count": 1, "batch": False,
+                 "workgroup": workgroup},
         actor=current_user, db=db,
     )
 
@@ -734,7 +739,8 @@ async def deploy_cell_azure(
             "azure:vm:deploy",
             request={"region": loc, "instance_type": payload.broker_vm_size,
                      "image": payload.broker_image_id, "name": broker_name,
-                     "count": 1, "batch": False},
+                     "count": 1, "batch": False,
+                     "workgroup": workgroup},
             actor=current_user, db=db,
         )
         broker_req = AzureDeployRequest(

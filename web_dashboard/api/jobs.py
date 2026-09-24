@@ -20,13 +20,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
 
-def _job_to_response(job, *, window_names: Optional[dict] = None) -> JobResponse:
+def _job_to_response(job, *, window_names: Optional[dict] = None,
+                     db: Session = None) -> JobResponse:
     """Project one Job row for the API.
 
-    ``window_names`` is an optional ``{change_window_id: name}`` map so the list endpoint
-    can resolve every window in ONE query instead of one per row. Omitted by the single-
-    job endpoints, where a lazy lookup is a single row anyway.
+    ``window_names`` is a ``{change_window_id: name}`` map so the LIST endpoint can
+    resolve every window in one query instead of one per row. The single-job endpoints
+    pass ``db`` instead and take the one-row lookup — without it the job detail page
+    showed a booked change with no window name, which reads as "booked into nothing".
     """
+    if window_names is None and db is not None and job.change_window_id:
+        window_names = change_window_service.names_for(db, [job])
     return JobResponse(
         id=job.id,
         job_type=job.job_type,
@@ -138,7 +142,7 @@ def get_job(
         raise HTTPException(status_code=404, detail="Job not found")
     if job.created_by != current_user.username and not can_audit_jobs(current_user):
         raise HTTPException(status_code=403, detail="Access denied")
-    return _job_to_response(job)
+    return _job_to_response(job, db=db)
 
 
 @router.get("/{job_id}/logs")

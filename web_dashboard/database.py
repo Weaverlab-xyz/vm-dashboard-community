@@ -1426,6 +1426,26 @@ class Workgroup(Base):
     is_default = Column(Boolean, default=False, nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     created_by_user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # ── Required change window (services/admission_service._enforce_change_window) ──
+    # "Nothing in this workgroup may be changed outside Prod Weekend." Unlike the
+    # per-run picker, which an operator chooses, this one cannot be bypassed by
+    # clicking Run now — the gate every mutating endpoint already calls refuses and
+    # offers to book instead.
+    #
+    # BOTH NULL is what every existing row backfills to, and NULL means "as today":
+    # no constraint, no behaviour change. A workgroup becomes constrained only when an
+    # administrator both picks a window and ticks the requirement, so enabling the
+    # feature on a live estate blocks nothing by construction rather than by a guard.
+    #
+    # A plain id rather than a ForeignKey, for the same reason `Job.change_window_id`
+    # is: an administrator tidying up the maintenance calendar must never cascade into
+    # a workgroup's configuration. A window that no longer exists reads as "misconfigured
+    # — pick another", which is what the Workgroups tab shows.
+    change_window_id = Column(String(36), nullable=True)
+    # Bare BOOLEAN, NO DEFAULT, deliberately. PostgreSQL has rejected a defaulted ADD
+    # COLUMN in this tree's migration list before and the savepoint swallowed it
+    # silently — see the `users.is_admin` note. NULL reads as False everywhere.
+    require_change_window = Column(Boolean, nullable=True)
 
 
 class VMWorkgroupOverride(Base):
@@ -4417,6 +4437,14 @@ def init_db():
             "ALTER TABLE jobs ADD COLUMN approved_at TIMESTAMP",
             "ALTER TABLE jobs ADD COLUMN approved_by VARCHAR(100)",
             "ALTER TABLE jobs ADD COLUMN missed_window_at TIMESTAMP",
+
+            # A workgroup that may only be changed inside a named window. Both
+            # backfill to NULL = "unconstrained", which is every existing
+            # workgroup, so turning this on blocks nothing until an administrator
+            # opts a workgroup in. `require_change_window` is a bare BOOLEAN with
+            # no DEFAULT for the PostgreSQL reason described on users.is_admin.
+            "ALTER TABLE workgroups ADD COLUMN change_window_id VARCHAR(36)",
+            "ALTER TABLE workgroups ADD COLUMN require_change_window BOOLEAN",
         ]
         # Migrations that never ran because they could not get their table lock in
         # _DDL_LOCK_TIMEOUT_MS. Collected rather than raised: one contended statement

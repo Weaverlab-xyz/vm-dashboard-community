@@ -16,7 +16,7 @@ import logging
 import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,9 @@ from ..models.azure import (
     AzureSSHKeyInfo,
     AzureVMInfo,
 )
-from ..services import (azure_service, azure_listing, deploy_batch, job_service,
+from ..models.schedule import SCHEDULE_FIELDS, ScheduleRequestMixin
+from ..services import (azure_service, azure_listing, change_window_service,
+                        deploy_batch, job_service,
                         cache_service, cloud_stats, region_catalog, unmanaged_vms,
                         workgroup_service)
 from ..services.azure_service import AzureError
@@ -815,6 +817,14 @@ async def _fan_out_batch(
     function, so a ``children``-carrying create_job in the same function as the single
     deploy's ``pending`` one reads as a violation whatever the runtime branch does.
     """
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     names = deploy_batch.expand_names(req.vm_name, req.count, "azure")
     deploy_batch.reject_name_collisions(db, "azure_deploy", names)
     await deploy_batch.enforce_admission(
@@ -883,9 +893,10 @@ async def _fan_out_batch(
             "location": loc,
             "resource_group": rg,
             "workgroup": workgroup,
-            "req": bulk.model_dump(),
+            "req": bulk.model_dump(exclude=SCHEDULE_FIELDS),
             "children": children,
         },
+        **_sched,
     )
     return AzureDeployResponse(
         job_id=parent.id,
@@ -909,6 +920,14 @@ async def deploy_vm(
     marketplace). Returns a job_id trackable at /api/jobs/{job_id} or /ws/jobs/{job_id}.
     ``count > 1`` fans out into a batch (see ``_fan_out_batch``).
     """
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     if req.os_type.lower() != "windows" and not req.ssh_public_key.strip():
         raise HTTPException(status_code=400, detail="ssh_public_key is required for Linux deploys.")
     loc = _resolve_location(req.location)
@@ -928,13 +947,25 @@ async def deploy_vm(
 
     # Pre-action policy gate (inert unless enabled + this action is gated).
     from ..services import admission_service
-    admission_service.enforce(
+    _gate = admission_service.enforce(
         "azure:vm:deploy",
         request={"region": loc, "instance_type": req.vm_size,
                  "image": req.image_id, "name": req.vm_name,
-                 "count": 1, "batch": False},
+                 "count": 1, "batch": False,
+                 "workgroup": workgroup},
         actor=current_user, db=db,
+        # The booking, so the gate admits a change that ACCEPTS the
+        # window it would otherwise refuse for.
+        scheduled=_sched,
+        # This seam hands the verdict to create_job below, so a policy that says a
+        # change needs a second person produces a job awaiting approval rather than
+        # a refusal. See admission_service.enforce.
+        approvable=True,
     )
+    # Merged rather than splatted separately: both dicts can carry
+    # `approval_required`, and `f(**a, **b)` with a shared key is a TypeError. OR
+    # semantics, because either reason to require approval is sufficient.
+    _sched = {**_sched, **_gate} if _gate else _sched
 
     job = job_service.create_job(
         db,
@@ -961,8 +992,9 @@ async def deploy_vm(
             # Full request so the runner can rebuild the deploy call. Only secret
             # *references* live on it, resolved at deploy time — same shape as the
             # OCI and Packer jobs.
-            "req": req.model_dump(),
+            "req": req.model_dump(exclude=SCHEDULE_FIELDS),
         },
+        **_sched,
     )
     job_service.set_cloud_resource_id(db, job.id, req.vm_name)
 
@@ -990,6 +1022,14 @@ async def bulk_deploy_vms(
     Deploy multiple Azure VMs in one request.
     Each VM gets its own job_id. One ACI Jumpoint container is shared across the batch.
     """
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     if not req.items:
         raise HTTPException(status_code=400, detail="At least one VM item is required.")
     if req.os_type.lower() != "windows" and not req.ssh_public_key.strip():
@@ -1101,9 +1141,10 @@ async def bulk_deploy_vms(
             "location": loc,
             "resource_group": rg,
             "workgroup": workgroup,
-            "req": req.model_dump(),
+            "req": req.model_dump(exclude=SCHEDULE_FIELDS),
             "children": children,
         },
+        **_sched,
     )
 
     return AzureBulkDeployResponse(
@@ -1213,6 +1254,12 @@ async def edit_vm_tags(
 @router.delete("/vms/{vm_name}")
 async def destroy_vm(
     vm_name: str,
+    # Query parameters, not a request body: this is a DELETE, and a body on DELETE is
+    # legal but poorly supported by intermediaries — and `API.del()` in app.js takes a
+    # path only. Blank on all three means "destroy now", which is every existing caller.
+    run_at: str = Query("", description="YYYY-MM-DDTHH:MM, local to run_timezone"),
+    run_timezone: str = Query("", description="IANA name; blank = UTC"),
+    change_window_id: str = Query("", description="Book into a named change window"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("azure", "delete")),
 ):
@@ -1223,13 +1270,21 @@ async def destroy_vm(
     ``azure_deploy`` job) and cloud-recovered VMs ("deployed by: unknown") have no
     such job — for those we FALL BACK: confirm the VM still exists in Azure and
     terminate it anyway, so the Azure-tab Destroy button isn't a dead 404."""
+    # Resolved before the admission gate so a workgroup-constrained destroy can
+    # ACCEPT the window the gate offers. Without this the refusal is a dead end:
+    # the operator is told to book it and has no way to.
+    _sched = change_window_service.schedule_kwargs(
+        db, run_at=run_at, run_timezone=run_timezone,
+        change_window_id=change_window_id)
+
     deploy_job = _find_deploy_job(db, "azure_deploy", "vm_name", vm_name)
 
     if not deploy_job:
         # No deploy job means no workgroup to check against, so this path is
         # admin-only by construction — the listing hides these from non-admins too.
         _assert_can_act(current_user, None, f"VM '{vm_name}'")
-        return await _destroy_without_deploy_job(vm_name, db, current_user)
+        return await _destroy_without_deploy_job(vm_name, db, current_user,
+                                                sched=_sched)
 
     # Resolve the resource group here and persist it: the runner rebuilds the call from
     # metadata, and re-deriving it there would read whatever `azure_resource_group` is
@@ -1245,6 +1300,7 @@ async def destroy_vm(
         request={"region": deploy_job.metadata_dict.get("location", ""), "name": vm_name,
                  "workgroup": deploy_job.workgroup, "has_deploy_job": True},
         actor=current_user, db=db,
+        scheduled=_sched,
     )
 
     destroy_job = job_service.create_job(
@@ -1255,6 +1311,7 @@ async def destroy_vm(
         # down; without it the destroy job belongs to no workgroup at all.
         workgroup=deploy_job.workgroup,
         metadata={"vm_name": vm_name, "deploy_job_id": deploy_job.id, "resource_group": rg},
+        **_sched,
     )
 
     job_service.log_audit(
@@ -1288,7 +1345,7 @@ class PowerOpRequest(BaseModel):
 
 
 async def _queue_one(db, current_user, *, op: str, payload: PowerOpRequest,
-                     batch_id=None) -> dict:
+                     batch_id=None, sched=None) -> dict:
     """Queue ONE Azure power op. The only path that does, single or bulk.
 
     Returns ``{"job_id", "status", "task", "warning"}``. ``task`` is always None: a
@@ -1354,6 +1411,7 @@ async def _queue_one(db, current_user, *, op: str, payload: PowerOpRequest,
         metadata={"action": op, "vm_name": payload.vm_name, "resource_group": rg,
                   "deploy_job_id": deploy_job.id if deploy_job else None,
                   "unmanaged": deploy_job is None},
+        **(sched or {}),
     )
     job_service.log_audit(db, current_user.username, "azure_power",
                           details={"action": op, "vm_name": payload.vm_name})
@@ -1380,7 +1438,7 @@ def _power_endpoint(op: str):
 BULK_OPS = ("start", "stop")
 
 
-class BulkPowerRequest(BaseModel):
+class BulkPowerRequest(ScheduleRequestMixin, BaseModel):
     """One op, many VMs. `targets` carries the same payload the single route takes.
 
     The op is a FIELD and the identifiers are in the BODY, matching every other
@@ -1405,13 +1463,21 @@ async def bulk_power(
     is a worker job, so there is nothing for this process to run.
     """
     op = payload.op.strip().lower()
+    # One booking for the whole batch — a selection split across a window boundary
+    # would be the worst of both outcomes. `{}` for an immediate op, leaving each
+    # create_job exactly as it was.
+    _sched = change_window_service.schedule_kwargs(db, **payload.schedule_fields())
     return await queue_power_batch(
         db, kind="azure", op=payload.op, targets=payload.targets,
         allowed_ops=BULK_OPS,
         queue_one=lambda target, batch_id: _queue_one(
-            db, current_user, op=op, payload=target, batch_id=batch_id),
+            db, current_user, op=op, payload=target, batch_id=batch_id,
+            sched=_sched),
         label_of=lambda target: target.vm_name,
-        created_by=current_user.username)
+        created_by=current_user.username,
+        # Tells the batch helper this is a booking, so its guard can refuse a path
+        # whose power op would run in-process NOW instead of via the worker.
+        scheduled=bool(_sched))
 
 
 router.add_api_route("/power/start", _power_endpoint("start"), methods=["POST"],
@@ -1421,7 +1487,7 @@ router.add_api_route("/power/stop", _power_endpoint("stop"), methods=["POST"],
 
 
 async def _destroy_without_deploy_job(
-    vm_name: str, db: Session, current_user: User,
+    vm_name: str, db: Session, current_user: User, *, sched: dict = None,
 ) -> dict:
     """Fallback destroy for VMs that have no completed ``azure_deploy`` job — VDI
     pool seats and cloud-recovered ("unknown") VMs.
@@ -1511,6 +1577,7 @@ async def _destroy_without_deploy_job(
         job_type="azure_destroy",
         created_by=current_user.username,
         metadata={"vm_name": vm_name, "resource_group": rg, "deploy_job_id": None},
+        **(sched or {}),
     )
     job_service.log_audit(
         db, current_user.username, "azure_destroy",
@@ -1534,6 +1601,11 @@ def create_image_from_vm(
     Capture a managed image from an Azure VM.
     If generalize=True: VM will be deallocated + generalized (VM becomes unusable).
     """
+    # `{}` for an immediate run, so the create_job below is unchanged when nobody
+    # books a window. Resolved before it, so a bad time is a 400 rather than an
+    # image job that quietly never starts.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     deploy_jobs = (
         db.query(Job)
         .filter(Job.job_type == "azure_deploy", Job.status == "completed")
@@ -1557,6 +1629,7 @@ def create_image_from_vm(
             "generalize": req.generalize,
             "resource_group": rg,
         },
+        **_sched,
     )
 
     job_service.log_audit(
@@ -1569,7 +1642,7 @@ def create_image_from_vm(
 
 # ── Export managed image to portable VHD on hub backend ──────────────────────
 
-class ExportImageRequest(BaseModel):
+class ExportImageRequest(ScheduleRequestMixin, BaseModel):
     image_name: str  # Registry name to record the exported image under
     resource_group: Optional[str] = None  # Defaults to the configured azure_resource_group
     os_type: str = "Linux"  # Guest OS recorded on the registry row ("Linux" | "Windows")
@@ -1591,6 +1664,11 @@ def export_managed_image(
     """Manually export a managed image to VHD on the hub backend and register
     it in the image registry. Useful when the auto-export during build was
     skipped or failed."""
+    # `{}` for an immediate run, so the create_job below is unchanged when nobody
+    # books a window. Resolved before it, so a bad time is a 400 rather than an
+    # image job that quietly never starts.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     rg = req.resource_group or _rg()
     job = job_service.create_job(
         db,
@@ -1599,6 +1677,7 @@ def export_managed_image(
         metadata={"image_name": image_name, "registry_name": req.image_name,
                   "resource_group": rg, "os_type": req.os_type,
                   "created_by": current_user.username},
+        **_sched,
     )
     job_service.log_audit(
         db, current_user.username, "azure_export_image",

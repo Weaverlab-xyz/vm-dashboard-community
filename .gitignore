@@ -53,6 +53,13 @@ config-bundle*.json
 # Local SQLite fallback (production uses Postgres via Docker Compose)
 *.db
 *.sqlite3
+# SQLite's sidecar files. `*.db` does not match them, so a `git add -A` while the dev
+# database happens to be mid-transaction sweeps a binary journal into the commit --
+# which is exactly how one reached a pull request.
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite3-journal
 
 # Logs
 *.log

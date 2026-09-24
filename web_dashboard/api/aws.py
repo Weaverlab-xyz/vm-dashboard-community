@@ -15,7 +15,7 @@ import logging
 import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -40,7 +40,8 @@ from ..models.aws import (
     NetworkOptions,
     SSHKeySecretDetail,
 )
-from ..services import aws_service, deploy_batch, job_service, cache_service, cloud_stats, region_catalog, workgroup_service
+from ..models.schedule import ScheduleRequestMixin
+from ..services import change_window_service, aws_service, deploy_batch, job_service, cache_service, cloud_stats, region_catalog, workgroup_service
 from ..services.aws_service import AWSError
 from .auth import require_admin, require_permission
 from ..services import vm_suspend_policy
@@ -550,6 +551,11 @@ def copy_community_ami(
     The copy runs as a background job (AWS typically takes 2–10 minutes).
     Track progress at /jobs/{job_id}.
     """
+    # `{}` for an immediate run, so the create_job below is unchanged when nobody
+    # books a window. Resolved before it, so a bad time is a 400 rather than an
+    # image job that quietly never starts.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     job = job_service.create_job(
         db,
         job_type="ami_copy",
@@ -559,6 +565,7 @@ def copy_community_ami(
             "name": req.name,
             "description": req.description,
         },
+        **_sched,
     )
 
     job_service.log_audit(
@@ -623,6 +630,14 @@ async def _fan_out_batch(
     function, so a ``children``-carrying create_job in the same function as the single
     deploy's ``pending`` one reads as a violation whatever the runtime branch does.
     """
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     names = deploy_batch.expand_names(req.instance_name, req.count, "aws")
     deploy_batch.reject_name_collisions(db, "ec2_deploy", names)
     await deploy_batch.enforce_admission(
@@ -685,6 +700,7 @@ async def _fan_out_batch(
             "pra_credential_ref": req.pra_credential_ref,
             "children": children,
         },
+        **_sched,
     )
     return DeployResponse(
         job_id=parent.id,
@@ -708,6 +724,14 @@ async def deploy_ami(
     Returns a job_id trackable at /api/jobs/{job_id} or /api/ws/jobs/{job_id}.
     ``count > 1`` fans out into a batch (see ``_fan_out_batch``).
     """
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
     region = _resolve_region(req.region)
     await _validate_ssh_key_override(req.ssh_key_secret_override)
@@ -718,13 +742,25 @@ async def deploy_ami(
 
     # Pre-action policy gate (inert unless enabled + this action is gated).
     from ..services import admission_service
-    admission_service.enforce(
+    _gate = admission_service.enforce(
         "aws:ec2:deploy",
         request={"region": region, "instance_type": req.instance_type,
                  "image": req.ami_id, "name": req.instance_name,
-                 "count": 1, "batch": False},
+                 "count": 1, "batch": False,
+                 "workgroup": workgroup},
         actor=current_user, db=db,
+        # The booking, so the gate admits a change that ACCEPTS the
+        # window it would otherwise refuse for.
+        scheduled=_sched,
+        # This seam hands the verdict to create_job below, so a policy that says a
+        # change needs a second person produces a job awaiting approval rather than
+        # a refusal. See admission_service.enforce.
+        approvable=True,
     )
+    # Merged rather than splatted separately: both dicts can carry
+    # `approval_required`, and `f(**a, **b)` with a shared key is a TypeError. OR
+    # semantics, because either reason to require approval is sufficient.
+    _sched = {**_sched, **_gate} if _gate else _sched
 
     job = job_service.create_job(
         db,
@@ -749,6 +785,7 @@ async def deploy_ami(
             "jumpoint_name": req.jumpoint_name,
             "pra_credential_ref": req.pra_credential_ref,
         },
+        **_sched,
     )
 
     job_service.log_audit(
@@ -777,6 +814,14 @@ async def bulk_deploy_amis(
     subnet, and security groups. A single ECS Jumpoint container is started for
     the entire batch (instead of one per instance). Returns a list of job IDs.
     """
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     if not req.items:
         raise HTTPException(status_code=400, detail="At least one AMI item is required.")
 
@@ -863,6 +908,7 @@ async def bulk_deploy_amis(
                 for job_id, item in job_items
             ],
         },
+        **_sched,
     )
 
     results = [
@@ -1056,6 +1102,12 @@ async def edit_instance_tags(
 @router.delete("/instances/{instance_id}", response_model=DestroyResponse)
 def destroy_instance(
     instance_id: str,
+    # Query parameters, not a request body: this is a DELETE, and a body on DELETE is
+    # legal but poorly supported by intermediaries — and `API.del()` in app.js takes a
+    # path only. Blank on all three means "destroy now", which is every existing caller.
+    run_at: str = Query("", description="YYYY-MM-DDTHH:MM, local to run_timezone"),
+    run_timezone: str = Query("", description="IANA name; blank = UTC"),
+    change_window_id: str = Query("", description="Book into a named change window"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("aws", "delete")),
 ):
@@ -1063,6 +1115,13 @@ def destroy_instance(
     Terminate a dashboard-deployed EC2 instance via the AWS API.
     Only instances tracked in the dashboard DB can be terminated here.
     """
+    # Resolved before the admission gate so a workgroup-constrained destroy can
+    # ACCEPT the window the gate offers. Without this the refusal is a dead end:
+    # the operator is told to book it and has no way to.
+    _sched = change_window_service.schedule_kwargs(
+        db, run_at=run_at, run_timezone=run_timezone,
+        change_window_id=change_window_id)
+
     deploy_job = _find_deploy_job(db, "ec2_deploy", "instance_id", instance_id)
     if not deploy_job:
         raise HTTPException(
@@ -1085,6 +1144,7 @@ def destroy_instance(
         request={"region": region, "name": instance_id,
                  "workgroup": deploy_job.workgroup, "has_deploy_job": True},
         actor=current_user, db=db,
+        scheduled=_sched,
     )
 
     destroy_job = job_service.create_job(
@@ -1099,6 +1159,7 @@ def destroy_instance(
             "deploy_job_id": deploy_job.id,
             "region": region,
         },
+        **_sched,
     )
 
     job_service.log_audit(
@@ -1139,7 +1200,7 @@ class PowerOpRequest(BaseModel):
 
 
 async def _queue_one(db, current_user, *, op: str, payload: PowerOpRequest,
-                     batch_id=None) -> dict:
+                     batch_id=None, sched=None) -> dict:
     """Queue ONE EC2 power op. The only path that does, single or bulk.
 
     Returns ``{"job_id", "status", "task", "warning"}``. ``task`` is always None: a
@@ -1205,6 +1266,7 @@ async def _queue_one(db, current_user, *, op: str, payload: PowerOpRequest,
         metadata={"action": op, "instance_id": payload.instance_id, "region": region,
                   "deploy_job_id": deploy_job.id if deploy_job else None,
                   "unmanaged": deploy_job is None},
+        **(sched or {}),
     )
     job_service.log_audit(db, current_user.username, "ec2_power",
                           details={"action": op, "instance_id": payload.instance_id})
@@ -1231,7 +1293,7 @@ def _power_endpoint(op: str):
 BULK_OPS = ("start", "stop")
 
 
-class BulkPowerRequest(BaseModel):
+class BulkPowerRequest(ScheduleRequestMixin, BaseModel):
     """One op, many VMs. `targets` carries the same payload the single route takes.
 
     The op is a FIELD and the identifiers are in the BODY, matching every other
@@ -1256,13 +1318,21 @@ async def bulk_power(
     is a worker job, so there is nothing for this process to run.
     """
     op = payload.op.strip().lower()
+    # One booking for the whole batch — a selection split across a window boundary
+    # would be the worst of both outcomes. `{}` for an immediate op, leaving each
+    # create_job exactly as it was.
+    _sched = change_window_service.schedule_kwargs(db, **payload.schedule_fields())
     return await queue_power_batch(
         db, kind="aws", op=payload.op, targets=payload.targets,
         allowed_ops=BULK_OPS,
         queue_one=lambda target, batch_id: _queue_one(
-            db, current_user, op=op, payload=target, batch_id=batch_id),
+            db, current_user, op=op, payload=target, batch_id=batch_id,
+            sched=_sched),
         label_of=lambda target: target.instance_id,
-        created_by=current_user.username)
+        created_by=current_user.username,
+        # Tells the batch helper this is a booking, so its guard can refuse a path
+        # whose power op would run in-process NOW instead of via the worker.
+        scheduled=bool(_sched))
 
 
 router.add_api_route("/power/start", _power_endpoint("start"), methods=["POST"],
@@ -1273,7 +1343,7 @@ router.add_api_route("/power/stop", _power_endpoint("stop"), methods=["POST"],
 
 # ── Export AMI to portable VHD on hub backend ────────────────────────────────
 
-class ExportImageRequest(BaseModel):
+class ExportImageRequest(ScheduleRequestMixin, BaseModel):
     image_name: str  # Registry name to record the exported image under
 
 
@@ -1293,12 +1363,18 @@ def export_ami(
     """Manually export an existing AMI to VHD on the hub backend and register
     it in the image registry. Useful when the auto-export in the Packer build
     flow was skipped or failed but the AMI itself is fine."""
+    # `{}` for an immediate run, so the create_job below is unchanged when nobody
+    # books a window. Resolved before it, so a bad time is a 400 rather than an
+    # image job that quietly never starts.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     job = job_service.create_job(
         db,
         job_type="aws_export_image",
         created_by=current_user.username,
         metadata={"ami_id": ami_id, "image_name": req.image_name,
                   "region": _aws_region(), "created_by": current_user.username},
+        **_sched,
     )
     job_service.log_audit(
         db, current_user.username, "aws_export_image",
@@ -1329,6 +1405,11 @@ def create_image_from_instance(
     may have filesystem inconsistencies — suitable for most Linux workloads.
     The image creation runs as a background job; AWS typically takes 5–20 minutes.
     """
+    # `{}` for an immediate run, so the create_job below is unchanged when nobody
+    # books a window. Resolved before it, so a bad time is a 400 rather than an
+    # image job that quietly never starts.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     job = job_service.create_job(
         db,
         job_type="ec2_create_image",
@@ -1339,6 +1420,7 @@ def create_image_from_instance(
             "description": req.description,
             "no_reboot": req.no_reboot,
         },
+        **_sched,
     )
 
     job_service.log_audit(

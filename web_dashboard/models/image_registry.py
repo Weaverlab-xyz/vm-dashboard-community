@@ -44,3 +44,12 @@ class PromoteImageRequest(BaseModel):
     target_cloud: str                            # "aws" | "azure" | "gcp"
     target_region: Optional[str] = None          # honoured for AWS / GCP same-cloud cross-region
     target_resource_group: Optional[str] = None  # honoured for Azure
+    # ── Change window ─────────────────────────────────────────────────────────
+    # Blank on all three and the promote starts as soon as the worker has capacity,
+    # which is what every existing caller does. Resolved once by
+    # change_window_service.schedule_kwargs and stamped onto the job row; never stored
+    # in job metadata, because scheduling is a property of the queue rather than of the
+    # promotion.
+    run_at: str = ""              # "YYYY-MM-DDTHH:MM" local to run_timezone
+    run_timezone: str = ""        # IANA; blank = UTC
+    change_window_id: str = ""    # a named window; its next occurrence is used

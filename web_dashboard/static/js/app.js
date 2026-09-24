@@ -124,7 +124,16 @@ window.API = {
             const detail = err.detail;
             const message = typeof detail === 'string'
                 ? detail
-                : (detail && detail.message) || `HTTP ${resp.status}`;
+                // `reasons` before the HTTP fallback: the admission guardrail answers
+                // {error, reasons: [...]} with no `message`, so every policy denial in
+                // the product used to surface as a bare "HTTP 403" and the operator was
+                // never told WHICH rule refused them. The reasons are already
+                // human-readable strings written for exactly this.
+                : (detail && detail.message)
+                  || (detail && Array.isArray(detail.reasons) && detail.reasons.length
+                        ? detail.reasons.join('; ')
+                        : null)
+                  || `HTTP ${resp.status}`;
             const e = new Error(message);
             // Entitle user-JIT Phase 4: expose request_access_url + missing
             // scope/level on the Error so callers can render a deep link.
@@ -133,6 +142,11 @@ window.API = {
                 if (detail.request_access_url) e.requestAccessUrl = detail.request_access_url;
                 if (detail.missing_scope)      e.missingScope     = detail.missing_scope;
                 if (detail.missing_level)      e.missingLevel     = detail.missing_level;
+                if (detail.error)              e.policyError      = detail.error;
+                if (Array.isArray(detail.reasons)) e.reasons       = detail.reasons;
+                // A change-window refusal carries the next occurrence so the caller can
+                // offer "book it instead" rather than leaving the operator at a dead end.
+                if (detail.schedule)           e.schedule         = detail.schedule;
             }
             // Hand the Error to toast() out of band, because no call site does: all
             // ~142 of them pass a STRING built from it (`toast(e.message, 'error')`,
@@ -173,9 +187,16 @@ window.API = {
         if (!resp.ok) {
             const err = await resp.json().catch(() => ({ detail: resp.statusText }));
             const detail = err.detail;
+            // Same `reasons` fallback as `request` above, and for the same reason: an
+            // upload refused by policy must say which rule refused it. Kept in step
+            // with that one — tests/test_api_error_reasons.js pins both.
             throw new Error(typeof detail === 'string'
                 ? detail
-                : (detail && detail.message) || `HTTP ${resp.status}`);
+                : (detail && detail.message)
+                  || (detail && Array.isArray(detail.reasons) && detail.reasons.length
+                        ? detail.reasons.join('; ')
+                        : null)
+                  || `HTTP ${resp.status}`);
         }
         return resp.json();
     },
@@ -378,6 +399,149 @@ window.afterDeploy = function (resp, opts) {
 // `_override_key`), its `showToast` if it has one, and its `guestToolsMaybeReady` and
 // `canOp` when present. Nothing here is a getter: tests/template_helpers_check.js
 // extracts helpers by the literal `name(args) {` shape and cannot see one.
+// ── Change-window scheduling, shared by every run form ───────────────────────
+//
+// Spread into a page's Alpine component the same way bulkPowerState() is:
+//
+//     x-data="awsPage()"   →   function awsPage() { return { ...scheduleState(), … } }
+//
+// and render the control with the partial:
+//
+//     {% from "partials/schedule_picker.html" import schedule_picker %}
+//     {{ schedule_picker() }}
+//
+// The page then spreads `schedulePayload()` into whatever body it POSTs. THAT is the
+// step to get right: a page that renders the picker but forgets the spread offers a
+// control that silently does nothing, which is worse than not offering it. There were
+// four post sites on the Config Management page alone and three of them would have
+// been missed by hand — tests/test_schedule_picker_wiring.py pins every page that
+// renders the partial against the bodies it posts.
+//
+// Nothing here is a getter, matching the note on bulkPowerState below:
+// tests/template_helpers_check.js extracts helpers by the literal `name(args) {`
+// shape and cannot see one.
+// Turn a change-window refusal into one click.
+//
+// `admission_service` refuses an action against a workgroup that may only be changed
+// inside its window, and attaches the next occurrence as `detail.schedule` — which
+// API.request lifts onto the Error as `e.schedule`. Without this helper the operator
+// reads "the next window opens Saturday 02:00" and has to go and find a form that can
+// book it; for a destroy there was no such form at all, so the refusal was a dead end.
+//
+// `retry(changeWindowId)` re-issues the ORIGINAL request with the window attached.
+// Returns true if it booked (the caller should treat that as success), false if this
+// error was not a bookable refusal (the caller should report it as before).
+window.bookInstead = async function (e, retry) {
+    const offer = e && e.schedule;
+    if (!offer || !offer.change_window_id) return false;
+    const when = String(offer.next_start || '').replace('T', ' ').slice(0, 16);
+    const ok = confirm(
+        (e.message || 'That change is outside the allowed window.')
+        + '
+
+Schedule it for the next "' + offer.window_name + '" window'
+        + (when ? ' (' + when + ' UTC)' : '') + ' instead?');
+    if (!ok) return false;
+    await retry(offer.change_window_id);
+    return true;
+};
+
+window.scheduleState = function () {
+    return {
+        // 'now' is the default and must stay so. In that mode schedulePayload()
+        // returns three empty strings, the server's resolve() reads that as "run now"
+        // and returns {}, and create_job is called exactly as it was before this
+        // feature existed. Every page inherits that property by using this helper.
+        scheduleMode: 'now',
+        scheduleModes: [
+            { id: 'now', label: 'Now' },
+            { id: 'at', label: 'At a time' },
+            { id: 'window', label: 'Change window' },
+        ],
+        runAt: '',
+        // The BROWSER's zone, not UTC. `datetime-local` yields wall-clock text with no
+        // offset, so a server assuming UTC would move every booking by the operator's
+        // offset with nothing on screen to explain it.
+        runTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+        changeWindowId: '',
+        changeWindows: [],
+
+        scheduleWindow() {
+            return this.changeWindows.find(w => w.id === this.changeWindowId) || null;
+        },
+
+        // True when the chosen mode has everything it needs. Pages put this in their
+        // submit button's :disabled so "At a time" with no time cannot be posted as an
+        // immediate run — which is what would otherwise happen, since the server reads
+        // a blank run_at as "now".
+        scheduleReady() {
+            if (this.scheduleMode === 'at') return !!this.runAt;
+            if (this.scheduleMode === 'window') return !!this.changeWindowId;
+            return true;
+        },
+
+        scheduleVerb(busyLabel, idleLabel) {
+            if (busyLabel) return busyLabel;
+            return this.scheduleMode === 'now' ? (idleLabel || 'Run') : 'Schedule';
+        },
+
+        schedulePayload() {
+            if (this.scheduleMode === 'at') {
+                return { run_at: this.runAt, run_timezone: this.runTimezone,
+                         change_window_id: '' };
+            }
+            if (this.scheduleMode === 'window') {
+                return { run_at: '', run_timezone: '',
+                         change_window_id: this.changeWindowId };
+            }
+            return { run_at: '', run_timezone: '', change_window_id: '' };
+        },
+
+        scheduleStamp(iso) {
+            if (!iso) return '';
+            return String(iso).replace('T', ' ').slice(0, 16);
+        },
+
+        // The three scheduling fields for a bulk POWER body. Separate from
+        // schedulePayload() only so a page can render the picker for one form and
+        // still send an unbooked bulk power op if it wants; today they are the same
+        // three fields and the cloud pages share one picker for both.
+        // Bulk power's OWN booking fields, deliberately NOT the deploy form's.
+        //
+        // A page has one scheduleState() and several forms. The deploy picker lives in
+        // a MODAL, so a mode left on "At a time" by a cancelled deploy would silently
+        // book the next power op from a toolbar that showed nothing about it. Separate
+        // state means the toolbar can only book when the toolbar says so.
+        bulkPowerScheduled: false,
+        bulkPowerRunAt: '',
+        bulkPowerTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+
+        bulkPowerScheduleReady() {
+            return !this.bulkPowerScheduled || !!this.bulkPowerRunAt;
+        },
+
+        bulkPowerSchedule() {
+            if (!this.bulkPowerScheduled || !this.bulkPowerRunAt) {
+                return { run_at: '', run_timezone: '', change_window_id: '' };
+            }
+            return { run_at: this.bulkPowerRunAt,
+                     run_timezone: this.bulkPowerTimezone,
+                     change_window_id: '' };
+        },
+
+        async loadChangeWindows() {
+            try {
+                const r = await API.get('/api/change-windows?enabled_only=true');
+                this.changeWindows = (r && r.windows) || [];
+            } catch (e) {
+                // A missing picker must never break the form it sits on: "Now" still
+                // works, which is the behaviour the page had before.
+                this.changeWindows = [];
+            }
+        },
+    };
+};
+
 window.bulkPowerState = function () {
     return {
         bulkPowerBusy: false,
@@ -508,6 +672,11 @@ window.bulkPowerState = function () {
                 : typeof this.notify === 'function' ? this.notify(m, t)
                 : toast(m, t));
 
+            if (!this.bulkPowerScheduleReady()) {
+                say('Pick a time, or untick Schedule — a blank time would run this '
+                    + 'now, which is the opposite of what the tick asks for.', 'error');
+                return;
+            }
             const plan = this.bulkPowerPlan(op);
             if (plan.targets.length === 0) {
                 // No request, and no dialog. The selection is real but this op has
@@ -517,14 +686,29 @@ window.bulkPowerState = function () {
                     + ' right now — check their current state.', 'error');
                 return;
             }
-            const question = this.bulkPowerConfirm(op, plan);
+            let question = this.bulkPowerConfirm(op, plan);
+            // A booked batch is a different question from an immediate one, and the
+            // confirm is the last place to notice you left the picker on.
+            if (question && this.bulkPowerScheduled && this.bulkPowerRunAt) {
+                question += '
+
+This will be SCHEDULED for '
+                          + this.bulkPowerRunAt.replace('T', ' ')
+                          + ' (' + this.bulkPowerTimezone + '), not run now.';
+            }
             if (question && !confirm(question)) return;
 
             this.bulkPowerBusy = true;
             this.bulkPowerOp = op;
             try {
+                // The booking, when the page offers one. `bulkPowerSchedule()` is
+                // spread in by the cloud pages (which also spread scheduleState());
+                // a page without it sends nothing extra and behaves exactly as before.
+                const booking = typeof this.bulkPowerSchedule === 'function'
+                    ? this.bulkPowerSchedule() : {};
                 const resp = await API.post(this.bulkPowerUrl,
-                                            { op: op, targets: plan.targets });
+                                            { op: op, targets: plan.targets,
+                                              ...booking });
                 const failed = resp.failed || [];
                 let message = 'Queued ' + resp.count + ' job'
                             + (resp.count !== 1 ? 's' : '');

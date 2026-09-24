@@ -75,7 +75,7 @@ async def run_power_batch(tasks):
 
 async def queue_power_batch(db, *, kind: str, op: str, targets: list, allowed_ops,
                             queue_one, label_of, created_by: str = "",
-                            background_tasks=None) -> dict:
+                            background_tasks=None, scheduled: bool = False) -> dict:
     """Queue one power op across many VMs, one job each, sharing a ``batch_id``.
 
     ``queue_one(target, batch_id)`` is the router's own single-VM path and must return
@@ -99,6 +99,10 @@ async def queue_power_batch(db, *, kind: str, op: str, targets: list, allowed_op
 
     Returns ``{batch_id, op, count, jobs, failed, warnings}``; raises 400 when nothing
     queued, because a response saying ``count: 0`` next to a 200 reads as success.
+
+    ``scheduled`` says the caller booked this batch into a change window. It exists to
+    make one mistake impossible rather than to change what this function does: see the
+    guard in the loop below, which refuses a direct in-process task on a booked batch.
 
     ``warnings`` is the third outcome, and it is deliberately not a kind of failure:
     ``queue_one`` may return a ``warning`` string for a target it queued anyway. A cloud
@@ -158,6 +162,24 @@ async def queue_power_batch(db, *, kind: str, op: str, targets: list, allowed_op
                 # offline agent. None of them necessarily applies to the next VM.
                 failed.append({"name": label, "error": str(exc.detail)})
                 continue
+            if scheduled and result.get("task") is not None:
+                # A programming error, said out loud — the same call this module
+                # already makes about a forgotten `background_tasks`.
+                #
+                # A `task` is work THIS PROCESS runs, now. On the cloud routers it is
+                # always None, because a `*_power` row is claimed by the jobs worker
+                # and the change-window gate on that claim is what makes a booking
+                # mean anything. An on-premises DIRECT connection returns a real
+                # coroutine instead — so a router that offered scheduling on that path
+                # would create a job row booked for Saturday and then power the VM off
+                # immediately. Silently: the row would even look scheduled afterwards.
+                #
+                # Booking such a path needs the work to move behind the queue first.
+                raise RuntimeError(
+                    f"{kind}: a scheduled power batch returned a direct task for "
+                    f"{label!r}. That work would run NOW, ignoring the booking. Only "
+                    f"paths whose power op is claimed by the jobs worker may be "
+                    f"scheduled.")
             jobs.append({"name": label, "job_id": result["job_id"],
                          "status": result.get("status") or "queued"})
             # A warning is NOT a refusal — the job was queued. It exists because some
