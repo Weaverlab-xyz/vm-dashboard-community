@@ -42,10 +42,19 @@ def _skip(reason):
         sys.exit(0)
 
 
+# Probe the optional third-party deps by NAME, then import the first-party modules
+# unguarded — the shape tests/test_import_guard_narrowness.py requires. A `try` around
+# the first-party import would swallow a genuinely broken `_opa` or `admission_service`
+# as if it were a missing package, and this file would then exit 0 having tested
+# nothing: the exact silent no-op that gate was written for. `fastapi` is
+# admission_service's own import; `cryptography` is config_service's.
 try:
-    from web_dashboard.services import _opa
-except Exception as exc:  # pragma: no cover — deps absent outside CI
-    _skip(f"dashboard import unavailable: {exc}")
+    import cryptography  # noqa: F401
+    import fastapi  # noqa: F401
+except ModuleNotFoundError as exc:
+    _skip(f"optional dependency missing: {exc.name}")
+
+from web_dashboard.services import _opa  # noqa: E402
 
 if not _opa.opa_available():
     # `OPA_REQUIRED=1` turns the skip into a failure. The CI job sets it, because a
