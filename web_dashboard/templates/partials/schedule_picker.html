@@ -1,0 +1,101 @@
+{#
+  "When to run" — the change-window control, shared by every run form.
+
+  Requires the page's Alpine component to spread window.scheduleState() and to spread
+  `schedulePayload()` into whatever body it POSTs:
+
+    {% from "partials/schedule_picker.html" import schedule_picker %}
+    {{ schedule_picker() }}
+
+    function awsPage() { return { ...scheduleState(), ... } }
+    API.post('/api/aws/deploy', { ...form, ...this.schedulePayload() })
+
+  and to call `loadChangeWindows()` from its init(), and put `scheduleReady()` in its
+  submit button's :disabled.
+
+  THE SPREAD IS THE STEP THAT GETS MISSED. A page that renders this and forgets it
+  shows a working control that silently books nothing — worse than not offering one.
+  tests/test_schedule_picker_wiring.py pins every page that imports this macro against
+  the request bodies it posts.
+
+  `heading` is shown above the control; pass '' on a form that is already inside a
+  labelled card. `compact` drops the explanatory footnote for a tight sidebar.
+
+  On loops: the x-for directives below iterate a plain PROPERTY, not a helper call, so
+  they do not trip
+  tests/test_templates_parse.py::test_x_for_helpers_are_defined_in_their_page — that
+  check only flags an x-for whose source is invoked as a function, and it matches on
+  the literal text, so do not write an example of one in a comment. (This file did, and
+  failed its own check.) partials/bulk_power_toolbar.html had to expand at compile time
+  because it loops over a Jinja argument; this one does not, and server-rendering a
+  list that is fetched at runtime would only make it stale.
+
+  The timezone is a free-text input rather than a select of every IANA zone, so this
+  partial needs nothing from the page's route context. It is pre-filled with the
+  browser's own zone, which is right for almost every operator, and the server refuses
+  an unknown name with a message that names the format
+  (change_window.resolve_timezone).
+#}
+
+{% macro schedule_picker(heading='When to run', compact=false) %}
+<div class="border-t border-gray-200 pt-4 mt-1">
+  {% if heading %}
+  <label class="block text-xs font-medium text-gray-700 mb-2">{{ heading }}</label>
+  {% endif %}
+
+  <div class="flex gap-1 mb-3" role="group" aria-label="{{ heading or 'When to run' }}">
+    <template x-for="opt in scheduleModes" :key="opt.id">
+      <button type="button" @click="scheduleMode = opt.id"
+              :class="scheduleMode === opt.id
+                        ? 'bg-blue-700 text-white border-blue-700'
+                        : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'"
+              class="flex-1 text-xs font-medium px-2 py-1.5 rounded-md border transition"
+              x-text="opt.label"></button>
+    </template>
+  </div>
+
+  {# At a specific time #}
+  <div x-show="scheduleMode === 'at'" x-cloak class="space-y-2">
+    <input type="datetime-local" x-model="runAt"
+           class="w-full text-sm border border-gray-300 rounded-lg px-3 py-2
+                  focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+    <div>
+      <label class="block text-[11px] text-gray-500 mb-1">Timezone</label>
+      <input type="text" x-model="runTimezone" placeholder="UTC"
+             class="w-full text-sm border border-gray-300 rounded-lg px-3 py-2">
+    </div>
+    {% if not compact %}
+    <p class="text-[11px] text-gray-500">
+      Starts at this time, and is marked <strong>missed</strong> if it has not started
+      within the grace period — it will never run late.
+    </p>
+    {% endif %}
+  </div>
+
+  {# In a named change window #}
+  <div x-show="scheduleMode === 'window'" x-cloak class="space-y-2">
+    <select x-model="changeWindowId"
+            class="w-full text-sm border border-gray-300 rounded-lg px-3 py-2">
+      <option value="">Select a change window…</option>
+      <template x-for="w in changeWindows" :key="w.id">
+        <option :value="w.id" x-text="w.name"></option>
+      </template>
+    </select>
+    <p x-show="!changeWindows.length" x-cloak class="text-[11px] text-gray-500">
+      No change windows are defined yet. An administrator can add them in Settings.
+    </p>
+    <p x-show="scheduleWindow()" x-cloak class="text-[11px] text-gray-600">
+      <span x-text="scheduleWindow() && scheduleWindow().summary"></span><br>
+      <span x-show="scheduleWindow() && scheduleWindow().next_start" class="text-gray-500">
+        Next:
+        <span x-text="scheduleWindow() && scheduleStamp(scheduleWindow().next_start)"></span>
+        –
+        <span x-text="scheduleWindow() && scheduleStamp(scheduleWindow().next_end)"></span>
+        UTC
+      </span>
+      <span x-show="scheduleWindow() && scheduleWindow().next_error" class="text-amber-700"
+            x-text="scheduleWindow() && scheduleWindow().next_error"></span>
+    </p>
+  </div>
+</div>
+{% endmacro %}

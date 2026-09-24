@@ -221,6 +221,50 @@ def _parse_run_at(run_at: str, tz_name: str) -> datetime:
     return parsed.replace(tzinfo=tz).astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def schedule_kwargs(db: Session, *, run_at: str = "", run_timezone: str = "",
+                    change_window_id: str = "") -> dict:
+    """The scheduling arguments for ``create_job``, or ``{}`` for an immediate run.
+
+    The ONE thing a run form calls. Every page that creates a job takes the same three
+    fields off its request model, passes them here, and splats the result into
+    ``create_job``:
+
+        job_service.create_job(db, job_type=..., ...,
+                               **change_window_service.schedule_kwargs(db, **sched))
+
+    Returning an EMPTY DICT rather than a dict of Nones is the load-bearing detail.
+    Splatted into ``create_job`` it is then byte-for-byte the call that was there
+    before, so adding scheduling to a page cannot change what an unscheduled run does
+    — which is the property that makes rolling this out across a dozen forms safe.
+
+    Raises ``HTTPException(400)`` rather than ``ScheduleError`` because every caller is
+    an HTTP route and each would otherwise write the same three-line translation. The
+    messages are already operator-facing ("02:00 does not fall inside the Prod Weekend
+    window…"), so a refusal lands on the form at submit time rather than becoming a
+    change that quietly never runs.
+
+    **Approval applies to SCHEDULED changes only.** An immediate run is an operator
+    doing something now, and is unchanged. Requiring approval for those would gate
+    every button in the application — a different and much larger feature. The gate
+    here is "a change booked for later needs a second person before it fires".
+    """
+    try:
+        scheduled_for, window_ends_at, window_id = resolve(
+            db, run_at=run_at, run_timezone=run_timezone,
+            change_window_id=change_window_id)
+    except ScheduleError as exc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(exc))
+    if scheduled_for is None:
+        return {}
+    return {
+        "scheduled_for": scheduled_for,
+        "window_ends_at": window_ends_at,
+        "change_window_id": window_id,
+        "approval_required": approval_required_default(),
+    }
+
+
 def _check_lead(at: datetime, now: datetime) -> None:
     if at <= now:
         raise ScheduleError(
