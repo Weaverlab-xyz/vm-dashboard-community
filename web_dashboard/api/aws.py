@@ -1088,10 +1088,7 @@ async def edit_instance_tags(
         db, cloud="aws", targets=payload.targets,
         add=payload.add, remove=payload.remove,
         apply_one=_apply, label_of=lambda t: t.instance_id,
-        created_by=current_user.username,
-        # Tells the batch helper this is a booking, so its guard can refuse a path
-        # whose power op would run in-process NOW instead of via the worker.
-        scheduled=bool(_sched))
+        created_by=current_user.username)
 
     # The listing cache holds the old chips for up to its TTL otherwise. Process-local,
     # so a sibling gunicorn worker can still serve the previous tags for that minute —
@@ -1317,7 +1314,10 @@ async def bulk_power(
             db, current_user, op=op, payload=target, batch_id=batch_id,
             sched=_sched),
         label_of=lambda target: target.instance_id,
-        created_by=current_user.username)
+        created_by=current_user.username,
+        # Tells the batch helper this is a booking, so its guard can refuse a path
+        # whose power op would run in-process NOW instead of via the worker.
+        scheduled=bool(_sched))
 
 
 router.add_api_route("/power/start", _power_endpoint("start"), methods=["POST"],
