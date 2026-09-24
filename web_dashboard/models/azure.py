@@ -206,7 +206,7 @@ class AzureBulkDeployResponse(BaseModel):
 
 # ── Image capture ─────────────────────────────────────────────────────────────
 
-class AzureCreateImageRequest(BaseModel):
+class AzureCreateImageRequest(ScheduleRequestMixin, BaseModel):
     name: str
     description: str = ""
     generalize: bool = False   # True = deallocate+generalize (VM unusable after)

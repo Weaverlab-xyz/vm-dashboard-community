@@ -40,6 +40,7 @@ from ..models.aws import (
     NetworkOptions,
     SSHKeySecretDetail,
 )
+from ..models.schedule import ScheduleRequestMixin
 from ..services import change_window_service, aws_service, deploy_batch, job_service, cache_service, cloud_stats, region_catalog, workgroup_service
 from ..services.aws_service import AWSError
 from .auth import require_admin, require_permission
@@ -550,6 +551,11 @@ def copy_community_ami(
     The copy runs as a background job (AWS typically takes 2–10 minutes).
     Track progress at /jobs/{job_id}.
     """
+    # `{}` for an immediate run, so the create_job below is unchanged when nobody
+    # books a window. Resolved before it, so a bad time is a 400 rather than an
+    # image job that quietly never starts.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     job = job_service.create_job(
         db,
         job_type="ami_copy",
@@ -559,6 +565,7 @@ def copy_community_ami(
             "name": req.name,
             "description": req.description,
         },
+        **_sched,
     )
 
     job_service.log_audit(
@@ -1300,7 +1307,7 @@ router.add_api_route("/power/stop", _power_endpoint("stop"), methods=["POST"],
 
 # ── Export AMI to portable VHD on hub backend ────────────────────────────────
 
-class ExportImageRequest(BaseModel):
+class ExportImageRequest(ScheduleRequestMixin, BaseModel):
     image_name: str  # Registry name to record the exported image under
 
 
@@ -1320,12 +1327,18 @@ def export_ami(
     """Manually export an existing AMI to VHD on the hub backend and register
     it in the image registry. Useful when the auto-export in the Packer build
     flow was skipped or failed but the AMI itself is fine."""
+    # `{}` for an immediate run, so the create_job below is unchanged when nobody
+    # books a window. Resolved before it, so a bad time is a 400 rather than an
+    # image job that quietly never starts.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     job = job_service.create_job(
         db,
         job_type="aws_export_image",
         created_by=current_user.username,
         metadata={"ami_id": ami_id, "image_name": req.image_name,
                   "region": _aws_region(), "created_by": current_user.username},
+        **_sched,
     )
     job_service.log_audit(
         db, current_user.username, "aws_export_image",
@@ -1356,6 +1369,11 @@ def create_image_from_instance(
     may have filesystem inconsistencies — suitable for most Linux workloads.
     The image creation runs as a background job; AWS typically takes 5–20 minutes.
     """
+    # `{}` for an immediate run, so the create_job below is unchanged when nobody
+    # books a window. Resolved before it, so a bad time is a 400 rather than an
+    # image job that quietly never starts.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     job = job_service.create_job(
         db,
         job_type="ec2_create_image",
@@ -1366,6 +1384,7 @@ def create_image_from_instance(
             "description": req.description,
             "no_reboot": req.no_reboot,
         },
+        **_sched,
     )
 
     job_service.log_audit(

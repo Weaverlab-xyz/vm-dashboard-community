@@ -148,7 +148,7 @@ class CommunityAMIListResponse(BaseModel):
     count: int
 
 
-class CopyAMIRequest(BaseModel):
+class CopyAMIRequest(ScheduleRequestMixin, BaseModel):
     source_ami_id: str = Field(..., description="Public AMI ID to copy")
     name: str = Field(..., description="Name for the private copy")
     description: str = Field(default="", description="Optional description")
@@ -199,7 +199,7 @@ class BulkDeployResponse(BaseModel):
     batch_id: Optional[str] = None
 
 
-class CreateImageRequest(BaseModel):
+class CreateImageRequest(ScheduleRequestMixin, BaseModel):
     name: str = Field(..., description="Name for the new AMI")
     description: str = Field(default="", description="Optional description")
     no_reboot: bool = Field(default=True, description="If True, instance is not rebooted before imaging")

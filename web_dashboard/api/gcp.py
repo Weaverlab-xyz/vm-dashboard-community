@@ -30,7 +30,7 @@ from ..models.gcp import (
     GCPNetworkOptions,
     GCPSSHKeyDetail,
 )
-from ..models.schedule import SCHEDULE_FIELDS
+from ..models.schedule import SCHEDULE_FIELDS, ScheduleRequestMixin
 from ..services import change_window_service, cache_service, cloud_stats, deploy_batch, job_service, region_catalog, workgroup_service
 from ..services import gcp_service
 from .auth import require_admin, require_permission
@@ -944,6 +944,11 @@ def create_image_from_instance(
     db: Session = Depends(get_db),
 ):
     """Capture a GCE instance as a custom image. Runs in background."""
+    # `{}` for an immediate run, so the create_job below is unchanged when nobody
+    # books a window. Resolved before it, so a bad time is a 400 rather than an
+    # image job that quietly never starts.
+    _sched = change_window_service.schedule_kwargs(db, **payload.schedule_fields())
+
     project_id = _gcp_project()
     if not project_id:
         raise HTTPException(status_code=400, detail="GCP project ID not configured.")
@@ -963,6 +968,7 @@ def create_image_from_instance(
             "project_id": project_id,
             "zone": zone,
         },
+        **_sched,
     )
     return GCPDeployResponse(
         job_id=job.id, status="pending",
@@ -1233,7 +1239,7 @@ router.add_api_route("/power/stop", _power_endpoint("stop"), methods=["POST"],
 
 # ── Export custom image to portable VHD on hub backend ───────────────────────
 
-class ExportImageRequest(BaseModel):
+class ExportImageRequest(ScheduleRequestMixin, BaseModel):
     image_name: str  # Registry name to record the exported image under
 
 
@@ -1253,6 +1259,11 @@ def export_custom_image(
     """Manually export a custom GCE image to VHD on the hub backend and
     register it in the image registry. Useful when the auto-export during
     build was skipped or failed."""
+    # `{}` for an immediate run, so the create_job below is unchanged when nobody
+    # books a window. Resolved before it, so a bad time is a 400 rather than an
+    # image job that quietly never starts.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     project_id = _gcp_project()
     if not project_id:
         raise HTTPException(status_code=400, detail="GCP project ID not configured.")
@@ -1263,6 +1274,7 @@ def export_custom_image(
         created_by=current_user.username,
         metadata={"image_name": image_name, "registry_name": req.image_name,
                   "project_id": project_id, "created_by": current_user.username},
+        **_sched,
     )
     job_service.log_audit(
         db, current_user.username, "gcp_export_image",

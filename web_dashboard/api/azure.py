@@ -38,7 +38,7 @@ from ..models.azure import (
     AzureSSHKeyInfo,
     AzureVMInfo,
 )
-from ..models.schedule import SCHEDULE_FIELDS
+from ..models.schedule import SCHEDULE_FIELDS, ScheduleRequestMixin
 from ..services import (azure_service, azure_listing, change_window_service,
                         deploy_batch, job_service,
                         cache_service, cloud_stats, region_catalog, unmanaged_vms,
@@ -1563,6 +1563,11 @@ def create_image_from_vm(
     Capture a managed image from an Azure VM.
     If generalize=True: VM will be deallocated + generalized (VM becomes unusable).
     """
+    # `{}` for an immediate run, so the create_job below is unchanged when nobody
+    # books a window. Resolved before it, so a bad time is a 400 rather than an
+    # image job that quietly never starts.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     deploy_jobs = (
         db.query(Job)
         .filter(Job.job_type == "azure_deploy", Job.status == "completed")
@@ -1586,6 +1591,7 @@ def create_image_from_vm(
             "generalize": req.generalize,
             "resource_group": rg,
         },
+        **_sched,
     )
 
     job_service.log_audit(
@@ -1598,7 +1604,7 @@ def create_image_from_vm(
 
 # ── Export managed image to portable VHD on hub backend ──────────────────────
 
-class ExportImageRequest(BaseModel):
+class ExportImageRequest(ScheduleRequestMixin, BaseModel):
     image_name: str  # Registry name to record the exported image under
     resource_group: Optional[str] = None  # Defaults to the configured azure_resource_group
     os_type: str = "Linux"  # Guest OS recorded on the registry row ("Linux" | "Windows")
@@ -1620,6 +1626,11 @@ def export_managed_image(
     """Manually export a managed image to VHD on the hub backend and register
     it in the image registry. Useful when the auto-export during build was
     skipped or failed."""
+    # `{}` for an immediate run, so the create_job below is unchanged when nobody
+    # books a window. Resolved before it, so a bad time is a 400 rather than an
+    # image job that quietly never starts.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     rg = req.resource_group or _rg()
     job = job_service.create_job(
         db,
@@ -1628,6 +1639,7 @@ def export_managed_image(
         metadata={"image_name": image_name, "registry_name": req.image_name,
                   "resource_group": rg, "os_type": req.os_type,
                   "created_by": current_user.username},
+        **_sched,
     )
     job_service.log_audit(
         db, current_user.username, "azure_export_image",

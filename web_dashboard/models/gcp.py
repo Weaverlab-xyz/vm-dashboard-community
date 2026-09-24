@@ -145,7 +145,7 @@ class GCPBulkDeployResponse(BaseModel):
     batch_id: Optional[str] = None
 
 
-class GCPCreateImageRequest(BaseModel):
+class GCPCreateImageRequest(ScheduleRequestMixin, BaseModel):
     image_name: str
     description: str = ""
 
