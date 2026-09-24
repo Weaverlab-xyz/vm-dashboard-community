@@ -109,7 +109,8 @@ async def deploy_cell(
         request={"region": region, "zone": zone,
                  "instance_type": payload.machine_type,
                  "image": payload.image_self_link,
-                 "name": payload.instance_name, "count": 1, "batch": False},
+                 "name": payload.instance_name, "count": 1, "batch": False,
+                 "workgroup": workgroup},
         actor=current_user, db=db,
     )
 

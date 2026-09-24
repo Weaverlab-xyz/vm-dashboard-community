@@ -842,13 +842,25 @@ async def deploy_instance(
     # region must come from the *requested* zone so the allowed-regions guardrail
     # checks where the VM actually lands, not the global default region.
     from ..services import admission_service
-    admission_service.enforce(
+    _gate = admission_service.enforce(
         "gcp:gce:deploy",
         request={"region": region, "zone": zone,
                  "instance_type": payload.machine_type, "image": payload.image_self_link,
-                 "name": payload.instance_name, "count": 1, "batch": False},
+                 "name": payload.instance_name, "count": 1, "batch": False,
+                 "workgroup": workgroup},
         actor=current_user, db=db,
+        # The booking, so the gate admits a change that ACCEPTS the
+        # window it would otherwise refuse for.
+        scheduled=_sched,
+        # This seam hands the verdict to create_job below, so a policy that says a
+        # change needs a second person produces a job awaiting approval rather than
+        # a refusal. See admission_service.enforce.
+        approvable=True,
     )
+    # Merged rather than splatted separately: both dicts can carry
+    # `approval_required`, and `f(**a, **b)` with a shared key is a TypeError. OR
+    # semantics, because either reason to require approval is sufficient.
+    _sched = {**_sched, **_gate} if _gate else _sched
 
     await _validate_gcp_ssh_override(project_id, payload)
 

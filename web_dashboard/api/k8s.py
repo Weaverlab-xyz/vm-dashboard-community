@@ -171,19 +171,26 @@ def provision_cluster(
         "register_token_in_passwordsafe": payload.register_token_in_passwordsafe,
     }.items() if v is not None}
 
+    # Resolved BEFORE the gate, not inline in the call below, because the gate needs
+    # it: a workgroup that may only be changed inside a maintenance window is enforced
+    # from `input.request.workgroup`. Resolving it twice would also mean validating the
+    # caller's membership twice.
+    workgroup = _resolve_workgroup(db, current_user, payload.workgroup)
+
     # Pre-action policy gate (inert unless enabled + this action is gated).
     from ..services import admission_service
     admission_service.enforce(
         "k8s:provision",
         request={"region": payload.region, "instance_type": payload.node_instance_type,
-                 "name": payload.name, "node_count": payload.node_count},
+                 "name": payload.name, "node_count": payload.node_count,
+                 "workgroup": workgroup},
         actor=current_user, db=db,
     )
     try:
         result = k8s_service.create_cluster(
             db, cloud=payload.cloud, name=payload.name, region=payload.region,
             created_by=current_user.username,
-            workgroup=_resolve_workgroup(db, current_user, payload.workgroup), **opts,
+            workgroup=workgroup, **opts,
         )
     except K8sError as e:
         raise HTTPException(status_code=400, detail=str(e))

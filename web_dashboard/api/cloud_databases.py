@@ -381,13 +381,19 @@ async def provision_database(
     region = _resolve_db_region(payload.cloud, payload.region)
     await _reject_cross_region_network(payload.engine, payload.cloud, region, opts)
 
+    # Resolved BEFORE the gate — see the same note in api/k8s.py: the change-window
+    # check reads `input.request.workgroup`, and resolving inline below would both hide
+    # it from policy and re-validate the caller's membership a second time.
+    workgroup = _resolve_workgroup(db, current_user, payload.workgroup)
+
     # Pre-action policy gate (inert unless enabled + this action is gated).
     from ..services import admission_service
     admission_service.enforce(
         "clouddb:provision",
         request={"region": region, "engine": payload.engine,
                  "cloud": payload.cloud, "name": payload.name,
-                 "instance_type": payload.instance_class or payload.tier or payload.sku_name or ""},
+                 "instance_type": payload.instance_class or payload.tier or payload.sku_name or "",
+                 "workgroup": workgroup},
         actor=current_user, db=db,
     )
     try:
@@ -400,7 +406,7 @@ async def provision_database(
             pra_credential_ref=payload.pra_credential_ref,
             register_in_entitle=payload.register_in_entitle,
             register_in_passwordsafe=payload.register_in_passwordsafe,
-            workgroup=_resolve_workgroup(db, current_user, payload.workgroup), **opts,
+            workgroup=workgroup, **opts,
         )
     except cloud_database_service.CloudDatabaseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

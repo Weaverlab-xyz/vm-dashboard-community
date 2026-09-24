@@ -220,14 +220,62 @@ def test_enforce_fails_closed_on_engine_error():
     assert _js.audits[-1][1] == "aws:ec2:deploy:denied"
 
 
-def test_enforce_needs_approval_is_advisory_allow():
+def test_enforce_needs_approval_gates_a_seam_that_can_act():
+    """Community HAS an approval gate now — Job.approval_required, the approve
+    endpoint, the `change_windows:use` permission — so this verdict is enforced rather
+    than logged.
+
+    A seam that passes `approvable=True` is promising to hand the result to
+    create_job, so it is admitted WITH the requirement attached.
+    """
     _reset()
     CONF["admission_control_enabled"] = "1"
     CONF["admission_gated_actions"] = "aws:ec2:deploy"
     _opa._value = {"r": {"needs_approval": ["a human should look"]}}
-    # community has no approval gate → advisory, must NOT raise
-    adm.enforce("aws:ec2:deploy", request={"region": "x"}, actor=_Actor(), db=object())
-    assert _js.audits == []  # not a denial
+    out = adm.enforce("aws:ec2:deploy", request={"region": "x"}, actor=_Actor(),
+                      db=object(), approvable=True)
+    assert out == {"approval_required": True}, out
+    # Audited as its own action, NOT as a denial: the change was admitted.
+    assert [a[1] for a in _js.audits] == ["aws:ec2:deploy:needs_approval"], _js.audits
+
+
+def test_enforce_needs_approval_refuses_a_seam_that_cannot():
+    """The uniformity property, and why it is a refusal rather than a shrug.
+
+    A seam that cannot create an approval-gated job has two options: admit an action a
+    policy said needs a second person, or refuse. Admitting is the one outcome nobody
+    asked for — and it would make a policy appear to work on some pages while silently
+    doing nothing on others, which is worse than not enforcing it at all.
+    """
+    _reset()
+    CONF["admission_control_enabled"] = "1"
+    CONF["admission_gated_actions"] = "aws:ec2:deploy"
+    _opa._value = {"r": {"needs_approval": ["a human should look"]}}
+    try:
+        adm.enforce("aws:ec2:deploy", request={"region": "x"}, actor=_Actor(),
+                    db=object())
+    except Exception as exc:  # HTTPException, stubbed in this harness
+        detail = getattr(exc, "detail", {})
+        assert detail.get("error") == "needs_approval", detail
+        assert "a human should look" in detail["reasons"][0], detail
+        return
+    raise AssertionError("an un-actionable approval verdict was admitted")
+
+
+def test_an_allowed_action_returns_no_extra_job_kwargs():
+    """`enforce` returns create_job kwargs now. An ordinary allow must return an EMPTY
+    dict, so splatting it leaves every existing call byte-for-byte unchanged."""
+    _reset()
+    CONF["admission_control_enabled"] = "1"
+    CONF["admission_gated_actions"] = "aws:ec2:deploy"
+    _opa._value = {"r": {}}
+    assert adm.enforce("aws:ec2:deploy", request={"region": "x"}, actor=_Actor(),
+                       db=object()) == {}
+
+
+def test_an_ungated_action_returns_no_extra_job_kwargs():
+    _reset()
+    assert adm.enforce("aws:ec2:deploy", request={}, actor=_Actor(), db=object()) == {}
 
 
 if __name__ == "__main__":

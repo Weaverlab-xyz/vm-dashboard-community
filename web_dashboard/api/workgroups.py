@@ -33,6 +33,11 @@ class WorkgroupUpdate(BaseModel):
     display_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
     description: Optional[str] = None
     local_vm_path: Optional[str] = None
+    # Constrain every gated change against this workgroup to a maintenance window.
+    # None means "leave alone", so an existing caller is unaffected; "" clears the
+    # window. See admission_service._enforce_change_window.
+    change_window_id: Optional[str] = None
+    require_change_window: Optional[bool] = None
 
 
 class WorkgroupResponse(BaseModel):
@@ -43,6 +48,11 @@ class WorkgroupResponse(BaseModel):
     local_vm_path: Optional[str] = None
     is_default: bool
     member_count: int
+    change_window_id: Optional[str] = None
+    require_change_window: bool = False
+    # Resolved for display so the Workgroups tab can name the window without a
+    # second call, and can say so when the window it points at is gone.
+    change_window_name: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -67,7 +77,27 @@ def _to_response(db: Session, wg) -> WorkgroupResponse:
         local_vm_path=wg.local_vm_path,
         is_default=bool(wg.is_default),
         member_count=len(workgroup_service.members(db, wg.name)),
+        change_window_id=wg.change_window_id,
+        require_change_window=wg.require_change_window is True,
+        change_window_name=_window_name(db, wg.change_window_id),
     )
+
+
+def _window_name(db, window_id):
+    """The window's name for display, or None if it is unset or has been deleted.
+
+    None for a deleted one is deliberate rather than an error: the Workgroups tab
+    renders `require_change_window` with no name as "misconfigured", which is exactly
+    what it is — and what `admission_service` refuses on.
+    """
+    if not window_id:
+        return None
+    try:
+        from ..database import ChangeWindow
+        row = db.query(ChangeWindow).filter(ChangeWindow.id == window_id).first()
+        return row.name if row else None
+    except Exception:  # noqa: BLE001 — a label must never break the list
+        return None
 
 
 def _raise_from(err: WorkgroupError, default_code: int = 400) -> None:
@@ -139,6 +169,8 @@ def update_workgroup(
             display_name=payload.display_name,
             description=payload.description,
             local_vm_path=payload.local_vm_path,
+            change_window_id=payload.change_window_id,
+            require_change_window=payload.require_change_window,
         )
     except WorkgroupError as exc:
         _raise_from(exc)

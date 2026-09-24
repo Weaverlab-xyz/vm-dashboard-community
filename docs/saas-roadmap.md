@@ -118,6 +118,18 @@ the next things queued for QA.
 
 ### Approval / change-control gate for destructive automation
 
+> **Shipped in community (was fully on this list):** a **two-person approval gate**.
+> A change booked into a [change window](change-windows.md) can require sign-off from
+> a second user holding `change_windows:use` before the worker will claim it; the
+> requester cannot approve their own, rescheduling clears the approval, and the
+> decision is recorded in the audit trail. An Action-Guardrails policy emitting
+> `needs_approval` now produces such a job rather than being logged and admitted.
+>
+> **What SaaS still adds:** the gate on a defined set of high-blast-radius actions
+> executing *immediately* — community's gate is on booked changes and on what policy
+> designates, not on every destructive action by default — plus multi-tenant action
+> sets and approval routing.
+
 - **What community does:** destructive operations (decommission VM,
   `terraform destroy`, image/registry deletes, tenant hard-delete)
   execute immediately on the actor's authority. RBAC gates *who* can
@@ -128,8 +140,8 @@ the next things queued for QA.
   then does it execute, with the approval recorded in the audit trail.
   Distinct from JIT elevation (which *grants permission*); this gates
   *the act itself*.
-- **Status:** In design. *(Backlog — sketched 2026-05-30; not yet
-  specified.)*
+- **Status:** Partially shipped in community (see the note above); the
+  immediate-action and routing halves remain. *(Sketched 2026-05-30.)*
 - **Dev-testable?** Yes. Pure app-layer queue + approval state machine.
 
 ### Secret lifecycle — rotation, expiry, and scanning

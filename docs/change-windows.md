@@ -136,6 +136,56 @@ Two reasons, and the message says which:
 
 ---
 
+## Requiring a window for a whole workgroup
+
+Everything above is a **choice**: the operator picks Now, and Now is what happens. A
+workgroup-level window is a **constraint** — it cannot be bypassed by clicking Run now.
+
+**RBAC → Workgroups → Edit → Change window**, then tick **Require it**.
+
+With that set, any *gated* change against a resource in that workgroup is refused outside
+the window, with the reason and the next occurrence:
+
+```
+403  prod may only be changed during Prod Weekend
+     (Sat 02:00–06:00 (UTC), 4h). The next window opens 2026-09-26 02:00 UTC.
+```
+
+and the form offers to book it instead. **Accepting that offer is admitted** — booking
+into the named window, or picking any time that falls inside it, satisfies the
+requirement. A booking *outside* it does not; a booking is not a bypass.
+
+### Which actions it covers
+
+The same list as the guardrails: **Settings → Action Guardrails → Gated actions**. One
+list, not two — if an action is worth gating on policy, it is the kind of action a
+change window is about. Two consequences worth knowing:
+
+* **Nothing is constrained until that list has entries.** A workgroup can require a
+  window and still allow everything, if no action is gated.
+* **Power operations are not on it by default**, so a window does not block start/stop
+  unless an administrator adds them. That is usually right — powering a VM off is
+  reversible, and the [suspend schedule](cloud-vms.md) is the better tool for it.
+
+You do **not** need to enable the policy engine. `admission_control_enabled` switches
+*OPA* on; a maintenance window is enforced in the dashboard and needs no Rego.
+
+### How it fails
+
+* **Required, with a window that was deleted** → every gated change is refused, saying
+  so. An administrator picks another. Failing closed here is deliberate: somebody asked
+  for these changes to be gated, and a broken gate is not an open one.
+* **Required, with no window picked** → refused at the point of saving the workgroup,
+  not at deploy time. Storing that state would block every change with nothing to book
+  into.
+* **The dashboard cannot tell whether a window is required** (a schema problem) → the
+  change is **admitted**, and a warning is logged. The opposite direction on purpose:
+  the overwhelmingly likely cause is an install that never used the feature, and 403ing
+  every deploy on that estate would be far worse than not enforcing a constraint nobody
+  configured.
+
+---
+
 ## Requiring approval
 
 **Settings → Change Windows → Require approval for scheduled changes.**

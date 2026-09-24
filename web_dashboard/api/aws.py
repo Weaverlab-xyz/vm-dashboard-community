@@ -742,13 +742,25 @@ async def deploy_ami(
 
     # Pre-action policy gate (inert unless enabled + this action is gated).
     from ..services import admission_service
-    admission_service.enforce(
+    _gate = admission_service.enforce(
         "aws:ec2:deploy",
         request={"region": region, "instance_type": req.instance_type,
                  "image": req.ami_id, "name": req.instance_name,
-                 "count": 1, "batch": False},
+                 "count": 1, "batch": False,
+                 "workgroup": workgroup},
         actor=current_user, db=db,
+        # The booking, so the gate admits a change that ACCEPTS the
+        # window it would otherwise refuse for.
+        scheduled=_sched,
+        # This seam hands the verdict to create_job below, so a policy that says a
+        # change needs a second person produces a job awaiting approval rather than
+        # a refusal. See admission_service.enforce.
+        approvable=True,
     )
+    # Merged rather than splatted separately: both dicts can carry
+    # `approval_required`, and `f(**a, **b)` with a shared key is a TypeError. OR
+    # semantics, because either reason to require approval is sufficient.
+    _sched = {**_sched, **_gate} if _gate else _sched
 
     job = job_service.create_job(
         db,

@@ -109,6 +109,25 @@ and writes an `<action>:denied` entry to the **tamper-evident audit log**
 (see [`/api/audit/verify`](secrets-management.md)). No job is created and no cloud
 resource is touched.
 
+## `needs_approval` is enforced
+
+A rule may contribute `needs_approval` instead of `deny`. That verdict used to be
+advisory — logged and admitted — because community had no approval gate. It now has
+one, so the verdict is acted on:
+
+- On a surface that can create an approval-gated job (the cloud deploy forms), the job
+  is created **awaiting approval**: it is not claimed by the worker until somebody
+  holding `change_windows:use` approves it, and the requester cannot approve their own.
+  See [Change Windows → Requiring approval](change-windows.md#requiring-approval).
+- On a surface that cannot yet express that, the action is **refused** with a 403
+  naming the reason. Refusing rather than shrugging is deliberate: admitting an action
+  a policy said needs a second person is the one outcome nobody asked for, and a policy
+  that worked on some pages and silently did nothing on others would be worse than no
+  policy.
+
+The requirement is audited as `<action>:needs_approval`, distinct from
+`<action>:denied` — the change was admitted, just not yet runnable.
+
 ## Fails closed
 
 The guardrail uses the OPA binary bundled in the container image. If the gate is
@@ -116,6 +135,23 @@ The guardrail uses the OPA binary bundled in the container image. If the gate is
 deploys are **denied** (403) rather than silently admitted. Un-gated actions and
 the disabled state are unaffected. `OPA_BINARY` overrides the binary path;
 `ADMISSION_POLICY_DIR` overrides the policy directory.
+
+## Change windows are the other half of this
+
+`prod_window.rego` freezes changes on named **weekdays**, in UTC, for everybody. A
+[change window](change-windows.md) is the inverse and is considerably more precise: a
+named period with a start time, a length and a real timezone, attached to a
+**workgroup**, and — the part a freeze cannot do — a refusal that offers to *book* the
+change rather than just rejecting it.
+
+They share this feature's **gated actions** list, so there is one answer to "what counts
+as a change". Use the freeze for a blunt estate-wide "nothing on a Sunday"; use a change
+window when a team has an agreed maintenance period and you want work to land inside it
+rather than be turned away.
+
+A workgroup window needs no Rego and does **not** require `admission_control_enabled` —
+that flag switches the policy engine on, and a maintenance window is enforced in the
+dashboard.
 
 ## The built-in policies
 
@@ -160,8 +196,5 @@ than an exact list, replace the exact-match check with a prefix/regex rule.
 
 ## What this is not
 
-- **Not** the async human **approval gate** (two-person sign-off) — that's a
-  separate, hosted-edition feature. Community policies should use `deny` for hard
-  blocks; a `needs_approval` verdict is advisory-only here (logged, not enforced).
 - **Not** post-apply compliance scanning — this blocks *before* a deploy; it doesn't
   scan running infrastructure.
