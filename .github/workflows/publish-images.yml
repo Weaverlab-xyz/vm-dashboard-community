@@ -16,6 +16,15 @@ name: Publish images
 #   chrweav/ansible-cloud              (context: runners/ansible-cloud)
 #   chrweav/dashboard-agent            (context: runners/agent)
 #   chrweav/hypervisor-runner          (context: runners/hypervisor)
+#
+# There is deliberately no Hub description-sync step here (it would need a Hub
+# password, not the Read/Write token above). The published overview for
+# chrweav/infra-dashboard is therefore PASTED BY HAND from DOCKERHUB.md in the
+# repo root. If a release changes the runnable stack -- a new service, a renamed
+# env var, a new companion image -- update DOCKERHUB.md and re-paste it, or the
+# quickstart on Hub goes stale silently: it is the one surface no test reads and
+# the first one a new user runs. It already drifted once, through the whole
+# introduction of the `worker` service.
 
 on:
   push:
