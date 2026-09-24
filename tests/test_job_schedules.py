@@ -43,7 +43,7 @@ from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from web_dashboard.database import Base, ChangeWindow, Job, JobSchedule  # noqa: E402
+from web_dashboard.database import Base, ChangeWindow, Job  # noqa: E402
 from web_dashboard.services import job_service, schedule_service  # noqa: E402
 from web_dashboard.services.suspend_schedule import ScheduleError  # noqa: E402
 
