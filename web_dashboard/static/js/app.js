@@ -476,6 +476,33 @@ window.scheduleState = function () {
             return String(iso).replace('T', ' ').slice(0, 16);
         },
 
+        // The three scheduling fields for a bulk POWER body. Separate from
+        // schedulePayload() only so a page can render the picker for one form and
+        // still send an unbooked bulk power op if it wants; today they are the same
+        // three fields and the cloud pages share one picker for both.
+        // Bulk power's OWN booking fields, deliberately NOT the deploy form's.
+        //
+        // A page has one scheduleState() and several forms. The deploy picker lives in
+        // a MODAL, so a mode left on "At a time" by a cancelled deploy would silently
+        // book the next power op from a toolbar that showed nothing about it. Separate
+        // state means the toolbar can only book when the toolbar says so.
+        bulkPowerScheduled: false,
+        bulkPowerRunAt: '',
+        bulkPowerTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+
+        bulkPowerScheduleReady() {
+            return !this.bulkPowerScheduled || !!this.bulkPowerRunAt;
+        },
+
+        bulkPowerSchedule() {
+            if (!this.bulkPowerScheduled || !this.bulkPowerRunAt) {
+                return { run_at: '', run_timezone: '', change_window_id: '' };
+            }
+            return { run_at: this.bulkPowerRunAt,
+                     run_timezone: this.bulkPowerTimezone,
+                     change_window_id: '' };
+        },
+
         async loadChangeWindows() {
             try {
                 const r = await API.get('/api/change-windows?enabled_only=true');
@@ -619,6 +646,11 @@ window.bulkPowerState = function () {
                 : typeof this.notify === 'function' ? this.notify(m, t)
                 : toast(m, t));
 
+            if (!this.bulkPowerScheduleReady()) {
+                say('Pick a time, or untick Schedule — a blank time would run this '
+                    + 'now, which is the opposite of what the tick asks for.', 'error');
+                return;
+            }
             const plan = this.bulkPowerPlan(op);
             if (plan.targets.length === 0) {
                 // No request, and no dialog. The selection is real but this op has
@@ -628,14 +660,29 @@ window.bulkPowerState = function () {
                     + ' right now — check their current state.', 'error');
                 return;
             }
-            const question = this.bulkPowerConfirm(op, plan);
+            let question = this.bulkPowerConfirm(op, plan);
+            // A booked batch is a different question from an immediate one, and the
+            // confirm is the last place to notice you left the picker on.
+            if (question && this.bulkPowerScheduled && this.bulkPowerRunAt) {
+                question += '
+
+This will be SCHEDULED for '
+                          + this.bulkPowerRunAt.replace('T', ' ')
+                          + ' (' + this.bulkPowerTimezone + '), not run now.';
+            }
             if (question && !confirm(question)) return;
 
             this.bulkPowerBusy = true;
             this.bulkPowerOp = op;
             try {
+                // The booking, when the page offers one. `bulkPowerSchedule()` is
+                // spread in by the cloud pages (which also spread scheduleState());
+                // a page without it sends nothing extra and behaves exactly as before.
+                const booking = typeof this.bulkPowerSchedule === 'function'
+                    ? this.bulkPowerSchedule() : {};
                 const resp = await API.post(this.bulkPowerUrl,
-                                            { op: op, targets: plan.targets });
+                                            { op: op, targets: plan.targets,
+                                              ...booking });
                 const failed = resp.failed || [];
                 let message = 'Queued ' + resp.count + ' job'
                             + (resp.count !== 1 ? 's' : '');

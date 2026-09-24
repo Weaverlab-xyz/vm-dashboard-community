@@ -41,6 +41,8 @@ work to stop at the boundary, make the window long enough for the work, or split
 | Cloud VM deploys — AWS, Azure, GCP, OCI | **When to run** in the deploy dialog |
 | Image promotion | the promote request |
 | Packer image builds | the build request |
+| Image export / capture / AMI copy | the request |
+| Bulk power — AWS, Azure, GCP, OCI | **Schedule** on the selection toolbar |
 
 Any job type can be *held* for a window — that lives in the job queue itself, not in a
 form — so a surface without a picker yet can still be booked through the API by passing
@@ -67,6 +69,24 @@ A booked job appears on **Jobs** with a second badge next to its status. It is s
 > job type in the dashboard can be held for a window. What is per-page is only the
 > **picker**; a page gets it by rendering one shared partial and spreading one helper,
 > and nothing in the queue changes when it does.
+
+### Scheduling power operations
+
+The **Schedule** tick on the cloud selection toolbar books the whole selection for a
+time. It has its own time field, separate from the deploy dialog's — a mode left set by
+a dialog you cancelled must not silently book the next power operation.
+
+Two things to know:
+
+* **Only the cloud pages offer it.** An on-premises power operation against a *direct*
+  connection runs in the dashboard process rather than through the job queue, so a
+  booking there would create a scheduled-looking job and power the machine off
+  immediately. The toolbar does not offer the control on those pages, and the server
+  refuses the combination outright if one is ever wired by mistake.
+* **For a recurring power schedule, use Repeat instead** — open the resulting job and
+  repeat it in a window. And for plain business hours, the
+  [suspend schedule](cloud-vms.md) is the better tool: it understands per-VM
+  eligibility, which a generic power booking does not.
 
 ### Bulk deploys book as a unit
 

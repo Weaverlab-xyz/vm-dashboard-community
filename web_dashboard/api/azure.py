@@ -1243,7 +1243,10 @@ async def edit_vm_tags(
         db, cloud="azure", targets=payload.targets,
         add=payload.add, remove=payload.remove,
         apply_one=_apply, label_of=lambda t: t.vm_name,
-        created_by=current_user.username)
+        created_by=current_user.username,
+        # Tells the batch helper this is a booking, so its guard can refuse a path
+        # whose power op would run in-process NOW instead of via the worker.
+        scheduled=bool(_sched))
 
     await cache_service.invalidate(cache_service.key_global("azure_vms"))
     return result
@@ -1329,7 +1332,7 @@ class PowerOpRequest(BaseModel):
 
 
 async def _queue_one(db, current_user, *, op: str, payload: PowerOpRequest,
-                     batch_id=None) -> dict:
+                     batch_id=None, sched=None) -> dict:
     """Queue ONE Azure power op. The only path that does, single or bulk.
 
     Returns ``{"job_id", "status", "task", "warning"}``. ``task`` is always None: a
@@ -1395,6 +1398,7 @@ async def _queue_one(db, current_user, *, op: str, payload: PowerOpRequest,
         metadata={"action": op, "vm_name": payload.vm_name, "resource_group": rg,
                   "deploy_job_id": deploy_job.id if deploy_job else None,
                   "unmanaged": deploy_job is None},
+        **(sched or {}),
     )
     job_service.log_audit(db, current_user.username, "azure_power",
                           details={"action": op, "vm_name": payload.vm_name})
@@ -1421,7 +1425,7 @@ def _power_endpoint(op: str):
 BULK_OPS = ("start", "stop")
 
 
-class BulkPowerRequest(BaseModel):
+class BulkPowerRequest(ScheduleRequestMixin, BaseModel):
     """One op, many VMs. `targets` carries the same payload the single route takes.
 
     The op is a FIELD and the identifiers are in the BODY, matching every other
@@ -1446,11 +1450,16 @@ async def bulk_power(
     is a worker job, so there is nothing for this process to run.
     """
     op = payload.op.strip().lower()
+    # One booking for the whole batch — a selection split across a window boundary
+    # would be the worst of both outcomes. `{}` for an immediate op, leaving each
+    # create_job exactly as it was.
+    _sched = change_window_service.schedule_kwargs(db, **payload.schedule_fields())
     return await queue_power_batch(
         db, kind="azure", op=payload.op, targets=payload.targets,
         allowed_ops=BULK_OPS,
         queue_one=lambda target, batch_id: _queue_one(
-            db, current_user, op=op, payload=target, batch_id=batch_id),
+            db, current_user, op=op, payload=target, batch_id=batch_id,
+            sched=_sched),
         label_of=lambda target: target.vm_name,
         created_by=current_user.username)
 

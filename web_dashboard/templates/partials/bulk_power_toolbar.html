@@ -48,7 +48,32 @@
      'hard_reboot': 'bg-orange-500 hover:bg-orange-600 text-white',
    } %}
 
-{% macro bulk_power_buttons(ops, labels={}) %}
+{#
+  `schedulable` adds a compact "Schedule" control to the toolbar. Pass it ONLY on a page
+  whose bulk-power route accepts `run_at` / `run_timezone` — today the four cloud pages.
+  The on-premises routes ignore unknown fields rather than erroring, so offering the
+  control there would render a booking that silently never happened.
+
+  Its state is bulkPowerState's OWN (`bulkPowerScheduled` / `bulkPowerRunAt`), not the
+  page's deploy picker: those live in a modal, and a mode left set by a cancelled deploy
+  must not book a power op from a toolbar that shows nothing about it.
+#}
+{% macro bulk_power_buttons(ops, labels={}, schedulable=false) %}
+{% if schedulable %}
+<label class="flex items-center gap-1.5 text-xs text-gray-600 mr-1"
+       title="Queue these power operations for a time instead of running them now.">
+  <input type="checkbox" x-model="bulkPowerScheduled"
+         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+  Schedule
+</label>
+<input x-show="bulkPowerScheduled" x-cloak type="datetime-local"
+       x-model="bulkPowerRunAt"
+       class="text-xs border border-gray-300 rounded px-2 py-1 mr-1">
+<input x-show="bulkPowerScheduled" x-cloak type="text" x-model="bulkPowerTimezone"
+       placeholder="UTC" title="IANA timezone"
+       class="text-xs border border-gray-300 rounded px-2 py-1 w-36 mr-1">
+<span x-show="bulkPowerScheduled" class="w-px h-5 bg-blue-200 mx-1"></span>
+{% endif %}
 {% for op in ops %}
 <button @click="submitBulkPower('{{ op }}')"
         :disabled="bulkPowerBusy || !bulkOpAllowed('{{ op }}')"
