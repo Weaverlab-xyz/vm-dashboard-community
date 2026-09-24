@@ -113,6 +113,36 @@ def test_no_new_statement_carries_a_default_or_a_boolean():
             "a BOOLEAN ADD COLUMN is the canonical form of that trap: %s" % stmt)
 
 
+def test_no_migration_anywhere_defaults_a_boolean_to_an_integer():
+    """The same trap, over the WHOLE list rather than only this change's statements.
+
+    The check above is scoped to `_ours()`, which is correct for a test about the role
+    columns — and is exactly why this escaped. `ALTER TABLE users ADD COLUMN is_admin
+    BOOLEAN DEFAULT 0` had been in the list since long before that check existed, was
+    never covered by it, and PostgreSQL had been silently skipping it: an install that
+    predated the column never received it, and would fail with `column users.is_admin
+    does not exist` on the first query against `users`. SQLite accepts the integer
+    literal, so nothing in a SQLite-only suite could ever have noticed.
+
+    Found by `tests/test_postgres_migrations.py`, which runs the real statements against
+    a real PostgreSQL in CI. This is the cheap static twin of that check: it needs no
+    database, so it fails in front of whoever writes the next one rather than waiting
+    for the service-container job.
+
+    Narrower than the `_ours()` rule above on purpose. That one bans DEFAULT and BOOLEAN
+    outright, which is the right bar for a NEW retrofit; this one bans only the
+    combination that is actually invalid, because the list already contains legitimate
+    `INTEGER DEFAULT 0` and `VARCHAR DEFAULT 'x'` statements that work on both backends.
+    """
+    offenders = [s for s in _migration_statements()
+                 if re.search(r"\bBOOLEAN\s+DEFAULT\s+[01]\b", s, re.I)]
+    assert not offenders, (
+        "PostgreSQL rejects an integer literal as a BOOLEAN default and its savepoint "
+        "swallows the whole statement, so the column silently never appears on an "
+        "upgraded install. Write `DEFAULT false` / `DEFAULT true`:\n  "
+        + "\n  ".join(offenders))
+
+
 def test_no_new_statement_carries_a_foreign_key_clause():
     """Deliberate, and the delete guard in role_service depends on knowing it.
 

@@ -57,3 +57,87 @@ jobs:
             echo "::error::One or more test files failed"
           fi
           exit $fail
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  #
+  # Production runs PostgreSQL; the job above runs SQLite. That is the right trade for
+  # almost everything — the application code is dialect-neutral by design, and a service
+  # container for 400+ files would buy little — but it leaves one real gap, and the gap
+  # is SILENT in the direction that matters.
+  #
+  # `init_db`'s migration list runs each statement in its own savepoint and swallows the
+  # failure, because "column already exists" is the expected outcome on every boot after
+  # the first. A statement that is malformed *for PostgreSQL* is swallowed identically:
+  # nothing raises, nothing logs, the column never appears, and SQLite — more permissive
+  # about literals and types — keeps the suite green. Adding this job immediately found
+  # one (`ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT 0`, which PostgreSQL
+  # rejects and SQLite accepts).
+  #
+  # DELIBERATELY NOT the whole suite. Pointing every file at one shared database would
+  # not be a drop-in: 12 files use `os.environ.setdefault("DATABASE_URL", ...)` and so
+  # would silently move onto PostgreSQL, ~90 touch the database, and several call
+  # `init_db()` or seed the same usernames — 400+ sequential processes sharing one
+  # database produces cross-file interference, not signal. Isolating them properly is a
+  # separate piece of work. This job runs the files written FOR PostgreSQL, and the
+  # `tests/test_postgres_*.py` glob is the extension point for the next one.
+  postgres:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Pinned to the major version the deployment targets. A major bump belongs in
+        # its own change, next to whatever else it breaks.
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        # Without this the steps below can start before the server accepts connections,
+        # which fails as a confusing driver error rather than as "not ready yet".
+        options: >-
+          --health-cmd "pg_isready -U test -d testdb"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"  # matches the Dockerfile base image
+          cache: pip
+          cache-dependency-path: web_dashboard/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r web_dashboard/requirements.txt
+
+      - name: Run PostgreSQL schema tests
+        env:
+          # psycopg2-binary is already in requirements.txt, so the default driver works.
+          DATABASE_URL: postgresql://test:test@localhost:5432/testdb
+          JWT_SECRET_KEY: ci-postgres-schema-tests
+        run: |
+          shopt -s nullglob
+          files=(tests/test_postgres_*.py)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::no tests/test_postgres_*.py files found — this job would"\
+                 "pass without testing anything"
+            exit 1
+          fi
+          fail=0
+          for f in "${files[@]}"; do
+            echo "::group::$f"
+            python "$f" || fail=1
+            echo "::endgroup::"
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::One or more PostgreSQL test files failed"
+          fi
+          exit $fail

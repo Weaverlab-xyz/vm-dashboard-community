@@ -4017,7 +4017,18 @@ def init_db():
         Base.metadata.create_all(bind=conn)
 
         _migrations = [
-            "ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT 0",
+            # `false`, not `0`. PostgreSQL will not coerce an integer literal to a
+            # boolean default and rejects the whole statement; SQLite accepts `0`
+            # happily, so this was green everywhere and silently skipped on Postgres.
+            # Because each statement runs in its own savepoint the rollback said
+            # nothing, and the column simply never appeared. Harmless on a fresh
+            # install -- `create_all` builds `users` from the model with `is_admin`
+            # already on it, so this ALTER is a no-op there -- but an install that
+            # PREDATES the column never got it, and every query against `users`
+            # would then fail with UndefinedColumn. Found by
+            # tests/test_postgres_migrations.py, which is the only thing in the tree
+            # that runs these statements against a real PostgreSQL.
+            "ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT false",
             "ALTER TABLE users ADD COLUMN permissions TEXT",
             "ALTER TABLE users ADD COLUMN session_permissions TEXT",
             # POV accessors: a prospect's ephemeral login, bound to one POV. See the
