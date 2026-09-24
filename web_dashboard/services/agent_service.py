@@ -38,6 +38,7 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Optional
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -394,6 +395,14 @@ def lease_one(db: Session, agent: RemoteAgent) -> Optional[dict]:
 
     Returns a plain dict, not the ORM row, so the caller can build a response without
     detached-instance surprises.
+
+    The time-and-approval clauses come from ``job_service.claimable_now``, shared with
+    ``_claim_one``. They are NOT optional here and they are not a copy: a config-
+    management run against an on-prem target is agent-executed, so this is the claim
+    query a change window most often has to hold back. This function also predates
+    ``retry_after`` and never honoured it, which meant an agent-bound job that failed
+    transiently was re-leased instantly instead of waiting out its backoff; routing
+    through the shared predicate fixes that too.
     """
     allowed = allowed_job_types(agent)
     if not allowed:
@@ -403,8 +412,9 @@ def lease_one(db: Session, agent: RemoteAgent) -> Optional[dict]:
         job = (
             db.query(Job)
             .filter(Job.status == "queued", Job.agent_id == agent.id,
-                    Job.job_type.in_(allowed))
-            .order_by(Job.created_at.asc())
+                    Job.job_type.in_(allowed),
+                    *job_service.claimable_now())
+            .order_by(func.coalesce(Job.scheduled_for, Job.created_at).asc())
             .first()
         )
         if job is None:

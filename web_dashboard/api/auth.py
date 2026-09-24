@@ -271,6 +271,22 @@ PERMISSION_SCOPE_LEVELS = {
     "notifications": _RW,
     "epml": _RW,
     "ot": _RWD,
+    # Change windows and the job scheduler.
+    #
+    # `write` defines windows and recurring schedules; `use` APPROVES a change booked
+    # into one. Two levels because they are two authorities: the person who maintains
+    # the maintenance calendar is not necessarily the person allowed to sign off a
+    # production change, and an approval gate the requester can clear is not a gate.
+    # No `read` and no `delete`: reading a window is part of every run form, so gating
+    # it would mean gating Config Management on a second scope, and deleting one is a
+    # `write` on the calendar.
+    #
+    # Every route on this scope is NEW, so unlike the general case in
+    # has_permission's warning it revokes NOTHING and needs no backfill. That is also
+    # why it is gated with `require_explicit_permission`: this is an admin authority
+    # being delegated, not a previously-ungated route being tightened, and the
+    # permissive form would hand it to every legacy NULL-permission user.
+    "change_windows": ["write", "use"],
 }
 
 # Kept as a list under its original name: api/entitle_rest.py, main.py's page context,
@@ -294,7 +310,8 @@ PERMISSION_SCOPE_GROUPS = {
     "Platform": ["images", "containers", "k8s", "cloud_function", "cloud_database",
                  "storage", "secrets", "config_mgmt"],
     "POV": ["pov", "pov_templates"],
-    "Operations": ["gateways", "agents", "notifications", "epml", "ot"],
+    "Operations": ["gateways", "agents", "notifications", "epml", "ot",
+                   "change_windows"],
 }
 
 

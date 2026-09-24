@@ -15,8 +15,162 @@
       <h1 class="text-2xl font-bold text-gray-900" x-text="jobLabel()">Job Details</h1>
       <p class="text-sm text-gray-400 font-mono mt-1">{{ job_id }}</p>
     </div>
-    <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold"
-          :class="statusBadge(job.status)" x-text="job.status || '…'"></span>
+    <div class="flex items-center gap-2">
+      <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold"
+            :class="statusBadge(job.status)" x-text="job.status || '…'"></span>
+      <span x-show="job.schedule_state" x-cloak
+            class="inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold"
+            :class="scheduleBadge(job.schedule_state)"
+            x-text="scheduleLabel(job.schedule_state)"></span>
+    </div>
+  </div>
+
+  <!-- ── Change window ─────────────────────────────────────────────────────────
+       Shown only for a job that carries one. This is where the times actually live:
+       the badge above says WHAT kind of waiting this is, and this panel says until
+       when, in whose window, and what to do about it.
+  -->
+  <div x-show="job.schedule_state || job.scheduled_for" x-cloak
+       class="bg-white rounded-xl border border-gray-200 p-5 mb-6">
+    <div class="flex items-start justify-between gap-4 flex-wrap">
+      <div>
+        <p class="text-sm font-semibold text-gray-700 mb-2">Change window</p>
+        <dl class="text-sm text-gray-600 space-y-1">
+          <div x-show="job.change_window_name" class="flex gap-2">
+            <dt class="text-gray-500 w-28">Window</dt>
+            <dd class="font-medium text-gray-800" x-text="job.change_window_name"></dd>
+          </div>
+          <div x-show="job.scheduled_for" class="flex gap-2">
+            <dt class="text-gray-500 w-28">Runs at</dt>
+            <dd class="font-mono" x-text="utcStamp(job.scheduled_for)"></dd>
+          </div>
+          <div x-show="job.window_ends_at" class="flex gap-2">
+            <dt class="text-gray-500 w-28">Window ends</dt>
+            <dd class="font-mono" x-text="utcStamp(job.window_ends_at)"></dd>
+          </div>
+          <div x-show="job.approval_required" class="flex gap-2">
+            <dt class="text-gray-500 w-28">Approval</dt>
+            <dd>
+              <span x-show="job.approved_at"
+                    x-text="'approved by ' + (job.approved_by || '?') + ' at '
+                            + utcStamp(job.approved_at)"></span>
+              <span x-show="!job.approved_at" class="text-amber-700 font-medium">
+                waiting for a second person
+              </span>
+            </dd>
+          </div>
+        </dl>
+        <p class="text-xs text-gray-500 mt-3 max-w-prose"
+           x-text="scheduleTitle(job)"></p>
+      </div>
+
+      <div class="flex flex-col gap-2 min-w-[10rem]">
+        <!-- Approve. Hidden unless it would do something; the server refuses
+             self-approval regardless of whether this button is visible. -->
+        <button x-show="job.approval_required && !job.approved_at
+                        && (job.status === 'pending' || job.status === 'queued')"
+                x-cloak @click="approveChange()" :disabled="busy"
+                class="text-sm bg-green-600 hover:bg-green-700 disabled:opacity-50
+                       text-white font-medium px-3 py-2 rounded-lg transition">
+          Approve
+        </button>
+        <button x-show="job.status === 'pending' || job.status === 'queued'
+                        || job.schedule_state === 'missed'"
+                x-cloak @click="showReschedule = !showReschedule"
+                class="text-sm bg-white border border-gray-300 hover:bg-gray-50
+                       font-medium px-3 py-2 rounded-lg transition"
+                x-text="job.schedule_state === 'missed' ? 'Reschedule' : 'Change time'">
+        </button>
+      </div>
+    </div>
+
+    <!-- Reschedule / release. Also the recovery path for a missed change: the run is
+         terminal, the intent is not. -->
+    <div x-show="showReschedule" x-cloak class="mt-4 pt-4 border-t border-gray-100">
+      <p x-show="job.approval_required && job.approved_at"
+         class="text-xs text-amber-700 mb-2">
+        This change is already approved. Moving it clears that approval — the approver
+        signed off on a time, not on the job.
+      </p>
+      <div class="flex flex-wrap items-end gap-3">
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">New time</label>
+          <input type="datetime-local" x-model="newRunAt"
+                 class="text-sm border border-gray-300 rounded-lg px-3 py-2">
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">Timezone</label>
+          <input type="text" x-model="newRunTimezone" placeholder="UTC"
+                 class="text-sm border border-gray-300 rounded-lg px-3 py-2 w-48">
+        </div>
+        <button @click="reschedule(newRunAt)" :disabled="busy || !newRunAt"
+                class="text-sm bg-blue-700 hover:bg-blue-800 disabled:opacity-50
+                       text-white font-medium px-3 py-2 rounded-lg transition">
+          Move
+        </button>
+        <button @click="reschedule('')" :disabled="busy"
+                class="text-sm text-blue-600 hover:underline font-medium px-2 py-2"
+                title="Clear the schedule and let this run as soon as there is capacity">
+          Release to run now
+        </button>
+      </div>
+      <p x-show="scheduleError" x-cloak class="text-xs text-red-600 mt-2"
+         x-text="scheduleError"></p>
+    </div>
+  </div>
+
+  <!-- ── Repeat in a change window ────────────────────────────────────────────
+       The ONLY way a recurring schedule is created. A schedule reuses this job's saved
+       parameters, so the run being repeated is one that has already been validated,
+       authorized and usually already run — there is no second form to drift from this
+       one. Hidden entirely for job types whose parameters are values rather than refs.
+  -->
+  <div x-show="repeat.eligible" x-cloak
+       class="bg-white rounded-xl border border-gray-200 p-5 mb-6">
+    <div class="flex items-start justify-between gap-4 flex-wrap">
+      <div>
+        <p class="text-sm font-semibold text-gray-700">Repeat in a change window</p>
+        <p class="text-xs text-gray-500 mt-1 max-w-prose">
+          Run this same job on every occurrence of a window. It reuses the parameters
+          saved on this job, so what repeats is what you already ran.
+        </p>
+      </div>
+      <button x-show="!repeat.open" @click="repeat.open = true"
+              class="text-sm bg-white border border-gray-300 hover:bg-gray-50
+                     font-medium px-3 py-2 rounded-lg transition">Repeat…</button>
+    </div>
+
+    <div x-show="repeat.open" x-cloak class="mt-4 pt-4 border-t border-gray-100
+                                             flex flex-wrap items-end gap-3">
+      <div class="grow min-w-[12rem]">
+        <label class="block text-xs text-gray-500 mb-1">Name</label>
+        <input type="text" x-model="repeat.name" placeholder="Weekly patch baseline"
+               class="w-full text-sm border border-gray-300 rounded-lg px-3 py-2">
+      </div>
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">Change window</label>
+        <select x-model="repeat.windowId"
+                class="text-sm border border-gray-300 rounded-lg px-3 py-2">
+          <option value="">Select…</option>
+          <template x-for="w in repeat.windows" :key="w.id">
+            <option :value="w.id" x-text="w.name"></option>
+          </template>
+        </select>
+      </div>
+      <button @click="createSchedule()" :disabled="busy || !repeat.windowId"
+              class="text-sm bg-blue-700 hover:bg-blue-800 disabled:opacity-50
+                     text-white font-medium px-3 py-2 rounded-lg transition">
+        Create schedule
+      </button>
+      <button @click="repeat.open = false"
+              class="text-sm text-gray-600 hover:underline px-2 py-2">Cancel</button>
+      <p x-show="!repeat.windows.length" x-cloak
+         class="w-full text-[11px] text-gray-500">
+        No change windows are defined yet — an administrator can add them in Settings.
+      </p>
+      <p x-show="repeat.error" x-cloak class="w-full text-xs text-red-600"
+         x-text="repeat.error"></p>
+    </div>
   </div>
 
   <!-- Info grid -->
@@ -374,6 +528,101 @@
       confirmUnlock: false,
       unlocking: false,
 
+      // ── Change window ────────────────────────────────────────────────────
+      showReschedule: false,
+      newRunAt: '',
+      // The operator's own zone, for the same reason the Config Management form
+      // defaults to it: `datetime-local` has no offset, so a server that assumed UTC
+      // would move the booking by their offset with nothing on screen to explain it.
+      newRunTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+      scheduleError: '',
+      busy: false,
+
+      // Repeat-in-a-window. `eligible` starts false so the panel is hidden until the
+      // server has said this job type may be repeated at all — showing a control that
+      // then 400s teaches nothing.
+      repeat: { eligible: false, open: false, name: '', windowId: '',
+                windows: [], error: '' },
+
+      async loadRepeatOptions() {
+        try {
+          const e = await API.get(`/api/schedules/eligibility/${this.jobId}`);
+          this.repeat.eligible = !!(e && e.schedulable);
+        } catch (err) {
+          this.repeat.eligible = false;
+        }
+        if (!this.repeat.eligible) return;
+        try {
+          const r = await API.get('/api/change-windows?enabled_only=true');
+          this.repeat.windows = (r && r.windows) || [];
+        } catch (err) {
+          this.repeat.windows = [];
+        }
+      },
+
+      async createSchedule() {
+        this.repeat.error = '';
+        this.busy = true;
+        try {
+          await API.post(`/api/schedules/from-job/${this.jobId}`, {
+            name: this.repeat.name || '',
+            change_window_id: this.repeat.windowId,
+          });
+          toast('Schedule created.', 'success');
+          this.repeat.open = false;
+          window.location.href = '/schedules';
+        } catch (e) {
+          this.repeat.error = e.message || 'Could not create the schedule.';
+        } finally {
+          this.busy = false;
+        }
+      },
+
+      // Timestamps come back as naive UTC and are labelled as such rather than being
+      // silently rendered in local time. A change window read an hour wrong is exactly
+      // the failure this feature exists to prevent, so the unit is always on screen.
+      utcStamp(v) {
+        if (!v) return '–';
+        return String(v).replace('T', ' ').slice(0, 16) + ' UTC';
+      },
+
+      async approveChange() {
+        this.scheduleError = '';
+        this.busy = true;
+        try {
+          await API.post(`/api/change-windows/approvals/${this.jobId}`, {});
+          toast('Change approved — it will run in its window.', 'success');
+          await this.loadJob();
+        } catch (e) {
+          // The self-approval refusal lands here, and it is the message that teaches
+          // the feature, so it is surfaced rather than replaced with something generic.
+          this.scheduleError = e.message || 'Could not approve this change.';
+          toast(this.scheduleError, 'error');
+        } finally {
+          this.busy = false;
+        }
+      },
+
+      async reschedule(runAt) {
+        this.scheduleError = '';
+        this.busy = true;
+        try {
+          await API.post(`/api/jobs/${this.jobId}/reschedule`, {
+            run_at: runAt || '',
+            run_timezone: runAt ? (this.newRunTimezone || '') : '',
+            change_window_id: '',
+          });
+          toast(runAt ? 'Change moved.' : 'Released — this will run shortly.',
+                'success');
+          this.showReschedule = false;
+          await this.loadJob();
+        } catch (e) {
+          this.scheduleError = e.message || 'Could not move this change.';
+        } finally {
+          this.busy = false;
+        }
+      },
+
       // Fallback when the job_type isn't in JOB_ORIGIN (typically only hit
       // when a new job_type is added without updating the map). Dashboard
       // is the user's preferred fallback over /jobs.
@@ -391,6 +640,7 @@
         }
         await this.loadFindings();
         await this.loadStateLock();
+        await this.loadRepeatOptions();
       },
 
       isTerminal() {
@@ -651,6 +901,7 @@
       },
 
       statusBadge, timeAgo, formatDuration,
+      scheduleBadge, scheduleLabel, scheduleTitle,
     };
   }
 </script>

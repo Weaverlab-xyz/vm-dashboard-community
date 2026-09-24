@@ -152,6 +152,11 @@
    {% if request.url.path.startswith('/inventory') %}{{ nav_active }}{% endif %}">Inventory</a>
 <a data-nav="jobs" href="/jobs" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/jobs') %}{{ nav_active }}{% endif %}">Jobs</a>
+{# Recurring changes. Row-filtered by owner in api/schedules the same way /jobs is, so
+   the link is ungated: a user with no schedules sees an empty table, which is true,
+   rather than a missing link that reads as the feature not existing. #}
+<a data-nav="schedules" href="/schedules" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+   {% if request.url.path.startswith('/schedules') %}{{ nav_active }}{% endif %}">Schedules</a>
 
 {# ── Admin ────────────────────────────────────────────────────────── #}
 {# Agents AND their hypervisor connections — one page, two tabs. /connections lights this

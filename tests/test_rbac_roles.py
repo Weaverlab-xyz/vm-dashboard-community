@@ -204,11 +204,28 @@ def test_every_builtin_map_passes_the_role_validator():
 
 
 def test_the_read_only_role_covers_the_whole_catalog():
-    """Every scope offers `read`, so "see everything, change nothing" is exhaustive or it
-    is a silent gap -- and a gap in a built-in is held by everyone assigned it."""
+    """"See everything, change nothing" must be exhaustive over the scopes that HAVE
+    something to see, or it is a silent gap -- and a gap in a built-in is held by
+    everyone assigned it.
+
+    Scoped to the scopes that offer `read` rather than to the whole catalog, because
+    not every scope does. `change_windows` is the first: its two levels are `write`
+    (maintain the maintenance calendar) and `use` (approve a change), and listing the
+    windows is deliberately authenticated-only — every run form needs that list to
+    render its picker, so gating it would make Config Management depend on a second
+    permission, which is the silent-revocation trap docs/permissions.md warns about.
+    A scope with no `read` level has nothing a read-only role could be granted, so
+    demanding an entry would mean granting a level the catalog does not offer — which
+    `test_the_builtins_grant_only_levels_the_scope_offers` then refuses.
+    """
     ro = next(s for s in role_service._BUILTIN_ROLES if s["slug"] == "read-only")
-    missing = sorted(set(PERMISSION_SCOPES) - set(ro["permissions"]))
+    readable = {s for s in PERMISSION_SCOPES
+                if "read" in PERMISSION_SCOPE_LEVELS.get(s, ())}
+    missing = sorted(readable - set(ro["permissions"]))
     assert not missing, f"read-only omits {missing}"
+    unreadable = sorted(set(ro["permissions"]) - readable)
+    assert not unreadable, (
+        f"read-only grants read on scopes that do not offer it: {unreadable}")
     for scope, levels in ro["permissions"].items():
         assert levels == ["read"], f"read-only grants {levels} on {scope}"
 

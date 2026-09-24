@@ -928,6 +928,176 @@
         </div>
       </template>
 
+      <!-- Change windows. A row-CRUD panel rather than a config form: a window is a
+           record with a name people pick by, not a setting. The two settings that ARE
+           settings (approval, grace) sit above the table. -->
+      <template x-if="panel?.key === 'change_windows' && !panelLoading">
+        <div class="space-y-4" x-init="cw.load()">
+          <p class="text-sm text-gray-500">
+            A change window is a recurring period during which changes may <strong>start</strong>.
+            Define one here and every run form can book a job into it by name.
+            See <a href="/docs/change-windows" class="text-blue-600 underline">the change windows doc</a>.
+          </p>
+
+          <div class="rounded-lg border border-gray-200 bg-gray-50 p-3 text-[11px] text-gray-600">
+            A job that has not started by the time its window closes is marked
+            <strong>missed</strong> and never runs late — that is the point of a window
+            rather than a delay timer. A job that has already <em>started</em> is left to
+            finish: interrupting a Terraform apply or a half-applied playbook is worse
+            than running a few minutes long, so the overrun is recorded instead.
+          </div>
+
+          <!-- The two real settings -->
+          <label class="flex items-start gap-2">
+            <input type="checkbox" x-model="panelCfg.change_approval_required"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-gray-700">
+              Require approval for scheduled changes
+              <span class="block text-[11px] text-gray-500">
+                A change booked into a window waits for someone holding
+                <span class="font-mono">change_windows:use</span> before it becomes
+                eligible to run. Immediate runs are unaffected — this gates booked
+                changes, not every button in the dashboard.
+              </span>
+            </span>
+          </label>
+
+          <label class="flex items-start gap-2"
+                 x-show="panelCfg.change_approval_required" x-cloak>
+            <input type="checkbox" x-model="panelCfg.change_approval_allow_self"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-gray-700">
+              Let people approve their own changes
+              <span class="block text-[11px] text-amber-700">
+                Off is the point of the gate — an approval the requester can grant
+                themselves is not an approval. Turn this on only for a single-operator
+                install, where the alternative is not being able to use windows at all.
+              </span>
+            </span>
+          </label>
+
+          <div>
+            <label class="block text-sm text-gray-700 mb-1">
+              Grace period for a one-off time (minutes)
+            </label>
+            <input type="number" min="1" x-model.number="panelCfg.change_window_grace_minutes"
+                   class="w-32 text-sm border border-gray-300 rounded-lg px-3 py-2">
+            <p class="text-[11px] text-gray-500 mt-1">
+              A change booked for a bare time rather than a named window gets this much
+              leeway before it counts as missed. Named windows use their own length.
+            </p>
+          </div>
+
+          <!-- The windows themselves -->
+          <div class="pt-2 border-t border-gray-100">
+            <div class="flex items-center justify-between mb-2">
+              <h4 class="text-sm font-semibold text-gray-700">Windows</h4>
+              <button type="button" @click="cw.startNew()"
+                      class="text-xs bg-white border border-gray-300 hover:bg-gray-50
+                             font-medium px-2.5 py-1.5 rounded-lg">Add window</button>
+            </div>
+
+            <p x-show="!cw.loading && !cw.windows.length && !cw.draft" x-cloak
+               class="text-[11px] text-gray-500">
+              No change windows yet. Runs can still be booked for a specific time without
+              one.
+            </p>
+
+            <div class="space-y-2">
+              <template x-for="w in cw.windows" :key="w.id">
+                <div class="flex items-start justify-between gap-3 rounded-lg border
+                            border-gray-200 p-3">
+                  <div class="min-w-0">
+                    <p class="text-sm font-medium text-gray-800">
+                      <span x-text="w.name"></span>
+                      <span x-show="w.enabled === false" x-cloak
+                            class="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-gray-100
+                                   text-gray-600">disabled</span>
+                    </p>
+                    <p class="text-[11px] text-gray-500" x-text="w.summary"></p>
+                    <p x-show="w.description" x-cloak
+                       class="text-[11px] text-gray-400" x-text="w.description"></p>
+                  </div>
+                  <div class="flex items-center gap-2 shrink-0">
+                    <button type="button" @click="cw.edit(w)"
+                            class="text-xs text-blue-600 hover:underline">Edit</button>
+                    <button type="button" @click="cw.remove(w)"
+                            class="text-xs text-red-600 hover:underline">Delete</button>
+                  </div>
+                </div>
+              </template>
+            </div>
+
+            <!-- Add / edit form -->
+            <div x-show="cw.draft" x-cloak
+                 class="mt-3 rounded-lg border border-blue-200 bg-blue-50/40 p-3 space-y-2">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                  <label class="block text-[11px] text-gray-600 mb-1">Name</label>
+                  <input type="text" x-model="cw.draft.name" placeholder="Prod Weekend"
+                         class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5">
+                </div>
+                <div>
+                  <label class="block text-[11px] text-gray-600 mb-1">Timezone (IANA)</label>
+                  <input type="text" x-model="cw.draft.timezone" placeholder="UTC"
+                         class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5">
+                </div>
+                <div>
+                  <label class="block text-[11px] text-gray-600 mb-1">Starts (HH:MM)</label>
+                  <input type="text" x-model="cw.draft.start_at_local" placeholder="02:00"
+                         class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5">
+                </div>
+                <div>
+                  <label class="block text-[11px] text-gray-600 mb-1">Length (minutes)</label>
+                  <input type="number" min="1" x-model.number="cw.draft.duration_minutes"
+                         class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5">
+                </div>
+              </div>
+
+              <div>
+                <label class="block text-[11px] text-gray-600 mb-1">Days</label>
+                <div class="flex gap-1">
+                  <template x-for="(lbl, i) in cw.dayLabels" :key="i">
+                    <button type="button" @click="cw.toggleDay(i)"
+                            :class="cw.dayOn(i)
+                                      ? 'bg-blue-700 text-white border-blue-700'
+                                      : 'bg-white text-gray-600 border-gray-300'"
+                            class="text-[11px] px-2 py-1 rounded border"
+                            x-text="lbl"></button>
+                  </template>
+                </div>
+              </div>
+
+              <div>
+                <label class="block text-[11px] text-gray-600 mb-1">Description (optional)</label>
+                <input type="text" x-model="cw.draft.description"
+                       class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5">
+              </div>
+
+              <label class="flex items-center gap-2">
+                <input type="checkbox" x-model="cw.draft.enabled"
+                       class="rounded border-gray-300 text-blue-600">
+                <span class="text-[11px] text-gray-600">
+                  Enabled — offered on run forms. Disabling retires a window without
+                  touching changes already booked into it.
+                </span>
+              </label>
+
+              <p x-show="cw.error" x-cloak class="text-[11px] text-red-600"
+                 x-text="cw.error"></p>
+
+              <div class="flex gap-2">
+                <button type="button" @click="cw.save()" :disabled="cw.saving"
+                        class="text-xs bg-blue-700 hover:bg-blue-800 disabled:opacity-50
+                               text-white font-medium px-3 py-1.5 rounded-lg">Save</button>
+                <button type="button" @click="cw.cancel()"
+                        class="text-xs text-gray-600 hover:underline px-2">Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
+
       <template x-if="panel?.key === 'worker' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
@@ -7041,6 +7211,8 @@ function settingsPage() {
         desc: 'Sign in with any OpenID Connect provider — Okta, Auth0, Keycloak, Authentik, Authelia, Google Workspace, JumpCloud, Ping, GitLab. Configured from the issuer URL; endpoints are discovered automatically.' },
       { key: 'worker',       label: 'Job Worker',              hasConfig: true,  enabled: true, configOnly: true,
         desc: 'How many background jobs run at once, per kind. Raise the poll-only limit if image exports and copies queue up; raise the heavy limit to provision more clusters or databases in parallel. Takes effect within seconds, no restart.' },
+      { key: 'change_windows', label: 'Change Windows',        hasConfig: true,  enabled: true, configOnly: true,
+        desc: 'Named periods during which changes may start — "Prod Weekend, Sat 02:00–06:00 New York". Any run form can then book a job into one by name instead of starting it now. A job that misses its window is marked missed and never runs late. Optionally require a second person to approve a booked change before it fires.' },
     ],
 
     // OIDC discovery probe result (Test connection in the SSO panel).
@@ -7094,6 +7266,119 @@ function settingsPage() {
       draft: null,           // the endpoint being added/edited, or null
       saving: false, testingId: '',
       testResult: null,      // { id, ok, error, status_code }
+    },
+
+    // Change windows. Self-contained — every method below uses only `this` (the `cw`
+    // object) plus the page-global API/toast helpers, so it needs nothing from the root
+    // component and can be read in one place. The two approval settings and the grace
+    // period are ordinary config keys and ride `panelCfg` like every other setting.
+    cw: {
+      windows: [], loading: false, saving: false, error: '',
+      draft: null,           // the window being added/edited, or null
+      dayLabels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+
+      async load() {
+        this.loading = true;
+        this.error = '';
+        try {
+          // Not enabled_only: an administrator managing the calendar needs to see the
+          // retired ones, which is the whole difference between disabling and deleting.
+          const r = await API.get('/api/change-windows');
+          this.windows = (r && r.windows) || [];
+        } catch (e) {
+          this.error = e.message || 'Could not load change windows.';
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      blank() {
+        return { id: '', name: '', start_at_local: '02:00', duration_minutes: 240,
+                 // Blank resolves to UTC server-side rather than to the server's local
+                 // zone, which is an accident of the container image.
+                 timezone: '', schedule_days: '1111111', description: '',
+                 enabled: true };
+      },
+
+      startNew() { this.error = ''; this.draft = this.blank(); },
+
+      edit(w) {
+        this.error = '';
+        this.draft = {
+          id: w.id, name: w.name || '',
+          start_at_local: w.start_at_local || '02:00',
+          duration_minutes: w.duration_minutes || 240,
+          // "UTC" is what describe() renders for an unset zone; send it back as blank
+          // so a round-trip through this form does not turn an unset zone into a pinned
+          // one. They behave identically, but the stored value should not drift.
+          timezone: (w.timezone === 'UTC' ? '' : (w.timezone || '')),
+          schedule_days: w.schedule_days || '1111111',
+          description: w.description || '',
+          enabled: w.enabled !== false,
+        };
+      },
+
+      cancel() { this.draft = null; this.error = ''; },
+
+      dayOn(i) {
+        return this.draft && this.draft.schedule_days.charAt(i) === '1';
+      },
+
+      toggleDay(i) {
+        if (!this.draft) return;
+        const chars = this.draft.schedule_days.split('');
+        chars[i] = chars[i] === '1' ? '0' : '1';
+        this.draft.schedule_days = chars.join('');
+      },
+
+      async save() {
+        if (!this.draft) return;
+        this.saving = true;
+        this.error = '';
+        const body = {
+          name: this.draft.name,
+          start_at_local: this.draft.start_at_local,
+          duration_minutes: this.draft.duration_minutes,
+          timezone: this.draft.timezone,
+          schedule_days: this.draft.schedule_days,
+          description: this.draft.description,
+          enabled: this.draft.enabled,
+        };
+        try {
+          if (this.draft.id) {
+            await API.put(`/api/change-windows/${this.draft.id}`, body);
+          } else {
+            await API.post('/api/change-windows', body);
+          }
+          this.draft = null;
+          await this.load();
+          toast('Change window saved.', 'success');
+        } catch (e) {
+          // The server's refusals here are the ones that teach the feature — a zero
+          // length window, an unknown timezone, a day mask with nothing selected — so
+          // they are shown verbatim rather than replaced with something generic.
+          this.error = e.message || 'Could not save this change window.';
+        } finally {
+          this.saving = false;
+        }
+      },
+
+      async remove(w) {
+        if (!confirm(`Delete the change window "${w.name}"?\n\n`
+                     + 'Changes already booked into it keep their times and still run; '
+                     + 'they just lose the name. To stop it being offered on run forms '
+                     + 'without deleting it, edit it and clear Enabled.')) return;
+        this.error = '';
+        try {
+          await API.del(`/api/change-windows/${w.id}`);
+          await this.load();
+          toast('Change window deleted.', 'success');
+        } catch (e) {
+          // Includes the refusal when changes are still booked into it.
+          this.error = e.message || 'Could not delete this change window.';
+          toast(this.error, 'error');
+        }
+      },
     },
 
     // Cross-cloud per-region config sets — the Multi-region panel. One state block

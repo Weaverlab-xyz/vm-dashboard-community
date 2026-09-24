@@ -153,6 +153,12 @@ _NAV_EXEMPT = {
     "secrets": "vault administration (require_admin)",
     # api/jobs.py filters rows by can_audit_jobs (jobs:read) rather than gating the route.
     "jobs": "row-filtered via can_audit_jobs",
+    # Same shape as `jobs`, and exempt for the same reason: api/schedules.py scopes every
+    # route to the caller's own rows (falling back to can_audit_jobs), so the page shows
+    # an empty table rather than 403ing. NOT keyed on `change_windows` — that scope is
+    # the maintenance CALENDAR and the approval authority, whereas repeating your own job
+    # is the same right as running it, which you already have.
+    "schedules": "row-filtered by owner via can_audit_jobs",
     # Its own nav entry, but it is the POV detail page's sibling under the `pov` scope.
     "pov_templates": "has the `pov_templates` scope",
     # An outbound link to the operator's Entitle portal, not a page on this app. Gating it

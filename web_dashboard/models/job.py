@@ -20,6 +20,20 @@ class JobResponse(BaseModel):
     created_by: Optional[str]
     error_message: Optional[str]
     duration_seconds: Optional[int]
+    # ── Change window / scheduler ─────────────────────────────────────────────
+    # `schedule_state` is derived SERVER-SIDE (job_service.schedule_state) rather than
+    # from the fields below, because the jobs list and the job detail page would
+    # otherwise each reimplement "is this scheduled, or merely pending?" and the two
+    # would disagree the first time either was edited. One string, one definition.
+    #
+    # Empty on every job that carries no schedule, which is almost all of them.
+    schedule_state: str = ""          # "" | scheduled | awaiting_approval | missed | overran
+    scheduled_for: Optional[datetime] = None
+    window_ends_at: Optional[datetime] = None
+    change_window_name: Optional[str] = None   # resolved for display; None = ad-hoc time
+    approval_required: bool = False
+    approved_at: Optional[datetime] = None
+    approved_by: Optional[str] = None
 
     class Config:
         from_attributes = True

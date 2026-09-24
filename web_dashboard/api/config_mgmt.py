@@ -482,6 +482,58 @@ class RunRequest(BaseModel):
     connection_id: str = ""   # the agent-bound hypervisor connection a VM was synced from
     transport: str = ""       # "ssh" | "winrm" | "local"
     port: int = 0             # the port on the target; 0 = derive from the transport
+    # ── Change window ─────────────────────────────────────────────────────────
+    # Leave all three blank and the run starts as soon as the worker has capacity, which
+    # is what every existing caller does and what every existing caller keeps doing.
+    #
+    # These are resolved to a concrete pair of UTC instants ONCE, by
+    # change_window_service.resolve, and stamped onto the job row — they are not stored
+    # in the job metadata and are not re-read at run time. That is why they do NOT need
+    # an entry in ansible_run_meta.RUN_META_KEYS: scheduling is a property of the queue,
+    # not of the Ansible invocation, and a run that was scheduled is byte-for-byte the
+    # same run as one that was not.
+    run_at: str = ""              # "YYYY-MM-DDTHH:MM" local to run_timezone
+    run_timezone: str = ""        # IANA; blank = UTC. The browser sends no offset.
+    change_window_id: str = ""    # a named window; its next occurrence is used
+
+
+def _schedule_kwargs(payload: "RunRequest", db) -> dict:
+    """The scheduling arguments for ``create_job``, or ``{}`` for an immediate run.
+
+    Returning an empty dict rather than a dict of Nones is deliberate: splatted into
+    ``create_job`` it is then byte-for-byte the call that was there before, so a run with
+    no schedule cannot be affected by this feature at all.
+
+    Resolved ONCE, here, for all three execution paths (agent / cloud-localhost / VM).
+    Each of those ends at its own ``create_job``, and a scheduling rule applied to two of
+    the three would be a change window that silently did not apply to on-premises targets
+    -- which are the ones most likely to have one.
+
+    **Approval applies to SCHEDULED changes only.** An immediate run is an operator doing
+    something now and is unchanged; requiring approval for those would gate every button
+    in the application, which is a different and much larger feature. The gate here is
+    "a change booked for later needs a second person before it fires".
+    """
+    from ..services import change_window_service
+    from ..services.suspend_schedule import ScheduleError
+    try:
+        scheduled_for, window_ends_at, window_id = change_window_service.resolve(
+            db,
+            run_at=payload.run_at,
+            run_timezone=payload.run_timezone,
+            change_window_id=payload.change_window_id,
+        )
+    except ScheduleError as exc:
+        # A 400 on the form now, rather than a change that quietly never runs.
+        raise HTTPException(status_code=400, detail=str(exc))
+    if scheduled_for is None:
+        return {}
+    return {
+        "scheduled_for": scheduled_for,
+        "window_ends_at": window_ends_at,
+        "change_window_id": window_id,
+        "approval_required": change_window_service.approval_required_default(),
+    }
 
 
 def _cfg(key: str) -> str:
@@ -780,7 +832,7 @@ async def _run_agent_ansible(payload: "RunRequest", db, current_user):
     job = job_service.create_job(
         db, job_type="agent_ansible", created_by=current_user.username,
         workgroup="ansible", metadata=meta, batch_id=payload.batch_id,
-        agent_id=payload.agent_id)
+        agent_id=payload.agent_id, **_schedule_kwargs(payload, db))
     if payload.secret_vars:
         job_service.log_audit(
             db, current_user.username, "ansible_secret_use",
@@ -901,6 +953,7 @@ async def _run_cloud_localhost(payload: "RunRequest", db, current_user):
             "secret_vars": payload.secret_vars or {},
         },
         batch_id=payload.batch_id,
+        **_schedule_kwargs(payload, db),
     )
     if wants_secret:
         job_service.log_audit(
@@ -1045,6 +1098,7 @@ async def run_playbook(
         metadata=ansible_run_meta.run_meta(
             payload, description=description, asset_backend=asset_backend),
         batch_id=payload.batch_id,
+        **_schedule_kwargs(payload, db),
     )
     if wants_secret:
         # Audit the use — kinds + var names only, never the source refs or values.
@@ -1094,6 +1148,11 @@ class BulkRunRequest(BaseModel):
     secret_ssh_key_source: str = ""
     managed_account: ManagedAccountRef | None = None
     managed_become: ManagedAccountRef | None = None
+    # Applies to the WHOLE batch — see the copy in run_playbook_bulk. A batch split
+    # across a window boundary would be the worst of both worlds.
+    run_at: str = ""
+    run_timezone: str = ""
+    change_window_id: str = ""
 
 
 @router.post("/run-bulk", dependencies=[Depends(require_permission("config_mgmt", "write"))])
@@ -1164,6 +1223,14 @@ async def run_playbook_bulk(
             managed_account=payload.managed_account,
             managed_become=payload.managed_become,
             batch_id=batch_id,
+            # Scheduling rides the batch: booking a bulk run into a window must book
+            # EVERY target in it, or half the batch runs now and half on Saturday. This
+            # copy is field-by-field rather than a spread, so a new RunRequest field is
+            # silently dropped here unless it is added — which is exactly what would have
+            # happened to these three.
+            run_at=payload.run_at,
+            run_timezone=payload.run_timezone,
+            change_window_id=payload.change_window_id,
             **target["spec"],
         )
         try:

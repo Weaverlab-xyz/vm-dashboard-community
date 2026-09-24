@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+{% block title %}Scheduled Changes{% endblock %}
+
+{% block content %}
+<div x-data="scheduleList()" x-init="init()">
+
+  <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-6">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Scheduled Changes</h1>
+      <p class="text-sm text-gray-500 mt-1">
+        Jobs that repeat on every occurrence of a change window.
+      </p>
+    </div>
+    <div class="flex items-center gap-2">
+      <a href="/jobs?scheduled=1"
+         class="text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2
+                rounded-lg shadow-sm font-medium transition">Waiting changes</a>
+      <button @click="load()" :disabled="loading"
+              class="text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2
+                     rounded-lg shadow-sm font-medium transition">Refresh</button>
+    </div>
+  </div>
+
+  <!-- There is no "new schedule" button, and that is deliberate: a schedule is created
+       from a job that has already been validated and run, via the Repeat control on the
+       job's own page. See services/schedule_service for why there is no second path. -->
+  <div class="rounded-xl border border-gray-200 bg-gray-50 p-4 mb-6 text-sm text-gray-600">
+    To add one, open a job on the
+    <a href="/jobs" class="text-blue-600 underline">Jobs</a> page and choose
+    <strong>Repeat in a change window</strong>. A schedule reuses that job's saved
+    parameters, so the run you already tested is the run that repeats.
+  </div>
+
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="bg-gray-50 border-b border-gray-200 text-left">
+          <th class="px-4 py-3 font-semibold text-gray-600">Name</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">Window</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">Next run</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">Last run</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">State</th>
+          <th class="px-4 py-3 font-semibold text-gray-600 text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-50">
+        <tr x-show="loading">
+          <td colspan="6" class="px-4 py-10 text-center text-gray-400">Loading…</td>
+        </tr>
+        <tr x-show="!loading && !schedules.length">
+          <td colspan="6" class="px-4 py-10 text-center text-gray-400">
+            No recurring changes yet.
+          </td>
+        </tr>
+        <template x-for="s in schedules" :key="s.id">
+          <tr class="hover:bg-gray-50 transition align-top">
+            <td class="px-4 py-3">
+              <p class="font-medium text-gray-800" x-text="s.name"></p>
+              <p class="text-xs text-gray-500" x-text="s.job_type"></p>
+              <p x-show="s.description" x-cloak class="text-xs text-gray-400 truncate
+                        max-w-[22rem]" x-text="s.description"></p>
+            </td>
+            <td class="px-4 py-3 text-gray-600">
+              <p x-text="s.window_name || '–'"></p>
+              <p class="text-xs text-gray-400" x-text="s.window_summary"></p>
+            </td>
+            <td class="px-4 py-3 text-gray-600 text-xs font-mono"
+                x-text="s.enabled ? stamp(s.next_run) : '–'"></td>
+            <td class="px-4 py-3 text-xs">
+              <span x-show="!s.last_run_at" class="text-gray-400">never</span>
+              <a x-show="s.last_job_id" x-cloak :href="'/jobs/' + s.last_job_id"
+                 class="text-blue-600 hover:underline font-mono"
+                 x-text="stamp(s.last_run_at)"></a>
+            </td>
+            <td class="px-4 py-3">
+              <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                    :class="s.enabled ? 'bg-green-100 text-green-800'
+                                      : 'bg-gray-100 text-gray-700'"
+                    x-text="s.enabled ? 'active' : 'disabled'"></span>
+              <!-- The reason a schedule switched itself off is the whole value of the
+                   self-disable: one that merely stopped firing is something you find out
+                   from the thing it was supposed to be maintaining. -->
+              <p x-show="s.disabled_reason" x-cloak
+                 class="text-[11px] text-red-600 mt-1 max-w-[18rem]"
+                 x-text="s.disabled_reason"></p>
+              <p x-show="s.problem" x-cloak
+                 class="text-[11px] text-amber-700 mt-1 max-w-[18rem]"
+                 x-text="s.problem"></p>
+              <p x-show="s.enabled && s.consecutive_failures" x-cloak
+                 class="text-[11px] text-amber-700 mt-1"
+                 x-text="s.consecutive_failures + ' consecutive failure(s)'"></p>
+            </td>
+            <td class="px-4 py-3 text-right whitespace-nowrap">
+              <button @click="toggle(s)"
+                      class="text-blue-600 hover:underline text-xs font-medium mr-2"
+                      x-text="s.enabled ? 'Disable' : 'Enable'"></button>
+              <button @click="remove(s)"
+                      class="text-red-600 hover:text-red-700 text-xs font-medium">
+                Delete
+              </button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <p x-show="error" x-cloak class="text-sm text-red-600 mt-3" x-text="error"></p>
+</div>
+
+<script>
+  function scheduleList() {
+    return {
+      schedules: [],
+      loading: false,
+      error: '',
+
+      async init() {
+        requireAuth();
+        await this.load();
+      },
+
+      async load() {
+        this.loading = true;
+        this.error = '';
+        try {
+          const r = await API.get('/api/schedules');
+          this.schedules = (r && r.schedules) || [];
+        } catch (e) {
+          this.error = e.message || 'Could not load schedules.';
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      // Times are naive UTC from the API and are labelled as such. A recurring change
+      // read an hour wrong is the failure the whole feature exists to prevent, so the
+      // unit is never left to the reader to assume.
+      stamp(iso) {
+        if (!iso) return '–';
+        return String(iso).replace('T', ' ').slice(0, 16) + ' UTC';
+      },
+
+      async toggle(s) {
+        this.error = '';
+        try {
+          await API.put(`/api/schedules/${s.id}`, { enabled: !s.enabled });
+          await this.load();
+        } catch (e) {
+          this.error = e.message || 'Could not update this schedule.';
+        }
+      },
+
+      async remove(s) {
+        if (!confirm(`Delete the schedule "${s.name}"?\n\n`
+                     + 'Runs it already created keep their own history and any run '
+                     + 'already booked into a window will still happen — this stops '
+                     + 'future ones.')) return;
+        this.error = '';
+        try {
+          await API.del(`/api/schedules/${s.id}`);
+          await this.load();
+          toast('Schedule deleted.', 'success');
+        } catch (e) {
+          this.error = e.message || 'Could not delete this schedule.';
+        }
+      },
+    };
+  }
+</script>
+{% endblock %}

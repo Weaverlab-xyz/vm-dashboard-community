@@ -178,6 +178,13 @@ doing by hand what you already do by hand today.
 Backoff is 30s, 2m, 10m, 30m — the same schedule the notification drain already uses.
 `job_retry_max_attempts` (default 3, counting the first run) is clamped to that schedule.
 
+**A retry inside a change window can push past the window's end**, and when it does the
+job is marked missed rather than retried outside it. That is the correct outcome and not a
+special case: the window is the boundary, a retry is just another attempt to start, and an
+attempt that cannot start inside the window must not start at all. If a change is being
+missed this way, the window is too short for the work plus its backoff. See
+[Change Windows](change-windows.md).
+
 ### The dead-letter tail
 
 A job that uses every attempt is `failed` with `attempts > 0`. **There is no fourth

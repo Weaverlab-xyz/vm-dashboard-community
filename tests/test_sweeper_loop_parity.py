@@ -1,13 +1,13 @@
 """Sweeper loops must run their database pass OFF the event loop.
 
-``web_dashboard/main.py`` runs six enqueue-only sweeper loops inside the gunicorn app
+``web_dashboard/main.py`` runs seven enqueue-only sweeper loops inside the gunicorn app
 process (``-w 2``). Each one opens a session, calls a synchronous ``enqueue_*`` function,
 and sleeps. That call is not cheap and it is not merely a query: ``spend_sweeper`` and
 ``suspend_sweeper`` take ``pg_advisory_xact_lock`` first, which BLOCKS until the lock is
 granted, and then run two SELECTs and an INSERT. Awaited directly, that stalls every HTTP
 request the worker is serving.
 
-Four of the six had this right — ``asyncio.to_thread`` — and two did not. Both of the two
+Four of the first six had this right — ``asyncio.to_thread`` — and two did not. Both of the two
 carried a docstring saying "Same shape and the same reasoning as ``_expiry_sweeper_loop``",
 which is the loop that does it correctly, so the claim of parity was in the source while the
 parity itself was not. Nothing failed: the app served requests slightly slower, only while
@@ -46,7 +46,7 @@ except Exception as exc:  # pragma: no cover — deps absent outside CI
 _SRC = open(os.path.join(_ROOT, "web_dashboard/main.py"), encoding="utf-8").read()
 _TREE = ast.parse(_SRC)
 
-# The six enqueue-only sweepers. Named rather than pattern-matched: a new one should have
+# The enqueue-only sweepers. Named rather than pattern-matched: a new one should have
 # to be added here deliberately, which is the moment to ask whether it needs its own loop.
 SWEEPERS = (
     "_ci_sweeper_loop",
@@ -55,6 +55,7 @@ SWEEPERS = (
     "_expiry_sweeper_loop",
     "_pov_reconcile_loop",
     "_hypervisor_sync_loop",
+    "_schedule_sweeper_loop",
 )
 
 # Coroutines that legitimately hand-roll `while True`. The two warm primitives are the
@@ -199,7 +200,7 @@ def test_every_sweeper_delegates_to_the_primitive():
 
 
 def test_only_the_primitives_hand_roll_a_loop():
-    """Catches a SEVENTH sweeper added beside the six rather than through them."""
+    """Catches a sweeper added beside the others rather than through them."""
     offenders = []
     for node in ast.walk(_TREE):
         if not isinstance(node, ast.AsyncFunctionDef):
@@ -280,6 +281,7 @@ EXPECTED_FALLBACKS = {
     "_hypervisor_sync_loop": 300,
     "_suspend_sweeper_loop": 600,
     "_spend_sweeper_loop": 600,
+    "_schedule_sweeper_loop": 300,
 }
 
 

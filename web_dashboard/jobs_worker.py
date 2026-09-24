@@ -38,6 +38,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from . import worker_health
@@ -89,6 +90,10 @@ HANDLED_TYPES = (
     # and three worker replicas. Running it here also gives each pass a job row, Live
     # Output and cancel — see services/expiry_reaper.
     "expiry_sweep",
+    # Change-window backstop. Marks a scheduled job missed when its window closed before
+    # anything could claim it, and materialises recurring schedules. The app's loop only
+    # ENQUEUES one — see services/schedule_sweeper.
+    "schedule_sweep",
 )
 
 # ── Concurrency tiers ─────────────────────────────────────────────────────────
@@ -206,6 +211,10 @@ LIGHT_TYPES = (
     "gateway_deploy", "gateway_teardown",              # pure cloud SDK (jumpoint_host_service)
     "epml_sync",                                       # HTTP download + storage upload
     "expiry_sweep",                                    # pure DB, sub-second
+    # Pure DB as well, and sub-second: two indexed queries and a bounded UPDATE. It also
+    # must not queue behind anything — it is the guard that stops a job running OUTSIDE
+    # its change window, so a late pass is the one failure this feature cannot have.
+    "schedule_sweep",
     # Pure DB as well: it evaluates schedules and enqueues *_power rows,
     # and powers nothing itself.
     "suspend_sweep",
@@ -275,6 +284,12 @@ SINGLETON_TYPES = frozenset((
     # Singleton for the same reason the other sweeps are: two concurrent passes would
     # both accrue the same interval onto the same rows, double-billing every capped VM.
     "spend_sweep",
+    # Singleton because two passes would both select the same overdue rows and both try
+    # to reap them. `set_missed_window` is idempotent — it refuses a row that has already
+    # left `pending` — so the DAMAGE is bounded, but each pass would still emit its own
+    # `job.window_missed`, and telling an operator twice that one change was missed is
+    # how a real alert starts getting ignored.
+    "schedule_sweep",
     "epml_sync",
 ))
 
@@ -355,9 +370,20 @@ def _claim_one(db: Session, allowed: tuple = HANDLED_TYPES,
 
     NOTE the ordering change a narrowed ``allowed`` introduces: a NEWER light job
     overtakes an OLDER pending heavy one whose tier is full. That is the point — an
-    image-export poll must not wait 40 minutes behind a Packer build — so ``created_at``
-    order is now only guaranteed WITHIN a tier. A heavy job cannot be starved by it:
-    heavy capacity is only ever consumed by heavy jobs.
+    image-export poll must not wait 40 minutes behind a Packer build — so the order below
+    is only guaranteed WITHIN a tier. A heavy job cannot be starved by it: heavy capacity
+    is only ever consumed by heavy jobs.
+
+    **Scheduling lives in ``job_service.claimable_now``, not here.** A job booked for a
+    change window is an ordinary ``pending`` row with a future ``scheduled_for``, so it
+    is simply not selected until its window opens — no new status, no separate queue, and
+    every job type in HANDLED_TYPES gets it at once. The same predicate is applied by
+    ``agent_service.lease_one``; keeping it in one function is what stops the two from
+    drifting, as they already did over ``retry_after``.
+
+    A window that closes while a job is still waiting does NOT fall to this function:
+    ``schedule_sweeper`` marks such a row missed, so it disappears from the filter above
+    by becoming ``cancelled`` rather than by being skipped forever.
     """
     if not allowed:
         return None
@@ -365,11 +391,17 @@ def _claim_one(db: Session, allowed: tuple = HANDLED_TYPES,
         job = (
             db.query(Job)
             .filter(Job.status == "pending", Job.job_type.in_(allowed),
-                    # A requeued job waits out its backoff. NULL for every row that has
-                    # never failed, which is almost all of them — see Job.retry_after.
-                    (Job.retry_after.is_(None))
-                    | (Job.retry_after <= datetime.utcnow()))
-            .order_by(Job.created_at.asc())
+                    # A requeued job waits out its backoff; a SCHEDULED job waits for its
+                    # change window to open; an unapproved one waits for a human. All
+                    # three are NULL on almost every row, and NULL passes. Shared with
+                    # agent_service.lease_one — see job_service.claimable_now for why
+                    # these clauses may not be written out twice.
+                    *job_service.claimable_now())
+            # COALESCE, not created_at: within one window, the order that matters is when
+            # each job was booked to run, not when the form was submitted. A change booked
+            # three weeks ago must not jump ahead of one booked yesterday for an earlier
+            # slot in the same window.
+            .order_by(func.coalesce(Job.scheduled_for, Job.created_at).asc())
             .first()
         )
         if job is None:
@@ -714,6 +746,14 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             # flag, and a different set of rows.
             from .services import spend_sweeper
             await spend_sweeper.run(db, job_id=job_id, meta=meta)
+        elif job_type == "schedule_sweep":
+            # One change-window pass: mark every scheduled job whose window closed
+            # before anything claimed it, and materialise due recurring schedules.
+            # Unlike the three sweeps above this one has NO master flag — the guard it
+            # provides is what makes a change window mean anything, and a deployment
+            # where it was switched off would run bookings hours late instead.
+            from .services import schedule_sweeper
+            await schedule_sweeper.run(db, job_id=job_id, meta=meta)
         else:  # pragma: no cover — HANDLED_TYPES guards the claim
             logger.warning("job runner: unhandled job_type %s (job %s)", job_type, job_id)
     finally:
