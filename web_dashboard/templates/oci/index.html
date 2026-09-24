@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
+{% from "partials/schedule_picker.html" import schedule_picker %}
 {% from "partials/tag_chips.html" import tag_chips %}
 {% from "partials/tag_editor.html" import tag_editor %}
 
@@ -671,9 +672,11 @@
         <p x-show="deployError" class="text-xs text-red-600" x-text="deployError"></p>
       </div>
 
+      <div class="mt-4">{{ schedule_picker() }}</div>
+
       <div class="flex justify-end gap-2 mt-6">
         <button @click="deployModal = false" class="px-4 py-2 text-sm text-gray-600 hover:text-gray-900 font-medium">Cancel</button>
-        <button @click="deploy()" :disabled="deploying || !deployReady()"
+        <button @click="deploy()" :disabled="deploying || !deployReady() || !scheduleReady()"
                 class="px-4 py-2 text-sm bg-red-700 hover:bg-red-800 disabled:opacity-40 text-white rounded-lg font-medium transition">
           <span x-text="deploying ? 'Deploying…' : 'Deploy'"></span>
         </button>
@@ -807,6 +810,10 @@
 function ociDashboard() {
   return {
     ...deployNameState(),
+    // Change-window booking for the deploy form. See
+    // partials/schedule_picker.html; the schedulePayload() spread in the
+    // deploy submit is what makes it do anything.
+    ...scheduleState(),
     // Multi-select bulk: tick images, launch one instance per image. The other axis
     // from deployForm.count, which launches N copies of ONE image.
     selectedImages: [],
@@ -939,6 +946,7 @@ function ociDashboard() {
 
     async init() {
       if (typeof requireAuth === 'function') requireAuth();
+      this.loadChangeWindows();
       API.get('/api/groups/workgroups')
         .then(r => { this.availableWorkgroups = r || []; })
         .catch(() => { this.availableWorkgroups = []; });
@@ -1666,7 +1674,9 @@ function ociDashboard() {
     async deploy() {
       this.deploying = true;
       this.deployError = '';
-      const body = { ...this.deployForm, image_ocid: this.selectedImage.ocid, image_name: this.selectedImage.display_name };
+      const body = { ...this.deployForm, image_ocid: this.selectedImage.ocid,
+                     image_name: this.selectedImage.display_name,
+                     ...this.schedulePayload() };
       try {
         const r = await API.post('/api/oci/deploy', body);
         this.deployModal = false;

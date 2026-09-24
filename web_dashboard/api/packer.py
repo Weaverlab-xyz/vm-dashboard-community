@@ -23,7 +23,9 @@ from ..models.packer import (
     OCIPackerBuildRequest,
     PackerBuildResponse,
 )
-from ..services import job_service, oci_freetier, oci_service
+from ..models.schedule import SCHEDULE_FIELDS
+from ..services import (change_window_service, job_service, oci_freetier,
+                        oci_service)
 from ..services.oci_service import OCIError
 from .auth import require_permission
 
@@ -56,9 +58,13 @@ def build_aws_image(
             # Full request + creator so the worker can reconstruct and run the
             # build. Only secret *references* live in the request (resolved at
             # build launch), so nothing sensitive is persisted here.
-            "req": req.model_dump(),
+            # Excluding the change-window fields: they are queue state, not build
+            # parameters, and a payload that carried its own booking would read as
+            # scheduled for a past time forever. See models/schedule.py.
+            "req": req.model_dump(exclude=SCHEDULE_FIELDS),
             "created_by": current_user.username,
         },
+        **change_window_service.schedule_kwargs(db, **req.schedule_fields()),
     )
     job_service.log_audit(
         db, current_user.username, "packer_aws_build",
@@ -95,9 +101,13 @@ def build_azure_image(
             "image_offer": req.image_offer,
             "image_sku": req.image_sku,
             "os_type": req.os_type,
-            "req": req.model_dump(),
+            # Excluding the change-window fields: they are queue state, not build
+            # parameters, and a payload that carried its own booking would read as
+            # scheduled for a past time forever. See models/schedule.py.
+            "req": req.model_dump(exclude=SCHEDULE_FIELDS),
             "created_by": current_user.username,
         },
+        **change_window_service.schedule_kwargs(db, **req.schedule_fields()),
     )
     job_service.log_audit(
         db, current_user.username, "packer_azure_build",
@@ -136,9 +146,13 @@ def build_gcp_image(
             "image_name": req.image_name,
             "source_image": source,
             "machine_type": req.machine_type,
-            "req": req.model_dump(),
+            # Excluding the change-window fields: they are queue state, not build
+            # parameters, and a payload that carried its own booking would read as
+            # scheduled for a past time forever. See models/schedule.py.
+            "req": req.model_dump(exclude=SCHEDULE_FIELDS),
             "created_by": current_user.username,
         },
+        **change_window_service.schedule_kwargs(db, **req.schedule_fields()),
     )
     job_service.log_audit(
         db, current_user.username, "packer_gcp_build",
@@ -220,9 +234,13 @@ async def build_oci_image(
             "image_name": req.image_name,
             "base_image_ocid": req.base_image_ocid,
             "shape": req.shape,
-            "req": req.model_dump(),
+            # Excluding the change-window fields: they are queue state, not build
+            # parameters, and a payload that carried its own booking would read as
+            # scheduled for a past time forever. See models/schedule.py.
+            "req": req.model_dump(exclude=SCHEDULE_FIELDS),
             "created_by": current_user.username,
         },
+        **change_window_service.schedule_kwargs(db, **req.schedule_fields()),
     )
     job_service.log_audit(
         db, current_user.username, "packer_oci_build",

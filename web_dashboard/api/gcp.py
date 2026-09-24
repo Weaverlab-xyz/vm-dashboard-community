@@ -30,7 +30,8 @@ from ..models.gcp import (
     GCPNetworkOptions,
     GCPSSHKeyDetail,
 )
-from ..services import cache_service, cloud_stats, deploy_batch, job_service, region_catalog, workgroup_service
+from ..models.schedule import SCHEDULE_FIELDS
+from ..services import change_window_service, cache_service, cloud_stats, deploy_batch, job_service, region_catalog, workgroup_service
 from ..services import gcp_service
 from .auth import require_admin, require_permission
 from ..services import vm_suspend_policy
@@ -583,6 +584,14 @@ async def _fan_out_batch(
     apart is invisible to a static walk. Nested defs don't help either; ast.walk
     descends into them.
     """
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **payload.schedule_fields())
+
     names = deploy_batch.expand_names(payload.instance_name, payload.count, "gcp")
     deploy_batch.reject_name_collisions(db, "gce_deploy", names)
     # Policy gate every VM in the batch before creating a single row — a denial partway
@@ -622,7 +631,7 @@ async def _fan_out_batch(
                 "image_name":      payload.image_name,
                 "workgroup":       payload.workgroup,
                 "bulk":            True,
-                "req":             child_req.model_dump(),
+                "req":             child_req.model_dump(exclude=SCHEDULE_FIELDS),
             },
         )
         job_service.set_cloud_resource_id(db, job.id, name)
@@ -633,7 +642,7 @@ async def _fan_out_batch(
                      "workgroup": payload.workgroup, "bulk": True},
         )
         children.append({"job_id": job.id, "instance_name": name,
-                         "req": child_req.model_dump()})
+                         "req": child_req.model_dump(exclude=SCHEDULE_FIELDS)})
 
     # One parent for the batch — this is the row the runner claims, and it drives the
     # queued children above behind a single shared Jumpoint.
@@ -650,6 +659,7 @@ async def _fan_out_batch(
             "workgroup":  payload.workgroup,
             "children":   children,
         },
+        **_sched,
     )
     return GCPDeployResponse(
         job_id=parent.id,
@@ -679,6 +689,14 @@ async def bulk_deploy_instances(
     ``GCPDeployRequest`` per child from ``children[].req``, so a per-child image is
     simply a different value in a field it already reads.
     """
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     if not req.items:
         raise HTTPException(status_code=400, detail="At least one image is required.")
 
@@ -754,7 +772,7 @@ async def bulk_deploy_instances(
                 "image_name":      item.image_name,
                 "workgroup":       workgroup,
                 "bulk":            True,
-                "req":             child_req.model_dump(),
+                "req":             child_req.model_dump(exclude=SCHEDULE_FIELDS),
             },
         )
         job_service.set_cloud_resource_id(db, job.id, item.instance_name)
@@ -765,7 +783,7 @@ async def bulk_deploy_instances(
                      "workgroup": workgroup, "bulk": True},
         )
         children.append({"job_id": job.id, "instance_name": item.instance_name,
-                         "req": child_req.model_dump()})
+                         "req": child_req.model_dump(exclude=SCHEDULE_FIELDS)})
         results.append(GCPBulkDeployJobResult(
             image_self_link=item.image_self_link,
             instance_name=item.instance_name,
@@ -784,6 +802,7 @@ async def bulk_deploy_instances(
             "workgroup":  workgroup,
             "children":   children,
         },
+        **_sched,
     )
     return GCPBulkDeployResponse(jobs=results, count=len(results), batch_id=batch_id)
 
@@ -796,6 +815,14 @@ async def deploy_instance(
 ):
     """Deploy one or more GCE instances from an image. Runs in background; returns the
     job ID immediately. ``count > 1`` fans out into a batch (see ``_fan_out_batch``)."""
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **payload.schedule_fields())
+
     project_id = _gcp_project()
     if not project_id:
         raise HTTPException(status_code=400, detail="GCP project ID not configured — run the setup wizard.")
@@ -841,8 +868,9 @@ async def deploy_instance(
             "workgroup":        workgroup,
             # Full request so the runner can rebuild the deploy call. Only secret
             # *references* live on it, resolved at deploy time.
-            "req":              payload.model_dump(),
+            "req":              payload.model_dump(exclude=SCHEDULE_FIELDS),
         },
+        **_sched,
     )
     job_service.set_cloud_resource_id(db, job.id, payload.instance_name)
     job_service.log_audit(

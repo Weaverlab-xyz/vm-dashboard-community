@@ -38,7 +38,9 @@ from ..models.azure import (
     AzureSSHKeyInfo,
     AzureVMInfo,
 )
-from ..services import (azure_service, azure_listing, deploy_batch, job_service,
+from ..models.schedule import SCHEDULE_FIELDS
+from ..services import (azure_service, azure_listing, change_window_service,
+                        deploy_batch, job_service,
                         cache_service, cloud_stats, region_catalog, unmanaged_vms,
                         workgroup_service)
 from ..services.azure_service import AzureError
@@ -815,6 +817,14 @@ async def _fan_out_batch(
     function, so a ``children``-carrying create_job in the same function as the single
     deploy's ``pending`` one reads as a violation whatever the runtime branch does.
     """
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     names = deploy_batch.expand_names(req.vm_name, req.count, "azure")
     deploy_batch.reject_name_collisions(db, "azure_deploy", names)
     await deploy_batch.enforce_admission(
@@ -883,9 +893,10 @@ async def _fan_out_batch(
             "location": loc,
             "resource_group": rg,
             "workgroup": workgroup,
-            "req": bulk.model_dump(),
+            "req": bulk.model_dump(exclude=SCHEDULE_FIELDS),
             "children": children,
         },
+        **_sched,
     )
     return AzureDeployResponse(
         job_id=parent.id,
@@ -909,6 +920,14 @@ async def deploy_vm(
     marketplace). Returns a job_id trackable at /api/jobs/{job_id} or /ws/jobs/{job_id}.
     ``count > 1`` fans out into a batch (see ``_fan_out_batch``).
     """
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     if req.os_type.lower() != "windows" and not req.ssh_public_key.strip():
         raise HTTPException(status_code=400, detail="ssh_public_key is required for Linux deploys.")
     loc = _resolve_location(req.location)
@@ -961,8 +980,9 @@ async def deploy_vm(
             # Full request so the runner can rebuild the deploy call. Only secret
             # *references* live on it, resolved at deploy time — same shape as the
             # OCI and Packer jobs.
-            "req": req.model_dump(),
+            "req": req.model_dump(exclude=SCHEDULE_FIELDS),
         },
+        **_sched,
     )
     job_service.set_cloud_resource_id(db, job.id, req.vm_name)
 
@@ -990,6 +1010,14 @@ async def bulk_deploy_vms(
     Deploy multiple Azure VMs in one request.
     Each VM gets its own job_id. One ACI Jumpoint container is shared across the batch.
     """
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     if not req.items:
         raise HTTPException(status_code=400, detail="At least one VM item is required.")
     if req.os_type.lower() != "windows" and not req.ssh_public_key.strip():
@@ -1101,9 +1129,10 @@ async def bulk_deploy_vms(
             "location": loc,
             "resource_group": rg,
             "workgroup": workgroup,
-            "req": req.model_dump(),
+            "req": req.model_dump(exclude=SCHEDULE_FIELDS),
             "children": children,
         },
+        **_sched,
     )
 
     return AzureBulkDeployResponse(

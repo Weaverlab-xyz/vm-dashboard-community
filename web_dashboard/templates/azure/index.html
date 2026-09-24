@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "partials/bulk_power_toolbar.html" import bulk_power_buttons %}
+{% from "partials/schedule_picker.html" import schedule_picker %}
 {% from "partials/secret_picker.html" import secret_picker %}
 {% from "partials/tag_chips.html" import tag_chips %}
 {% from "partials/tag_editor.html" import tag_editor %}
@@ -606,14 +607,18 @@
                          "Gateway deploy key", "Overrides the ACI Gateway deploy key for this deploy.") }}
       </div>
 
+      <div class="mt-4">{{ schedule_picker() }}</div>
+
       <div class="flex justify-end gap-3 mt-5">
         <button @click="deployModal.open = false"
                 class="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">
           Cancel
         </button>
-        <button @click="submitDeploy()" :disabled="deployModal.submitting"
+        <button @click="submitDeploy()"
+                :disabled="deployModal.submitting || !scheduleReady()"
                 class="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50">
-          <span x-show="!deployModal.submitting">Deploy VM</span>
+          <span x-show="!deployModal.submitting"
+                x-text="scheduleVerb('', 'Deploy VM')"></span>
           <span x-show="deployModal.submitting">Deploying…</span>
         </button>
       </div>
@@ -1582,6 +1587,10 @@ function azureDashboard() {
   return {
     ...secretPickerState(),
     ...deployNameState(),
+    // Change-window booking for the deploy form. See
+    // partials/schedule_picker.html; the schedulePayload() spread in the
+    // deploy submit is what makes it do anything.
+    ...scheduleState(),
     // State
     loading: false,
     credError: '',   // the server's reason, '' when there is none
@@ -1723,6 +1732,7 @@ function azureDashboard() {
 
     async init() {
       requireAuth();
+      this.loadChangeWindows();
       this.loadSecretBackends();
       const hash = window.location.hash.slice(1);
       {% if pra_enabled %}
@@ -2317,6 +2327,7 @@ function azureDashboard() {
           register_in_entitle: !!m.register_in_entitle,
           register_in_passwordsafe: !!m.register_in_passwordsafe,
           ssh_key_secret_override: m.ssh_key_secret_override || null,
+          ...this.schedulePayload(),
         });
         m.open = false;
         // A batch lands on the /jobs rollup; a single deploy keeps its own path.

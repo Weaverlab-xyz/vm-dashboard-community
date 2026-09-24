@@ -4,6 +4,8 @@ Pydantic models for AWS/Terraform API endpoints.
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
+from .schedule import ScheduleRequestMixin
+
 from ..services.vm_naming import MAX_DEPLOY_COUNT
 from .tags import TagChip
 
@@ -83,7 +85,7 @@ class SSHKeySecretDetail(BaseModel):
     description: str = ""
 
 
-class DeployRequest(BaseModel):
+class DeployRequest(ScheduleRequestMixin, BaseModel):
     ami_id: str = Field(..., description="AMI ID to deploy")
     instance_name: str = Field(..., description="Name tag for the instance")
     instance_type: str = Field(default="t3.medium", description="EC2 instance type")
@@ -163,7 +165,7 @@ class BulkDeployItem(BaseModel):
     instance_name: str = Field(..., description="Name tag for this specific instance")
 
 
-class BulkDeployRequest(BaseModel):
+class BulkDeployRequest(ScheduleRequestMixin, BaseModel):
     items: List[BulkDeployItem] = Field(..., description="List of AMIs to deploy with per-instance names")
     instance_type: str = Field(default="t3.medium", description="EC2 instance type (shared)")
     region: Optional[str] = Field(default=None, description="AWS region to deploy into (shared; defaults to the configured aws_region). Subnet + security groups must belong to this region.")

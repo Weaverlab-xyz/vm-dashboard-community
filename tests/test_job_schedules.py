@@ -44,7 +44,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from web_dashboard.database import Base, ChangeWindow, Job, JobSchedule  # noqa: E402
-from web_dashboard.services import schedule_service  # noqa: E402
+from web_dashboard.services import job_service, schedule_service  # noqa: E402
 from web_dashboard.services.suspend_schedule import ScheduleError  # noqa: E402
 
 
@@ -100,15 +100,64 @@ def test_a_job_type_outside_the_allowlist_is_refused():
     assert "packer_aws_build" in reason
 
 
-def test_the_allowlist_holds_only_ref_bearing_types():
-    """Pins the SET, so extending it is a deliberate edit next to the rule.
+def test_the_allowlist_is_per_key_not_per_type():
+    """The mechanism itself, because the per-type version of it was unsafe.
 
-    Every member must be a job type whose metadata is references rather than values —
-    a secret copied into `job_schedules.payload` would sit there in clear, and a one-shot
-    handle would make every occurrence after the first fail oddly.
+    A type-only allowlist said "this job type may repeat" and then copied the metadata
+    verbatim — but `job_service.set_completed` MERGES each runner's result into that
+    metadata, so the dict being copied is the post-run one. Naming the keys is what
+    stops a runner's output reaching `job_schedules.payload`.
     """
-    assert schedule_service.SCHEDULABLE_JOB_TYPES == frozenset(
-        {"ansible_local", "ansible_cloud_run", "agent_ansible"})
+    keys = schedule_service.SCHEDULABLE_PAYLOAD_KEYS
+    assert isinstance(keys, dict) and keys, "the allowlist must be a per-type key map"
+    for job_type, allowed in keys.items():
+        assert isinstance(allowed, frozenset) and allowed, (
+            f"{job_type} names no keys, so it would store an empty payload")
+    assert schedule_service.SCHEDULABLE_JOB_TYPES == frozenset(keys), (
+        "the type set and the key map have drifted — one is derived from the other "
+        "precisely so they cannot")
+
+
+def test_a_runner_result_never_reaches_the_stored_payload():
+    """The property the filter exists for, exercised on a real post-run job.
+
+    `epml_sync` is the sharp case: its create-time metadata is two harmless strings,
+    and its COMPLETED metadata carries BeyondTrust pre-signed download URLs that
+    expire in ~30 minutes. Copied verbatim they would sit in the schedules table
+    indefinitely.
+    """
+    db = _session()
+    job = _job(db, job_type="epml_sync", meta={"description": "EPM-L sync",
+                                               "backend": "s3"})
+    # What the runner writes back on completion.
+    job_service.set_completed(db, job.id, {
+        "packages": [{"name": "epm", "link": "https://bt.example/pkg?sig=SECRET"}],
+        "rpm_uploaded": 3, "summary": "ok",
+    })
+    db.refresh(job)
+    assert "packages" in job.metadata_dict, "precondition: the runner result merged"
+
+    payload = schedule_service.payload_for(job)
+    assert payload == {"description": "EPM-L sync", "backend": "s3"}, payload
+    blob = repr(payload)
+    assert "SECRET" not in blob and "packages" not in blob, (
+        "a runner result reached the stored payload: " + blob)
+
+
+def test_the_filter_keeps_what_the_runner_actually_reads():
+    """The other half — filtering must not drop a key the run path needs, or every
+    occurrence would run with different parameters from the job it was copied from."""
+    db = _session()
+    meta = {"asset": "patch.yml", "target": "10.0.0.5", "extra_vars": {"a": 1},
+            "secret_vars": {"PW": "config://x"}, "description": "Ansible: patch.yml"}
+    job = _job(db, meta=dict(meta))
+    job_service.set_completed(db, job.id, {"output": "PLAY [all] ...",
+                                           "returncode": 0})
+    db.refresh(job)
+    payload = schedule_service.payload_for(job)
+    for key, value in meta.items():
+        assert payload.get(key) == value, f"{key} was dropped from the payload"
+    assert "output" not in payload and "returncode" not in payload, payload
 
 
 # ── Creation ──────────────────────────────────────────────────────────────────

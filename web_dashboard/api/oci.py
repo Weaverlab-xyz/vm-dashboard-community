@@ -39,7 +39,9 @@ from ..models.oci import (
     OCINetworkOptions,
     OCISSHKeyDetail,
 )
+from ..models.schedule import SCHEDULE_FIELDS
 from ..services import (
+    change_window_service,
     cache_service, cloud_stats, deploy_batch, job_service, oci_freetier, oci_service,
     workgroup_service,
 )
@@ -512,6 +514,14 @@ async def _fan_out_batch(
     the whole batch before dispatching, because "would these N together exceed the
     envelope" is inherently a batch question.
     """
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **payload.schedule_fields())
+
     names = deploy_batch.expand_names(payload.instance_name, payload.count, "oci")
     deploy_batch.reject_name_collisions(db, "oci_deploy", names)
     await deploy_batch.enforce_admission(
@@ -549,7 +559,7 @@ async def _fan_out_batch(
                 "region":           _region(),
                 "workgroup":        payload.workgroup,
                 "bulk":             True,
-                "req":              child_req.model_dump(),
+                "req":              child_req.model_dump(exclude=SCHEDULE_FIELDS),
             },
         )
         job_service.set_cloud_resource_id(db, job.id, name)
@@ -559,7 +569,7 @@ async def _fan_out_batch(
                      "workgroup": payload.workgroup, "bulk": True},
         )
         children.append({"job_id": job.id, "instance_name": name,
-                         "req": child_req.model_dump()})
+                         "req": child_req.model_dump(exclude=SCHEDULE_FIELDS)})
 
     parent = job_service.create_job(
         db,
@@ -573,6 +583,7 @@ async def _fan_out_batch(
             "workgroup":        payload.workgroup,
             "children":         children,
         },
+        **_sched,
     )
     return OCIDeployResponse(
         job_id=parent.id,
@@ -782,6 +793,14 @@ async def bulk_deploy_instances(
     from ``children[].req``, so a per-child image is just a different value in a field
     it already reads.
     """
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     if not req.items:
         raise HTTPException(status_code=400, detail="At least one image is required.")
     if not _configured():
@@ -890,7 +909,7 @@ async def bulk_deploy_instances(
                 "region":           _region(),
                 "workgroup":        workgroup,
                 "bulk":             True,
-                "req":              child_req.model_dump(),
+                "req":              child_req.model_dump(exclude=SCHEDULE_FIELDS),
             },
         )
         job_service.set_cloud_resource_id(db, job.id, item.instance_name)
@@ -900,7 +919,7 @@ async def bulk_deploy_instances(
                      "workgroup": workgroup, "bulk": True},
         )
         children.append({"job_id": job.id, "instance_name": item.instance_name,
-                         "req": child_req.model_dump()})
+                         "req": child_req.model_dump(exclude=SCHEDULE_FIELDS)})
         results.append(OCIBulkDeployJobResult(
             image_ocid=item.image_ocid, instance_name=item.instance_name,
             job_id=job.id, status="queued"))
@@ -917,6 +936,7 @@ async def bulk_deploy_instances(
             "workgroup":        workgroup,
             "children":         children,
         },
+        **_sched,
     )
     return OCIBulkDeployResponse(jobs=results, count=len(results), batch_id=batch_id,
                                  free_tier_warnings=free_tier_warnings)
@@ -931,6 +951,14 @@ async def deploy_instance(
     """Deploy one or more OCI compute instances from an image. Runs in background;
     returns a job id immediately. Enforces the free-tier warn-and-confirm gate over
     the whole request, so ``count`` is factored into the envelope."""
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **payload.schedule_fields())
+
     if not _configured():
         raise HTTPException(status_code=400, detail="OCI not configured — run the setup wizard.")
 
@@ -1007,8 +1035,9 @@ async def deploy_instance(
             # Full request so the runner can rebuild the deploy call. Only secret
             # *references* live on it, resolved at deploy time — same shape as the
             # Packer build jobs (services/packer_build_service.run_build).
-            "req":              payload.model_dump(),
+            "req":              payload.model_dump(exclude=SCHEDULE_FIELDS),
         },
+        **_sched,
     )
     job_service.set_cloud_resource_id(db, job.id, payload.instance_name)
     job_service.log_audit(

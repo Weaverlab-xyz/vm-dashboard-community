@@ -40,7 +40,7 @@ from ..models.aws import (
     NetworkOptions,
     SSHKeySecretDetail,
 )
-from ..services import aws_service, deploy_batch, job_service, cache_service, cloud_stats, region_catalog, workgroup_service
+from ..services import change_window_service, aws_service, deploy_batch, job_service, cache_service, cloud_stats, region_catalog, workgroup_service
 from ..services.aws_service import AWSError
 from .auth import require_admin, require_permission
 from ..services import vm_suspend_policy
@@ -623,6 +623,14 @@ async def _fan_out_batch(
     function, so a ``children``-carrying create_job in the same function as the single
     deploy's ``pending`` one reads as a violation whatever the runtime branch does.
     """
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     names = deploy_batch.expand_names(req.instance_name, req.count, "aws")
     deploy_batch.reject_name_collisions(db, "ec2_deploy", names)
     await deploy_batch.enforce_admission(
@@ -685,6 +693,7 @@ async def _fan_out_batch(
             "pra_credential_ref": req.pra_credential_ref,
             "children": children,
         },
+        **_sched,
     )
     return DeployResponse(
         job_id=parent.id,
@@ -708,6 +717,14 @@ async def deploy_ami(
     Returns a job_id trackable at /api/jobs/{job_id} or /api/ws/jobs/{job_id}.
     ``count > 1`` fans out into a batch (see ``_fan_out_batch``).
     """
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
     region = _resolve_region(req.region)
     await _validate_ssh_key_override(req.ssh_key_secret_override)
@@ -749,6 +766,7 @@ async def deploy_ami(
             "jumpoint_name": req.jumpoint_name,
             "pra_credential_ref": req.pra_credential_ref,
         },
+        **_sched,
     )
 
     job_service.log_audit(
@@ -777,6 +795,14 @@ async def bulk_deploy_amis(
     subnet, and security groups. A single ECS Jumpoint container is started for
     the entire batch (instead of one per instance). Returns a list of job IDs.
     """
+    # Resolved BEFORE anything is created. It depends only on the three request
+    # fields and the database, so there is nothing to validate first -- and in the
+    # fan-out this ordering is load-bearing: resolving after the children loop would
+    # let a bad time 400 with a batch of `queued` children already committed and no
+    # parent to ever drive them. `{}` for an immediate deploy, which leaves every
+    # create_job below byte-for-byte what it was.
+    _sched = change_window_service.schedule_kwargs(db, **req.schedule_fields())
+
     if not req.items:
         raise HTTPException(status_code=400, detail="At least one AMI item is required.")
 
@@ -863,6 +889,7 @@ async def bulk_deploy_amis(
                 for job_id, item in job_items
             ],
         },
+        **_sched,
     )
 
     results = [

@@ -30,30 +30,92 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from ..database import ChangeWindow, Job, JobSchedule, User
-from . import change_window, change_window_service, job_service
+from . import (agent_ansible_meta, ansible_run_meta, change_window,
+               change_window_service, job_service)
 from .suspend_schedule import ScheduleError
 
 logger = logging.getLogger(__name__)
 
-# Job types a recurring schedule may reproduce.
+# The two Ansible key sets are IMPORTED, never restated. `ansible_run_meta.RUN_META_KEYS`
+# is the closed allowlist the run path itself reads, so a key added there is a key a
+# schedule may carry, automatically and without a second edit that somebody would
+# eventually forget. `description` rides along because /jobs renders it as the job's
+# label and the runners ignore it.
+_ANSIBLE_KEYS = set(ansible_run_meta.RUN_META_KEYS) | {"description"}
+_AGENT_ANSIBLE_KEYS = set(agent_ansible_meta.RUN_META_KEYS) | {"description"}
+
+# **The allowlist is per-KEY, not per-type, and that distinction is the whole safety
+# argument.** A type-only list said "this job type may repeat" and then copied the
+# metadata dict verbatim — but the dict a schedule copies is the POST-RUN one.
+# `job_service.set_completed` MERGES each runner's result into `Job.extra_data`, so what
+# gets stored is whatever the runner wrote back, not what the endpoint created.
 #
-# The bar for adding one is NOT "is it useful to repeat" — it is "is every value in this
-# job type's metadata still safe and still meaningful a month from now". Two failure
-# modes to check against before extending this:
+# That is not a theoretical gap. `epml_sync`'s create-time metadata is two strings; its
+# COMPLETED metadata carries BeyondTrust pre-signed download URLs that expire in about
+# thirty minutes. A type-only list would have copied them into `job_schedules.payload`
+# and left them there indefinitely — a pre-signed URL and a one-shot handle, both of
+# which this comment's predecessor explicitly warned about, smuggled in by the one route
+# nobody thought to check.
 #
-#   * a SECRET in the payload. It would sit in `job_schedules.payload` in clear, outside
-#     the ref-based handling every other credential path in this tree uses.
-#   * a ONE-SHOT handle — an upload id, a pre-signed URL, a checked-out lease. The first
-#     occurrence would work and every later one would fail in a way that looks like an
-#     infrastructure problem.
+# Filtering to named keys makes every type safe BY CONSTRUCTION rather than by audit: a
+# runner result key can never reach the payload, because it was never named here. It also
+# means the next contributor cannot widen the blast radius by adding a type — they have
+# to say which keys, next to this paragraph.
 #
-# Config Management is the case this feature was built for and the one type that has been
-# audited against both: `ansible_run_meta.RUN_META_KEYS` is a closed allowlist of refs.
-SCHEDULABLE_JOB_TYPES = frozenset((
-    "ansible_local",
-    "ansible_cloud_run",
-    "agent_ansible",
-))
+# Membership in this dict is what makes a type schedulable, so the two cannot drift.
+#
+# What earns a key a place: it must be a REFERENCE the runner reads, still meaningful a
+# month later. Not a secret value, not a one-shot handle (an upload id, a pre-signed URL,
+# a checked-out lease), not a result.
+SCHEDULABLE_PAYLOAD_KEYS = {
+    # Config Management. `ansible_run_meta.RUN_META_KEYS` is already a closed allowlist
+    # of refs and is reused verbatim rather than restated — the two drifting apart is
+    # exactly the failure this whole mechanism exists to prevent. `description` is the
+    # human label /jobs renders.
+    "ansible_local": frozenset(_ANSIBLE_KEYS),
+    "ansible_cloud_run": frozenset({
+        "description", "target_kind", "target_id", "cloud", "asset",
+        "asset_backend", "extra_vars", "secret_vars",
+    }),
+    "agent_ansible": frozenset(_AGENT_ANSIBLE_KEYS),
+    # Power. References only — an instance id and its placement — and the runners echo
+    # back exactly what they were given, so there is no result key to exclude.
+    "ec2_power": frozenset({"action", "instance_id", "region", "deploy_job_id",
+                            "unmanaged"}),
+    "azure_power": frozenset({"action", "vm_name", "resource_group", "deploy_job_id",
+                              "unmanaged"}),
+    "gce_power": frozenset({"action", "instance_name", "zone", "project_id",
+                            "deploy_job_id"}),
+    "oci_power": frozenset({"action", "instance_ocid", "deploy_job_id"}),
+    # Image export. A source image id plus placement; the runner merges export details
+    # and a registered image id on completion, and the filter drops both.
+    "aws_export_image": frozenset({"ami_id", "registry_name", "region", "created_by"}),
+    "azure_export_image": frozenset({"image_name", "registry_name", "resource_group",
+                                     "os_type", "created_by"}),
+    "gcp_export_image": frozenset({"image_name", "registry_name", "project_id",
+                                   "created_by"}),
+    # NB: `oci_export_image` is deliberately absent. It is dispatched by the worker but
+    # no endpoint ever creates one — it only arises inline from `packer_oci_build` — so
+    # there is no job to repeat from.
+    #
+    # Image promotion. Every key is a reference to a durable registry row.
+    "image_promote_aws": frozenset({"image_id", "image_name", "image_version",
+                                    "target_cloud", "target_region"}),
+    "image_promote_azure": frozenset({"image_id", "image_name", "image_version",
+                                      "target_cloud", "target_region",
+                                      "target_resource_group"}),
+    "image_promote_gcp": frozenset({"image_id", "image_name", "image_version",
+                                    "target_cloud", "target_region"}),
+    "image_promote_oci": frozenset({"image_id", "image_name", "image_version",
+                                    "target_cloud", "target_region"}),
+    # EPM for Linux package sync. The runner reads `backend` and nothing else; the two
+    # keys here are the entire safe payload, and the filter is what keeps the completed
+    # job's pre-signed package URLs out of it.
+    "epml_sync": frozenset({"description", "backend"}),
+}
+
+#: Kept for callers that only ask "may this type repeat at all".
+SCHEDULABLE_JOB_TYPES = frozenset(SCHEDULABLE_PAYLOAD_KEYS)
 
 # Consecutive failures before a schedule switches itself off. A recurring change that
 # fails every week forever is worse than one that stops: it trains people to ignore the
@@ -63,6 +125,26 @@ MAX_CONSECUTIVE_FAILURES = 3
 
 def _utcnow() -> datetime:
     return datetime.utcnow()
+
+
+def payload_for(job: Job) -> dict:
+    """The job's metadata, filtered to the keys its type is allowed to replay.
+
+    The filter, not the type check, is what makes a stored payload safe: the dict this
+    reads is the POST-RUN one, because ``job_service.set_completed`` merges each
+    runner's result into it. So the job being copied carries whatever the runner wrote
+    back — Ansible output, an export's registered image id, `epml_sync`'s pre-signed
+    package URLs — none of which the runner reads on the way IN, and none of which
+    should outlive the run.
+
+    Dropping an unknown key rather than refusing it is deliberate. A result key is not
+    an error, it is just not input; refusing would make every successful job
+    un-repeatable the moment its runner learned to record something new.
+    """
+    allowed = SCHEDULABLE_PAYLOAD_KEYS.get(job.job_type)
+    if allowed is None:
+        return {}
+    return {k: v for k, v in (job.metadata_dict or {}).items() if k in allowed}
 
 
 def schedulable_reason(job: Job) -> str:
@@ -122,7 +204,7 @@ def create_from_job(db: Session, *, job: Job, name: str, change_window_id: str,
         # reason: switching something on must never make a backlog eligible at once.
         last_materialised_for=change_window.next_occurrence(window, _utcnow())[0],
     )
-    row.payload_dict = job.metadata_dict or {}
+    row.payload_dict = payload_for(job)
     db.add(row)
     db.commit()
     db.refresh(row)
