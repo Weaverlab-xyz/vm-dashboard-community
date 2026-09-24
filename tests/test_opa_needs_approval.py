@@ -133,10 +133,12 @@ def _install_stubs():
 
 _install_stubs()
 
-try:
-    from web_dashboard.services import _opa as _real_opa
-except Exception as exc:  # pragma: no cover — deps absent outside CI
-    _skip(f"_opa import unavailable: {exc}")
+# Imported unguarded, deliberately. `_install_stubs` above has already supplied every
+# dependency admission_service has (fastapi, config_service, job_service, the pydantic
+# settings), and `_opa` itself is stdlib-only — so there is no optional package left to
+# be absent, and a `try` here could only ever swallow a REAL breakage and exit 0 having
+# tested nothing. See tests/test_import_guard_narrowness.py, which gates exactly that.
+from web_dashboard.services import _opa as _real_opa  # noqa: E402
 
 if not _real_opa.opa_available():
     # See test_opa_policies.py for why CI makes this fatal rather than silent.
@@ -149,10 +151,7 @@ if not _real_opa.opa_available():
     _skip("no opa binary on PATH (set OPA_BINARY, or see the `opa` CI job) — "
           "this file only tests what the real engine does")
 
-try:
-    from web_dashboard.services import admission_service as adm
-except Exception as exc:  # pragma: no cover
-    _skip(f"admission_service import unavailable: {exc}")
+from web_dashboard.services import admission_service as adm  # noqa: E402
 
 HTTPException = sys.modules["fastapi"].HTTPException
 _js = sys.modules["web_dashboard.services.job_service"]
