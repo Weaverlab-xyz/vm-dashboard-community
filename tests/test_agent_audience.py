@@ -1,7 +1,7 @@
 """The remote-agent signing audience: visibility, reset, and the mint-time guard.
 
 Written after a live failure on 2026-08-03. On a split-vhost deployment — the UI on one
-hostname, ``/api/agent*`` on another — the Settings field defaults to the origin the admin's
+hostname, ``/api/agent/*`` on another — the Settings field defaults to the origin the admin's
 browser is on, which is the *UI* hostname. Minting one enrolment code pinned the audience to
 it permanently. Correcting the field afterwards did nothing, because pinning is write-once
 and the pin wins. The agent dialled the UI vhost, got a 404 from it, and the console showed
@@ -81,6 +81,7 @@ def _deny():
 def _app() -> TestClient:
     app = FastAPI()
     app.include_router(agent_api.router)
+    app.include_router(agent_api.admin_router)
 
     def _db():
         db = SessionLocal()
@@ -133,7 +134,7 @@ def _state(public_base: str = "", pinned: str = PINNED) -> None:
 
 
 def _register(name: str = ""):
-    return CLIENT.post("/api/agent", json={"name": name or f"agent-{uuid.uuid4().hex[:8]}",
+    return CLIENT.post("/api/agents", json={"name": name or f"agent-{uuid.uuid4().hex[:8]}",
                                            "site": "dc1"})
 
 
@@ -199,8 +200,8 @@ def test_reading_or_resetting_the_audience_requires_an_admin():
     """The same gate as minting a code. Without it, the reset would be a way for anything
     that can reach an agent endpoint to un-pin the audience at will."""
     _state(pinned=PINNED)
-    assert ANON.get("/api/agent/audience").status_code == 403
-    assert ANON.delete("/api/agent/audience").status_code == 403
+    assert ANON.get("/api/agents/audience").status_code == 403
+    assert ANON.delete("/api/agents/audience").status_code == 403
     assert agent_api._pinned_audience() == PINNED, "a refused reset cleared the pin anyway"
 
 
@@ -209,8 +210,8 @@ def test_the_audience_cannot_be_set_through_its_own_route():
     write-once key."""
     _state(pinned=PINNED)
     for method in ("POST", "PUT", "PATCH"):
-        resp = CLIENT.request(method, "/api/agent/audience", json={"audience": "https://evil.test"})
-        assert resp.status_code in (404, 405), f"{method} /api/agent/audience is routed"
+        resp = CLIENT.request(method, "/api/agents/audience", json={"audience": "https://evil.test"})
+        assert resp.status_code in (404, 405), f"{method} /api/agents/audience is routed"
     assert agent_api._pinned_audience() == PINNED
 
 
@@ -220,7 +221,7 @@ def test_the_pinned_audience_is_readable():
     """The gap this closes: `agent_base_url` had exactly one reader in the codebase and no
     way to see it, so an audience pinned to the wrong hostname was undiagnosable."""
     _state(public_base=PINNED, pinned=PINNED)
-    body = CLIENT.get("/api/agent/audience").json()
+    body = CLIENT.get("/api/agents/audience").json()
     assert body["pinned"] == PINNED
     assert body["public_base_url"] == PINNED
     assert body["effective"] == PINNED
@@ -231,14 +232,14 @@ def test_the_reset_route_is_not_swallowed_by_the_agent_id_route():
     """`DELETE /{agent_id}` is declared first and a path param matches one segment, so a
     404 here would mean the route ordering silently broke."""
     _state(pinned=PINNED)
-    resp = CLIENT.delete("/api/agent/audience")
+    resp = CLIENT.delete("/api/agents/audience")
     assert resp.status_code == 200, resp.text
     assert "Agent not found" not in resp.text
 
 
 def test_the_unpinned_state_reports_what_a_mint_would_pin():
     _state(pinned="")
-    body = CLIENT.get("/api/agent/audience").json()
+    body = CLIENT.get("/api/agents/audience").json()
     assert body["pinned"] == ""
     assert body["effective"] == ORIGIN
     assert any("permanently pins" in w for w in body["warnings"])
@@ -249,9 +250,9 @@ def test_the_reset_counts_the_agents_it_will_break():
     concrete in the confirm dialog rather than an abstraction the operator skips."""
     _state(pinned=PINNED)
     _enrolled()
-    before = CLIENT.get("/api/agent/audience").json()["agents_enrolled"]
+    before = CLIENT.get("/api/agents/audience").json()["agents_enrolled"]
     assert before >= 1
-    resp = CLIENT.delete("/api/agent/audience").json()
+    resp = CLIENT.delete("/api/agents/audience").json()
     assert resp["previous"] == PINNED
     assert resp["agents_affected"] == before
     assert str(before) in resp["detail"], "the detail should name the number affected"
@@ -259,7 +260,7 @@ def test_the_reset_counts_the_agents_it_will_break():
 
 def test_resetting_an_unpinned_audience_is_a_no_op_not_an_error():
     _state(pinned="")
-    resp = CLIENT.delete("/api/agent/audience")
+    resp = CLIENT.delete("/api/agents/audience")
     assert resp.status_code == 200
     assert resp.json()["previous"] == ""
     assert "nothing to reset" in resp.json()["detail"]
@@ -271,7 +272,7 @@ def test_the_next_mint_after_a_reset_repins_from_public_base_url():
     """The recovery the docs described and did not provide. Reset does not take an audience
     — it clears the key so the ordinary admin mint pins it again from the stated URL."""
     _state(public_base="https://agents.example.test", pinned=PINNED)
-    assert CLIENT.delete("/api/agent/audience").status_code == 200
+    assert CLIENT.delete("/api/agents/audience").status_code == 200
     assert agent_api._pinned_audience() == ""
 
     resp = _register()
@@ -289,7 +290,7 @@ def test_an_enrolled_agent_stops_authenticating_after_a_reset():
     agent_id, private = _enrolled()
     assert _lease(private, agent_id).status_code == 200
 
-    CLIENT.delete("/api/agent/audience")
+    CLIENT.delete("/api/agents/audience")
     _pin("https://moved.test")                 # as the next mint would
     resp = _lease(private, agent_id)
     assert resp.status_code == 401, "the old signature must stop verifying"
@@ -327,7 +328,7 @@ def test_a_refused_mint_creates_no_agent_row():
     ever saw."""
     _state(public_base="https://dash.corrected.test", pinned="https://ui.stale.test")
     name = f"blocked-{uuid.uuid4().hex[:8]}"
-    assert CLIENT.post("/api/agent", json={"name": name}).status_code == 409
+    assert CLIENT.post("/api/agents", json={"name": name}).status_code == 409
 
     db = SessionLocal()
     try:
@@ -338,7 +339,7 @@ def test_a_refused_mint_creates_no_agent_row():
 
     # And the name is still free once the conflict is resolved.
     _state(public_base="https://ui.stale.test", pinned="https://ui.stale.test")
-    assert CLIENT.post("/api/agent", json={"name": name}).status_code == 201
+    assert CLIENT.post("/api/agents", json={"name": name}).status_code == 201
 
 
 def test_a_refused_reissue_leaves_the_running_container_working():
@@ -349,7 +350,7 @@ def test_a_refused_reissue_leaves_the_running_container_working():
     assert _lease(private, agent_id).status_code == 200
 
     config_service.set(public_url.CONFIG_KEY, "https://dash.corrected.test")
-    resp = CLIENT.post(f"/api/agent/{agent_id}/enrollment-code")
+    resp = CLIENT.post(f"/api/agents/{agent_id}/enrollment-code")
     assert resp.status_code == 409
     assert resp.json()["detail"]["code"] == "agent_audience_conflict"
 
@@ -364,7 +365,7 @@ def test_an_acknowledged_mismatch_mints_against_the_pin_and_says_so():
     this guard would block agent registration permanently. The refusal is about not emitting
     a stale URL *silently* — an admin who asked again gets it, labelled."""
     _state(public_base="https://dash.corrected.test", pinned="https://ui.stale.test")
-    resp = CLIENT.post("/api/agent", json={"name": f"ack-{uuid.uuid4().hex[:8]}"},
+    resp = CLIENT.post("/api/agents", json={"name": f"ack-{uuid.uuid4().hex[:8]}"},
                        params={"acknowledge_audience": "true"})
     assert resp.status_code == 201, resp.text
     install = resp.json()["install"]
@@ -377,7 +378,7 @@ def test_an_acknowledged_mismatch_mints_against_the_pin_and_says_so():
 def test_the_refusal_names_its_own_override():
     """A dead-end 409 sends the operator to the source to find out it was not one."""
     _state(public_base="https://dash.corrected.test", pinned="https://ui.stale.test")
-    detail = CLIENT.post("/api/agent", json={"name": "x"}).json()["detail"]
+    detail = CLIENT.post("/api/agents", json={"name": "x"}).json()["detail"]
     assert detail["override"] == "acknowledge_audience=true"
 
 
@@ -386,7 +387,7 @@ def test_acknowledging_does_not_move_the_pin():
     re-pinning from public_base_url here would invalidate every enrolled agent as a side
     effect of registering one new one."""
     _state(public_base="https://dash.corrected.test", pinned="https://ui.stale.test")
-    CLIENT.post("/api/agent", json={"name": f"ack2-{uuid.uuid4().hex[:8]}"},
+    CLIENT.post("/api/agents", json={"name": f"ack2-{uuid.uuid4().hex[:8]}"},
                 params={"acknowledge_audience": "true"})
     assert agent_api._pinned_audience() == "https://ui.stale.test"
 

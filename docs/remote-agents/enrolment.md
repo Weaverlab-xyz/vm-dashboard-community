@@ -21,6 +21,13 @@ This adds Caddy on a **separate vhost that proxies only `/api/agent/*`**. The UI
 login form, the OAuth callbacks and `/setup` stay on the internal address. The whole
 internet-facing surface becomes one machine-only, HTML-free, session-free prefix.
 
+The **trailing slash in that matcher is load-bearing.** The agents' own routes are
+`/api/agent/…`; the console's routes for managing them are `/api/agents/…`, plural. A
+matcher without the slash is a prefix match on the raw string, so it catches both — and
+publishes "mint an enrolment code" and "revoke an agent" on the hostname your agents
+reach. They still need an administrator's bearer token, so this is not an open door, but
+it is the wrong side of the wall the vhost split exists to build.
+
 The base stack still publishes 8001; bind it to loopback or firewall it, or the
 plain-HTTP dashboard sits beside the TLS vhost and the split buys you nothing.
 
@@ -181,8 +188,10 @@ exception. It does not move the pin: the override is permission to use the pinne
 not to re-pin, because re-pinning would invalidate every enrolled agent as a side effect of
 registering one new one.
 
-The same information is available to a script at `GET /api/agent/audience`, and the reset at
-`DELETE /api/agent/audience`; both are admin-only.
+The same information is available to a script at `GET /api/agents/audience`, and the reset
+at `DELETE /api/agents/audience`. Both are admin-only, and both are on the **plural**
+prefix — the operator half of the API, which the agent vhost deliberately does not
+serve. Call them against the internal hostname.
 
 #### The BeyondTrust Gateway
 

@@ -67,6 +67,7 @@ class _Admin:
 def _app() -> TestClient:
     app = FastAPI()
     app.include_router(agent_api.router)
+    app.include_router(agent_api.admin_router)
 
     def _db():
         db = SessionLocal()
@@ -95,7 +96,7 @@ CLIENT = _app()
 
 def _ready(name: str = "") -> tuple:
     name = name or f"agent-{uuid.uuid4().hex[:8]}"
-    resp = CLIENT.post("/api/agent", json={"name": name, "site": "dc1"})
+    resp = CLIENT.post("/api/agents", json={"name": name, "site": "dc1"})
     assert resp.status_code == 201, resp.text
     code = resp.json()["enrollment_code"]
     private, public = agent_signing.generate_keypair()

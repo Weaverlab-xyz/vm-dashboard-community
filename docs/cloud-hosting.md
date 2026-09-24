@@ -119,7 +119,9 @@ second is the one people get wrong:
 
 - It splits the vhosts. `/api/agent/*` is served on one hostname and the UI on
   another, so the internet-facing surface is one prefix with no HTML, no login
-  form, no session cookies, no OAuth callbacks and no `/setup`.
+  form, no session cookies, no OAuth callbacks and no `/setup`. Keep the trailing
+  slash: the console's own agent-management routes are `/api/agents/*`, plural,
+  and a matcher without it publishes those too.
 - It keeps `TRUSTED_PROXY_HOSTS` correct without configuring anything. The app
   believes `X-Forwarded-*` only from peers in that list, which defaults to
   `127.0.0.1`. A sidecar reaches the app over loopback, so the default is

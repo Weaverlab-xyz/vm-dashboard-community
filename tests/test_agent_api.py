@@ -67,6 +67,7 @@ def _app() -> TestClient:
     the whole application's startup (config_service, warmers, the setup guard)."""
     app = FastAPI()
     app.include_router(agent_api.router)
+    app.include_router(agent_api.admin_router)
 
     def _db():
         db = SessionLocal()
@@ -132,7 +133,7 @@ OPERATOR = _operator_app()
 def _register(name: str = "") -> tuple[str, str]:
     """Create an agent through the operator API; return (agent_id, enrolment code)."""
     name = name or f"agent-{uuid.uuid4().hex[:8]}"
-    resp = CLIENT.post("/api/agent", json={"name": name, "site": "dc1"})
+    resp = CLIENT.post("/api/agents", json={"name": name, "site": "dc1"})
     assert resp.status_code == 201, resp.text
     body = resp.json()
     return body["id"], body["enrollment_code"]
@@ -228,8 +229,8 @@ def test_a_malformed_public_key_is_refused_at_enrolment():
 
 def test_duplicate_agent_names_are_refused():
     name = f"dupe-{uuid.uuid4().hex[:8]}"
-    assert CLIENT.post("/api/agent", json={"name": name}).status_code == 201
-    assert CLIENT.post("/api/agent", json={"name": name}).status_code == 400
+    assert CLIENT.post("/api/agents", json={"name": name}).status_code == 201
+    assert CLIENT.post("/api/agents", json={"name": name}).status_code == 400
 
 
 # ── signing ───────────────────────────────────────────────────────────────────
@@ -631,7 +632,7 @@ def test_revoking_an_agent_stops_it_immediately_and_fails_its_job():
     _signed(private, agent_id, "POST", "/api/agent/lease", {})
     assert _job(job_id).status == "running"
 
-    assert CLIENT.delete(f"/api/agent/{agent_id}").status_code == 200
+    assert CLIENT.delete(f"/api/agents/{agent_id}").status_code == 200
     assert _job(job_id).status == "failed"
     assert _signed(private, agent_id, "POST", "/api/agent/lease", {}).status_code == 401
 
@@ -643,7 +644,7 @@ def test_reissuing_a_code_locks_out_the_running_container():
     _agent_id, private = _enroll(code)
     assert _signed(private, agent_id, "POST", "/api/agent/lease", {}).status_code == 200
 
-    resp = CLIENT.post(f"/api/agent/{agent_id}/enrollment-code")
+    resp = CLIENT.post(f"/api/agents/{agent_id}/enrollment-code")
     assert resp.status_code == 200 and resp.json()["enrollment_code"].startswith("agte_")
     assert _signed(private, agent_id, "POST", "/api/agent/lease", {}).status_code == 401
 
@@ -653,7 +654,7 @@ def test_reissuing_a_code_locks_out_the_running_container():
 def test_the_listing_derives_status_and_never_leaks_key_material():
     agent_id, private = _ready()
     _signed(private, agent_id, "POST", "/api/agent/lease", {})
-    rows = CLIENT.get("/api/agent").json()["agents"]
+    rows = CLIENT.get("/api/agents").json()["agents"]
     row = next(r for r in rows if r["id"] == agent_id)
     assert row["status"] == "online"
     for leaky in ("public_key", "enroll_code_hash", "enrollment_code", "private_key"):
@@ -666,7 +667,7 @@ def test_the_listing_carries_the_signals_needed_to_judge_an_agent():
     the UI rather than erroring."""
     agent_id, private = _ready()
     _signed(private, agent_id, "POST", "/api/agent/lease", {})
-    row = next(r for r in CLIENT.get("/api/agent").json()["agents"] if r["id"] == agent_id)
+    row = next(r for r in CLIENT.get("/api/agents").json()["agents"] if r["id"] == agent_id)
     for field in ("created_by", "created_at", "enrolled_at", "last_seen_ip",
                   "policy_hash", "id"):
         assert field in row, f"the listing no longer returns {field}"
@@ -681,7 +682,7 @@ def test_a_live_agent_record_cannot_be_removed():
     what settles its in-flight jobs, and deleting the row first would leave one running
     with nothing to reconcile it."""
     agent_id, _private = _ready()
-    resp = CLIENT.delete(f"/api/agent/{agent_id}/record")
+    resp = CLIENT.delete(f"/api/agents/{agent_id}/record")
     assert resp.status_code == 409
     assert "revoke" in resp.json()["detail"].lower()
 
@@ -694,11 +695,11 @@ def test_removing_a_revoked_record_frees_the_name():
     _enroll(code)
 
     # Same name is refused while the row exists, revoked or not.
-    assert CLIENT.delete(f"/api/agent/{agent_id}").status_code == 200
-    assert CLIENT.post("/api/agent", json={"name": name}).status_code == 400
+    assert CLIENT.delete(f"/api/agents/{agent_id}").status_code == 200
+    assert CLIENT.post("/api/agents", json={"name": name}).status_code == 400
 
-    assert CLIENT.delete(f"/api/agent/{agent_id}/record").status_code == 200
-    assert CLIENT.post("/api/agent", json={"name": name}).status_code == 201, \
+    assert CLIENT.delete(f"/api/agents/{agent_id}/record").status_code == 200
+    assert CLIENT.post("/api/agents", json={"name": name}).status_code == 201, \
         "the name should be reusable once the record is gone"
 
 
@@ -712,8 +713,8 @@ def test_removing_a_record_keeps_the_job_history():
     _signed(private, agent_id, "POST", f"/api/agent/jobs/{job_id}/logs",
             {"lines": ["something it did"]})
 
-    CLIENT.delete(f"/api/agent/{agent_id}")
-    assert CLIENT.delete(f"/api/agent/{agent_id}/record").status_code == 200
+    CLIENT.delete(f"/api/agents/{agent_id}")
+    assert CLIENT.delete(f"/api/agents/{agent_id}/record").status_code == 200
 
     job = _job(job_id)
     assert job is not None, "the job row must survive the agent's deletion"
@@ -731,23 +732,23 @@ def test_the_record_route_is_not_swallowed_by_the_agent_id_route():
     /{id}/record must still reach its own handler — a 404 here would mean the route
     ordering silently broke."""
     agent_id, _private = _ready()
-    assert CLIENT.delete(f"/api/agent/{agent_id}/record").status_code == 409  # not 404
+    assert CLIENT.delete(f"/api/agents/{agent_id}/record").status_code == 409  # not 404
 
 
 def test_removing_an_unknown_record_is_a_404():
-    assert CLIENT.delete(f"/api/agent/{uuid.uuid4()}/record").status_code == 404
+    assert CLIENT.delete(f"/api/agents/{uuid.uuid4()}/record").status_code == 404
 
 
 def test_discovery_is_refused_for_an_offline_agent():
     """Queuing work for a dead agent would silently sit there; saying so is kinder."""
     agent_id, _code = _register()
-    resp = CLIENT.post(f"/api/agent/{agent_id}/discover", json={"scan_kind": "k8s"})
+    resp = CLIENT.post(f"/api/agents/{agent_id}/discover", json={"scan_kind": "k8s"})
     assert resp.status_code == 409
 
 
 def test_discovery_queues_a_job_bound_to_the_agent():
     agent_id, private = _ready()
-    resp = CLIENT.post(f"/api/agent/{agent_id}/discover",
+    resp = CLIENT.post(f"/api/agents/{agent_id}/discover",
                        json={"scan_kind": "all", "cidrs": ["10.20.0.0/24"],
                              "max_hosts": 10 ** 7})
     assert resp.status_code == 202
@@ -774,7 +775,7 @@ def test_a_stale_agent_version_is_refused_before_anything_is_queued():
     finally:
         db.close()
 
-    resp = CLIENT.post(f"/api/agent/{agent_id}/discover", json={"cidrs": ["10.20.0.0/24"]})
+    resp = CLIENT.post(f"/api/agents/{agent_id}/discover", json={"cidrs": ["10.20.0.0/24"]})
     assert resp.status_code == 409
     detail = resp.json()["detail"]
     assert "2.0 or later" in detail and "Re-enrolment is not needed" in detail
@@ -793,7 +794,7 @@ def test_an_agent_whose_policy_omits_discovery_is_refused_too():
     finally:
         db.close()
 
-    resp = CLIENT.post(f"/api/agent/{agent_id}/discover", json={"cidrs": ["10.20.0.0/24"]})
+    resp = CLIENT.post(f"/api/agents/{agent_id}/discover", json={"cidrs": ["10.20.0.0/24"]})
     assert resp.status_code == 409
     assert "policy.yaml" in resp.json()["detail"]
 

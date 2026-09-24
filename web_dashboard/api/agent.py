@@ -10,23 +10,41 @@ Agent half — Ed25519-signed, no user identity involved:
   POST /api/agent/jobs/{id}/secret          — a hypervisor credential, sealed
   POST /api/agent/jobs/{id}/ansible-bundle  — a Config-Management run bundle, sealed
 
-Operator half — admin only:
+Operator half — admin only, and on a DIFFERENT prefix (``agents``, plural):
 
-  POST   /api/agent                         — register an agent, mint an enrolment code
-  GET    /api/agent                         — list, with derived status
-  GET    /api/agent/audience                — the pinned signing audience, read-only
-  DELETE /api/agent/audience                — clear the pin so the next mint re-pins it
-  GET    /api/agent/{id}                    — one agent
-  POST   /api/agent/{id}/enrollment-code    — re-issue for a reinstall
-  POST   /api/agent/{id}/discover           — queue a discovery scan
-  DELETE /api/agent/{id}                    — revoke
+  POST   /api/agents                        — register an agent, mint an enrolment code
+  GET    /api/agents                        — list, with derived status
+  GET    /api/agents/audience               — the pinned signing audience, read-only
+  DELETE /api/agents/audience               — clear the pin so the next mint re-pins it
+  GET    /api/agents/{id}                   — one agent
+  POST   /api/agents/{id}/enrollment-code   — re-issue for a reinstall
+  POST   /api/agents/{id}/discover          — queue a discovery scan
+  PATCH  /api/agents/{id}                   — edit name/site/description
+  DELETE /api/agents/{id}                   — revoke
+  DELETE /api/agents/{id}/record            — forget a revoked agent
 
-Two things about this module are load-bearing and easy to undo by accident.
+Three things about this module are load-bearing and easy to undo by accident.
 
-**Route order.** Every agent-half route is declared before the operator half's
-``/{agent_id}`` routes. FastAPI matches in declaration order, so moving them would make
-``/api/agent/lease`` bind ``agent_id="lease"`` and 404 — or worse, 403 under the admin
-dependency, which reads like a permissions bug rather than a routing one.
+**Two routers, and the prefix difference is a security boundary.** The remote-agent
+deployment (``docker-compose.agent.yml``) puts a gateway in front that publishes the
+agent protocol on a hostname reachable from wherever the agents live, and keeps the rest
+of the dashboard on an internal address. That gateway selects what to publish by path
+prefix, so the split has to be visible in the path or it cannot be made. While both
+halves lived under ``/api/agent`` the gateway's matcher published "re-issue an enrolment
+code" and "revoke an agent" to the hostile network too. They needed an administrator's
+bearer token, so it was never an open door — it was the wrong side of the wall, while the
+gateway config said in plain words that they were not there at all.
+
+The matcher's trailing slash is what enforces this. ``/api/agent*`` is a prefix match on
+the raw string and catches ``/api/agents`` and ``/api/agentcell`` as well; ``/api/agent/*``
+catches this router and nothing else. ``tests/test_agent_vhost_surface.py`` parses that
+matcher out of the Caddyfile and checks it against the live route table, so the two
+cannot drift apart again in silence.
+
+**Route order.** Within ``admin_router``, ``/audience`` is declared before the
+``/{agent_id}`` routes. FastAPI matches in declaration order, so the other way round
+would bind ``agent_id="audience"`` and 404 — or worse, 403 under the admin dependency,
+which reads like a permissions bug rather than a routing one.
 
 **No ``require_permission``.** Agent-half routes never touch it. That dependency treats
 an empty permission dict as *unrestricted* (api/auth.py) for backward compatibility with
@@ -58,7 +76,11 @@ from ..services.agent_service import AgentError
 from .auth import require_explicit_permission
 
 logger = logging.getLogger(__name__)
+# Singular: the machine protocol, and the ONLY prefix the agent vhost proxies.
 router = APIRouter(prefix="/api/agent", tags=["agent"])
+# Plural: the operator half. A different prefix so the gateway's path matcher can tell
+# the two apart — see the module docstring.
+admin_router = APIRouter(prefix="/api/agents", tags=["agent"])
 
 # Defined in agent_service so pov_broker can read the same key without importing a
 # router. Aliased rather than re-spelled: two literals is how they drift apart.
@@ -1075,7 +1097,7 @@ def _install_hint(request: Request, code: str, audience: dict) -> dict:
     }
 
 
-@router.post("", status_code=201)
+@admin_router.post("", status_code=201)
 def create_agent(body: CreateAgentRequest, request: Request,
                        acknowledge_audience: bool = False,
                        current_user: User = Depends(require_explicit_permission("agents", "write")),
@@ -1103,7 +1125,7 @@ def create_agent(body: CreateAgentRequest, request: Request,
             "install": _install_hint(request, code, audience)}
 
 
-@router.get("")
+@admin_router.get("")
 def list_agents(current_user: User = Depends(require_explicit_permission("agents", "read")),
                       db: Session = Depends(get_db)):
     """Every registered agent, with derived status and its running-job count."""
@@ -1128,7 +1150,7 @@ def _enrolled_count(db: Session) -> int:
         RemoteAgent.public_key != "").count()
 
 
-@router.get("/audience")
+@admin_router.get("/audience")
 def read_audience(request: Request, current_user: User = Depends(require_explicit_permission("agents", "read")),
                         db: Session = Depends(get_db)):
     """The pinned signing audience and why it might be wrong. **Read-only.**
@@ -1146,7 +1168,7 @@ def read_audience(request: Request, current_user: User = Depends(require_explici
     return {**_audience_state(request), "agents_enrolled": _enrolled_count(db)}
 
 
-@router.delete("/audience")
+@admin_router.delete("/audience")
 def reset_audience(request: Request, current_user: User = Depends(require_explicit_permission("agents", "write")),
                          db: Session = Depends(get_db)):
     """Clear the pin so the next minted code pins the audience again.
@@ -1200,13 +1222,13 @@ def _load(db: Session, agent_id: str) -> RemoteAgent:
     return agent
 
 
-@router.get("/{agent_id}")
+@admin_router.get("/{agent_id}")
 def get_agent(agent_id: str, current_user: User = Depends(require_explicit_permission("agents", "read")),
                     db: Session = Depends(get_db)):
     return _agent_row(_load(db, agent_id))
 
 
-@router.post("/{agent_id}/enrollment-code")
+@admin_router.post("/{agent_id}/enrollment-code")
 def reissue_code(agent_id: str, request: Request,
                        acknowledge_audience: bool = False,
                        current_user: User = Depends(require_explicit_permission("agents", "write")),
@@ -1241,7 +1263,7 @@ class DiscoverRequest(BaseModel):
     concurrency: int = 32
 
 
-@router.post("/{agent_id}/discover", status_code=202)
+@admin_router.post("/{agent_id}/discover", status_code=202)
 def queue_discovery(agent_id: str, body: DiscoverRequest, request: Request,
                           current_user: User = Depends(require_explicit_permission("agents", "write")),
                           db: Session = Depends(get_db)):
@@ -1325,7 +1347,7 @@ class AgentUpdateRequest(BaseModel):
     description: Optional[str] = None
 
 
-@router.patch("/{agent_id}")
+@admin_router.patch("/{agent_id}")
 def update_agent(agent_id: str, body: AgentUpdateRequest, request: Request,
                        current_user: User = Depends(require_explicit_permission("agents", "write")),
                        db: Session = Depends(get_db)):
@@ -1351,7 +1373,7 @@ def update_agent(agent_id: str, body: AgentUpdateRequest, request: Request,
     return _agent_row(agent)
 
 
-@router.delete("/{agent_id}")
+@admin_router.delete("/{agent_id}")
 def revoke(agent_id: str, request: Request,
                  current_user: User = Depends(require_explicit_permission("agents", "delete")),
                  db: Session = Depends(get_db)):
@@ -1364,7 +1386,7 @@ def revoke(agent_id: str, request: Request,
     return {"detail": f"Agent '{agent.name}' revoked.", "jobs_cleared": affected}
 
 
-@router.delete("/{agent_id}/record")
+@admin_router.delete("/{agent_id}/record")
 def remove_record(agent_id: str, request: Request,
                         current_user: User = Depends(require_explicit_permission("agents", "delete")),
                         db: Session = Depends(get_db)):

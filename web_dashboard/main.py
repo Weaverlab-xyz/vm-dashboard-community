@@ -790,6 +790,9 @@ _SETUP_BYPASS_PREFIXES = ("/setup", "/api/setup", "/static", "/api/health", "/ap
 # /api/entitle/rest is here for the same reason: Entitle calls it as a machine
 # client and would read a 302-to-HTML as an integration failure rather than as
 # "this dashboard has not finished its first-run setup".
+# Matched with startswith, so "/api/agent" deliberately covers the operator half on
+# /api/agents too — that half is XHR from the console, which reads a 302-to-HTML no
+# better than the agent does. Do not "tighten" this to "/api/agent/".
 _SETUP_503_PREFIXES = ("/api/agent", "/api/entitle/rest",
                        # Entitle's ephemeral adapter for POV accessors, here for exactly
                        # the same reason as its standing sibling: a machine client reads a
@@ -1056,9 +1059,20 @@ app.include_router(suspend_api.router)
 app.include_router(change_windows_api.router)
 app.include_router(schedules_api.router)
 app.include_router(docs_pages.router)
-# Remote on-prem agents. Gated: this is the only router that accepts requests from
-# outside the dashboard's own trust domain, so it must be off unless asked for.
+# Remote on-prem agents, in two halves on two prefixes.
+#
+# `agent_api.router` (/api/agent) is the machine protocol — Ed25519 signatures, no user
+# identity — and the only router that accepts requests from outside the dashboard's own
+# trust domain, so it must be off unless asked for. It is also the only prefix the
+# remote-agent gateway publishes to the network the agents live on.
+#
+# `agent_api.admin_router` (/api/agents, plural) is the operator console half. Same
+# feature gate, different prefix, and the prefix is the point: it is what keeps
+# "mint an enrolment code" and "revoke an agent" off the internet-facing vhost. See
+# api/agent.py's module docstring and tests/test_agent_vhost_surface.py.
 app.include_router(agent_api.router,
+                   dependencies=[_feature_gate("remote_agents_enabled")])
+app.include_router(agent_api.admin_router,
                    dependencies=[_feature_gate("remote_agents_enabled")])
 
 # ── API explorer (/swagger) + authenticated schema ────────────────────────────
@@ -1754,14 +1768,17 @@ async def agents_page(request: Request):
     Two tabs, each gated inside the template on the flags its own half needs:
 
       * **Agents** -- the containers that poll out of a private network for work
-        (remote_agents_enabled, /api/agent);
+        (remote_agents_enabled, /api/agents);
       * **Connections** -- where each hypervisor lives and how to authenticate to it
         (any of the six hypervisor flags, /api/connections).
 
     DELIBERATELY UNGATED, matching /k8s and the other feature pages: with remote agents off
     the Agents panel is the only thing that tells an operator where the switch lives, and a
     404 cannot say that. Nav-gated on remote_agents_enabled (+ admin) instead; the
-    /api/agent router is feature-gated and every route on it needs the `agents` scope.
+    /api/agents router this page calls is feature-gated and every route on it needs the
+    `agents` scope. (/api/agent, singular, is the agents' own signed protocol — a
+    separate router on a separate prefix, because that prefix is what the remote-agent
+    gateway publishes to the network the agents live on.)
 
     /connections renders this same template opened on the Connections tab, and keeps its
     own any-of-six gate — see that route for why it is still here.

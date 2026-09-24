@@ -823,12 +823,12 @@ function storagePage() {
       }
     },
 
-    // Agents that could broker the remote-filesystem backend. /api/agent is gated on
+    // Agents that could broker the remote-filesystem backend. /api/agents is gated on
     // the Remote Agents integration, so a 404 here is a configuration answer rather
     // than a failure — say which one, instead of leaving an empty picker.
     async loadAgents() {
       try {
-        const r = await API.get('/api/agent');
+        const r = await API.get('/api/agents');
         this.agents = (r && r.agents) || [];
         this.agentsError = this.agents.length ? ''
           : 'No agents are enrolled yet. Enrol one on the Agents page first.';
