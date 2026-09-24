@@ -14,6 +14,10 @@ So these assertions are structural and read the source rather than the behaviour
   * no call site anywhere passes ``agent_id`` with a contradicting ``status``;
   * the agent API never reaches for ``require_permission``, whose empty-permissions
     fallback means *unrestricted*;
+  * the protocol half and the operator half stay on separate routers, because the
+    remote-agent gateway publishes one prefix and not the other — see
+    ``tests/test_agent_vhost_surface.py`` for the same rule checked against the
+    gateway config itself;
   * every type in ``AGENT_JOB_TYPES`` has its own branch in ``_envelope_payload``, and
     the chain ends in a raise rather than a default — a default does not error, it
     projects one type's metadata through another type's allowlist and lets the agent
@@ -222,6 +226,25 @@ def test_the_operator_half_is_admin_only():
     # sealed channel it uses, not against this route.
     agent_half = {"enroll_agent", "lease_job", "heartbeat", "push_logs", "complete",
                   "job_secret", "job_ansible_bundle", "job_gateway_key"}
+
+    # The list above and the router each function is decorated with are two spellings of
+    # the same membership, and the second one is the one that decides what the agent
+    # gateway publishes. Pin them together, or a route added to `router` without being
+    # named here would be skipped by the loop below *and* land on the public vhost.
+    on_protocol_router = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for d in node.decorator_list:
+            if (isinstance(d, ast.Call) and getattr(d.func, "attr", "") in
+                    ("get", "post", "delete", "patch")
+                    and getattr(d.func.value, "id", "") == "router"):
+                on_protocol_router.add(node.name)
+    assert on_protocol_router == agent_half, (
+        f"the agent protocol half is {sorted(on_protocol_router)} by router but "
+        f"{sorted(agent_half)} by this list. Anything on `router` is published on the "
+        f"agent vhost — see docker-compose.agent.yml.")
+
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -244,25 +267,41 @@ def test_the_operator_half_is_admin_only():
             "unrestricted, so this route would be open to every pre-OIDC user")
 
 
-def test_agent_routes_are_declared_before_the_agent_id_routes():
-    """FastAPI matches in declaration order, so a /{agent_id} route declared first
-    would bind agent_id='lease' and break the protocol in a way that reads like a
-    permissions bug."""
-    src = _read(_AGENT_API)
-    routes = re.findall(r'@router\.(?:get|post|delete|patch)\("([^"]*)"', src)
-    first_param = next((i for i, p in enumerate(routes) if "{agent_id}" in p), len(routes))
-    protocol = [i for i, p in enumerate(routes)
-                if p in ("/enroll", "/lease") or p.startswith("/jobs/")]
+def _routes(decorator):
+    """Paths decorated by one named router, in declaration order."""
+    return re.findall(r'@%s\.(?:get|post|delete|patch)\("([^"]*)"' % decorator,
+                      _read(_AGENT_API))
+
+
+def test_the_protocol_router_carries_no_operator_shaped_route():
+    """The halves are split by router, not by ordering, and that split is a security
+    boundary — ``router``'s prefix is the one the remote-agent gateway publishes to the
+    network the agents live on (see docker-compose.agent.yml). An operator route landing
+    back on ``router`` republishes it there, silently.
+
+    ``/{agent_id}`` is the shape to catch: it is every operator route except the two
+    collection ones, and it used to share this router, which is exactly how
+    ``POST /api/agent/{id}/enrollment-code`` ended up on the public vhost.
+
+    tests/test_agent_vhost_surface.py asserts the same property against the live route
+    table and the actual Caddyfile; this one fails at the diff, with no app to import.
+    """
+    protocol = _routes("router")
     assert protocol, "no agent-protocol routes found — did they get renamed?"
-    assert all(i < first_param for i in protocol), (
-        "an agent-protocol route is declared after a /{agent_id} route")
+    assert all(p in ("/enroll", "/lease") or p.startswith("/jobs/") for p in protocol), (
+        f"the agent-protocol router declares a route that is not part of the protocol: "
+        f"{[p for p in protocol if not (p in ('/enroll', '/lease') or p.startswith('/jobs/'))]}")
+    assert not any("{agent_id}" in p for p in protocol), (
+        "a /{agent_id} route is on the protocol router — it would be published on the "
+        "agent vhost, and it would bind agent_id='lease'")
 
 
 def test_the_audience_routes_precede_the_agent_id_routes():
-    """Same trap, one segment further on. 'audience' is a single path segment, so declared
-    after /{agent_id} it would bind agent_id='audience' and answer 404 — 'Agent not found'
-    for a route that has nothing to do with an agent id."""
-    routes = re.findall(r'@router\.(?:get|post|delete|patch)\("([^"]*)"', _read(_AGENT_API))
+    """'audience' is a single path segment, so declared after /{agent_id} on the same
+    router it would bind agent_id='audience' and answer 404 — 'Agent not found' for a
+    route that has nothing to do with an agent id. FastAPI matches in declaration
+    order, and both live on admin_router."""
+    routes = _routes("admin_router")
     first_param = next((i for i, p in enumerate(routes) if "{agent_id}" in p), len(routes))
     audience = [i for i, p in enumerate(routes) if p == "/audience"]
     assert len(audience) == 2, f"expected GET + DELETE /audience, found {len(audience)}"

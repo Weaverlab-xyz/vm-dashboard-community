@@ -63,6 +63,7 @@ class _Admin:
 def _app() -> TestClient:
     app = FastAPI()
     app.include_router(agent_api.router)
+    app.include_router(agent_api.admin_router)
 
     def _db():
         db = SessionLocal()
@@ -92,7 +93,7 @@ CLIENT = _app()
 
 def _ready() -> tuple[str, str]:
     """A registered, enrolled agent. Returns (agent_id, private key)."""
-    resp = CLIENT.post("/api/agent",
+    resp = CLIENT.post("/api/agents",
                        json={"name": f"agent-{uuid.uuid4().hex[:8]}", "site": "dc1"})
     assert resp.status_code == 201, resp.text
     code = resp.json()["enrollment_code"]
@@ -320,7 +321,7 @@ def test_an_unauthenticated_request_cannot_pin_the_signing_audience():
 def test_an_operator_minting_a_code_does_pin_it():
     config_service.set(agent_api._AUDIENCE_CONFIG, "")
     try:
-        resp = CLIENT.post("/api/agent",
+        resp = CLIENT.post("/api/agents",
                            json={"name": f"agent-{uuid.uuid4().hex[:8]}"})
         assert resp.status_code == 201, resp.text
         assert config_service.get(agent_api._AUDIENCE_CONFIG)
@@ -329,7 +330,7 @@ def test_an_operator_minting_a_code_does_pin_it():
 
 
 def test_the_install_hint_offers_a_code_file_form_and_absolute_bind_paths():
-    resp = CLIENT.post("/api/agent", json={"name": f"agent-{uuid.uuid4().hex[:8]}"})
+    resp = CLIENT.post("/api/agents", json={"name": f"agent-{uuid.uuid4().hex[:8]}"})
     assert resp.status_code == 201, resp.text
     install = resp.json()["install"]
     code = resp.json()["enrollment_code"]
@@ -383,7 +384,7 @@ def test_the_install_command_relabels_its_bind_mounts_for_selinux():
     `z`/`Z` where SELinux is absent, so there is no host to detect and no case in which
     dropping the flag is an improvement.
     """
-    resp = CLIENT.post("/api/agent", json={"name": f"agent-{uuid.uuid4().hex[:8]}"})
+    resp = CLIENT.post("/api/agents", json={"name": f"agent-{uuid.uuid4().hex[:8]}"})
     assert resp.status_code == 201, resp.text
     install = resp.json()["install"]
 
@@ -429,7 +430,7 @@ def test_the_powershell_form_is_the_same_container_in_another_shell():
     `connections.yaml` shows this block does get edited after the fact. The emitter builds
     both from one template so that cannot happen; this is the assertion that keeps it so.
     """
-    resp = CLIENT.post("/api/agent", json={"name": f"agent-{uuid.uuid4().hex[:8]}"})
+    resp = CLIENT.post("/api/agents", json={"name": f"agent-{uuid.uuid4().hex[:8]}"})
     assert resp.status_code == 201, resp.text
     install = resp.json()["install"]
 
@@ -449,7 +450,7 @@ def test_the_powershell_forms_carry_no_bourne_continuations():
     unrelated errors from one wrong character is the worst failure this feature can produce,
     and it is one forgotten line away.
     """
-    resp = CLIENT.post("/api/agent", json={"name": f"agent-{uuid.uuid4().hex[:8]}"})
+    resp = CLIENT.post("/api/agents", json={"name": f"agent-{uuid.uuid4().hex[:8]}"})
     assert resp.status_code == 201, resp.text
     install = resp.json()["install"]
 
@@ -483,7 +484,7 @@ def test_the_powershell_code_file_can_never_be_written_as_utf16():
     flag, because the regression being pinned is somebody simplifying this back to a
     redirect.
     """
-    resp = CLIENT.post("/api/agent", json={"name": f"agent-{uuid.uuid4().hex[:8]}"})
+    resp = CLIENT.post("/api/agents", json={"name": f"agent-{uuid.uuid4().hex[:8]}"})
     assert resp.status_code == 201, resp.text
     body = resp.json()
     alt, code = body["install"]["docker_run_code_file_powershell"], body["enrollment_code"]
@@ -508,7 +509,7 @@ def test_every_install_form_names_the_same_dashboard_url():
     bases — an agent enrolling against the wrong hostname 401s the whole fleet's worth of
     confusing symptoms, and the two forms are resolved in one place precisely so they
     cannot disagree."""
-    resp = CLIENT.post("/api/agent", json={"name": f"agent-{uuid.uuid4().hex[:8]}"})
+    resp = CLIENT.post("/api/agents", json={"name": f"agent-{uuid.uuid4().hex[:8]}"})
     assert resp.status_code == 201, resp.text
     install = resp.json()["install"]
 

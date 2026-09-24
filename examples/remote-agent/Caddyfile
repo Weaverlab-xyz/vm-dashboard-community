@@ -43,10 +43,23 @@
 
 	encode gzip
 
-	# The ONLY thing this vhost serves. Everything else — the UI, /api/auth,
-	# /setup, /swagger, the OAuth callbacks — stays on the internal address and is
+	# The ONLY thing this vhost serves: the agent protocol itself — enrol, lease,
+	# and the per-job routes — every one of which authenticates with an Ed25519
+	# signature. Everything else — the UI, /api/auth, /setup, /swagger, the OAuth
+	# callbacks, and the operator console's own /api/agents (plural) routes, which
+	# mint enrolment codes and revoke agents — stays on the internal address and is
 	# never reachable from wherever the agents live.
-	handle /api/agent* {
+	#
+	# THE TRAILING SLASH IS LOAD-BEARING. `/api/agent*` (no slash) is a prefix match
+	# on the raw string, so it also catches `/api/agents/{id}/enrollment-code` and
+	# `/api/agentcell/*` — two consoles' worth of operator routes, published here by
+	# accident while this comment claimed they were not. `/api/agent/*` matches the
+	# protocol and nothing else.
+	#
+	# tests/test_agent_vhost_surface.py parses this matcher out of this file and
+	# checks it against the app's real route table, so the claim above is asserted
+	# rather than asserted-in-prose. If you change the line below, run that test.
+	handle /api/agent/* {
 		reverse_proxy app:8000 {
 			# The agent holds a lease poll open for up to ~50s.
 			transport http {

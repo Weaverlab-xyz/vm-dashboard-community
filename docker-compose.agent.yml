@@ -17,6 +17,15 @@
 # /setup wizard — every route on it authenticates with an Ed25519 signature or gets a
 # 401. It also makes the pen-test scope about a page long.
 #
+# For that claim to hold, the operator routes have to be somewhere the matcher does not
+# reach, and they are: the console half lives on /api/agents (plural) and /api/agentcell,
+# which `/api/agent/*` does not match. It is worth knowing that `/api/agent*` — the same
+# line without the slash — DOES match both, and published "mint an enrolment code" and
+# "revoke an agent" here for as long as it was written that way. Those routes need a
+# bearer token, so this was never an open door; it was the wrong side of the wall, while
+# these comments said otherwise. tests/test_agent_vhost_surface.py now checks the
+# Caddyfile matcher against the app's route table so the two cannot drift again.
+#
 # Usage:
 #   AGENT_HOSTNAME=agents.example.com \
 #   docker compose -f docker-compose.hub.yml -f docker-compose.agent.yml up -d

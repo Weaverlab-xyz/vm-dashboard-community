@@ -1,4 +1,6 @@
-{# The Agents tab of the Remote Agents page (agents/index.html), backed by /api/agent.
+{# The Agents tab of the Remote Agents page (agents/index.html), backed by /api/agents
+   (plural: the operator half. /api/agent, singular, is the agents' own signed protocol
+   and is the only prefix the remote-agent gateway publishes -- see api/agent.py).
 
    Enrolled agents: the containers that run inside a private network and poll OUT to this
    dashboard for work. Everything an agent then REACHES is a row on the Connections tab
@@ -523,7 +525,7 @@ function agentsPage() {
     async load(quiet) {
       if (!quiet) this.loading = true;
       try {
-        const r = await API.get('/api/agent');
+        const r = await API.get('/api/agents');
         this.agents = r.agents || [];
         this.notEnabled = false;
         this.noAccess = '';
@@ -585,7 +587,7 @@ function agentsPage() {
 
     async create(ackAudience) {
       try {
-        const r = await API.post('/api/agent' + (ackAudience ? '?acknowledge_audience=true' : ''), {
+        const r = await API.post('/api/agents' + (ackAudience ? '?acknowledge_audience=true' : ''), {
           name: this.form.name.trim(),
           site: this.form.site.trim(),
           description: this.form.description.trim(),
@@ -631,7 +633,7 @@ function agentsPage() {
       if (!ackAudience && !confirm(`Issue a new enrolment code for '${a.name}'?\n\nThe currently running container will stop being able to claim work immediately.`)) return;
       try {
         const q = ackAudience ? '?acknowledge_audience=true' : '';
-        this.showEnrol(await API.post(`/api/agent/${encodeURIComponent(a.id)}/enrollment-code${q}`, {}));
+        this.showEnrol(await API.post(`/api/agents/${encodeURIComponent(a.id)}/enrollment-code${q}`, {}));
         await this.load();
       } catch (e) {
         // Refused before reissue_enroll_code ran, so this agent's key is intact and its
@@ -645,7 +647,7 @@ function agentsPage() {
     async revoke(a) {
       if (!confirm(`Revoke agent '${a.name}'?\n\nAny job it is running will be marked failed.`)) return;
       try {
-        const r = await API.delete('/api/agent/' + encodeURIComponent(a.id));
+        const r = await API.delete('/api/agents/' + encodeURIComponent(a.id));
         this.flash(r.detail || 'Agent revoked.', 'success');
         await this.load();
       } catch (e) {
@@ -659,7 +661,7 @@ function agentsPage() {
         `This frees the name so it can be registered again. Its job history is kept ` +
         `(the jobs simply stop naming an agent), and the audit log is untouched.`)) return;
       try {
-        const r = await API.delete(`/api/agent/${encodeURIComponent(a.id)}/record`);
+        const r = await API.delete(`/api/agents/${encodeURIComponent(a.id)}/record`);
         this.flash(r.detail || 'Agent record removed.', 'success');
         if (this.expanded === a.id) this.expanded = null;
         await this.load();
@@ -680,7 +682,7 @@ function agentsPage() {
 
     async runDiscover() {
       try {
-        const r = await API.post(`/api/agent/${encodeURIComponent(this.discover.agentId)}/discover`, {
+        const r = await API.post(`/api/agents/${encodeURIComponent(this.discover.agentId)}/discover`, {
           scan_kind: this.discover.scan_kind,
           cidrs: this._list(this.discover.cidrs),
           hostnames: this._list(this.discover.hostnames),

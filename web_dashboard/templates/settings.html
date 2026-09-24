@@ -7939,7 +7939,7 @@ function settingsPage() {
         if (intg.key === 'remote_agents') {
           this.agentAudience = null;
           try {
-            this.agentAudience = await API.get('/api/agent/audience');
+            this.agentAudience = await API.get('/api/agents/audience');
           } catch (e) { /* the router is feature-gated; off means 404, and this panel is where you turn it on */ }
         }
         // Containers: same read-only breakdown for the managed Portainer node, so the
@@ -8560,7 +8560,7 @@ function settingsPage() {
       if (!confirm(`Reset the signing audience?\n\nIt is pinned to ${a.pinned}. The next enrolment code will pin it again — from Public base URL if you have set one, otherwise from the origin your browser is on.${affected}`)) return;
       this.agentAudienceResetting = true;
       try {
-        const r = await API.delete('/api/agent/audience');
+        const r = await API.delete('/api/agents/audience');
         this.agentAudience = r;
         this.showToast(r.detail || 'Signing audience reset.');
       } catch (e) {
