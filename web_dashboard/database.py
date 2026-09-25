@@ -870,6 +870,23 @@ class Job(Base):
     # keeps jobs_worker._claim_one (status='pending') from racing the agent for the row.
     agent_id = Column(String(36), ForeignKey("remote_agents.id", ondelete="SET NULL"),
                       index=True, nullable=True)
+    # An unattended check-in: this row exists because something polled an external
+    # system on a timer, not because anyone asked for a change. Stamped in
+    # job_service.create_job from job_service.CHECKIN_VERBS, and read only by
+    # list_jobs, which hides the COMPLETED ones by default.
+    #
+    # A real indexed column for the third time on this table, and for the same reason
+    # as batch_id and agent_id above: the thing that tells a hypervisor check-in apart
+    # from an operator's power op is `verb` inside extra_data, and extra_data is a Text
+    # column holding JSON that no operator filters portably across SQLite and
+    # PostgreSQL. It cannot be job_type instead — an inventory_sync and a power_on are
+    # both `agent_hypervisor`, deliberately (one agent handler, one grant), so hiding
+    # by type would hide every power op an operator ever ran.
+    #
+    # NULL on every pre-existing row, and NULL means "not a check-in", i.e. SHOWN. The
+    # additive direction is the safe one here: adding the column cannot make a row that
+    # was visible yesterday disappear today.
+    is_checkin = Column(Boolean, nullable=True, index=True)
     # Auto-delete timer. Meaningful ONLY on the cloud VM deploy types
     # (expiry_policy.REAPABLE_VM_JOB_TYPES) — a VM has no inventory table of its own,
     # so its deploy Job row IS its record of existence, which is why `job:<id>` is
@@ -4174,6 +4191,14 @@ def init_db():
             # page can filter to a batch and roll up its status.
             "ALTER TABLE jobs ADD COLUMN batch_id VARCHAR(32)",
             "CREATE INDEX ix_jobs_batch_id ON jobs(batch_id)",
+            # Unattended check-ins (hypervisor inventory_sync today), so /jobs can hide
+            # the completed ones. No DEFAULT clause, for the reason spelled out on
+            # users.is_admin at the top of this list: PostgreSQL rejects a defaulted
+            # ADD COLUMN in this tree and the savepoint swallows the rollback, so the
+            # column would silently never appear. Every existing row reads NULL, which
+            # is exactly right — none of them were classified, and NULL means "shown".
+            "ALTER TABLE jobs ADD COLUMN is_checkin BOOLEAN",
+            "CREATE INDEX ix_jobs_is_checkin ON jobs(is_checkin)",
             # Auto-delete timer (resource expiry). Real indexed columns rather than
             # keys in extra_data, for exactly the reason given on batch_id above:
             # extra_data is a Text column holding a JSON string, so no operator
@@ -4631,6 +4656,18 @@ def init_db():
                 print(f"Cloud databases: backfilled {n} database name(s).")
         except Exception as e:  # never block startup on backfill
             print(f"Cloud database name backfill skipped: {e}")
+
+    # One-time: classify pre-existing hypervisor jobs as check-in or operator work, so
+    # /jobs can hide the syncs that are already there rather than only the ones written
+    # from now on. Data, not DDL, so it stays outside the advisory lock above for the
+    # same reason the two backfills before it do. Convergent, batched, and resumable.
+    with SessionLocal() as _checkin_db:
+        try:
+            n = job_service.backfill_job_checkins(_checkin_db)
+            if n:
+                print(f"Jobs: classified {n} pre-existing check-in row(s).")
+        except Exception as e:  # never block startup on backfill
+            print(f"Job check-in backfill skipped: {e}")
 
     print("Database initialized successfully!")
 

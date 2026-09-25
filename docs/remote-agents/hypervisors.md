@@ -123,6 +123,26 @@ finish queues it, and it sees everything the burst moved. A graceful `shutdown` 
 `reboot` is the case where one press is not enough: the sync runs seconds later, while the
 guest is still on its way down, so it honestly records a VM that is still running.
 
+### Syncs are hidden on the Jobs page
+
+A connection polled every 30 minutes writes 48 job rows a day, more if its inventory
+pages, and every one of them completes green with nothing for anyone to do. So the Jobs
+page **hides completed inventory syncs by default** — tick **Show hypervisor check-ins**
+to see them. It is a separate box from **Show routine sweeps** because these are a cadence
+you set per connection, and a stale inventory is diagnosed by reading the syncs without
+the dashboard's own housekeeping on top.
+
+Three things are never hidden, which is what makes the default safe to leave on:
+
+- **Power ops.** A `power_off` is the same `agent_hypervisor` job type as a sync — one
+  agent handler, one grant — but it is an operator action, and it stays on the page.
+- **A sync that failed or was cancelled.** That is a connection whose cached inventory is
+  now out of date, so it stays visible here and in the dashboard's failed-jobs panel.
+- **A sync that is still running**, including the one you just queued with Sync Now.
+
+Nothing is deleted. Unlike the auto-delete sweep's rows, a hidden check-in stays in the
+database and comes back the moment you tick the box.
+
 ### Powering a selection
 
 Every hypervisor page, and the Workstation page, has a checkbox on each row. Tick some and
