@@ -968,7 +968,11 @@ def plan_bulk_run(items: list, selected_ids: list) -> dict:
 # for one run; across a batch it would let an operator believe a credential had been
 # applied to every cluster, so a bulk run rejects them outright.
 _CONNECTION_FIELDS = ("secret_ssh_key_source", "secret_become_source",
-                      "managed_account", "managed_become")
+                      "managed_account", "managed_become",
+                      # A localhost play escalates nothing — there is no remote user to
+                      # become. Listed for the same reason as the rest: one ignored run
+                      # is survivable, a whole batch quietly ignoring it is not.
+                      "become_method")
 
 
 def reject_connection_fields(kind: str, present: dict):

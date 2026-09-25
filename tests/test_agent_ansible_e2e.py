@@ -329,7 +329,16 @@ try:
     run(bundle=VM_BUNDLE, payload=VM_PAYLOAD, engine=Engine(exit_code=2))
     check("a failed playbook raises", False, "no exception")
 except agent.PolicyRefusal as e:
+    check("a failed playbook is NOT a policy refusal", False, str(e))
+except agent.RunFailure as e:
     check("a failed playbook raises and explains", "one or more hosts failed" in str(e), str(e))
+
+# A play that ran and failed must not be dressed up as a refusal: the two send an operator
+# to opposite places, and the error line is all a failed job row shows.
+check("RunFailure is not a PolicyRefusal",
+      not issubclass(agent.RunFailure, agent.PolicyRefusal), agent.RunFailure.__mro__)
+check("a policy refusal is not a RunFailure",
+      not issubclass(agent.PolicyRefusal, agent.RunFailure), agent.PolicyRefusal.__mro__)
 
 try:
     run(bundle=dict(VM_BUNDLE, extra_vars={"ansible_connection": "local"}), payload=VM_PAYLOAD)

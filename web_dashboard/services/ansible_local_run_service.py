@@ -225,6 +225,7 @@ async def _run_job(
     secret_ssh_key_source: str = "",
     managed_account: dict | None = None,
     managed_become: dict | None = None,
+    become_method: str = "",
     epml_token_var: str = "",
 ) -> None:
     """Execute one VM (SSH/WinRM) Config-Management run.
@@ -285,6 +286,21 @@ async def _run_job(
             job_service.set_failed(db, job_id, str(e))
             return
         secret_extra_vars = _creds.extra_vars
+        # Into the TRUSTED var dict, not the operator's `extra_vars`: `ansible_*` is
+        # connection configuration, so the value has to come from the validated field on
+        # the job rather than from anything an operator can type. Same var the agent path
+        # sets from its typed bundle field — one meaning, one name, two transports.
+        #
+        # Caught rather than allowed to propagate: the endpoint normalizes this before the
+        # job is written, so a bad value here means a metadata row that did not come from
+        # it — and an uncaught raise in the durable worker would leave the job `running`
+        # with nothing said, which is worse than a named failure.
+        from ..services import ansible_become as _become
+        try:
+            _become.apply_to(secret_extra_vars, become_method)
+        except _become.BecomeError as e:
+            job_service.set_failed(db, job_id, str(e))
+            return
         secret_ssh_pem = _creds.ssh_pem
         managed_cred_vars = _creds.managed_cred_vars
         managed_plain_vars = _creds.managed_plain_vars

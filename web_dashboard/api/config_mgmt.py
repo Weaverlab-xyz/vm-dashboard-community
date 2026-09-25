@@ -467,6 +467,13 @@ class RunRequest(BaseModel):
     # separate account for the become/sudo password.
     managed_account: ManagedAccountRef | None = None
     managed_become: ManagedAccountRef | None = None
+    # How the play escalates when it says `become: true`. A plugin NAME from
+    # services.ansible_become.BECOME_METHODS — "" keeps Ansible's own default (sudo).
+    # Needed because an account entitled through BeyondTrust Privilege Management for
+    # Unix & Linux escalates via `pbrun` and typically has NO sudoers entry, and the
+    # sudo failure is unreadable: sudo's password prompt lands on the module's stdout
+    # and Ansible reports "No start of json char found" rather than naming the cause.
+    become_method: str = ""
     # ── Agent-executed runs ───────────────────────────────────────────────────
     # Set when the target sits on a network the dashboard has no route to, so the run must
     # be queued for a remote agent instead of a runner the dashboard launches. The inventory
@@ -1030,6 +1037,16 @@ async def run_playbook(
     if _refusal:
         raise HTTPException(status_code=_refusal.status, detail=_refusal.detail)
 
+    # Checked here, before anything is queued, so an unusable method is a 400 the
+    # operator reads now rather than a play that escalates by sudo on a PMUL host and
+    # fails with sudo's prompt spliced into the module's JSON. Normalized, so the value
+    # stored on the job is the one both runners will act on.
+    from ..services import ansible_become as _become
+    try:
+        payload.become_method = _become.normalize(payload.become_method)
+    except _become.BecomeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     atype = ansible_local_service.asset_type(payload.asset)
 
     # A cloud run only actually uses the cloud runner for bare-IP playbook targets;
@@ -1042,6 +1059,19 @@ async def run_playbook(
             and is_adhoc and atype == "playbook"):
         _validate_cloud_secret_stores(
             eff_runner, payload.secret_vars, payload.secret_become_source)
+
+    # The transient cloud runners take a playbook, an SSH key and a secret channel —
+    # `_dispatch_cloud_runner` has no plain-var argument at all, so there is nowhere to
+    # put the become method. Refused rather than dropped: silently ignoring it would
+    # escalate by sudo on the very host the operator selected pbrun for, and the sudo
+    # failure does not name itself. The local and agent runners both carry it.
+    if (payload.become_method and eff_runner in ("ecs", "aci", "gcp")
+            and is_adhoc and atype == "playbook"):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"a become method ({payload.become_method}) cannot be used on the "
+                    f"{eff_runner.upper()} runner — it has no channel for play variables. "
+                    f"Run this target through the local runner or a remote agent."))
 
     # Managed-account checkout works on the local and ACI runners (both inject the
     # credential inline); on ECS / Cloud Run it needs an ephemeral store copy, which is
@@ -1128,6 +1158,7 @@ class BulkRunRequest(BaseModel):
     secret_ssh_key_source: str = ""
     managed_account: ManagedAccountRef | None = None
     managed_become: ManagedAccountRef | None = None
+    become_method: str = ""
     # Applies to the WHOLE batch — see the copy in run_playbook_bulk. A batch split
     # across a window boundary would be the worst of both worlds.
     run_at: str = ""
@@ -1185,6 +1216,7 @@ async def run_playbook_bulk(
         "secret_become_source": payload.secret_become_source,
         "managed_account": payload.managed_account,
         "managed_become": payload.managed_become,
+        "become_method": payload.become_method,
     })
     if wrong_fields:
         raise HTTPException(status_code=400, detail=wrong_fields)
@@ -1202,6 +1234,7 @@ async def run_playbook_bulk(
             secret_ssh_key_source=payload.secret_ssh_key_source,
             managed_account=payload.managed_account,
             managed_become=payload.managed_become,
+            become_method=payload.become_method,
             batch_id=batch_id,
             # Scheduling rides the batch: booking a bulk run into a window must book
             # EVERY target in it, or half the batch runs now and half on Saturday. This
