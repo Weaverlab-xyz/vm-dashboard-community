@@ -1169,12 +1169,59 @@ async function bulkPowerClickChecks() {
      && o.log.posted[0][1].run_at === '2026-10-01T02:00'
      && o.log.posted[0][1].run_timezone === 'Europe/London');
 
-  // Ticked with no time is the one refusal the picker owes the operator: a blank
-  // run_at would run the whole batch NOW, which is the opposite of what was asked.
+  // The other arm of the same control: a named change window, which carries a
+  // DEADLINE the bare timestamp does not. The toolbar sent a hard-coded '' for this
+  // until the on-premises agent path was wired, so every cloud bulk-power route had
+  // been resolving a change_window_id that no page could produce.
+  o = arm(onPremToolbar({ selectedVmIds: ['1', '2'], bulkPowerScheduled: true,
+                          bulkPowerWindowId: 'cw-7',
+                          bulkPowerWindows: [{ id: 'cw-7', name: 'Weekend Patching' }] }));
+  await o.submitBulkPower('stop');
+  ok(BP + ' a window-booked batch names the window and sends its id',
+     /SCHEDULED for the next "Weekend Patching" window/.test(o.log.asked[0])
+     && o.log.posted[0][1].change_window_id === 'cw-7'
+     && o.log.posted[0][1].run_at === '');
+
+  // Mutually exclusive, and the window wins: change_window_service.resolve refuses
+  // both together, and a 400 after fifty VMs were selected is a bad way to learn it.
+  o = arm(onPremToolbar({ selectedVmIds: ['1', '2'], bulkPowerScheduled: true,
+                          bulkPowerRunAt: '2026-10-01T02:00',
+                          bulkPowerWindowId: 'cw-7',
+                          bulkPowerWindows: [{ id: 'cw-7', name: 'Weekend Patching' }] }));
+  await o.submitBulkPower('stop');
+  ok(BP + ' a time and a window together send only the window',
+     o.log.posted[0][1].change_window_id === 'cw-7'
+     && o.log.posted[0][1].run_at === ''
+     && o.log.posted[0][1].run_timezone === '');
+
+  // A window whose name has not loaded still books — the confirm degrades, the
+  // request does not. The select is populated by its own fetch, which can fail.
+  o = arm(onPremToolbar({ selectedVmIds: ['1', '2'], bulkPowerScheduled: true,
+                          bulkPowerWindowId: 'cw-9', bulkPowerWindows: [] }));
+  await o.submitBulkPower('stop');
+  ok(BP + ' an unnamed window still books, with a generic dialog',
+     /SCHEDULED for the next "change window" window/.test(o.log.asked[0])
+     && o.log.posted[0][1].change_window_id === 'cw-9');
+
+  // Ticked with neither a time nor a window is the one refusal the picker owes the
+  // operator: leaving both blank would run the whole batch NOW, which is the opposite
+  // of what was asked.
   o = arm(onPremToolbar({ bulkPowerScheduled: true }));
   await o.submitBulkPower('start');
-  ok(BP + ' Schedule ticked with no time refuses rather than running now',
-     o.log.posted.length === 0 && /Pick a time/.test(o.log.said[0][0]));
+  ok(BP + ' Schedule ticked with neither a time nor a window refuses to run now',
+     o.log.posted.length === 0 && /Pick a time or a change window/.test(o.log.said[0][0]));
+
+  // The mixin must not reach into scheduleState(): six on-premises pages spread only
+  // bulkPowerState(), and an unbound call there left Start and Force Off dead on all
+  // of them. The fixture above supplies no sibling mixin, so a reintroduced
+  // dependency shows up as a throw rather than as a silent no-op.
+  o = arm(onPremToolbar({ bulkPowerScheduled: true, bulkPowerWindowId: 'cw-7',
+                          bulkPowerWindows: [{ id: 'cw-7', name: 'W' }] }));
+  ok(BP + ' the mixin owns its window list rather than borrowing one',
+     Array.isArray(o.bulkPowerWindows)
+     && typeof o.loadBulkPowerWindows === 'function'
+     && typeof o.changeWindows === 'undefined'
+     && typeof o.loadChangeWindows === 'undefined');
 
   // A failed request must release the button, or the toolbar is dead until a reload.
   o = arm(onPremToolbar(), { boom: true });

@@ -511,6 +511,18 @@ window.scheduleState = function () {
             return String(iso).replace('T', ' ').slice(0, 16);
         },
 
+        // Back to "Now". A page has ONE scheduleState() and more than one form that
+        // reads it — on the cloud pages, the single-deploy modal and the bulk-deploy
+        // modal. Both render the picker, so a mode carried over from a cancelled
+        // launch is at least visible rather than silent (which is the bulk-power
+        // hazard described below), but a datetime typed for one launch is not an
+        // answer for the next one. Modal open handlers call this.
+        scheduleReset() {
+            this.scheduleMode = 'now';
+            this.runAt = '';
+            this.changeWindowId = '';
+        },
+
         // The bulk-power booking fields (`bulkPowerScheduled` and friends) used to live
         // here, beside the deploy form's. They belong to the toolbar that reads them
         // and now live in bulkPowerState(), below, which every page carrying that
@@ -559,18 +571,56 @@ window.bulkPowerState = function () {
         bulkPowerScheduled: false,
         bulkPowerRunAt: '',
         bulkPowerTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+        // The change-window arm of the same control. Every cloud bulk-power route has
+        // resolved a `change_window_id` since the picker shipped — `schedule_kwargs`
+        // at api/aws.py bulk_power and its three peers — but this mixin used to send a
+        // hard-coded '' for it, so the window half of the feature was reachable only
+        // on the single-VM deploy forms. These two are mutually exclusive: a window
+        // supplies both the start and the deadline, and resolve() refuses both.
+        bulkPowerWindowId: '',
+        // Its OWN list and OWN loader, NOT scheduleState()'s. This mixin is spread
+        // into all ten power pages and the six on-prem ones do not spread
+        // scheduleState() at all, so calling that mixin's window loader from here
+        // would be an unbound call on every one of them — the exact failure
+        // documented above, which left Start and Force Off dead on six pages. Five
+        // duplicated lines is the price of a mixin that depends on nothing.
+        //
+        // The sibling's loader is deliberately NOT named in this comment: a grep-based
+        // check cannot tell a mention from a call, and a comment is a bad place to
+        // learn that.
+        bulkPowerWindows: [],
+
+        async loadBulkPowerWindows() {
+            try {
+                const r = await API.get('/api/change-windows?enabled_only=true');
+                this.bulkPowerWindows = (r && r.windows) || [];
+            } catch (e) {
+                // A toolbar that cannot list windows still powers VMs off now.
+                this.bulkPowerWindows = [];
+            }
+        },
 
         bulkPowerScheduleReady() {
-            return !this.bulkPowerScheduled || !!this.bulkPowerRunAt;
+            if (!this.bulkPowerScheduled) return true;
+            return !!this.bulkPowerRunAt || !!this.bulkPowerWindowId;
         },
 
         bulkPowerSchedule() {
-            if (!this.bulkPowerScheduled || !this.bulkPowerRunAt) {
+            if (!this.bulkPowerScheduled) {
                 return { run_at: '', run_timezone: '', change_window_id: '' };
             }
-            return { run_at: this.bulkPowerRunAt,
-                     run_timezone: this.bulkPowerTimezone,
-                     change_window_id: '' };
+            // A window wins if both are somehow set: it is the stricter of the two,
+            // carrying a deadline the bare timestamp does not.
+            if (this.bulkPowerWindowId) {
+                return { run_at: '', run_timezone: '',
+                         change_window_id: this.bulkPowerWindowId };
+            }
+            if (this.bulkPowerRunAt) {
+                return { run_at: this.bulkPowerRunAt,
+                         run_timezone: this.bulkPowerTimezone,
+                         change_window_id: '' };
+            }
+            return { run_at: '', run_timezone: '', change_window_id: '' };
         },
 
         // The op the toolbar may send. Falls back to allowed when the page has no
@@ -691,8 +741,9 @@ window.bulkPowerState = function () {
                 : toast(m, t));
 
             if (!this.bulkPowerScheduleReady()) {
-                say('Pick a time, or untick Schedule — a blank time would run this '
-                    + 'now, which is the opposite of what the tick asks for.', 'error');
+                say('Pick a time or a change window, or untick Schedule — leaving '
+                    + 'both blank would run this now, which is the opposite of what '
+                    + 'the tick asks for.', 'error');
                 return;
             }
             const plan = this.bulkPowerPlan(op);
@@ -706,11 +757,21 @@ window.bulkPowerState = function () {
             }
             let question = this.bulkPowerConfirm(op, plan);
             // A booked batch is a different question from an immediate one, and the
-            // confirm is the last place to notice you left the picker on.
-            if (question && this.bulkPowerScheduled && this.bulkPowerRunAt) {
-                question += '\n\nThis will be SCHEDULED for '
-                          + this.bulkPowerRunAt.replace('T', ' ')
-                          + ' (' + this.bulkPowerTimezone + '), not run now.';
+            // confirm is the last place to notice you left the picker on. Both arms
+            // are named: a window books just as firmly as a timestamp, and reading
+            // "not run now" is the whole point of saying either.
+            if (question && this.bulkPowerScheduled) {
+                if (this.bulkPowerWindowId) {
+                    const w = this.bulkPowerWindows.find(
+                        x => x.id === this.bulkPowerWindowId);
+                    question += '\n\nThis will be SCHEDULED for the next "'
+                              + ((w && w.name) || 'change window')
+                              + '" window, not run now.';
+                } else if (this.bulkPowerRunAt) {
+                    question += '\n\nThis will be SCHEDULED for '
+                              + this.bulkPowerRunAt.replace('T', ' ')
+                              + ' (' + this.bulkPowerTimezone + '), not run now.';
+                }
             }
             if (question && !confirm(question)) return;
 

@@ -202,6 +202,13 @@
           Selected: <strong x-text="selectedVmIds.length"></strong>
         </span>
         <div class="flex items-center gap-2">
+          {# No `schedulable=true`, and this is the ONE page where that is deliberate
+             rather than pending. Booking a power op needs the job to wait in a queue,
+             which here means an `agent_hypervisor` row leased by the agent. Nutanix
+             has no agent power path at all — see the standing decision in
+             api/nutanix.py::_queue_one — so every target on this page is dialled
+             directly by this process and runs the moment the request lands. A control
+             here would render a booking that every VM refuses. #}
           {{ bulk_power_buttons(['start', 'shutdown', 'stop', 'reboot']) }}
           <button x-show="$store.auth.isAdmin" @click="openBulkAssign()"
                   class="text-xs px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium">

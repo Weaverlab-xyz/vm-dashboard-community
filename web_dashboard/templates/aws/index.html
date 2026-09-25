@@ -1285,6 +1285,13 @@
           </div>
           {% endif %}
 
+          <!-- When to run. The bulk route has resolved a booking since the picker
+               shipped (change_window_service.schedule_kwargs in bulk_deploy_amis);
+               this control is what lets anyone send one. Shares the page's single
+               scheduleState() with the launch form above, which is why both modals
+               call scheduleReset() on open. -->
+          {{ schedule_picker() }}
+
           <!-- Error -->
           <div x-show="bulkDeployError"
                class="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700"
@@ -1296,11 +1303,12 @@
               Cancel
             </button>
             <button @click="submitBulkDeploy()"
-                    :disabled="bulkDeploying || deployForm.security_group_ids.length === 0 || !deployForm.subnet_id || !deployForm.workgroup"
+                    :disabled="bulkDeploying || deployForm.security_group_ids.length === 0 || !deployForm.subnet_id || !deployForm.workgroup || !scheduleReady()"
                     class="flex-1 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50
                            text-white text-sm font-medium rounded-lg transition">
               <span x-show="!bulkDeploying">
-                Launch <span x-text="bulkDeployItems.length"></span> Instance<span x-show="bulkDeployItems.length !== 1">s</span>
+                <span x-text="scheduleVerb('', 'Launch')"></span>
+                <span x-text="bulkDeployItems.length"></span> Instance<span x-show="bulkDeployItems.length !== 1">s</span>
               </span>
               <span x-show="bulkDeploying" x-cloak>Launching…</span>
             </button>
@@ -2638,6 +2646,10 @@
       async openDeployModal(ami) {
         // ami may be null when invoked from "Deploy from AMI ID…" — user pastes
         // an arbitrary AMI ID into deployForm.ami_id and we skip ENA checks.
+        // Back to "Now": this modal and the bulk one share the page's single
+        // scheduleState(), so a time typed for a launch that was cancelled must not
+        // become the default for the next one.
+        this.scheduleReset();
         this.selectedAmi = ami;
         const defaultName = ami
           ? ami.name.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 30)
@@ -2920,6 +2932,7 @@
       },
 
       async openBulkDeployModal() {
+        this.scheduleReset();
         this.bulkDeployItems = this.selectedAmiIds.map(id => {
           const ami = this.amis.find(a => a.ami_id === id);
           return {
@@ -3015,6 +3028,7 @@
             register_in_entitle: this.deployForm.register_in_entitle,
             register_in_passwordsafe: this.deployForm.register_in_passwordsafe,
             ssh_key_secret_override: this.deployForm.ssh_key_secret_override || null,
+            ...this.schedulePayload(),
           });
           this.bulkDeployResults = resp.jobs || [];
           this.bulkBatchId = resp.batch_id || '';

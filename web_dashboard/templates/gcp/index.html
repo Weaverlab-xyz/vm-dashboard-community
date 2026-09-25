@@ -772,6 +772,12 @@
         </label>
         {% endif %}
 
+        <!-- When to run. bulk_deploy_instances has resolved a booking since the
+             picker shipped; this control is what lets anyone send one. Shares the
+             page's single scheduleState() with the launch modal, which is why both
+             call scheduleReset() on open. -->
+        {{ schedule_picker() }}
+
         <div x-show="bulkModal.error" x-cloak
              class="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700"
              x-text="bulkModal.error"></div>
@@ -780,10 +786,11 @@
       <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
         <button @click="bulkModal.open = false" class="px-4 py-2 text-sm text-gray-600 font-medium">Cancel</button>
         <button @click="submitBulkDeploy()"
-                :disabled="bulkModal.submitting || !bulkModal.workgroup"
+                :disabled="bulkModal.submitting || !bulkModal.workgroup || !scheduleReady()"
                 class="px-5 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition">
           <span x-show="!bulkModal.submitting">
-            Deploy <span x-text="bulkModal.items.length"></span> Instance<span x-show="bulkModal.items.length !== 1">s</span>
+            <span x-text="scheduleVerb('', 'Deploy')"></span>
+            <span x-text="bulkModal.items.length"></span> Instance<span x-show="bulkModal.items.length !== 1">s</span>
           </span>
           <span x-show="bulkModal.submitting" x-cloak>Deploying…</span>
         </button>
@@ -2260,6 +2267,7 @@ function gcpDashboard() {
       // img may be null when invoked from "Deploy from Image URI…" — user pastes
       // a Compute Engine source_image reference (full URL, projects/PROJECT/...
       // path, or family path) into deployForm.image_self_link.
+      this.scheduleReset();
       this.selectedImage = img;
       this.deployError   = '';
       this.deploying     = false;
@@ -2314,6 +2322,9 @@ function gcpDashboard() {
     },
 
     async openBulkDeployModal() {
+      // Back to "Now": this modal and the single launch modal share the page's one
+      // scheduleState(), so a time typed for a cancelled launch must not carry over.
+      this.scheduleReset();
       const items = this.customImages.filter(i => this.selectedImages.includes(i.self_link));
       this.bulkModal = {
         open: true,
@@ -2357,6 +2368,7 @@ function gcpDashboard() {
           workgroup: m.workgroup,
           register_in_entitle: m.register_in_entitle,
           register_in_passwordsafe: m.register_in_passwordsafe,
+          ...this.schedulePayload(),
         });
         m.open = false;
         this.selectedImages = [];

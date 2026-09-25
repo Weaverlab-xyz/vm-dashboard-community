@@ -39,7 +39,8 @@ def conn_or_error(db: Session, kind: str, connection_id: Optional[str] = None):
 
 def agent_power_job(db: Session, conn, *, op: str, target_id: str,
                     target_scope: str = "", target_type: str = "vm",
-                    created_by: str = "", description: str = "", batch_id=None):
+                    created_by: str = "", description: str = "", batch_id=None,
+                    sched: Optional[dict] = None):
     """Enqueue a power op for an AGENT-BOUND connection, or return None.
 
     The dashboard has no route to these endpoints — that is the whole reason the
@@ -72,6 +73,16 @@ def agent_power_job(db: Session, conn, *, op: str, target_id: str,
     one connection only the LAST job to finish queues an inventory sync, rather than
     each of them queueing a sync of the same inventory. That behaviour is bulk power's
     load-bearing assumption and it comes for free from going through here.
+
+    ``sched`` is ``change_window_service.schedule_kwargs``' output — ``{}`` for "now",
+    otherwise ``scheduled_for`` / ``window_ends_at`` / ``change_window_id`` /
+    ``approval_required``. **This path needs nothing else to honour a booking.**
+    ``agent_service.lease_one`` filters on ``job_service.claimable_now()``, the same
+    predicate the local worker claims through, so an ``agent_hypervisor`` row booked for
+    Saturday is simply not offered to the agent until Saturday. That is why on-premises
+    power can be scheduled at all — but ONLY here. The direct-dial path in each router
+    runs its work in this process, and a booking there would be a lie; those callers
+    refuse a scheduled request rather than passing it down.
     """
     if not getattr(conn, "agent_id", None):
         return None
@@ -132,9 +143,39 @@ def agent_power_job(db: Session, conn, *, op: str, target_id: str,
     meta["description"] = description or f"{verb} via agent '{agent.name}'"
     job = job_service.create_job(
         db, job_type="agent_hypervisor", created_by=created_by,
-        metadata=meta, agent_id=agent.id, batch_id=batch_id)
+        metadata=meta, agent_id=agent.id, batch_id=batch_id, **(sched or {}))
     job_service.set_cloud_resource_id(db, job.id, conn.id)
     return job
+
+
+def refuse_direct_booking(conn, op: str) -> None:
+    """Refuse a booked power op on a connection the dashboard dials itself.
+
+    Called by each router's ``_queue_one`` after :func:`agent_power_job` has declined,
+    which is exactly the case where the work is a coroutine this process runs now.
+    Booking it would create a row stamped ``scheduled_for`` and then power the VM
+    immediately — and the row would still *look* scheduled afterwards, which is the
+    failure ``api/power_batch.queue_power_batch``'s guard exists to make impossible.
+    That guard stays where it is: it is the backstop for a router that forgets to call
+    this, and it raises RuntimeError because reaching it would be a bug. This is the
+    ordinary, expected refusal, and it happens BEFORE any job row exists.
+
+    Per-target rather than per-request on purpose. One page's selection can mix
+    agent-bound and directly-dialled connections, so this lands in the batch's
+    ``failed`` list with a reason while the agent-bound targets queue normally —
+    refusing the whole batch would punish the VMs that could have been booked.
+
+    501, matching :func:`agent_power_job`'s answer for an op it cannot express: the
+    request is well formed and the operator is entitled to make it, this deployment
+    simply cannot carry it out on this connection.
+    """
+    raise HTTPException(
+        status_code=501,
+        detail=(f"'{conn.name}' is a connection this dashboard dials directly, so "
+                f"'{op}' runs here and now — it cannot be scheduled. Scheduling a "
+                f"power operation needs an agent-brokered connection, where the job "
+                f"waits in the queue until the agent leases it. Bind this connection "
+                f"to an agent, or untick Schedule and run it now."))
 
 
 def agent_tag_job(db: Session, conn, *, tags: list, target_id: str,
