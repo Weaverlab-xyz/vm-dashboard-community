@@ -212,6 +212,35 @@ def test_the_bake_resets_the_cluster_identity_but_keeps_the_image_store():
     assert "rm -rf \"$_dir\"" in reset.group(1)
 
 
+def test_the_identity_wipe_unmounts_before_it_deletes():
+    """`systemctl stop kubesolo` does not undo kubelet's mounts. Every pod that ran
+    leaves a tmpfs at .../volumes/kubernetes.io~projected/kube-api-access-* holding
+    its service-account token, and those outlive the process — so the wipe hits
+    `rm: cannot remove ...: Device or resource busy` and, under `set -eu`, kills the
+    bake at the very last step with the image otherwise finished. Cost a 8m57s Azure
+    cell bake 2026-09-25.
+
+    Ordering is the test: unmounting after the delete is the same bug. So is
+    unmounting shallowest-first, because a parent will not release while a child is
+    still mounted."""
+    stop = _SRC.index("systemctl stop kubesolo")
+    delete = _SRC.index("for _dir in /var/lib/kubesolo/*; do", stop)
+    window = _SRC[stop:delete]
+
+    assert "umount" in window, (
+        "nothing unmounts kubelet's pod volumes between stopping kubesolo and "
+        "deleting its state directory — the delete cannot remove a mountpoint")
+    assert "/proc/self/mounts" in window, (
+        "the unmount does not consult the kernel's mount table, so it can only be "
+        "guessing at paths that carry random pod UIDs")
+    assert "sort -r" in window, (
+        "the unmount is not deepest-first; a parent mount will not release while a "
+        "child of it is still mounted")
+    assert "umount -l" in window, (
+        "no lazy-unmount fallback — one stubborn mount and the bake dies anyway, "
+        "seconds before the host is generalized and captured")
+
+
 def test_the_cell_carries_the_clients_the_kubesolo_plays_expect():
     """examples/playbooks/kubesolo/ shells out to kubectl and helm because KubeSolo
     ships neither. A cell that lacks them cannot run the Entitle agent play, which is

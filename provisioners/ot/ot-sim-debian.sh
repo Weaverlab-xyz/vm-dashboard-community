@@ -2315,6 +2315,26 @@ else
     # it must NOT be interrupted in the middle of.
     systemctl stop ot-faas.service >/dev/null 2>&1 || true
     systemctl stop kubesolo >/dev/null 2>&1 || true
+    # Stopping kubelet does NOT unmount what kubelet mounted. Every pod that ran
+    # leaves a tmpfs at .../volumes/kubernetes.io~projected/kube-api-access-* holding
+    # its service-account token, and those survive the process exiting — so the wipe
+    # below walks into `rm: cannot remove ...: Device or resource busy` and, under
+    # `set -eu`, takes the whole bake down at the last step, nine minutes in, with the
+    # image otherwise finished. A mountpoint cannot be removed, only unmounted.
+    #
+    # Deepest-first, because a parent mount will not release while a child is still
+    # mounted: reverse lexical order gives that for free, since a child path is its
+    # parent plus more characters. Lazy unmount as the fallback — this host is seconds
+    # from being generalized and captured, so detaching a stubborn mount is enough;
+    # nothing will read through it again. Unmounting frees no layer data, so the
+    # containerd store the loop below deliberately keeps survives this untouched.
+    awk -v p="$KUBESOLO_PATH/" 'index($2, p) == 1 {print $2}' /proc/self/mounts \
+      | sort -r \
+      | while read -r _mnt; do
+          umount "$_mnt" 2>/dev/null \
+            || umount -l "$_mnt" 2>/dev/null \
+            || log "WARNING: could not unmount $_mnt"
+        done
     for _dir in /var/lib/kubesolo/*; do
       [ -e "$_dir" ] || continue
       # Everything but the image store: those layers cannot be re-pulled inside the
