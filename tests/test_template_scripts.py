@@ -26,6 +26,8 @@ Runs under pytest, or standalone:
 import os
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
 from html.parser import HTMLParser
 
@@ -255,6 +257,94 @@ def test_the_scanner_actually_catches_the_bug_it_was_written_for():
 """
     lines, err = _scan(fine)
     assert not lines and not err, f"false positive: {lines} {err}"
+
+
+def test_no_string_literal_spans_a_newline_in_static_js():
+    """The same defect, in the file this whole module never looked at.
+
+    Shipped live in 26.10.20 and it took the ENTIRE UI down, on every page at once:
+    two `confirm()` prompts in `static/js/app.js` carried a real newline inside a `'`
+    string, so the browser discarded the whole file. Every global it defines went with
+    it -- `responsiveNav`, `statusBadge`, the `auth` store -- and the dashboard rendered
+    its heading and one empty card, with 88 `ReferenceError`s in the console and not one
+    server-side symptom to find.
+
+    Nothing could catch it. `_blocks()` walks `templates/**/*.html` and yields INLINE
+    script bodies, so the one JavaScript file that every page loads was the single
+    largest blind spot in the suite -- and the riskiest, because a template break costs
+    you one page while this costs you all of them.
+
+    **Only the string check runs here, not `_scan`'s bracket half.** `_scan` has no
+    regex-literal state (it never needed one: inline template scripts have no regexes),
+    and app.js is full of `.replace(/\\//g, '_')`, which it reads as a comment or a stray
+    delimiter and then reports an unbalanced brace 800 lines later. Applying the bracket
+    check here would mean a guard that cries wolf from the day it lands, and a guard
+    nobody believes is worse than no guard. The string half is exactly the half that
+    catches this bug class.
+    """
+    bad = []
+    for path in sorted((pathlib.Path(_ROOT) / "web_dashboard" / "static" / "js")
+                       .rglob("*.js")):
+        lines, _ = _scan(path.read_text(encoding="utf-8"))
+        bad += [f"{path.relative_to(_ROOT)}:{ln}" for ln in lines]
+    assert not bad, (
+        "unterminated string literal(s) in a static JS file -- the browser discards the "
+        "WHOLE file, so every page that loads it loses every global it defines:\n  "
+        + "\n  ".join(bad))
+
+
+def test_static_js_actually_parses():
+    """`node --check` on every static JS file — a real parser, not a lexer.
+
+    The scanner above catches the ONE shape that has now shipped twice, and it runs
+    everywhere, which is why it exists. This catches everything else: a stray brace, a
+    dropped paren, a reserved word as an identifier — any of which discards the whole
+    file exactly as the raw newline did.
+
+    Skipped where node is absent (the Windows dev machine), which is the same bargain
+    `test_templates_parse._run_node` already makes. That is acceptable ONLY because the
+    lexer above is unconditional: the two together mean the common defect is caught at
+    the desk and every other defect is caught before merge. CI is ubuntu-latest, where
+    node is always present, so nothing reaches an image unparsed.
+    """
+    node = shutil.which("node")
+    if not node:
+        print("   (skipped: node not installed)")
+        return
+    bad = []
+    for path in sorted((pathlib.Path(_ROOT) / "web_dashboard" / "static" / "js")
+                       .rglob("*.js")):
+        proc = subprocess.run([node, "--check", str(path)],
+                              capture_output=True, text=True)
+        if proc.returncode != 0:
+            bad.append(f"{path.relative_to(_ROOT)}:\n{proc.stderr.strip()}")
+    assert not bad, (
+        "static JS does not parse -- the browser discards the WHOLE file and every page "
+        "that loads it loses every global it defines:\n" + "\n".join(bad))
+
+
+def test_the_static_js_scanner_catches_the_bug_it_was_written_for():
+    """A guard that cannot fail is not a guard — the shipped 26.10.20 defect, verbatim."""
+    broken = """
+            if (question && this.bulkPowerScheduled && this.bulkPowerRunAt) {
+                question += '
+
+This will be SCHEDULED for '
+                          + this.bulkPowerRunAt.replace('T', ' ');
+            }
+"""
+    lines, _ = _scan(broken)
+    assert lines, "the static-JS scanner would not have caught the bug that motivated it"
+
+    # The fixed form, which is what shipped in its place, must stay clean.
+    fixed = """
+            if (question && this.bulkPowerScheduled && this.bulkPowerRunAt) {
+                question += '\\n\\nThis will be SCHEDULED for '
+                          + this.bulkPowerRunAt.replace('T', ' ');
+            }
+"""
+    lines, _ = _scan(fixed)
+    assert not lines, f"false positive on the fixed form: {lines}"
 
 
 def test_the_extractor_honours_every_end_tag_form():
