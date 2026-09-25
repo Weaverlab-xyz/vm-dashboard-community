@@ -583,42 +583,78 @@ async def read_attribute_vocabulary(tenant=None) -> dict:
     return out
 
 
-async def set_asset_attribute(asset_id, attribute_id, *, assign: bool,
-                              tenant=None) -> None:
-    """Assign or remove ONE attribute on ONE asset. Raises :class:`PSApiError`.
+async def _set_object_attribute(collection: str, object_id, attribute_id, *,
+                                assign: bool, tenant=None) -> None:
+    """Assign or remove ONE attribute on ONE object. Raises :class:`PSApiError`.
 
-    ``POST Assets/{assetID}/Attributes/{attributeID}`` to assign,
-    ``DELETE`` the same path to remove — the BeyondInsight convention, and the shape the
-    capability table's "Attributes and attribute types — POST" refers to.
+    ``collection`` is the BeyondInsight collection the object lives in — ``Assets`` or
+    ``ManagedSystems``. ``POST {collection}/{id}/Attributes/{attributeID}`` to assign,
+    ``DELETE`` the same path to remove.
 
     Deliberately one object per call rather than a batch: there is no batch endpoint, and
     a caller that wants many gets a per-object outcome out of it, which is what lets a
     partial apply be reported honestly instead of as one failure.
     """
     try:
-        aid = int(asset_id)
+        oid = int(object_id)
         attr = int(attribute_id)
     except (TypeError, ValueError):
-        raise PSApiError("an asset id and an attribute id are numbers") from None
+        raise PSApiError("an object id and an attribute id are numbers") from None
 
     async with _client(tenant) as client:
         await _sign_in(client, tenant)
         try:
-            path = f"Assets/{aid}/Attributes/{attr}"
+            path = f"{collection}/{oid}/Attributes/{attr}"
             resp = await (client.post(path) if assign else client.delete(path))
-            # 200/201 assign, 200/204 remove. A DELETE of something already absent
-            # answers 404, and that is not a failure — the caller asked for it gone and
-            # it is gone. Treating it as one would make a retry after a partial apply
-            # report errors for the targets that had already succeeded.
             if resp.status_code in (200, 201, 204):
                 return
             if not assign and resp.status_code == 404:
-                return
+                # A DELETE of something already absent answers 404, and that is not a
+                # failure — the caller asked for it gone and it is gone. But a Password
+                # Safe that does not serve this collection's attribute endpoint at all
+                # answers 404 to exactly the same request, and calling THAT a success
+                # would report a removal that never happened. One GET separates them:
+                # the collection's attribute list answering is what proves the endpoint
+                # family exists on this appliance.
+                listing = await client.get(f"{collection}/{oid}/Attributes")
+                if listing.status_code == 200:
+                    return
+                raise PSApiError(
+                    f"Password Safe did not remove the attribute: it does not serve "
+                    f"attributes on {collection} ({listing.status_code})")
             raise PSApiError(
                 f"Password Safe refused the attribute change "
                 f"({resp.status_code})")
         finally:
             await _sign_out(client)
+
+
+async def set_asset_attribute(asset_id, attribute_id, *, assign: bool,
+                              tenant=None) -> None:
+    """One attribute on one ASSET — ``Assets/{assetID}/Attributes/{attributeID}``.
+
+    The shape the capability table's "Attributes and attribute types — POST" refers to,
+    and the one verified live against a tenant.
+    """
+    await _set_object_attribute("Assets", asset_id, attribute_id,
+                                assign=assign, tenant=tenant)
+
+
+async def set_managed_system_attribute(system_id, attribute_id, *, assign: bool,
+                                       tenant=None) -> None:
+    """One attribute on one MANAGED SYSTEM —
+    ``ManagedSystems/{managedSystemID}/Attributes/{attributeID}``.
+
+    The sibling of :func:`set_asset_attribute`, and the one that matters most here:
+    everything this dashboard onboards into Password Safe lands as a managed system, so
+    without this the inventory page could read a row's attributes and never change them.
+
+    The READ half (``GET ManagedSystems/{id}/Attributes``) is verified; the write half is
+    not, which is why :func:`_set_object_attribute` refuses to read a 404 on DELETE as a
+    success without proving the endpoint family exists first.
+    """
+    await _set_object_attribute("ManagedSystems", system_id, attribute_id,
+                                assign=assign, tenant=tenant)
 
 
 async def process_smart_rule(rule_id, tenant=None, *, queue: bool = True) -> dict:

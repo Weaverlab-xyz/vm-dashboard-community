@@ -483,6 +483,13 @@ class RunRequest(BaseModel):
     # separate account for the become/sudo password.
     managed_account: ManagedAccountRef | None = None
     managed_become: ManagedAccountRef | None = None
+    # How the play escalates when it says `become: true`. A plugin NAME from
+    # services.ansible_become.BECOME_METHODS — "" keeps Ansible's own default (sudo).
+    # Needed because an account entitled through BeyondTrust Privilege Management for
+    # Unix & Linux escalates via `pbrun` and typically has NO sudoers entry, and the
+    # sudo failure is unreadable: sudo's password prompt lands on the module's stdout
+    # and Ansible reports "No start of json char found" rather than naming the cause.
+    become_method: str = ""
     # ── Agent-executed runs ───────────────────────────────────────────────────
     # Set when the target sits on a network the dashboard has no route to, so the run must
     # be queued for a remote agent instead of a runner the dashboard launches. The inventory
@@ -557,6 +564,8 @@ def _secret_use_details(payload: "RunRequest", target: str) -> dict:
         kinds.append("become-password")
     if payload.secret_ssh_key_source:
         kinds.append("ssh-key")
+    if payload.epml_token_var:
+        kinds.append("epml-token (minted)")
     managed_accts = []
     if payload.managed_account:
         kinds.append("managed-account (checkout)")
@@ -570,6 +579,8 @@ def _secret_use_details(payload: "RunRequest", target: str) -> dict:
                               "system_id": payload.managed_become.system_id})
     return {"kinds": kinds, "vars": sorted(payload.secret_vars.keys()),
             "managed_accounts": managed_accts,
+            # The var NAME, never the token — the same rule the job row obeys.
+            "epml_token_var": payload.epml_token_var,
             "asset": payload.asset, "target": target}
 
 
@@ -811,6 +822,9 @@ async def _run_agent_ansible(payload: "RunRequest", db, current_user):
     from ..services import ansible_run_gate as _gate
     _refusal = _gate.check_permission(
         wants_secret=bool(payload.secret_vars),
+        # This path DOES carry epml_token_var (agent_ansible_meta.RUN_META_KEYS), so the
+        # bundle mints a real token for it — the permission has to be checked here too.
+        wants_epml_token=bool(payload.epml_token_var),
         can_use_secrets=_can_use_secrets(current_user),
         has_managed=False, password_safe_enabled=True)
     if _refusal:
@@ -861,13 +875,14 @@ async def _run_agent_ansible(payload: "RunRequest", db, current_user):
         db, job_type="agent_ansible", created_by=current_user.username,
         workgroup="ansible", metadata=meta, batch_id=payload.batch_id,
         agent_id=payload.agent_id, **_schedule_kwargs(payload, db))
-    # Audited on the same condition as the dashboard-run path, not just on secret_vars:
-    # an agent run can carry a managed account too, and a bulk run now gives every
-    # target its own, so "which account did this job check out" has to be recorded here
-    # as well or a 50-host agent batch leaves no trace of 50 distinct checkouts.
+    # Audited on the same condition as the dashboard-run path, not just on secret_vars
+    # (or secret_vars + epml_token_var): an agent run can carry a managed account too,
+    # and a bulk run now gives every target its OWN, so "which account did this job
+    # check out" has to be recorded here as well, or a 50-host agent batch leaves no
+    # trace of 50 distinct checkouts.
     if (payload.secret_vars or payload.secret_become_source
-            or payload.secret_ssh_key_source or payload.managed_account
-            or payload.managed_become):
+            or payload.secret_ssh_key_source or payload.epml_token_var
+            or payload.managed_account or payload.managed_become):
         job_service.log_audit(
             db, current_user.username, "ansible_secret_use",
             details=_secret_use_details(payload, f"agent:{overrides['target_host']}"))
@@ -1075,6 +1090,9 @@ async def run_playbook(
                         or payload.secret_ssh_key_source or has_managed)
     _refusal = _gate.check_permission(
         wants_secret=wants_secret,
+        # Separate from wants_secret on purpose: nothing has to pre-exist in a cloud
+        # store for a minted token, so the residency check below must NOT widen with it.
+        wants_epml_token=bool(payload.epml_token_var),
         can_use_secrets=_can_use_secrets(current_user),
         has_managed=has_managed,
         # Short-circuited, so a run with no managed account still costs no config read
@@ -1082,6 +1100,16 @@ async def run_playbook(
         password_safe_enabled=has_managed and cs.get_bool("password_safe_enabled"))
     if _refusal:
         raise HTTPException(status_code=_refusal.status, detail=_refusal.detail)
+
+    # Checked here, before anything is queued, so an unusable method is a 400 the
+    # operator reads now rather than a play that escalates by sudo on a PMUL host and
+    # fails with sudo's prompt spliced into the module's JSON. Normalized, so the value
+    # stored on the job is the one both runners will act on.
+    from ..services import ansible_become as _become
+    try:
+        payload.become_method = _become.normalize(payload.become_method)
+    except _become.BecomeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     atype = ansible_local_service.asset_type(payload.asset)
 
@@ -1095,6 +1123,19 @@ async def run_playbook(
             and is_adhoc and atype == "playbook"):
         _validate_cloud_secret_stores(
             eff_runner, payload.secret_vars, payload.secret_become_source)
+
+    # The transient cloud runners take a playbook, an SSH key and a secret channel —
+    # `_dispatch_cloud_runner` has no plain-var argument at all, so there is nowhere to
+    # put the become method. Refused rather than dropped: silently ignoring it would
+    # escalate by sudo on the very host the operator selected pbrun for, and the sudo
+    # failure does not name itself. The local and agent runners both carry it.
+    if (payload.become_method and eff_runner in ("ecs", "aci", "gcp")
+            and is_adhoc and atype == "playbook"):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"a become method ({payload.become_method}) cannot be used on the "
+                    f"{eff_runner.upper()} runner — it has no channel for play variables. "
+                    f"Run this target through the local runner or a remote agent."))
 
     # Managed-account checkout works on the local and ACI runners (both inject the
     # credential inline); on ECS / Cloud Run it needs an ephemeral store copy, which is
@@ -1133,7 +1174,7 @@ async def run_playbook(
         batch_id=payload.batch_id,
         **_schedule_kwargs(payload, db),
     )
-    if wants_secret:
+    if wants_secret or payload.epml_token_var:
         job_service.log_audit(
             db, current_user.username, "ansible_secret_use",
             details=_secret_use_details(payload, payload.target))
@@ -1153,6 +1194,8 @@ class BulkRunRequest(BaseModel):
     asset_backend: str = ""
     extra_vars: dict = {}
     secret_vars: dict = {}
+    # See RunRequest — the NAME only, and it applies to every target in the batch.
+    epml_token_var: str = ""
     # VM-only connection fields; ignored for k8s/database rows (localhost plays).
     ansible_user: str = ""
     secret_become_source: str = ""
@@ -1172,6 +1215,7 @@ class BulkRunRequest(BaseModel):
     # host back on the fleet account, which is the bug this feature fixes.
     managed_accounts: dict[str, ManagedAccountRef | None] = {}
     managed_becomes: dict[str, ManagedAccountRef | None] = {}
+    become_method: str = ""
     # Applies to the WHOLE batch — see the copy in run_playbook_bulk. A batch split
     # across a window boundary would be the worst of both worlds.
     run_at: str = ""
@@ -1253,6 +1297,7 @@ async def run_playbook_bulk(
         "secret_become_source": payload.secret_become_source,
         "managed_account": payload.managed_account or payload.managed_accounts,
         "managed_become": payload.managed_become or payload.managed_becomes,
+        "become_method": payload.become_method,
     })
     if wrong_fields:
         raise HTTPException(status_code=400, detail=wrong_fields)
@@ -1272,6 +1317,7 @@ async def run_playbook_bulk(
         req = RunRequest(
             asset=payload.asset,
             asset_backend=payload.asset_backend,
+            epml_token_var=payload.epml_token_var,
             extra_vars=payload.extra_vars,
             secret_vars=payload.secret_vars,
             ansible_user=payload.ansible_user,
@@ -1279,6 +1325,7 @@ async def run_playbook_bulk(
             secret_ssh_key_source=payload.secret_ssh_key_source,
             managed_account=t_account,
             managed_become=t_become,
+            become_method=payload.become_method,
             batch_id=batch_id,
             # Scheduling rides the batch: booking a bulk run into a window must book
             # EVERY target in it, or half the batch runs now and half on Saturday. This

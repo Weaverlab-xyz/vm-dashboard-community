@@ -505,6 +505,36 @@ into the run. The operator never sees the value; it's scrubbed from job output a
 the use is audited. Requires the `secrets:use` permission. See
 [Using a Secrets-Management secret in a run](integrations/ansible\secrets.md#using-a-secrets-management-secret-in-a-run).
 
+**Escalate through a privilege broker, not just sudo.** The run form's **Become method**
+picker sets how a play escalates when it says `become: true`. Leave it on the default and
+Ansible uses `sudo`; pick `pbrun` (or `pmrun`) when the account is entitled through
+BeyondTrust Privilege Management for Unix & Linux, `dzdo` for Delinea/Centrify, `pfexec`
+on Solaris, and so on.
+
+Worth setting deliberately, because the sudo failure does not name itself: an account with
+no sudoers entry makes sudo print its lecture and password prompt onto the module's stdout,
+and Ansible reports `Module result deserialization failed: No start of json char found`
+rather than "this account cannot sudo". Only the method *name* is ever sent — the
+escalation binary and its flags are not configurable from the dashboard, and the remote
+agent re-checks the name against its own allow-list before using it.
+
+Available on the **local runner** and on **remote agents**. The transient cloud runners
+(ECS / ACI / Cloud Run) take a playbook, an SSH key and a secret channel with no
+plain-variable argument, so a run that sets a become method against one is refused rather
+than quietly run under sudo.
+
+> **On a PMUL host, check what the policy actually permits.** Under `become`, every
+> escalated Ansible task arrives at `pbrun` as the *same* command — a `BECOME-SUCCESS`
+> wrapper invoking `python3 AnsiballZ_<module>.py`. PBUL never sees `dnf install` or
+> `systemctl restart`, so per-command role entitlements do not constrain an Ansible run:
+> permitting the wrapper permits everything Ansible chooses to do. If you want PMUL to
+> gate each action, skip `become` and have tasks invoke `pbrun <cmd>` explicitly.
+>
+> [`examples/playbooks/linux/pmul-ansible-entitlement.yml`](../examples/playbooks/linux/pmul-ansible-entitlement.yml)
+> adds the pbrun-shaped probe to a role idempotently, with a backup and a dry-run mode.
+> Run it against the **policy server**, with an account that already has root — it is the
+> play that repairs the pbrun escalation path, so it cannot rely on that path working.
+
 The **SPIRE** page's build form offers the same two choices — a managed account or an
 SSH-key secret — reading the same `/api/config-mgmt/managed-accounts` and
 `/api/config-mgmt/secret-options` endpoints, refusing a run for the same reasons, and

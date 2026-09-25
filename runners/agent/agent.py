@@ -152,6 +152,19 @@ class PolicyRefusal(Exception):
     locally in full — the local log is the audit record the dashboard cannot edit."""
 
 
+class RunFailure(Exception):
+    """The work was permitted, was started, and failed. Reported back VERBATIM.
+
+    Distinct from :class:`PolicyRefusal` because the two send an operator to opposite
+    places. A refusal means this agent said no and the fix is in policy.yaml; a run failure
+    means policy said yes, the runner started, and the playbook or the Engine is what broke
+    — the fix is in the play or on the target. Rendering the second as "Agent policy
+    refused: ansible-playbook exited 2" is the specific confusion this type exists to stop:
+    it sends someone hunting for a rule that never fired, and the error line is the ONLY
+    text a failed job row renders, so there is nothing else to correct the impression.
+    """
+
+
 class Throttled(Exception):
     """The dashboard answered 429 and said when to come back.
 
@@ -3941,12 +3954,12 @@ def _stream_logs(container: str, on_line, deadline: float) -> None:
         if resp.status != 200:
             detail = resp.read()[:200].decode("utf-8", "replace")
             if resp.status == 501:
-                raise PolicyRefusal(
+                raise RunFailure(
                     "this host's Docker logging driver is not file-based, so the run's "
                     "output cannot be read back (the Engine answered 501). The agent asks "
                     "for json-file per container, so this usually means the daemon forbids "
                     "it — check `log-driver` in /etc/docker/daemon.json.")
-            raise PolicyRefusal(f"could not read the runner's output ({resp.status}): {detail}")
+            raise RunFailure(f"could not read the runner's output ({resp.status}): {detail}")
 
         buf = bytearray()
         held = {1: bytearray(), 2: bytearray()}
@@ -4080,8 +4093,8 @@ def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict
 
         status, start_body = _engine("POST", f"/containers/{container}/start")
         if status not in (204, 304):
-            raise PolicyRefusal(f"the Ansible runner would not start ({status}): "
-                                f"{str(start_body)[:300]}")
+            raise RunFailure(f"the Ansible runner would not start ({status}): "
+                             f"{str(start_body)[:300]}")
         emit(f"running {image}")
         watcher.start()
         _stream_logs(container, emit, deadline)
@@ -4119,7 +4132,7 @@ def _run_ansible_sibling(policy: "Policy", *, image: str, files: dict, env: dict
                 f"in this agent, not a setting — a playbook this heavy should do its work "
                 f"on the target rather than on the controller.")
         if code < 0 and wait_error:
-            raise PolicyRefusal(f"the Ansible runner failed to run: {wait_error}")
+            raise RunFailure(f"the Ansible runner failed to run: {wait_error}")
         return code
     finally:
         done.set()
@@ -4302,6 +4315,20 @@ def _run_verb(conn, payload, policy, emit, verb, kind, job_id, checkins):
 # inventory variable in Ansible's precedence order, so a filter on the inventory alone would
 # be worth nothing.
 _RESERVED_VAR_PREFIX = "ansible_"
+
+# The escalation methods this agent will set. Mirrors
+# ``web_dashboard.services.ansible_become.BECOME_METHODS`` and is pinned to it by
+# tests/test_ansible_become.py.
+#
+# Re-checked HERE and not merely dashboard-side, for the reason `_check_extra_vars` gives:
+# the dashboard applying a filter is not the same as this agent enforcing one. What keeps
+# the surface safe is that a become METHOD is a plugin name Ansible looks up in its own
+# table — it can never be a command. `become_exe` and `become_flags` CAN be, which is why
+# the bundle has no field for either and this list may never grow one.
+_BECOME_METHODS = frozenset({
+    "sudo", "pbrun", "pmrun", "doas", "dzdo", "pfexec",
+    "su", "ksu", "sesu", "machinectl", "runas",
+})
 
 # Ansible's own exit codes. Reported as text because "the run failed (exit 4)" sends an
 # operator to a search engine, and every one of these has a specific meaning worth stating.
@@ -4488,6 +4515,17 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
         play_vars["ansible_ssh_pass"] = bundle["login_password"]     # SSH
     if bundle.get("become_password"):
         play_vars["ansible_become_password"] = bundle["become_password"]
+    # Escalation method. Refused rather than ignored when it is not one this agent knows:
+    # dropping it would run the play under sudo on a host the operator chose pbrun for,
+    # and sudo's own failure there is a password prompt spliced into the module's stdout,
+    # which Ansible reports as "No start of json char found" and names nothing.
+    become_method = str(bundle.get("become_method") or "").strip().lower()
+    if become_method:
+        if become_method not in _BECOME_METHODS:
+            raise PolicyRefusal(
+                f"the dashboard asked for become method {become_method!r}, which this "
+                f"agent does not allow. Permitted: {', '.join(sorted(_BECOME_METHODS))}.")
+        play_vars["ansible_become_method"] = become_method
     if play_vars:
         files[f"{_JOB_DIR.strip('/')}/secret_vars.json"] = \
             json.dumps(play_vars).encode("utf-8")
@@ -4516,8 +4554,9 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
         # in a result dict would complete the job green, which is the single worst outcome
         # for a config-management run — an operator reads "completed" and believes the host
         # was configured.
-        raise PolicyRefusal(
-            f"ansible-playbook exited {code}" + (f" — {meaning}" if meaning else ""))
+        raise RunFailure(
+            f"ansible-playbook exited {code}" + (f" — {meaning}" if meaning else "")
+            + ". The failing task is in this job's output.")
     return {"exit_code": code}
 
 
@@ -4984,6 +5023,13 @@ def execute(dashboard: Dashboard, policy: Policy, job: dict) -> None:
         log.warning("REFUSED job %s: %s", job_id, exc)
         reporter.stop()
         dashboard.complete(job_id, status="failed", error=f"Agent policy refused: {exc}")
+    except RunFailure as exc:
+        # Deliberately UNPREFIXED. Policy permitted this job and the agent ran it; what
+        # failed is the work. The raise sites write a complete sentence for exactly this
+        # reason — there is no prefix here to lean on.
+        log.warning("job %s failed: %s", job_id, exc)
+        reporter.stop()
+        dashboard.complete(job_id, status="failed", error=str(exc))
     except Exception as exc:  # noqa: BLE001
         log.exception("job %s failed", job_id)
         reporter.stop()
