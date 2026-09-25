@@ -356,6 +356,10 @@ async def build(db, *, job, agent) -> tuple:
         "login_user": login_user,
         "login_password": login_password,
         "become_password": creds.extra_vars.get("ansible_become_password") or "",
+        # A plugin NAME, and typed for the same reason the passwords are: the agent
+        # strips `ansible_*` out of `extra_vars` above, so this could not travel as one.
+        # The agent re-checks it against its own allowlist before using it.
+        "become_method": str(meta.get("become_method") or ""),
         "ssh_private_key": creds.ssh_pem or "",
         "winrm": _winrm_options(transport, meta["target_port"]),
     }

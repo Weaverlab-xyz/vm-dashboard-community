@@ -38,6 +38,10 @@ RUN_META_KEYS = (
     "secret_ssh_key_source",
     "managed_account",
     "managed_become",
+    # Which escalation method the play uses — a plugin NAME from
+    # services.ansible_become.BECOME_METHODS, never a command. "" = Ansible's own
+    # default (sudo), which is what every run written before this field existed meant.
+    "become_method",
     # The NAME of the var an EPM-L installation token is bound to, never the token.
     # The token is minted at run time and only ever exists in the run's scrubbed
     # secret channel — see ansible_local_run_service.
@@ -60,6 +64,7 @@ _DEFAULTS = {
     "secret_ssh_key_source": "",
     "managed_account": None,
     "managed_become": None,
+    "become_method": "",
     "epml_token_var": "",
 }
 
