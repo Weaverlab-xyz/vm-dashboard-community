@@ -2092,8 +2092,9 @@ async def pin_private_address(rg: str, nic_name: str) -> dict:
 def _vm_jumpoint_cloud_init(container_image: str, deploy_key: str,
                             install_db_clients: bool = False) -> str:
     """Base64 cloud-init: install Docker, then run the BT Jumpoint container
-    privileged with /dev/net/tun (the caps a protocol tunnel needs). The deploy
-    key is an opaque token, single-quoted for the shell.
+    privileged with /dev/net/tun (the caps a protocol tunnel needs) and on the
+    HOST network (what a network tunnel needs on top). The deploy key is an
+    opaque token, single-quoted for the shell.
 
     When ``install_db_clients`` is set (for the Password Safe Azure cloud-DB
     onboarding) it also installs the native DB clients the "{engine} Azure Run
@@ -2115,8 +2116,16 @@ def _vm_jumpoint_cloud_init(container_image: str, deploy_key: str,
             "apt-get update",
             "ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc-dev",
         ]
+    # --network host is load-bearing for a NETWORK Tunnel Jump, and invisible to a
+    # protocol tunnel — which is why this was missed. On the default bridge the
+    # container's only interface is 172.17.0.x/16: a protocol tunnel opens an OUTBOUND
+    # TCP socket and Docker masquerades it, so it works, while a network tunnel asks
+    # the Jumpoint to route L3 for a subnet that is not on any interface it can see.
+    # Both jumpoint-subnet (10.99.5.0/24) and vm-subnet (10.99.2.0/24) fail identically.
+    # Host networking costs no inbound exposure here: the VM's public IP is Standard
+    # SKU with no NSG attached, which is deny-all inbound by default.
     runcmd.append(
-        "docker run -d --restart always --name jumpoint "
+        "docker run -d --restart always --name jumpoint --network host "
         "--privileged --device /dev/net/tun --cap-add NET_ADMIN --cap-add NET_RAW "
         f"-e DEPLOY_KEY='{deploy_key}' {container_image}")
     lines = ["#cloud-config", "package_update: true", "packages:"]
@@ -2168,8 +2177,14 @@ def _run_vm_jumpoint_sync(
         private_ip_allocation_method="Dynamic",
         public_ip_address={"id": pip.id},
     )
+    # enable_ip_forwarding is the Azure-fabric half of a NETWORK Tunnel Jump. Linux
+    # forwards happily (docker sets net.ipv4.ip_forward=1), but Azure drops any frame
+    # leaving a NIC whose source IP is not that NIC's own unless this is set — so a
+    # tunnel that preserves the console's virtual source address comes up green and
+    # carries nothing, with no error on either side. Costs nothing when unused.
     nic = network.network_interfaces.begin_create_or_update(
-        rg, nic_name, NetworkInterface(location=location, ip_configurations=[ip_config], tags=tags)
+        rg, nic_name, NetworkInterface(location=location, ip_configurations=[ip_config],
+                                       enable_ip_forwarding=True, tags=tags)
     ).result()
 
     image_ref = ImageReference(
