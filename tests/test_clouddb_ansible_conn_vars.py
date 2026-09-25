@@ -39,6 +39,12 @@ class _CloudDatabase:
     # from Password Safe instead and is covered by tests/test_database_registration.py.
     source = "provisioned"
     db_name = None
+    # Password Safe onboarding ids. Present-and-None rather than absent: the real model
+    # declares them as nullable columns, so a row that was never onboarded reads None,
+    # and a stub that omits them entirely would AttributeError on a branch that is fine
+    # against the real thing.
+    ps_managed_system_id = None
+    ps_managed_account_id = None
 
     def __init__(self, **kw):
         self.__dict__.update(kw)
@@ -73,6 +79,7 @@ def _install_stubs():
     cfg = types.ModuleType("web_dashboard.services.config_service")
     cfg.get = lambda key: CONF.get(key, "")
     cfg.set = lambda key, val: CONF.__setitem__(key, val)
+    cfg.get_bool = lambda key, default=False: bool(CONF.get(key, default))
     sys.modules["web_dashboard.services.config_service"] = cfg
 
     js = types.ModuleType("web_dashboard.services.job_service")
@@ -145,6 +152,127 @@ def test_postgres_aws_uses_store_password_and_provisioned_db_name():
         "db_login_password": "s3cret-pw",
         "db_name": "appdb",
     }
+
+
+# ── the database's OWN Password Safe managed account (opt-in) ─────────────────
+#
+# A provisioned row that was onboarded into Password Safe can connect as the account
+# onboarding created for it, rather than as the stored admin. That account is unique
+# per database by construction, which is what gives a BULK Config-Management run a
+# distinct credential per target with nothing to pick.
+#
+# It is off by default and must stay that way: `psafe_<id12>` is created with a bare
+# LOGIN and no GRANTs (cloud_db_sql_service), so switching a working deployment onto
+# it silently turns every data-touching playbook into a permissions failure.
+
+class _StubBTAPIError(Exception):
+    pass
+
+
+def _stub_btapi(credential="ps-checked-out", raises=None):
+    """Replace btapi_service for one test. It is imported INSIDE the function under
+    test, so patching sys.modules is enough."""
+    mod = types.ModuleType("web_dashboard.services.btapi_service")
+    mod.BTAPIError = _StubBTAPIError
+    calls = []
+
+    async def _get(system_id, account_id, duration_min=30, uses_ssh_key=False):
+        calls.append((system_id, account_id, duration_min))
+        if raises:
+            raise raises
+        return 4242, credential
+
+    mod.get_ps_credential_with_request = _get
+    sys.modules["web_dashboard.services.btapi_service"] = mod
+    return calls
+
+
+def _onboarded_row(**kw):
+    base = dict(id="db-own", engine="postgres", cloud="aws",
+                private_host="pg.internal", port=5432,
+                ps_managed_system_id="77", ps_managed_account_id="88")
+    base.update(kw)
+    return _CloudDatabase(**base)
+
+
+def test_default_off_keeps_the_stored_admin_even_when_onboarded():
+    """The back-compat guarantee. An onboarded row with the flag unset must behave
+    byte-for-byte as it did before this branch existed."""
+    CONF.clear()
+    CONF["clouddb/db-own/admin"] = "admin-pw"
+    calls = _stub_btapi()
+    out = _run(_FakeDB(_onboarded_row()), "db-own",
+               {"master_username": "dbadmin", "db_name": "appdb"})
+    assert out["db_login_user"] == "dbadmin"
+    assert out["db_login_password"] == "admin-pw"
+    assert calls == [], "Password Safe must not be called with the opt-in off"
+
+
+def test_opt_in_connects_as_the_rows_own_managed_account():
+    CONF.clear()
+    CONF["clouddb/db-own/admin"] = "admin-pw"
+    CONF["clouddb_ansible_use_ps_account"] = True
+    calls = _stub_btapi(credential="rotated-pw")
+    out = _run(_FakeDB(_onboarded_row()), "db-own",
+               {"master_username": "dbadmin", "db_name": "appdb"})
+    # The checkout is against THIS row's recorded pair, coerced to ints.
+    assert calls == [(77, 88, 60)]
+    assert out["db_login_user"] == svc._managed_user_name("db-own")
+    assert out["db_login_password"] == "rotated-pw"
+    # Everything else still comes from the row / provisioning job.
+    assert out["db_login_host"] == "pg.internal"
+    assert out["db_name"] == "appdb"
+
+
+def test_opt_in_without_an_onboarding_record_stays_on_the_admin():
+    """The flag is global; a row that was never onboarded has no account to use, and
+    must keep working rather than fail."""
+    CONF.clear()
+    CONF["clouddb/db-own/admin"] = "admin-pw"
+    CONF["clouddb_ansible_use_ps_account"] = True
+    calls = _stub_btapi()
+    row = _onboarded_row(ps_managed_system_id=None, ps_managed_account_id=None)
+    out = _run(_FakeDB(row), "db-own", {"master_username": "dbadmin", "db_name": "appdb"})
+    assert out["db_login_password"] == "admin-pw" and calls == []
+
+
+def test_opt_in_key_set_matches_the_registered_path():
+    """The two just-in-time paths must return the SAME keys, or a playbook written
+    against one silently gets undefined vars from the other."""
+    CONF.clear()
+    CONF["clouddb/db-own/admin"] = "admin-pw"
+    CONF["clouddb_ansible_use_ps_account"] = True
+    _stub_btapi()
+    out = _run(_FakeDB(_onboarded_row()), "db-own", {"db_name": "appdb"})
+    assert set(out) == {"db_engine", "db_login_host", "db_login_port",
+                        "db_login_user", "db_login_password", "db_name"}
+
+
+def test_a_malformed_onboarding_record_is_a_clear_error():
+    """A non-numeric id would otherwise surface as a bare ValueError from int()."""
+    CONF.clear()
+    CONF["clouddb_ansible_use_ps_account"] = True
+    _stub_btapi()
+    row = _onboarded_row(ps_managed_system_id="not-a-number")
+    try:
+        _run(_FakeDB(row), "db-own", {"db_name": "appdb"})
+    except svc.CloudDatabaseError as e:
+        assert "malformed" in str(e) and "re-register" in str(e)
+    else:
+        raise AssertionError("a malformed onboarding record should raise")
+
+
+def test_an_empty_credential_is_refused():
+    """Connecting with '' would fail at the database with a confusing auth error."""
+    CONF.clear()
+    CONF["clouddb_ansible_use_ps_account"] = True
+    _stub_btapi(credential="")
+    try:
+        _run(_FakeDB(_onboarded_row()), "db-own", {"db_name": "appdb"})
+    except svc.CloudDatabaseError as e:
+        assert "empty credential" in str(e)
+    else:
+        raise AssertionError("an empty credential should raise")
 
 
 def test_sqlserver_gcp_forces_sqlserver_user_and_master_db():

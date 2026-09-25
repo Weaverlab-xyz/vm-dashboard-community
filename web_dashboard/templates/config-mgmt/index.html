@@ -372,25 +372,143 @@
 
             <!-- Managed account (BeyondTrust Password Safe) — live list, JIT checkout.
                  Shown for a specific host (on-prem free-text or a cloud VM IP), or in
-                 bulk mode for the sample host. Kind-gated too: a k8s/database run is a
-                 localhost play with no SSH connection to authenticate. -->
-            <div x-show="targetKind === 'vm' && effectiveHost && (managedEnabled || managedLoading)" x-cloak
+                 bulk mode as a PER-TARGET table: every selected object gets its own
+                 account list, read server-side from that object's own address. Kind-
+                 gated too: a k8s/database run is a localhost play with no SSH
+                 connection to authenticate. -->
+            <div x-show="targetKind === 'vm' && (bulk ? bulk.kind === 'vm' : effectiveHost)
+                         && (managedEnabled || managedLoading || bulkTargetsLoading)" x-cloak
                  class="border-t border-gray-100 pt-3 space-y-2">
               <p class="text-xs font-medium text-gray-700">Managed account
                 <span class="text-gray-400 font-normal">(Password Safe — checked out just-in-time)</span></p>
 
-              <p x-show="bulk" x-cloak class="text-[11px] text-blue-700">
-                These accounts are read from <strong x-text="bulk ? bulk.sampleName || bulk.sampleHost : ''"></strong>
-                as a sample. The run sends the account <em>name</em>, and each host checks out
-                its own credential — a host without that account fails only its own job.
-              </p>
+              <!-- ── Bulk: one row per target ──────────────────────────────── -->
+              <template x-if="bulk">
+                <div class="space-y-2">
+                  <p class="text-[11px] text-blue-700">
+                    Each target checks out <strong>its own</strong> credential. Pick a default
+                    below to pre-select every row, then override any row that differs.
+                  </p>
 
-              <p x-show="managedLoading" class="text-[11px] text-gray-400">Looking up managed accounts…</p>
-              <p x-show="!managedLoading && managedError" x-text="managedError" class="text-[11px] text-amber-600"></p>
-              <p x-show="!managedLoading && !managedError && managedSystems.length === 0"
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                      <label class="block text-xs font-medium text-gray-600 mb-1">
+                        Default connection account
+                        <span class="text-gray-400">(applies to rows left unset)</span>
+                      </label>
+                      <select x-model="managedAccountKey" @change="resuggestBulkAccounts()"
+                              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="">— none —</option>
+                        <template x-for="s in bulkDefaultSystems" :key="'d-'+s.system_id">
+                          <optgroup :label="`${s.name} (${s.ip})`">
+                            <template x-for="a in s.accounts" :key="'d-'+a.account_id">
+                              <option :value="`${s.system_id}:${a.account_id}`"
+                                      x-text="`${a.name}${a.domain ? ' @'+a.domain : ''} ${a.uses_ssh_key ? '[SSH key]' : '[password]'}`"></option>
+                            </template>
+                          </optgroup>
+                        </template>
+                      </select>
+                    </div>
+                    <div>
+                      <label class="block text-xs font-medium text-gray-600 mb-1">
+                        Default become / sudo account <span class="text-gray-400">(optional)</span>
+                      </label>
+                      <select x-model="managedBecomeKey" @change="resuggestBulkAccounts()"
+                              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="">— none —</option>
+                        <template x-for="s in bulkDefaultSystems" :key="'db-'+s.system_id">
+                          <optgroup :label="`${s.name} (${s.ip})`">
+                            <template x-for="a in s.accounts" :key="'db-'+a.account_id">
+                              <option :value="`${s.system_id}:${a.account_id}`"
+                                      x-text="`${a.name}${a.domain ? ' @'+a.domain : ''}`"></option>
+                            </template>
+                          </optgroup>
+                        </template>
+                      </select>
+                    </div>
+                  </div>
+
+                  <p x-show="bulkTargetsLoading" class="text-[11px] text-gray-400">
+                    Looking up managed accounts for each target…</p>
+                  <p x-show="!bulkTargetsLoading && bulkTargetsError" x-text="bulkTargetsError"
+                     class="text-[11px] text-amber-600"></p>
+                  <p x-show="bulkTruncated" x-cloak class="text-[11px] text-amber-600">
+                    Too many managed systems matched this selection to list them all. The rows
+                    below may be incomplete — narrow the selection, or run the affected hosts
+                    separately with an account picked from each one's own list.
+                  </p>
+
+                  <div x-show="bulkTargets.length" x-cloak
+                       class="border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-72 overflow-y-auto">
+                    <template x-for="t in bulkTargets" :key="t.inventory_id">
+                      <div class="p-2 space-y-1"
+                           :class="!bulkAccountKeys[t.inventory_id] ? 'bg-amber-50' : ''">
+                        <div class="flex items-baseline justify-between gap-2">
+                          <span class="text-xs font-medium text-gray-700 truncate" x-text="t.name"></span>
+                          <span class="text-[11px] text-gray-400 font-mono shrink-0" x-text="t.host"></span>
+                        </div>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <select x-model="bulkAccountKeys[t.inventory_id]"
+                                  @change="markBulkManual(t.inventory_id)"
+                                  class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="">— none —</option>
+                            <template x-for="s in (t.systems || [])" :key="t.inventory_id+'-'+s.system_id">
+                              <optgroup :label="`${s.name} (${s.ip})`">
+                                <template x-for="a in s.accounts" :key="t.inventory_id+'-'+a.account_id">
+                                  <option :value="`${s.system_id}:${a.account_id}`"
+                                          x-text="`${a.name}${a.domain ? ' @'+a.domain : ''} ${a.uses_ssh_key ? '[SSH key]' : '[password]'}`"></option>
+                                </template>
+                              </optgroup>
+                            </template>
+                          </select>
+                          <select x-model="bulkBecomeKeys[t.inventory_id]"
+                                  @change="markBulkManual(t.inventory_id)"
+                                  class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="">— no become account —</option>
+                            <template x-for="s in (t.systems || [])" :key="t.inventory_id+'-b-'+s.system_id">
+                              <optgroup :label="`${s.name} (${s.ip})`">
+                                <template x-for="a in s.accounts" :key="t.inventory_id+'-b-'+a.account_id">
+                                  <option :value="`${s.system_id}:${a.account_id}`"
+                                          x-text="`${a.name}${a.domain ? ' @'+a.domain : ''}`"></option>
+                                </template>
+                              </optgroup>
+                            </template>
+                          </select>
+                        </div>
+                        <p x-show="t.error" x-cloak x-text="t.error" class="text-[11px] text-amber-600"></p>
+                        <p x-show="!t.error && !bulkAccountKeys[t.inventory_id]" x-cloak
+                           class="text-[11px] text-amber-700">
+                          No matching managed account — this target will fall back to the default
+                          account name and, if that host does not have it, fail its own job.
+                        </p>
+                        <p x-show="bulkAccountKeys[t.inventory_id] && t.suggested_basis
+                                   && !bulkManualRows.has(t.inventory_id)" x-cloak
+                           class="text-[11px] text-gray-400"
+                           x-text="({'default-name': 'Matched the default account name.',
+                                     'recorded-system': 'From the Password Safe system this VM was onboarded into.',
+                                     'only-account': 'The only account this host has.'})[t.suggested_basis] || ''"></p>
+                        <p x-show="bulkFailed.find(f => f.inventory_id === t.inventory_id)" x-cloak
+                           class="text-[11px] text-red-600"
+                           x-text="(bulkFailed.find(f => f.inventory_id === t.inventory_id) || {}).error"></p>
+                      </div>
+                    </template>
+                  </div>
+
+                  <p x-show="bulkTargets.length && bulkUnmatchedCount" x-cloak
+                     class="text-[11px] text-amber-700">
+                    <strong x-text="bulkUnmatchedCount"></strong>
+                    of <strong x-text="bulkTargets.length"></strong> targets have no account
+                    selected. You can still run — each one fails only its own job.
+                  </p>
+                </div>
+              </template>
+
+              <p x-show="!bulk && managedLoading" class="text-[11px] text-gray-400">Looking up managed accounts…</p>
+              <p x-show="!bulk && !managedLoading && managedError" x-text="managedError" class="text-[11px] text-amber-600"></p>
+              <p x-show="!bulk && !managedLoading && !managedError && managedSystems.length === 0"
                  class="text-[11px] text-gray-400">No Password Safe managed accounts found for this host.</p>
 
-              <template x-if="managedSystems.length > 0">
+              <template x-if="!bulk && managedSystems.length > 0">
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <div>
                     <label class="block text-xs font-medium text-gray-600 mb-1">Connection account</label>
@@ -423,9 +541,9 @@
                   </div>
                 </div>
               </template>
-              <p x-show="managedSystems.length > 0 && managedCarWarning"
-                 x-text="managedCarWarning" class="text-[11px] text-amber-600"></p>
-              <p x-show="managedSystems.length > 0" class="text-[11px] text-gray-400">
+              <p x-show="managedCarWarning" x-text="managedCarWarning"
+                 class="text-[11px] text-amber-600"></p>
+              <p x-show="bulk ? bulkTargets.length : managedSystems.length > 0" class="text-[11px] text-gray-400">
                 Sets <code>ansible_user</code> to the account and injects its credential (SSH key → connection
                 key; password → <code>ansible_ssh_pass</code>). Checked out just-in-time; you never see the value.
                 Works on the <strong>local</strong> and <strong>Azure (ACI)</strong> runners<template x-if="managedEphemeralEnabled"><span>, and on <strong>ECS / Cloud Run</strong> via a short-lived RBAC-locked store copy</template><template x-if="!managedEphemeralEnabled"><span>; not on ECS / Cloud Run</span></template>.
@@ -637,9 +755,10 @@ function configMgmt() {
   return {
     loading: true,
     targets: [],
-    // A selection handed over from /inventory: {ids, kind, names, sampleHost,
-    // sampleName}. Non-null puts the page in bulk mode — the target picker is
-    // replaced by the selection and the run posts to /run-bulk.
+    // A selection handed over from /inventory: {ids, kind, names}. IDS ONLY —
+    // every address is re-resolved server-side, both for the per-target account
+    // lookup and for the run itself. Non-null puts the page in bulk mode: the target
+    // picker is replaced by the selection and the run posts to /run-bulk.
     bulk: null,
     assets: [],
     assetsLoading: true,
@@ -701,6 +820,17 @@ function configMgmt() {
     agentDatabases: [],
     managedAccountKey: '',
     managedBecomeKey: '',
+    // ── Per-target managed accounts (bulk mode) ───────────────────────────────
+    // One row per selected target, each with its OWN Password Safe account list,
+    // resolved server-side from that target's address. managedAccountKey above stays
+    // the BATCH DEFAULT: it seeds the suggestions and covers any row left unset.
+    bulkTargets: [],
+    bulkTargetsLoading: false,
+    bulkTargetsError: '',
+    bulkAccountKeys: {},        // inventory_id → "systemId:accountId"
+    bulkBecomeKeys: {},
+    bulkTruncated: false,
+    bulkFailed: [],             // per-target refusals from the last submit
     get hasCloudTargets() {
       return this.cloudTargets.aws.length > 0
           || this.cloudTargets.azure.length > 0
@@ -796,9 +926,11 @@ function configMgmt() {
     // host, or a cloud target's IP. On-prem GROUP keys have no single host, so
     // they yield '' (managed accounts are per-system).
     get effectiveHost() {
-      // Bulk: one representative host, only to populate the account NAME list. Each
-      // job re-resolves the chosen name against its own host at run time.
-      if (this.bulk) return this.bulk.sampleHost || '';
+      // Bulk mode has no single host BY DESIGN: every selected target gets its own
+      // account list from /bulk-managed-accounts, keyed on the address the SERVER
+      // resolved for it. The old 'representative host' here is what made one account
+      // apply to the whole fleet.
+      if (this.bulk) return '';
       const t = this.form.target;
       if (t === '__host__') return (this.customHost || '').trim();
       if (t.startsWith('aws:'))   return t.slice(4);
@@ -819,7 +951,7 @@ function configMgmt() {
     // placeholder IP, so an IP-only lookup misses it; the name finds it. '' for
     // on-prem free-text hosts (there the host string is itself the name).
     get effectiveHostName() {
-      if (this.bulk) return this.bulk.sampleName || '';
+      if (this.bulk) return '';
       const t = this.form.target;
       let list = null, ip = '';
       if (t.startsWith('aws:'))        { list = this.cloudTargets.aws;   ip = t.slice(4); }
@@ -888,22 +1020,24 @@ function configMgmt() {
       return { secret_vars, secret_become_source, secret_ssh_key_source };
     },
 
-    // A managed account for a BULK run: the name only. The picker's ids came from
-    // the sample host's list, and both are specific to that one managed system —
-    // sending them would make all N jobs check out that machine's credential. The
-    // server resolves the name against each job's own host instead.
+    // The BATCH DEFAULT for a bulk run: the name only. A default applies to targets
+    // whose own list we have not read ids from, so ids here would point every such
+    // job at one machine's credential. The server resolves the name against each
+    // job's own host instead. Per-target refs are pinned and travel separately.
     bulkManagedRef(key) {
       if (!this.canUseSecrets || !this.managedEnabled) return null;
-      const ref = this.resolveManaged(key);
+      const ref = this.resolveManagedIn(this.bulkDefaultSystems, key);
       return ref ? { account_name: ref.account_name } : null;
     },
 
-    // Resolve a "system_id:account_id" picker value to the run-request shape
-    // (ids + non-secret name + ssh-key flag). Never carries a credential.
-    resolveManaged(key) {
+    // Resolve a "system_id:account_id" picker value against a GIVEN system list.
+    // Parameterised because bulk mode has one list per target: reading the
+    // single-target `managedSystems` here would resolve a row's key against another
+    // host's accounts and silently produce the wrong ids.
+    resolveManagedIn(systems, key) {
       if (!key) return null;
       const [sid, aid] = key.split(':').map(Number);
-      for (const s of this.managedSystems) {
+      for (const s of (systems || [])) {
         if (s.system_id !== sid) continue;
         for (const a of s.accounts) {
           if (a.account_id === aid) {
@@ -915,15 +1049,129 @@ function configMgmt() {
       return null;
     },
 
+    resolveManaged(key) { return this.resolveManagedIn(this.managedSystems, key); },
+
     // Find the raw account object for a picker value (to read change_after_release).
-    _managedAccountObj(key) {
+    _managedAccountObj(key, systems) {
       if (!key) return null;
       const [sid, aid] = key.split(':').map(Number);
-      for (const s of this.managedSystems) {
+      for (const s of (systems || this.managedSystems)) {
         if (s.system_id !== sid) continue;
         return s.accounts.find(a => a.account_id === aid) || null;
       }
       return null;
+    },
+
+    // ── Bulk: per-target account lists ────────────────────────────────────────
+
+    // Every account offered across the selection, so the batch-default picker has
+    // something to choose from. De-duped by system, so one system listed for two
+    // targets does not appear twice.
+    get bulkDefaultSystems() {
+      const seen = new Map();
+      for (const t of this.bulkTargets) {
+        for (const s of (t.systems || [])) {
+          if (!seen.has(s.system_id)) seen.set(s.system_id, s);
+        }
+      }
+      return [...seen.values()];
+    },
+
+    get bulkUnmatchedCount() {
+      return this.bulkTargets.filter(t => !this.bulkAccountKeys[t.inventory_id]).length;
+    },
+
+    // Ask the server for each selected target's Password Safe accounts. Only IDS are
+    // sent: the server re-resolves them through the same RBAC filter and planner the
+    // run uses, so the address each list is read for is the address the run will
+    // actually connect to.
+    async loadBulkManagedAccounts() {
+      if (!this.bulk || this.bulk.kind !== 'vm' || !this.canUseSecrets) {
+        this.bulkTargets = []; this.bulkTargetsError = ''; this.bulkTruncated = false;
+        return;
+      }
+      // Read the default BEFORE clearing the table. bulkDefaultName() resolves the
+      // default picker's key against the systems pooled FROM bulkTargets, so clearing
+      // first would send an empty name — and "re-suggest" would then suggest nothing,
+      // which is precisely the control the operator just used.
+      const defaultName = this.bulkDefaultName();
+      const defaultBecomeName = this.bulkDefaultBecomeName();
+      this.bulkTargets = []; this.bulkTargetsError = ''; this.bulkTruncated = false;
+      this.bulkTargetsLoading = true;
+      try {
+        const r = await API.post('/api/config-mgmt/bulk-managed-accounts', {
+          inventory_ids: this.bulk.ids,
+          default_account_name: defaultName,
+          default_become_name: defaultBecomeName,
+        }) || {};
+        this.managedEnabled = !!r.enabled;
+        this.managedEphemeralEnabled = !!r.ephemeral_enabled;
+        this.bulkTargets = r.targets || [];
+        this.bulkTruncated = !!r.truncated;
+        for (const t of this.bulkTargets) {
+          // Seed from the server's suggestion, but never clobber a row the operator
+          // has already set by hand — this also runs on 're-suggest'.
+          if (!this.bulkManualRows.has(t.inventory_id)) {
+            this.bulkAccountKeys[t.inventory_id] = t.suggested_key || '';
+            this.bulkBecomeKeys[t.inventory_id] = t.suggested_become_key || '';
+          }
+        }
+      } catch (e) {
+        this.bulkTargetsError = e.message || 'Managed-account lookup failed.';
+      } finally {
+        this.bulkTargetsLoading = false;
+      }
+    },
+
+    // The batch default's account NAME, read off the default picker's key against the
+    // pooled system list. The server suggests per row by matching this name, which is
+    // what makes an untouched row resolve to the same account the name-only fallback
+    // would have found for it.
+    bulkDefaultName() {
+      const r = this.resolveManagedIn(this.bulkDefaultSystems, this.managedAccountKey);
+      return r ? r.account_name : '';
+    },
+    bulkDefaultBecomeName() {
+      const r = this.resolveManagedIn(this.bulkDefaultSystems, this.managedBecomeKey);
+      return r ? r.account_name : '';
+    },
+
+    // Rows the operator touched by hand, so a re-suggest does not overwrite them.
+    bulkManualRows: new Set(),
+    markBulkManual(id) { this.bulkManualRows.add(id); },
+
+    // Re-run the suggestion pass after the batch default changes. The account lists
+    // themselves do not depend on the default — only the suggestion does — so this
+    // re-reads them and lets loadBulkManagedAccounts re-seed, which it skips for any
+    // row in bulkManualRows. That is what keeps an explicit per-row choice from being
+    // silently replaced by a later change to the default.
+    async resuggestBulkAccounts() {
+      await this.loadBulkManagedAccounts();
+    },
+
+    // The per-target payload. A row with NO key is OMITTED, not sent as null:
+    // omitting falls back to the batch default (name-only), which then fails that one
+    // job at dispatch with a message naming the host. Sending null would instead run
+    // the job with no managed account at all — falling back to ansible_user and an
+    // SSH key, which can SUCCEED under the wrong identity.
+    perTargetManagedRefs() {
+      const managed_accounts = {}, managed_becomes = {};
+      if (!this.canUseSecrets || !this.managedEnabled) {
+        return { managed_accounts, managed_becomes };
+      }
+      // A SCHEDULED batch sends names, not ids: an id pinned now can name an account
+      // that has been removed or re-registered by the time the window opens.
+      // `scheduleMode` comes from the scheduleState() mixin spread into this
+      // component, so it is a plain member here.
+      const pin = this.scheduleMode === 'now';
+      for (const t of this.bulkTargets) {
+        const id = t.inventory_id;
+        const acct = this.resolveManagedIn(t.systems, this.bulkAccountKeys[id]);
+        if (acct) managed_accounts[id] = pin ? acct : { account_name: acct.account_name };
+        const bec = this.resolveManagedIn(t.systems, this.bulkBecomeKeys[id]);
+        if (bec) managed_becomes[id] = pin ? bec : { account_name: bec.account_name };
+      }
+      return { managed_accounts, managed_becomes };
     },
 
     // Advisory: on an ECS/GCP ephemeral run the credential is briefly copied to the
@@ -932,8 +1180,17 @@ function configMgmt() {
     // "Change Password After Release" — nudge when a selected password account lacks it.
     get managedCarWarning() {
       if (!this.managedEphemeralEnabled) return '';
-      for (const key of [this.managedAccountKey, this.managedBecomeKey]) {
-        const a = this._managedAccountObj(key);
+      // (key, systems) pairs: in bulk mode each row's key belongs to its OWN system
+      // list, so checking them all against `managedSystems` would look up the wrong
+      // host's account and warn — or stay silent — about the wrong one.
+      const pairs = this.bulk
+        ? this.bulkTargets.flatMap(t => [
+            [this.bulkAccountKeys[t.inventory_id], t.systems],
+            [this.bulkBecomeKeys[t.inventory_id], t.systems]])
+        : [[this.managedAccountKey, this.managedSystems],
+           [this.managedBecomeKey, this.managedSystems]];
+      for (const [key, systems] of pairs) {
+        const a = this._managedAccountObj(key, systems);
         if (a && !a.uses_ssh_key && a.change_after_release !== true) {
           const state = a.change_after_release === false ? 'is off' : 'is unconfirmed';
           return `On ECS / Cloud Run the credential is briefly copied to the cloud store. The dashboard flags ` +
@@ -980,7 +1237,7 @@ function configMgmt() {
       this.loading = false;
       // Needs canUseSecrets from loadSecretOptions, and in bulk mode keys on the
       // handed-over sample host rather than a picked target.
-      if (this.bulk) await this.loadManagedAccounts();
+      if (this.bulk) await this.loadBulkManagedAccounts();
     },
 
     // Pick up a selection handed over from /inventory. Removed on read: a refresh
@@ -998,7 +1255,13 @@ function configMgmt() {
       } catch (e) { /* malformed — ignore and stay in single-target mode */ }
     },
 
-    clearBulk() { this.bulk = null; this.loadManagedAccounts(); },
+    clearBulk() {
+      this.bulk = null;
+      this.bulkTargets = []; this.bulkAccountKeys = {}; this.bulkBecomeKeys = {};
+      this.bulkManualRows = new Set(); this.bulkTargetsError = '';
+      this.bulkTruncated = false; this.bulkFailed = [];
+      this.loadManagedAccounts();
+    },
 
     kindNoun(k) {
       return ({ vm: 'VM', database: 'database', k8s: 'Kubernetes cluster', portainer: 'Portainer' })[k] || k;
@@ -1131,17 +1394,26 @@ function configMgmt() {
             secret_become_source: s.secret_become_source,
             secret_ssh_key_source: s.secret_ssh_key_source,
             epml_token_var: this.canUseSecrets ? (this.epmlTokenVar || '').trim() : '',
-            // Name-only: system_id/account_id belong to the sample host, so sending
-            // them would point every job at that one machine's credential.
+            // The batch DEFAULT is name-only — it covers targets the operator did
+            // not choose an account for, and a pinned ref there would point every one
+            // of them at a single machine's credential.
             managed_account: this.bulkManagedRef(this.managedAccountKey),
             managed_become: this.bulkManagedRef(this.managedBecomeKey),
+            // ...and the per-target choices, which ARE pinned to their own host.
+            ...this.perTargetManagedRefs(),
             ...this.schedulePayload(),
           });
           const failed = result.failed || [];
           if (failed.length) {
+            // Held on the row as well as toasted. Per-target refusals used to be
+            // all-or-nothing (one account, one answer); now that each target can have
+            // its own account, "which of these 50 was refused, and why" is a question
+            // the table is the only place to answer.
+            this.bulkFailed = failed;
             toast(`Queued ${result.count} job(s); ${failed.length} could not run: `
                   + failed.map(f => `${f.name} (${f.error})`).join('; '), 'error');
           } else {
+            this.bulkFailed = [];
             toast(`Queued ${result.count} job(s) — batch ${result.batch_id}`, 'success');
           }
           this.bulk = null;

@@ -246,6 +246,192 @@ def test_find_account_tolerates_a_system_with_no_accounts():
     assert ma.find_account_by_name(systems, "root")["system_id"] == 2
 
 
+# ── select_systems / narrow_by_ip / filter_by_ip ────────────────────────────────
+#
+# The batch counterpart of btapi_service's per-host lookup: one already-fetched
+# estate, narrowed locally, so a 50-target bulk run does not re-list the estate 50
+# times. narrow_by_ip is shared with that per-host path, so these also pin the
+# precedence both of them rely on.
+
+def _sys(sid, name, ip=""):
+    return {"ManagedSystemID": sid, "Name": name, "IPAddress": ip}
+
+
+_ESTATE = [
+    _sys(1, "DC01", "10.0.0.10"),        # same name, different workgroup…
+    _sys(2, "DC01", "10.0.0.11"),        # …as this one
+    _sys(3, "web-01", "10.0.0.20"),
+    _sys(4, "ssm-box", "127.0.0.1"),     # plugin-onboarded: placeholder IP
+    _sys(5, "no-ip", None),
+]
+
+
+def test_select_systems_name_and_ip_agree_is_the_unambiguous_hit():
+    got = ma.select_systems(_ESTATE, "10.0.0.11", "DC01")
+    assert [s["ManagedSystemID"] for s in got] == [2]
+
+
+def test_select_systems_lone_name_match_wins_without_an_ip_match():
+    # The plugin-onboarded shape: registered by name, IP is a placeholder, and the
+    # address we would connect on appears nowhere in Password Safe.
+    got = ma.select_systems(_ESTATE, "10.99.1.7", "ssm-box")
+    assert [s["ManagedSystemID"] for s in got] == [4]
+
+
+def test_select_systems_returns_every_name_match_when_the_ip_cannot_disambiguate():
+    # Ambiguity is surfaced, never silently resolved — picking one of these would be
+    # connecting to a host in the wrong workgroup.
+    got = ma.select_systems(_ESTATE, "10.0.0.99", "DC01")
+    assert [s["ManagedSystemID"] for s in got] == [1, 2]
+
+
+def test_select_systems_is_case_insensitive_on_the_name():
+    assert [s["ManagedSystemID"] for s in ma.select_systems(_ESTATE, "", "WEB-01")] == [3]
+    assert [s["ManagedSystemID"] for s in ma.select_systems(_ESTATE, "", " web-01 ")] == [3]
+
+
+def test_select_systems_falls_back_to_the_ip_when_the_name_misses():
+    got = ma.select_systems(_ESTATE, "10.0.0.20", "not-registered")
+    assert [s["ManagedSystemID"] for s in got] == [3]
+
+
+def test_select_systems_ip_only():
+    assert [s["ManagedSystemID"] for s in ma.select_systems(_ESTATE, "10.0.0.10", "")] == [1]
+
+
+def test_select_systems_empty_estate_and_no_match():
+    assert ma.select_systems([], "10.0.0.1", "DC01") == []
+    assert ma.select_systems(None, "10.0.0.1", "DC01") == []
+    assert ma.select_systems(_ESTATE, "10.1.1.1", "nope") == []
+
+
+def test_select_systems_reads_the_systemname_field_variant():
+    estate = [{"ManagedSystemID": 9, "SystemName": "alt", "IPAddress": "10.0.0.9"}]
+    assert [s["ManagedSystemID"] for s in ma.select_systems(estate, "", "alt")] == [9]
+
+
+def test_narrow_by_ip_prefers_the_ip_match_else_hands_back_everything():
+    cands = [_sys(1, "DC01", "10.0.0.10"), _sys(2, "DC01", "10.0.0.11")]
+    assert [s["ManagedSystemID"] for s in ma.narrow_by_ip(cands, "10.0.0.11")] == [2]
+    assert [s["ManagedSystemID"] for s in ma.narrow_by_ip(cands, "10.9.9.9")] == [1, 2]
+    assert ma.narrow_by_ip([], "10.0.0.1") == []
+    assert ma.narrow_by_ip(None, "10.0.0.1") == []
+
+
+def test_filter_by_ip():
+    assert [s["ManagedSystemID"] for s in ma.filter_by_ip(_ESTATE, "10.0.0.20")] == [3]
+    assert ma.filter_by_ip(None, "10.0.0.20") == []
+
+
+# ── suggest_account ─────────────────────────────────────────────────────────────
+#
+# A suggestion is shown, never silently applied. Tier 1 is load-bearing beyond
+# convenience: matching the batch's chosen NAME guarantees the pre-selection equals
+# what the name-only fallback would resolve to for that host, which is what makes
+# leaving a row untouched safe.
+
+def test_suggest_prefers_the_batch_default_name():
+    systems = _systems((1, [(10, "root"), (11, "svc-ansible")]))
+    ref, basis = ma.suggest_account(systems, default_name="svc-ansible")
+    assert basis == ma.BASIS_DEFAULT_NAME
+    assert (ref["system_id"], ref["account_id"]) == (1, 11)
+
+
+def test_suggest_default_name_outranks_the_recorded_system():
+    systems = _systems((1, [(10, "root")]), (2, [(20, "svc-ansible")]))
+    ref, basis = ma.suggest_account(systems, default_name="svc-ansible", ps_system_id="1")
+    assert basis == ma.BASIS_DEFAULT_NAME
+    assert ref["system_id"] == 2
+
+
+def test_suggest_falls_back_to_the_recorded_system():
+    # The plugin-onboarded case: no name chosen yet, but registration recorded which
+    # managed system this VM actually is.
+    systems = _systems((1, [(10, "root")]), (2, [(20, "other")]))
+    ref, basis = ma.suggest_account(systems, ps_system_id="2")
+    assert basis == ma.BASIS_RECORDED_SYSTEM
+    assert (ref["system_id"], ref["account_id"]) == (2, 20)
+
+
+def test_suggest_declines_when_the_recorded_system_is_ambiguous():
+    # Two accounts on the right system is not a basis for guessing between them.
+    systems = _systems((1, [(10, "root"), (11, "admin")]))
+    assert ma.suggest_account(systems, ps_system_id="1") == (None, "")
+
+
+def test_suggest_takes_a_single_unambiguous_candidate():
+    ref, basis = ma.suggest_account(_systems((7, [(70, "root")])))
+    assert basis == ma.BASIS_ONLY_ACCOUNT
+    assert (ref["system_id"], ref["account_id"]) == (7, 70)
+
+
+def test_suggest_declines_when_there_is_nothing_to_go_on():
+    assert ma.suggest_account(_systems((1, [(10, "a")]), (2, [(20, "b")]))) == (None, "")
+    assert ma.suggest_account([]) == (None, "")
+    assert ma.suggest_account(None) == (None, "")
+    assert ma.suggest_account(_systems((1, []))) == (None, "")
+
+
+def test_suggest_matches_the_cloud_plugin_suffix_form_via_tier_one():
+    systems = _systems((1, [(10, "svc-ansible;local")]))
+    ref, basis = ma.suggest_account(systems, default_name="svc-ansible")
+    assert basis == ma.BASIS_DEFAULT_NAME
+    # The account's OWN name travels, suffix included — it becomes ansible_user.
+    assert ref["account_name"] == "svc-ansible;local"
+
+
+def test_suggest_tolerates_a_recorded_system_not_in_the_list():
+    ref, basis = ma.suggest_account(_systems((7, [(70, "root")])), ps_system_id="999")
+    assert basis == ma.BASIS_ONLY_ACCOUNT      # falls through to tier 3
+
+
+# ── pick_ref ────────────────────────────────────────────────────────────────────
+#
+# PRESENCE decides, not truthiness. Collapsing "mapped to None" into "absent" would
+# make "no managed account for this host" silently mean "use the fleet account here",
+# which is the bug the per-target map exists to fix.
+
+_DEFAULT = {"account_name": "svc-fleet"}
+_OWN = {"system_id": 7, "account_id": 8, "account_name": "svc-web01"}
+
+
+def test_pick_ref_present_key_wins_over_the_default():
+    assert ma.pick_ref({"job:a": _OWN}, "job:a", _DEFAULT) == _OWN
+
+
+def test_pick_ref_absent_key_falls_back_to_the_default():
+    assert ma.pick_ref({"job:a": _OWN}, "job:b", _DEFAULT) == _DEFAULT
+
+
+def test_pick_ref_explicit_none_means_no_account_not_the_default():
+    assert ma.pick_ref({"job:a": None}, "job:a", _DEFAULT) is None
+
+
+def test_pick_ref_empty_map_is_the_default_for_every_target():
+    assert ma.pick_ref({}, "job:a", _DEFAULT) == _DEFAULT
+    assert ma.pick_ref(None, "job:a", _DEFAULT) == _DEFAULT
+
+
+def test_pick_ref_default_may_itself_be_none():
+    assert ma.pick_ref({}, "job:a", None) is None
+
+
+# ── stray_ids ───────────────────────────────────────────────────────────────────
+
+def test_stray_ids_flags_keys_outside_the_run():
+    assert ma.stray_ids(["job:a", "job:z"], ["job:a", "job:b"]) == ["job:z"]
+
+
+def test_stray_ids_is_empty_when_every_key_is_a_target():
+    assert ma.stray_ids(["job:b", "job:a"], ["job:a", "job:b"]) == []
+    assert ma.stray_ids([], ["job:a"]) == []
+    assert ma.stray_ids(None, ["job:a"]) == []
+
+
+def test_stray_ids_is_sorted_so_the_error_message_is_stable():
+    assert ma.stray_ids(["z", "a", "m"], []) == ["a", "m", "z"]
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

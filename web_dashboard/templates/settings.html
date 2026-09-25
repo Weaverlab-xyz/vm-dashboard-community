@@ -2019,6 +2019,21 @@
                 itself, so an off-Azure Resource Broker needs no extra setup. Their DB password segment must still be
                 valid: it is unused by a self-rotate change but <em>Verify Functional Account</em> logs in with it.
               </p>
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" x-model="panelCfg.clouddb_ansible_use_ps_account"
+                       class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                Ansible runs connect as the database&#39;s own managed account
+              </label>
+              <p class="text-xs text-gray-400">
+                Config-Management runs against a <strong>provisioned</strong> database connect as the stored admin. Turn
+                this on and a database that has been onboarded here instead connects as its <em>own</em> Password Safe
+                managed account, checked out just-in-time — so a bulk run over several databases uses a different account
+                for each one rather than one admin for all of them. Registered databases already work this way.
+                <strong>Grant that account first.</strong> The managed user the dashboard creates
+                (<code class="bg-gray-100 px-1 rounded">psafe_&lt;id&gt;</code>) holds
+                <strong>no privileges at all</strong> — it exists to be rotated, not to read anything — so until you
+                grant it what your playbooks need, every run fails on permissions. Leave this off if you are unsure.
+              </p>
               <p class="text-xs text-gray-400" x-show="panelCfg.clouddb_ps_functional_account_mode === 'reference'">
                 The dashboard resolves the functional accounts you name below and never creates or deletes them — the same
                 contract as the VM and Kubernetes onboarding. Each managed system inherits its account&#39;s platform, so the

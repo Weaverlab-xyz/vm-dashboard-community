@@ -273,6 +273,28 @@ def test_empty_connection_fields_do_not_trip_the_guard():
                                                 "secret_ssh_key_source": ""}) is None
 
 
+def test_a_per_target_map_alone_is_still_refused_for_non_vm_kinds():
+    """The per-target map is a SECOND way to send a managed account, and the guard
+    must see it. run_playbook_bulk folds it into the same key (`managed_account or
+    managed_accounts`) precisely so a batch that populated only the map cannot slip
+    past this refusal while the single field is empty."""
+    msg = inv.reject_connection_fields("k8s", {
+        "managed_account": {"k8s:a": {"account_name": "svc"}}})
+    assert msg and "managed_account" in msg
+
+    msg = inv.reject_connection_fields("database", {
+        "managed_become": {"clouddb:d1": {"account_name": "sudo"}}})
+    assert msg and "managed_become" in msg
+
+
+def test_an_empty_per_target_map_does_not_trip_the_guard():
+    """`payload.managed_account or payload.managed_accounts` yields `{}` when both are
+    unset, and an empty dict must read as "not set" — otherwise every k8s/database
+    bulk run would be refused."""
+    assert inv.reject_connection_fields("k8s", {"managed_account": {},
+                                                "managed_become": {}}) is None
+
+
 # ── RBAC helper shared with the inventory listing ─────────────────────────────
 
 def test_accessible_workgroups_admin_is_none():
