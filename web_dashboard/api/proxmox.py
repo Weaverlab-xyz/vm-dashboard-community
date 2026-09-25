@@ -6,23 +6,24 @@ deploy, delete) are dispatched as background jobs so the client gets a job ID
 immediately and can poll /api/jobs/{id} for progress.
 """
 import functools
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import Job, User, get_db
+from ..models.schedule import ScheduleRequestMixin
 from .auth import get_current_user, require_permission
-from ..services import job_service, workgroup_service, workgroup_override_service
+from ..services import change_window_service, job_service, workgroup_service, workgroup_override_service
 from ..services import proxmox_service
 from ..services.proxmox_service import ProxmoxError
 from ..services import hypervisor_view_service
 from ..services import tag_policy
 from . import tag_batch
 from .hypervisor_deps import (agent_power_job, agent_tag_job, conn_in_task,
-                              conn_or_error,
-                              queue_power_batch)
+                              conn_or_error, queue_power_batch,
+                              refuse_direct_booking)
 
 # Every route in this module was `get_current_user` only -- including deploy,
 # image import and VM delete. The router-level read gate is the floor; the
@@ -512,7 +513,8 @@ async def _run_power_op(job_id: str, connection_id: str, node: str, vmid: int, v
 
 
 async def _queue_one(db, current_user, *, op: str, payload: PowerOpRequest,
-                     connection_id: str = "", batch_id=None) -> dict:
+                     connection_id: str = "", batch_id=None,
+                     sched: Optional[dict] = None) -> dict:
     """Queue ONE Proxmox power op. The only path that does, single or bulk.
 
     Returns ``{"job_id", "status", "task"}``. ``task`` is a zero-arg coroutine function
@@ -537,9 +539,16 @@ async def _queue_one(db, current_user, *, op: str, payload: PowerOpRequest,
         target_scope=payload.node, target_type=payload.vm_type,
         created_by=current_user.username,
         description=f"{op} {label} via agent",
-        batch_id=batch_id)
+        batch_id=batch_id, sched=sched)
     if agent_job is not None:
         return {"job_id": agent_job.id, "status": agent_job.status, "task": None}
+
+    # Past here the work is a coroutine THIS process runs, so a booking cannot be
+    # honoured. Refused before create_job, per target, so an operator whose selection
+    # mixes agent-bound and directly-dialled connections still gets the bookable half
+    # queued. See hypervisor_deps.refuse_direct_booking.
+    if sched:
+        refuse_direct_booking(conn, op)
 
     job = job_service.create_job(
         db,
@@ -588,8 +597,15 @@ def _power_endpoint(op: str):
 BULK_OPS = ("start", "shutdown", "stop", "reboot")
 
 
-class BulkPowerRequest(BaseModel):
-    """One op, many VMs. `targets` carries the same payload the single route takes."""
+class BulkPowerRequest(ScheduleRequestMixin, BaseModel):
+    """One op, many VMs. `targets` carries the same payload the single route takes.
+
+    The schedule fields come from the mixin. They are honoured only for agent-bound
+    connections: an `agent_hypervisor` row waits in the queue until
+    `agent_service.lease_one` offers it, and that query filters on
+    `job_service.claimable_now()`. A directly-dialled connection is refused per target
+    by `hypervisor_deps.refuse_direct_booking`.
+    """
     op: str
     targets: List[PowerOpRequest]
     connection_id: str = ""
@@ -614,14 +630,20 @@ async def bulk_power(
     why the page gates those two buttons and not these.
     """
     op = payload.op.strip().lower()
+    # Resolved BEFORE anything is created, like every other booked route: a bad
+    # time must 400 with no job rows behind it. `{}` for an immediate run, which
+    # leaves the create_job calls below byte-for-byte what they were.
+    _sched = change_window_service.schedule_kwargs(db, **payload.schedule_fields())
     return await queue_power_batch(
         db, kind="proxmox", op=payload.op, targets=payload.targets,
         allowed_ops=BULK_OPS,
         queue_one=lambda target, batch_id: _queue_one(
             db, current_user, op=op, payload=target,
-            connection_id=payload.connection_id, batch_id=batch_id),
+            connection_id=payload.connection_id, batch_id=batch_id,
+            sched=_sched),
         label_of=lambda target: target.name or f"{target.vm_type}/{target.vmid}",
         created_by=current_user.username,
+        scheduled=bool(_sched),
         background_tasks=background_tasks)
 
 

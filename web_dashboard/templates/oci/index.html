@@ -786,6 +786,11 @@
           </label>
         </div>
 
+        <!-- When to run. bulk_deploy_instances has resolved a booking since the
+             picker shipped; this control is what lets anyone send one. Shares the
+             page's single scheduleState() with the launch form on the same tab. -->
+        {{ schedule_picker() }}
+
         <p x-show="bulkModal.error" x-cloak class="text-xs text-red-600" x-text="bulkModal.error"></p>
       </div>
 
@@ -1557,6 +1562,9 @@ function ociDashboard() {
     },
 
     openBulkDeployModal() {
+      // Back to "Now": this modal and the single deploy modal share the page's one
+      // scheduleState(), so a time typed for a cancelled launch must not carry over.
+      this.scheduleReset();
       const items = this.filteredImages().filter(i => this.selectedImages.includes(i.ocid));
       this.bulkModal = {
         open: true,
@@ -1582,6 +1590,9 @@ function ociDashboard() {
       if (m.names.some(n => !n || !n.trim())) return false;
       if ((this.bulkFreeTierWarnings().length || m.serverGateTripped)
           && !m.acknowledge_charges) return false;
+      // "At a time" with no time would post as an immediate run, because the server
+      // reads a blank run_at as "now".
+      if (!this.scheduleReady()) return false;
       return true;
     },
 
@@ -1603,6 +1614,7 @@ function ociDashboard() {
           assign_public_ip: m.assign_public_ip,
           workgroup: m.workgroup,
           acknowledge_charges: m.acknowledge_charges,
+          ...this.schedulePayload(),
         });
         m.open = false;
         this.selectedImages = [];
@@ -1658,6 +1670,7 @@ function ociDashboard() {
     },
 
     openDeployModal(img) {
+      this.scheduleReset();
       this.selectedImage = img;
       this.deployError = '';
       this.serverGateTripped = false;

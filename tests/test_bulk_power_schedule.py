@@ -5,15 +5,26 @@
 is always None: a `*_power` row is claimed by the jobs worker, and the change-window
 clause on that claim is the entire mechanism by which a booking means anything.
 
-An on-premises DIRECT connection is the opposite — its `_queue_one` returns a real
-coroutine. A router that wired scheduling onto that path would create a job row booked
-for Saturday and power the VM off immediately, and the row would still *read* as
-scheduled afterwards. There is no error, no log line, and the job page agrees with the
-operator's intent while the machine is already off.
+An on-premises connection splits in two, and the split is the whole subject here:
 
-So `queue_power_batch` refuses that combination outright, in the same "programming
-error, said out loud" style the module already uses for a forgotten `background_tasks`.
-These two tests are what keep that honest in both directions.
+* **Agent-bound** — `_queue_one` returns `task: None` and an `agent_hypervisor` row.
+  `agent_service.lease_one` filters on `job_service.claimable_now()`, the same
+  predicate the local worker claims through, so the booking is honoured by the lease.
+  These pages may offer the control.
+* **Directly dialled** — `_queue_one` returns a real coroutine. A router that wired
+  scheduling onto that path would create a job row booked for Saturday and power the
+  VM off immediately, and the row would still *read* as scheduled afterwards. No
+  error, no log line, and the job page agrees with the operator's intent while the
+  machine is already off.
+
+Two defences, at different levels. Each router refuses the direct combination per
+target in `_queue_one`, before any job row exists, so a mixed selection still books the
+half that can be booked. `queue_power_batch` keeps its RuntimeError as the backstop for
+a router that forgets — deliberately a "programming error, said out loud", because
+reaching it aborts the batch.
+
+These tests keep that honest in both directions, and keep the toolbar control and the
+routes behind it from drifting apart.
 
 Run: python tests/test_bulk_power_schedule.py   (or under pytest)
 """
@@ -118,16 +129,23 @@ def test_a_scheduled_batch_of_worker_claimed_jobs_is_fine():
     assert bag.tasks == [], "a worker-claimed batch scheduled in-process work"
 
 
-def test_the_cloud_routers_are_the_only_ones_offering_the_control():
-    """The toolbar control must appear only where the route accepts a booking.
+#: Page directory -> the router module whose bulk-power route it posts to.
+_PAGE_ROUTER = {
+    "aws": "aws", "azure": "azure", "gcp": "gcp", "oci": "oci",
+    "hyperv": "hyperv", "proxmox": "proxmox", "vsphere": "vsphere",
+    "xcpng": "xcpng", "vms": "vms", "nutanix": "nutanix",
+}
 
-    The on-premises bulk-power models do not carry the scheduling fields, and pydantic
-    ignores unknown ones rather than erroring — so a control on those pages would
-    render a booking that silently never happened.
-    """
+#: The one page that must never offer the control. Nutanix has no agent power path at
+#: all — see the standing decision in api/nutanix.py::_queue_one — so every target is
+#: dialled directly by this process and nothing on the page can be booked.
+_NEVER_SCHEDULABLE = {"nutanix"}
+
+
+def _pages_offering_the_control():
     import re
     tpl = os.path.join(_ROOT, "web_dashboard", "templates")
-    offering, expected = set(), {"aws", "azure", "gcp", "oci"}
+    offering = set()
     for root, _dirs, files in os.walk(tpl):
         for name in files:
             if not name.endswith(".html"):
@@ -135,9 +153,69 @@ def test_the_cloud_routers_are_the_only_ones_offering_the_control():
             src = open(os.path.join(root, name), encoding="utf-8").read()
             if re.search(r"bulk_power_buttons\([^)]*schedulable\s*=\s*true", src, re.S):
                 offering.add(os.path.basename(root))
-    assert offering == expected, (
-        f"pages offering a bulk-power booking: {sorted(offering)}; "
-        f"expected exactly {sorted(expected)} — the routes that accept one")
+    return offering
+
+
+def test_every_page_offering_the_control_posts_to_a_route_that_accepts_one():
+    """The toolbar control must appear only where the route accepts a booking.
+
+    A model that does not carry the scheduling fields makes the control a lie, because
+    pydantic ignores unknown fields rather than erroring — the page would render a
+    booking that silently never happened. Asserted as a RULE rather than a fixed list:
+    the list was `{aws, azure, gcp, oci}` until the on-premises agent path was wired,
+    and a hard-coded set turns "this page grew the capability" into a test failure that
+    reads like a regression.
+    """
+    import re
+    api = os.path.join(_ROOT, "web_dashboard", "api")
+    bad = []
+    for page in sorted(_pages_offering_the_control()):
+        module = _PAGE_ROUTER.get(page)
+        assert module, f"{page}/ offers the control but is not in _PAGE_ROUTER"
+        src = open(os.path.join(api, f"{module}.py"), encoding="utf-8").read()
+        if "class BulkPowerRequest(ScheduleRequestMixin" not in src:
+            bad.append(f"{page}: api/{module}.py BulkPowerRequest has no schedule fields")
+        elif not re.search(r"_sched\s*=\s*change_window_service\.schedule_kwargs", src):
+            bad.append(f"{page}: api/{module}.py bulk_power never resolves the booking")
+        elif "scheduled=bool(_sched)" not in src:
+            bad.append(f"{page}: api/{module}.py does not tell queue_power_batch it is booked")
+    assert not bad, "toolbar controls with no route behind them:\n  " + "\n  ".join(bad)
+
+
+def test_a_page_whose_power_ops_cannot_queue_never_offers_the_control():
+    """The inverse, and the one that needs naming rather than deriving.
+
+    Booking requires the work to WAIT somewhere — a `*_power` row for the jobs worker,
+    or an `agent_hypervisor` row for the agent's lease. A router with no such path runs
+    every op in this process, so a control on its page would refuse every target.
+    """
+    offending = _pages_offering_the_control() & _NEVER_SCHEDULABLE
+    assert not offending, (
+        f"{sorted(offending)} offers a bulk-power booking, but every one of its "
+        f"targets is dialled directly by this process and would be refused")
+
+
+def test_the_on_premises_direct_path_refuses_a_booking_before_creating_a_job():
+    """Each on-premises router that CAN dial a connection itself must refuse a booked
+    request on that path, and do it before `create_job`.
+
+    `queue_power_batch`'s RuntimeError is the backstop for a router that forgets this;
+    it is not the intended route, because reaching it aborts the whole batch. A mixed
+    selection has to leave the agent-bound targets queued.
+    """
+    api = os.path.join(_ROOT, "web_dashboard", "api")
+    bad = []
+    for module in ("hyperv", "proxmox", "vsphere", "xcpng"):
+        src = open(os.path.join(api, f"{module}.py"), encoding="utf-8").read()
+        if "refuse_direct_booking(conn, op)" not in src:
+            bad.append(f"api/{module}.py never refuses a booking on its direct path")
+            continue
+        # Before create_job, not after: a refusal must leave nothing on /jobs.
+        refusal = src.index("refuse_direct_booking(conn, op)")
+        after = src.index('job_type=f"', refusal) if 'job_type=f"' in src[refusal:] else -1
+        if after == -1:
+            bad.append(f"api/{module}.py refuses after its direct create_job, not before")
+    assert not bad, "\n  ".join(bad)
 
 
 def _run():

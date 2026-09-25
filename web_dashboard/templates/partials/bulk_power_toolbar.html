@@ -20,12 +20,18 @@
   is what says so — a button here for an op the server does not accept would 400 the
   whole batch with a message about the op rather than about the VMs.
 
-  A Jinja `{% for %}`, deliberately, NOT an Alpine `x-for`: this file is walked by
+  The OPS loop is a Jinja `{% for %}`, deliberately, NOT an Alpine `x-for`: this file
+  is walked by
   tests/test_templates_parse.py::test_x_for_helpers_are_defined_in_their_page, which
   requires the helper behind an `x-for` to be defined in the same file — a partial
   cannot satisfy that, and partials/secret_picker.html avoids it for the same reason.
   Expanding at compile time also puts each op's literal name in the rendered markup,
   so the toolbar is greppable by the same tests that already grep the row buttons.
+
+  The change-window `x-for` below is not a counter-example: that check matches only an
+  x-for whose source is INVOKED (`w in windows()`), and this one iterates a plain
+  property, exactly as partials/schedule_picker.html does. The ops list could not work
+  that way regardless — it comes from a Jinja argument, not from page state.
 #}
 {% set _BULK_LABELS = {
      'start':       'Start',
@@ -50,28 +56,59 @@
 
 {#
   `schedulable` adds a compact "Schedule" control to the toolbar. Pass it ONLY on a page
-  whose bulk-power route accepts `run_at` / `run_timezone` — today the four cloud pages.
-  The on-premises routes ignore unknown fields rather than erroring, so offering the
-  control there would render a booking that silently never happened.
+  whose bulk-power route accepts `run_at` / `run_timezone` / `change_window_id` — that
+  is, one whose `BulkPowerRequest` mixes `ScheduleRequestMixin` and whose `bulk_power`
+  resolves a `_sched`. Pydantic DROPS unknown fields rather than erroring, so a control
+  on a page without that wiring renders a booking that silently never happened.
 
-  Its state is bulkPowerState's OWN (`bulkPowerScheduled` / `bulkPowerRunAt`), not the
-  page's deploy picker: those live in a modal, and a mode left set by a cancelled deploy
-  must not book a power op from a toolbar that shows nothing about it.
+  Nine of the ten pages pass it. The odd one out is **nutanix**, and permanently: a
+  booking only means something if the work WAITS in a queue, which on-premises means an
+  `agent_hypervisor` row the agent leases. Nutanix has no agent power path at all, so
+  every one of its targets is dialled by this process and runs on arrival. The other
+  five on-premises pages can hold either kind of connection, and a directly-dialled one
+  is refused per target by `hypervisor_deps.refuse_direct_booking` — so a mixed
+  selection still books the half that can be booked.
+
+  tests/test_bulk_power_schedule.py asserts both directions of this as rules rather
+  than as a fixed list of page names.
+
+  Its state is bulkPowerState's OWN (`bulkPowerScheduled` / `bulkPowerRunAt` /
+  `bulkPowerWindowId`), not the page's deploy picker: those live in a modal, and a mode
+  left set by a cancelled deploy must not book a power op from a toolbar that shows
+  nothing about it. The window list is bulkPowerState's own too — see the comment on
+  loadBulkPowerWindows for why this partial must not reach into scheduleState().
+
+  A time and a window are mutually exclusive, and the markup says so by hiding each
+  when the other is set: change_window_service.resolve refuses both together, and a
+  400 after the operator has already selected fifty VMs is a bad way to learn it.
 #}
 {% macro bulk_power_buttons(ops, labels={}, schedulable=false) %}
 {% if schedulable %}
 <label class="flex items-center gap-1.5 text-xs text-gray-600 mr-1"
-       title="Queue these power operations for a time instead of running them now.">
+       title="Queue these power operations for a time or a change window instead of running them now.">
   <input type="checkbox" x-model="bulkPowerScheduled"
+         @change="if (bulkPowerScheduled && !bulkPowerWindows.length) loadBulkPowerWindows()"
          class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
   Schedule
 </label>
-<input x-show="bulkPowerScheduled" x-cloak type="datetime-local"
+<input x-show="bulkPowerScheduled && !bulkPowerWindowId" x-cloak type="datetime-local"
        x-model="bulkPowerRunAt"
        class="text-xs border border-gray-300 rounded px-2 py-1 mr-1">
-<input x-show="bulkPowerScheduled" x-cloak type="text" x-model="bulkPowerTimezone"
+<input x-show="bulkPowerScheduled && !bulkPowerWindowId" x-cloak type="text"
+       x-model="bulkPowerTimezone"
        placeholder="UTC" title="IANA timezone"
        class="text-xs border border-gray-300 rounded px-2 py-1 w-36 mr-1">
+<span x-show="bulkPowerScheduled && !bulkPowerWindowId && !bulkPowerRunAt" x-cloak
+      class="text-xs text-gray-400 mr-1">or</span>
+<select x-show="bulkPowerScheduled && !bulkPowerRunAt" x-cloak
+        x-model="bulkPowerWindowId"
+        title="Run in the next occurrence of a change window."
+        class="text-xs border border-gray-300 rounded px-2 py-1 mr-1">
+  <option value="">Change window…</option>
+  <template x-for="w in bulkPowerWindows" :key="w.id">
+    <option :value="w.id" x-text="w.name"></option>
+  </template>
+</select>
 <span x-show="bulkPowerScheduled" class="w-px h-5 bg-blue-200 mx-1"></span>
 {% endif %}
 {% for op in ops %}

@@ -108,7 +108,7 @@
         Selected: <strong x-text="selectedVmIds.length"></strong>
       </span>
       <div class="flex items-center gap-2">
-        {{ bulk_power_buttons(['start', 'shutdown', 'stop', 'reboot']) }}
+        {{ bulk_power_buttons(['start', 'shutdown', 'stop', 'reboot'], schedulable=true) }}
         <button x-show="$store.auth.isAdmin" @click="openBulkAssign()"
                 class="text-xs px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium">
           Assign workgroup

@@ -186,7 +186,7 @@
         Selected: <strong x-text="selectedVmIds.length"></strong>
       </span>
       <div class="flex items-center gap-2">
-        {{ bulk_power_buttons(['start', 'shutdown', 'stop', 'reboot']) }}
+        {{ bulk_power_buttons(['start', 'shutdown', 'stop', 'reboot'], schedulable=true) }}
         <button @click="openTagEditorSelected()"
                 class="px-2.5 py-1 text-xs font-medium rounded-lg bg-white border border-blue-300 text-blue-700 hover:bg-blue-50">Edit tags</button>
         <button x-show="$store.auth.isAdmin" @click="openBulkAssign()"

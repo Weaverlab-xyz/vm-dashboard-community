@@ -784,14 +784,21 @@
           Onboard each Linux VM into Password Safe (managed system + account)
         </label>
         {% endif %}
+
+        <!-- When to run. bulk_deploy_vms has resolved a booking since the picker
+             shipped; this control is what lets anyone send one. Shares the page's
+             single scheduleState() with the launch modal, which is why both call
+             scheduleReset() on open. -->
+        {{ schedule_picker() }}
       </div>
 
       <div class="flex justify-end gap-3 mt-5">
         <button @click="bulkModal.open = false"
                 class="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
-        <button @click="submitBulkDeploy()" :disabled="bulkModal.submitting"
+        <button @click="submitBulkDeploy()" :disabled="bulkModal.submitting || !scheduleReady()"
                 class="px-4 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg disabled:opacity-50">
-          <span x-show="!bulkModal.submitting">Deploy <span x-text="bulkModal.items.length"></span> VMs</span>
+          <span x-show="!bulkModal.submitting"><span x-text="scheduleVerb('', 'Deploy')"></span>
+            <span x-text="bulkModal.items.length"></span> VMs</span>
           <span x-show="bulkModal.submitting">Deploying…</span>
         </button>
       </div>
@@ -2200,6 +2207,7 @@ function azureDashboard() {
       // img may be null when invoked from "Deploy from URN/ID…" — user pastes
       // a marketplace URN (publisher:offer:sku:version) or a full ARM resource
       // ID (managed image / Shared Image Gallery version) into imageRef.
+      this.scheduleReset();
       this.deployModal = {
         open: false, image: img,
         imageRef: '',
@@ -2342,6 +2350,9 @@ function azureDashboard() {
     },
 
     async openBulkDeployModal() {
+      // Back to "Now": this modal and the single launch modal share the page's one
+      // scheduleState(), so a time typed for a cancelled launch must not carry over.
+      this.scheduleReset();
       const selected = this.privateImages.filter(i => this.selectedImages.includes(i.resource_id));
       this.bulkModal = {
         open: true,
@@ -2455,6 +2466,7 @@ function azureDashboard() {
           image_offer: firstImage?.offer || null,
           image_sku: firstImage?.sku || null,
           image_version: firstImage?.version || null,
+          ...this.schedulePayload(),
         });
         m.open = false;
         if (window.afterDeploy(result, { label: 'Azure bulk deploy' })) return;
