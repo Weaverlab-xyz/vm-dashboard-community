@@ -164,6 +164,35 @@ def test_inventory_column_count_matches_both_colspans():
                 f"{flags}: {n_th} <th> but colspan(s) {sorted(colspans)}")
 
 
+def test_inventory_hideable_columns_pair_a_th_with_a_td():
+    """The column picker hides a column by putting the same `showCol('key')` on its <th>
+    and on its <td>. Miss one and the header and the body disagree by one cell from that
+    column rightwards — every row shifted, nothing thrown, and the colspan test above
+    structurally cannot see it because both counts are still right.
+
+    Counted as multisets so a key used twice in one half is caught too.
+    """
+    from collections import Counter
+    full = os.path.join(_TEMPLATES, "inventory", "list.html")
+    with open(full, encoding="utf-8") as fh:
+        src = fh.read()
+
+    thead = re.search(r"<thead>.*?</thead>", src, re.S)
+    body = re.search(r"<tbody.*?</tbody>", src, re.S)
+    assert thead and body, "inventory/list.html lost its <thead>/<tbody>"
+
+    call = re.compile(r"""showCol\(\s*['"]([a-z_]+)['"]\s*\)""")
+    head_keys = Counter(call.findall(thead.group(0)))
+    body_keys = Counter(call.findall(body.group(0)))
+
+    # A floor, so the walk silently matching nothing cannot pass as agreement.
+    assert len(head_keys) >= 8, f"only {len(head_keys)} hideable columns found"
+    assert head_keys == body_keys, (
+        "header and body disagree about which columns are hideable: "
+        f"header-only {sorted((head_keys - body_keys).elements())}, "
+        f"body-only {sorted((body_keys - head_keys).elements())}")
+
+
 def test_pov_ladder_colspan_matches_the_managed_table():
     """The setup ladder is a full-width second row, so its colspan must equal the number
     of columns above it.
