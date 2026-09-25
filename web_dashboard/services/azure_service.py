@@ -2089,11 +2089,111 @@ async def pin_private_address(rg: str, nic_name: str) -> dict:
 # the Jumpoint runs as a PRIVILEGED container on a real Azure VM (cloud-init runs
 # `docker run --privileged --device /dev/net/tun …`). One shared, ref-counted VM.
 
+# ── Network-tunnel address pool ───────────────────────────────────────────────
+# A PRA **Network Tunnel** leases the operator a real address ON the target network
+# for the life of the session. The Gateway asks DHCP for it first, which Azure will
+# never answer — Azure's DHCP only serves an address already bound to a NIC — so it
+# falls back to the "Managed IP Addresses for Protocol Tunnel" pool configured on the
+# Gateway in the Pathfinder console, and then **ARPs to validate the address**. An
+# address Azure does not know about gets no ARP reply, and the agent refuses it:
+#
+#   Timeout: No valid ARP reply received from 10.99.5.202 in 2000ms
+#   Allocated IP address [10.99.5.202] not an existing Azure resource?  Is it
+#     configured as a secondary IP address on the virtual NIC of the Gateway VM?
+#   setup: Exception - Address: 0.0.0.0 not found
+#
+# So every pool address has to exist as a SECONDARY ipconfig on the Gateway's NIC.
+# Registering them makes the fabric answer ARP with the subnet gateway's own MAC, and
+# the agent binds the lease as a /32 on eth0 — that bound /32 is the success tell.
+# A UDR is NOT the answer here; the product is Azure-aware and asks for ipconfigs.
+#
+# The pool must MATCH what is configured in the Pathfinder console — the dashboard
+# cannot read or write that — so the derived value is logged and returned in the
+# ensure metadata for the operator to copy across.
+
+# How many addresses to carve out when deriving. Each is one ipconfig on the NIC, and
+# one concurrent network-tunnel session; 8 is generous for a demo gateway and stays
+# far below Azure's per-NIC ipconfig limit.
+_TUNNEL_POOL_SIZE = 8
+# Hard ceiling for an OPERATOR-SUPPLIED pool. Without it, pasting a /16 into the
+# config field would try to create 65k ipconfigs — a very expensive typo.
+_TUNNEL_POOL_MAX = 32
+
+
+def derive_tunnel_pool(subnet_prefix: str, size: int = _TUNNEL_POOL_SIZE) -> list[str]:
+    """The last ``size`` usable addresses of ``subnet_prefix``, as dotted strings.
+
+    Taken from the TOP of the subnet on purpose: Azure hands out dynamic addresses
+    from the bottom (.4 upward), so the top stays clear of real hosts the longest.
+    Azure reserves the first four addresses of every subnet (network, gateway, and
+    two for DNS) plus the broadcast address — ``hosts()`` drops the first and last,
+    and the ``[3:]`` drops .1/.2/.3. A subnet too small to give ``size`` addresses
+    yields however many it can rather than raising; an unparseable prefix yields [].
+    """
+    import ipaddress
+    try:
+        net = ipaddress.ip_network(subnet_prefix, strict=False)
+    except ValueError:
+        logger.warning("tunnel-pool: cannot parse subnet prefix %r", subnet_prefix)
+        return []
+    usable = list(net.hosts())[3:]
+    return [str(ip) for ip in usable[-size:]] if usable else []
+
+
+def parse_tunnel_pool(spec: str) -> list[str]:
+    """Expand an operator-supplied pool into addresses. Accepts ``a.b.c.d-a.b.c.e``
+    (inclusive), a CIDR, or a single address. Returns [] for anything unparseable —
+    the caller falls back to deriving, because refusing to build the Gateway over a
+    malformed optional setting would be the worse failure."""
+    import ipaddress
+    spec = (spec or "").strip()
+    if not spec:
+        return []
+    try:
+        if "-" in spec:
+            lo_s, hi_s = (p.strip() for p in spec.split("-", 1))
+            lo, hi = ipaddress.ip_address(lo_s), ipaddress.ip_address(hi_s)
+            if hi < lo:
+                lo, hi = hi, lo
+            out = [str(ipaddress.ip_address(i)) for i in range(int(lo), int(hi) + 1)]
+        elif "/" in spec:
+            out = [str(ip) for ip in ipaddress.ip_network(spec, strict=False).hosts()]
+        else:
+            out = [str(ipaddress.ip_address(spec))]
+    except ValueError:
+        logger.warning("tunnel-pool: cannot parse pool spec %r — deriving instead", spec)
+        return []
+    if len(out) > _TUNNEL_POOL_MAX:
+        logger.warning("tunnel-pool: spec %r expands to %d addresses; capping at %d",
+                       spec, len(out), _TUNNEL_POOL_MAX)
+        out = out[:_TUNNEL_POOL_MAX]
+    return out
+
+
+def resolve_tunnel_pool(spec: str, subnet_prefix: str) -> list[str]:
+    """The pool to register: an explicit ``spec`` when it parses, else derived from
+    the subnet. Keeping both behind one call is what stops the two paths drifting."""
+    return parse_tunnel_pool(spec) or derive_tunnel_pool(subnet_prefix)
+
+
+def _subnet_parts(subnet_id: str) -> tuple[str, str, str]:
+    """(resource_group, vnet, subnet) from an ARM subnet id; ("","","") if it does
+    not look like one."""
+    p = [s for s in (subnet_id or "").split("/") if s]
+    try:
+        return (p[p.index("resourceGroups") + 1],
+                p[p.index("virtualNetworks") + 1],
+                p[p.index("subnets") + 1])
+    except (ValueError, IndexError):
+        return ("", "", "")
+
+
 def _vm_jumpoint_cloud_init(container_image: str, deploy_key: str,
                             install_db_clients: bool = False) -> str:
     """Base64 cloud-init: install Docker, then run the BT Jumpoint container
-    privileged with /dev/net/tun (the caps a protocol tunnel needs). The deploy
-    key is an opaque token, single-quoted for the shell.
+    privileged with /dev/net/tun (the caps a protocol tunnel needs) and on the
+    HOST network (what a network tunnel needs on top). The deploy key is an
+    opaque token, single-quoted for the shell.
 
     When ``install_db_clients`` is set (for the Password Safe Azure cloud-DB
     onboarding) it also installs the native DB clients the "{engine} Azure Run
@@ -2115,8 +2215,16 @@ def _vm_jumpoint_cloud_init(container_image: str, deploy_key: str,
             "apt-get update",
             "ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc-dev",
         ]
+    # --network host is load-bearing for a NETWORK Tunnel Jump, and invisible to a
+    # protocol tunnel — which is why this was missed. On the default bridge the
+    # container's only interface is 172.17.0.x/16: a protocol tunnel opens an OUTBOUND
+    # TCP socket and Docker masquerades it, so it works, while a network tunnel asks
+    # the Jumpoint to route L3 for a subnet that is not on any interface it can see.
+    # Both jumpoint-subnet (10.99.5.0/24) and vm-subnet (10.99.2.0/24) fail identically.
+    # Host networking costs no inbound exposure here: the VM's public IP is Standard
+    # SKU with no NSG attached, which is deny-all inbound by default.
     runcmd.append(
-        "docker run -d --restart always --name jumpoint "
+        "docker run -d --restart always --name jumpoint --network host "
         "--privileged --device /dev/net/tun --cap-add NET_ADMIN --cap-add NET_RAW "
         f"-e DEPLOY_KEY='{deploy_key}' {container_image}")
     lines = ["#cloud-config", "package_update: true", "packages:"]
@@ -2127,20 +2235,79 @@ def _vm_jumpoint_cloud_init(container_image: str, deploy_key: str,
     return base64.b64encode(cloud_init.encode()).decode()
 
 
+def _subnet_prefix(network, subnet_id: str) -> str:
+    """The address prefix of ``subnet_id`` (e.g. "10.99.5.0/24"), or "" — best-effort,
+    because a pool we cannot derive must not block the Gateway from coming up."""
+    srg, vnet, sub = _subnet_parts(subnet_id)
+    if not (srg and vnet and sub):
+        return ""
+    try:
+        s = network.subnets.get(srg, vnet, sub)
+        return s.address_prefix or (list(s.address_prefixes or [""]) or [""])[0]
+    except Exception as e:
+        logger.warning("tunnel-pool: cannot read subnet %s: %s", sub, e)
+        return ""
+
+
+def _ensure_tunnel_ipconfigs(network, rg: str, nic_name: str, subnet_id: str,
+                             pool: list[str]) -> list[str]:
+    """Register each pool address as a static SECONDARY ipconfig on the NIC. Returns
+    the pool actually present afterwards.
+
+    Idempotent and additive: only MISSING addresses are added, and existing ipconfigs
+    (including the primary, which carries the public IP) are never rewritten. Runs on
+    the reuse path too — an already-built Gateway predating this code has none of
+    these, and that is exactly the VM that silently loses network tunnels."""
+    if not pool:
+        return []
+    try:
+        nic = network.network_interfaces.get(rg, nic_name)
+    except Exception as e:
+        logger.warning("tunnel-pool: cannot read NIC %s: %s", nic_name, e)
+        return []
+    have = {getattr(c, "private_ip_address", None) for c in (nic.ip_configurations or [])}
+    missing = [ip for ip in pool if ip not in have]
+    if not missing:
+        return pool
+    for ip in missing:
+        nic.ip_configurations.append(NetworkInterfaceIPConfiguration(
+            name=f"ipconfig-tnl{ip.split('.')[-1]}", subnet={"id": subnet_id},
+            private_ip_allocation_method="Static", private_ip_address=ip,
+        ))
+    try:
+        network.network_interfaces.begin_create_or_update(rg, nic_name, nic).result()
+        logger.info("tunnel-pool: registered %d address(es) on %s (%s)",
+                    len(missing), nic_name, ", ".join(missing))
+        return pool
+    except Exception as e:
+        # Never fatal: protocol tunnels and every other Gateway function work without
+        # the pool. Only NETWORK tunnels need it, and the log says which addresses.
+        logger.warning("tunnel-pool: could not register %s on %s: %s",
+                       ", ".join(missing), nic_name, e)
+        return []
+
+
 def _run_vm_jumpoint_sync(
     cred, sub_id: str, rg: str, location: str, subnet_id: str, name: str,
     container_image: str, deploy_key: str, vm_size: str,
     admin_username: str, admin_password: str, install_db_clients: bool = False,
+    tunnel_pool_spec: str = "",
 ) -> dict:
     """Find-or-create an Azure VM running the BT Jumpoint container. Idempotent on
     name: returns ``reused=True`` when it already exists. The NIC carries a
     **Standard SKU, Static** public IP used solely for a stable, knowable EGRESS
     address (the dashboard whitelists it in the Rancher node firewall). Standard
     public IPs are *secure by default* — all inbound is blocked unless an NSG
-    explicitly allows it, and none is attached — so this adds no ingress path."""
+    explicitly allows it, and none is attached — so this adds no ingress path.
+
+    Also registers the network-tunnel address pool as secondary ipconfigs (see the
+    section comment above ``derive_tunnel_pool``) and returns it as ``tunnel_pool``
+    so the caller can show the operator what to put in the Pathfinder console."""
     compute = _get_compute(cred, sub_id)
     network = _get_network(cred, sub_id)
     pip_name = f"{name}-pip"
+    nic_name = f"{name}-nic"
+    pool = resolve_tunnel_pool(tunnel_pool_spec, _subnet_prefix(network, subnet_id))
     try:
         existing = compute.virtual_machines.get(rg, name)
     except Exception:
@@ -2152,8 +2319,12 @@ def _run_vm_jumpoint_sync(
             public_ip = network.public_ip_addresses.get(rg, pip_name).ip_address or ""
         except Exception:
             pass  # older jumpoint without a PIP → caller falls back to a manual CIDR
+        # A Gateway built before this existed has no pool; add it without touching
+        # anything else, so network tunnels start working without a rebuild.
         return {"vm_id": existing.id, "vm_name": name, "resource_group": rg,
-                "reused": True, "public_ip": public_ip}
+                "reused": True, "public_ip": public_ip,
+                "tunnel_pool": _ensure_tunnel_ipconfigs(
+                    network, rg, nic_name, subnet_id, pool)}
 
     tags = {"managed-by": "vm-dashboard", "purpose": "clouddb-jumpoint"}
     # Standard + Static = secure-by-default (no inbound) egress IP.
@@ -2162,14 +2333,28 @@ def _run_vm_jumpoint_sync(
         PublicIPAddress(location=location, sku=PublicIPAddressSku(name="Standard"),
                         public_ip_allocation_method="Static", tags=tags),
     ).result()
-    nic_name = f"{name}-nic"
     ip_config = NetworkInterfaceIPConfiguration(
         name="ipconfig1", subnet={"id": subnet_id},
         private_ip_allocation_method="Dynamic",
         public_ip_address={"id": pip.id},
+        primary=True,   # required once the pool adds siblings below
     )
+    # The pool goes on at CREATE time rather than via a follow-up update: one ARM call,
+    # and the Gateway is never briefly live without the addresses its tunnels need.
+    ip_configs = [ip_config] + [
+        NetworkInterfaceIPConfiguration(
+            name=f"ipconfig-tnl{ip.split('.')[-1]}", subnet={"id": subnet_id},
+            private_ip_allocation_method="Static", private_ip_address=ip,
+        ) for ip in pool
+    ]
+    # enable_ip_forwarding is the Azure-fabric half of a NETWORK Tunnel Jump. Linux
+    # forwards happily (docker sets net.ipv4.ip_forward=1), but Azure drops any frame
+    # leaving a NIC whose source IP is not that NIC's own unless this is set — so a
+    # tunnel that preserves the console's virtual source address comes up green and
+    # carries nothing, with no error on either side. Costs nothing when unused.
     nic = network.network_interfaces.begin_create_or_update(
-        rg, nic_name, NetworkInterface(location=location, ip_configurations=[ip_config], tags=tags)
+        rg, nic_name, NetworkInterface(location=location, ip_configurations=ip_configs,
+                                       enable_ip_forwarding=True, tags=tags)
     ).result()
 
     image_ref = ImageReference(
@@ -2197,26 +2382,31 @@ def _run_vm_jumpoint_sync(
     )
     vm = compute.virtual_machines.begin_create_or_update(rg, name, vm_params).result()
     return {"vm_id": vm.id, "vm_name": name, "resource_group": rg, "reused": False,
-            "public_ip": (pip.ip_address or "")}
+            "public_ip": (pip.ip_address or ""), "tunnel_pool": pool}
 
 
 async def run_vm_jumpoint(
     rg: str, location: str, subnet_id: str, name: str,
     container_image: str, deploy_key: str, vm_size: str = "Standard_B1s",
     admin_username: str = "jpadmin", admin_password: str = "",
-    install_db_clients: bool = False,
+    install_db_clients: bool = False, tunnel_pool_spec: str = "",
 ) -> dict:
     """Ensure an Azure VM Jumpoint (idempotent on name). The VM egresses via a
     Standard, secure-by-default (no inbound) public IP on its NIC, returned as
     ``public_ip`` so callers can whitelist that stable egress address; it phones
     home to PRA over egress. ``install_db_clients`` bakes the native DB clients
-    into the VM for the Password Safe cloud-DB Run Command plugin (fresh-VM only)."""
+    into the VM for the Password Safe cloud-DB Run Command plugin (fresh-VM only).
+
+    ``tunnel_pool_spec`` overrides the derived network-tunnel address pool; blank
+    derives it from the subnet. Either way the result is returned as ``tunnel_pool``
+    — it has to be entered in the Pathfinder console by hand, so the caller needs to
+    be able to show it."""
     try:
         cred, sub_id = await _ensure_creds()
         return await _to_thread(
             _run_vm_jumpoint_sync, cred, sub_id, rg, location, subnet_id, name,
             container_image, deploy_key, vm_size, admin_username, admin_password,
-            install_db_clients,
+            install_db_clients, tunnel_pool_spec,
         )
     except AzureError:
         raise

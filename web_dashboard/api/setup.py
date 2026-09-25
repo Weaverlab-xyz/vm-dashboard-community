@@ -97,6 +97,9 @@ class AzureRegionConfig(BaseModel):
     db_sqlserver_subnet_id: str = ""
     db_sqlserver_private_dns_zone_id: str = ""
     jumpoint_subnet_id: str = ""
+    # Network-tunnel lease pool, carved out of jumpoint_subnet_id above — per-region
+    # for the same reason that subnet is. Blank derives it from the subnet.
+    jumpoint_tunnel_pool: str = ""
     aci_subnet_id: str = ""
     gallery_name: str = ""
     gallery_resource_group: str = ""
@@ -1127,6 +1130,13 @@ class PRAFeatureConfig(BaseModel):
     # Blank keeps the config.py default (Standard_B2s). Changing it never resizes a
     # live Gateway: delete the Gateway VM and the next deploy recreates it.
     azure_jumpoint_vm_size: str = ""
+    # Network-tunnel lease pool for the managed Azure Gateway VM. Blank DERIVES it
+    # from the gateway subnet (last 8 usable addresses); set to pin one explicitly,
+    # e.g. "10.99.5.200-10.99.5.207", a CIDR, or a single address. Must match
+    # "Managed IP Addresses for Protocol Tunnel" on the Gateway in the Pathfinder
+    # console — the dashboard cannot read that, and a mismatch surfaces only as the
+    # Gateway agent failing its ARP check on a lease. Per-region entries win.
+    azure_jumpoint_tunnel_pool: str = ""
     # OT demo cell on AWS: refuse a subnet that auto-assigns public IPs (see config.py).
     ot_aws_require_private_subnet: bool = True
     # OT demo cell on GCP: Purdue-zone firewall rules on the cell's tag (see config.py).

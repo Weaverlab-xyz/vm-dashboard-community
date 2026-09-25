@@ -358,7 +358,75 @@ needs no setup of its own.
 | `gcp_cloud_run_docker_deploy_key` | The GCP Gateway deploy key (with two legacy fallbacks) |
 | `azure_aci_subnet_id` / `azure_aci_deploy_key` | Azure gateway subnet and deploy key |
 | `azure_vm_jumpoint_mode` | `shared` (default) or `aci` — which shape a *VM deploy* borrows; the managed VM is `clouddb-jumpoint` |
+| `azure_jumpoint_tunnel_pool` | Network-tunnel lease pool. Blank **derives** it from the gateway subnet; per-region `jumpoint_tunnel_pool` wins. See [Network tunnels need an address pool](#network-tunnels-need-an-address-pool) |
 | `bt_jumpoint_name` | Unrelated to host placement: the PRA Gateway a jump item routes through, **by name**. Adding a host to that Gateway's cluster does not change this value |
+
+---
+
+## Network tunnels need an address pool
+
+A **Protocol Tunnel** working tells you nothing about whether a **Network Tunnel** will. A
+protocol tunnel opens an outbound TCP socket; a network tunnel leases the operator a *real
+address on the target network* for the life of the session. On Azure that lease needs three
+things, and only the first two are automatic.
+
+**1 and 2 — the dashboard does these.** The gateway container runs with `--network host` (on
+the Docker bridge it can only see `172.17.0.0/16`, so no VNet subnet is on any interface it
+has), and its NIC is created with `enableIPForwarding` (Azure drops frames leaving a NIC whose
+source IP is not that NIC's own).
+
+**3 — the address pool.** The gateway asks DHCP for its lease first; Azure never answers,
+because its DHCP only serves an address already bound to a NIC. It falls back to the pool, then
+**ARPs to validate the address it picked**. An address Azure does not know about gets no reply:
+
+```
+Timeout: No valid ARP reply received from 10.99.5.202 in 2000ms
+Allocated IP address [10.99.5.202] not an existing Azure resource?  Is it configured as a
+  secondary IP address on the virtual NIC of the Gateway VM?
+setup: Exception - Address: 0.0.0.0 not found
+```
+
+So every pool address is registered as a **secondary ipconfig** on the gateway's NIC. The
+dashboard does this on create *and on reuse*, so a gateway built before this existed picks up
+its pool without a rebuild. A route table is **not** the answer — the product is Azure-aware and
+asks for ipconfigs by name.
+
+### Where the pool comes from
+
+Blank (the default) **derives** it from the gateway subnet: the last 8 usable addresses. The top
+of the subnet, because Azure allocates dynamically from the bottom (`.4` upward), so the top
+stays clear of real hosts longest; Azure's four reserved addresses and the broadcast are never
+included. For `10.99.5.0/24` that is `10.99.5.247`–`10.99.5.254`.
+
+To pin one instead, set `jumpoint_tunnel_pool` for the region (or the flat
+`azure_jumpoint_tunnel_pool`) to a range `10.99.5.200-10.99.5.207`, a CIDR, or a single address.
+An unparseable value falls back to deriving rather than leaving the gateway with no pool, and an
+oversized one is capped — a pasted `/16` would otherwise try to create 65k ipconfigs.
+
+> **Prefer the per-region key.** A pool only makes sense inside its own subnet's prefix, so a
+> flat key is the wrong answer in every region but the default one — the same trap described in
+> [Placement and the region picker](#placement-and-the-region-picker).
+
+### It has to match the appliance, and nothing checks that for you
+
+The pool must equal **Managed IP Addresses for Protocol Tunnel** on the Gateway in the
+Pathfinder console (`app.beyondtrust.io` → Privileged Remote Access → Jump → the Gateway →
+Gateway Platform). That section only appears once **Enable Protocol Tunnel Method** is ticked,
+which is why it reads as "missing" if you go looking for the IP list first. It is **not** in the
+appliance's `/login`.
+
+The dashboard can neither read nor write that setting, so a mismatch is invisible until a
+session fails its ARP check. For that reason the resolved pool is logged at INFO when the
+gateway is ensured:
+
+```
+gateway-host(azure): network-tunnel pool on clouddb-jumpoint = 10.99.5.247, … — this must
+match Managed IP Addresses for Protocol Tunnel on the Gateway in the Pathfinder console
+```
+
+Success looks like the gateway binding a lease as a `/32` on `eth0` (`10.99.5.204/32`). Note the
+pool addresses do **not** answer ping — they are registered to the NIC but not bound in the
+guest OS — and that is fine: the agent checks ARP, not ICMP.
 
 ---
 

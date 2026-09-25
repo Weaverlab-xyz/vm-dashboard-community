@@ -968,6 +968,24 @@ class Settings(BaseSettings):
     # Web-Jump OOM constraint as gcp_jumpoint_machine_type: headless Chromium renders
     # ON the Gateway and needs ≥2 GB — Standard_B1ms minimum, Standard_B2s preferred.
     azure_jumpoint_vm_size: str = "Standard_B2s"
+    # Network-tunnel address pool for the managed Azure Gateway VM. A PRA Network
+    # Tunnel leases the operator a real address ON the target network, and Azure only
+    # honours addresses registered as secondary ipconfigs on the Gateway's NIC — so
+    # the dashboard registers them. Blank (the default) DERIVES the pool from the
+    # gateway subnet: the last 8 usable addresses, taken from the top because Azure's
+    # dynamic allocation climbs from the bottom. Set this to pin an explicit pool —
+    # "10.99.5.200-10.99.5.207", a CIDR, or a single address.
+    #
+    # Whatever ends up here MUST match "Managed IP Addresses for Protocol Tunnel" on
+    # the Gateway in the Pathfinder console; the dashboard can neither read nor write
+    # that, so a mismatch shows up only as the agent failing its ARP check. The
+    # resolved pool is logged and returned as `tunnel_pool` for exactly this reason.
+    #
+    # PER-REGION: prefer the `jumpoint_tunnel_pool` field of `azure_region_configs`.
+    # This flat key is the fallback, and on a multi-region install it is the WRONG
+    # answer everywhere but the default region — a pool only makes sense inside its
+    # own subnet's prefix.
+    azure_jumpoint_tunnel_pool: str = ""
     # OT demo cell on AWS: refuse to deploy into a subnet that auto-assigns public IPs.
     # EC2 has no per-instance external-IP switch (GCE and Azure do, and the OT forms pin
     # them off there) — MapPublicIpOnLaunch decides — so this is the only place the
