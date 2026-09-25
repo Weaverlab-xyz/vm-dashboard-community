@@ -873,6 +873,54 @@ def test_every_page_with_a_bulk_toolbar_defines_all_of_its_seams():
                 f"unbound name — which Alpine fails silently on")
 
 
+def test_the_bulk_power_mixin_reaches_nothing_it_has_not_declared():
+    """Every `this.x` the mixin needs must be its own, a declared seam, or guarded.
+
+    The test above checks the seams the mixin DOCUMENTS. This one checks the other
+    direction — what it actually reaches for — because the way this broke was a
+    dependency that was never documented at all.
+
+    `submitBulkPower` opened with `if (!this.bulkPowerScheduleReady())`, and that
+    method lives in `scheduleState()`, a different mixin. The four cloud pages spread
+    both, so it worked there. The six on-premises pages spread only `bulkPowerState()`,
+    so the first line of the click handler threw "not a function" — and Alpine swallows
+    a handler's exception, so Start and Force Off did nothing whatsoever: no dialog, no
+    toast, no request, nothing in the network tab. It reads as a dead button, which is
+    the one failure mode this whole mixin is written in fear of, and it shipped live.
+
+    A read of an undeclared property is just as silent (`undefined`), so declared-or-
+    guarded is the rule for both. Assignments are excluded: `this.selectAll = false`
+    on a page without one creates it and cannot throw.
+    """
+    mixin = _read(os.path.join(_ROOT, "web_dashboard", "static", "js", "app.js"))
+    header = mixin[mixin.index("// ── Reusable bulk power toolbar"):
+                   mixin.index("window.bulkPowerState = function")]
+    body = mixin[mixin.index("window.bulkPowerState = function"):]
+    body = body[:body.index("// ── WebSocket job tracker")]
+
+    # Declared by the mixin itself: a property or a method at the object's own
+    # indentation, which is what a spread actually delivers to the page.
+    own = set(re.findall(r"^        (?:async )?(\w+)\s*[:(]", body, re.M))
+    # Declared as a seam, required or optional, in the header block above.
+    declared = set(re.findall(r"^//   (\w+)", header, re.M))
+    # Reached behind a guard: `typeof this.x === 'function'` for a method, `this.x ||`
+    # for a property. Either way the page is allowed not to have it.
+    guarded = (set(re.findall(r"typeof this\.(\w+) === 'function'", body))
+               | set(re.findall(r"this\.(\w+)\s*\|\|", body)))
+    # `this.x = …` is a write. `this.x ===` / `this.x ==` are reads.
+    written_only = {n for n in re.findall(r"this\.(\w+)\s*=(?!=)", body)
+                    if not re.search(r"this\." + n + r"\s*(?:[.(\[)]|[!=]==?|\|\|)",
+                                     body)}
+
+    reached = set(re.findall(r"this\.(\w+)", body))
+    undeclared = sorted(reached - own - declared - guarded - written_only)
+    assert not undeclared, (
+        f"window.bulkPowerState() reaches {undeclared} without declaring it, guarding "
+        f"it with typeof, or listing it as a page seam in the header above. On a page "
+        f"that does not happen to have it, the toolbar's buttons die silently — see "
+        f"this test's docstring for the time that shipped")
+
+
 def test_every_destructive_bulk_op_has_a_confirmation_sentence():
     """A new bulk op must not arrive with no dialog.
 

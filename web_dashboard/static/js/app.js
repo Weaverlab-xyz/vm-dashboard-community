@@ -368,8 +368,8 @@ window.afterDeploy = function (resp, opts) {
 //
 // Spread into an on-prem VM page component (`...bulkPowerState()`) and render with the
 // `bulk_power_buttons` Jinja macro (templates/partials/bulk_power_toolbar.html). The
-// page keeps its own selection state — `selectedVmIds` — and supplies four seams,
-// because the six pages genuinely disagree about all four:
+// page keeps its own selection state — `selectedVmIds` — and supplies five seams,
+// because the six pages genuinely disagree about all of them:
 //
 //   bulkPowerUrl            '/api/<kind>/power/bulk'
 //   _bulkPowerRows()        the currently visible rows (filteredVms, filteredResources…)
@@ -377,6 +377,7 @@ window.afterDeploy = function (resp, opts) {
 //                           powerOp already POSTs, so bulk cannot address a VM
 //                           differently from the button beside it
 //   _bulkPowerState(vm)     'on' | 'off' | 'other' | null
+//   _vmKey(vm)              the selection key, matching the server's `_override_key`
 //
 // And two optional ones:
 //
@@ -395,10 +396,15 @@ window.afterDeploy = function (resp, opts) {
 // make bulk Force Off silently skip exactly the VMs whose own row offers it — the
 // under-offering, silent-skip failure this whole helper is written to avoid.
 //
-// It also uses the page's existing `_vmKey(vm)` (must match the server's
-// `_override_key`), its `showToast` if it has one, and its `guestToolsMaybeReady` and
-// `canOp` when present. Nothing here is a getter: tests/template_helpers_check.js
-// extracts helpers by the literal `name(args) {` shape and cannot see one.
+// It also uses the page's `showToast` if it has one, and its `guestToolsMaybeReady`
+// and `canOp` when present — each behind a `typeof` guard, which is the ONLY way this
+// mixin may reach something it does not define itself. Everything it needs
+// unconditionally is either a seam listed above (and pinned per page by
+// tests/test_hypervisor_power_routing.py) or its own property; reaching for another
+// mixin's is what killed the whole toolbar on all six on-prem pages, see
+// `bulkPowerScheduled` below. Nothing here is a getter:
+// tests/template_helpers_check.js extracts helpers by the literal `name(args) {` shape
+// and cannot see one.
 // ── Change-window scheduling, shared by every run form ───────────────────────
 //
 // Spread into a page's Alpine component the same way bulkPowerState() is:
@@ -500,32 +506,10 @@ window.scheduleState = function () {
             return String(iso).replace('T', ' ').slice(0, 16);
         },
 
-        // The three scheduling fields for a bulk POWER body. Separate from
-        // schedulePayload() only so a page can render the picker for one form and
-        // still send an unbooked bulk power op if it wants; today they are the same
-        // three fields and the cloud pages share one picker for both.
-        // Bulk power's OWN booking fields, deliberately NOT the deploy form's.
-        //
-        // A page has one scheduleState() and several forms. The deploy picker lives in
-        // a MODAL, so a mode left on "At a time" by a cancelled deploy would silently
-        // book the next power op from a toolbar that showed nothing about it. Separate
-        // state means the toolbar can only book when the toolbar says so.
-        bulkPowerScheduled: false,
-        bulkPowerRunAt: '',
-        bulkPowerTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-
-        bulkPowerScheduleReady() {
-            return !this.bulkPowerScheduled || !!this.bulkPowerRunAt;
-        },
-
-        bulkPowerSchedule() {
-            if (!this.bulkPowerScheduled || !this.bulkPowerRunAt) {
-                return { run_at: '', run_timezone: '', change_window_id: '' };
-            }
-            return { run_at: this.bulkPowerRunAt,
-                     run_timezone: this.bulkPowerTimezone,
-                     change_window_id: '' };
-        },
+        // The bulk-power booking fields (`bulkPowerScheduled` and friends) used to live
+        // here, beside the deploy form's. They belong to the toolbar that reads them
+        // and now live in bulkPowerState(), below, which every page carrying that
+        // toolbar spreads — this one is spread by the four cloud pages only.
 
         async loadChangeWindows() {
             try {
@@ -552,6 +536,37 @@ window.bulkPowerState = function () {
         // rather than in the macro so a page that gains a guest-tools gate does not
         // also have to remember the toolbar.
         bulkGuestOps: ['shutdown', 'reboot'],
+
+        // Bulk power's OWN booking fields, deliberately NOT the deploy form's. A page
+        // has one scheduleState() and several forms; the deploy picker lives in a
+        // MODAL, so a mode left on "At a time" by a cancelled deploy would otherwise
+        // silently book the next power op from a toolbar that showed nothing about it.
+        //
+        // They live HERE, in the mixin that reads them, and not in scheduleState():
+        // they were added there, and submitBulkPower — spread into all ten pages —
+        // called bulkPowerScheduleReady() unguarded. The six on-prem pages spread only
+        // bulkPowerState(), so on every one of them the first line of the click handler
+        // threw "not a function" and the Start and Force Off buttons did nothing at
+        // all, with no toast and no request. Only the four cloud pages, which spread
+        // both mixins, ever worked. A mixin may call a seam it does not define only
+        // behind a `typeof … === 'function'` guard, the way the booking call below
+        // does; anything it needs unconditionally has to be its own.
+        bulkPowerScheduled: false,
+        bulkPowerRunAt: '',
+        bulkPowerTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+
+        bulkPowerScheduleReady() {
+            return !this.bulkPowerScheduled || !!this.bulkPowerRunAt;
+        },
+
+        bulkPowerSchedule() {
+            if (!this.bulkPowerScheduled || !this.bulkPowerRunAt) {
+                return { run_at: '', run_timezone: '', change_window_id: '' };
+            }
+            return { run_at: this.bulkPowerRunAt,
+                     run_timezone: this.bulkPowerTimezone,
+                     change_window_id: '' };
+        },
 
         // The op the toolbar may send. Falls back to allowed when the page has no
         // `canOp` — templates/nutanix/index.html has no agent path and therefore no
@@ -697,9 +712,10 @@ window.bulkPowerState = function () {
             this.bulkPowerBusy = true;
             this.bulkPowerOp = op;
             try {
-                // The booking, when the page offers one. `bulkPowerSchedule()` is
-                // spread in by the cloud pages (which also spread scheduleState());
-                // a page without it sends nothing extra and behaves exactly as before.
+                // The booking. It is this mixin's own now, so it is always here; the
+                // guard stays because a page may legitimately override it, and on a
+                // page that renders no Schedule control it returns three empty
+                // strings, which the server reads as "run now".
                 const booking = typeof this.bulkPowerSchedule === 'function'
                     ? this.bulkPowerSchedule() : {};
                 const resp = await API.post(this.bulkPowerUrl,

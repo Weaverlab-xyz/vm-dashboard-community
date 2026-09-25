@@ -1067,6 +1067,132 @@ for (const page of ['aws/index.html', 'azure/index.html', 'gcp/index.html',
      w._bulkPowerWarn({}, 'stop') === '');
 }
 
+// ── Bulk power: pressing the button, on a page that spreads ONE mixin ────────
+//
+// Everything above pulls a single pure method out of the mixin, and that is precisely
+// how the mixin shipped with a dead toolbar. `submitBulkPower` is what the button is
+// bound to, and its first line called `this.bulkPowerScheduleReady()` — a method of
+// `scheduleState()`, a DIFFERENT mixin. The four cloud pages spread both and worked;
+// the six on-premises pages spread only `bulkPowerState()`, so there the handler threw
+// "not a function" before doing anything at all, and Alpine swallows a handler's
+// exception: Start and Force Off produced no dialog, no toast and no request, in a
+// released build, on every hypervisor page at once.
+//
+// So this builds the object an ON-PREM page actually has — window.bulkPowerState()
+// plus the seams that page defines, and nothing else — and presses the buttons. Any
+// future reach into another mixin fails here rather than in someone's browser.
+function onPremToolbar(extra) {
+  const log = { posted: [], asked: [], said: [], landed: [] };
+  return Object.assign(
+    extractWindowAssigned('../static/js/app.js', 'bulkPowerState')(),
+    {
+      bulkPowerUrl: '/api/vms/power/bulk',
+      selectedVmIds: ['3', '4'],
+      selectAll: true,
+      _bulkPowerRows: () => VMS,
+      _vmKey: (vm) => String(vm.id),
+      _bulkPowerTarget: (vm) => ({ vm_id: vm.id, name: vm.name }),
+      _bulkPowerState: (vm) => (vm.state === undefined ? null : vm.state),
+      showToast: (m, t) => log.said.push([m, t]),
+      log,
+    },
+    extra || {});
+}
+
+async function bulkPowerClickChecks() {
+  const BP = 'submitBulkPower:';
+  const arm = (o, opts) => {
+    opts = opts || {};
+    global.confirm = (q) => { o.log.asked.push(q); return opts.agree !== false; };
+    global.API = { post: async (url, body) => {
+      o.log.posted.push([url, body]);
+      if (opts.boom) throw new Error('503: the agent is offline');
+      return Object.assign({ count: body.targets.length, batch_id: 'b-1' },
+                           opts.resp || {});
+    } };
+    // A `global.window` of our own: an earlier block deletes the shared one when it
+    // finishes with its fake location, and this runs after it.
+    global.window = global.window || {};
+    global.window.afterDeploy = (resp, arg) => { o.log.landed.push([resp, arg]);
+                                                 return !!resp.batch_id; };
+    return o;
+  };
+
+  // The regression itself: one mixin, and the request still leaves the page.
+  let o = arm(onPremToolbar());
+  await o.submitBulkPower('start');
+  ok(BP + ' an on-prem page spreading only bulkPowerState() posts the batch',
+     o.log.posted.length === 1 && o.log.posted[0][0] === '/api/vms/power/bulk'
+     && o.log.posted[0][1].op === 'start'
+     && o.log.posted[0][1].targets.map(t => t.name).join() === 'web01,app01');
+  ok(BP + ' Start asks nothing first, matching the per-row button',
+     o.log.asked.length === 0);
+  ok(BP + ' the batch is landed on, and the selection and the button released',
+     o.log.landed.length === 1 && o.selectedVmIds.length === 0
+     && o.selectAll === false && o.bulkPowerBusy === false && o.bulkPowerOp === '');
+
+  // Unbooked, which is every on-prem page: the three scheduling fields go out empty,
+  // which `job_service.resolve()` reads as "run now" — the behaviour these pages had
+  // before scheduling existed. A blank run_at must never mean a booking.
+  ok(BP + ' an unbooked toolbar sends the scheduling fields empty',
+     o.log.posted[0][1].run_at === '' && o.log.posted[0][1].change_window_id === '');
+
+  // Force Off confirms first, and a dismissed dialog sends nothing.
+  o = arm(onPremToolbar({ selectedVmIds: ['1', '2'] }), { agree: false });
+  await o.submitBulkPower('stop');
+  ok(BP + ' Force Off confirms, and a declined dialog posts nothing',
+     o.log.asked.length === 1 && /not asked/.test(o.log.asked[0])
+     && o.log.posted.length === 0 && o.bulkPowerBusy === false);
+
+  o = arm(onPremToolbar({ selectedVmIds: ['1', '2'] }));
+  await o.submitBulkPower('stop');
+  ok(BP + ' Force Off posts the running VMs once confirmed',
+     o.log.posted.length === 1
+     && o.log.posted[0][1].targets.map(t => t.name).join() === 'dc01,sql01');
+
+  // A selection this op cannot touch is a toast, not a request and not a dialog: the
+  // 400 the server would answer with talks about the op, not about the VMs.
+  o = arm(onPremToolbar({ selectedVmIds: ['1', '2'] }));
+  await o.submitBulkPower('start');
+  ok(BP + ' an all-running selection sent Start is refused locally, with a reason',
+     o.log.posted.length === 0 && o.log.asked.length === 0
+     && /None of the 2/.test(o.log.said[0][0]) && o.log.said[0][1] === 'error');
+
+  // A booked batch: the toolbar's OWN picker state, and the confirm has to say so —
+  // the last chance to notice the tick is still on.
+  o = arm(onPremToolbar({ selectedVmIds: ['1', '2'], bulkPowerScheduled: true,
+                          bulkPowerRunAt: '2026-10-01T02:00',
+                          bulkPowerTimezone: 'Europe/London' }));
+  await o.submitBulkPower('stop');
+  ok(BP + ' a booked batch says so in the dialog and carries the time',
+     /SCHEDULED for 2026-10-01 02:00 \(Europe\/London\)/.test(o.log.asked[0])
+     && o.log.posted[0][1].run_at === '2026-10-01T02:00'
+     && o.log.posted[0][1].run_timezone === 'Europe/London');
+
+  // Ticked with no time is the one refusal the picker owes the operator: a blank
+  // run_at would run the whole batch NOW, which is the opposite of what was asked.
+  o = arm(onPremToolbar({ bulkPowerScheduled: true }));
+  await o.submitBulkPower('start');
+  ok(BP + ' Schedule ticked with no time refuses rather than running now',
+     o.log.posted.length === 0 && /Pick a time/.test(o.log.said[0][0]));
+
+  // A failed request must release the button, or the toolbar is dead until a reload.
+  o = arm(onPremToolbar(), { boom: true });
+  await o.submitBulkPower('start');
+  ok(BP + ' a failed post is reported and the button released',
+     /agent is offline/.test(o.log.said[0][0]) && o.log.said[0][1] === 'error'
+     && o.bulkPowerBusy === false && o.bulkPowerOp === '');
+
+  // No batch id is not silence: the jobs exist and the operator has to be told where.
+  o = arm(onPremToolbar(), { resp: { batch_id: '' } });
+  await o.submitBulkPower('start');
+  ok(BP + ' a response with no batch id says so instead of going quiet',
+     /no batch id/.test(o.log.said[o.log.said.length - 1][0]));
+
+  delete global.API;
+  delete global.confirm;
+}
+
 // ── Workload Lab → Agent ────────────────────────────────────────────────────
 // The tab renders a non-human principal, and three of its helpers decide things the
 // markup cannot restate: whether a state is a FAULT, whether a link is a CAPABILITY, and
@@ -1372,7 +1498,7 @@ async function portainerFirewallChecks() {
   delete global.toast;
 }
 
-Promise.all([ociPlacementChecks(), portainerFirewallChecks()])
+Promise.all([ociPlacementChecks(), portainerFirewallChecks(), bulkPowerClickChecks()])
   .then(() => process.exit(fail ? 1 : 0),
         (e) => { console.log('FAIL a deferred check threw: ' + e);
                  process.exit(1); });
