@@ -4446,10 +4446,11 @@ def init_db():
             "ALTER TABLE workgroups ADD COLUMN change_window_id VARCHAR(36)",
             "ALTER TABLE workgroups ADD COLUMN require_change_window BOOLEAN",
         ]
-        # Migrations that never ran because they could not get their table lock in
-        # _DDL_LOCK_TIMEOUT_MS. Collected rather than raised: one contended statement
-        # must not stop the other ~60 from applying.
-        _lock_timed_out: list[str] = []
+        # Migrations that never applied because of LOCK CONTENTION rather than because
+        # the column was already there. Collected rather than raised: one contended
+        # statement must not stop the other ~60 from applying. Each entry is
+        # (sqlstate, statement) so the warning can say which of the two it was.
+        _not_applied: list[tuple[str, str]] = []
 
         for stmt in _migrations:
             if _is_sqlite:
@@ -4469,25 +4470,51 @@ def init_db():
                 except Exception as exc:  # noqa: BLE001 — see the docstring
                     conn.execute(text("ROLLBACK TO SAVEPOINT _mig"))
                     # Nearly every exception here is the expected "column already
-                    # exists", which is why this block swallows by default. A LOCK
-                    # TIMEOUT is the one case that must not be silent: it means the
-                    # statement never ran, so the column is genuinely still missing and
-                    # some later reader will fail on it in a way that points nowhere
-                    # near here. SQLSTATE 55P03 = lock_not_available.
-                    if getattr(getattr(exc, "orig", None), "pgcode", None) == "55P03":
-                        _lock_timed_out.append(stmt)
+                    # exists", which is why this block swallows by default. TWO codes
+                    # must not be silent, because both mean the statement NEVER RAN --
+                    # so the column is genuinely still missing and some later reader
+                    # fails on it in a way that points nowhere near here:
+                    #
+                    #   55P03 lock_not_available  -- the SET LOCAL lock_timeout above
+                    #                                gave up waiting for the table.
+                    #   40P01 deadlock_detected   -- PostgreSQL picked THIS transaction
+                    #                                as the victim of a lock cycle.
+                    #
+                    # The deadlock case is not theoretical and is nastier than the
+                    # timeout, because the two are NOT symmetrical: a timeout is always
+                    # ours, a deadlock kills one of the two participants and which one is
+                    # PostgreSQL's choice. On 2026-09-25 a co-deployed jobs_worker
+                    # claimed an `expiry_sweep` (holding `jobs`, then wanting
+                    # `hypervisor_vm_cache`) while this transaction held
+                    # `hypervisor_vm_cache` and wanted ACCESS EXCLUSIVE on `jobs`.
+                    # PostgreSQL chose the sweep, so the migration applied and only a job
+                    # died. Had it chosen init_db, the ALTER would have been rolled back
+                    # to the savepoint and swallowed here with NO log line at all -- an
+                    # UndefinedColumn from a random route days later, with nothing
+                    # anywhere connecting it to a deploy.
+                    #
+                    # Note this transaction accumulates ACCESS EXCLUSIVE on every table
+                    # it touches and holds them all until the commit below, INCLUDING for
+                    # the no-op "column already exists" statements, which is what makes
+                    # it a plausible deadlock partner in the first place.
+                    _code = getattr(getattr(exc, "orig", None), "pgcode", None)
+                    if _code in ("55P03", "40P01"):
+                        _not_applied.append((_code, stmt))
 
-        if _lock_timed_out:
+        if _not_applied:
             # WARNING, not an exception: the app boots and serves, which is the whole
             # point of the timeout. But say exactly what was skipped and why, because
             # the eventual symptom is an UndefinedColumn error from a random route.
             import logging as _logging
             _logging.getLogger(__name__).warning(
-                "init_db: %d migration(s) skipped -- could not acquire a table lock "
-                "within %dms, most likely because a long-running transaction (usually "
-                "the jobs_worker mid-job) held it. They are idempotent and will be "
-                "retried on the next boot. Skipped: %s",
-                len(_lock_timed_out), _DDL_LOCK_TIMEOUT_MS, "; ".join(_lock_timed_out))
+                "init_db: %d migration(s) skipped -- lock contention with another "
+                "transaction, usually the jobs_worker mid-job (55P03 = gave up after "
+                "%dms waiting for the table; 40P01 = this transaction was chosen as a "
+                "deadlock victim). They are idempotent and will be retried on the next "
+                "boot; stopping the worker before the next deploy applies them. "
+                "Skipped: %s",
+                len(_not_applied), _DDL_LOCK_TIMEOUT_MS,
+                "; ".join(f"[{code}] {stmt}" for code, stmt in _not_applied))
 
         if not _is_sqlite:
             conn.commit()  # ends the txn → releases pg_advisory_xact_lock(20260101)
