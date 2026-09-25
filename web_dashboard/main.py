@@ -28,6 +28,7 @@ from .services import branding
 from .services import cache_service
 from .services import config_service, feature_flags
 from .services import personas
+from .services import static_assets
 from .services import ui_theme
 from .services import public_url
 
@@ -844,8 +845,35 @@ _base_dir = os.path.dirname(__file__)
 _static_dir = os.path.join(_base_dir, "static")
 _templates_dir = os.path.join(_base_dir, "templates")
 
+
+class _VersionedStaticFiles(StaticFiles):
+    """``StaticFiles`` that states its caching instead of leaving it to the browser.
+
+    Starlette sends `etag` and `last-modified` and no `Cache-Control`, which is not
+    "don't cache" -- it is "decide for yourself". Chrome decided, and a fixed `app.js`
+    took hours to reach browsers that already had the broken one (the whole story is in
+    services/static_assets.py).
+
+    Which answer a request gets depends on whether its URL can ever change meaning --
+    a year for one pinned to a content digest, revalidate for one that is not. That
+    policy is `static_assets.cache_control`, kept next to the function that builds the
+    URLs it is about and reachable by a test that does not import this app. All this
+    class does is the plumbing.
+
+    The header goes on AFTER `super()`, which is also what puts it on a 304:
+    `NotModifiedResponse` copies `cache-control` from the FileResponse it is built from,
+    and there is none there to copy at that point.
+    """
+
+    def file_response(self, full_path, stat_result, scope, status_code: int = 200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        response.headers["Cache-Control"] = static_assets.cache_control(
+            scope.get("query_string", b""))
+        return response
+
+
 if os.path.isdir(_static_dir):
-    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+    app.mount("/static", _VersionedStaticFiles(directory=_static_dir), name="static")
 
 
 def _feature_flags() -> dict:
@@ -920,6 +948,12 @@ templates = Jinja2Templates(
 # Kept: read by call sites outside the theme, and theme_for() takes it as an argument
 # rather than reading settings itself so it stays a pure function.
 templates.env.globals["app_env"] = settings.app_env
+# `{{ static_url('js/app.js') }}` -- the ONLY way a template may reference a static
+# asset, enforced by tests/test_static_assets.py. A global rather than a context
+# processor because it is a pure function of the files on disk, with no request or DB
+# in it, and because login.html renders outside the normal chrome and would be exactly
+# the page a per-route context forgot (see the note on _profile_context above).
+templates.env.globals["static_url"] = static_assets.url
 
 
 # ── Register API routers ──────────────────────────────────────────────────────
