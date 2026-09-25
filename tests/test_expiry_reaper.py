@@ -84,7 +84,11 @@ def _install_stubs():
     sa_orm.Session = type("Session", (), {})
     sa.orm = sa_orm
     sa_exc = types.ModuleType("sqlalchemy.exc")
-    sa_exc.IntegrityError = type("IntegrityError", (Exception,), {})
+    # The real hierarchy, not two unrelated classes: `IntegrityError` IS a
+    # `SQLAlchemyError`, and job_service.set_failed catches the base to recover a
+    # session whose transaction a DB error already aborted.
+    sa_exc.SQLAlchemyError = type("SQLAlchemyError", (Exception,), {})
+    sa_exc.IntegrityError = type("IntegrityError", (sa_exc.SQLAlchemyError,), {})
     sa.exc = sa_exc
     sys.modules.setdefault("sqlalchemy", sa)
     sys.modules.setdefault("sqlalchemy.orm", sa_orm)
