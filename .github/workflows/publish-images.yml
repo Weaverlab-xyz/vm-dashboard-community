@@ -5,16 +5,19 @@ name: Publish images
 #
 # Requires two repository secrets:
 #   DOCKERHUB_USERNAME  - Docker Hub account / namespace (chrweav)
-#   DOCKERHUB_TOKEN     - a Docker Hub access token. Pushing the images needs
-#                         Read/Write, but the description-sync step at the end
-#                         of the job needs Read/Write/DELETE: Hub's description
-#                         API is an account-management call, and a Read/Write
-#                         token is refused there with a 403. Delete is the
-#                         narrowest scope Hub offers that includes it -- there
-#                         is no description-only or metadata-only scope. If you
-#                         would rather not hand the push credential delete
-#                         rights, give the sync step a second, R/W/D token of
-#                         its own instead and leave this one at Read/Write.
+#   DOCKERHUB_TOKEN     - a Docker Hub access token with Read/Write/DELETE
+#                         scope. Pushing the images needs only Read/Write; the
+#                         description-sync step at the end of the job is what
+#                         needs delete. Hub's description API is an account-
+#                         management call and refuses a Read/Write token with a
+#                         403, and delete is the narrowest scope Hub offers that
+#                         covers it -- there is no description-only or metadata-
+#                         only scope, so this one credential carries it.
+#                         A token's scope CANNOT be edited after creation: to
+#                         change it you create a replacement token, update this
+#                         secret, then delete the old one. Pick R/W/D at
+#                         creation or the sync step 403s while the six pushes
+#                         carry on succeeding.
 #
 # Images built (each from a clean checkout, so corp-ca/ is empty and no
 # BUILD_SKIP_DEBIAN_UPDATES is passed -> the public images carry no corp CA
@@ -148,12 +151,12 @@ jobs:
         if: github.ref_type == 'tag' && matrix.image == 'chrweav/infra-dashboard'
         run: sed '0,/^---$/d' DOCKERHUB.md > hub-overview.md
 
-      # Reuses DOCKERHUB_TOKEN, but that token must carry Read/Write/DELETE --
-      # Hub's description API refuses a plain Read/Write token with a 403, and
-      # delete is the narrowest scope that covers the call (see the header). A
-      # Hub account password also works here; a token is preferred because it is
-      # revocable on its own. Left at the end of the job on purpose: a scope
-      # problem here then costs only the overview, never the image push.
+      # Reuses DOCKERHUB_TOKEN, which carries Read/Write/DELETE for this step's
+      # sake -- Hub's description API refuses a plain Read/Write token with a 403
+      # (see the header). A Hub account password also works here; a token is
+      # preferred because it is revocable on its own. Left at the end of the job
+      # on purpose: a scope problem here then costs only the overview, never the
+      # image push.
       - name: Sync the Hub repository overview
         if: github.ref_type == 'tag' && matrix.image == 'chrweav/infra-dashboard'
         uses: peter-evans/dockerhub-description@v4
