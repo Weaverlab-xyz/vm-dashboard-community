@@ -1294,9 +1294,20 @@ async def _ensure_jumpoint_host_azure(region: str, name: str = "",
             vm_size=_cfg("azure_jumpoint_vm_size") or "Standard_B2s",
             admin_password=azure_service._azure_compliant_password(),
             install_db_clients=install_db_clients,
+            # Per-region first, flat key second, derive-from-subnet third. Reading the
+            # flat key first is the mistake `_azure_gateway_location` documents.
+            tunnel_pool_spec=rc.get("jumpoint_tunnel_pool") or "",
         )
         logger.info("gateway-host(azure): gateway VM %s %s in %s",
                     name, "reused" if meta.get("reused") else "started", location)
+        # The pool has to be typed into the Pathfinder console by hand ("Managed IP
+        # Addresses for Protocol Tunnel"), so log it at INFO rather than leaving the
+        # operator to read it back off the NIC.
+        if meta.get("tunnel_pool"):
+            logger.info("gateway-host(azure): network-tunnel pool on %s = %s — this "
+                        "must match Managed IP Addresses for Protocol Tunnel on the "
+                        "Gateway in the Pathfinder console",
+                        name, ", ".join(meta["tunnel_pool"]))
         _record_placement(placement, location, meta.get("public_ip"))
         _persist_jumpoint_egress_ip(meta.get("public_ip"), "azure", name,
                                     managed=not requested)

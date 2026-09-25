@@ -78,6 +78,12 @@ _SPECS: dict[str, _Spec] = {
             # Gateway hosts are per-region like every other subnet here; AWS and GCP
             # already carried this field and Azure was the only cloud without it.
             "jumpoint_subnet_id":     "azure_jumpoint_subnet_id",
+            # The network-tunnel address pool is carved out of jumpoint_subnet_id, so
+            # it is per-region for the same reason that subnet is: a pool pinned flat
+            # is outside the prefix in every other region, and the only symptom is the
+            # Gateway agent failing its ARP check on a lease. Blank derives from the
+            # subnet, which is region-correct with no configuration at all.
+            "jumpoint_tunnel_pool":   "azure_jumpoint_tunnel_pool",
             # An ACI container group attaches to a VNet-DELEGATED subnet, which is
             # regional — so a runner that must reach a private address in another
             # region needs that region's own subnet. AWS already had this as
