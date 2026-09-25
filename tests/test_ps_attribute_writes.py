@@ -90,8 +90,9 @@ class _User:
 
 
 def _post(asset_ids, attribute_id, *, assign=True, writer=None, db=None,
-          vocab_state="ok"):
+          vocab_state="ok", system_ids=(), sys_writer=None):
     writer = writer or _Writer()
+    sys_writer = sys_writer or _Writer()
     own = db is None
     db = db or SessionLocal()
 
@@ -99,21 +100,27 @@ def _post(asset_ids, attribute_id, *, assign=True, writer=None, db=None,
         return {"state": vocab_state, "types": _TYPES, "values_by_type": _VALUES,
                 "detail": "" if vocab_state == "ok" else "no API"}
 
+    # FIVE names, not four: the managed-system writer has to be patched too or a
+    # system-only payload reaches the real httpx call.
     real = (api.ps_api_service.read_attribute_vocabulary,
             api.ps_api_service.set_asset_attribute,
+            api.ps_api_service.set_managed_system_attribute,
             api._enabled, api.ps_api_service.configured)
     api.ps_api_service.read_attribute_vocabulary = _vocab
     api.ps_api_service.set_asset_attribute = writer
+    api.ps_api_service.set_managed_system_attribute = sys_writer
     api._enabled = lambda: True
     api.ps_api_service.configured = lambda: True
     try:
         payload = api.AssetAttributeRequest(asset_ids=asset_ids,
+                                            system_ids=list(system_ids),
                                             attribute_id=attribute_id, assign=assign)
         return asyncio.run(api.set_asset_attributes(payload, db=db,
                                                     current_user=_User())), writer
     finally:
         (api.ps_api_service.read_attribute_vocabulary,
          api.ps_api_service.set_asset_attribute,
+         api.ps_api_service.set_managed_system_attribute,
          api._enabled, api.ps_api_service.configured) = real
         if own:
             db.close()
@@ -247,8 +254,13 @@ def test_an_assignment_writes_one_audit_row_per_asset():
 def test_a_removal_is_a_different_action_so_audit_can_tell_them_apart():
     db = SessionLocal()
     try:
+        before = len(_rows(db, api.AUDIT_REMOVE))
         _post([73], 21, assign=False, db=db)
-        assert [r.target_vm for r in _rows(db, api.AUDIT_REMOVE)] == ["asset:73"]
+        rows = _rows(db, api.AUDIT_REMOVE)
+        # Sliced, not compared whole: this DB is shared across the module and every other
+        # removal test in it would otherwise have to be written before this one.
+        assert len(rows) - before == 1
+        assert rows[-1].target_vm == "asset:73"
     finally:
         db.close()
 
@@ -270,6 +282,73 @@ def test_both_audit_actions_are_dotted_so_the_prefix_filter_groups_them():
     assert api.AUDIT_ASSIGN.startswith("attributes.")
     assert api.AUDIT_REMOVE.startswith("attributes.")
     assert not api.AUDIT_ASSIGN.startswith("tags.")
+
+
+# ── 4b. managed systems ──────────────────────────────────────────────────────
+#
+# Everything this dashboard onboards into Password Safe lands as a MANAGED SYSTEM, not an
+# asset, so for most of the inventory page the asset-only write path was unreachable. The
+# two collections are different endpoints and neither substitutes for the other.
+
+def test_a_system_only_payload_writes_through_the_managed_system_endpoint():
+    sysw = _Writer()
+    out, assetw = _post([], 21, system_ids=[91, 92], sys_writer=sysw)
+    assert assetw.calls == [], "an asset write was made for a managed-system target"
+    assert [c[0] for c in sysw.calls] == [91, 92]
+    assert out["count"] == 2
+
+
+def test_a_mixed_payload_writes_each_id_to_its_own_collection():
+    """The normal shape for a host this dashboard onboarded: one resource is BOTH an
+    asset and a managed system, and the two records can disagree. Writing to only one is
+    how a removal ends up appearing to do nothing — the chip is still there, carried by
+    the other record."""
+    sysw = _Writer()
+    out, assetw = _post([64], 21, system_ids=[91], sys_writer=sysw)
+    assert [c[0] for c in assetw.calls] == [64]
+    assert [c[0] for c in sysw.calls] == [91]
+    assert out["count"] == 2
+    assert {(u["kind"], u["name"]) for u in out["updated"]} == {
+        ("asset", "64"), ("managed_system", "91")}
+
+
+def test_a_managed_system_audits_under_its_own_target_prefix():
+    """`asset:64` and `managed_system:64` are two different records that happen to share
+    an id, so /audit must not fold them together."""
+    db = SessionLocal()
+    try:
+        before = len(_rows(db, api.AUDIT_ASSIGN))
+        _post([64], 21, system_ids=[64], db=db)
+        rows = _rows(db, api.AUDIT_ASSIGN)
+        assert len(rows) - before == 2
+        assert {r.target_vm for r in rows[-2:]} == {"asset:64", "managed_system:64"}
+    finally:
+        db.close()
+
+
+def test_a_failing_system_is_named_with_its_kind():
+    """`name` stays the bare id — a `kind` beside it is what tells two records with the
+    same id apart, in the response and in the modal's failure list."""
+    out, _w = _post([], 21, system_ids=[91, 92], sys_writer=_Writer(fail_on=[91]))
+    assert [(f["kind"], f["name"]) for f in out["failed"]] == [("managed_system", "91")]
+    assert [(u["kind"], u["name"]) for u in out["updated"]] == [("managed_system", "92")]
+
+
+def test_the_cap_counts_both_lists_together():
+    """Fifty is a limit on what one click does to the tenant, not on either list."""
+    half = api.MAX_TARGETS // 2 + 1
+    code, detail, calls = _refused(list(range(half)), 21,
+                                   system_ids=list(range(100, 100 + half)))
+    assert code == 400 and str(api.MAX_TARGETS) in detail
+    assert calls == [], "a partial batch ran before the cap was checked"
+
+
+def test_an_id_shared_by_both_kinds_is_two_targets_not_a_duplicate():
+    sysw = _Writer()
+    out, assetw = _post([64, 64], 21, system_ids=[64], sys_writer=sysw)
+    assert [c[0] for c in assetw.calls] == [64], "the repeated asset was not de-duped"
+    assert [c[0] for c in sysw.calls] == [64]
+    assert out["count"] == 2
 
 
 # ── 5. gating ────────────────────────────────────────────────────────────────

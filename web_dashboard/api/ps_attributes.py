@@ -52,6 +52,12 @@ AUDIT_REMOVE = "attributes.remove"
 
 MAX_TARGETS = 50
 
+# Re-exported from the catalog rather than spelled again here: these two strings are also
+# the `kind` the inventory page reads off a matched object and the prefix of the audit
+# target, so a second copy is a rename waiting to half-land.
+KIND_ASSET = pac.KIND_ASSET
+KIND_SYSTEM = pac.KIND_SYSTEM
+
 
 def _enabled() -> bool:
     return config_service.get_bool("password_safe_enabled",
@@ -97,22 +103,35 @@ async def attribute_vocabulary(_: User = Depends(require_admin)):
 
 
 class AssetAttributeRequest(BaseModel):
-    """One attribute, applied to or removed from every target."""
-    asset_ids: List[int]
+    """One attribute, applied to or removed from every target.
+
+    TWO id lists, because a Password Safe attribute lives on an asset OR on a managed
+    system and the two are different collections. Both default to empty: a caller with
+    only managed systems must not have to send `asset_ids: []` to be understood.
+    """
+    asset_ids: List[int] = []
+    system_ids: List[int] = []
     attribute_id: int
     assign: bool = True
 
 
-@router.post("/asset-attributes", summary="Assign or remove one attribute across assets")
+@router.post("/asset-attributes",
+             summary="Assign or remove one attribute across assets and managed systems")
 async def set_asset_attributes(
     payload: AssetAttributeRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Apply one attribute change to one or many assets.
+    """Apply one attribute change to one or many Password Safe records.
 
-    Per-asset outcomes are reported BY NAME, never as a count: a bulk apply across a
+    Per-target outcomes are reported BY NAME, never as a count: a bulk apply across a
     selection is N independent calls, and "3 failed" means checking all of them.
+
+    One resource can be BOTH an asset and a managed system — that is the normal shape for
+    a host this dashboard onboarded — so a single row on the inventory page can produce
+    two targets here, and therefore two audit rows under two different `target_vm` keys.
+    That is deliberate: they are two records, they can disagree, and writing to only one
+    of them is how a removal appears to do nothing.
     """
     _require_ready()
     vocabulary = await _vocabulary()
@@ -124,43 +143,52 @@ async def set_asset_attributes(
         # make it — this particular attribute is not assignable. 400 reads as a typo.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    targets = list(dict.fromkeys(payload.asset_ids or []))   # de-duped, order kept
+    # (kind, id) pairs, de-duped with order kept. Nothing is filtered out: id 0 is a
+    # perfectly ordinary id to this route, and dropping falsey ones would quietly shrink
+    # a batch below the cap it was meant to be refused for.
+    targets = list(dict.fromkeys(
+        [(KIND_ASSET, i) for i in (payload.asset_ids or [])] +
+        [(KIND_SYSTEM, i) for i in (payload.system_ids or [])]))
     if not targets:
-        raise HTTPException(status_code=400, detail="No assets selected.")
+        raise HTTPException(status_code=400, detail="No targets selected.")
     if len(targets) > MAX_TARGETS:
         raise HTTPException(
             status_code=400,
-            detail=f"{len(targets)} assets selected; the limit for one change is "
+            detail=f"{len(targets)} records selected; the limit for one change is "
                    f"{MAX_TARGETS}.")
 
     updated, failed = [], []
-    for asset_id in targets:
+    for kind, object_id in targets:
+        # An explicit conditional, not a lookup table: a table built at import time
+        # would bind the function objects once, which both defeats a test's monkeypatch
+        # and hides the call from anything reading this module.
+        writer = (ps_api_service.set_asset_attribute if kind == KIND_ASSET
+                  else ps_api_service.set_managed_system_attribute)
         try:
-            await ps_api_service.set_asset_attribute(
-                asset_id, payload.attribute_id, assign=payload.assign)
-        except Exception as exc:  # noqa: BLE001 — one asset must not end the run
-            logger.warning("Password Safe attribute change failed for asset %s",
-                           asset_id, exc_info=True)
-            # Only OUR message reaches the browser. `PSApiError` is raised by
-            # `set_asset_attribute` with a fixed string and a numeric status code, which
-            # is the part an operator can act on. Anything else — an httpx transport
-            # error, a bug — carries a message this module did not write and must not
-            # forward (CodeQL py/stack-trace-exposure); it stays in the log above, which
-            # is where someone debugging it should be looking anyway.
+            await writer(object_id, payload.attribute_id, assign=payload.assign)
+        except Exception as exc:  # noqa: BLE001 — one record must not end the run
+            logger.warning("Password Safe attribute change failed for %s %s",
+                           kind, object_id, exc_info=True)
+            # Only OUR message reaches the browser. `PSApiError` is raised by the writer
+            # with a fixed string and a numeric status code, which is the part an
+            # operator can act on. Anything else — an httpx transport error, a bug —
+            # carries a message this module did not write and must not forward (CodeQL
+            # py/stack-trace-exposure); it stays in the log above, which is where someone
+            # debugging it should be looking anyway.
             failed.append({
-                "name": str(asset_id),
+                "name": str(object_id), "kind": kind,
                 "error": (str(exc) if isinstance(exc, ps_api_service.PSApiError)
                           else "the attribute change failed — see the dashboard log")})
             continue
-        updated.append({"name": str(asset_id),
+        updated.append({"name": str(object_id), "kind": kind,
                         "type": type_row["name"], "value": value["value"]})
         # After the call, never before: a row claiming a change the tenant refused is
-        # worse than no row. One per asset, so /audit's target filter answers "what has
+        # worse than no row. One per record, so /audit's target filter answers "what has
         # this dashboard written about this asset".
         job_service.log_audit(
             db, current_user.username,
             AUDIT_ASSIGN if payload.assign else AUDIT_REMOVE,
-            target_vm=f"asset:{asset_id}",
+            target_vm=f"{kind}:{object_id}",
             details={"attribute_id": payload.attribute_id,
                      "type": type_row["name"], "value": value["value"]})
 
