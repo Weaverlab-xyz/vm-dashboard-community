@@ -437,9 +437,7 @@ window.bookInstead = async function (e, retry) {
     const when = String(offer.next_start || '').replace('T', ' ').slice(0, 16);
     const ok = confirm(
         (e.message || 'That change is outside the allowed window.')
-        + '
-
-Schedule it for the next "' + offer.window_name + '" window'
+        + '\n\nSchedule it for the next "' + offer.window_name + '" window'
         + (when ? ' (' + when + ' UTC)' : '') + ' instead?');
     if (!ok) return false;
     await retry(offer.change_window_id);
@@ -690,9 +688,7 @@ window.bulkPowerState = function () {
             // A booked batch is a different question from an immediate one, and the
             // confirm is the last place to notice you left the picker on.
             if (question && this.bulkPowerScheduled && this.bulkPowerRunAt) {
-                question += '
-
-This will be SCHEDULED for '
+                question += '\n\nThis will be SCHEDULED for '
                           + this.bulkPowerRunAt.replace('T', ' ')
                           + ' (' + this.bulkPowerTimezone + '), not run now.';
             }
