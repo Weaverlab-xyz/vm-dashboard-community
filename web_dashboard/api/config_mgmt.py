@@ -770,6 +770,9 @@ async def _run_agent_ansible(payload: "RunRequest", db, current_user):
     from ..services import ansible_run_gate as _gate
     _refusal = _gate.check_permission(
         wants_secret=bool(payload.secret_vars),
+        # This path DOES carry epml_token_var (agent_ansible_meta.RUN_META_KEYS), so the
+        # bundle mints a real token for it — the permission has to be checked here too.
+        wants_epml_token=bool(payload.epml_token_var),
         can_use_secrets=_can_use_secrets(current_user),
         has_managed=False, password_safe_enabled=True)
     if _refusal:
@@ -820,10 +823,12 @@ async def _run_agent_ansible(payload: "RunRequest", db, current_user):
         db, job_type="agent_ansible", created_by=current_user.username,
         workgroup="ansible", metadata=meta, batch_id=payload.batch_id,
         agent_id=payload.agent_id, **_schedule_kwargs(payload, db))
-    if payload.secret_vars:
+    if payload.secret_vars or payload.epml_token_var:
         job_service.log_audit(
             db, current_user.username, "ansible_secret_use",
             details={"vars": sorted(payload.secret_vars.keys()), "asset": payload.asset,
+                     # The var NAME, never the token — the same rule the job row obeys.
+                     "epml_token_var": payload.epml_token_var,
                      "target": f"agent:{overrides['target_host']}"})
     return {"job_id": job.id, "status": "queued"}
 
@@ -1029,6 +1034,9 @@ async def run_playbook(
                         or payload.secret_ssh_key_source or has_managed)
     _refusal = _gate.check_permission(
         wants_secret=wants_secret,
+        # Separate from wants_secret on purpose: nothing has to pre-exist in a cloud
+        # store for a minted token, so the residency check below must NOT widen with it.
+        wants_epml_token=bool(payload.epml_token_var),
         can_use_secrets=_can_use_secrets(current_user),
         has_managed=has_managed,
         # Short-circuited, so a run with no managed account still costs no config read
@@ -1110,7 +1118,7 @@ async def run_playbook(
         batch_id=payload.batch_id,
         **_schedule_kwargs(payload, db),
     )
-    if wants_secret:
+    if wants_secret or payload.epml_token_var:
         # Audit the use — kinds + var names only, never the source refs or values.
         kinds = []
         if payload.secret_vars:
@@ -1119,6 +1127,8 @@ async def run_playbook(
             kinds.append("become-password")
         if payload.secret_ssh_key_source:
             kinds.append("ssh-key")
+        if payload.epml_token_var:
+            kinds.append("epml-token (minted)")
         # Managed-account use — record kind + account name(s) + system, never the credential.
         managed_accts = []
         if payload.managed_account:
@@ -1135,6 +1145,8 @@ async def run_playbook(
             db, current_user.username, "ansible_secret_use",
             details={"kinds": kinds, "vars": sorted(payload.secret_vars.keys()),
                      "managed_accounts": managed_accts,
+                     # The var NAME, never the token — the same rule the job row obeys.
+                     "epml_token_var": payload.epml_token_var,
                      "asset": payload.asset, "target": payload.target})
     # No background task: the job is a queued row now, claimed by jobs_worker. Its
     # parameters live in the metadata written above, so a worker restart resumes it

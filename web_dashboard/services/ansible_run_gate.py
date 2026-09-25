@@ -54,8 +54,16 @@ def effective_runner(cloud: str, *, cfg) -> str:
 
 
 def check_permission(*, wants_secret: bool, can_use_secrets: bool,
-                     has_managed: bool, password_safe_enabled: bool) -> Refusal | None:
+                     has_managed: bool, password_safe_enabled: bool,
+                     wants_epml_token: bool = False) -> Refusal | None:
     """May this caller use a credential in a run at all, and is the feature it needs on?
+
+    ``wants_epml_token`` is a SECOND way to spend a credential and is deliberately its
+    own argument rather than folded into ``wants_secret``: nothing is picked from the
+    secret store, so none of the store-residency machinery applies, but the dashboard
+    mints a live BeyondTrust installation token server-side and hands it to a play the
+    requester chose. It gets its own sentence because an operator refused for a field
+    they did not touch cannot act on the one above.
 
     Split from :func:`check_runner_capability` rather than bundled, because
     ``api/config_mgmt`` has a THIRD check between the two — ``_validate_cloud_secret_stores``
@@ -68,6 +76,12 @@ def check_permission(*, wants_secret: bool, can_use_secrets: bool,
         return Refusal(
             403,
             "Using a Secrets-Management secret in a run requires the 'secrets:use' permission.")
+    if wants_epml_token and not can_use_secrets:
+        return Refusal(
+            403,
+            "The 'secrets:use' permission is required to bind an EPM for Linux "
+            "installation token to a run variable — the dashboard mints a live token "
+            "for it at dispatch.")
     if has_managed and not password_safe_enabled:
         return Refusal(
             400,
@@ -105,6 +119,7 @@ def check_runner_capability(*, needs_ephemeral_store: bool = False,
 
 def check_credentials(*, wants_secret: bool, can_use_secrets: bool,
                       has_managed: bool, password_safe_enabled: bool,
+                      wants_epml_token: bool = False,
                       needs_ephemeral_store: bool = False,
                       ephemeral_enabled: bool = False,
                       runner: str = "",
@@ -119,6 +134,7 @@ def check_credentials(*, wants_secret: bool, can_use_secrets: bool,
     return check_permission(
         wants_secret=wants_secret, can_use_secrets=can_use_secrets,
         has_managed=has_managed, password_safe_enabled=password_safe_enabled,
+        wants_epml_token=wants_epml_token,
     ) or check_runner_capability(
         needs_ephemeral_store=needs_ephemeral_store,
         ephemeral_enabled=ephemeral_enabled, runner=runner,

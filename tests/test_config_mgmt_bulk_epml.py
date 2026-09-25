@@ -121,6 +121,7 @@ def _full_payload(**over):
         run_timezone="America/New_York",
         change_window_id="saturday-night",
         epml_token_var=TOKEN_VAR,
+        become_method="pbrun",
     )
     base.update(over)
     return cm.BulkRunRequest(**base)
@@ -162,9 +163,19 @@ def test_every_shared_field_survives_the_fan_out():
 
     shared = set(cm.RunRequest.model_fields) & set(cm.BulkRunRequest.model_fields)
     # A derivation that silently finds nothing would pass forever; pin the floor.
-    assert len(shared) >= 13, (
+    assert len(shared) >= 14, (
         f"only {len(shared)} shared fields found ({sorted(shared)}) — did one of the "
         f"models move or get renamed?")
+
+    # A field left at its model default in _full_payload is a field this guard does not
+    # actually cover: dropping it would compare equal on both sides. Fail loudly rather
+    # than shrink quietly — become_method was added to both models by an unrelated PR
+    # and was silently uncovered here until this check was added.
+    unset = [f for f in sorted(shared)
+             if getattr(payload, f) == cm.BulkRunRequest.model_fields[f].get_default()]
+    assert not unset, (
+        f"_full_payload leaves {unset} at the model default, so the copy check below "
+        f"cannot detect them being dropped — give each a distinctive value")
 
     for field in sorted(shared):
         sent, arrived = getattr(payload, field), getattr(captured, field)
@@ -178,7 +189,7 @@ def test_the_fan_out_copy_is_still_field_by_field():
     """The guard above compares what the copy produced, so it only means something
     while the copy is still explicit. A ``**payload.model_dump()`` spread would make
     it pass unconditionally — and would quietly forward inventory_ids too."""
-    tree = ast.parse(inspect.cleandoc(inspect.getsource(cm.run_playbook_bulk)))
+    tree = ast.parse(inspect.getsource(cm.run_playbook_bulk))
     calls = [n for n in ast.walk(tree)
              if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "RunRequest"]
     assert len(calls) == 1, f"expected one RunRequest(...) construction, found {len(calls)}"
