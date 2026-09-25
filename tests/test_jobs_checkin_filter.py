@@ -56,13 +56,26 @@ _JOBSVC = os.path.join(_ROOT, "web_dashboard", "services", "job_service.py")
 _DB = os.path.join(_ROOT, "web_dashboard", "database.py")
 _PAGE = os.path.join(_ROOT, "web_dashboard", "templates", "jobs", "list.html")
 
+# The only legitimate reason to skip is a bare interpreter with no app deps, so probe
+# for those BY NAME and let every other ImportError propagate as a failure. A blanket
+# `except Exception: skip` around the first-party imports below would turn "job_service
+# no longer imports" — the exact regression half this file exists to catch — into a
+# SKIP that exits 0 and reads as a pass. See tests/test_import_guard_narrowness.py.
 try:
-    from web_dashboard.database import Base, Job, SessionLocal, engine
-    from web_dashboard.services import agent_hypervisor_meta as ahm
-    from web_dashboard.services import job_service
-except Exception as exc:  # noqa: BLE001
-    print(f"SKIP: {exc}")
-    sys.exit(0)
+    import pydantic          # noqa: F401
+    import pydantic_settings  # noqa: F401
+    import sqlalchemy        # noqa: F401
+except ModuleNotFoundError as exc:  # pragma: no cover — bare interpreter
+    try:
+        import pytest
+        pytest.skip(f"app deps unavailable: {exc}", allow_module_level=True)
+    except ModuleNotFoundError:
+        print(f"SKIP: {exc}")
+        sys.exit(0)
+
+from web_dashboard.database import Base, Job, SessionLocal, engine  # noqa: E402
+from web_dashboard.services import agent_hypervisor_meta as ahm     # noqa: E402
+from web_dashboard.services import job_service                      # noqa: E402
 
 Base.metadata.create_all(bind=engine)
 
