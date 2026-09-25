@@ -12,7 +12,9 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ..database import Job, AuditLog
-from . import audit_chain, retry_policy
+# Stdlib-only and pure by design (see its module docstring), so this is safe at import
+# time where most sibling services are not — CHECKIN_VERBS below reads its verb lists.
+from . import agent_hypervisor_meta, audit_chain, retry_policy
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,42 @@ ACTIVE_STATUSES = ("queued", "pending", "running")
 #
 # Display and retention only — nothing authorizes off this tuple.
 ROUTINE_JOB_TYPES = ("expiry_sweep", "schedule_sweep")
+
+# The same noise, one level down. A job type here is unattended for SOME of its rows and
+# operator work for the rest, told apart by the verb in its metadata — so it cannot join
+# ROUTINE_JOB_TYPES above, which hides a whole type.
+#
+# ``agent_hypervisor`` is the case: an ``inventory_sync`` is a timer polling a hypervisor
+# every 30 minutes per connection, paged, so ONE 3000-VM vCenter writes several rows per
+# pass and a busy estate buries the first page of /jobs faster than the sweeps do. A
+# ``power_on`` is the same job type, because it is the same agent handler under the same
+# grant — and it is an operator's record of having stopped a production VM. Hiding by
+# type would hide both, which is why :data:`~web_dashboard.database.Job.is_checkin` is a
+# column and this table is keyed on the verb.
+#
+# Read at CREATE time only (:func:`create_job` stamps the column). Changing it does not
+# reclassify rows already written, which is the honest behaviour: the column records what
+# the job was understood to be when it was enqueued.
+#
+# Display only. Unlike ROUTINE_JOB_TYPES, nothing prunes off this — a check-in row is
+# hidden, never deleted, so the history stays complete for anyone who ticks the box.
+CHECKIN_VERBS = {
+    "agent_hypervisor": agent_hypervisor_meta.READ_VERBS,
+}
+
+
+def is_checkin(job_type: str, metadata: Optional[dict]) -> bool:
+    """Is this an unattended check-in, per :data:`CHECKIN_VERBS`?
+
+    Pure, and deliberately conservative: an absent or unrecognised verb is NOT a
+    check-in. ``agent_hypervisor_meta.normalize`` falls an unknown verb back to
+    ``inventory_sync``, so the opposite default would quietly classify a malformed
+    power op as noise and hide it.
+    """
+    verbs = CHECKIN_VERBS.get(job_type or "")
+    if not verbs:
+        return False
+    return str((metadata or {}).get("verb") or "") in verbs
 
 
 def claimable_now(now: Optional[datetime] = None) -> list:
@@ -150,6 +188,18 @@ def create_job(
         change_window_id=change_window_id or None,
         job_schedule_id=job_schedule_id or None,
         approval_required=bool(approval_required) or None,
+        # Derived here, never passed in, for the reason agent_id is forced here: this
+        # is the one function every job row passes through, so a new caller that
+        # enqueues an inventory_sync cannot forget to classify it and quietly start
+        # spamming /jobs again.
+        #
+        # Three-valued on purpose, and the third value is what makes the backfill
+        # terminate: True/False mean "classified", NULL means "a type that is never a
+        # check-in, so nobody looked". If a power op were written NULL too,
+        # :func:`backfill_job_checkins` could not tell it from a row that predates the
+        # column and would re-scan every one of them on every boot, forever.
+        is_checkin=(is_checkin(job_type, metadata)
+                    if (job_type or "") in CHECKIN_VERBS else None),
     )
     if metadata:
         job.metadata_dict = metadata
@@ -578,6 +628,69 @@ def schedule_state(job) -> str:
     return ""
 
 
+def backfill_job_checkins(db: Session, batch: int = 200) -> int:
+    """One-time: classify pre-existing rows of the :data:`CHECKIN_VERBS` job types.
+
+    Returns the number of rows written. Without this the feature does nothing on an
+    existing install for months: :func:`list_jobs` hides on the ``is_checkin`` column,
+    every row that predates the column reads NULL, and NULL means "show it" — so the
+    thousands of inventory syncs already on /jobs, which are the entire reason the
+    filter exists, would stay exactly where they are.
+
+    Convergent and idempotent, deriving that from the data rather than from a marker
+    row: it only ever writes rows where the column IS NULL, it writes every row it
+    reads (``False`` as readily as ``True``), and the value is a pure function of
+    metadata that does not change. Two processes racing compute the same answer, so it
+    takes no advisory lock — the one thing that could reintroduce the init_db deadlock.
+
+    Batched, in SMALL batches, because the candidate set is unbounded in a way the other
+    backfills in this tree are not — and so is each row. It is every hypervisor job ever
+    written (four connections syncing every 30 minutes for a year is five figures), and
+    the verb this has to read shares ``extra_data`` with the inventory page the agent
+    handed back, which ``agent_service.MAX_RESULT_BYTES`` caps at 256 KB *each*. A
+    thousand-row batch is therefore a quarter of a gigabyte of JSON at startup on a
+    container sized for none of it. 200 bounds the peak and the rows are freed between
+    passes; an interrupted run costs nothing, because the next boot picks up exactly the
+    rows it did not reach.
+
+    Reads two columns and writes with a bulk UPDATE rather than loading ORM rows, for
+    the same reason: the identity map would hold every page of every sync it touched
+    until the session closed.
+    """
+    types = tuple(CHECKIN_VERBS)
+    if not types:
+        return 0
+    written = 0
+    while True:
+        rows = (db.query(Job.id, Job.job_type, Job.extra_data)
+                  .filter(Job.job_type.in_(types), Job.is_checkin.is_(None))
+                  .limit(batch).all())
+        if not rows:
+            break
+        verdicts = {True: [], False: []}
+        for job_id, job_type, extra in rows:
+            try:
+                meta = json.loads(extra) if extra else {}
+            except (TypeError, ValueError):
+                meta = {}          # unparseable metadata is not a check-in, per is_checkin
+            verdicts[is_checkin(job_type, meta if isinstance(meta, dict) else {})
+                     ].append(job_id)
+        for verdict, ids in verdicts.items():
+            if ids:
+                (db.query(Job).filter(Job.id.in_(ids))
+                   .update({Job.is_checkin: verdict}, synchronize_session=False))
+        db.commit()
+        written += len(rows)
+        # Every row above was written non-NULL, so the next pass cannot return the same
+        # ones and this terminates. Belt and braces: a short page is the last page, and
+        # bailing on one means a column that silently refused a write can't spin here.
+        if len(rows) < batch:
+            break
+    if written:
+        logger.info("job is_checkin backfill: classified %s pre-existing row(s)", written)
+    return written
+
+
 def get_job(db: Session, job_id: str) -> Optional[Job]:
     """Fetch a single job by ID."""
     return db.query(Job).filter(Job.id == job_id).first()
@@ -592,6 +705,7 @@ def list_jobs(
     workgroup: Optional[str] = None,
     batch_id: Optional[str] = None,
     include_routine: bool = True,
+    include_checkins: bool = True,
     dead_lettered: bool = False,
     scheduled: bool = False,
 ) -> tuple[List[Job], int]:
@@ -604,6 +718,19 @@ def list_jobs(
     It excludes only ``completed`` ones, so a failed sweep still surfaces. Defaults to True
     so this stays a display choice made by the caller that renders a list, not a filter
     silently applied to every count in the app.
+
+    ``include_checkins=False`` is the same idea one level down, for the unattended rows
+    of a job type whose OTHER rows are operator work — today the hypervisor
+    ``inventory_sync`` (see :data:`CHECKIN_VERBS`). It reads the ``is_checkin`` column
+    rather than the type, so a ``power_on`` sharing that type is never hidden, and it
+    excludes only ``completed`` ones for the same reason routine does: a sync that
+    FAILED is a connection an operator needs to look at. Defaults to True, again so the
+    hiding is a choice made by the caller rendering a list.
+
+    The two flags are independent on purpose. They are different noise with different
+    fixes — sweeps are the dashboard's own housekeeping, check-ins are a cadence an
+    operator sets per connection — and someone diagnosing a stale inventory wants the
+    syncs without 48 rows/day of expiry sweeps on top.
 
     ``dead_lettered=True`` narrows to jobs that used every retry and failed anyway. That is
     a QUERY, not a status: ``failed`` with ``attempts > 0``. Adding a fourth status would
@@ -627,6 +754,12 @@ def list_jobs(
             (Job.scheduled_for.isnot(None)) | (Job.approval_required.is_(True)))
     if not include_routine:
         query = query.filter(~and_(Job.job_type.in_(ROUTINE_JOB_TYPES),
+                                   Job.status == "completed"))
+    if not include_checkins:
+        # `is_(True)` rather than `== True`, so the NULL every row that predates the
+        # column carries passes — the same reason claimable_now spells its clauses that
+        # way. A NULL here means "was never classified", which must read as "show it".
+        query = query.filter(~and_(Job.is_checkin.is_(True),
                                    Job.status == "completed"))
     if status:
         # Accept a comma-separated list (e.g. "pending,running") so a single

@@ -1,0 +1,257 @@
+---
+# Entitle an Ansible run to escalate through pbrun on a BeyondTrust Privilege
+# Management for Unix & Linux (PMUL) policy server.
+#
+# WHY THIS EXISTS
+#
+# Ansible's `become` wraps every escalated task in a success probe. The two become
+# plugins wrap it DIFFERENTLY, and a role written for one does not match the other:
+#
+#   sudo  → sudo ... -u root /bin/sh -c 'echo BECOME-SUCCESS-xxxx ; python3 …'
+#   pbrun → pbrun <flags> -u root 'echo BECOME-SUCCESS-xxxx ; python3 …'
+#
+# pbrun's plugin builds the probe with noexe=True, so the `/bin/sh -c` is absent. A
+# Role Based Policy that only permits `/bin/sh -c echo BECOME-SUCCESS*` therefore
+# matches sudo runs and REJECTS pbrun ones. This play adds the bare form alongside it,
+# so the role covers both.
+#
+# Run it with the dashboard's "Become method" left on the default, or against a host
+# where your account already has root: it is the play that REPAIRS the pbrun escalation
+# path, so it cannot rely on that path already working.
+#
+# TARGET: the POLICY SERVER (where the RBP database lives), not the managed client.
+#
+#   extra_vars:
+#     pmul_role_name: "Ansible Tasks"       # the role to entitle
+#     pmul_apply: true                      # false = report the change, write nothing
+#
+# SAFETY
+#
+#   * Exports a timestamped backup of the RBP before writing.
+#   * Idempotent — re-running once the entry is present changes nothing.
+#   * Reads the role and REFUSES TO WRITE unless the reply parses and the role's command
+#     list is found. A wrong pbdbutil flag therefore fails the play; it never writes a
+#     half-understood document back into the policy database.
+#   * Honours --check: with `pmul_apply: false` (or check mode) it reports the diff only.
+#
+# THE ONE THING TO VERIFY FOR YOUR PMUL VERSION
+#
+# `pbdbutil`'s RBP sub-commands have varied across releases. The three commands below are
+# variables for that reason — check them against `pbdbutil --help` on your policy server
+# and override if they differ. Everything else is derived from what the server returns.
+
+- hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    pmul_role_name: "Ansible Tasks"
+    # The entitlement to add. A pbrun-shaped BECOME-SUCCESS probe.
+    pmul_become_probe: "echo BECOME-SUCCESS*"
+    pmul_apply: true
+
+    pmul_pbdbutil: /opt/pbul/bin/pbdbutil
+    pmul_backup_dir: /var/tmp
+    # Override these if your release names them differently.
+    pmul_cmd_export: "{{ pmul_pbdbutil }} --rbp -e"
+    pmul_cmd_get_roles: "{{ pmul_pbdbutil }} --rbp -g role"
+    pmul_cmd_update: "{{ pmul_pbdbutil }} --rbp -u role"
+
+  tasks:
+    - name: ── Check this host is a PMUL policy server ─────────────────────────
+      ansible.builtin.stat:
+        path: "{{ pmul_pbdbutil }}"
+      register: pmul_bin
+
+    - name: Fail with an actionable message when pbdbutil is missing
+      ansible.builtin.assert:
+        that: pmul_bin.stat.exists
+        fail_msg: >-
+          {{ pmul_pbdbutil }} not found. This play edits the Role Based Policy, so it
+          must run against the PMUL POLICY SERVER — not a managed client, and not the
+          host you were trying to configure with Ansible. Override pmul_pbdbutil if the
+          install lives elsewhere.
+
+    - name: ── Read the current roles ──────────────────────────────────────────
+      ansible.builtin.command: "{{ pmul_cmd_get_roles }}"
+      register: pmul_roles_raw
+      changed_when: false
+      failed_when: false
+
+    - name: Fail when the policy database could not be read
+      ansible.builtin.assert:
+        that:
+          - pmul_roles_raw.rc == 0
+          - (pmul_roles_raw.stdout | default('') | trim) | length > 0
+        fail_msg: >-
+          `{{ pmul_cmd_get_roles }}` exited {{ pmul_roles_raw.rc }}
+          ({{ (pmul_roles_raw.stderr | default('')) [:300] }}). This sub-command has
+          varied across PMUL releases — check `{{ pmul_pbdbutil }} --help` and override
+          pmul_cmd_get_roles. Nothing has been written.
+
+    - name: Parse the reply as JSON
+      ansible.builtin.set_fact:
+        pmul_roles_doc: "{{ pmul_roles_raw.stdout | from_json }}"
+      failed_when: false
+
+    - name: Fail when the reply was not JSON
+      ansible.builtin.assert:
+        that: pmul_roles_doc is defined
+        fail_msg: >-
+          `{{ pmul_cmd_get_roles }}` did not return JSON. Override pmul_cmd_get_roles
+          with the form your release uses. Nothing has been written.
+
+    # The list of roles may sit at the top level or under a wrapper key, and the key
+    # holding a role's commands has been `cmd`, `cmds` and `commands` across releases.
+    # Both are DISCOVERED rather than assumed — the play mutates whatever the server
+    # gave it, so it does not depend on a schema this file had to guess.
+    - name: ── Locate the role ────────────────────────────────────────────────
+      # The roles come back either as a bare list or wrapped under a key. Both shapes are
+      # handled explicitly — no cleverness, because a wrong guess here is what would send
+      # a malformed document back into the policy database.
+      ansible.builtin.set_fact:
+        pmul_role_list: >-
+          {{ pmul_roles_doc if pmul_roles_doc is not mapping
+             else (pmul_roles_doc.roles
+                   | default(pmul_roles_doc.role, true)
+                   | default([], true)) }}
+
+    - name: Select the named role
+      ansible.builtin.set_fact:
+        pmul_role: >-
+          {{ pmul_role_list | selectattr('name', 'defined')
+                            | selectattr('name', 'equalto', pmul_role_name)
+                            | list | first | default({}, true) }}
+
+    - name: Fail when the role does not exist
+      ansible.builtin.assert:
+        that: pmul_role
+        fail_msg: >-
+          No role named {{ pmul_role_name | quote }} in the policy database. Roles found:
+          {{ pmul_role_list | selectattr('name', 'defined') | map(attribute='name')
+             | list | join(', ') | default('none', true) }}.
+
+    - name: Find the key that holds this role's commands
+      ansible.builtin.set_fact:
+        pmul_cmd_key: >-
+          {{ ['cmd', 'cmds', 'commands'] | select('in', pmul_role.keys() | list)
+             | list | first | default('', true) }}
+
+    - name: Fail when the command list cannot be identified
+      ansible.builtin.assert:
+        that: pmul_cmd_key | length > 0
+        fail_msg: >-
+          Could not find the command list on role {{ pmul_role_name | quote }} — its keys
+          are {{ pmul_role.keys() | list | join(', ') }}. Refusing to write a document
+          this play does not understand. Add the entitlement by hand, or extend the
+          candidate key list above.
+
+    - name: ── Work out whether anything needs doing ──────────────────────────
+      ansible.builtin.set_fact:
+        pmul_cmds_before: "{{ pmul_role[pmul_cmd_key] | default([], true) }}"
+
+    - name: Compute the new command list
+      ansible.builtin.set_fact:
+        pmul_cmds_after: "{{ pmul_cmds_before + [pmul_become_probe] }}"
+        pmul_needs_change: "{{ pmul_become_probe not in pmul_cmds_before }}"
+
+    - name: Report the pending change
+      ansible.builtin.debug:
+        msg: >-
+          {{ ('Role ' ~ pmul_role_name ~ ' already permits ' ~ pmul_become_probe
+              ~ ' — nothing to do.') if not pmul_needs_change
+             else ('Will add ' ~ pmul_become_probe ~ ' to ' ~ pmul_role_name
+                   ~ '. Before: ' ~ (pmul_cmds_before | join(', '))) }}
+
+    # ── Everything below only runs when a change is actually needed ────────────
+
+    - name: ── Back up the policy before writing ──────────────────────────────
+      ansible.builtin.shell:
+        cmd: >-
+          {{ pmul_cmd_export }} > {{ pmul_backup_dir }}/rbp-backup-{{
+          ansible_date_time.iso8601_basic_short | default('manual') }}.json
+      register: pmul_backup
+      when:
+        - pmul_needs_change
+        - pmul_apply | bool
+        - not ansible_check_mode
+      changed_when: pmul_backup.rc == 0
+
+    - name: Fail when the backup did not succeed
+      ansible.builtin.assert:
+        that: pmul_backup.rc == 0
+        fail_msg: >-
+          The RBP export failed ({{ (pmul_backup.stderr | default(''))[:300] }}), so the
+          policy has NOT been modified. Check pmul_cmd_export, or take a backup by hand
+          before re-running.
+      when:
+        - pmul_needs_change
+        - pmul_apply | bool
+        - not ansible_check_mode
+
+    - name: ── Write the entitlement back ─────────────────────────────────────
+      # The role is handed back exactly as it was read, with one array replaced — which
+      # is why no field this play does not understand can be lost in the round trip.
+      ansible.builtin.command:
+        cmd: "{{ pmul_cmd_update }}"
+        stdin: "{{ pmul_role | combine({pmul_cmd_key: pmul_cmds_after}) | to_json }}"
+      register: pmul_write
+      when:
+        - pmul_needs_change
+        - pmul_apply | bool
+        - not ansible_check_mode
+      changed_when: pmul_write.rc == 0
+      failed_when: pmul_write.rc != 0
+
+    - name: ── Verify by reading the role back ────────────────────────────────
+      ansible.builtin.command: "{{ pmul_cmd_get_roles }}"
+      register: pmul_verify_raw
+      changed_when: false
+      when:
+        - pmul_needs_change
+        - pmul_apply | bool
+        - not ansible_check_mode
+
+    - name: Confirm the entitlement is present
+      # A substring check on the re-read, not a JSON query: `json_query` needs
+      # community.general plus jmespath on the target, and a dependency this play does
+      # not otherwise have is not worth it to confirm one string round-tripped.
+      ansible.builtin.assert:
+        that: pmul_become_probe in (pmul_verify_raw.stdout | default(''))
+        fail_msg: >-
+          The write reported success but {{ pmul_become_probe }} is not in the role when
+          read back. The backup in {{ pmul_backup_dir }} is the pre-change state.
+      when:
+        - pmul_needs_change
+        - pmul_apply | bool
+        - not ansible_check_mode
+
+    - name: ── Report ──────────────────────────────────────────────────────────
+      ansible.builtin.debug:
+        msg: >-
+          {{ ('No change — ' ~ pmul_role_name ~ ' already permits the pbrun probe.')
+             if not pmul_needs_change
+             else (('DRY RUN — would add ' ~ pmul_become_probe ~ ' to ' ~ pmul_role_name
+                    ~ '. Set pmul_apply: true to write it.')
+                   if (not (pmul_apply | bool) or ansible_check_mode)
+                   else (pmul_role_name ~ ' now permits ' ~ pmul_become_probe
+                         ~ '. Ansible runs using become_method pbrun will escalate. '
+                         ~ 'Backup written to ' ~ pmul_backup_dir ~ '.')) }}
+
+    # WHAT THIS DOES NOT DO, deliberately:
+    #
+    # It does not REMOVE the existing `/bin/sh -c echo BECOME-SUCCESS*` entry. That form
+    # is sudo's, and keeping both means the role works whichever become method a run
+    # uses — and means this play is safe to apply before you have confirmed which shape
+    # your Ansible emits.
+    #
+    # It does not narrow the entitlement. `echo BECOME-SUCCESS*` permits ANY command
+    # after the probe token, as root, because that is what Ansible's become contract
+    # requires: under `become`, every escalated task arrives at pbrun as the same wrapper
+    # running `python3 AnsiballZ_<module>.py`. PBUL never sees `dnf install` or
+    # `systemctl restart`, so per-command role entitlements do not constrain an Ansible
+    # run — permitting the wrapper permits everything Ansible chooses to do. This is the
+    # same exposure the pre-existing sudo entry already grants, not a new one.
+    #
+    # If you need PMUL to gate each action, do not use `become` at all: have tasks invoke
+    # `pbrun <cmd>` explicitly via command/shell, and the granular role command lists do
+    # the work with pbreplay showing per-command decisions.

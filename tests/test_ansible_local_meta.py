@@ -42,6 +42,7 @@ def _payload(**over):
                 secret_become_source="cfg:become_key",
                 secret_ssh_key_source="bt_safe://prod/key",
                 managed_account=None, managed_become=None,
+                become_method="pbrun",
                 epml_token_var="epml_installation_token",
                 asset_backend="s3")
     base.update(over)

@@ -65,6 +65,13 @@ FLAGS = ("password_safe_enabled", "pra_enabled", "epml_enabled")
 # service-account key SA: mode embeds in the functional account, which the composite
 # builder had been leaving out (segment 1 was hardcoded `-`), making SA a dead option
 # for the one engine that cannot avoid it.
+# `clouddb_ansible_use_ps_account` is newer still, and sits on the Password Safe panel
+# because it decides WHICH Password Safe object a run authenticates as: on, an Ansible
+# run against a provisioned database connects as that database's own managed account
+# instead of the stored admin, which is what gives a bulk Config-Management run a
+# distinct credential per database. It defaults off because that account is created
+# privilege-free (see config.py), so enabling it without granting the account anything
+# turns working runs into permission errors.
 # A key that vanishes from all three models is a field an
 # operator can no longer set; one that appears on two breaks the union-check equivalence
 # test_setup_feature_roundtrip documents in its own docstring.
@@ -88,6 +95,7 @@ clouddb_ps_functional_account_mode_gcp
 clouddb_ps_functional_account_mode_gcp_sqlserver
 clouddb_ps_functional_account_mysql clouddb_ps_functional_account_sqlserver
 clouddb_ps_pravault_functional_account clouddb_ps_self_rotation
+clouddb_ansible_use_ps_account
 clouddb_ps_import_workgroup clouddb_ps_import_default_cloud clouddb_ps_import_max_systems
 clouddb_ps_import_platform_map clouddb_db_client_image_postgres
 clouddb_db_client_image_mysql clouddb_db_client_image_sqlserver

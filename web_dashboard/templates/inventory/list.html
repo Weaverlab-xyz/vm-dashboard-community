@@ -115,6 +115,48 @@
           </template>
         </select>
       </div>
+
+      {# Column picker. Lives HERE, not in the table card: that card is overflow-hidden
+         (and overflow-x:auto, from base.html), and an absolutely-positioned panel inside
+         it renders clipped — invisible but still hit-testable, so it reads as a dead
+         button. z-20 rather than the dashboard lens's z-30, because this sits far enough
+         down the page to meet the sticky nav once scrolled. #}
+      <div class="relative ml-auto" @keydown.escape="colsOpen = false">
+        <button @click="colsOpen = !colsOpen" :aria-expanded="colsOpen"
+                title="Choose which columns this table shows"
+                class="inline-flex items-center gap-2 text-sm border border-gray-300 bg-white
+                       hover:bg-gray-50 text-gray-700 px-3 py-1.5 rounded-lg transition">
+          Columns
+          <span x-show="hiddenColCount()" x-cloak
+                class="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-500"
+                x-text="hiddenColCount() + ' hidden'"></span>
+        </button>
+
+        <div x-show="colsOpen" x-cloak @click.outside="colsOpen = false"
+             class="absolute right-0 mt-1 w-60 bg-white border border-gray-200 rounded-lg
+                    shadow-lg z-20 py-1">
+          <p class="px-3 py-2 text-xs text-gray-400 border-b border-gray-100">
+            Name and Details always show. A column that is empty on every row starts
+            hidden until you choose here.
+          </p>
+          <div class="py-1 space-y-1">
+            <template x-for="c in colDefs()" :key="c.key">
+              <label class="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-700
+                            hover:bg-gray-50 cursor-pointer">
+                <input type="checkbox" :checked="showCol(c.key)" @change="toggleCol(c.key)"
+                       class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                <span x-text="c.label"></span>
+              </label>
+            </template>
+          </div>
+          <div class="border-t border-gray-100 pt-1">
+            <button @click="showAllCols()"
+                    class="w-full text-left px-3 py-2 text-sm text-blue-600 hover:bg-gray-50 transition">
+              Show every column
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -131,7 +173,8 @@
         <div>
           <h3 class="text-base font-semibold text-gray-800">Password Safe attributes</h3>
           <p class="text-xs text-gray-500 mt-0.5">
-            <span x-text="psEdit.rows.length"></span> asset(s)
+            <span x-text="psTargetCount()"></span> record(s) across
+            <span x-text="psEdit.rows.length"></span> resource(s)
           </p>
         </div>
         <button @click="closePsEditor()" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
@@ -143,13 +186,26 @@
              x-text="psEdit.error"></div>
 
         <div x-show="!psEdit.rows.length" x-cloak class="text-xs text-gray-500">
-          None of the selected rows has a Password Safe <strong>asset</strong>. Attributes
-          live on assets — a resource matched only to a managed system has nothing to
-          write to.
+          None of the selected rows matches a Password Safe record the dashboard can write
+          to. An attribute attaches to an asset or a managed system, so a resource that
+          matches neither — or that two records claim at once — has no unambiguous target.
         </div>
 
         <template x-if="psEdit.rows.length">
           <div class="space-y-3">
+            {# The targets, BEFORE the apply rather than only in the result. A resource
+               that is both an asset and a managed system is two writes, and finding that
+               out afterwards is finding it out too late. #}
+            <div class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 space-y-1
+                        max-h-32 overflow-y-auto">
+              <p class="text-xs font-medium text-gray-600">Writing to</p>
+              <template x-for="r in psEdit.rows" :key="r.id">
+                <p class="text-xs text-gray-600">
+                  <span class="font-medium" x-text="r.name"></span>
+                  <span class="text-gray-400" x-text="' — ' + psBasisNote(r.ps)"></span>
+                </p>
+              </template>
+            </div>
             <div>
               <label class="block text-xs font-medium text-gray-600 mb-1">Attribute type</label>
               <select x-model="psEdit.typeId" @change="psEdit.attributeId = ''"
@@ -192,17 +248,21 @@
             <p x-show="psEdit.result.count" class="text-xs text-green-700">
               <span x-text="psEdit.result.assigned ? 'Applied' : 'Removed'"></span>
               <strong x-text="psEdit.result.type + ' = ' + psEdit.result.value"></strong>
-              on <span x-text="psEdit.result.count"></span> asset(s).
+              on <span x-text="psEdit.result.count"></span> record(s).
             </p>
-            {# Named, never counted — a bulk apply is N independent calls. #}
+            {# Named, never counted — a bulk apply is N independent calls. Keyed on kind
+               AND id: an asset and a managed system can share an id, and a duplicate
+               x-for key breaks the whole list rather than one row of it. #}
             <div x-show="psEdit.result.failed.length" x-cloak
                  class="border border-amber-200 bg-amber-50 rounded-lg px-3 py-2 space-y-1">
               <p class="text-xs font-medium text-amber-900">
                 <span x-text="psEdit.result.failed.length"></span> could not be changed:
               </p>
-              <template x-for="f in psEdit.result.failed" :key="f.name">
+              <template x-for="f in psEdit.result.failed" :key="f.kind + ':' + f.name">
                 <p class="text-xs text-amber-800">
-                  <span class="font-medium" x-text="'asset ' + f.name"></span> — <span x-text="f.error"></span>
+                  <span class="font-medium"
+                        x-text="(f.kind === 'asset' ? 'asset ' : 'managed system ') + f.name"></span>
+                  — <span x-text="f.error"></span>
                 </p>
               </template>
             </div>
@@ -243,7 +303,7 @@
                 class="px-3 py-1.5 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40">
           <span x-show="psEdit.busy" x-cloak>Applying…</span>
           <span x-show="!psEdit.busy"
-                x-text="(psEdit.assign ? 'Apply to ' : 'Remove from ') + psEdit.rows.length"></span>
+                x-text="(psEdit.assign ? 'Apply to ' : 'Remove from ') + psTargetCount()"></span>
         </button>
       </div>
     </div>
@@ -290,8 +350,8 @@
       </div>
       <div class="flex items-center gap-3 shrink-0">
         {% if password_safe_enabled %}
-        {# Counts only the rows that HAVE an asset, so the button never promises more
-           than it can do — a selection of ten where three match an asset says three. #}
+        {# Counts only the rows with a writable Password Safe record, so the button never
+           promises more than it can do — a selection of ten where three match says three. #}
         <button x-show="psEditableRows().length" x-cloak
                 @click="openPsEditor(psEditableRows())"
                 class="px-2.5 py-1 text-xs font-medium rounded-lg bg-white border
@@ -342,23 +402,41 @@
   <!-- Inventory table -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
     <table class="w-full text-sm">
+      {# Sticky, density and column visibility all live on the CELLS, never on the header
+         element or the row:
+         * `position: sticky` on a table header element is Firefox-only; only header and
+           data CELLS stick in Chrome and Safari, so each carries its own `sticky left-…`.
+         * under `border-collapse: collapse` a border belongs to the TABLE, so the header
+           rule and the row dividers disappear behind an opaque sticky cell. An inset
+           box-shadow is painted with the element and travels with it while scrolling.
+         * the row background has to be re-stated on a sticky cell for the same reason,
+           which is why the selected/plain colour is entirely in the :class binding — a
+           static bg-white alongside a bound bg-blue-50 is a specificity tie decided by
+           Tailwind's sheet order, not by the attribute.
+         * the header element itself stays BARE, with no attributes: two tests below
+           locate it by an exact opening tag to count columns against the colspans and to
+           pair each hideable header cell with its data cell. Note this comment does not
+           WRITE either tag, for the same reason — the column count is a raw-source regex
+           and would happily count one quoted in prose. #}
       <thead>
         <tr class="bg-gray-50 border-b border-gray-200 text-left">
-          <th class="px-4 py-3 w-10">
+          <th class="px-0 py-2 w-10 min-w-[2.5rem] max-w-[2.5rem] text-center sticky left-0 z-10
+                     bg-gray-50 shadow-[inset_0_-1px_0_0_rgb(229,231,235)]">
             <input type="checkbox" @change="toggleAll($event.target.checked)"
                    :checked="allShownSelected()" :disabled="selectableShown().length === 0"
                    title="Select all runnable resources shown"
                    class="rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:opacity-30">
           </th>
-          <th class="px-4 py-3 font-semibold text-gray-600">Provider</th>
-          <th class="px-4 py-3 font-semibold text-gray-600">Kind</th>
-          <th class="px-4 py-3 font-semibold text-gray-600">Name</th>
-          <th class="px-4 py-3 font-semibold text-gray-600">Region</th>
-          <th class="px-4 py-3 font-semibold text-gray-600">State</th>
-          <th class="px-4 py-3 font-semibold text-gray-600">Workgroup</th>
-          <th class="px-4 py-3 font-semibold text-gray-600">Tags</th>
+          <th x-show="showCol('provider')" class="px-3 py-2 font-semibold text-gray-600 whitespace-nowrap">Provider</th>
+          <th x-show="showCol('kind')" class="px-3 py-2 font-semibold text-gray-600 whitespace-nowrap">Kind</th>
+          <th class="px-3 py-2 font-semibold text-gray-600 whitespace-nowrap min-w-[12rem] sticky left-[2.5rem] z-10
+                     bg-gray-50 shadow-[inset_-1px_0_0_0_rgb(229,231,235),inset_0_-1px_0_0_rgb(229,231,235)]">Name</th>
+          <th x-show="showCol('region')" class="px-3 py-2 font-semibold text-gray-600 whitespace-nowrap">Region</th>
+          <th x-show="showCol('state')" class="px-3 py-2 font-semibold text-gray-600 whitespace-nowrap">State</th>
+          <th x-show="showCol('workgroup')" class="px-3 py-2 font-semibold text-gray-600 whitespace-nowrap">Workgroup</th>
+          <th x-show="showCol('tags')" class="px-3 py-2 font-semibold text-gray-600 whitespace-nowrap">Tags</th>
           {% if password_safe_enabled %}
-          <th class="px-4 py-3 font-semibold text-gray-600">
+          <th x-show="showCol('ps')" class="px-3 py-2 font-semibold text-gray-600">
             Password Safe
             {# One note for the whole column, not one per row: an unreadable endpoint or a
                permission gap is a TENANT fact and repeating it on forty rows buries it. #}
@@ -370,12 +448,12 @@
                   :title="'Only the first ' + ps.cap + ' matched records had their attributes read.'">capped</span>
           </th>
           {% endif %}
-          <th class="px-4 py-3 font-semibold text-gray-600">Deployed By</th>
-          <th class="px-4 py-3 font-semibold text-gray-600">Created</th>
+          <th x-show="showCol('deployed')" class="px-3 py-2 font-semibold text-gray-600 whitespace-nowrap">Deployed By</th>
+          <th x-show="showCol('created')" class="px-3 py-2 font-semibold text-gray-600 whitespace-nowrap">Created</th>
           {% if resource_expiry_enabled %}
-          <th class="px-4 py-3 font-semibold text-gray-600">Expires</th>
+          <th x-show="showCol('expires')" class="px-3 py-2 font-semibold text-gray-600 whitespace-nowrap">Expires</th>
           {% endif %}
-          <th class="px-4 py-3 font-semibold text-gray-600 text-right">Details</th>
+          <th class="px-3 py-2 font-semibold text-gray-600 text-right whitespace-nowrap">Details</th>
         </tr>
       </thead>
       <tbody class="divide-y divide-gray-50">
@@ -389,26 +467,30 @@
         </tr>
         <template x-for="r in filtered()" :key="r.id">
           <tr class="group hover:bg-gray-50 transition" :class="isSelected(r) ? 'bg-blue-50' : ''">
-            <td class="px-4 py-3">
+            <td class="px-0 py-2 text-center sticky left-0 z-10 group-hover:bg-gray-50"
+                :class="isSelected(r) ? 'bg-blue-50' : 'bg-white'">
               <input type="checkbox" :checked="isSelected(r)" @change="toggle(r)"
                      :disabled="!selectable(r)" :title="disabledReason(r)"
                      class="rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:opacity-30 disabled:cursor-not-allowed">
             </td>
-            <td class="px-4 py-3 font-medium text-gray-800 uppercase" x-text="r.cloud"></td>
-            <td class="px-4 py-3 text-gray-600" x-text="kindLabel(r.kind)"></td>
-            <td class="px-4 py-3 text-gray-800 max-w-[220px] truncate" x-text="r.name" :title="r.name"></td>
-            <td class="px-4 py-3 text-gray-500" x-text="r.region || '–'"></td>
-            <td class="px-4 py-3">
+            <td x-show="showCol('provider')" class="px-3 py-2 font-medium text-gray-800 uppercase whitespace-nowrap" x-text="r.cloud"></td>
+            <td x-show="showCol('kind')" class="px-3 py-2 text-gray-600 whitespace-nowrap" x-text="kindLabel(r.kind)"></td>
+            <td class="px-3 py-2 text-gray-800 max-w-[18rem] truncate sticky left-[2.5rem] z-10
+                       group-hover:bg-gray-50 shadow-[inset_-1px_0_0_0_rgb(243,244,246)]"
+                :class="isSelected(r) ? 'bg-blue-50' : 'bg-white'"
+                x-text="r.name" :title="r.name"></td>
+            <td x-show="showCol('region')" class="px-3 py-2 text-gray-500 whitespace-nowrap" x-text="r.region || '–'"></td>
+            <td x-show="showCol('state')" class="px-3 py-2">
               <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
                     :class="stateBadge(r.state)" x-text="r.state"></span>
             </td>
-            <td class="px-4 py-3 text-gray-500" x-text="r.workgroup || '–'"></td>
-            <td class="px-4 py-3 max-w-[260px]">
+            <td x-show="showCol('workgroup')" class="px-3 py-2 text-gray-500 whitespace-nowrap" x-text="r.workgroup || '–'"></td>
+            <td x-show="showCol('tags')" class="px-3 py-2 max-w-[260px]">
               {{ tag_chips("r.tags", limit=3) }}
               <span x-show="!(r.tags || []).length" class="text-gray-300">–</span>
             </td>
             {% if password_safe_enabled %}
-            <td class="px-4 py-3 max-w-[260px]">
+            <td x-show="showCol('ps')" class="px-3 py-2 max-w-[260px]">
               <template x-if="(r.ps || {}).state === 'ok'">
                 <span :title="psBasisNote(r.ps)">{{ tag_chips("r.ps.attributes", limit=3) }}</span>
               </template>
@@ -423,15 +505,19 @@
                     class="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 cursor-help"
                     :title="r.ps.detail"
                     x-text="r.ps.objects.length + ' records'"></span>
-              <span x-show="!r.ps || r.ps.state === 'unmatched'" x-cloak
+              {# The catch-all, written as "none of the states above" rather than as
+                 `unmatched` specifically: `error` is a declared state with no branch of
+                 its own, and a state this page has not heard of must still render a cell
+                 an operator can hover, not an empty one. #}
+              <span x-show="!['ok','none','not_fetched','ambiguous'].includes((r.ps || {}).state)" x-cloak
                     class="text-gray-300 cursor-help"
                     :title="(r.ps && r.ps.detail) || 'no Password Safe record matches this resource'">–</span>
             </td>
             {% endif %}
-            <td class="px-4 py-3 text-gray-500" x-text="r.deployed_by || '–'"></td>
-            <td class="px-4 py-3 text-gray-500 text-xs" x-text="timeAgo(r.created_at)"></td>
+            <td x-show="showCol('deployed')" class="px-3 py-2 text-gray-500 whitespace-nowrap" x-text="r.deployed_by || '–'"></td>
+            <td x-show="showCol('created')" class="px-3 py-2 text-gray-500 text-xs whitespace-nowrap" x-text="timeAgo(r.created_at)"></td>
             {% if resource_expiry_enabled %}
-            <td class="px-4 py-3 whitespace-nowrap">
+            <td x-show="showCol('expires')" class="px-3 py-2 whitespace-nowrap">
               <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
                     :class="expiryBadge(r)" :title="expiryTitle(r)"
                     x-text="expiryLabel(r)"></span>
@@ -441,14 +527,21 @@
               </button>
             </td>
             {% endif %}
-            <td class="px-4 py-3 text-right whitespace-nowrap">
+            <td class="px-3 py-2 text-right whitespace-nowrap">
               {% if password_safe_enabled %}
-              {# Only where there is an ASSET. A row matched to a managed system alone
-                 has nothing to write to, and offering the control would be a promise
-                 the page cannot keep. #}
-              <button x-show="psAssetOf(r)" x-cloak @click="openPsEditor([r])"
+              {# Every row says something here. Where there is a writable record the
+                 control is live; where there is not, the reason is on the greyed twin
+                 rather than left to be inferred from a blank cell — which is what made
+                 this look as though picking an Attribute filter unlocked editing.
+
+                 A <span>, not a disabled <button>: Firefox suppresses `title` on a
+                 disabled form control, so the explanation would never appear. #}
+              <button x-show="psTargetsOf(r).length" x-cloak @click="openPsEditor([r])"
                       class="text-blue-500 hover:underline text-xs font-medium mr-3"
-                      :title="'Edit Password Safe attributes on ' + (psAssetOf(r) || {}).name">Attributes</button>
+                      :title="'Edit Password Safe attributes on ' + psBasisNote(r.ps)">Attributes</button>
+              <span x-show="!psTargetsOf(r).length" x-cloak
+                    class="text-gray-300 text-xs font-medium mr-3 cursor-help"
+                    :title="psNoTargetNote(r)">Attributes</span>
               {% endif %}
               <a :href="r.detail_href"
                  class="text-blue-500 hover:underline text-xs font-medium" x-text="'Open →'"></a>
@@ -522,8 +615,34 @@
       filterWorkgroup: '',
       filterTag: '',
       filterPsAttr: '',
-      // The attribute editor. Only rows matched to an ASSET can be written — attributes
-      // live on assets, and a row matched only to a managed system has none.
+
+      // ── columns ─────────────────────────────────────────────────────────────
+      // Thirteen columns is more than fits, and on most estates several of them are '–'
+      // on every row. Two independent things decide what shows, deliberately kept apart:
+      //
+      //   hiddenCols     the operator's own choice. Persisted. Stores what is HIDDEN, so
+      //                  a column added to this page later defaults to visible rather
+      //                  than silently missing for everyone who has ever used the picker.
+      //   autoHiddenKeys derived from the rows, recomputed at the end of load(). Never
+      //                  persisted and never merged into hiddenCols — folding it in would
+      //                  re-hide a column the operator had just un-hidden, on the next
+      //                  Refresh, with no way to tell what happened.
+      //
+      // The two flags are hoisted out of Jinja and into data because the helpers below
+      // are extracted and eval'd on their own by tests/template_helpers_check.js, which
+      // gets raw JS and would choke on a Jinja conditional inside a function body.
+      // (Describing that tag rather than writing it: Jinja parses its own syntax inside
+      // a JS comment just as happily as anywhere else.)
+      hiddenCols: [],
+      autoHiddenKeys: [],
+      colsPinned: false,
+      colsOpen: false,
+      psEnabled: {{ 'true' if password_safe_enabled else 'false' }},
+      expiryEnabled: {{ 'true' if resource_expiry_enabled else 'false' }},
+
+      // The attribute editor. Every Password Safe record behind a row is a target —
+      // asset, managed system, or both — because a resource that is both carries the
+      // attribute on two rows that can disagree.
       psEdit: { open: false, rows: [], typeId: '', attributeId: '',
                 assign: true, busy: false, error: '', result: null },
       psVocab: [],       // attribute types + their values; the picker itself
@@ -549,6 +668,7 @@
 
       async init() {
         requireAuth();
+        this.restoreCols();
         await this.load();
         // Arming state, the extend increment and the ceiling live on /status rather than
         // on the cached listing — they're config-derived, and the listing is 60s stale by
@@ -579,6 +699,9 @@
         } finally {
           this.loading = false;
         }
+        // Once, here, rather than from showCol(): every hideable cell is its own Alpine
+        // effect, so a helper that scans all rows would be re-run ~600 times per toggle.
+        this.recomputeAutoHidden();
         if (this.assets.length === 0) {
           try {
             this.assets = await API.get('/api/config-mgmt/assets') || [];
@@ -586,6 +709,98 @@
             this.assets = [];   // bulk run stays unavailable; the table still works
           }
         }
+      },
+
+      // ── columns ─────────────────────────────────────────────────────────────
+
+      // The hideable columns, in table order. Each carries its own emptiness test beside
+      // its label so the picker and the auto-hide read one list — a separate accessor map
+      // is the kind of pair that drifts the first time a column is added.
+      //
+      // Name, the checkbox and Details are absent on purpose: Name is the row's identity
+      // and the column pinned to the left, and Details is how you leave the page.
+      colDefs() {
+        return [
+          { key: 'provider',  label: 'Provider',    has: r => !!r.cloud },
+          { key: 'kind',      label: 'Kind',        has: r => !!r.kind },
+          { key: 'region',    label: 'Region',      has: r => !!r.region },
+          { key: 'state',     label: 'State',       has: r => !!r.state },
+          { key: 'workgroup', label: 'Workgroup',   has: r => !!r.workgroup },
+          { key: 'tags',      label: 'Tags',        has: r => ((r.tags || []).length > 0) },
+          // Emptiness here is "no Password Safe record matched", NOT "no chips": a row in
+          // the none / not_fetched / ambiguous states has something worth reading.
+          ...(this.psEnabled ? [{ key: 'ps', label: 'Password Safe',
+              has: r => ((((r.ps || {}).objects)) || []).length > 0 }] : []),
+          { key: 'deployed',  label: 'Deployed By', has: r => !!r.deployed_by },
+          { key: 'created',   label: 'Created',     has: r => !!r.created_at },
+          ...(this.expiryEnabled ? [{ key: 'expires', label: 'Expires',
+              has: r => !!r.expires_at || !!r.expiry_exempt }] : []),
+        ];
+      },
+
+      // A plain two-array lookup, and nothing else — this runs once per cell per render.
+      showCol(k) {
+        if ((this.hiddenCols || []).includes(k)) return false;
+        return !(this.autoHiddenKeys || []).includes(k);
+      },
+
+      toggleCol(k) {
+        // Touching the picker pins the choice: from here on the operator decides, and
+        // the emptiness sniff stops having an opinion.
+        this.colsPinned = true;
+        this.autoHiddenKeys = [];
+        this.hiddenCols = this.hiddenCols.includes(k)
+          ? this.hiddenCols.filter(x => x !== k)
+          : [...this.hiddenCols, k];
+        this.persistCols();
+      },
+
+      showAllCols() {
+        this.colsPinned = true;
+        this.autoHiddenKeys = [];
+        this.hiddenCols = [];
+        this.persistCols();
+      },
+
+      hiddenColCount() {
+        return this.colDefs().filter(c => !this.showCol(c.key)).length;
+      },
+
+      // Wrapped because a browser with site data blocked throws on the read itself.
+      restoreCols() {
+        let raw = null;
+        try { raw = localStorage.getItem('vm_cli_inventory_cols'); } catch (e) {}
+        if (raw === null) return;
+        // A stored key for a column that no longer exists — Password Safe turned off
+        // since it was written — would sit in the list forever and skew the badge.
+        const known = this.colDefs().map(c => c.key);
+        try {
+          this.hiddenCols = (JSON.parse(raw) || []).filter(k => known.includes(k));
+        } catch (e) { return; }
+        this.colsPinned = true;
+      },
+
+      persistCols() {
+        try {
+          localStorage.setItem('vm_cli_inventory_cols', JSON.stringify(this.hiddenCols));
+        } catch (e) {}
+      },
+
+      // Columns that are '–' on every row. Derived from `items`, never from filtered() —
+      // a column that appears and vanishes as the operator changes a filter is worse than
+      // a dead one.
+      recomputeAutoHidden() {
+        if (this.colsPinned || !this.items.length) { this.autoHiddenKeys = []; return; }
+        const filterFor = { provider: this.filterProvider, kind: this.filterKind,
+                            region: this.filterRegion, state: this.filterState,
+                            workgroup: this.filterWorkgroup, tags: this.filterTag,
+                            ps: this.filterPsAttr };
+        this.autoHiddenKeys = this.colDefs()
+          // Never hide a column the operator is actively filtering on: a set filter with
+          // no column to explain it is unreadable.
+          .filter(c => !filterFor[c.key])
+          .filter(c => !this.items.some(c.has))
+          .map(c => c.key);
       },
 
       // ── selection ───────────────────────────────────────────────────────────
@@ -649,18 +864,17 @@
       // pickers. sessionStorage rather than a query string (50 ids makes an unusable
       // URL) and rather than localStorage — a pending fleet run must not survive a
       // browser restart. The receiving page removes the key as soon as it reads it.
+      // Only IDS travel — deliberately no host addresses. The receiving page asks the
+      // server for each target's Password Safe accounts, and the server re-resolves
+      // every id from its own rows through the same RBAC filter and planner the run
+      // itself uses. A host supplied by the browser could aim an account lookup, and
+      // then a run, at a machine the operator never selected.
       handOffToConfigMgmt() {
         const rows = this.items.filter(i => this.selected.includes(i.id));
-        // A representative host, so the Password Safe account list can be populated
-        // there. Each job still resolves the chosen account name against its own
-        // host — this only supplies the names to choose from.
-        const sample = rows.find(r => r.kind === 'vm' && r.ip) || null;
         sessionStorage.setItem('cfgmgmt_bulk_selection', JSON.stringify({
           ids: this.selected,
           kind: this.selectedKind,
           names: rows.map(r => r.name),
-          sampleHost: sample ? sample.ip : '',
-          sampleName: sample ? sample.name : '',
         }));
         window.location.href = '/config-mgmt';
       },
@@ -730,15 +944,47 @@
         return [...new Set(this.items.map(i => i.workgroup).filter(Boolean))].sort();
       },
 
-      // The asset behind a row, or null. Attributes live on assets: a row matched only
-      // to a managed system (which is how everything this dashboard onboarded matches)
-      // has nothing to write to, and the editor must say so rather than fail on apply.
-      psAssetOf(r) {
-        return (((r || {}).ps || {}).objects || []).find(o => o.kind === 'asset') || null;
+      // Every Password Safe record this row's attributes can be written to.
+      //
+      // Both kinds, not just assets: a managed system takes attributes on its own
+      // endpoint, and everything this dashboard onboards matches as one — so gating on
+      // assets left most of this table unable to set an attribute at all.
+      //
+      // Both HALVES when a row matched both, too. The read path concatenates the two
+      // objects' attributes and flattens them into one set of chips, so removing from
+      // only one leaves the chip on screen and reads as a write that did nothing.
+      //
+      // Ambiguous is excluded deliberately. `objects` is still populated there, but it
+      // holds the two records that CONFLICT — writing to everything would put the
+      // attribute on two different machines the dashboard cannot tell apart.
+      psTargetsOf(r) {
+        const ps = (r || {}).ps || {};
+        if (ps.state === 'ambiguous' || ps.state === 'unmatched') return [];
+        return ps.objects || [];
+      },
+
+      // Why this row has no editor, in the operator's terms. Empty when it has one.
+      psNoTargetNote(r) {
+        const ps = (r || {}).ps || {};
+        if (this.psTargetsOf(r).length) return '';
+        if (ps.state === 'ambiguous') {
+          return ps.detail || 'two Password Safe records claim this resource, so the ' +
+                              'dashboard cannot tell which one to write to';
+        }
+        return ps.detail || 'no Password Safe record matches this resource, so there is ' +
+                            'nothing to attach an attribute to';
       },
 
       psEditableRows() {
-        return this.filtered().filter(r => this.selected.includes(r.id) && this.psAssetOf(r));
+        return this.filtered().filter(
+          r => this.selected.includes(r.id) && this.psTargetsOf(r).length);
+      },
+
+      // Records, not rows: one resource that is both an asset and a managed system is two
+      // writes, and a button promising fewer than it makes is the same lie in reverse.
+      psTargetCount() {
+        return (this.psEdit.rows || [])
+          .reduce((n, r) => n + this.psTargetsOf(r).length, 0);
       },
 
       // Only types this Password Safe will actually accept. A read-only one is kept in
@@ -751,7 +997,8 @@
       },
 
       async openPsEditor(rows) {
-        this.psEdit = { open: true, rows: (rows || []).filter(r => this.psAssetOf(r)),
+        this.psEdit = { open: true,
+                        rows: (rows || []).filter(r => this.psTargetsOf(r).length),
                         typeId: '', attributeId: '', assign: true,
                         busy: false, error: '', result: null };
         if (!this.psVocab.length) {
@@ -768,8 +1015,13 @@
         if (this.psEdit.busy || !this.psEdit.attributeId || !this.psEdit.rows.length) return;
         this.psEdit.busy = true; this.psEdit.error = '';
         try {
+          // Two lists, because the two kinds are different collections in Password Safe.
+          const targets = this.psEdit.rows.flatMap(r => this.psTargetsOf(r));
+          const idsOf = k => targets.filter(o => o.kind === k)
+                                    .map(o => parseInt(o.object_id, 10));
           const resp = await API.post('/api/password-safe/asset-attributes', {
-            asset_ids: this.psEdit.rows.map(r => parseInt(this.psAssetOf(r).object_id, 10)),
+            asset_ids: idsOf('asset'),
+            system_ids: idsOf('managed_system'),
             attribute_id: parseInt(this.psEdit.attributeId, 10),
             assign: this.psEdit.assign,
           });

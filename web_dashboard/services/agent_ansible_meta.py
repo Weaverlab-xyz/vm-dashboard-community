@@ -69,6 +69,11 @@ RUN_META_KEYS = (
     "secret_ssh_key_source",
     "managed_account",
     "managed_become",
+    # Escalation method — a plugin NAME from services.ansible_become.BECOME_METHODS.
+    # Crosses to the agent as a typed bundle scalar, NOT as an extra var: `ansible_*`
+    # coming from the dashboard is refused wholesale by the agent, so a run that sent
+    # ansible_become_method that way would be silently stripped and escalate by sudo.
+    "become_method",
     # The NAME of the var an EPM-L installation token is bound to, never the token.
     "epml_token_var",
     # A POV environment and one of its VMs, for a run whose login comes from the LAB
@@ -107,6 +112,7 @@ _DEFAULTS = {
     "secret_ssh_key_source": "",
     "managed_account": None,
     "managed_become": None,
+    "become_method": "",
     "epml_token_var": "",
     "pov_environment_id": "",
     "pov_vm_id": "",
@@ -117,7 +123,7 @@ _DEFAULTS = {
 _STRING_KEYS = (
     "connection_id", "target_id", "target_label", "asset", "asset_backend",
     "login_user", "secret_become_source", "secret_ssh_key_source", "epml_token_var",
-    "pov_environment_id", "pov_vm_id",
+    "become_method", "pov_environment_id", "pov_vm_id",
 )
 
 # Default port per transport, used when a caller supplies none. WinRM over HTTP (5985) is

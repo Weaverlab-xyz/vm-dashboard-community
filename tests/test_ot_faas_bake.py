@@ -30,6 +30,8 @@ import ast
 import io
 import os
 import re
+import shutil
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -78,6 +80,39 @@ def test_the_runtime_is_broker_only_and_refuses_a_cell():
     assert 'if [ "$OT_ROLE" != "broker" ] && [ "$OT_FAAS" != "none" ]; then' in _SRC, (
         "a cell could be baked with a function runtime — the cell is the plant floor "
         "and runs simulators, not the adapters that grant access to them")
+
+
+def test_the_faas_default_follows_the_role_so_a_bare_cell_bake_is_possible():
+    """The guard above refuses the pair (cell, openfaas). A flat ``openfaas`` default
+    therefore made the script's OWN default role unbakeable: OT_ROLE unset and
+    OT_FAAS unset died two seconds into the provisioner, on the guard. Caught on a
+    live Azure cell bake 2026-09-25 — and the guard test above passed the whole time,
+    because the guard was never the broken half.
+
+    EXECUTED, not grepped. A substring assertion is exactly what missed this: both
+    halves read correctly on their own, and only their composition is wrong."""
+    if not shutil.which("sh"):
+        print("SKIP: no POSIX sh on this host")
+        return
+    start = _SRC.index('if [ -z "${OT_FAAS:-}" ]; then')
+    tail = _SRC.index('OT_FAAS="$(echo "$OT_FAAS"', start)
+    block = _SRC[start:_SRC.index("\n", tail)]
+
+    def resolve(role, preset=None):
+        pre = "OT_ROLE=%s\n" % role + ("OT_FAAS=%s\n" % preset if preset else "")
+        out = subprocess.run(["sh", "-c", pre + block + '\necho "$OT_FAAS"'],
+                             capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr
+        return out.stdout.strip()
+
+    assert resolve("cell") == "none", (
+        "a cell bake with no variables set resolves to a runtime the next guard "
+        "refuses — the script's default role cannot be baked at all")
+    assert resolve("broker") == "openfaas", (
+        "a bare broker bake lost its function runtime")
+    # An explicit choice still wins, so the guard keeps refusing a deliberate mistake.
+    assert resolve("cell", "openfaas") == "openfaas", (
+        "the role default overrode an operator's explicit OT_FAAS")
 
 
 def test_an_unbuildable_runtime_is_refused_by_name_not_ignored():

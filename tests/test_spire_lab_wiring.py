@@ -567,6 +567,10 @@ def test_the_gate_owns_the_refusal_wording_and_the_api_layers_only_raise_it():
     cm = _read("web_dashboard", "api", "config_mgmt.py")
     sentences = (
         "requires the 'secrets:use' permission.",
+        # A second, distinct cause: a minted EPM-L token needs the same permission but
+        # is refused for a different reason, so it gets its own sentence — worded to
+        # avoid the one above, which the count below would otherwise catch as a copy.
+        "required to bind an EPM for Linux",
         "Managed-account checkout requires BeyondTrust Password Safe",
         "'Ephemeral cloud secrets' to be enabled in Settings",
         "GCP ephemeral secrets require 'gcp_ansible_runner_service_account'",

@@ -644,6 +644,22 @@ class Settings(BaseSettings):
     # credential is built: its DB password segment must be non-empty and valid even when
     # a self-rotate change never uses it.
     clouddb_ps_self_rotation: bool = False
+    # Ansible runs against a PROVISIONED cloud database connect as the stored admin
+    # (`clouddb/<id>/admin`). Turn this on and a row that has been onboarded into
+    # Password Safe instead connects as its OWN managed account, checked out
+    # just-in-time — the per-object credential, unique by construction, and the thing
+    # that makes a bulk Config-Management run over several databases use a different
+    # account for each one rather than one admin for all of them.
+    #
+    # OFF BY DEFAULT, and the reason is not caution. The managed account the dashboard
+    # creates (`psafe_<id12>`) is deliberately PRIVILEGE-FREE: cloud_db_sql_service
+    # gives it a bare LOGIN and no GRANTs at all, because it exists to be rotated, not
+    # to read anything (on Azure SQL it gets a contained user in `master` only). So a
+    # playbook that creates a schema, installs an extension or reads a table will fail
+    # on permissions until the operator grants this user what it needs OUT OF BAND.
+    # Registered databases are unaffected — they already connect as their own managed
+    # account, because a registered row has no admin credential to fall back on.
+    clouddb_ansible_use_ps_account: bool = False
     # Import from Password Safe (/databases → "Import from Password Safe"). Reads only —
     # nothing in Password Safe is created or changed. Password Safe already runs a
     # discovery scanner with managed credentials, so it knows a database's platform,

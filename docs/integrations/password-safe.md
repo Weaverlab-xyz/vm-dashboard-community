@@ -914,6 +914,7 @@ All four were guesses before, and two of them were wrong:
 | `GET Attributes` | **404** | No flat attribute collection either. |
 | `GET Assets/{id}/Attributes` | 200 | Per object, which is why the read is capped and only matched objects are fetched. |
 | `GET ManagedSystems/{id}/Attributes` | 200 | Exists, and is commonly empty. |
+| `POST`/`DELETE ManagedSystems/{id}/Attributes/{attributeID}` | **unverified** | Documented by BeyondTrust; not yet exercised against a tenant from here. See the write note below for what the dashboard does about that. |
 
 **An attribute's shape is easy to read backwards**, and doing so produces chips that look
 broken. A row is:
@@ -934,6 +935,25 @@ for exactly this.
 asset does not carry answers **404**, which the dashboard treats as success (the caller
 asked for it gone and it is gone, so a retry after a partial apply does not report errors
 for the targets that already succeeded).
+
+**Managed systems take attributes too, and that is the path that matters here.**
+`ManagedSystems/{managedSystemID}/Attributes/{attributeID}` is the same POST/DELETE shape
+in a different collection. It is the one most of `/inventory` needs: everything this
+dashboard onboards lands as a managed system, so while the write path was asset-only, most
+matched rows could have their attributes *read* and never changed.
+
+One asymmetry follows from the table above: the managed-system **read** is verified and
+the **write** is not. So the 404-is-success rule cannot simply be reused — an appliance
+that does not serve the endpoint at all answers 404 to exactly the same DELETE. Before
+accepting a 404 as "already gone", `ps_api_service._set_object_attribute` issues one
+`GET {collection}/{id}/Attributes`: a 200 proves the endpoint family exists and the
+attribute is genuinely absent, anything else is reported as a failure. Reporting a removal
+that never happened is the worse of the two errors by a wide margin.
+
+A resource matched to **both** an asset and a managed system gets the change written to
+both records. They are separate rows in Password Safe and can disagree; the inventory
+page's chips flatten them into one, so writing to only half means a removal leaves the chip
+on screen and reads as a failed write.
 
 An attribute is **assigned, not typed**: a type owns a fixed set of values, each with its
 own `AttributeID`, so `GET AttributeTypes/{id}/Attributes` is the picker and there is no

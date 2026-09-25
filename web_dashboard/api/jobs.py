@@ -67,6 +67,12 @@ def list_jobs(
     include_routine: bool = Query(
         False, description="Include completed timer-driven maintenance passes "
                            "(job_service.ROUTINE_JOB_TYPES). Excluded by default."),
+    include_checkins: bool = Query(
+        False, description="Include completed unattended check-ins — the hypervisor "
+                           "inventory syncs a cadence enqueues (job_service."
+                           "CHECKIN_VERBS). Excluded by default. Operator-initiated "
+                           "work of the same job type, e.g. a power op, is never "
+                           "affected by this."),
     dead_lettered: bool = Query(
         False, description="Only jobs that used every retry and failed anyway."),
     scheduled: bool = Query(
@@ -85,6 +91,13 @@ def list_jobs(
     hours. A *failed* routine pass is never hidden, so the dashboard's failed-jobs panel
     keeps working — see the constant for why that split matters.
 
+    ``include_checkins`` is the same default for the same reason, applied to the
+    hypervisor inventory syncs a cadence enqueues: 30 minutes per connection, several
+    paged rows apiece, all completing green with nothing for anyone to do. It keys on
+    the ``is_checkin`` column, not the job type — an operator's power op is an
+    ``agent_hypervisor`` row too and is never hidden — and again only ``completed``
+    rows, so a sync that failed still reaches the failed-jobs panel.
+
     ``dead_lettered=true`` is the retry tail: jobs that used every attempt and failed
     anyway. Scoped by the same owner filter as everything else here.
     """
@@ -98,6 +111,7 @@ def list_jobs(
         workgroup=workgroup,
         batch_id=batch_id,
         include_routine=include_routine,
+        include_checkins=include_checkins,
         dead_lettered=dead_lettered,
         scheduled=scheduled,
     )

@@ -397,15 +397,25 @@ def get_localhost_targets(
 class ManagedAccountRef(BaseModel):
     """A BeyondTrust Password Safe managed account. Never carries a credential.
 
-    Two forms, because a single run and a bulk run identify an account differently:
+    Two forms, because the ids are specific to ONE managed system:
 
     * PINNED — ``system_id`` + ``account_id``, picked from the live list for one
       host. Drives the just-in-time checkout directly.
-    * BY NAME — ``account_name`` only, used by a bulk run. Both ids are specific to
-      one managed system, so a pinned ref cannot be reused across a fleet: it would
-      check out one machine's credential and connect to every host with it. A
-      name-only ref is instead resolved against each job's OWN target host at run
-      time (see ``services.ansible_credentials.resolve_managed_ref``).
+    * BY NAME — ``account_name`` only. Resolved against each job's OWN target host at
+      run time (see ``services.ansible_credentials.resolve_managed_ref``).
+
+    **The rule a bulk run has to respect.** One pinned ref shared by a whole batch
+    checks out a single machine's credential and connects to every host with it.
+    ``BulkRunRequest`` therefore offers two places to put a ref, and they mean
+    different things:
+
+    * ``managed_account`` — the batch DEFAULT. Must be name-only for the same reason;
+      it is the fallback for any target the operator did not choose one for.
+    * ``managed_accounts[<inventory_id>]`` — a PER-TARGET ref, and pinned ids are
+      legitimate here precisely because the map is keyed by the target whose own live
+      list those ids came from. The server checks every key against its own resolved
+      plan (see ``managed_accounts.stray_ids``), so a ref cannot be smuggled onto a
+      host it was not picked for.
 
     ``account_name`` is non-secret and becomes ``ansible_user``.
     """
@@ -434,7 +444,13 @@ class RunRequest(BaseModel):
     # or on-prem group key). "k8s"/"database" = a Kubernetes cluster / cloud database:
     # a localhost play whose connection material is auto-injected server-side and which
     # ALWAYS runs on the in-cloud transient runner (see ansible_cloud_run_service). For
-    # those, target/cloud/ansible_user/secret_ssh_key_source/managed_account are ignored.
+    # those, target/cloud/ansible_user/secret_ssh_key_source/managed_account are ignored
+    # — there is no SSH connection to authenticate. That stays true even where a managed
+    # account IS involved: a registered database, and (behind
+    # `clouddb_ansible_use_ps_account`) an onboarded provisioned one, connect as their
+    # OWN Password Safe account, but it is read from the ROW at run time and never from
+    # this request. Which is also why a bulk run refuses an operator-supplied one for
+    # these kinds rather than quietly dropping it.
     # "portainer" is the same localhost shape with no resource behind it: the target is
     # the ONE configured Portainer, its connection is the PORTAINER_* env every runner
     # already gets, and target_id is therefore not required.
@@ -467,6 +483,13 @@ class RunRequest(BaseModel):
     # separate account for the become/sudo password.
     managed_account: ManagedAccountRef | None = None
     managed_become: ManagedAccountRef | None = None
+    # How the play escalates when it says `become: true`. A plugin NAME from
+    # services.ansible_become.BECOME_METHODS — "" keeps Ansible's own default (sudo).
+    # Needed because an account entitled through BeyondTrust Privilege Management for
+    # Unix & Linux escalates via `pbrun` and typically has NO sudoers entry, and the
+    # sudo failure is unreadable: sudo's password prompt lands on the module's stdout
+    # and Ansible reports "No start of json char found" rather than naming the cause.
+    become_method: str = ""
     # ── Agent-executed runs ───────────────────────────────────────────────────
     # Set when the target sits on a network the dashboard has no route to, so the run must
     # be queued for a remote agent instead of a runner the dashboard launches. The inventory
@@ -523,6 +546,42 @@ def _cfg(key: str) -> str:
 
 
 
+
+
+def _secret_use_details(payload: "RunRequest", target: str) -> dict:
+    """The ``ansible_secret_use`` audit detail for one run — **kinds, variable names
+    and account names only**, never a source ref, a credential or a value.
+
+    Shared by the dashboard-run and agent-run paths. They used to audit differently:
+    the agent path recorded only ``secret_vars`` and no managed-account name at all,
+    which cost little while a whole batch shared one account and costs a great deal
+    now that every target of a bulk run can have its own.
+    """
+    kinds = []
+    if payload.secret_vars:
+        kinds.append(f"{len(payload.secret_vars)} var(s)")
+    if payload.secret_become_source:
+        kinds.append("become-password")
+    if payload.secret_ssh_key_source:
+        kinds.append("ssh-key")
+    if payload.epml_token_var:
+        kinds.append("epml-token (minted)")
+    managed_accts = []
+    if payload.managed_account:
+        kinds.append("managed-account (checkout)")
+        managed_accts.append({"role": "connection",
+                              "account": payload.managed_account.account_name,
+                              "system_id": payload.managed_account.system_id})
+    if payload.managed_become:
+        kinds.append("managed-account become (checkout)")
+        managed_accts.append({"role": "become",
+                              "account": payload.managed_become.account_name,
+                              "system_id": payload.managed_become.system_id})
+    return {"kinds": kinds, "vars": sorted(payload.secret_vars.keys()),
+            "managed_accounts": managed_accts,
+            # The var NAME, never the token — the same rule the job row obeys.
+            "epml_token_var": payload.epml_token_var,
+            "asset": payload.asset, "target": target}
 
 
 def _can_use_secrets(user) -> bool:
@@ -763,6 +822,9 @@ async def _run_agent_ansible(payload: "RunRequest", db, current_user):
     from ..services import ansible_run_gate as _gate
     _refusal = _gate.check_permission(
         wants_secret=bool(payload.secret_vars),
+        # This path DOES carry epml_token_var (agent_ansible_meta.RUN_META_KEYS), so the
+        # bundle mints a real token for it — the permission has to be checked here too.
+        wants_epml_token=bool(payload.epml_token_var),
         can_use_secrets=_can_use_secrets(current_user),
         has_managed=False, password_safe_enabled=True)
     if _refusal:
@@ -813,11 +875,17 @@ async def _run_agent_ansible(payload: "RunRequest", db, current_user):
         db, job_type="agent_ansible", created_by=current_user.username,
         workgroup="ansible", metadata=meta, batch_id=payload.batch_id,
         agent_id=payload.agent_id, **_schedule_kwargs(payload, db))
-    if payload.secret_vars:
+    # Audited on the same condition as the dashboard-run path, not just on secret_vars
+    # (or secret_vars + epml_token_var): an agent run can carry a managed account too,
+    # and a bulk run now gives every target its OWN, so "which account did this job
+    # check out" has to be recorded here as well, or a 50-host agent batch leaves no
+    # trace of 50 distinct checkouts.
+    if (payload.secret_vars or payload.secret_become_source
+            or payload.secret_ssh_key_source or payload.epml_token_var
+            or payload.managed_account or payload.managed_become):
         job_service.log_audit(
             db, current_user.username, "ansible_secret_use",
-            details={"vars": sorted(payload.secret_vars.keys()), "asset": payload.asset,
-                     "target": f"agent:{overrides['target_host']}"})
+            details=_secret_use_details(payload, f"agent:{overrides['target_host']}"))
     return {"job_id": job.id, "status": "queued"}
 
 
@@ -1022,6 +1090,9 @@ async def run_playbook(
                         or payload.secret_ssh_key_source or has_managed)
     _refusal = _gate.check_permission(
         wants_secret=wants_secret,
+        # Separate from wants_secret on purpose: nothing has to pre-exist in a cloud
+        # store for a minted token, so the residency check below must NOT widen with it.
+        wants_epml_token=bool(payload.epml_token_var),
         can_use_secrets=_can_use_secrets(current_user),
         has_managed=has_managed,
         # Short-circuited, so a run with no managed account still costs no config read
@@ -1029,6 +1100,16 @@ async def run_playbook(
         password_safe_enabled=has_managed and cs.get_bool("password_safe_enabled"))
     if _refusal:
         raise HTTPException(status_code=_refusal.status, detail=_refusal.detail)
+
+    # Checked here, before anything is queued, so an unusable method is a 400 the
+    # operator reads now rather than a play that escalates by sudo on a PMUL host and
+    # fails with sudo's prompt spliced into the module's JSON. Normalized, so the value
+    # stored on the job is the one both runners will act on.
+    from ..services import ansible_become as _become
+    try:
+        payload.become_method = _become.normalize(payload.become_method)
+    except _become.BecomeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     atype = ansible_local_service.asset_type(payload.asset)
 
@@ -1042,6 +1123,19 @@ async def run_playbook(
             and is_adhoc and atype == "playbook"):
         _validate_cloud_secret_stores(
             eff_runner, payload.secret_vars, payload.secret_become_source)
+
+    # The transient cloud runners take a playbook, an SSH key and a secret channel —
+    # `_dispatch_cloud_runner` has no plain-var argument at all, so there is nowhere to
+    # put the become method. Refused rather than dropped: silently ignoring it would
+    # escalate by sudo on the very host the operator selected pbrun for, and the sudo
+    # failure does not name itself. The local and agent runners both carry it.
+    if (payload.become_method and eff_runner in ("ecs", "aci", "gcp")
+            and is_adhoc and atype == "playbook"):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"a become method ({payload.become_method}) cannot be used on the "
+                    f"{eff_runner.upper()} runner — it has no channel for play variables. "
+                    f"Run this target through the local runner or a remote agent."))
 
     # Managed-account checkout works on the local and ACI runners (both inject the
     # credential inline); on ECS / Cloud Run it needs an ephemeral store copy, which is
@@ -1080,32 +1174,10 @@ async def run_playbook(
         batch_id=payload.batch_id,
         **_schedule_kwargs(payload, db),
     )
-    if wants_secret:
-        # Audit the use — kinds + var names only, never the source refs or values.
-        kinds = []
-        if payload.secret_vars:
-            kinds.append(f"{len(payload.secret_vars)} var(s)")
-        if payload.secret_become_source:
-            kinds.append("become-password")
-        if payload.secret_ssh_key_source:
-            kinds.append("ssh-key")
-        # Managed-account use — record kind + account name(s) + system, never the credential.
-        managed_accts = []
-        if payload.managed_account:
-            kinds.append("managed-account (checkout)")
-            managed_accts.append({"role": "connection",
-                                  "account": payload.managed_account.account_name,
-                                  "system_id": payload.managed_account.system_id})
-        if payload.managed_become:
-            kinds.append("managed-account become (checkout)")
-            managed_accts.append({"role": "become",
-                                  "account": payload.managed_become.account_name,
-                                  "system_id": payload.managed_become.system_id})
+    if wants_secret or payload.epml_token_var:
         job_service.log_audit(
             db, current_user.username, "ansible_secret_use",
-            details={"kinds": kinds, "vars": sorted(payload.secret_vars.keys()),
-                     "managed_accounts": managed_accts,
-                     "asset": payload.asset, "target": payload.target})
+            details=_secret_use_details(payload, payload.target))
     # No background task: the job is a queued row now, claimed by jobs_worker. Its
     # parameters live in the metadata written above, so a worker restart resumes it
     # instead of stranding it — see services/ansible_run_meta.py.
@@ -1122,12 +1194,28 @@ class BulkRunRequest(BaseModel):
     asset_backend: str = ""
     extra_vars: dict = {}
     secret_vars: dict = {}
+    # See RunRequest — the NAME only, and it applies to every target in the batch.
+    epml_token_var: str = ""
     # VM-only connection fields; ignored for k8s/database rows (localhost plays).
     ansible_user: str = ""
     secret_become_source: str = ""
     secret_ssh_key_source: str = ""
+    # The batch DEFAULT — used for any target with no entry in the map below. Should
+    # be name-only: a pinned ref here would point every job at one machine's
+    # credential, which is the failure the per-target map exists to prevent.
     managed_account: ManagedAccountRef | None = None
     managed_become: ManagedAccountRef | None = None
+    # PER-TARGET refs, keyed by inventory id exactly as in `inventory_ids`. This is
+    # what lets one bulk run use a DIFFERENT managed account on every object.
+    #
+    # PRESENCE is the lookup, not truthiness (see managed_accounts.pick_ref): a key
+    # mapped to null means "this target gets no managed account", an ABSENT key falls
+    # back to the default above. Keys naming anything outside the resolved selection
+    # are refused rather than ignored — a silently-dropped override would put that
+    # host back on the fleet account, which is the bug this feature fixes.
+    managed_accounts: dict[str, ManagedAccountRef | None] = {}
+    managed_becomes: dict[str, ManagedAccountRef | None] = {}
+    become_method: str = ""
     # Applies to the WHOLE batch — see the copy in run_playbook_bulk. A batch split
     # across a window boundary would be the worst of both worlds.
     run_at: str = ""
@@ -1177,31 +1265,67 @@ async def run_playbook_bulk(
     except inventory_service.BulkSelectionError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    from ..services import managed_accounts as ma
+
+    # A per-target key that matches no target is REFUSED, never ignored. Ignoring it
+    # would silently run that host on the batch default — the operator picked a
+    # specific account for it and would have no way to tell that it wasn't used.
+    #
+    # One check covers both ways a key can be wrong: plan_bulk_run has already
+    # de-duped, capped and rejected every id it doesn't know, so on success
+    # `target_ids` IS the selection. "Unknown to the inventory" and "not in this
+    # selection" are the same condition from here.
+    target_ids = [t["id"] for t in plan["targets"]]
+    stray = ma.stray_ids(
+        set(payload.managed_accounts) | set(payload.managed_becomes), target_ids)
+    if stray:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{len(stray)} per-target managed account(s) name resources that "
+                    f"are not in this run: {', '.join(stray[:5])}. The selection may "
+                    f"have changed — reselect and try again."))
+
     # A k8s/database run is a localhost play with no SSH connection; the run path
     # silently ignores the connection-identity fields. Across a batch that silence
     # would be misleading, so refuse instead.
+    #
+    # The per-target maps are folded into the same two keys deliberately: the operator
+    # -facing message and `_CONNECTION_FIELDS` stay as they are, and a batch that
+    # populated ONLY the map cannot slip past the refusal.
     wrong_fields = inventory_service.reject_connection_fields(plan["kind"], {
         "secret_ssh_key_source": payload.secret_ssh_key_source,
         "secret_become_source": payload.secret_become_source,
-        "managed_account": payload.managed_account,
-        "managed_become": payload.managed_become,
+        "managed_account": payload.managed_account or payload.managed_accounts,
+        "managed_become": payload.managed_become or payload.managed_becomes,
+        "become_method": payload.become_method,
     })
     if wrong_fields:
         raise HTTPException(status_code=400, detail=wrong_fields)
 
     batch_id = uuid.uuid4().hex[:12]
     jobs, failed = [], []
+    accounts_used = {}          # inventory_id → account name, for the batch audit
     for target in plan["targets"]:
+        # The whole point of the feature: each target gets ITS OWN account when the
+        # operator chose one, and the batch default only where they didn't.
+        t_account = ma.pick_ref(payload.managed_accounts, target["id"],
+                                payload.managed_account)
+        t_become = ma.pick_ref(payload.managed_becomes, target["id"],
+                               payload.managed_become)
+        if t_account is not None:
+            accounts_used[target["id"]] = t_account.account_name
         req = RunRequest(
             asset=payload.asset,
             asset_backend=payload.asset_backend,
+            epml_token_var=payload.epml_token_var,
             extra_vars=payload.extra_vars,
             secret_vars=payload.secret_vars,
             ansible_user=payload.ansible_user,
             secret_become_source=payload.secret_become_source,
             secret_ssh_key_source=payload.secret_ssh_key_source,
-            managed_account=payload.managed_account,
-            managed_become=payload.managed_become,
+            managed_account=t_account,
+            managed_become=t_become,
+            become_method=payload.become_method,
             batch_id=batch_id,
             # Scheduling rides the batch: booking a bulk run into a window must book
             # EVERY target in it, or half the batch runs now and half on Saturday. This
@@ -1233,7 +1357,12 @@ async def run_playbook_bulk(
         db, current_user.username, "ansible_bulk_run",
         details={"batch_id": batch_id, "kind": plan["kind"], "asset": payload.asset,
                  "count": len(jobs), "targets": [j["name"] for j in jobs],
-                 "failed": [f["name"] for f in failed]})
+                 "failed": [f["name"] for f in failed],
+                 # Names only, never a credential. Each job audits its own use too,
+                 # but with a different account per target this is the one place the
+                 # whole "which account went where" picture is readable at a glance.
+                 "accounts": {j["name"]: accounts_used.get(j["inventory_id"], "")
+                              for j in jobs}})
     return {"batch_id": batch_id, "kind": plan["kind"], "count": len(jobs),
             "jobs": jobs, "failed": failed}
 
@@ -1276,41 +1405,91 @@ async def list_managed_accounts(
 
     Returns ``{"enabled": false, "systems": []}`` when BeyondTrust is off (no
     ps-cli call), and never 500s a lookup — a ps-cli error yields an ``error`` note
-    with an empty list so the UI can surface it inline."""
+    with an empty list so the UI can surface it inline.
+
+    The body lives in ``services.managed_account_lookup``, shared with the bulk
+    picker below so one host and fifty hosts are shaped by the same code."""
     if not _can_use_secrets(current_user):
         raise HTTPException(status_code=403, detail="The 'secrets:use' permission is required.")
 
-    from ..services import config_service as cs, btapi_service, managed_accounts as ma
+    from ..services import managed_account_lookup as mal
+    return await mal.lookup_host(host, name)
 
-    # ephemeral_enabled tells the UI that managed accounts can run on ECS/GCP (via
-    # the ephemeral store copy) and to nudge on change-after-release for those.
-    ephemeral_enabled = cs.get_bool("ansible_cloud_ephemeral_secrets_enabled")
-    if not cs.get_bool("password_safe_enabled"):
-        return {"enabled": False, "ephemeral_enabled": ephemeral_enabled, "systems": []}
 
-    host = (host or "").strip()
-    if not host:
-        return {"enabled": True, "ephemeral_enabled": ephemeral_enabled, "systems": []}
+class BulkManagedAccountsRequest(BaseModel):
+    """Which resources the bulk picker needs account lists for. Named by INVENTORY
+    ID, exactly as ``/run-bulk`` names them — never by address."""
+    inventory_ids: list[str] = []
+    # The account name chosen as the batch default, if any. Only used to PRE-SELECT a
+    # row; it is not applied to anything here.
+    default_account_name: str = ""
+    default_become_name: str = ""
 
-    ip, name = ma.lookup_args(host, name)
+
+@router.post("/bulk-managed-accounts",
+             dependencies=[Depends(require_permission("config_mgmt", "write"))])
+async def bulk_managed_accounts(
+    payload: BulkManagedAccountsRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Per-target Password Safe account lists for a bulk run — **ids and names only**.
+
+    This is what lets the run form offer a DIFFERENT managed account per selected
+    object. It deliberately resolves the selection through the *same* first steps as
+    :func:`run_playbook_bulk` — fresh ``collect()``, the same RBAC filter, the same
+    ``plan_bulk_run`` — and that identity is the security property: the host each
+    account list is read for is the host the run will actually connect to, taken from
+    the dashboard's own rows. Nothing about the address comes from the browser.
+
+    It inherits ``plan_bulk_run``'s all-or-nothing 400 on an unrunnable selection, and
+    should: a picker that accepted a selection the run then refuses would be showing
+    the operator accounts for a batch that cannot happen.
+
+    Non-VM kinds get an empty list rather than an error — a k8s/database run is a
+    localhost play with no SSH connection to authenticate, so there is no account to
+    pick. The run path refuses an operator-supplied one separately.
+    """
+    if not _can_use_secrets(current_user):
+        raise HTTPException(status_code=403, detail="The 'secrets:use' permission is required.")
+
+    from ..services import inventory_service, managed_account_lookup as mal
+
+    accessible = inventory_service.accessible_workgroups(current_user)
+    visible = [i for i in inventory_service.collect(db)
+               if inventory_service.visible_to(i, accessible, current_user.username)]
     try:
-        systems = await btapi_service.list_ps_managed_systems_by_ip_or_name(ip, name)
-        accounts_by_system: dict = {}
-        for s in systems:
-            sid = s.get("ManagedSystemID") or s.get("SystemId") or s.get("SystemID")
-            if sid is None:
-                continue
-            accounts_by_system[int(sid)] = \
-                await btapi_service.list_ps_managed_accounts_with_fallback(int(sid))
-        return {"enabled": True, "ephemeral_enabled": ephemeral_enabled,
-                "systems": ma.normalize_managed_systems(systems, accounts_by_system)}
-    except btapi_service.BTAPIError as exc:
-        # Log the real ps-cli error server-side; return a generic reason. A raw
-        # BTAPIError string carries ps-cli stderr, so returning it here would leak
-        # internal detail to the caller — CodeQL py/stack-trace-exposure.
-        logger.warning("managed-account lookup for %r failed: %s", host, exc)
-        return {"enabled": True, "ephemeral_enabled": ephemeral_enabled, "systems": [],
-                "error": "Password Safe lookup failed — check the BeyondTrust configuration and server logs."}
+        plan = inventory_service.plan_bulk_run(visible, payload.inventory_ids)
+    except inventory_service.BulkSelectionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if plan["kind"] != "vm":
+        return {"enabled": True, "ephemeral_enabled": False, "kind": plan["kind"],
+                "truncated": False, "targets": []}
+
+    by_id = {i["id"]: i for i in visible}
+    targets = []
+    for t in plan["targets"]:
+        item = by_id.get(t["id"]) or {}
+        targets.append({
+            "inventory_id": t["id"],
+            # The name hint, matching what ansible_local_run_service._managed_name_hint
+            # passes at run time: cloud-native onboarding registers the system under the
+            # DEPLOY NAME with a placeholder IP, so an IP-only lookup misses it.
+            "name": t["name"],
+            # The exact address the run will connect on — _target_spec sets `target`
+            # for both the direct and the agent-bound VM form.
+            "host": (t["spec"] or {}).get("target") or "",
+            # The managed system this VM was actually onboarded into, when recorded.
+            # An exact key beats an address; see managed_accounts.suggest_account.
+            "ps_system_id": item.get("ps_system_id") or "",
+        })
+
+    result = await mal.lookup_targets(
+        targets,
+        default_account_name=payload.default_account_name,
+        default_become_name=payload.default_become_name)
+    return {**result, "kind": plan["kind"]}
 
 
 @router.get("/drift")
