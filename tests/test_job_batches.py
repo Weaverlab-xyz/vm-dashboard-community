@@ -36,7 +36,11 @@ def _install_stubs():
     # survive being constructed and inverted — the fake query never interprets it.
     sa.and_ = lambda *a, **k: type("_Expr", (), {"__invert__": lambda s: s})()
     sa_exc = types.ModuleType("sqlalchemy.exc")
-    sa_exc.IntegrityError = type("IntegrityError", (Exception,), {})
+    # The real hierarchy, not two unrelated classes: `IntegrityError` IS a
+    # `SQLAlchemyError`, and job_service.set_failed catches the base to recover a
+    # session whose transaction a DB error already aborted.
+    sa_exc.SQLAlchemyError = type("SQLAlchemyError", (Exception,), {})
+    sa_exc.IntegrityError = type("IntegrityError", (sa_exc.SQLAlchemyError,), {})
     sa_orm = types.ModuleType("sqlalchemy.orm")
     sa_orm.Session = type("Session", (), {})
     sa.exc, sa.orm = sa_exc, sa_orm

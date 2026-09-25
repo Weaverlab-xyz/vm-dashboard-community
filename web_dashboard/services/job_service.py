@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from sqlalchemy import and_, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ..database import Job, AuditLog
@@ -329,8 +329,33 @@ def set_failed(db: Session, job_id: str, error: str,
     and without this the only durable home for any of it was ``error``. Both still
     matter: ``error_message`` is the one field the job page renders, this is where the
     same thing survives as structure rather than prose.
+
+    **A caller reaching here from `except` may hand us a POISONED session.** The thing
+    that failed the job is quite often the thing that aborted its transaction — a
+    deadlock, a lost connection, a constraint violation mid-flush — and on PostgreSQL
+    every later statement on that session then raises ``InFailedSqlTransaction``
+    ("current transaction is aborted, commands ignored until end of transaction block").
+    Which means the one function whose entire job is to record why a run died is the one
+    that cannot run when the death was a database error, and the real cause survives only
+    in the application log.
     """
-    job = db.query(Job).filter(Job.id == job_id).first()
+    # Recover such a session rather than dying on it — see the docstring. Nothing is lost
+    # by the rollback: PostgreSQL has ALREADY discarded every write in an aborted
+    # transaction, so the only choice left is whether this function gets to add one. On a
+    # healthy session the first read succeeds and the except is never entered.
+    #
+    # Seen live 2026-09-25 on the 26.10.20 upgrade: `init_db`'s ALTER TABLE on `jobs`
+    # deadlocked against a mid-flight `expiry_sweep`, PostgreSQL chose the sweep as the
+    # victim, and `expiry_reaper.run` caught that and called straight in here on the same
+    # session. The InFailedSqlTransaction escaped a service whose docstring says it never
+    # raises, and the job was left to `jobs_worker._fail_backstop`, whose fresh session
+    # did mark it failed — but with "current transaction is aborted" as the error message
+    # instead of "deadlock detected", pointing at nothing.
+    try:
+        job = db.query(Job).filter(Job.id == job_id).first()
+    except SQLAlchemyError:
+        db.rollback()
+        job = db.query(Job).filter(Job.id == job_id).first()
     if job:
         now = datetime.utcnow()
         job.error_message = error
