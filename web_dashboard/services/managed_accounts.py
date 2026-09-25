@@ -123,15 +123,161 @@ def find_account_by_name(systems: list, name: str):
         for account in (system.get("accounts") or []):
             raw = (account.get("name") or "").strip().lower()
             if wanted in (raw, ssh_login_user(raw)):
-                return {
-                    "system_id":    system["system_id"],
-                    "account_id":   account["account_id"],
-                    # The account's own name, not the operator's spelling — it
-                    # becomes ansible_user, and the suffix form is significant there.
-                    "account_name": account.get("name") or "",
-                    "uses_ssh_key": bool(account.get("uses_ssh_key")),
-                }
+                # _ref carries the account's OWN name, not the operator's spelling —
+                # it becomes ansible_user, and the suffix form is significant there.
+                return _ref(system, account)
     return None
+
+
+def system_name(system: dict) -> str:
+    """A ps-cli managed-system row's name, with the same field fallbacks
+    :func:`normalize_managed_systems` uses."""
+    return (system.get("Name") or system.get("SystemName") or "").strip()
+
+
+def narrow_by_ip(candidates: list, ip: str) -> list:
+    """Pick between name candidates using the IP, or hand back the ambiguity.
+
+    The precedence, which has exactly ONE definition because both the per-host ps-cli
+    lookup and the batch estate lookup call this:
+
+    1. Candidates whose ``IPAddress`` also matches — the unambiguous hit.
+    2. Otherwise every candidate. A lone one is the system registered under a name
+       with no (or a placeholder) IP, which is what cloud-native plugin onboarding
+       looks like. Several is genuine ambiguity — two systems can share a name in
+       different workgroups (``DC01`` in shield.int and ``DC01`` in weaverlab.xyz) —
+       and it is handed to the caller to surface rather than silently resolved.
+    """
+    return [s for s in candidates or [] if s.get("IPAddress") == ip] or list(candidates or [])
+
+
+def filter_by_ip(all_systems: list, ip: str) -> list:
+    """Every managed system in an estate whose ``IPAddress`` matches."""
+    return [s for s in all_systems or [] if s.get("IPAddress") == ip]
+
+
+def select_systems(all_systems: list, ip: str, name: str) -> list:
+    """The managed systems matching ``(ip, name)``, chosen from an ALREADY-FETCHED
+    estate rather than by asking ps-cli about this one host.
+
+    This exists because the per-host lookup's fallback is a full
+    ``managed-systems list`` — a 60s-timeout subprocess. A bulk run resolving 50
+    targets one at a time would pay for that estate up to 50 times and time the
+    request out. This lets a batch caller read the estate ONCE and answer every
+    target locally, reusing :func:`narrow_by_ip` so it cannot drift from the
+    per-host path.
+
+    The ONE deliberate difference from that path: the name candidates are matched
+    HERE, case-insensitively against the system's own name, rather than by ps-cli's
+    ``-n``. The estate is already in hand, so there is nothing to ask. Callers that
+    need ps-cli's own name semantics should keep using the per-host lookup.
+
+    Pure: fetching the raw rows is the caller's job.
+    """
+    ip = (ip or "").strip()
+    name = (name or "").strip()
+    if name:
+        lowered = name.lower()
+        candidates = [s for s in all_systems or []
+                      if system_name(s).lower() == lowered]
+        if candidates:
+            return narrow_by_ip(candidates, ip)
+    return filter_by_ip(all_systems, ip)
+
+
+# Why the suggestion tiers below carry a BASIS rather than just a ref: the operator
+# has to be able to tell an inference from their own pick before they submit a fleet
+# run. These are the values ``suggest_account`` reports.
+BASIS_DEFAULT_NAME = "default-name"      # matched the account name chosen for the batch
+BASIS_RECORDED_SYSTEM = "recorded-system"  # the managed system this VM was onboarded into
+BASIS_ONLY_ACCOUNT = "only-account"      # exactly one candidate existed
+
+
+def suggest_account(systems: list, default_name: str = "", ps_system_id: str = ""):
+    """Pre-select a managed account for one target of a bulk run.
+
+    Returns ``(ref, basis)`` — a :func:`find_account_by_name`-shaped ref and one of
+    the ``BASIS_*`` constants — or ``(None, "")`` when nothing is confident enough to
+    suggest. A suggestion is a starting point the operator can override per row; it
+    is never applied without being shown.
+
+    Three tiers, first hit wins:
+
+    1. **The name chosen for the batch.** Explicit intent, and it also GUARANTEES the
+       pre-selection equals what the name-only fallback would resolve to for this
+       host — which is what makes leaving a row untouched safe.
+    2. **The managed system this VM was actually onboarded into** (``ps_system_id``,
+       recorded at registration), when it has exactly one account. An exact key beats
+       an address: plugin-onboarded systems carry a ``127.0.0.1`` placeholder and a
+       packed locator, so they have no usable address to match on at all.
+    3. **A single unambiguous candidate** — one system, one account.
+
+    There is deliberately **no fuzzy/similar-name tier**. Password Safe names a system
+    after its HostName, this dashboard has written four different things into that
+    field across its onboarding paths, and two production bugs came out of matching on
+    it — see the ``ps_attribute_catalog`` module docstring. A wrong suggestion here
+    checks out the wrong machine's credential.
+    """
+    by_name = find_account_by_name(systems, default_name)
+    if by_name:
+        return by_name, BASIS_DEFAULT_NAME
+
+    if (ps_system_id or "").strip():
+        wanted = str(ps_system_id).strip()
+        for system in systems or []:
+            if str(system.get("system_id")) != wanted:
+                continue
+            accounts = system.get("accounts") or []
+            if len(accounts) == 1:
+                return _ref(system, accounts[0]), BASIS_RECORDED_SYSTEM
+            # Recorded but ambiguous: fall through rather than guess between its
+            # accounts. Tier 3 will decline too, which is the honest answer.
+            break
+
+    candidates = [(s, a) for s in systems or [] for a in (s.get("accounts") or [])]
+    if len(candidates) == 1:
+        return _ref(*candidates[0]), BASIS_ONLY_ACCOUNT
+    return None, ""
+
+
+def _ref(system: dict, account: dict) -> dict:
+    """A ``ManagedAccountRef``-shaped dict for one normalized system+account pair."""
+    return {
+        "system_id":    system["system_id"],
+        "account_id":   account["account_id"],
+        "account_name": account.get("name") or "",
+        "uses_ssh_key": bool(account.get("uses_ssh_key")),
+    }
+
+
+# A sentinel is required: ``None`` is a MEANINGFUL value in the per-target map (see
+# pick_ref), so it cannot double as "absent".
+_ABSENT = object()
+
+
+def pick_ref(per_target: dict, target_id: str, default):
+    """The managed-account ref for ONE target of a bulk run.
+
+    **Presence decides, not truthiness.** A key mapped to ``None`` means the operator
+    said this target gets no managed account; an ABSENT key means it falls back to the
+    batch default. Collapsing the two would make "none for this host" silently mean
+    "use the fleet account here", which is the bug this whole feature exists to fix.
+    """
+    if not per_target:
+        return default
+    found = per_target.get(target_id, _ABSENT)
+    return default if found is _ABSENT else found
+
+
+def stray_ids(keys, target_ids) -> list:
+    """Per-target keys naming something that is not a target of this run.
+
+    Refused by the caller, never ignored. A silently-dropped override is the
+    one-account-for-every-object bug coming back: the operator picks a distinct
+    account for a host, the key does not match, and that host quietly runs under the
+    fleet default instead. Sorted so the error message is stable.
+    """
+    return sorted(set(keys or ()) - set(target_ids or ()))
 
 
 def requires_ephemeral_store(has_managed: bool, eff_runner: str,

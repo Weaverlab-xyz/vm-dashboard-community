@@ -982,6 +982,10 @@ class PasswordSafeFeatureConfig(BaseModel):
     # "Change Password Using Own Credentials" on the DB managed account — see config.py.
     # Required with an unprivileged operator-created functional account.
     clouddb_ps_self_rotation: bool = False
+    # Ansible runs connect as the database's OWN Password Safe managed account rather
+    # than the stored admin — see config.py for why this defaults off (that account
+    # holds no privileges).
+    clouddb_ansible_use_ps_account: bool = False
     # Import from Password Safe — see config.py for what each one does.
     # clouddb_ps_import_max_systems MUST stay annotated `int`: _read_feature's
     # int-coercion branch only fires on an int annotation, and an unset int otherwise

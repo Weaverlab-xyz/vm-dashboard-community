@@ -242,19 +242,37 @@ that needs a Secrets-Management secret or a Password Safe managed account, use
 full run form applies to it: named secret vars, become password, SSH key, and the
 managed-account picker.
 
-**A managed account is matched by name on each host.** A `ManagedAccountRef` normally
-pins `system_id` + `account_id`, and both belong to one managed system — reusing one
-across a fleet would check out a *single machine's* credential and connect to every
-host with it. So a bulk run sends the account **name** instead, and each job resolves
-it against the host it is actually configuring, then checks out that host's own
-credential. The account list you pick from is read from one target as a sample; a host
-that doesn't have an account by that name fails **only its own job**, with a message
-naming the host and the account.
+**Every target picks its own managed account.** The form lists each selected VM with
+its own Password Safe dropdown, read from that target's own address. Pick a **default**
+above the table to pre-select every row, then override only the rows that differ — a
+fleet whose hosts carry `svc-ansible-web01`, `svc-ansible-db02` and so on is expressed
+directly, rather than needing one account name to be true everywhere.
 
-This works for domain accounts too — the Password Safe lookup already falls back to
-domain-linked accounts — and it matches the `{user};{suffix}` form that cloud-native
-onboarding registers (the AWS Systems Manager plugin appends a scope suffix), so
-picking `svc-ansible` matches `svc-ansible;local`.
+The suggestion for each row is made server-side, in three tiers: the account matching
+the default name you chose; the Password Safe system that VM was actually onboarded
+into (recorded at registration — the only thing that finds a plugin-onboarded system,
+which carries a `127.0.0.1` placeholder and no usable address); or a single unambiguous
+candidate. Rows say which tier they came from, so an inference is distinguishable from
+your own pick. There is deliberately **no fuzzy name matching**: a near-miss here checks
+out the wrong machine's credential.
+
+*Why the ids matter.* A `ManagedAccountRef` pins `system_id` + `account_id`, and both
+belong to one managed system — one such ref shared by a whole batch would check out a
+*single machine's* credential and connect to every host with it. Per-target refs are
+pinned because each one came from its own host's live list, and the server checks every
+key against the selection it resolved for itself. The **default** is sent as a name
+only, for the same reason: it applies to hosts whose own list was never read. A
+**scheduled** batch sends names throughout — an id pinned today can name an account
+that has been removed by the time the window opens.
+
+**A target with no match still runs.** It is flagged amber in the table and falls back
+to the default account name; if that host does not have it, it fails **only its own
+job**, with a message naming the host and the account. The rest of the batch runs.
+
+Name matching works for domain accounts too — the Password Safe lookup already falls
+back to domain-linked accounts — and it matches the `{user};{suffix}` form that
+cloud-native onboarding registers (the AWS Systems Manager plugin appends a scope
+suffix), so picking `svc-ansible` matches `svc-ansible;local`.
 
 **Connection credentials are refused for Kubernetes and database batches.** Those run
 a `localhost` play that reaches out over a kubeconfig or DB login — there is no SSH
@@ -263,6 +281,24 @@ connection to authenticate, and the run path silently ignores `managed_account`,
 absorb that quietly; a batch would leave you believing a credential had been applied
 to fifty clusters, so `/run-bulk` rejects the combination with a 400. Named
 `secret_vars` are honored on those targets and stay available.
+
+**Databases have a per-object account of their own.** A *registered* database already
+connects as the Password Safe account it was registered with, checked out just-in-time.
+A *provisioned* one connects as the stored admin by default, but if it has been
+onboarded into Password Safe you can switch it to its **own** managed account with
+**Settings → Integrations → Password Safe → _Ansible runs connect as the database's own
+managed account_**. That account is unique per database by construction, so a bulk run
+over several databases uses a different credential for each with nothing to pick.
+
+> The setting is **off by default and should stay off until you have granted the
+> account.** The managed user the dashboard creates (`psafe_<id>`) is built with a bare
+> login and **no privileges at all** — it exists to be rotated, not to read anything
+> (on Azure SQL it only gets a contained user in `master`). Turn this on without
+> granting it what your playbooks need and every run fails on permissions.
+
+Kubernetes clusters have no equivalent: a cluster records no single managed
+system/account pair, so there is nothing per-cluster to select. Use named `secret_vars`
+there.
 
 ---
 

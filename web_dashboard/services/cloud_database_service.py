@@ -4727,6 +4727,59 @@ async def _registered_connection_vars(row) -> dict:
     }
 
 
+async def _ps_onboarded_connection_vars(db: Session, row) -> dict:
+    """Connection vars for a PROVISIONED database, connecting as the Password Safe
+    managed account this row was onboarded with rather than as the stored admin.
+
+    Mirrors :func:`_registered_connection_vars` exactly — same just-in-time checkout,
+    same request duration, same "let the request expire on its own" contract, because
+    these runners inject the value inline and never make an ephemeral store copy. The
+    only difference is where the ref comes from: a registered row carries a
+    ``psmanaged:`` blob in ``credentials_ref``; a provisioned one carries the pair of
+    id columns that onboarding wrote.
+
+    **The account this connects as is privilege-free**, and that is deliberate on the
+    onboarding side: ``cloud_db_sql_service`` creates ``psafe_<id12>`` with a bare
+    LOGIN and no GRANTs, because it exists to be rotated rather than to read anything
+    (on Azure SQL it gets a contained user in ``master`` only). So a playbook that
+    actually touches data will fail on permissions unless the operator has granted
+    this user what it needs out of band. That is why the caller gates this on an
+    opt-in that defaults OFF — see ``clouddb_ansible_use_ps_account``.
+    """
+    from . import btapi_service
+
+    duration = int(_cfg("ansible_managed_request_duration_min") or 60)
+    try:
+        _req_id, credential = await btapi_service.get_ps_credential_with_request(
+            int(row.ps_managed_system_id), int(row.ps_managed_account_id),
+            duration_min=duration)
+    except btapi_service.BTAPIError as exc:
+        raise CloudDatabaseError(
+            f"Password Safe checkout failed for database {row.id}: {exc}") from exc
+    except (TypeError, ValueError) as exc:
+        raise CloudDatabaseError(
+            f"database {row.id} has a malformed Password Safe onboarding record "
+            f"(system={row.ps_managed_system_id!r} account={row.ps_managed_account_id!r}) "
+            f"— re-register it in Password Safe") from exc
+    if not credential:
+        raise CloudDatabaseError(
+            f"Password Safe returned an empty credential for database {row.id}")
+
+    prov_job = _provision_job_for(db, row.id)
+    tfv = ((prov_job.metadata_dict or {}).get("tf_variables") if prov_job else None) or {}
+    return {
+        "db_engine": row.engine,
+        "db_login_host": row.private_host or "",
+        "db_login_port": row.port or _DEFAULT_PORTS.get(row.engine),
+        # Derived, never spelled a second time: the name here and the name the
+        # onboarding SQL created have to be the same string or the login fails with a
+        # credential that is perfectly valid.
+        "db_login_user": _managed_user_name(row.id),
+        "db_login_password": credential,
+        "db_name": connection_db_name(row, tfv),
+    }
+
+
 async def ansible_connection_vars(db: Session, db_id: str) -> dict:
     """Connection variables an Ansible ``localhost`` play uses to reach this managed
     DB over the network. Resolved server-side and injected as **scrubbed secret
@@ -4756,6 +4809,14 @@ async def ansible_connection_vars(db: Session, db_id: str) -> dict:
     # provisioned path, unchanged.
     if row.source == "registered":
         return await _registered_connection_vars(row)
+    # A PROVISIONED row that was onboarded into Password Safe can connect as its OWN
+    # managed account — the per-object credential, unique by construction, with no
+    # picker needed. Opt-in and OFF by default because that account is deliberately
+    # privilege-free (see _ps_onboarded_connection_vars); turning it on without
+    # granting it anything turns working runs into permission errors.
+    if (row.ps_managed_system_id and row.ps_managed_account_id
+            and config_service.get_bool("clouddb_ansible_use_ps_account", False)):
+        return await _ps_onboarded_connection_vars(db, row)
     engine = row.engine
     prov_job = _provision_job_for(db, db_id)
     tfv = ((prov_job.metadata_dict or {}).get("tf_variables") if prov_job else None) or {}

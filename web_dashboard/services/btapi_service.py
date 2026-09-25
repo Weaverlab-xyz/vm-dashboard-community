@@ -156,32 +156,29 @@ def _list_managed_systems_by_ip_or_name_sync(ip: str, name: str) -> list:
 
     This correctly handles multiple systems with the same name in different
     workgroups (e.g. DC01 in shield.int and DC01 in weaverlab.xyz).
+
+    The IP-vs-name precedence itself lives in ``managed_accounts.narrow_by_ip`` /
+    ``filter_by_ip``, shared with the BATCH lookup used by a bulk run
+    (``managed_accounts.select_systems``), which answers many hosts from one
+    already-fetched estate. Two copies of this precedence is how the two paths would
+    start disagreeing about which system a host is.
     """
+    from . import managed_accounts as ma
+
     if name:
         candidates = _ps_run(["managed-systems", "list", "-n", name]) or []
-        # Prefer the candidate whose IP matches exactly
-        by_ip = [s for s in candidates if s.get("IPAddress") == ip]
-        if by_ip:
-            return by_ip
-        # If no IP match but name matched exactly one system, use it
-        # (handles cases where IP isn't registered in PS at all)
-        if len(candidates) == 1:
-            return candidates
-        # Multiple name matches, no IP disambiguation — return all so caller
-        # can surface the ambiguity rather than silently picking the wrong one
         if candidates:
-            return candidates
+            return ma.narrow_by_ip(candidates, ip)
 
     # No name or name lookup returned nothing — try full list filtered by IP
-    all_systems = _ps_run(["managed-systems", "list"]) or []
-    return [s for s in all_systems if s.get("IPAddress") == ip]
+    return ma.filter_by_ip(_ps_run(["managed-systems", "list"]) or [], ip)
 
 
 def _list_managed_accounts_sync(system_id: int) -> list:
     return _ps_run(["managed-accounts", "list", "-id", str(system_id)]) or []
 
 
-def _list_managed_accounts_with_fallback_sync(system_id: int) -> list:
+def _list_managed_accounts_with_fallback_sync(system_id: int, all_accounts=None) -> list:
     """
     Fetch managed accounts for a system, with fallback to list-accounts.
 
@@ -192,13 +189,19 @@ def _list_managed_accounts_with_fallback_sync(system_id: int) -> list:
 
     Returns a normalised list where every entry has ManagedAccountID and
     ManagedSystemID so callers don't need to know which path was taken.
+
+    ``all_accounts`` lets a BATCH caller supply that whole-tenant list once. The
+    fallback is a full ``list-accounts`` per system, so a bulk run over hosts whose
+    systems have no locally-managed accounts would otherwise re-read every account in
+    the tenant once per host. Omitted, this reads it itself exactly as before.
     """
     results = _ps_run(["managed-accounts", "list", "-id", str(system_id)]) or []
     if results:
         return results
 
     # Fallback: fetch all accounts and filter by SystemId
-    all_accounts = _ps_run(["managed-accounts", "list-accounts"]) or []
+    if all_accounts is None:
+        all_accounts = _ps_run(["managed-accounts", "list-accounts"]) or []
     matched = [a for a in all_accounts if a.get("SystemId") == system_id]
 
     # Normalise field names to match the list -id schema expected by callers
@@ -307,17 +310,65 @@ async def list_ps_managed_systems_by_ip_or_name(ip: str, name: str) -> list:
     return await asyncio.to_thread(_list_managed_systems_by_ip_or_name_sync, ip, name)
 
 
+async def list_ps_managed_systems_all() -> list:
+    """Every Password Safe managed system, in one ps-cli call.
+
+    For a BATCH caller only. Resolving N hosts through
+    :func:`list_ps_managed_systems_by_ip_or_name` pays for this same estate listing
+    once per host whenever the name hint misses — 50 targets is up to 50 subprocesses
+    at a 60s timeout each, which times the request out. Read it once here and narrow
+    locally with ``managed_accounts.select_systems``.
+    """
+    rows = await asyncio.to_thread(_ps_run, ["managed-systems", "list"])
+    if rows is None:
+        return []
+    # _ps_run hands back raw TEXT when the output is not JSON (some ps-cli verbs answer
+    # in plain text and their callers parse it). Every consumer here iterates dicts, so
+    # a string would iterate CHARACTERS and fail on `.get` deep inside the narrowing.
+    #
+    # Raised rather than coerced to []: an empty list is a meaningful answer here ("this
+    # tenant has no managed systems"), so returning one for an unparseable response
+    # would tell a batch caller that every host has no accounts — silently, and with no
+    # way to tell that apart from the truth. The caller catches this and falls back to
+    # per-host lookups.
+    if not isinstance(rows, list):
+        raise BTAPIError(
+            "ps-cli managed-systems list returned a non-JSON response; cannot read the "
+            "managed-system estate")
+    return rows
+
+
 async def list_ps_managed_accounts(system_id: int) -> list:
     """List managed accounts for a Password Safe managed system."""
     return await asyncio.to_thread(_list_managed_accounts_sync, system_id)
 
 
-async def list_ps_managed_accounts_with_fallback(system_id: int) -> list:
+async def list_ps_managed_accounts_with_fallback(system_id: int, all_accounts=None) -> list:
     """
     List managed accounts with fallback to list-accounts for domain-linked accounts.
     Use this for Windows VMs where accounts may be domain-linked rather than local.
+
+    ``all_accounts`` is the batch caller's pre-read whole-tenant list — see the sync
+    helper for why reading it once matters over a fleet.
     """
-    return await asyncio.to_thread(_list_managed_accounts_with_fallback_sync, system_id)
+    return await asyncio.to_thread(
+        _list_managed_accounts_with_fallback_sync, system_id, all_accounts)
+
+
+async def list_ps_managed_accounts_all() -> list:
+    """Every managed account in the tenant, in one ps-cli call — the batch caller's
+    input to :func:`list_ps_managed_accounts_with_fallback`. Domain-linked accounts
+    are only visible through this verb, which is why the per-system lookup falls back
+    to it at all."""
+    rows = await asyncio.to_thread(_ps_run, ["managed-accounts", "list-accounts"])
+    if rows is None:
+        return []
+    # Same reasoning as list_ps_managed_systems_all: coercing an unparseable response
+    # to [] would silently mean "this system has no domain accounts".
+    if not isinstance(rows, list):
+        raise BTAPIError(
+            "ps-cli managed-accounts list-accounts returned a non-JSON response")
+    return rows
 
 
 async def get_ps_credential(
