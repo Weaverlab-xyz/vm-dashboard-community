@@ -197,6 +197,34 @@ def test_the_fuxa_seed_never_fails_the_bake():
             f"operator opens an empty HMI mid-demo with no idea why")
 
 
+def test_the_cnf_apt_hook_is_cleared_before_the_first_apt_get_update():
+    """Ubuntu's command-not-found installs an APT::Update::Post-Invoke-Success hook,
+    and `cnf-update-db` exits non-zero when a `cnf_Commands` index was never fetched
+    — routine on Azure's Ubuntu images. apt-get then reports the HOOK's status as its
+    own, so under `set -eu` a bake dies on an update that actually succeeded. Killed a
+    live Azure cell bake 2026-09-25.
+
+    Ordering is the whole test: clearing the hook after the update that trips it is
+    the same bug. `set -eu` means there is no second chance."""
+    for path in _SCRIPTS:
+        src = _read(path)
+        if "apt-get update" not in src:
+            continue
+        name = os.path.basename(path)
+        clear = src.find("#clear APT::Update::Post-Invoke-Success;")
+        assert clear != -1, (
+            f"{name}: nothing clears the command-not-found apt hook, so a bake on an "
+            f"Ubuntu source image dies on its own `apt-get update`")
+        first_update = src.find("apt-get update")
+        assert clear < first_update, (
+            f"{name}: the hook is cleared at {clear} but the first `apt-get update` "
+            f"runs at {first_update} — under set -eu the bake is already dead")
+        # Tolerating a non-zero apt-get instead would hide a real update failure.
+        assert "apt-get update -q || true" not in src, (
+            f"{name}: apt-get update's exit status is suppressed — a genuinely broken "
+            f"mirror would then sail past and surface as a missing package later")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

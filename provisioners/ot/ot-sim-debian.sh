@@ -296,6 +296,22 @@ log "starting ot-sim bake on $(cat /etc/debian_version 2>/dev/null || echo unkno
 
 # ── 2. System updates ────────────────────────────────────────────────────────
 export DEBIAN_FRONTEND=noninteractive
+
+# Ubuntu wires command-not-found's index rebuild into apt as an
+# APT::Update::Post-Invoke-Success hook, and `cnf-update-db` exits non-zero whenever a
+# `cnf_Commands` index it expects was never fetched — routine on Azure's Ubuntu images,
+# and the jammy-backports/multiverse one in particular. The update itself SUCCEEDS; the
+# hook fails afterwards and apt-get reports the hook's status as its own, so `set -e`
+# kills the whole bake over an interactive shell convenience that has no business in a
+# baked server image. The tell is an apt error naming `APT::Update::Post-Invoke-Success`
+# and a CommandNotFound/db/creator.py traceback, directly after a clean "Fetched ... MB".
+#
+# Clear the hook list rather than tolerating a non-zero apt-get: a REAL update failure
+# must still stop the build. apt.conf.d is read in lexical order, so 99- lands after the
+# 50command-not-found that installs the hook. A no-op on Debian, which does not ship it.
+mkdir -p /etc/apt/apt.conf.d
+printf '#clear APT::Update::Post-Invoke-Success;\n' \
+  > /etc/apt/apt.conf.d/99-ot-sim-no-cnf-hook
 if [ "${OT_SKIP_UPDATES:-0}" = "1" ]; then
   log "OT_SKIP_UPDATES=1 — skipping dist-upgrade"
   apt-get update -q
