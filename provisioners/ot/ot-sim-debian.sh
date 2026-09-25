@@ -148,7 +148,16 @@ OT_PROBE_IMAGE="${OT_PROBE_IMAGE:-busybox:1.36}"
 # broker rebuilt inside that window and NOT fine for a customer POV, which is why the
 # dashboard treats the runtime as swappable and Nuclio (Apache-2.0) is the planned
 # answer for anything shipped to a customer. Do not quietly make CE the only path.
-OT_FAAS="$(echo "${OT_FAAS:-openfaas}" | tr '[:upper:]' '[:lower:]')"
+#
+# The default is ROLE-AWARE, and it has to be. The guard below refuses the pair
+# (cell, openfaas) outright, so a flat `openfaas` default made the script's OWN
+# default role — cell — unbakeable: an operator who set no variables at all got a
+# die two seconds into the provisioner. Only the UNSET case follows the role; an
+# explicit OT_FAAS=openfaas on a cell is still a user error and still refused.
+if [ -z "${OT_FAAS:-}" ]; then
+  if [ "$OT_ROLE" = "broker" ]; then OT_FAAS="openfaas"; else OT_FAAS="none"; fi
+fi
+OT_FAAS="$(echo "$OT_FAAS" | tr '[:upper:]' '[:lower:]')"
 case "$OT_FAAS" in
   openfaas|none) ;;
   nuclio|deployment)
