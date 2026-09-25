@@ -7,7 +7,10 @@
   <link rel="icon" href="{{ theme.favicon }}">
   <script src="https://cdn.tailwindcss.com"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-  <script src="/static/js/app.js"></script>
+  {# Versioned via static_url for the reason base.html gives. This page owns its own
+     head, so it is the one that silently keeps a bare reference when the other is
+     fixed -- the guard in tests/test_static_assets.py walks every template. #}
+  <script src="{{ static_url('js/app.js') }}"></script>
   {# This page owns its own head and inherits nothing from base.html, so the brand CSS has
      to be included again here -- the same reason the environment banner is repeated below. #}
   {% include '_brand_css.html' %}

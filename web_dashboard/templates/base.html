@@ -9,7 +9,14 @@
   <link rel="icon" href="{{ theme.favicon }}">
   <script src="https://cdn.tailwindcss.com"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-  <script src="/static/js/app.js"></script>
+  {# Versioned, never bare. Written as a literal path with no version, this let Chrome
+     keep serving a broken app.js for hours after the fix was deployed. static_url()
+     puts a hash of the file's bytes in the query, so a deploy that changes the file
+     changes this URL. See services/static_assets.py; tests/test_static_assets.py fails
+     any template that goes back to writing the path out by hand -- in an attribute or
+     in a comment like this one, which is why this one describes the path rather than
+     quoting it. #}
+  <script src="{{ static_url('js/app.js') }}"></script>
   <style>
     [x-cloak] { display: none !important; }
     .progress-bar-fill { transition: width 0.4s ease; }
