@@ -42,6 +42,18 @@
         Show routine sweeps
       </label>
 
+      <!-- Hypervisor inventory syncs, hidden on the same terms and for the same reason:
+           one per agent-bound connection every 30 minutes, several paged rows apiece,
+           all green. A SEPARATE box from routine sweeps because it is a cadence the
+           operator sets per connection, and diagnosing a stale inventory means wanting
+           these without the sweeps. Power ops share the job type and are never hidden. -->
+      <label class="flex items-center gap-2 text-sm text-gray-600 cursor-pointer"
+             title="Scheduled hypervisor inventory syncs. Power ops are always shown, and so is a sync that failed.">
+        <input type="checkbox" x-model="includeCheckins" @change="page=1; loadJobs()"
+               class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+        Show hypervisor check-ins
+      </label>
+
       <!-- The change-window queue: work that has not started and is waiting on a clock
            or on a person. A separate filter rather than a status, because a scheduled
            job IS `pending` and must keep showing under that status everywhere else. -->
@@ -178,6 +190,10 @@
       // default, matching the API default — `total` then counts real jobs, which is the
       // number the header is claiming to show.
       includeRoutine: false,
+      // Completed unattended check-ins — the hypervisor inventory syncs a cadence
+      // enqueues (job_service.CHECKIN_VERBS). Off by default, matching the API
+      // default, so `total` keeps counting what the table is showing.
+      includeCheckins: false,
       // One bulk Config-Management run. Seeded from ?batch_id= so a run can link
       // straight here, and so the URL stays shareable/bookmarkable.
       filterBatch: '',
@@ -207,6 +223,7 @@
           if (this.filterStatus) url += `&status=${this.filterStatus}`;
           if (this.filterBatch) url += `&batch_id=${encodeURIComponent(this.filterBatch)}`;
           if (this.includeRoutine) url += '&include_routine=true';
+          if (this.includeCheckins) url += '&include_checkins=true';
           if (this.scheduledOnly) url += '&scheduled=true';
           const resp = await API.get(url);
           if (!resp) return;
