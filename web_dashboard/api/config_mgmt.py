@@ -1122,6 +1122,8 @@ class BulkRunRequest(BaseModel):
     asset_backend: str = ""
     extra_vars: dict = {}
     secret_vars: dict = {}
+    # See RunRequest — the NAME only, and it applies to every target in the batch.
+    epml_token_var: str = ""
     # VM-only connection fields; ignored for k8s/database rows (localhost plays).
     ansible_user: str = ""
     secret_become_source: str = ""
@@ -1195,6 +1197,7 @@ async def run_playbook_bulk(
         req = RunRequest(
             asset=payload.asset,
             asset_backend=payload.asset_backend,
+            epml_token_var=payload.epml_token_var,
             extra_vars=payload.extra_vars,
             secret_vars=payload.secret_vars,
             ansible_user=payload.ansible_user,
