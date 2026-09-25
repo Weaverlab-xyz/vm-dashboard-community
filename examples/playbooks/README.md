@@ -78,6 +78,8 @@ as the per-cloud user with the key the dashboard injected at deploy) or the loca
 | `install-docker.yml` | Install Docker Engine from the official repos, enable the service |
 | `node-exporter.yml` | Install Prometheus node_exporter as a systemd unit (:9100) |
 | `nginx-web.yml` | Install + enable nginx, serve a sample page (:80) |
+| `epml-activate.yml` | Activate an already-installed BeyondTrust EPM for Linux agent (token bound at run time) |
+| `pmul-ansible-entitlement.yml` | Entitle Ansible's `pbrun` become probe in a PMUL role — run against the **policy server**, not the managed client |
 
 ## Docker Swarm (`swarm/`)
 

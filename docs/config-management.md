@@ -493,6 +493,11 @@ than quietly run under sudo.
 > `systemctl restart`, so per-command role entitlements do not constrain an Ansible run:
 > permitting the wrapper permits everything Ansible chooses to do. If you want PMUL to
 > gate each action, skip `become` and have tasks invoke `pbrun <cmd>` explicitly.
+>
+> [`examples/playbooks/linux/pmul-ansible-entitlement.yml`](../examples/playbooks/linux/pmul-ansible-entitlement.yml)
+> adds the pbrun-shaped probe to a role idempotently, with a backup and a dry-run mode.
+> Run it against the **policy server**, with an account that already has root — it is the
+> play that repairs the pbrun escalation path, so it cannot rely on that path working.
 
 The **SPIRE** page's build form offers the same two choices — a managed account or an
 SSH-key secret — reading the same `/api/config-mgmt/managed-accounts` and
