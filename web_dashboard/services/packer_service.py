@@ -854,6 +854,36 @@ def _human_readable(line: str) -> Optional[str]:
     return None
 
 
+def _error_detail(lines: list[str], limit: int = 20) -> str:
+    """
+    Build the detail body of a PackerError out of raw ``packer build`` output.
+
+    Runs the lines through the same humanizing path the Live Output pane uses
+    (``_human_readable``), so the job detail page's Error panel shows the same
+    sentences instead of raw machine-readable CSV — a timestamp/target/`ui,error`
+    prefix and Packer's ``%!(PACKER_COMMA)`` escaping in place of every comma.
+
+    Suppressed lines (``_human_readable`` → None) are dropped rather than joined
+    in as "None"; plain-text lines (packer init, which is not machine-readable)
+    pass through unchanged. Returns "" if nothing survived — the caller falls
+    back to the raw tail so a failure is never reported with an empty body.
+    """
+    out: list[str] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        readable = _human_readable(line)
+        if readable is None:
+            continue
+        # `ui` subtypes are decoded above; msg_type == "error" lines come back
+        # raw, so decode here too — this is the one escape Packer applies.
+        # rstrip only: packer init indents the bullets under "N errors occurred".
+        readable = readable.replace("%!(PACKER_COMMA)", ",").rstrip()
+        if readable.strip():
+            out.append(readable)
+    return "\n".join(out[-limit:])
+
+
 async def run_build(
     cloud: str,
     build_dir: Path,
@@ -942,9 +972,15 @@ async def run_build(
     full_output = "\n".join(build_output)
 
     if rc != 0:
-        # Surface the last meaningful error lines
-        errors = [l for l in build_output[-60:] if l.strip()]
-        raise PackerError(f"packer build failed (exit {rc}):\n" + "\n".join(errors[-20:]))
+        # Surface the last meaningful error lines, humanized exactly as the Live
+        # Output pane renders them so the two panels on the job detail page agree.
+        tail = build_output[-60:]
+        detail = _error_detail(tail)
+        if not detail:
+            # Nothing survived humanizing — keep the raw tail rather than an
+            # empty Error panel.
+            detail = "\n".join([l for l in tail if l.strip()][-20:])
+        raise PackerError(f"packer build failed (exit {rc}):\n{detail}")
 
     artifact_id = _parse_artifact(cloud, full_output)
     on_progress(95, f"Build complete. Artifact: {artifact_id or '(see job log)'}")
