@@ -152,6 +152,7 @@ _DOCS_DIR = (Path(__file__).resolve().parents[2] / "docs").resolve()
 _MOVED = {
     # Hub folders, 2026-09 (docs/scheduling/, docs/integrations/beyondtrust/, ot-demo-cell/)
     "change-windows":                            "scheduling/change-windows",
+    "policy-guardrails":                         "scheduling/policy-guardrails",
     "integrations/password-safe":                "integrations/beyondtrust/password-safe",
     "integrations/privileged-remote-access":     "integrations/beyondtrust/privileged-remote-access",
     "integrations/gateways":                     "integrations/beyondtrust/gateways",
@@ -281,6 +282,8 @@ _TITLE_OVERRIDES = {
     "integrations/beyondtrust/entitle-dashboard-permissions": "Entitle dashboard permissions",
     "integrations/beyondtrust/gateways": "Gateway hosts",
     "profiles/demo/ot-demo-cell/ot-protocol-clients": "OT protocol clients on Windows",
+    # The filename predates the product name; Settings and the page's own H1 say this.
+    "scheduling/policy-guardrails":      "Action Guardrails",
     # The Workload Lab folder. Derived titles read as filenames here -- "Spiffe", "Cloud",
     # "Kubernetes", "Subordinate Ca" -- and the last of those is simply wrong. "Cloud" and
     # "Kubernetes" are also the short names of two unrelated top-level pages, so without

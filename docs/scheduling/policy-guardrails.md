@@ -47,7 +47,7 @@ actions:
 ### Creates and teardowns are not the same question
 
 The teardown actions were added because the asymmetry was hard to defend: the
-[auto-delete timer](auto-delete-timer.md) needs four gates and two arming clocks before it
+[auto-delete timer](../auto-delete-timer.md) needs four gates and two arming clocks before it
 will delete a VM, while a human pressing **Destroy** on the same VM passed through none of
 them. The reaper was more constrained than the operator.
 
@@ -106,7 +106,7 @@ A denied deploy returns **HTTP 403** with the reasons:
 ```
 
 and writes an `<action>:denied` entry to the **tamper-evident audit log**
-(see [`/api/audit/verify`](secrets-management.md)). No job is created and no cloud
+(see [`/api/audit/verify`](../secrets-management.md)). No job is created and no cloud
 resource is touched.
 
 ## `needs_approval` can be enforced
@@ -143,7 +143,7 @@ verdict**. With it on:
 - On a surface that can create an approval-gated job (the cloud deploy forms), the job
   is created **awaiting approval**: it is not claimed by the worker until somebody
   holding `change_windows:use` approves it, and the requester cannot approve their own.
-  See [Change Windows → Requiring approval](scheduling/change-windows.md#requiring-approval).
+  See [Change Windows → Requiring approval](change-windows.md#requiring-approval).
 - On a surface that cannot yet express that, the action is **refused** with a 403
   naming the reason. Refusing rather than shrugging is deliberate: admitting an action
   a policy said needs a second person is the one outcome nobody asked for, and a policy
@@ -157,7 +157,7 @@ With the setting **off**, a `needs_approval` verdict is logged and the action pr
 exactly as before. Nothing is audited, because nothing was gated.
 
 This is separate from the change-window approval gate
-([Change Windows → Requiring approval](scheduling/change-windows.md#requiring-approval)), which
+([Change Windows → Requiring approval](change-windows.md#requiring-approval)), which
 governs a change an operator *booked*. This one governs a verdict a *policy* reached,
 and you may reasonably want either without the other.
 
@@ -172,7 +172,7 @@ the disabled state are unaffected. `OPA_BINARY` overrides the binary path;
 ## Change windows are the other half of this
 
 `prod_window.rego` freezes changes on named **weekdays**, in UTC, for everybody. A
-[change window](scheduling/change-windows.md) is the inverse and is considerably more precise: a
+[change window](change-windows.md) is the inverse and is considerably more precise: a
 named period with a start time, a length and a real timezone, attached to a
 **workgroup**, and — the part a freeze cannot do — a refusal that offers to *book* the
 change rather than just rejecting it.

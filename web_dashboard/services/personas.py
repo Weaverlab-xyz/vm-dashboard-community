@@ -293,7 +293,7 @@ _CLOUDOPS = Persona(
                     "not accumulating privileged infrastructure by accident.",
             target="/inventory",
             minutes=8,
-            docs="policy-guardrails",
+            docs="scheduling/policy-guardrails",
             requires_flags=("admission_control_enabled", "resource_expiry_enabled"),
         ),
     ),
@@ -779,7 +779,7 @@ _SECURITY = Persona(
                     "a quarterly report.",
             target="/inventory",
             minutes=10,
-            docs="policy-guardrails",
+            docs="scheduling/policy-guardrails",
             requires_flags=("admission_control_enabled",),
         ),
         UseCase(

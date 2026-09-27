@@ -25,7 +25,7 @@ solution), see [saas-comparison.md](saas-comparison.md).
 > **tamper-evident (hash-chained) audit trail**, **action-level policy
 > guardrails** (OPA pre-action admission), **config drift-aware runs**, and
 > the staleness-alerting + artefact secret-scanning half of **secret
-> lifecycle** — see [policy-guardrails.md](policy-guardrails.md),
+> lifecycle** — see [policy-guardrails.md](scheduling/policy-guardrails.md),
 > [config-management.md](config-management.md),
 > [secrets-management.md](secrets-management.md). **(2)** The **per-tenant
 > isolation primitive is now Built (prod)** — the hosted deployment is
@@ -464,7 +464,7 @@ the next things queued for QA.
 > Config-driven limits are settable without writing Rego, and denials land
 > in the (hash-chained) audit log. Off by default
 > (`admission_control_enabled`). See
-> [policy-guardrails.md](policy-guardrails.md).
+> [policy-guardrails.md](scheduling/policy-guardrails.md).
 
 - **What community does:** OPA pre-action guardrails over deploy
   operations (allowed regions / instance-size caps / prod-window), gated
