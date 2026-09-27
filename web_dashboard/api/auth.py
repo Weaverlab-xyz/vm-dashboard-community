@@ -68,6 +68,12 @@ def _get_user_from_pat(raw_token: str, db: Session) -> User:
     user = db.query(User).filter(User.id == pat.user_id, User.is_active == True).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
+    if user.is_service_account:
+        # Refused at use as well as at creation: a PAT minted for one before
+        # api/users.create_user_token stopped allowing it must not keep working. A service
+        # account authenticates with an OAuth client -- see services/service_accounts.
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Service accounts authenticate with an OAuth client, not a PAT")
     return user
 
 

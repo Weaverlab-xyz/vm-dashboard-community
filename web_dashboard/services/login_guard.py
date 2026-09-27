@@ -102,8 +102,13 @@ def _retry_after(stamps: list, cap: int, window: timedelta, now: datetime) -> in
     return int((pivot + window - now).total_seconds()) + 1
 
 
-def check(db: Session, *, username: str, ip: str = "", now: Optional[datetime] = None) -> None:
+def check(db: Session, *, username: str, ip: str = "", now: Optional[datetime] = None,
+          ip_only: bool = False) -> None:
     """Raise :class:`LoginThrottled` if this username or address is over its cap.
+
+    ``ip_only`` skips the per-username cap, for a caller whose "username" is an
+    unverified claim that guards nothing guessable -- the OAuth token endpoint, where a
+    per-identity budget would only let a stranger lock a named workload out.
 
     Called **before** the password is verified, so a throttled request never reaches
     bcrypt — which also means the throttle cannot be used as a CPU amplifier.
@@ -130,7 +135,7 @@ def check(db: Session, *, username: str, ip: str = "", now: Optional[datetime] =
 
     user_stamps = [r.attempted_at for r in rows if r.username == key]
     user_cap = _cfg_int("login_max_attempts", DEFAULT_MAX_PER_USER)
-    if user_cap > 0 and len(user_stamps) >= user_cap:
+    if not ip_only and user_cap > 0 and len(user_stamps) >= user_cap:
         raise LoginThrottled(_retry_after(user_stamps, user_cap, window, now), "user")
 
     if ip:

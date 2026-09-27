@@ -125,11 +125,17 @@ def _make_client(sa_id: str, **kw) -> dict:
     return r.json()
 
 
-def _token(cid: str, secret: str, scope: str = None, basic: bool = True):
+# The test client carries no client address, so each request states one explicitly --
+# the throttle tests need distinct sources, and every other test gets the same one.
+oauth_api._client_ip = lambda request: (request.headers.get("x-test-ip", "")
+                                        if request is not None else "")
+
+
+def _token(cid: str, secret: str, scope: str = None, basic: bool = True, ip: str = "10.0.0.1"):
     data = {"grant_type": "client_credentials"}
     if scope is not None:
         data["scope"] = scope
-    headers = {}
+    headers = {"x-test-ip": ip}
     if basic:
         headers["Authorization"] = "Basic " + base64.b64encode(
             f"{cid}:{secret}".encode()).decode()
@@ -445,6 +451,86 @@ def test_a_persons_login_jwt_still_works():
     db.close()
     tok = create_access_token({"sub": name})
     assert _c().get("/probe/me", headers=_bearer(tok)).json() == {"user": name}
+
+
+def _clear_throttle():
+    from web_dashboard.database import LoginAttempt
+    db = SessionLocal()
+    db.query(LoginAttempt).delete()
+    db.commit()
+    db.close()
+
+
+def test_garbage_naming_a_client_cannot_lock_that_client_out():
+    """The token endpoint used to key its failure budget on the CLAIMED client id, before
+    anything was verified -- ten garbage requests naming a real agent locked it out for
+    the whole window. It now throttles by source address only."""
+    _clear_throttle()
+    try:
+        sa = _make_sa(_GRANTS)
+        cl = _make_client(sa["id"])
+        for _ in range(12):
+            assert _token(cl["client_id"], "vmss_wrong", ip="203.0.113.9").status_code == 401
+        r = _token(cl["client_id"], cl["client_secret"], ip="10.0.0.1")
+        assert r.status_code == 200, (
+            f"{r.status_code}: a stranger's failures naming this client locked it out")
+    finally:
+        _clear_throttle()
+
+
+def test_one_address_is_still_throttled():
+    """What the per-identity key was standing in for: a single source hammering the
+    endpoint still hits the per-address cap and gets a 429 with Retry-After."""
+    from web_dashboard.services import login_guard
+    _clear_throttle()
+    try:
+        for _ in range(login_guard.DEFAULT_MAX_PER_IP):
+            _token("vmsa_" + uuid.uuid4().hex[:24], "vmss_wrong", ip="203.0.113.9")
+        r = _token("vmsa_anything", "vmss_wrong", ip="203.0.113.9")
+        assert r.status_code == 429, r.status_code
+        assert r.headers.get("retry-after")
+        # ...and only that source: a well-behaved one is unaffected.
+        sa = _make_sa(_GRANTS)
+        cl = _make_client(sa["id"])
+        assert _token(cl["client_id"], cl["client_secret"], ip="10.0.0.2").status_code == 200
+    finally:
+        _clear_throttle()
+
+
+def test_with_no_known_address_the_endpoint_is_still_bounded():
+    """ip_only applies only when an address is known; with none, the per-IP cap cannot
+    apply, and dropping the source key's cap too would leave nothing throttled."""
+    from web_dashboard.services import login_guard
+    _clear_throttle()
+    try:
+        for _ in range(login_guard.DEFAULT_MAX_PER_USER):
+            _token("vmsa_" + uuid.uuid4().hex[:24], "vmss_wrong", ip="")
+        assert _token("vmsa_x", "vmss_wrong", ip="").status_code == 429
+    finally:
+        _clear_throttle()
+
+
+def test_a_service_account_cannot_hold_a_pat():
+    sa = _make_sa(_GRANTS)
+    r = _c().post(f"/api/users/{sa['id']}/tokens", json={"name": "standing"})
+    assert r.status_code == 400, r.text
+
+
+def test_a_service_account_pat_minted_before_the_refusal_stops_working():
+    """Refused at USE too, so one created before the route refused it is dead."""
+    from web_dashboard.api.tokens import _generate_raw, hash_pat
+    from web_dashboard.database import PersonalAccessToken
+    sa = _make_sa(_GRANTS)
+    raw = _generate_raw()
+    db = SessionLocal()
+    db.add(PersonalAccessToken(user_id=sa["id"], name="legacy", token_hash=hash_pat(raw)))
+    db.commit()
+    db.close()
+    assert _c().get("/probe/me", headers=_bearer(raw)).status_code == 401
+    assert mcp_server._validate_pat(raw) is None
+    db = SessionLocal()
+    assert ws_api._authenticate(_FakeWS(raw), db) == (None, None)
+    db.close()
 
 
 if __name__ == "__main__":

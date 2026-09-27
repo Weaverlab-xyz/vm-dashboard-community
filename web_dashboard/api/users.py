@@ -464,6 +464,15 @@ def create_user_token(
     # prospect is a standing credential into this dashboard, which is the thing this whole
     # feature is arranged not to create.
     _refuse_accessor(user)
+    # Nor for a service account. Its credential is an OAuth client: short-lived tokens, a
+    # scope that can only narrow, revocation that ends outstanding tokens. A PAT here --
+    # which may never expire and carries the account's full permissions -- would be the
+    # standing credential the whole design removes, minted from this page.
+    if user.is_service_account:
+        raise HTTPException(
+            status_code=400,
+            detail="A service account cannot hold a Personal Access Token. Give it an "
+                   "OAuth client (secret or SPIFFE JWT-SVID) under OAuth clients instead.")
     from datetime import timedelta
     raw = _generate_raw()
     expires_at = (

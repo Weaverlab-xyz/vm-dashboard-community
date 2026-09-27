@@ -25,8 +25,10 @@ A Personal Access Token is a person's credential lent to a machine:
 | Rotation | mint a new PAT, then revoke the old | rotate in place; the old secret keeps working for a grace window |
 | Narrowing per job | no | request a `scope` — the token can only narrow what the account holds |
 
-PATs still work everywhere they did. Service accounts are the recommended shape for
-anything non-human.
+PATs still work everywhere they did for people. Service accounts are the recommended shape
+for anything non-human — and a service account **cannot hold a PAT**: the Users page refuses
+to create one, and one created before that refusal is rejected at use. Its credential is an
+OAuth client.
 
 ## Setting one up
 
@@ -116,8 +118,11 @@ All routes are admin-only.
 | `POST` | `/api/spire-lab/{lab}/jwt-bundle` | capture a Workload Lab trust domain's JWT bundle |
 | `POST` | `/api/oauth/token` | the token endpoint (unauthenticated; client credentials only) |
 
-Failed client authentications share the sign-in page's throttle, keyed per client ID and
-per source address.
+Failed token requests are throttled **per source address only** (the sign-in page's per-IP
+cap, 50 failures in 15 minutes by default). Deliberately not per client ID or SPIFFE ID: the
+identity in a failed request is an unverified claim, and keying on it would let anyone lock a
+named workload out by sending garbage in its name. Secrets and signatures are not guessable,
+so a per-identity budget would protect nothing.
 
 ## Tokens from your own IdP (no dashboard secret)
 
