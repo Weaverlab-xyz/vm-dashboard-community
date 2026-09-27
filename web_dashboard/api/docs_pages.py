@@ -161,8 +161,9 @@ _DOCS_DIR = (Path(__file__).resolve().parents[2] / "docs").resolve()
 _INDEX_SECTIONS = {
     "General", "integrations",
     "profiles", "profiles/demo", "profiles/demo/personas", "profiles/pov",
-    "integrations/databases", "onboarding", "integrations/ansible", "remote-agents",
-    "workload-lab",
+    "integrations/beyondtrust", "integrations/beyondtrust/databases", "onboarding",
+    "integrations/ansible", "remote-agents", "workload-lab", "scheduling",
+    "profiles/demo/ot-demo-cell",
 }
 
 # Heading text per section. Without this a nested section renders as
@@ -174,11 +175,14 @@ _SECTION_LABELS = {
     "profiles/demo":              "Demo profile",
     "profiles/demo/personas":     "Demo profile · personas",
     "profiles/pov":               "POV profile",
-    "integrations/databases":     "Databases · Password Safe rotation",
+    "integrations/beyondtrust":   "BeyondTrust products",
+    "integrations/beyondtrust/databases":     "BeyondTrust · Password Safe for databases",
     "onboarding":                 "Onboarding · per-cloud setup",
     "integrations/ansible":       "Remote Worker runners",
     "remote-agents":              "Remote agents",
     "workload-lab":               "Workload Lab",
+    "scheduling":                 "Scheduling",
+    "profiles/demo/ot-demo-cell": "OT Demo Cell",
 }
 
 # Titles for docs whose filename is an identifier rather than a phrase. The persona pages are
@@ -220,8 +224,8 @@ _TITLE_OVERRIDES = {
     "profiles/pov/customer-access":      "What the customer sees",
     "profiles/pov/lifecycle":            "Keeping a POV true, and reaping it",
     "profiles/pov/ps-runbook":           "Password Safe POC runbook",
-    "integrations/databases/password-safe":     "Rotation on AWS and Azure",
-    "integrations/databases/password-safe-gcp": "Rotation on GCP Cloud SQL",
+    "integrations/beyondtrust/databases/password-safe":     "Rotation on AWS and Azure",
+    "integrations/beyondtrust/databases/password-safe-gcp": "Rotation on GCP Cloud SQL",
     "onboarding/aws":                    "AWS setup",
     "onboarding/azure":                  "Azure setup",
     "onboarding/gcp":                    "GCP setup",
@@ -229,6 +233,12 @@ _TITLE_OVERRIDES = {
     "onboarding/feature-test":           "Feature-test checklist",
     "onboarding/troubleshooting":        "Onboarding troubleshooting",
     "integrations/entra-oauth":          "Sign in with Microsoft (Entra)",
+    # The BeyondTrust folder. "Epml" is not a word, and "Entitle Dashboard Permissions"
+    # reads as a settings page rather than the Entitle mechanism it describes.
+    "integrations/beyondtrust/epml":     "EPM for Linux",
+    "integrations/beyondtrust/entitle-dashboard-permissions": "Entitle dashboard permissions",
+    "integrations/beyondtrust/gateways": "Gateway hosts",
+    "profiles/demo/ot-demo-cell/ot-protocol-clients": "OT protocol clients on Windows",
     # The Workload Lab folder. Derived titles read as filenames here -- "Spiffe", "Cloud",
     # "Kubernetes", "Subordinate Ca" -- and the last of those is simply wrong. "Cloud" and
     # "Kubernetes" are also the short names of two unrelated top-level pages, so without

@@ -74,7 +74,7 @@ Beyond the PRA Shell Jump prereqs, the scripts also prepare the image for
 > SSH-ephemeral-accounts registration connects as the **cloud-default user** with the
 > VM's **own launch keypair** (the key cloud-init injects at boot) — so the provisioner
 > no longer installs a separate Entitle public key. Point `entitle_ssh_sudo_user` at the
-> cloud-default user; see [`docs/integrations/entitle.md`](../../docs/integrations/entitle.md).
+> cloud-default user; see [`docs/integrations/beyondtrust/entitle.md`](../../docs/integrations/beyondtrust/entitle.md).
 
 - **EPM-L package install (opt-in).** When `BT_EPML_URL` is set — a presigned URL
   to the OS-appropriate package, obtained from the dashboard's EPM-L integration

@@ -118,9 +118,9 @@ _GROUP_BLURBS = {
 # groups point at the integration page rather than at a POV page: an SE fielding "how does
 # this actually work?" in the room needs the product, not the lab.
 _GROUP_DOCS = {
-    "pra": ("integrations/privileged-remote-access",),
-    "password_safe": ("integrations/password-safe",),
-    "entitle": ("integrations/entitle",),
+    "pra": ("integrations/beyondtrust/privileged-remote-access",),
+    "password_safe": ("integrations/beyondtrust/password-safe",),
+    "entitle": ("integrations/beyondtrust/entitle",),
     ENVIRONMENT: ("profiles/pov/lifecycle",),
 }
 
@@ -158,7 +158,7 @@ _PRA_CARDS = (
                 "dials outward — no VPN, no port opened, nothing published.",
         target="#overview",
         minutes=8,
-        docs="integrations/gateways",
+        docs="integrations/beyondtrust/gateways",
         requires_products=("pra",),
     ),
     UseCase(
@@ -169,7 +169,7 @@ _PRA_CARDS = (
                 "learns the password.",
         target="#wired",
         minutes=10,
-        docs="integrations/privileged-remote-access",
+        docs="integrations/beyondtrust/privileged-remote-access",
         requires_products=("pra", "password_safe"),
     ),
     UseCase(
@@ -179,7 +179,7 @@ _PRA_CARDS = (
                 "inside it — the machine has no route in and never needed one.",
         target="#wired",
         minutes=8,
-        docs="integrations/privileged-remote-access",
+        docs="integrations/beyondtrust/privileged-remote-access",
         requires_products=("pra",),
     ),
     UseCase(
@@ -189,7 +189,7 @@ _PRA_CARDS = (
                 "Gateway this POV installed rather than a diagram.",
         target="#overview",
         minutes=8,
-        docs="integrations/gateways",
+        docs="integrations/beyondtrust/gateways",
         requires_products=("pra",),
     ),
     UseCase(
@@ -199,7 +199,7 @@ _PRA_CARDS = (
                 "recorded end to end, with no credential handed over.",
         target="#wired",
         minutes=10,
-        docs="integrations/privileged-remote-access",
+        docs="integrations/beyondtrust/privileged-remote-access",
         requires_products=("pra",),
     ),
     UseCase(
@@ -210,7 +210,7 @@ _PRA_CARDS = (
                 "opening the plant network.",
         target="#wired",
         minutes=12,
-        docs="integrations/privileged-remote-access",
+        docs="integrations/beyondtrust/privileged-remote-access",
         requires_products=("pra",),
     ),
     UseCase(
@@ -232,7 +232,7 @@ _PRA_CARDS = (
                 "their screen or in their notes.",
         target="#wired",
         minutes=12,
-        docs="integrations/password-safe",
+        docs="integrations/beyondtrust/password-safe",
         requires_products=("pra", "password_safe"),
     ),
     UseCase(
@@ -242,7 +242,7 @@ _PRA_CARDS = (
                 "appliance, against the Gateway this POV is actually using.",
         target="#overview",
         minutes=8,
-        docs="integrations/gateways",
+        docs="integrations/beyondtrust/gateways",
         requires_products=("pra",),
     ),
     UseCase(
@@ -253,7 +253,7 @@ _PRA_CARDS = (
                 "nobody patches.",
         target="#wired",
         minutes=10,
-        docs="integrations/privileged-remote-access",
+        docs="integrations/beyondtrust/privileged-remote-access",
         requires_products=("pra",),
     ),
     UseCase(
@@ -263,7 +263,7 @@ _PRA_CARDS = (
                 "plainly where the recording is held and who can reach it.",
         target="#wired",
         minutes=10,
-        docs="integrations/privileged-remote-access",
+        docs="integrations/beyondtrust/privileged-remote-access",
         requires_products=("pra",),
     ),
     UseCase(
@@ -273,7 +273,7 @@ _PRA_CARDS = (
                 "endpoint, through a brokered tunnel instead of a jump box.",
         target="#wired",
         minutes=10,
-        docs="integrations/privileged-remote-access",
+        docs="integrations/beyondtrust/privileged-remote-access",
         requires_products=("pra",),
     ),
 )
@@ -288,7 +288,7 @@ _PASSWORD_SAFE_CARDS = (
                 "inside the environment reaches it, so nothing on the machine changes.",
         target="#vms",
         minutes=10,
-        docs="integrations/password-safe",
+        docs="integrations/beyondtrust/password-safe",
         requires_products=("password_safe",),
     ),
     UseCase(
@@ -321,7 +321,7 @@ _PASSWORD_SAFE_CARDS = (
                 "password manager.",
         target="#vms",
         minutes=10,
-        docs="integrations/password-safe",
+        docs="integrations/beyondtrust/password-safe",
         requires_products=("password_safe",),
     ),
     UseCase(
@@ -331,7 +331,7 @@ _PASSWORD_SAFE_CARDS = (
                 "since imaging, brought under management and rotated per machine.",
         target="#vms",
         minutes=8,
-        docs="integrations/password-safe",
+        docs="integrations/beyondtrust/password-safe",
         requires_products=("password_safe",),
     ),
     UseCase(
@@ -342,7 +342,7 @@ _PASSWORD_SAFE_CARDS = (
                 "would break.",
         target="#wired",
         minutes=12,
-        docs="integrations/password-safe",
+        docs="integrations/beyondtrust/password-safe",
         requires_products=("password_safe",),
     ),
     UseCase(
@@ -353,7 +353,7 @@ _PASSWORD_SAFE_CARDS = (
                 "the customer’s own stack.",
         target="#vms",
         minutes=12,
-        docs="integrations/password-safe",
+        docs="integrations/beyondtrust/password-safe",
         requires_products=("password_safe",),
     ),
     UseCase(
@@ -364,7 +364,7 @@ _PASSWORD_SAFE_CARDS = (
                 "rotates because nobody is sure what would break.",
         target="#wired",
         minutes=12,
-        docs="integrations/password-safe",
+        docs="integrations/beyondtrust/password-safe",
         requires_products=("password_safe",),
     ),
 )

@@ -760,7 +760,7 @@
                 action is either created as a job <strong>awaiting approval</strong>
                 (on a surface that can express that, such as the cloud deploy forms) or
                 <strong>refused</strong>. See
-                <a href="/docs/change-windows" class="text-blue-600 underline">Change
+                <a href="/docs/scheduling/change-windows" class="text-blue-600 underline">Change
                 Windows</a> for who may approve.
               </span>
               <span class="block text-[11px] text-amber-700 mt-1">
@@ -959,7 +959,7 @@
           <p class="text-sm text-gray-500">
             A change window is a recurring period during which changes may <strong>start</strong>.
             Define one here and every run form can book a job into it by name.
-            See <a href="/docs/change-windows" class="text-blue-600 underline">the change windows doc</a>.
+            See <a href="/docs/scheduling/change-windows" class="text-blue-600 underline">the change windows doc</a>.
           </p>
 
           <div class="rounded-lg border border-gray-200 bg-gray-50 p-3 text-[11px] text-gray-600">
@@ -1739,7 +1739,7 @@
                 the managed system DNS name is <code class="bg-gray-100 px-1 rounded">{instance-id}:{region}</code>
                 and the account name is <code class="bg-gray-100 px-1 rounded">{name};{suffix}</code>.
               </p>
-              <!-- Cloud VM → PRA Vault key sync (docs/integrations/password-safe.md) -->
+              <!-- Cloud VM → PRA Vault key sync (docs/integrations/beyondtrust/password-safe.md) -->
               <div class="pt-2 border-t border-gray-100 space-y-3">
                 <label class="flex items-center gap-2 text-sm text-gray-700">
                   <input type="checkbox" x-model="panelCfg.passwordsafe_vault_sync_enabled" class="rounded text-blue-600">
@@ -1863,7 +1863,7 @@
               on AWS, the <code class="bg-gray-100 px-1 rounded">{engine} Azure Run Command Plugin</code> on Azure),
               and onboards the PRA Vault credential (via the <code class="bg-gray-100 px-1 rounded">PRA Vault Username Password</code> plugin)
               so Password Safe propagates rotations into the tunnel-injected credential. GCP and OCI are not supported.
-              The custom plugins + the RSA key prep are one-time manual setup — see the <a href="/docs/integrations/databases/password-safe" class="underline" target="_blank">database onboarding guide</a>.
+              The custom plugins + the RSA key prep are one-time manual setup — see the <a href="/docs/integrations/beyondtrust/databases/password-safe" class="underline" target="_blank">database onboarding guide</a>.
             </p>
             <label class="flex items-center gap-2 mb-3 text-sm text-gray-700">
               <input type="checkbox" x-model="panelCfg.clouddb_ps_onboarding_enabled"
@@ -2630,7 +2630,7 @@
               Password Safe, so every rotation reaches PRA with nothing running on the dashboard's side.
               Importing the two plugins, creating the functional accounts, and granting the API identity Requestor + an
               auto-release access policy on the new managed accounts are one-time manual setup — see the
-              <a href="/docs/integrations/password-safe#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>.
+              <a href="/docs/integrations/beyondtrust/password-safe#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>.
               <span class="text-amber-600">Neither account's access policy may enable "Change Password After
               Release"</span> — a credential change on <em>either</em> member of a synced pair re-rotates both, so a
               release-triggered change on the PRA copy would rotate the real cluster token.

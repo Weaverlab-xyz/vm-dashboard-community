@@ -496,8 +496,8 @@ The mechanism, the functional-account rules and the per-cloud setup are two page
 
 | Channel | Page |
 |---|---|
-| AWS (`dbssm`) and Azure (`dbazure`), plus the shared model | [Password Safe rotation (AWS + Azure)](integrations/databases/password-safe.md) |
-| GCP (`dbgcp`, Cloud SQL Data API) | [Password Safe rotation for Cloud SQL](integrations/databases/password-safe-gcp.md) |
+| AWS (`dbssm`) and Azure (`dbazure`), plus the shared model | [Password Safe rotation (AWS + Azure)](integrations/beyondtrust/databases/password-safe.md) |
+| GCP (`dbgcp`, Cloud SQL Data API) | [Password Safe rotation for Cloud SQL](integrations/beyondtrust/databases/password-safe-gcp.md) |
 
 ## Layer 3 — Entitle (just-in-time access)
 
@@ -512,7 +512,7 @@ needs the provisioning job's admin credential, so a
 [registered](#registering-an-existing-database) database is not offerable — the button is
 hidden and the API refuses it with a 400. Teardown
 deregisters on decommission. Full Entitle setup (owner, workflow,
-durations, the agent) lives in the [Entitle integration](integrations/entitle.md) doc.
+durations, the agent) lives in the [Entitle integration](integrations/beyondtrust/entitle.md) doc.
 
 The account model is **per engine**:
 
@@ -678,5 +678,5 @@ See [Permissions](permissions.md) for how workgroups sit alongside permission sc
   no Ansible runner resolves for `oci`. Registration still gives you the inventory row.
 
 For the base BeyondTrust/PRA setup (OAuth accounts, Jump Group/Jumpoint, deploy keys), see
-the [Privileged Remote Access](integrations/privileged-remote-access.md) doc. For the sandbox network
+the [Privileged Remote Access](integrations/beyondtrust/privileged-remote-access.md) doc. For the sandbox network
 topology, see [Cloud Sandbox](CLOUD_SANDBOX.md).

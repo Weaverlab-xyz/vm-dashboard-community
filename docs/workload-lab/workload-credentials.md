@@ -345,4 +345,4 @@ code rather than clicked through the console.
 Related: [Dynamic AWS and Azure credentials](dynamic-credentials.md) ·
 [Secrets management](../secrets-management.md) ·
 [Machine-identity JIT design](../design/cloud-identity-jit.md) ·
-[Password Safe](../integrations/password-safe.md) · [Entitle](../integrations/entitle.md)
+[Password Safe](../integrations/beyondtrust/password-safe.md) · [Entitle](../integrations/beyondtrust/entitle.md)

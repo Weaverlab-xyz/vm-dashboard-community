@@ -58,6 +58,33 @@ jobs:
           fi
           exit $fail
 
+  # ── Docs gate ───────────────────────────────────────────────────────────────
+  #
+  # A PR that changes user-facing surface must change docs/ too, or carry a
+  # `Docs: none — <reason>` commit trailer. The precise per-surface check
+  # (routes, nav, feature flags, schedulable requests) is tests/test_docs_coverage.py
+  # in the job above; this is the coarse "did anyone think about the docs" check for
+  # everything that file cannot enumerate. The logic lives in the script so it runs
+  # locally unchanged: scripts/ci/docs_gate.sh origin/main
+  #
+  # PRs only: on a push to main there is no base to diff against, and the PR that
+  # produced the push was already gated.
+  docs-gate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The gate diffs against the merge base and reads every commit on the branch,
+          # so it needs history, not the default single-commit checkout.
+          fetch-depth: 0
+
+      - name: Check docs changed with the code
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: scripts/ci/docs_gate.sh "origin/${BASE_REF}"
+
   # ── PostgreSQL ──────────────────────────────────────────────────────────────
   #
   # Production runs PostgreSQL; the job above runs SQLite. That is the right trade for

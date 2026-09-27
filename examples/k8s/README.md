@@ -4,7 +4,7 @@ Ready-to-adapt manifests for the **EKS / AKS / GKE clusters the dashboard
 manages** — provision or register a cluster, import it into the Rancher
 management plane, and broker access via BeyondTrust PRA
 (see [docs/integrations/rancher.md](../../docs/integrations/rancher.md) and
-[docs/integrations/privileged-remote-access.md](../../docs/integrations/privileged-remote-access.md)).
+[docs/integrations/beyondtrust/privileged-remote-access.md](../../docs/integrations/beyondtrust/privileged-remote-access.md)).
 
 They are the Kubernetes counterpart to [`examples/compose/`](../compose/) and
 [`examples/playbooks/`](../playbooks/): the community-edition answer to an
@@ -67,7 +67,7 @@ whole set.
 
 If you registered the cluster as an **Entitle Kubernetes integration**
 ("Register in Entitle" on the cluster page; see
-[docs/integrations/entitle.md](../../docs/integrations/entitle.md)), users request
+[docs/integrations/beyondtrust/entitle.md](../../docs/integrations/beyondtrust/entitle.md)), users request
 just-in-time namespace access in Entitle rather than holding standing kubeconfig
 credentials — orthogonal to these manifests, which define *what* runs.
 

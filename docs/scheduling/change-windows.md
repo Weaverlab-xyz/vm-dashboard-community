@@ -39,11 +39,18 @@ work to stop at the boundary, make the window long enough for the work, or split
 |---|---|
 | Config Management runs | **When to run** on the run form (single and bulk) |
 | Cloud VM deploys — AWS, Azure, GCP, OCI | **When to run** in the deploy dialog |
-| Image promotion | the promote request |
-| Packer image builds | the build request |
-| Image export / capture / AMI copy | the request |
-| Bulk power — AWS, Azure, GCP, OCI | **Schedule** on the selection toolbar |
+| Bulk cloud VM deploys — AWS, Azure, GCP, OCI | **When to run** in the bulk deploy dialog; see [below](#bulk-deploys-book-as-a-unit) |
+| Image promotion | the promote request — API only, no form control yet |
+| Packer image builds — AWS, Azure, GCP, OCI | the build request — API only, no form control yet |
+| Image export / capture / AMI copy — export and capture on AWS, Azure, GCP; AMI copy on AWS | the request — API only, no form control yet |
+| Bulk power — cloud: AWS, Azure, GCP, OCI | **Schedule** on the selection toolbar |
+| Bulk power — on-premises: Proxmox, vSphere, Hyper-V, XCP-ng, VMware Workstation | **Schedule** on the selection toolbar — **agent-bound connections only**; see [below](#scheduling-power-operations) |
 | Cloud VM destroys — AWS, Azure, GCP, OCI | offered when a window refuses one; or `?run_at=` on the API |
+
+Not bookable, each for a reason rather than for effort: **Nutanix power** (see below),
+**Kubernetes cluster and cloud database provisioning** (the inventory row is written as
+`provisioning` the moment you ask, so a booking for Saturday would show a cluster
+"provisioning" for three days, and its expiry clock could run out before it ever applied).
 
 Any job type can be *held* for a window — that lives in the job queue itself, not in a
 form — so a surface without a picker yet can still be booked through the API by passing
@@ -92,26 +99,38 @@ want to book one directly — query parameters rather than a body because these 
 
 ### Scheduling power operations
 
-The **Schedule** tick on the cloud selection toolbar books the whole selection for a
-time. It has its own time field, separate from the deploy dialog's — a mode left set by
-a dialog you cancelled must not silently book the next power operation.
+The **Schedule** tick on the selection toolbar books the whole selection, either for a
+**time** or for the next occurrence of a **window** — one or the other, never both;
+picking one clears the other. It has its own fields, separate from the deploy dialog's — a
+mode left set by a dialog you cancelled must not silently book the next power operation.
 
-Two things to know:
+Things to know:
 
-* **Only the cloud pages offer it.** An on-premises power operation against a *direct*
-  connection runs in the dashboard process rather than through the job queue, so a
-  booking there would create a scheduled-looking job and power the machine off
-  immediately. The toolbar does not offer the control on those pages, and the server
-  refuses the combination outright if one is ever wired by mistake.
+* **Cloud pages** (AWS, Azure, GCP, OCI) can book any selection.
+* **On-premises pages** (Proxmox, vSphere, Hyper-V, XCP-ng, VMware Workstation) can book
+  only VMs on an **agent-bound** connection. There the job waits in the queue and the
+  [remote agent](../remote-agents/hypervisors.md) is simply not offered it until its time.
+  A connection the dashboard dials **directly** runs a power operation in the dashboard
+  process, right now — a booking there would create a scheduled-looking job and power the
+  machine off immediately. So each direct-connection VM in the selection is refused on its
+  own (HTTP 501, naming the connection), and the agent-bound VMs in the same selection
+  are still booked. To book a direct connection, bind it to an agent, or untick
+  **Schedule** and run it now. Workstation connections are always agent-bound, so they
+  always can be booked.
+* **Nutanix never offers it.** Nutanix has no agent power path at all — a power change
+  there is a full VM spec write carrying a version number, and a stale one writes to the
+  VM instead of failing — so every Nutanix target is direct, and a booking would be a lie.
 * **For a recurring power schedule, use Repeat instead** — open the resulting job and
   repeat it in a window. And for plain business hours, the
-  [suspend schedule](cloud-vms.md) is the better tool: it understands per-VM
+  [suspend schedule](../cloud-vms.md) is the better tool: it understands per-VM
   eligibility, which a generic power booking does not.
 
 ### Bulk deploys book as a unit
 
-A deploy of several VMs creates one parent job and one child per VM. The **parent**
-carries the booking; the children are driven by it and never claimed on their own. So a
+The bulk deploy dialog on each cloud page has the same **When to run** control as the
+single-VM one. A deploy of several VMs creates one parent job and one child per VM. The
+**parent** carries the booking; the children are driven by it and never claimed on their
+own. So a
 batch is never split across a window boundary — either the whole batch runs in the
 window or none of it does.
 
@@ -172,7 +191,7 @@ Two reasons, and the message says which:
 * **Nobody approved it.** It was never eligible. Approve before the window closes.
 * **It never got a turn.** The worker was saturated, the app was down, or an earlier
   change overran. Either widen the window or raise the worker's concurrency — see
-  [Job Worker](job-worker.md).
+  [Job Worker](../job-worker.md).
 
 ---
 
@@ -205,7 +224,7 @@ change window is about. Two consequences worth knowing:
   window and still allow everything, if no action is gated.
 * **Power operations are not on it by default**, so a window does not block start/stop
   unless an administrator adds them. That is usually right — powering a VM off is
-  reversible, and the [suspend schedule](cloud-vms.md) is the better tool for it.
+  reversible, and the [suspend schedule](../cloud-vms.md) is the better tool for it.
 
 You do **not** need to enable the policy engine. `admission_control_enabled` switches
 *OPA* on; a maintenance window is enforced in the dashboard and needs no Rego.
@@ -248,13 +267,16 @@ the job page and presses **Approve**.
 The permission is deliberately separate from `config_mgmt:write`: maintaining the
 maintenance calendar (`change_windows:write`) and signing off a production change
 (`change_windows:use`) are different authorities from being allowed to run a playbook. See
-[Permissions](permissions.md).
+[Permissions](../permissions.md).
 
 ---
 
 ## Repeating a change
 
-**Schedules** lists jobs that run on every occurrence of a window.
+**Schedules** in the nav — the **Scheduled Changes** page at `/schedules` — lists jobs
+that run on every occurrence of a window. One-off bookings that are still waiting are on
+**Waiting changes** (`/jobs?scheduled=1`) instead; [Scheduling](../scheduling.md) has the
+difference in one table.
 
 A schedule is created **from a job**, not from a form of its own: open a job, choose
 **Repeat in a change window**, pick the window. It reuses that job's saved parameters, so
@@ -275,8 +297,9 @@ Things worth knowing:
   filter is what keeps an Ansible run's output, an export's registered image id, or an
   EPM-L sync's pre-signed package URLs out of the schedules table.
 
-  Repeatable today: Config Management runs, power operations, image exports, image
-  promotions, and the EPM for Linux package sync.
+  Repeatable today: Config Management runs, cloud power operations (AWS, Azure, GCP,
+  OCI), image exports, image promotions, and the EPM for Linux package sync. On-premises
+  power can be *booked* but not repeated.
 
   Not repeatable, and each for a specific reason: **cloud VM deploys** (their saved
   state carries live teardown handles, so a replay would tear down the *first* VM's PRA
@@ -312,7 +335,7 @@ whose timezone was mistyped, is reported as misconfigured there.
 **A change was missed even though the worker looked idle.**
 The window has to be open when a worker polls, which it does every couple of seconds. If
 the window is shorter than the time the queue takes to drain ahead of it, widen the window
-or see [Job Worker](job-worker.md) for concurrency.
+or see [Job Worker](../job-worker.md) for concurrency.
 
 **Approval does not appear.**
 The Approve button shows only for a job that requires approval and has not had it. If you
@@ -331,10 +354,10 @@ zone you meant.
 
 ## See also
 
-* [Config Management](config-management.md) — what a scheduled run actually does, and how
+* [Config Management](../config-management.md) — what a scheduled run actually does, and how
   its credentials are handled.
-* [Job Worker](job-worker.md) — why a job might not get a turn inside its window.
-* [Permissions](permissions.md) — the `change_windows` scope and its two levels.
-* [Notifications](notifications.md) — routing `job.window_missed` somewhere you will see it.
-* [Auto-delete Timer](auto-delete-timer.md) — the other time-based feature, and the one
+* [Job Worker](../job-worker.md) — why a job might not get a turn inside its window.
+* [Permissions](../permissions.md) — the `change_windows` scope and its two levels.
+* [Notifications](../notifications.md) — routing `job.window_missed` somewhere you will see it.
+* [Auto-delete Timer](../auto-delete-timer.md) — the other time-based feature, and the one
   that destroys things.

@@ -99,7 +99,7 @@ def _links():
     the existence check below can't trip over one.
 
     A leading ``/`` is skipped along with the URL schemes: those are *app routes*
-    (``/docs/integrations/entitle``), which the docs viewer serves and which are not
+    (``/docs/integrations/beyondtrust/entitle``), which the docs viewer serves and which are not
     filesystem paths. Resolving them against the repo root would fail a link that works
     in the product.
     """

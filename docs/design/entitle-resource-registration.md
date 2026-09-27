@@ -10,7 +10,7 @@ dashboard's own actions (the former approval gate, now removed). Implemented by
 [`entitle_registration_service.py`](../../web_dashboard/services/entitle_registration_service.py)
 via the `entitleio/entitle` (v3) Terraform provider, hooked into the AWS/Azure/GCP
 VM deploy paths (shared [`entitle_vm_hook.py`](../../web_dashboard/services/entitle_vm_hook.py))
-and the cloud-database provisioning flow. See [`../integrations/entitle.md`](../integrations/entitle.md)
+and the cloud-database provisioning flow. See [`../integrations/beyondtrust/entitle.md`](../integrations/beyondtrust/entitle.md)
 for the operator view; this doc covers the architecture + the two open build-outs
 (agent cluster, K8s integrations).
 
@@ -96,7 +96,7 @@ before stashing because that path destroys by id and never needs the value). So 
 (and the name) from that state and restores the ref, minting only if there is nothing to
 recover — or if a *different* name was requested, which is how an operator deliberately
 forces a fresh token. An unrecoverable conflict is a dead end by construction and fails with the
-remedies spelled out in the message — see the [troubleshooting entry](../integrations/entitle.md#troubleshooting).
+remedies spelled out in the message — see the [troubleshooting entry](../integrations/beyondtrust/entitle.md#troubleshooting).
 
 **The mint's lifecycle ends with the agent's** (`destroy_agent_token`). Because the
 conflict above is a dead end, a minted token must never outlive its agent: the `remove`

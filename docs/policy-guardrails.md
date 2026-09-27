@@ -143,7 +143,7 @@ verdict**. With it on:
 - On a surface that can create an approval-gated job (the cloud deploy forms), the job
   is created **awaiting approval**: it is not claimed by the worker until somebody
   holding `change_windows:use` approves it, and the requester cannot approve their own.
-  See [Change Windows → Requiring approval](change-windows.md#requiring-approval).
+  See [Change Windows → Requiring approval](scheduling/change-windows.md#requiring-approval).
 - On a surface that cannot yet express that, the action is **refused** with a 403
   naming the reason. Refusing rather than shrugging is deliberate: admitting an action
   a policy said needs a second person is the one outcome nobody asked for, and a policy
@@ -157,7 +157,7 @@ With the setting **off**, a `needs_approval` verdict is logged and the action pr
 exactly as before. Nothing is audited, because nothing was gated.
 
 This is separate from the change-window approval gate
-([Change Windows → Requiring approval](change-windows.md#requiring-approval)), which
+([Change Windows → Requiring approval](scheduling/change-windows.md#requiring-approval)), which
 governs a change an operator *booked*. This one governs a verdict a *policy* reached,
 and you may reasonably want either without the other.
 
@@ -172,7 +172,7 @@ the disabled state are unaffected. `OPA_BINARY` overrides the binary path;
 ## Change windows are the other half of this
 
 `prod_window.rego` freezes changes on named **weekdays**, in UTC, for everybody. A
-[change window](change-windows.md) is the inverse and is considerably more precise: a
+[change window](scheduling/change-windows.md) is the inverse and is considerably more precise: a
 named period with a start time, a length and a real timezone, attached to a
 **workgroup**, and — the part a freeze cannot do — a refusal that offers to *book* the
 change rather than just rejecting it.

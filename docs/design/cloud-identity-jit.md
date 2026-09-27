@@ -7,7 +7,7 @@
 > **Scope:** Community + prod/dev. Community is the reference target.
 > **Depends on:** the existing human-facing Entitle approval gate already
 > shipping for secret read / update / delete (see
-> [`integrations/entitle.md`](../integrations/entitle.md)). This doc
+> [`integrations/beyondtrust/entitle.md`](../integrations/beyondtrust/entitle.md)). This doc
 > extends the same Entitle tenant to cover the dashboard's *machine*
 > identity elevations.
 > **Validation notes:** see Appendix D for the per-claim check against
@@ -32,7 +32,7 @@ every privilege the dashboard ever uses, indefinitely, without an
 approval trail.
 
 The human-facing approval gate we already shipped (see
-[`integrations/entitle.md`](../integrations/entitle.md)) covers the
+[`integrations/beyondtrust/entitle.md`](../integrations/beyondtrust/entitle.md)) covers the
 case where a human reads / updates / deletes a secret. It does **not**
 cover the case where the dashboard's own service principal performs a
 privileged cloud action on behalf of a workflow (deploy, destroy,

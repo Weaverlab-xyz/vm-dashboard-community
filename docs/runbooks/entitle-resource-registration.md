@@ -4,7 +4,7 @@
 
 End-to-end check that built VMs/DBs register as Entitle integrations, and (for
 private targets) that the Entitle agent makes them reachable. See
-[`../integrations/entitle.md`](../integrations/entitle.md) and
+[`../integrations/beyondtrust/entitle.md`](../integrations/beyondtrust/entitle.md) and
 [`../design/entitle-resource-registration.md`](../design/entitle-resource-registration.md).
 
 ## Prerequisites

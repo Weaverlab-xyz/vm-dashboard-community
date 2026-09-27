@@ -70,8 +70,35 @@ plumbing will be redirected.
      other local dashboards on 8000; see `docker-compose.yml`.)*
    - Your feature works end-to-end against your own AWS / Azure / GCP
      account.
-5. Open a PR. Describe what changed and why; note any `.env.example`
+5. Update the docs (see [Documentation](#documentation) below).
+6. Open a PR. Describe what changed and why; note any `.env.example`
    keys added.
+
+### Documentation
+
+`docs/` is the product's in-app help as well as the GitHub tree, so a feature
+without a page is a feature nobody can find. Two CI checks hold that line:
+
+- **`tests/test_docs_coverage.py`** (in the `tests` job) fails when a page
+  route, nav link, `*_enabled` feature flag, or request model that accepts a
+  change-window booking (`ScheduleRequestMixin`) is not named in any doc. The
+  failure says what is missing and which page it most likely belongs on.
+- **The `docs-gate` job** fails a PR that has a `feat:` commit, or that changes
+  `web_dashboard/templates/`, `api/`, `models/`, `main.py` or
+  `services/feature_flags.py`, without also changing `docs/` or a README. If
+  the change really has nothing for a reader (a refactor, or a fix that
+  restores documented behaviour), add a trailer to any commit on the branch:
+
+  ```
+  Docs: none — <one sentence on why>
+  ```
+
+  Run it locally before pushing with `scripts/ci/docs_gate.sh origin/main`.
+  It is bash, so on Windows use Git Bash or WSL.
+
+A new page needs the one-line header block under its H1 and a row in
+[docs/README.md](docs/README.md); `tests/test_docs_conventions.py` enforces
+both.
 
 ### Faster lab infra for testing
 

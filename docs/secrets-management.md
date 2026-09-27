@@ -265,7 +265,7 @@ decodes its response to text, so a PEM bundle, a config file or JSON round-trips
 PKCS#12 or DER payload does not. A payload showing decode damage is **refused rather
 than returned**, since a corrupt bundle that looks like a value fails much later and
 somewhere unrelated. See
-[Password Safe → Troubleshooting](integrations/password-safe.md#troubleshooting).
+[Password Safe → Troubleshooting](integrations/beyondtrust/password-safe.md#troubleshooting).
 
 **Writing one goes through a file, because ps-cli has no inline route.** The type is
 inferred from the argument: `--text` makes a text secret, `-fp <path>` makes a file
@@ -331,7 +331,7 @@ file against the dashboard.
 
 With the BeyondTrust integration enabled, the dashboard can retrieve AWS, Azure,
 and SSH credentials directly from Password Safe at runtime rather than from the
-application database. See [docs/integrations/password-safe.md](integrations/password-safe.md)
+application database. See [docs/integrations/beyondtrust/password-safe.md](integrations/beyondtrust/password-safe.md)
 for setup instructions.
 
 **How it differs from Tier 2:**

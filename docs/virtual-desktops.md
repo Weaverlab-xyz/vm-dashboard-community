@@ -4,7 +4,8 @@
 
 > **Preview.** All three clouds provision and broker seats, but the feature has not been
 > run end to end on AWS or GCP against a live PRA appliance. Off by default; turn it on
-> with the **Virtual Desktops** preview toggle in Settings.
+> with the **Virtual Desktops** preview toggle in Settings (`vdesktops_enabled`). The pools
+> page is `/desktops`.
 
 A **desktop pool** is *N* private VMs built from one desktop image, tagged so the pool is
 recoverable from the cloud itself rather than only from this database. Seats are created,
@@ -131,6 +132,6 @@ Seats are exempt from the auto-delete timer: a pool is inventory, not a scratch 
 ## Related
 
 - [Cloud VMs](cloud-vms.md) — the single-VM deploy paths these seat backends reuse.
-- [Privileged Remote Access](integrations/privileged-remote-access.md) — Jump Groups, Jump Items and credential injection.
-- [Gateways](integrations/gateways.md) — the shared Gateway host and how it is reference-counted.
+- [Privileged Remote Access](integrations/beyondtrust/privileged-remote-access.md) — Jump Groups, Jump Items and credential injection.
+- [Gateways](integrations/beyondtrust/gateways.md) — the shared Gateway host and how it is reference-counted.
 - [Cloud sandbox](CLOUD_SANDBOX.md) — the desktops network segment the Azure default points at.

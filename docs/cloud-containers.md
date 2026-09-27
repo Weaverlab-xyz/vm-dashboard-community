@@ -19,7 +19,7 @@ and they all run on **AWS, Azure or GCP**, chosen per deploy:
 
 | Node | Doc | What it hosts |
 |---|---|---|
-| **Gateway** | [Gateway hosts](integrations/gateways.md) | the PRA broker every tunnel and jump goes through |
+| **Gateway** | [Gateway hosts](integrations/beyondtrust/gateways.md) | the PRA broker every tunnel and jump goes through |
 | **Portainer server** | [Portainer](integrations/portainer.md) | Portainer CE, managing remote Docker hosts via Edge agents |
 | **Rancher node** | [Rancher](integrations/rancher.md) | the Kubernetes management plane every cluster is imported into |
 
@@ -32,7 +32,7 @@ and they all run on **AWS, Azure or GCP**, chosen per deploy:
 Related surfaces on the same page live in their own docs: the **Portainer** tab
 → [Portainer integration](integrations/portainer.md); the **Kubernetes
 (Rancher)** tab → [Kubernetes](kubernetes.md) and [Rancher integration](integrations/rancher.md);
-the **Gateways** tab → [Gateway hosts](integrations/gateways.md).
+the **Gateways** tab → [Gateway hosts](integrations/beyondtrust/gateways.md).
 Note the **"Containers" nav link is gated on `portainer_enabled`** (default on) even though
 the Cloud tab works regardless — a cloud-only operator who disables Portainer reaches it via
 the direct `/containers` URL.
@@ -124,7 +124,7 @@ The tab is gated on `pra_enabled`, and the **Gateways** tile in the dashboard's
 Containers section deep-links straight to it (`/containers#gateways`). For the full story —
 why the managed gateway can't be deleted, why the region picker offers only configured
 regions, and the naming rules that keep the two kinds of host apart in the cloud — see
-**[Gateway hosts](integrations/gateways.md)**.
+**[Gateway hosts](integrations/beyondtrust/gateways.md)**.
 
 
 ### Reaping stranded runner jobs

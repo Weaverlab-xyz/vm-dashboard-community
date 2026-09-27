@@ -5,7 +5,7 @@
 > **Legacy mechanism.** This runbook covers Entitle granting dashboard
 > permissions through **Entra groups**. The current mechanism is a REST
 > integration that works for any user and takes effect immediately — see
-> [`../integrations/entitle-dashboard-permissions.md`](../integrations/entitle-dashboard-permissions.md).
+> [`../integrations/beyondtrust/entitle-dashboard-permissions.md`](../integrations/beyondtrust/entitle-dashboard-permissions.md).
 
 Operator walk-through for `web_dashboard/scripts/bootstrap_entitle_groups.py`.
 Validates Phase 1 of the [Entitle user-JIT design](../design/entitle-user-jit.md).

@@ -90,15 +90,15 @@ open in my plant?", that list is the answer.
 The cell's account is onboarded in Password Safe, mirrored onto the PRA vault and rotated
 once, so the credential a rep injects is real and current from the first session.
 
-**Guide:** [OT Demo Cell](../ot-demo-cell.md) · [Password Safe](../../../integrations/password-safe.md)
+**Guide:** [OT Demo Cell](../ot-demo-cell.md) · [Password Safe](../../../integrations/beyondtrust/password-safe.md)
 
 ### Where the Gateway sits, and why that is the whole story
 
 The architecture slide, told against a live gateway instead of a diagram: the broker inside
 the plant segment dials *outward*, so there is nothing to open on the perimeter.
 
-**Guide:** [Gateways](../../../integrations/gateways.md) ·
-[Privileged Remote Access](../../../integrations/privileged-remote-access.md)
+**Guide:** [Gateways](../../../integrations/beyondtrust/gateways.md) ·
+[Privileged Remote Access](../../../integrations/beyondtrust/privileged-remote-access.md)
 
 ## What to enable
 

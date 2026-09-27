@@ -157,12 +157,16 @@ stand the page up on their own. Making them do so would mean putting non-preview
 into the derived set, at which point the page stops resolving as all-preview and needs an
 RBAC scope of its own.
 
+The labs' old standalone addresses, `/cert-lab` and `/spire-lab`, now redirect to their
+tabs. Each stays behind its own flag, so `/spire-lab` does not resolve on an instance that
+enabled only the Certificate Lab.
+
 The tab bar is suppressed when only one tab is on — a bar holding a single pill reads as a
 rendering fault.
 
 ## Related
 
-* [Password Safe](integrations/password-safe.md) — the authority behind three of the five
+* [Password Safe](integrations/beyondtrust/password-safe.md) — the authority behind three of the five
   tabs. The Cloud tab's is [Workload Credentials](workload-lab/workload-credentials.md),
   and the Agent tab's is this dashboard itself.
 * [Agent Demo Cell](profiles/demo/agent-demo-cell.md) — the feature guide for the fifth

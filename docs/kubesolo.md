@@ -219,6 +219,6 @@ the play hands it to helm through a 0600 values file rather than `--set`, becaus
 
 - [Config Management](config-management.md) — the run form, targets and runners
 - [Remote Agents](remote-agents.md) — reaching an on-prem host at all
-- [Entitle](integrations/entitle.md) — the integration this agent serves
+- [Entitle](integrations/beyondtrust/entitle.md) — the integration this agent serves
 - [OT Demo Cell](profiles/demo/ot-demo-cell.md) — a cell that already runs KubeSolo, with its plant simulators on top
 - [Kubernetes](kubernetes.md) — the managed-cluster path, where the agent install is a button

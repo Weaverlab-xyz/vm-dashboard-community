@@ -71,7 +71,7 @@ permanent owner.
 Ask the room who is an administrator of their own provisioning tooling, and how they
 would find out. Most people have to go and look.
 
-**Guide:** [Entitle dashboard permissions](../../../integrations/entitle-dashboard-permissions.md)
+**Guide:** [Entitle dashboard permissions](../../../integrations/beyondtrust/entitle-dashboard-permissions.md)
 
 ### What it cost, without asking the cloud twice
 

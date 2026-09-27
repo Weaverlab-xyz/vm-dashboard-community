@@ -129,6 +129,9 @@ same per-VM ownership check, and the same discovery-derived region or resource g
 instance you cannot reach fails on its own without stopping the rest — the response names
 each one and why.
 
+To run the selection later, or in the next change window, tick **Schedule** on the same
+toolbar. See [Scheduling power operations](scheduling/change-windows.md#scheduling-power-operations).
+
 Four things worth knowing before ticking fifty boxes:
 
 - **They do not all run at once.** These are ordinary jobs, and the worker's light tier
@@ -608,7 +611,7 @@ the `bt_*` defaults. AWS + Azure also accept a per-deploy `pra_credential_ref` (
 `bt_client_secret`). **Windows Azure VMs** skip the SSH jump — use an RDP jump.
 
 The shared gateway host, deploy keys, and PRA OAuth setup are described in the
-[Privileged Remote Access](integrations/privileged-remote-access.md) doc.
+[Privileged Remote Access](integrations/beyondtrust/privileged-remote-access.md) doc.
 
 ---
 
@@ -624,14 +627,14 @@ method only** (no cloud-native plugin) and therefore needs SSH line-of-sight fro
 Broker / Gateway.
 
 This is documented in full — plugin uploads, per-cloud methods, the `adminuser` account, and
-the config-key table — in the [Password Safe](integrations/password-safe.md) doc's
+the config-key table — in the [Password Safe](integrations/beyondtrust/password-safe.md) doc's
 **"Password Safe VM onboarding"** section. Off-boarding is automatic on VM destroy.
 
 With `passwordsafe_vault_sync_enabled` on, the three cloud-native methods additionally
 mirror the VM's rotating SSH key into a **PRA Vault Private Key** account associated to the
 VM's Jump Group, so the key can be checked out in PRA's `/login` and injected into the VM's
 Shell Jump. Password Safe owns the propagation through a `SyncedAccounts` link — see
-[Using the VM's key in PRA](integrations/password-safe.md#using-the-vms-key-in-pra--the-pra-vault-private-key-sync).
+[Using the VM's key in PRA](integrations/beyondtrust/password-safe.md#using-the-vms-key-in-pra--the-pra-vault-private-key-sync).
 
 ---
 
@@ -647,7 +650,7 @@ build keypair and `sudo` as the image's cloud-default user (`ubuntu`/`ec2-user`/
 - **Private VM** (the sandbox default) → attaches the **shared Entitle agent** (Kubernetes,
   one per VPC) via `entitle_agent_token_name`.
 
-Requires `entitle_owner_id` + `entitle_workflow_id`. See the [Entitle integration](integrations/entitle.md)
+Requires `entitle_owner_id` + `entitle_workflow_id`. See the [Entitle integration](integrations/beyondtrust/entitle.md)
 doc. A separate **machine-identity JIT** track (the AWS `elevate()` wrapping of
 `ec2_deploy`/`ec2_terminate`) is covered in [design/cloud-identity-jit.md](design/cloud-identity-jit.md).
 
@@ -680,7 +683,7 @@ chip's tooltip tells you which word applies:
 | GCP | labels | key/value, **lowercase only**, no colons |
 | OCI | freeform tags | key/value |
 | Proxmox | tags | bare labels, no values |
-| Password Safe | attributes | not surfaced yet |
+| Password Safe | attributes | typed values, shown on [Inventory](inventory.md#password-safe-attributes) rather than here |
 | PRA | tag | not surfaced yet |
 
 Chips are coloured by **who owns the tag**, not by which cloud it came from:
@@ -714,8 +717,9 @@ may show no tags. Hypervisor rows are unaffected; they carry their tags natively
 **Where tags do not appear yet.** Among the hypervisors only Proxmox reports tags today —
 vSphere tags, Nutanix categories and XCP-ng tags need reads the remote agent does not
 perform yet, and Hyper-V has no native tag concept. Databases, Kubernetes clusters and
-cloud functions show no tags on Inventory. Password Safe attributes and PRA jump-item tags
-are not read at all yet.
+cloud functions show no tags on Inventory. PRA jump-item tags are not read at all yet.
+Password Safe **attributes** are a separate column on Inventory, with their own filter and
+editor: see [Inventory — Password Safe attributes](inventory.md#password-safe-attributes).
 
 ### Editing tags
 

@@ -80,6 +80,9 @@ group on each host.
 
 ### Step 3 — Enable and configure in the dashboard
 
+Turning it on sets the `hyperv_enabled` feature flag, and the **Hyper-V** page appears in
+the navigation at `/hyperv`.
+
 **Option A — Settings → Integrations → Microsoft Hyper-V**
 
 Toggle **Microsoft Hyper-V** on. Fill in the connection fields:
@@ -119,6 +122,14 @@ your VMs listed within a few seconds.
 | **Save** | Save VM state to disk (`Save-VM`) |
 | **VM detail modal** | vCPUs, memory, CPU usage, uptime, IP addresses, IS state, VM ID, path |
 | **Bulk power** | Tick several rows and send Start, Shutdown, Force Off or Restart to the whole selection from the toolbar — one job per VM, sharing a batch you watch on one page. VMs already in the target state are skipped and the dialog says how many; fifty per operation is the cap. See [Powering a selection](../remote-agents/hypervisors.md#powering-a-selection) |
+
+**Tags.** Hyper-V has no native tag concept, so VMs here show no tag chips. See
+[Cloud VMs — Tags and labels](../cloud-vms.md#tags-and-labels).
+
+**Scheduling power.** On a connection bound to a
+[remote agent](../remote-agents/hypervisors.md), the bulk power toolbar's **Schedule**
+tick books the operation for a time or a change window. A directly dialled connection
+cannot be booked, and each of its VMs is refused by name. See [Scheduling](../scheduling.md).
 
 ---
 

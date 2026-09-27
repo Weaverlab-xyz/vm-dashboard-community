@@ -253,7 +253,7 @@ that is maintained.
 | Nutanix AHV | [integrations/nutanix.md](integrations/nutanix.md) |
 | XCP-ng / XenServer | [integrations/xcpng.md](integrations/xcpng.md) |
 | BeyondTrust (Password Safe, PRA, EPM-L) | [integrations/beyondtrust.md](integrations/beyondtrust.md) |
-| Entitle | [integrations/entitle.md](integrations/entitle.md) |
+| Entitle | [integrations/beyondtrust/entitle.md](integrations/beyondtrust/entitle.md) |
 | Portainer CE | [integrations/portainer.md](integrations/portainer.md) |
 | Remote Worker (Ansible + k8s runners) | [integrations/ansible.md](integrations/ansible.md) |
 | Cloud Functions | [integrations/cloud-functions.md](integrations/cloud-functions.md) |

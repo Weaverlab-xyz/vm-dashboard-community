@@ -34,7 +34,7 @@ Run an Ansible playbook that looks its own credential up from Password Safe as i
 Nothing in the repository, nothing in the inventory file, nothing on disk when it finishes.
 
 **Guide:** [Ansible](../../../integrations/ansible.md) ·
-[Password Safe](../../../integrations/password-safe.md)
+[Password Safe](../../../integrations/beyondtrust/password-safe.md)
 
 ### A workload that mints its own cloud credential
 

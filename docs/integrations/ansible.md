@@ -134,7 +134,7 @@ The image-promote runner is documented with the runner itself, in
    [runner backends](ansible\config-reference.md#runner-backends) — pick Local or the matching cloud
    service per target cloud for each runner — the per-cloud SSH usernames, and,
    for cloud backends, the [shared cloud infrastructure](ansible\shared-cloud.md#shared-cloud-infrastructure).
-4. Toggle Remote Worker **on**. No restart required.
+4. Toggle Remote Worker **on**. This is the `ansible_enabled` feature flag. No restart required.
 
 ### Per-cloud SSH user (Ansible runner)
 

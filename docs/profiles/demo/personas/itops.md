@@ -37,14 +37,14 @@ an IT engineer will accept.
 Let a user run the one command that needs elevation and nothing else — no sudoers entry, no
 local admin group, and a record of what ran.
 
-**Guide:** [EPM for Linux](../../../integrations/epml.md)
+**Guide:** [EPM for Linux](../../../integrations/beyondtrust/epml.md)
 
 ### Support a user on a virtual desktop, recorded
 
 Stand up a virtual desktop and join the user's session to help them, with the session recorded
 and no credential shared.
 
-**Guide:** [Privileged Remote Access](../../../integrations/privileged-remote-access.md)
+**Guide:** [Privileged Remote Access](../../../integrations/beyondtrust/privileged-remote-access.md)
 
 ### Rotate a workstation local-admin password
 
@@ -52,7 +52,7 @@ The shared local administrator password every workstation has had since imaging,
 management and made unique per machine. This is the card that turns one compromised endpoint
 into one compromised endpoint rather than all of them.
 
-**Guide:** [Password Safe](../../../integrations/password-safe.md)
+**Guide:** [Password Safe](../../../integrations/beyondtrust/password-safe.md)
 
 ### Power a workstation on and off without RDP
 
@@ -66,7 +66,7 @@ without any standing access to it.
 Reach a workstation that is not on the corporate network at all, through an outbound-only
 broker.
 
-**Guide:** [Privileged Remote Access](../../../integrations/privileged-remote-access.md)
+**Guide:** [Privileged Remote Access](../../../integrations/beyondtrust/privileged-remote-access.md)
 
 ## What to enable
 

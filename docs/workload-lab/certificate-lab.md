@@ -348,7 +348,7 @@ the bundle over `GET Secrets-Safe/Secrets/{id}/file/download`, and presents the 
 to an mTLS endpoint.
 
 That route rather than `ps-cli` for the reason
-[password-safe.md](../integrations/password-safe.md) records: every path ps-cli offers
+[password-safe.md](../integrations/beyondtrust/password-safe.md) records: every path ps-cli offers
 decodes the body to text, so a PEM bundle survives and a **PKCS#12 is corrupted rather
 than refused**. The lab writes a `.pfx`, so the agent keeps the bytes itself.
 

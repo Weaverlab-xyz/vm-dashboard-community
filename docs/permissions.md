@@ -217,7 +217,9 @@ a way to become an administrator:
 
 - **RBAC (Users, Groups, Roles)** — anyone who can edit a user, or a role a user
   holds, can make themselves admin. The fourth tab, **Workgroups**, is the exception: it
-  scopes *objects* rather than actions, so it has a grantable `workgroups` scope.
+  scopes *objects* rather than actions, so it has a grantable `workgroups` scope. The page
+  is `/rbac`. `/users`, `/groups` and `/workgroups` still resolve, straight to their tab,
+  so older bookmarks and runbook links keep working.
 - **Settings / first-run setup**, and the **secret vault registry**.
 - **Worker concurrency and preflight**, which are instance-wide plumbing.
 

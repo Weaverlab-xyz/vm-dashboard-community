@@ -38,7 +38,7 @@ is a standalone tunnel to real gear.
 The cell's Kubernetes API (:6443) is absent for the opposite reason: it is not a
 fieldbus and its client is kubectl. Check it with the kubeconfig the cell writes for
 the tunnel -- `kubectl --kubeconfig <cell>/var/lib/ot-sim/kubeconfig-via-tunnel.yaml
-get nodes` -- as docs/profiles/demo/ot-protocol-clients.md describes.
+get nodes` -- as docs/profiles/demo/ot-demo-cell/ot-protocol-clients.md describes.
 """
 import argparse
 import json
