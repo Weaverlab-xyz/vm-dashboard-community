@@ -3867,9 +3867,9 @@ _BACKFILL_V1_DELIBERATELY_EMPTY = (
     # of its routes, which is what test_the_form_of_every_gate_agrees_with_the_backfill
     # checks this decision against.
     "change_windows",
-    # Same reason: a brand-new authority (destroy a POV assigned to you), so there is no
+    # Same reason: a brand-new authority (create, and run/destroy your own POVs), so no
     # prior access to preserve. The one place it IS added on upgrade is the built-in POV
-    # Presenter role, which is the point of it -- `_grant_presenter_own_pov_delete`.
+    # Presenter role, which is the point of it -- `_grant_presenter_own_pov`.
     "pov_own",
 )
 
@@ -4085,14 +4085,16 @@ def _retire_unenforced_levels(db) -> int:
     return changed
 
 
-_PRESENTER_OWN_POV_MARKER = "rbac_presenter_own_pov_delete_v1"
+_PRESENTER_OWN_POV_MARKER = "rbac_presenter_own_pov_v1"
 
 
-def _grant_presenter_own_pov_delete(db) -> int:
-    """Give the built-in POV Presenter role ``pov_own:delete`` on an existing install.
+def _grant_presenter_own_pov(db) -> int:
+    """Give the built-in POV Presenter role ``pov_own`` write and delete on an existing
+    install.
 
-    A presenter may destroy the POVs assigned to them and no others (api/pov.py
-    `_may_destroy`). New installs get it from the role literal in
+    A presenter may create POVs, and set up, run and destroy their own -- created by them
+    or assigned to them -- and no others (api/pov_gates.py). New installs get it from the
+    role literal in
     ``services/role_service``, but ``seed_builtins`` never updates an existing row's
     permissions, so without this the grant would reach new installs only.
 
@@ -4111,12 +4113,13 @@ def _grant_presenter_own_pov_delete(db) -> int:
     if role is not None:
         perms = role.permissions_dict
         levels = perms.get("pov_own")
-        if not isinstance(levels, list) or "delete" not in levels:
-            perms["pov_own"] = sorted(set(levels or []) | {"delete"})
+        want = {"write", "delete"}
+        if not isinstance(levels, list) or not want <= set(levels):
+            perms["pov_own"] = sorted(set(levels if isinstance(levels, list) else []) | want)
             role.permissions_dict = perms
             changed = 1
     db.add(SchemaMarker(key=_PRESENTER_OWN_POV_MARKER,
-                        detail=f"granted pov_own:delete to {changed} built-in role(s)"))
+                        detail=f"granted pov_own write+delete to {changed} built-in role(s)"))
     db.commit()
     return changed
 
@@ -4704,7 +4707,7 @@ def init_db():
                 "retired permission level cleanup skipped", exc_info=True)
         # Same placement and reason: reconcile below copies the role to its holders.
         try:
-            _grant_presenter_own_pov_delete(_seed_db)
+            _grant_presenter_own_pov(_seed_db)
         except Exception:  # noqa: BLE001 — a migration must never stop the app booting
             _seed_db.rollback()
             import logging as _logging

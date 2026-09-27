@@ -342,11 +342,11 @@ def test_the_seed_refreshes_built_in_wording_and_nothing_else():
     assert role_service.get(db, custom.id).description == "stale on purpose"
 
 
-def test_an_existing_install_gives_the_presenter_its_own_pov_destroy():
+def test_an_existing_install_gives_the_presenter_its_own_pov_levels():
     """seed_builtins never updates a row's permissions, so an install seeded before
     `pov_own` existed needs the one-time grant -- on the BUILT-IN row only."""
     from web_dashboard.database import (SchemaMarker, _PRESENTER_OWN_POV_MARKER,
-                                        _grant_presenter_own_pov_delete)
+                                        _grant_presenter_own_pov)
     db = _session()
     db.query(SchemaMarker).filter(SchemaMarker.key == _PRESENTER_OWN_POV_MARKER).delete()
     role_service.seed_builtins(db)
@@ -358,11 +358,12 @@ def test_an_existing_install_gives_the_presenter_its_own_pov_destroy():
                                 permissions={"pov": ["read", "use"]})
     db.commit()
 
-    assert _grant_presenter_own_pov_delete(db) == 1
+    assert _grant_presenter_own_pov(db) == 1
     db.expire_all()
-    assert role_service.get_by_slug(db, "pov-presenter").permissions_dict["pov_own"] == ["delete"]
+    assert role_service.get_by_slug(db, "pov-presenter").permissions_dict["pov_own"] == [
+        "delete", "write"]
     assert "pov_own" not in role_service.get(db, clone.id).permissions_dict
-    assert _grant_presenter_own_pov_delete(db) == 0, "the marker did not stop a re-run"
+    assert _grant_presenter_own_pov(db) == 0, "the marker did not stop a re-run"
 
 
 def test_the_seed_marks_its_rows_builtin():
