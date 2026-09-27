@@ -2,7 +2,8 @@
 MCP (Model Context Protocol) server — exposes dashboard read-only tools to AI clients.
 
 Transport: HTTP Streamable (SSE), mounted at /mcp in main.py.
-Auth:      Bearer PAT (vmcli_<64hex>) validated against personal_access_tokens table.
+Auth:      Bearer PAT (vmcli_<64hex>), or an OAuth workload access token from
+           ``POST /api/oauth/token`` -- both via ``api/auth.resolve_bearer``.
 Gate:      ``mcp_server_enabled`` (default off) — checked in :class:`_MCPAuth` before auth.
 
 Any MCP-compatible client (Claude Desktop, Claude Code, Cursor, etc.) can connect:
@@ -44,7 +45,6 @@ workgroups on exactly the pages an administrator most needs. That was a bug;
 ``tests/test_mcp_rbac.py`` pins the tools' side.
 """
 import contextvars
-import hashlib
 import json
 import logging
 from datetime import datetime
@@ -54,7 +54,6 @@ from mcp.server.fastmcp import FastMCP
 
 from ..database import (
     Job,
-    PersonalAccessToken,
     SessionLocal,
     User,
 )
@@ -861,30 +860,23 @@ async def secret_staleness() -> dict:
 
 
 def _validate_pat(raw_token: str) -> Optional[User]:
-    """Synchronous PAT validation — runs in a thread via the ASGI wrapper."""
-    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    """Resolve a bearer credential -- runs in a thread via the ASGI wrapper.
+
+    The name predates workload tokens and is kept because tests and docstrings cite it.
+    It no longer holds its own copy of the PAT lookup: it calls ``api/auth.resolve_bearer``
+    so a PAT, a login JWT and an OAuth workload token are accepted here exactly when the
+    REST API accepts them. The User comes back DETACHED, which ``effective_permissions_dict``
+    is written to survive -- including the token scope, a plain attribute on the instance.
+    """
+    from .auth import resolve_bearer
+    from fastapi import HTTPException
+
     db = SessionLocal()
     try:
-        pat = (
-            db.query(PersonalAccessToken)
-            .filter(
-                PersonalAccessToken.token_hash == token_hash,
-                PersonalAccessToken.is_active == True,  # noqa: E712
-            )
-            .first()
-        )
-        if not pat:
+        try:
+            return resolve_bearer(raw_token, db)
+        except HTTPException:
             return None
-        if pat.expires_at and pat.expires_at < datetime.utcnow():
-            return None
-        pat.last_used_at = datetime.utcnow()
-        db.commit()
-        user = (
-            db.query(User)
-            .filter(User.id == pat.user_id, User.is_active == True)  # noqa: E712
-            .first()
-        )
-        return user
     finally:
         db.close()
 
@@ -924,8 +916,8 @@ class _MCPAuth:
             await self._send_401(send, scope)
             return
 
-        raw_token = auth[7:]
-        if not raw_token.startswith("vmcli_"):
+        raw_token = auth[7:].strip()
+        if not raw_token:
             await self._send_401(send, scope)
             return
 
@@ -955,7 +947,7 @@ class _MCPAuth:
     async def _send_401(cls, send: Callable, scope: dict) -> None:
         await cls._send_json(
             send, scope, 401,
-            b'{"detail":"Missing or invalid PAT. Create one at /settings."}',
+            b'{"detail":"Missing or invalid token. Use a PAT from /settings or an OAuth access token from /api/oauth/token."}',
             [[b"www-authenticate", b'Bearer realm="vm-dashboard"']],
         )
 
@@ -971,6 +963,6 @@ class _MCPAuth:
 
 
 def get_mcp_asgi_app() -> Callable:
-    """Return the MCP ASGI app wrapped with the feature gate and PAT authentication."""
+    """Return the MCP ASGI app wrapped with the feature gate and bearer authentication."""
     raw_app = mcp.sse_app()
     return _MCPAuth(raw_app)

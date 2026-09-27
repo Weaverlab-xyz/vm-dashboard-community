@@ -66,6 +66,12 @@ Before this, the create form had no grid at all and saved no map, which left the
 the NULL state above — every section, every level, for anyone the admin added. Tick
 "Full access (unrestricted)" if that is genuinely what you want.
 
+**Service accounts are the exception to the NULL rule.** A [service account](service-accounts.md)
+— a workload principal that authenticates with an OAuth client — reads an empty map as
+**nothing**, not everything, and the "Full access" option is not offered for one. It can
+never be an administrator either. An OAuth access token may carry a `scope` that narrows
+the account's permissions further for that one token.
+
 ## Removing admin leaves nothing granted
 
 Unticking **Admin** on a user, or moving them off the **Administrator** role, leaves them

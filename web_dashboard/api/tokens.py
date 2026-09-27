@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import PersonalAccessToken, User, get_db
-from .auth import get_current_user
+from .auth import get_current_user, require_person
 
 router = APIRouter(prefix="/api/tokens", tags=["tokens"])
 
@@ -63,7 +63,7 @@ class TokenListItem(BaseModel):
 @router.post("", response_model=TokenCreateResponse, status_code=201)
 def create_token(
     body: CreateTokenRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_person),
     db: Session = Depends(get_db),
 ):
     """

@@ -589,11 +589,18 @@ def is_wired(row) -> bool:
     return set(STAGES).issubset(set(stages_done(row)))
 
 
-def deploy_notes(hours: int = DEFAULT_PAT_HOURS) -> list:
+def deploy_notes(hours: int = DEFAULT_PAT_HOURS, oauth: bool = False) -> list:
     """What the form says back, so the shape of the demo is read before it is run."""
-    return [
+    first = (
+        f"The agent runs as a service account with an OAuth client whose secret expires "
+        f"in {hours}h. The worker exchanges it for access tokens that live minutes; "
+        "revoking the cell (or the client under Users → Service accounts) refuses its "
+        "very next call. Revoking it mid-run is the demo."
+        if oauth else
         f"The agent's token expires in {hours}h and can be revoked at any time from "
-        "Settings → API Tokens. Revoking it mid-run is the demo.",
+        "Settings → API Tokens. Revoking it mid-run is the demo.")
+    return [
+        first,
         "Its identity (a SPIFFE SVID) and its authorization (this token) are two "
         "separate things — the SVID does not authenticate to /mcp. The worker names both "
         "in every log line so the gap stays visible.",

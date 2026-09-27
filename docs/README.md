@@ -50,6 +50,7 @@ demoing, running a lab, or running production.
 | [Auto-delete Timer](auto-delete-timer.md) | you want lab resources to clean themselves up — read it before enabling it, because it deletes infrastructure. |
 | [Inventory](inventory.md) | you want one list of everything across every cloud and hypervisor, to filter it by tag or Password Safe attribute, or to act on a selection. |
 | [Notifications](notifications.md) | you want to hear about expiring resources and failed jobs without opening the dashboard. |
+| [Service Accounts](service-accounts.md) | something that is not a person — a CI job, an MCP agent, a script — needs to call the API, and you would otherwise hand it a PAT. OAuth 2.0 client credentials, built in, no IdP needed. |
 | [Permissions](permissions.md) | you are deciding what a user may see or do — and especially before ticking "Full access", or handing a POV to a customer stakeholder. |
 | [Audit Log](audit-log.md) | you need to show who did what, or to satisfy yourself that the record has not been edited. |
 | [Scheduling](scheduling.md) | you want a change to run later, run repeatedly, or run only inside an approved window, or it has to wait for a second person to sign it off. The hub tells the three kinds of "schedule" apart; the full reference, [Change Windows](scheduling/change-windows.md), and its other half, [Action Guardrails](scheduling/policy-guardrails.md) — disallowed changes blocked before they start — are under [`scheduling/`](scheduling.md). |

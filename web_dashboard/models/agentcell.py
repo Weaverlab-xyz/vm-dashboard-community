@@ -44,6 +44,9 @@ class AgentCellCreateResponse(BaseModel):
     # row. The operator carries it into the install playbook; after this response nothing
     # can recover it.
     token: str = ""
+    # Set when the token user is a service account: the OAuth client's PUBLIC id. The
+    # secret travels in `token` above, as the `client_id:secret` pair the worker reads.
+    client_id: str = ""
     message: str = ""
     notes: List[str] = []
 

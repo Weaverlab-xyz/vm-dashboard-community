@@ -224,6 +224,43 @@ def test_the_options_route_marks_an_unrotated_token_unlinkable():
         "the picker offers one that `link_agent` will refuse")
 
 
+# -- a service account gets an OAuth client, not a PAT --------------------------
+
+def test_a_service_account_is_given_an_oauth_client_after_every_guard():
+    """Same ordering rule as the PAT: a refusal after the client exists has minted a
+    credential nothing records."""
+    src = _src()
+    assert "service_accounts.create_client(" in src, (
+        "the cell no longer mints an OAuth client for a service account, so a workload "
+        "principal is handed a PAT like a person")
+    mint = src.index("service_accounts.create_client(")
+    for guard in ("host_problem", "mcp_problem", "pat_expiry_problem",
+                  "trust_domain_problem", "pat_user_problem"):
+        assert src.index(guard) < mint, f"{guard}() is checked after the client is minted"
+
+
+def test_the_oauth_client_secret_dies_with_the_cell():
+    code = _code(_src())
+    assert "oauth_client.secret_expires_at = expires_at" in code, (
+        "the agent's OAuth client secret outlives the cell's expiry -- the default is "
+        "90 days, which is the long-lived credential this cell argues against")
+
+
+def test_revoke_deactivates_the_oauth_client():
+    code = _code(_src())
+    body = code.split("def revoke_agent(", 1)[1].split("\ndef ", 1)[0]
+    assert "row.oauth_client_id" in body and "client.is_active = False" in body, (
+        "revoking the cell leaves the OAuth client live, so the worker keeps minting "
+        "access tokens after the operator pressed Revoke")
+
+
+def test_the_row_records_the_client_id_not_the_secret():
+    block = _src(_DB).split("class AgentCell(Base):", 1)[1].split("\nclass ", 1)[0]
+    assert "oauth_client_id = Column" in block
+    for banned in ("client_secret", "oauth_secret"):
+        assert f"{banned} = Column" not in block, f"AgentCell stores {banned}"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

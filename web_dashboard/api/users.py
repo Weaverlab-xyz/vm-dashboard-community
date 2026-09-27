@@ -116,6 +116,32 @@ def _refuse_accessor(user: User) -> None:
                    "tab and removed when the POV is destroyed — edit or revoke it there.")
 
 
+def _refuse_service_account_escalation(db: Session, user: User, *, is_admin=None,
+                                       password=None, role_id=None) -> None:
+    """A service account never becomes an administrator and never gets a password.
+
+    ``User.is_effective_admin`` already answers False for one whatever its columns say,
+    so this is not the only guard -- it is the one that stops the page from STORING a
+    statement the rest of the dashboard will then silently ignore.
+    """
+    if user is None or not user.is_service_account:
+        return
+    if is_admin:
+        raise HTTPException(status_code=400,
+                            detail="A service account cannot be an administrator.")
+    if password:
+        raise HTTPException(
+            status_code=400,
+            detail="A service account has no password. It authenticates with an OAuth "
+                   "client — manage those under its OAuth clients.")
+    if role_id:
+        role = _resolve_role(db, role_id)
+        if role is not None and role.permissions_dict.get("is_admin"):
+            raise HTTPException(
+                status_code=400,
+                detail="A service account cannot hold an administrator role.")
+
+
 def _resolve_role(db: Session, raw: Optional[str]):
     """A role id from a request body to an `AccessRole`, or None to clear. 422 if unknown.
 
@@ -152,6 +178,7 @@ def list_users(
             is_admin=u.is_admin or False,
             auth_provider=u.auth_provider,
             mfa_required=u.mfa_required,
+            is_service_account=bool(u.is_service_account),
             permissions=u.permissions_dict or None,
             pov_env_ids=u.pov_env_ids_list,
             # The role's NAME as well as its id, so the list renders the assignment
@@ -240,6 +267,8 @@ def update_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     _refuse_accessor(user)
+    _refuse_service_account_escalation(db, user, is_admin=body.is_admin,
+                                       password=body.password, role_id=body.role_id)
     # Prevent admins from removing their own admin flag
     if user.id == admin.id and body.is_admin is False:
         raise HTTPException(status_code=400, detail="Cannot remove your own admin privilege")
@@ -329,6 +358,7 @@ def update_user(
         is_admin=user.is_admin or False,
         auth_provider=user.auth_provider,
         mfa_required=user.mfa_required,
+        is_service_account=bool(user.is_service_account),
         permissions=user.permissions_dict or None,
         pov_env_ids=user.pov_env_ids_list,
         role_id=user.role_id or "",
@@ -508,3 +538,196 @@ def list_user_fido2(
         }
         for c in creds
     ]
+
+
+# ── Service accounts and their OAuth clients ──────────────────────────────────
+# A workload principal: see services/service_accounts for the design. Every route here is
+# require_admin and audit-logged, and a client secret is returned exactly once.
+
+class ServiceAccountCreateRequest(BaseModel):
+    username: str
+    full_name: Optional[str] = None
+    workgroups: List[str] = []
+    # None or {} both mean NOTHING GRANTED for a service account -- the inverse of a
+    # person, where they mean unrestricted. Grant with a map or a role.
+    permissions: Optional[dict] = None
+    role_id: Optional[str] = None
+
+
+class OAuthClientCreateRequest(BaseModel):
+    name: str
+    secret_days: Optional[int] = None
+    token_ttl_seconds: Optional[int] = None
+
+
+class OAuthClientRotateRequest(BaseModel):
+    secret_days: Optional[int] = None
+    grace_minutes: Optional[int] = None
+
+
+class OAuthClientItem(BaseModel):
+    id: str
+    client_id: str
+    name: str
+    created_at: datetime
+    created_by: Optional[str] = None
+    secret_expires_at: Optional[datetime] = None
+    previous_expires_at: Optional[datetime] = None
+    token_ttl_seconds: int
+    last_used_at: Optional[datetime] = None
+    is_active: bool
+
+
+class OAuthClientSecretResponse(OAuthClientItem):
+    client_secret: str        # shown ONCE -- store it now
+    token_endpoint: str = "/api/oauth/token"
+
+
+def _client_item(c) -> dict:
+    return dict(
+        id=c.id, client_id=c.client_id, name=c.name, created_at=c.created_at,
+        created_by=c.created_by, secret_expires_at=c.secret_expires_at,
+        previous_expires_at=c.previous_expires_at,
+        token_ttl_seconds=c.token_ttl_seconds or 0, last_used_at=c.last_used_at,
+        is_active=bool(c.is_active),
+    )
+
+
+def _service_account_or_404(db: Session, user_id: str) -> User:
+    from ..services import service_accounts
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    problem = service_accounts.service_account_problem(user)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+    return user
+
+
+def _client_or_404(db: Session, user_id: str, client_row_id: str):
+    from ..database import OAuthClient
+    client = (db.query(OAuthClient)
+              .filter(OAuthClient.id == client_row_id, OAuthClient.user_id == user_id)
+              .first())
+    if not client:
+        raise HTTPException(status_code=404, detail="OAuth client not found")
+    return client
+
+
+@router.post("/service-accounts", response_model=UserResponse, status_code=201)
+def create_service_account(
+    body: ServiceAccountCreateRequest,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Create a workload principal. It holds nothing until a map or a role grants it."""
+    from ..services import job_service, service_accounts
+
+    if body.permissions:
+        validate_permissions_payload(body.permissions)
+    role = _resolve_role(db, body.role_id)
+    if role is not None and role.permissions_dict.get("is_admin"):
+        raise HTTPException(status_code=400,
+                            detail="A service account cannot hold an administrator role.")
+    try:
+        user = service_accounts.create_service_account(
+            db, username=body.username, full_name=body.full_name or "",
+            workgroups=body.workgroups, permissions=body.permissions or None)
+    except service_accounts.ServiceAccountError as exc:
+        raise HTTPException(status_code=409 if "taken" in str(exc) else 400, detail=str(exc))
+    if role is not None:
+        role_service.apply_role_to_user(db, user, role)
+    db.commit()
+    db.refresh(user)
+    job_service.log_audit(db, admin.username, "service_account.create",
+                          details={"service_account": user.username,
+                                   "role": role.name if role else ""})
+    return UserResponse(
+        id=user.id, username=user.username, full_name=user.full_name, email=user.email,
+        workgroups=user.workgroups_list, is_active=user.is_active, is_admin=False,
+        auth_provider=user.auth_provider, mfa_required=False, is_service_account=True,
+        permissions=user.permissions_dict or None, pov_env_ids=[],
+        role_id=user.role_id or "", role_name=role.name if role else "",
+    )
+
+
+@router.get("/{user_id}/oauth-clients", response_model=List[OAuthClientItem])
+def list_oauth_clients(
+    user_id: str,
+    _admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    from ..database import OAuthClient
+    if not db.query(User).filter(User.id == user_id).first():
+        raise HTTPException(status_code=404, detail="User not found")
+    rows = (db.query(OAuthClient).filter(OAuthClient.user_id == user_id)
+            .order_by(OAuthClient.created_at.desc()).all())
+    return [OAuthClientItem(**_client_item(c)) for c in rows]
+
+
+@router.post("/{user_id}/oauth-clients", response_model=OAuthClientSecretResponse,
+             status_code=201)
+def create_oauth_client(
+    user_id: str,
+    body: OAuthClientCreateRequest,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Mint a client_credentials client. The secret is returned once and never again."""
+    from ..services import job_service, service_accounts
+    user = _service_account_or_404(db, user_id)
+    try:
+        client, raw = service_accounts.create_client(
+            db, user, name=body.name, secret_days=body.secret_days,
+            token_ttl_seconds=body.token_ttl_seconds, created_by=admin.username)
+    except service_accounts.ServiceAccountError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    db.commit()
+    db.refresh(client)
+    job_service.log_audit(db, admin.username, "service_account.client_create",
+                          details={"service_account": user.username,
+                                   "client_id": client.client_id, "name": client.name})
+    return OAuthClientSecretResponse(**_client_item(client), client_secret=raw)
+
+
+@router.post("/{user_id}/oauth-clients/{client_row_id}/rotate",
+             response_model=OAuthClientSecretResponse)
+def rotate_oauth_client(
+    user_id: str,
+    client_row_id: str,
+    body: OAuthClientRotateRequest,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Issue a new secret. The previous one keeps working for ``grace_minutes``."""
+    from ..services import job_service, service_accounts
+    user = _service_account_or_404(db, user_id)
+    client = _client_or_404(db, user_id, client_row_id)
+    try:
+        raw = service_accounts.rotate_client(db, client, secret_days=body.secret_days,
+                                             grace_minutes=body.grace_minutes)
+    except service_accounts.ServiceAccountError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    db.commit()
+    db.refresh(client)
+    job_service.log_audit(db, admin.username, "service_account.client_rotate",
+                          details={"service_account": user.username,
+                                   "client_id": client.client_id})
+    return OAuthClientSecretResponse(**_client_item(client), client_secret=raw)
+
+
+@router.delete("/{user_id}/oauth-clients/{client_row_id}", status_code=200)
+def revoke_oauth_client(
+    user_id: str,
+    client_row_id: str,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Revoke a client. Every access token it issued stops working on its next use."""
+    from ..services import job_service
+    client = _client_or_404(db, user_id, client_row_id)
+    client.is_active = False
+    db.commit()
+    job_service.log_audit(db, admin.username, "service_account.client_revoke",
+                          details={"user_id": user_id, "client_id": client.client_id})
+    return {"detail": "OAuth client revoked"}

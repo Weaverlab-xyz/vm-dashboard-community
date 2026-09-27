@@ -20,12 +20,16 @@
     {% from "partials/permission_matrix.html" import permission_matrix %}
     {{ permission_matrix("Permissions", "User has unrestricted access to all sections.") }}
 #}
-{% macro permission_matrix(label, unrestricted_note, offer_unrestricted=True) %}
+{#- `hide_unrestricted_when`: an Alpine expression that hides the escape hatch at runtime,
+    for a form that serves two kinds of principal. A service account reads an empty map as
+    NOTHING (User.effective_permissions_dict), so "Full access" would be a lie there. -#}
+{% macro permission_matrix(label, unrestricted_note, offer_unrestricted=True, hide_unrestricted_when="") %}
 <div>
   <div class="flex items-center justify-between mb-2 gap-3">
     <label class="block text-sm font-medium text-gray-700">{{ label }}</label>
     {% if offer_unrestricted %}
-    <label class="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer shrink-0">
+    <label class="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer shrink-0"
+           {% if hide_unrestricted_when %}x-show="!({{ hide_unrestricted_when }})"{% endif %}>
       <input type="checkbox" x-model="form.permissionsUnrestricted"
              @change="toggleUnrestricted()"
              class="rounded border-gray-300 text-blue-600">

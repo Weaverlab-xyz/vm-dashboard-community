@@ -798,7 +798,10 @@ _SETUP_503_PREFIXES = ("/api/agent", "/api/entitle/rest",
                        # Entitle's ephemeral adapter for POV accessors, here for exactly
                        # the same reason as its standing sibling: a machine client reads a
                        # redirect to an HTML wizard as an integration failure.
-                       "/api/pov/accessor/rest")
+                       "/api/pov/accessor/rest",
+                       # The OAuth token endpoint and its metadata: every caller is a
+                       # workload, and an OAuth client library reads a 302 as a hard error.
+                       "/api/oauth", "/.well-known/oauth-authorization-server")
 
 @app.middleware("http")
 async def setup_guard(request: Request, call_next):
@@ -966,7 +969,7 @@ templates.env.globals["static_url"] = static_assets.url
 # Settings → Integrations panel takes effect immediately — no restart needed.
 
 from fastapi import Depends  # noqa: E402
-from .api import auth, jobs, websocket, aws, azure, gcp, oci, packer, mfa, tokens, users, groups, setup, secrets, storage, images, regions as regions_api  # noqa: E402
+from .api import auth, jobs, websocket, aws, azure, gcp, oci, packer, mfa, tokens, oauth, users, groups, setup, secrets, storage, images, regions as regions_api  # noqa: E402
 from .api import cloud_databases  # noqa: E402
 from .api import cert_lab as cert_lab_api  # noqa: E402
 from .api import spire_lab as spire_lab_api  # noqa: E402
@@ -1073,6 +1076,11 @@ app.include_router(regions_api.router)
 app.include_router(pra_api.router)
 app.include_router(mfa.router)
 app.include_router(tokens.router)
+# OAuth 2.0 client_credentials for service accounts (workload identities). No feature
+# gate: with no service account and no client it issues nothing, and it is the only
+# way a workload gets a short-lived token instead of a PAT.
+app.include_router(oauth.router)
+app.include_router(oauth.wellknown_router)
 app.include_router(users.router)
 app.include_router(groups.router)
 # Access roles. No _feature_gate: identity administration exists on every install, and

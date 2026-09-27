@@ -140,21 +140,88 @@ def _now() -> str:
 
 
 def read_token(path: str) -> str:
-    """The PAT, from a file the operator owns."""
+    """The dashboard credential, from a file the operator owns: a PAT (``vmcli_…``) or an
+    OAuth client pair (``vmsa_…:vmss_…``) -- see ``ClientCredentials``."""
     with open(path, encoding="utf-8") as fh:
         token = fh.read().strip()
     if not token:
         raise SystemExit(f"[agent] FATAL: {path} is empty — no authorization to spend.")
-    if not token.startswith("vmcli_"):
+    if not _is_dashboard_pat(token):
         raise SystemExit(
-            f"[agent] FATAL: {path} does not hold a dashboard PAT (expected vmcli_…).")
+            f"[agent] FATAL: {path} does not hold a dashboard PAT (expected vmcli_…) or "
+            "an OAuth client pair (expected vmsa_…:vmss_…).")
     return token
+
+
+class ClientCredentials:
+    """A service account's OAuth client, spent as short-lived access tokens.
+
+    The worker's authorization when the agent cell minted a CLIENT rather than a PAT
+    (``services/service_accounts``). The pair is exchanged at the dashboard's
+    ``/api/oauth/token`` (RFC 6749 client_credentials) for a token that lives minutes,
+    and re-exchanged a minute before that runs out -- so the credential on the wire to
+    /mcp expires on its own, and revoking the client ends the next call rather than the
+    next expiry.
+
+    Passed to ``call_once`` in place of a PAT string. ``run`` does not know the
+    difference, which keeps the one place the credential is spent the one place it is
+    spent. ``__repr__`` names the public client id only: this object reaches exception
+    text and must never carry the secret there.
+    """
+
+    REFRESH_MARGIN = 60
+
+    def __init__(self, client_id: str, client_secret: str, token_url: str):
+        self.client_id = client_id
+        self._secret = client_secret
+        self.token_url = token_url
+        self._access = ""
+        self._expires = 0.0
+
+    def __repr__(self) -> str:
+        return f"ClientCredentials({self.client_id})"
+
+    __str__ = __repr__
+
+    def bearer(self) -> str:
+        if self._access and time.time() < self._expires - self.REFRESH_MARGIN:
+            return self._access
+        import base64
+
+        basic = base64.b64encode(f"{self.client_id}:{self._secret}".encode()).decode()
+        body = _post_json(self.token_url, {"Authorization": f"Basic {basic}"},
+                          form={"grant_type": "client_credentials"})
+        self._access = body.get("access_token") or ""
+        if not self._access:
+            raise RuntimeError("the token endpoint returned no access_token")
+        self._expires = time.time() + int(body.get("expires_in") or 300)
+        return self._access
+
+
+def oauth_token_url(mcp_url: str) -> str:
+    """``https://host/mcp`` → ``https://host/api/oauth/token``. The dashboard serves both
+    from one origin, so the MCP URL the operator already configured is enough."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(mcp_url)
+    return f"{parts.scheme}://{parts.netloc}/api/oauth/token"
+
+
+def as_credential(raw: str, token_url: str):
+    """A PAT stays a string; a ``client_id:secret`` pair becomes ``ClientCredentials``."""
+    if raw.startswith("vmsa_") and ":" in raw:
+        client_id, _, secret = raw.partition(":")
+        return ClientCredentials(client_id, secret, token_url)
+    return raw
 
 
 # Anything token-shaped, for scrubbing error text. A client library that puts its request
 # headers in an exception repr would otherwise hand the Authorization header to the log --
 # on the one cell whose entire argument is about not leaking a credential.
 TOKEN_RE = re.compile(r"vmcli_[0-9a-fA-F]{8,}")
+# An OAuth client secret, for the same reason: it is sent as Basic auth to the token
+# endpoint, and an HTTP client's error repr is not this worker's decision.
+CLIENT_SECRET_RE = re.compile(r"vmss_[0-9a-fA-F]{8,}")
 # A ServiceAccount token is a JWT, and an episode handles one. Scrubbed on the same
 # principle and in the same place: what a third-party client or an API server puts in an
 # error body is not this worker's decision, so anything credential-shaped is removed on
@@ -181,6 +248,7 @@ def scrub(text: str) -> str:
     values never reach a printed string in the first place.
     """
     out = TOKEN_RE.sub("vmcli_<redacted>", text or "")
+    out = CLIENT_SECRET_RE.sub("vmss_<redacted>", out)
     out = JWT_SCRUB_RE.sub("<jwt redacted>", out)
     return AWS_KEY_RE.sub("<aws key id redacted>", out)
 
@@ -530,7 +598,12 @@ def _looks_like_jwt(value: str) -> bool:
 
 
 def _is_dashboard_pat(value: str) -> bool:
-    return (value or "").startswith("vmcli_")
+    """A dashboard credential: a PAT, or a service account's OAuth client pair."""
+    value = value or ""
+    if value.startswith("vmcli_"):
+        return True
+    client_id, sep, secret = value.partition(":")
+    return bool(sep) and client_id.startswith("vmsa_") and secret.startswith("vmss_")
 
 
 def _ps_session(api_url: str, client_id: str, client_secret: str) -> tuple:
@@ -1733,7 +1806,8 @@ async def call_once(url: str, token: str, tool: str) -> dict:
     from mcp import ClientSession
     from mcp.client.sse import sse_client
 
-    headers = {"Authorization": f"Bearer {token}"}
+    bearer = token.bearer() if isinstance(token, ClientCredentials) else token
+    headers = {"Authorization": f"Bearer {bearer}"}
     async with sse_client(url, headers=headers) as (reader, writer):
         async with ClientSession(reader, writer) as session:
             await session.initialize()
@@ -2260,6 +2334,9 @@ def main(argv=None) -> int:
                     help="the PAT's NAME, as Settings -> API Tokens lists it and as the "
                          "agent cell's create response returns it. Non-secret, and the "
                          "only thing about the token this worker ever logs.")
+    ap.add_argument("--oauth-token-url", default=os.environ.get("AGENT_OAUTH_TOKEN_URL", ""),
+                    help="where an OAuth client pair (vmsa_…:vmss_…) is exchanged for "
+                         "access tokens. Default: /api/oauth/token on --url's origin.")
     ap.add_argument("--token-source", choices=("file", "wlc", "ps"),
                     default=os.environ.get("AGENT_TOKEN_SOURCE", "file"),
                     help="where the dashboard PAT comes from. 'wlc' reads it out of "
@@ -2483,6 +2560,7 @@ def main(argv=None) -> int:
             reason=args.ps_reason, **wlc)
     else:
         token = read_token(args.token_file)
+    token = as_credential(token, args.oauth_token_url or oauth_token_url(args.url))
 
     return run(args.url, token, args.tool, args.spiffe_socket, args.interval,
                token_source=args.token_source, label=args.token_label)
