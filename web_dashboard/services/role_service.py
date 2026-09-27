@@ -131,9 +131,11 @@ _BUILTIN_ROLES = (
     {
         "slug": "pov-presenter",
         "name": "POV Presenter",
-        "description": "Run a proof of value: tick use cases, wake environments, and read "
-                       "the estate behind them. Narrow it further with the POV access "
-                       "picker on the user.",
+        # No "wake": powering an environment, waking included, is `pov:write`, which this
+        # role deliberately omits. A stakeholder who must wake their own POV needs write or
+        # a POV accessor alongside -- see docs/permissions.md.
+        "description": "Run a proof of value: tick use cases and read the estate behind "
+                       "them. Narrow it further with the POV access picker on the user.",
         # `pov:use` is the level that carries use-case ticking and wake -- see
         # docs/permissions.md. Create/destroy/share stay on write/delete, which this omits.
         "permissions": {
@@ -460,22 +462,36 @@ def delete(db: Session, role: AccessRole, *, force: bool = False) -> dict:
 # ── Seeding ───────────────────────────────────────────────────────────────────
 
 def seed_builtins(db: Session) -> int:
-    """Insert any missing built-in role. Returns how many were created.
+    """Insert any missing built-in role, and refresh the WORDING of the ones present.
+    Returns how many were created.
 
     Keyed on SLUG PRESENCE, not on the table being empty. ``workgroup_service.seed_if_empty``
     uses emptiness and it is the wrong key here: a ninth built-in shipped in a later release
     would never appear on an install that already has the first eight.
 
-    **Never updates an existing row**, which is what makes this safe without a
-    ``schema_markers`` entry. A marker guards a backfill whose re-run would re-grant
+    **Never updates an existing row's permissions**, which is what makes this safe without
+    a ``schema_markers`` entry. A marker guards a backfill whose re-run would re-grant
     something an administrator had deliberately removed; an insert-if-absent cannot
     re-grant, because the row it would touch is the row it skips. Combined with built-ins
     being undeletable, there is no state in which this resurrects something a person removed
     on purpose.
+
+    The name and description ARE refreshed, and only on ``is_builtin`` rows. Built-ins
+    cannot be edited (``update`` refuses them), so a stored description that differs from
+    the literal is never an administrator's choice -- it is a release that corrected the
+    wording, and without this the correction reached new installs only. POV Presenter's
+    said "wake environments" for a role that cannot wake one.
     """
     created = 0
+    refreshed = False
     for spec in _BUILTIN_ROLES:
-        if get_by_slug(db, spec["slug"]) is not None:
+        existing = get_by_slug(db, spec["slug"])
+        if existing is not None:
+            if existing.is_builtin and (existing.name != spec["name"]
+                                        or existing.description != spec["description"]):
+                existing.name = spec["name"]
+                existing.description = spec["description"]
+                refreshed = True
             continue
         role = AccessRole(
             id=str(uuid.uuid4()),
@@ -487,6 +503,6 @@ def seed_builtins(db: Session) -> int:
         role.permissions_dict = spec["permissions"]
         db.add(role)
         created += 1
-    if created:
+    if created or refreshed:
         db.commit()
     return created

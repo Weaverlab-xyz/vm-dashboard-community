@@ -235,7 +235,7 @@ Eight roles ship with the dashboard:
 | **Administrator** | Everything, including the admin-only pages. The grid is not consulted. |
 | **Operator** | Day-to-day work: deploy, run and use, but delete nothing. It does not include the audit log or change windows. |
 | **Read-Only** | Every section at its read level, and nothing else. `change_windows` offers no read level, so it is not included. |
-| **POV Presenter** | Run a proof of value — tick use cases, and read the environments and estate behind them. Pair it with the POV access picker. It holds `pov:read` and `pov:use` but not `pov:write`, so it **cannot wake or power** an environment. The role's own description in the app says it can; that description is wrong. |
+| **POV Presenter** | Run a proof of value — tick use cases, and read the environments and estate behind them. Pair it with the POV access picker. It holds `pov:read` and `pov:use` but not `pov:write`, so it **cannot wake or power** an environment. |
 | **Auditor** | The audit trail, job history and inventory. No writes. |
 | **Cloud Admin** | Full control of the cloud accounts and what runs in them. |
 | **DBA** | Cloud databases end to end, plus the secrets a database run needs. |

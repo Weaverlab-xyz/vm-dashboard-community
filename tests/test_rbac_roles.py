@@ -320,6 +320,28 @@ def test_the_seed_is_idempotent_and_never_updates_an_existing_row():
     assert role_service.seed_builtins(db) == 1
 
 
+def test_the_seed_refreshes_built_in_wording_and_nothing_else():
+    """A corrected description has to reach installs that already have the row -- the POV
+    Presenter one said "wake environments" for a role holding no pov:write. Wording only:
+    the permissions of the same row are left exactly as found, and a custom role is never
+    touched."""
+    db = _session()
+    role_service.seed_builtins(db)
+    pp = role_service.get_by_slug(db, "pov-presenter")
+    pp.description = "Run a proof of value: tick use cases, wake environments."
+    pp.permissions_dict = {"pov": ["read"]}           # stands in for any stored map
+    custom = role_service.create(db, name="Night Shift", description="stale on purpose",
+                                 permissions={"vms": ["read"]})
+    db.commit()
+
+    assert role_service.seed_builtins(db) == 0
+    pp = role_service.get_by_slug(db, "pov-presenter")
+    spec = next(r for r in role_service._BUILTIN_ROLES if r["slug"] == "pov-presenter")
+    assert pp.description == spec["description"] and "wake" not in pp.description
+    assert pp.permissions_dict == {"pov": ["read"]}, "the seed rewrote a built-in's permissions"
+    assert role_service.get(db, custom.id).description == "stale on purpose"
+
+
 def test_the_seed_marks_its_rows_builtin():
     db = _session()
     roles = _seeded(db)
