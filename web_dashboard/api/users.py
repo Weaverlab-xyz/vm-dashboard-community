@@ -558,6 +558,8 @@ class OAuthClientCreateRequest(BaseModel):
     name: str
     secret_days: Optional[int] = None
     token_ttl_seconds: Optional[int] = None
+    # Set = the client authenticates with a JWT-SVID for this SPIFFE ID and has no secret.
+    spiffe_id: Optional[str] = None
 
 
 class OAuthClientRotateRequest(BaseModel):
@@ -576,6 +578,8 @@ class OAuthClientItem(BaseModel):
     token_ttl_seconds: int
     last_used_at: Optional[datetime] = None
     is_active: bool
+    auth_method: str = "secret"
+    spiffe_id: Optional[str] = None
 
 
 class OAuthClientSecretResponse(OAuthClientItem):
@@ -590,6 +594,7 @@ def _client_item(c) -> dict:
         previous_expires_at=c.previous_expires_at,
         token_ttl_seconds=c.token_ttl_seconds or 0, last_used_at=c.last_used_at,
         is_active=bool(c.is_active),
+        auth_method=c.auth_method or "secret", spiffe_id=c.spiffe_id,
     )
 
 
@@ -679,14 +684,16 @@ def create_oauth_client(
     try:
         client, raw = service_accounts.create_client(
             db, user, name=body.name, secret_days=body.secret_days,
-            token_ttl_seconds=body.token_ttl_seconds, created_by=admin.username)
+            token_ttl_seconds=body.token_ttl_seconds, created_by=admin.username,
+            spiffe_id=body.spiffe_id or "")
     except service_accounts.ServiceAccountError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     db.commit()
     db.refresh(client)
     job_service.log_audit(db, admin.username, "service_account.client_create",
                           details={"service_account": user.username,
-                                   "client_id": client.client_id, "name": client.name})
+                                   "client_id": client.client_id, "name": client.name,
+                                   "spiffe_id": client.spiffe_id or ""})
     return OAuthClientSecretResponse(**_client_item(client), client_secret=raw)
 
 

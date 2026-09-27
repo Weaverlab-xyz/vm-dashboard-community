@@ -105,12 +105,15 @@ All routes are admin-only.
 |---|---|---|
 | `POST` | `/api/users/service-accounts` | create (`username`, `full_name`, `workgroups`, `permissions`, `role_id`) |
 | `GET` | `/api/users/{id}/oauth-clients` | list clients (never secrets) |
-| `POST` | `/api/users/{id}/oauth-clients` | create (`name`, `secret_days`, `token_ttl_seconds`) — returns `client_secret` once |
+| `POST` | `/api/users/{id}/oauth-clients` | create (`name`, `secret_days`, `token_ttl_seconds`, or `spiffe_id` for an SVID client) — returns `client_secret` once (empty for an SVID client) |
 | `POST` | `/api/users/{id}/oauth-clients/{client}/rotate` | new secret (`secret_days`, `grace_minutes`) — returns it once |
 | `DELETE` | `/api/users/{id}/oauth-clients/{client}` | revoke |
 | `GET` | `/api/users/{id}/external-identities` | list IdP identities mapped to it |
 | `POST` | `/api/users/{id}/external-identities` | map one (`name`, `subject`, `issuer`, `expected_client`) |
 | `DELETE` | `/api/users/{id}/external-identities/{mapping}` | remove the mapping |
+| `GET` / `PUT` | `/api/oauth/spiffe-trust-domains` | list / create-or-replace a trust domain's key source (`trust_domain`, `jwks_url`, `ca_pem`, `bundle_json`) |
+| `DELETE` | `/api/oauth/spiffe-trust-domains/{trust_domain}` | stop trusting it |
+| `POST` | `/api/spire-lab/{lab}/jwt-bundle` | capture a Workload Lab trust domain's JWT bundle |
 | `POST` | `/api/oauth/token` | the token endpoint (unauthenticated; client credentials only) |
 
 Failed client authentications share the sign-in page's throttle, keyed per client ID and
@@ -188,12 +191,71 @@ the v1 issuer under **Extra accepted issuers**. Issuers are compared exactly.
 - The token must be a **JWT** issued for the dashboard's audience. Opaque tokens (Okta's
   org authorization server) and tokens for other APIs (Microsoft Graph) cannot be verified.
 
+## SPIFFE workloads: authenticate with the SVID, hold nothing
+
+A workload attested by SPIRE already has an identity it never stores: short-lived SVIDs
+from its local agent. It can use a **JWT-SVID as the OAuth client assertion** at the
+dashboard's token endpoint, and hold no secret of any kind:
+
+```bash
+SVID=$(spire-agent api fetch jwt -audience https://dashboard.example.com/api/oauth/token \
+       -socketPath unix:///tmp/spire-agent/public/api.sock | tail -1 | tr -d '\t')
+curl -s -d grant_type=client_credentials \
+     -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-spiffe \
+     -d "client_assertion=$SVID" \
+     https://dashboard.example.com/api/oauth/token
+```
+
+`jwt-spiffe` is the IETF OAuth SPIFFE client-authentication profile; RFC 7523's
+`urn:ietf:params:oauth:client-assertion-type:jwt-bearer` is accepted too. `client_id` is
+optional (the SVID's SPIFFE ID resolves the client); if sent, it must match.
+
+### 1. Trust the trust domain
+
+**Users → SPIFFE trust domains** — one row per trust domain, with its JWT-SVID signing keys
+from either source:
+
+| Source | Use when | Caveat |
+|---|---|---|
+| **JWKS URL** | the dashboard can reach SPIRE's OIDC Discovery Provider (`/keys`) or a bundle endpoint | preferred: always current. Pin a private CA with the CA field. |
+| **Stored bundle** | it can't — e.g. the Workload Lab, whose provider is firewalled to its k3s node | SPIRE rotates JWT keys within `ca_ttl`; re-capture before then. The page flags a bundle older than five days. |
+
+Paste a bundle from `spire-server bundle show -format spiffe`, or on a **Workload Lab SPIRE
+row click Capture JWT bundle**: it runs `spire-jwt-bundle.yml` on the SPIRE host over the
+lab's usual SSH path and stores the result. Only `use: jwt-svid` keys are used; X.509
+roots in the bundle are ignored.
+
+### 2. Bind a SPIFFE ID to a service account
+
+**OAuth clients → Create → Authenticates with: a SPIFFE JWT-SVID**, and give the SPIFFE ID.
+The client has no secret (none is shown, and secret authentication is refused for it) and
+cannot be rotated — rotation is SPIRE's job now. One SPIFFE ID binds one active client.
+
+### What is checked
+
+- Signature against the trust domain's keys; asymmetric algorithms only.
+- **Audience is this dashboard's token endpoint** (or its issuer URL). An SVID minted for
+  anything else — the k3s API server, Workload Credentials — is refused, so one relying
+  party cannot replay another's SVID here.
+- **Single use**: SPIRE's JWT-SVIDs carry no `jti`, so the assertion's hash is recorded
+  until it expires and a second presentation is refused. Fetch a fresh SVID per exchange
+  (the agent worker does).
+- Lifetime at most one hour (SPIRE's default is five minutes); expired refused.
+- The bound client must be active and its service account enabled. Removing the trust
+  domain refuses every SVID client in it from the next exchange.
+
+### The agent demo cell
+
+When the cell's token user is a service account **and** the lab's trust domain is
+registered, the cell binds an SVID client to the agent's SPIFFE ID instead of minting a
+secret. Install the worker with `agent_token_source=spiffe` and the printed
+`agent_oauth_client_id`; nothing is written to the host. A second cell in the same trust
+domain (same SPIFFE ID) falls back to a secret client.
+
 ## What is not here yet
 
-This slots in behind the same bearer resolver (`api/auth.resolve_bearer`) and the same
-principal, without changing anything above:
-
-- **SPIFFE JWT-SVIDs as the client assertion** (RFC 7523). The worker would present its
-  JWT-SVID instead of a secret, so nothing static is held anywhere — the bridge
-  `agentcell_service`'s docstring names as the gap between the agent's identity and its
-  authorization.
+- IdP scopes and app roles are not translated into dashboard permissions; the service
+  account's grants are the whole of it.
+- The dashboard's workload tokens are signed with its own HS256 key, so only the dashboard
+  can verify them. Asymmetric signing with a published JWKS would let other services
+  verify them too.

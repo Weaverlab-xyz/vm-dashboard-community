@@ -113,13 +113,17 @@ def create_agent(
         # `client_id:secret` pair, which is the one string the worker's token file holds,
         # so the install playbook is unchanged.
         from ..services import service_accounts
+        svid_id = agentcell_service.svid_client_available(db, lab.trust_domain)
         try:
             oauth_client, secret = service_accounts.create_client(
-                db, agent_user, name=credential_name, created_by=current_user.username)
+                db, agent_user, name=credential_name, created_by=current_user.username,
+                spiffe_id=svid_id)
         except service_accounts.ServiceAccountError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         oauth_client.secret_expires_at = expires_at
-        raw = f"{oauth_client.client_id}:{secret}"
+        # An SVID-bound client has no secret: the worker runs with --token-source spiffe
+        # and there is nothing to carry into the playbook. Otherwise the pair, as before.
+        raw = "" if svid_id else f"{oauth_client.client_id}:{secret}"
     else:
         raw = _generate_raw()
         pat = PersonalAccessToken(
@@ -167,8 +171,10 @@ def create_agent(
         token=raw,
         message=(f"Agent {row.name} recorded. Run the two playbooks in "
                  "examples/playbooks/agent/ against the host to install it."),
-        notes=agentcell_service.deploy_notes(payload.pat_hours,
-                                             oauth=oauth_client is not None),
+        notes=agentcell_service.deploy_notes(
+            payload.pat_hours, oauth=oauth_client is not None,
+            svid=bool(oauth_client is not None and oauth_client.spiffe_id),
+            client_id=oauth_client.client_id if oauth_client else ""),
         client_id=oauth_client.client_id if oauth_client else "",
     )
 

@@ -12,6 +12,10 @@
   <div class="flex justify-end gap-2 mb-3">
     <!-- A workload principal: no password, never admin, authenticates with an OAuth
          client (client_credentials) instead of signing in. See docs/service-accounts.md. -->
+    <button @click="openTrustDomains()"
+            class="bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 text-sm font-medium px-4 py-2 rounded-lg transition">
+      SPIFFE trust domains
+    </button>
     <button @click="openCreateServiceAccount()"
             class="bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 text-sm font-medium px-4 py-2 rounded-lg transition">
       + New Service Account
@@ -436,6 +440,10 @@
       </div>
 
       <!-- One-time secret reveal -->
+      <div x-show="newClientId && !newClientSecret" class="mx-6 mt-4 p-4 bg-green-50 border border-green-200 rounded-lg text-sm text-green-900">
+        SVID client created: <code class="font-mono" x-text="newClientId"></code>. There is no secret —
+        the workload authenticates with its JWT-SVID.
+      </div>
       <div x-show="newClientSecret" class="mx-6 mt-4 p-4 bg-green-50 border border-green-200 rounded-lg space-y-2">
         <p class="text-sm font-medium text-green-800">Client secret issued — copy it now. It won't be shown again.</p>
         <div class="text-xs text-gray-600">Client ID</div>
@@ -459,12 +467,31 @@
       <!-- Create client form -->
       <div class="px-6 pt-4 pb-2">
         <form @submit.prevent="createClient()" class="flex flex-wrap items-end gap-3">
+          <div class="w-full flex flex-wrap items-center gap-4 text-sm">
+            <span class="text-xs font-medium text-gray-600">Authenticates with</span>
+            <label class="flex items-center gap-1.5 cursor-pointer">
+              <input type="radio" value="secret" x-model="newClientAuth"> a client secret
+            </label>
+            <label class="flex items-center gap-1.5 cursor-pointer">
+              <input type="radio" value="spiffe" x-model="newClientAuth"> a SPIFFE JWT-SVID (no secret)
+            </label>
+          </div>
+          <div x-show="newClientAuth === 'spiffe'" class="w-full">
+            <label class="block text-xs font-medium text-gray-600 mb-1">SPIFFE ID</label>
+            <input x-model="newClientSpiffeId" type="text" placeholder="spiffe://example.org/agent/mcp-reader"
+                   :required="newClientAuth === 'spiffe'"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <p class="text-[11px] text-gray-500 mt-1">
+              Its trust domain must be registered under <em>SPIFFE trust domains</em>. The workload
+              presents a JWT-SVID with audience <code x-text="tokenEndpoint()"></code>.
+            </p>
+          </div>
           <div class="flex-1 min-w-[10rem]">
             <label class="block text-xs font-medium text-gray-600 mb-1">Client name</label>
             <input x-model="newClientName" type="text" placeholder="e.g. mcp-agent-prod" required
                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
           </div>
-          <div class="w-32">
+          <div class="w-32" x-show="newClientAuth === 'secret'">
             <label class="block text-xs font-medium text-gray-600 mb-1">Secret expires (days)</label>
             <input x-model="newClientDays" type="number" min="1" max="365" placeholder="90"
                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -501,8 +528,11 @@
             <template x-for="c in userClients" :key="c.id">
               <tr>
                 <td class="py-2 font-medium" x-text="c.name"></td>
-                <td class="py-2 font-mono text-xs text-gray-600" x-text="c.client_id"></td>
-                <td class="py-2 text-gray-500" x-text="fmtDate(c.secret_expires_at)"></td>
+                <td class="py-2 font-mono text-xs text-gray-600">
+                  <div x-text="c.client_id"></div>
+                  <div x-show="c.spiffe_id" class="text-teal-700 break-all" x-text="'SVID: ' + c.spiffe_id"></div>
+                </td>
+                <td class="py-2 text-gray-500" x-text="c.spiffe_id ? '— (SVID)' : fmtDate(c.secret_expires_at)"></td>
                 <td class="py-2 text-gray-500" x-text="c.last_used_at ? fmtDate(c.last_used_at) : '—'"></td>
                 <td class="py-2">
                   <span :class="c.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'"
@@ -510,7 +540,7 @@
                         x-text="c.is_active ? 'Active' : 'Revoked'"></span>
                 </td>
                 <td class="py-2 text-right whitespace-nowrap">
-                  <button x-show="c.is_active" @click="rotateClient(c)"
+                  <button x-show="c.is_active && !c.spiffe_id" @click="rotateClient(c)"
                           class="text-blue-600 hover:text-blue-800 text-xs font-medium mr-2">Rotate</button>
                   <button x-show="c.is_active" @click="revokeClient(c)"
                           class="text-red-500 hover:text-red-700 text-xs font-medium">Revoke</button>
@@ -587,6 +617,65 @@
     </div>
   </div>
 
+  <!-- ── SPIFFE trust domains ─────────────────────────────────────────────── -->
+  <!-- Where a JWT-SVID's signing keys come from: a live JWKS URL (always current), or a
+       stored SPIFFE bundle (goes stale when SPIRE rotates its JWT keys). -->
+  <div x-show="showTdModal" x-cloak
+       class="fixed inset-0 bg-black/50 flex items-center justify-center z-40 p-4"
+       @keydown.escape.window="showTdModal = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto" @click.stop>
+      <div class="flex items-center justify-between px-6 py-4 border-b">
+        <h2 class="font-semibold text-gray-900">SPIFFE trust domains</h2>
+        <button @click="showTdModal = false" class="text-gray-400 hover:text-gray-600">✕</button>
+      </div>
+      <div class="px-6 py-4 space-y-3">
+        <p class="text-xs text-gray-500">
+          Trust a SPIRE trust domain's JWT-SVIDs as OAuth client assertions. Prefer a
+          <strong>JWKS URL</strong> (SPIRE's OIDC Discovery Provider <code>/keys</code>) — it stays
+          current as SPIRE rotates keys. A pasted <strong>bundle</strong>
+          (<code>spire-server bundle show -format spiffe</code>) works anywhere but needs
+          re-capturing after a rotation; a SPIRE lab can capture its own from the Workload Lab page.
+        </p>
+        <form @submit.prevent="saveTrustDomain()" class="space-y-2">
+          <input x-model="tdForm.trust_domain" type="text" placeholder="Trust domain, e.g. example.org" required
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+          <input x-model="tdForm.jwks_url" type="text" placeholder="JWKS URL (https://…/keys) — optional"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+          <textarea x-model="tdForm.ca_pem" rows="2" placeholder="CA certificate (PEM) the JWKS URL is served under — optional, for a private CA"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono"></textarea>
+          <textarea x-model="tdForm.bundle_json" rows="3" placeholder="SPIFFE bundle JSON — optional"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono"></textarea>
+          <div class="flex justify-end">
+            <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg">Save</button>
+          </div>
+        </form>
+        <template x-if="trustDomains.length === 0">
+          <p class="text-gray-400 text-sm text-center py-2">No trust domains registered</p>
+        </template>
+        <table x-show="trustDomains.length > 0" class="w-full text-sm">
+          <thead class="text-gray-500 text-xs uppercase">
+            <tr><th class="pb-2 text-left">Trust domain</th><th class="pb-2 text-left">Keys from</th><th class="pb-2"></th></tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            <template x-for="t in trustDomains" :key="t.id">
+              <tr>
+                <td class="py-2 font-mono" x-text="t.trust_domain"></td>
+                <td class="py-2 text-xs text-gray-600">
+                  <span x-show="t.source === 'url'" class="break-all" x-text="t.jwks_url + (t.ca_pinned ? ' (CA pinned)' : '')"></span>
+                  <span x-show="t.source === 'bundle'" x-text="'bundle, ' + t.bundle_jwt_keys + ' JWT key(s), captured ' + fmtDate(t.bundle_captured_at)"></span>
+                  <span x-show="t.stale" class="ml-1 text-amber-700 font-medium">— stale, re-capture</span>
+                </td>
+                <td class="py-2 text-right">
+                  <button @click="deleteTrustDomain(t)" class="text-red-500 hover:text-red-700 text-xs font-medium">Remove</button>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -657,6 +746,11 @@ function usersPage() {
     newClientId: '',
     newClientSecret: '',
     userExternal: [],
+    newClientAuth: 'secret',
+    newClientSpiffeId: '',
+    showTdModal: false,
+    trustDomains: [],
+    tdForm: { trust_domain: '', jwks_url: '', ca_pem: '', bundle_json: '' },
     extForm: { name: '', subject: '', expected_client: '', issuer: '' },
 
     // A service account can never hold the Administrator role; the API refuses it, so
@@ -1003,6 +1097,8 @@ function usersPage() {
       this.newClientTtl = '';
       this.newClientId = '';
       this.newClientSecret = '';
+      this.newClientAuth = 'secret';
+      this.newClientSpiffeId = '';
       this.showClientsModal = true;
       this.userExternal = [];
       this.extForm = { name: '', subject: '', expected_client: '', issuer: '' };
@@ -1050,6 +1146,41 @@ function usersPage() {
       }
     },
 
+    async openTrustDomains() {
+      this.tdForm = { trust_domain: '', jwks_url: '', ca_pem: '', bundle_json: '' };
+      this.showTdModal = true;
+      await this.loadTrustDomains();
+    },
+
+    async loadTrustDomains() {
+      try {
+        this.trustDomains = await API.get('/api/oauth/spiffe-trust-domains') || [];
+      } catch (e) {
+        toast('Could not load trust domains: ' + e.message, 'error');
+      }
+    },
+
+    async saveTrustDomain() {
+      try {
+        await API.request('PUT', '/api/oauth/spiffe-trust-domains', this.tdForm);
+        this.tdForm = { trust_domain: '', jwks_url: '', ca_pem: '', bundle_json: '' };
+        toast('Trust domain saved', 'success');
+        await this.loadTrustDomains();
+      } catch (e) {
+        toast('Error: ' + e.message, 'error');
+      }
+    },
+
+    async deleteTrustDomain(t) {
+      if (!confirm(`Stop trusting ${t.trust_domain}? Every SVID client in it is refused from its next exchange.`)) return;
+      try {
+        await API.del(`/api/oauth/spiffe-trust-domains/${encodeURIComponent(t.trust_domain)}`);
+        await this.loadTrustDomains();
+      } catch (e) {
+        toast('Error: ' + e.message, 'error');
+      }
+    },
+
     tokenEndpoint() {
       return window.location.origin + '/api/oauth/token';
     },
@@ -1062,12 +1193,14 @@ function usersPage() {
     async createClient() {
       try {
         const body = { name: this.newClientName };
-        if (this.newClientDays) body.secret_days = parseInt(this.newClientDays);
+        if (this.newClientAuth === 'spiffe') body.spiffe_id = this.newClientSpiffeId;
+        if (this.newClientDays && this.newClientAuth === 'secret') body.secret_days = parseInt(this.newClientDays);
         if (this.newClientTtl) body.token_ttl_seconds = parseInt(this.newClientTtl);
         this.showSecret(await API.post(`/api/users/${this.clientsUser.id}/oauth-clients`, body));
         this.newClientName = '';
         this.newClientDays = '';
         this.newClientTtl = '';
+        this.newClientSpiffeId = '';
         await this.loadClients();
       } catch (e) {
         toast('Error creating OAuth client: ' + e.message, 'error');

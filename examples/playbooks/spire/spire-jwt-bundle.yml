@@ -1,0 +1,83 @@
+# Publish the trust domain's JWT-SVID signing keys for the dashboard to trust.
+# Target: the SPIRE server VM, after spire-server-install.yml. Read-only on the host;
+# safe to re-run, and RE-RUNNING IS THE POINT.
+#
+# WHY THIS EXISTS. The dashboard's token endpoint accepts a JWT-SVID as an OAuth client
+# assertion (services/spiffe_assertion), so an agent can authenticate holding no secret.
+# To verify one it needs the trust domain's JWT signing keys. In production those come
+# from a JWKS URL (the OIDC Discovery Provider); a lab's provider is firewalled to its k3s
+# node and serves a certificate for a name only that node resolves, so the lab captures
+# the SPIFFE bundle here instead and the dashboard stores it.
+#
+# THE KEYS ROTATE. SPIRE rolls its JWT signing key within ca_ttl (168h in this lab),
+# publishing the next key ahead of time — so a capture keeps verifying for roughly that
+# long and then starts refusing valid SVIDs. The dashboard flags a capture older than five
+# days; run this again (the lab's "Capture JWT bundle" button does) to refresh it.
+#
+# NOTHING HERE IS SECRET. A bundle is public keys. It goes through Secrets Safe only
+# because that is the one channel out of an Ansible run that carries a VALUE rather than a
+# log — the same reason spire-admin-identity.yml publishes trust-bundle-pem that way.
+#
+# extra_vars:
+#   trust_domain: weaverlab.test              # REQUIRED
+#   admin_secret_folder: spire/weaverlab      # REQUIRED — the lab's folder
+#   ps_safe: Automation
+- name: Publish the SPIRE JWT-SVID bundle for the dashboard
+  hosts: all
+  become: true
+  vars:
+    trust_domain: ""
+    admin_secret_folder: ""
+    ps_safe: "Automation"
+    spire_root: /opt/spire
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true
+  tasks:
+    - name: Validate the inputs
+      ansible.builtin.assert:
+        that:
+          - trust_domain | length > 0
+          - admin_secret_folder | length > 0
+        fail_msg: "trust_domain and admin_secret_folder are required."
+
+    - name: Read the trust domain's SPIFFE bundle
+      ansible.builtin.command: "{{ spire_root }}/bin/spire-server bundle show -format spiffe"
+      register: spiffe_bundle
+      changed_when: false
+
+    # Refuse to publish something the dashboard would reject anyway, with the reason here
+    # rather than as a vague "no JWT keys" on the dashboard side.
+    - name: Check the bundle carries JWT-SVID keys
+      ansible.builtin.assert:
+        that:
+          - (spiffe_bundle.stdout | from_json)['keys'] | selectattr('use', 'equalto', 'jwt-svid') | list | length > 0
+        fail_msg: >-
+          `spire-server bundle show -format spiffe` returned no key with use=jwt-svid.
+          The server has not prepared a JWT signing key yet — wait a minute after install.
+
+    # no_log is for `ps_client_secret` in the module args, NOT for the payload: a failed
+    # task dumps its arguments, and the OAuth secret is in them.
+    - name: Publish the JWT bundle for the dashboard to read back
+      beyondtrust.secrets_safe.secrets_create:
+        api_url: "{{ ps_api_url }}"
+        api_version: "3.1"
+        client_id: "{{ ps_client_id }}"
+        client_secret: "{{ ps_client_secret }}"
+        verify_ca: "{{ ps_verify_ca }}"
+        safe_name: "{{ ps_safe }}"
+        folder_name: "{{ admin_secret_folder }}"
+        title: jwt-bundle-spiffe
+        secret_type: "text"
+        text: "{{ spiffe_bundle.stdout }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: What was published
+      ansible.builtin.debug:
+        msg:
+          - "Published {{ admin_secret_folder }}/jwt-bundle-spiffe"
+          - "JWT-SVID keys: {{ (spiffe_bundle.stdout | from_json)['keys'] | selectattr('use', 'equalto', 'jwt-svid') | map(attribute='kid') | list }}"
+          - "Re-run before ca_ttl elapses: SPIRE rotates these keys."

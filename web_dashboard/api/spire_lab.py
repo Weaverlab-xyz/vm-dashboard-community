@@ -498,6 +498,24 @@ def ps_register(lab_id: str, db: Session = Depends(get_db),
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@router.post("/{lab_id}/jwt-bundle")
+def capture_jwt_bundle(lab_id: str, db: Session = Depends(get_db),
+                       user: User = Depends(require_permission("cloud_function", "write"))):
+    """Capture this trust domain's JWT-SVID keys so the dashboard's token endpoint can
+    verify SVID client assertions from it (Users → SPIFFE trust domains shows the result).
+
+    Re-run it when SPIRE rotates its JWT key -- within ca_ttl -- or SVIDs signed with the
+    new key are refused. A trust domain given a JWKS URL does not need this.
+    """
+    _require_enabled()
+    _visible_or_404(db, lab_id, user)
+    try:
+        return spire_lab_service.start_jwt_bundle_capture(
+            db, lab_id=lab_id, created_by=user.username)
+    except SpireLabError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.delete("/{lab_id}/ps-register")
 def ps_deregister(lab_id: str, db: Session = Depends(get_db),
                   user: User = Depends(require_permission("cloud_function", "write"))):

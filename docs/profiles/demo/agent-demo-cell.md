@@ -74,19 +74,20 @@ token-shaped on its way to one.
 
 ## What is not built
 
-> **The SVID does not authenticate to `/mcp`, and nothing here pretends it does.** The MCP
-> server takes a Bearer PAT (`api/mcp_server.py`) and has no mTLS path. Bridging *those
-> two specifically* — having the SVID mint the PAT — would need the Password Safe
-> **SPIFFE SVID** plugin, whose configuration question `spire_lab_service` records as
-> unresolved. This cell does not bet on it.
+> **The SVID can now mint the authorization — through the dashboard, not Password Safe.**
+> With a service account as the token user and the lab's JWT bundle captured (the SPIRE
+> row's **Capture JWT bundle**), the cell binds an OAuth client to the agent's SPIFFE ID.
+> The worker runs with `--token-source spiffe`: it presents a fresh JWT-SVID at
+> `/api/oauth/token` and gets a minutes-long access token, holding nothing on the host.
+> See [Service accounts → SPIFFE workloads](../../service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing).
 >
-> **But the worker still need not hold a static secret**, and that is the part worth
-> demoing — see [No static secret on the host](#no-static-secret-on-the-host). The
-> identity that removes it federates over **OIDC**, which is a different mechanism from
-> the mTLS bridge above. SPIRE can be that issuer — the lab already publishes the trust
-> domain as one — and so can any of the three clouds. What stays unbuilt is specifically
-> the SVID-to-PAT bridge inside Password Safe, not the workload's ability to prove who it
-> is without holding anything.
+> What stays unbuilt is the *other* bridge — the SVID minting a credential **inside
+> Password Safe** via the SPIFFE SVID plugin, whose configuration question
+> `spire_lab_service` records as unresolved. `/mcp` itself still has no mTLS path; the SVID
+> is exchanged for a bearer token rather than presented on the connection.
+>
+> Without a service account or a captured bundle, the cell behaves as before: a PAT or
+> client secret is the authorization, and the SVID proves identity beside it in the log.
 
 ## No static secret on the host
 

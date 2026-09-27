@@ -788,7 +788,10 @@ def test_a_failed_link_leaves_the_trust_domain_available():
     """The governance half is what most labs are built for and stands on its own, so a k3s
     failure must not make a working trust domain read as broken."""
     src = _svc_src()
-    handler = src.split("except Exception as exc:  # noqa: BLE001")[-1]
+    # Scoped to the link's own function: the handler used to be found as the file's LAST
+    # `except`, which silently became some other job's the moment one was added below.
+    link = src.split("async def run_k8s_link(", 1)[1].split("\nasync def ", 1)[0]
+    handler = link.split("except Exception as exc:  # noqa: BLE001")[-1]
     assert 'row.k8s_status = "failed"' in handler
     assert 'row.status = "failed"' not in handler, \
         "the link's failure path also fails the lab, so the trust domain reads as broken"

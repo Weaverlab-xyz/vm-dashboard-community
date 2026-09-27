@@ -135,6 +135,13 @@
                    `ps_system_id` being set; `ps_account_id` stays empty by design because
                    the plugin DISCOVERS its accounts, so an empty one must not read here as
                    an incomplete onboard. -->
+              <!-- Lets the dashboard's own token endpoint verify this trust domain's
+                   JWT-SVIDs, so an agent here can authenticate holding no secret. -->
+              <button @click="captureJwtBundle(lab)" x-show="lab.status === 'available'"
+                      x-cloak :disabled="busy"
+                      class="text-teal-700 hover:underline text-xs mr-2 disabled:opacity-50"
+                      title="Store this trust domain's JWT-SVID keys so agents can authenticate to the dashboard with an SVID. Re-run after SPIRE rotates keys (within ca_ttl).">
+                Capture JWT bundle</button>
               <button @click="govern(lab)" x-show="lab.status === 'available' && !lab.ps_governed"
                       x-cloak :disabled="busy"
                       class="text-blue-600 hover:underline text-xs mr-2 disabled:opacity-50">
@@ -1017,6 +1024,18 @@ function spireLabPage() {
         await this.load();
       } catch (e) {
         this.notify('Could not onboard: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+
+    async captureJwtBundle(lab) {
+      this.busy = true;
+      try {
+        await API.post('/api/spire-lab/' + lab.id + '/jwt-bundle', {});
+        this.notify('Capturing the JWT-SVID bundle — one playbook; follow it in Jobs. The '
+                    + 'result appears under Users → SPIFFE trust domains. Re-capture after '
+                    + 'SPIRE rotates its JWT key (within ca_ttl).');
+      } catch (e) {
+        this.notify('Could not capture: ' + (e.message || e), 'error');
       } finally { this.busy = false; }
     },
 
