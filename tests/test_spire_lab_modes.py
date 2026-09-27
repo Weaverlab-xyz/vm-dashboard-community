@@ -205,9 +205,9 @@ def test_the_pem_split_goes_by_position_whatever_the_headers():
                      _pem("CERTIFICATE", "ROOT2")])
     r, d = _split(out)
     assert r.returncode == 0, r.stderr
-    assert "SVID" in open(os.path.join(d, "svid.pem")).read()
-    assert "KEY" in open(os.path.join(d, "key.pem")).read()
-    bundle = open(os.path.join(d, "bundle.pem")).read()
+    assert "SVID" in open(os.path.join(d, "svid.pem"), encoding="utf-8").read()
+    assert "KEY" in open(os.path.join(d, "key.pem"), encoding="utf-8").read()
+    bundle = open(os.path.join(d, "bundle.pem"), encoding="utf-8").read()
     assert "ROOT1" in bundle and "ROOT2" in bundle
     assert oct(os.stat(os.path.join(d, "key.pem")).st_mode & 0o777) == "0o600"
 
