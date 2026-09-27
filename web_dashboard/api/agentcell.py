@@ -102,16 +102,34 @@ def create_agent(
     if problem:
         raise HTTPException(status_code=400, detail=problem)
 
-    raw = _generate_raw()
     expires_at = agentcell_service.pat_expires_at(payload.pat_hours)
-    pat = PersonalAccessToken(
-        user_id=agent_user.id,
-        name=agentcell_service.pat_name_for(payload.name),
-        token_hash=hash_pat(raw),
-        expires_at=expires_at,
-    )
-    db.add(pat)
-    db.flush()
+    credential_name = agentcell_service.pat_name_for(payload.name)
+    oauth_client = None
+    pat = None
+    if agent_user.is_service_account:
+        # A service account gets an OAuth client, not a PAT: the worker exchanges the pair
+        # for access tokens that live minutes (services/service_accounts). The secret dies
+        # with the cell's own expiry, exactly as the PAT would have. `raw` is the
+        # `client_id:secret` pair, which is the one string the worker's token file holds,
+        # so the install playbook is unchanged.
+        from ..services import service_accounts
+        try:
+            oauth_client, secret = service_accounts.create_client(
+                db, agent_user, name=credential_name, created_by=current_user.username)
+        except service_accounts.ServiceAccountError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        oauth_client.secret_expires_at = expires_at
+        raw = f"{oauth_client.client_id}:{secret}"
+    else:
+        raw = _generate_raw()
+        pat = PersonalAccessToken(
+            user_id=agent_user.id,
+            name=credential_name,
+            token_hash=hash_pat(raw),
+            expires_at=expires_at,
+        )
+        db.add(pat)
+        db.flush()
 
     row = AgentCell(
         name=payload.name,
@@ -126,17 +144,19 @@ def create_agent(
         spire_lab_id=lab.id,
         trust_domain=lab.trust_domain,
         spiffe_id=agentcell_service.spiffe_id_for(lab.trust_domain),
-        pat_id=pat.id,
-        pat_name=pat.name,
+        pat_id=pat.id if pat else None,
+        pat_name=credential_name,
         pat_user_id=agent_user.id,
         pat_expires_at=expires_at,
+        oauth_client_id=oauth_client.id if oauth_client else None,
     )
     db.add(row)
     db.commit()
     db.refresh(row)
 
-    logger.info("agent cell %s created for host %s as %s (token %s, expires %s)",
-                row.id, row.host_name, row.spiffe_id, pat.name, expires_at)
+    logger.info("agent cell %s created for host %s as %s (%s %s, expires %s)",
+                row.id, row.host_name, row.spiffe_id,
+                "oauth client" if oauth_client else "token", credential_name, expires_at)
     return AgentCellCreateResponse(
         id=row.id,
         name=row.name,
@@ -147,7 +167,9 @@ def create_agent(
         token=raw,
         message=(f"Agent {row.name} recorded. Run the two playbooks in "
                  "examples/playbooks/agent/ against the host to install it."),
-        notes=agentcell_service.deploy_notes(payload.pat_hours),
+        notes=agentcell_service.deploy_notes(payload.pat_hours,
+                                             oauth=oauth_client is not None),
+        client_id=oauth_client.client_id if oauth_client else "",
     )
 
 
@@ -289,20 +311,26 @@ def build_options(
             "put the worker on the host are Ansible runs you make yourself, so there "
             "would be nothing to run them with.")
 
-    # Candidate token users. Non-admin and active only; see the docstring.
+    # Candidate token users. Non-admin and active only; see the docstring. Service
+    # accounts first: they are what an agent should run as (an OAuth client and
+    # short-lived tokens rather than a PAT on a person-shaped row).
     users = []
     for row in db.query(User).order_by(User.username.asc()).all():
         if not bool(getattr(row, "is_active", True)):
             continue
         if bool(getattr(row, "is_effective_admin", False)):
             continue
+        if getattr(row, "accessor_env_id", None):
+            continue
         users.append({"id": row.id, "username": row.username or "",
-                      "full_name": getattr(row, "full_name", "") or ""})
+                      "full_name": getattr(row, "full_name", "") or "",
+                      "is_service_account": bool(getattr(row, "is_service_account", False))})
+    users.sort(key=lambda u: (not u["is_service_account"], u["username"]))
     if not users:
         missing.append(
             "every active user on this instance is an administrator, and the cell "
             "refuses to mint against one — the token user IS the agent's blast radius. "
-            "Create a narrow user for the agent first.")
+            "Create a service account for the agent first (Users → Service accounts).")
 
     # ── What the agent can be made answerable for ────────────────────────────
     # The OTHER TABS' rows, which is what makes this tab a consumer rather than a fifth
@@ -706,6 +734,14 @@ def revoke_agent(
         raise HTTPException(status_code=404, detail="No such agent cell.")
 
     revoked = False
+    if row.oauth_client_id:
+        from ..database import OAuthClient
+        client = db.query(OAuthClient).filter(OAuthClient.id == row.oauth_client_id).first()
+        if client and client.is_active:
+            # Ends every access token the worker already holds on its next call, not at
+            # their expiry: api/auth.resolve_bearer re-reads the client every request.
+            client.is_active = False
+            revoked = True
     if row.pat_id:
         pat = db.query(PersonalAccessToken).filter(
             PersonalAccessToken.id == row.pat_id).first()

@@ -1,8 +1,10 @@
 """
 MCP (Model Context Protocol) server — exposes dashboard read-only tools to AI clients.
 
-Transport: HTTP Streamable (SSE), mounted at /mcp in main.py.
-Auth:      Bearer PAT (vmcli_<64hex>) validated against personal_access_tokens table.
+Transport: SSE, mounted at /mcp in main.py -- the stream at /mcp/sse, messages
+           POSTed to /mcp/messages/. See ``_sse_app`` for why it is built here.
+Auth:      Bearer PAT (vmcli_<64hex>), or an OAuth workload access token from
+           ``POST /api/oauth/token`` -- both via ``api/auth.resolve_bearer``.
 Gate:      ``mcp_server_enabled`` (default off) — checked in :class:`_MCPAuth` before auth.
 
 Any MCP-compatible client (Claude Desktop, Claude Code, Cursor, etc.) can connect:
@@ -10,7 +12,7 @@ Any MCP-compatible client (Claude Desktop, Claude Code, Cursor, etc.) can connec
     {
       "mcpServers": {
         "vm-dashboard": {
-          "url": "http://localhost:8001/mcp",
+          "url": "http://localhost:8001/mcp/sse",
           "headers": {"Authorization": "Bearer vmcli_<your-pat>"}
         }
       }
@@ -44,7 +46,6 @@ workgroups on exactly the pages an administrator most needs. That was a bug;
 ``tests/test_mcp_rbac.py`` pins the tools' side.
 """
 import contextvars
-import hashlib
 import json
 import logging
 from datetime import datetime
@@ -54,7 +55,6 @@ from mcp.server.fastmcp import FastMCP
 
 from ..database import (
     Job,
-    PersonalAccessToken,
     SessionLocal,
     User,
 )
@@ -861,30 +861,23 @@ async def secret_staleness() -> dict:
 
 
 def _validate_pat(raw_token: str) -> Optional[User]:
-    """Synchronous PAT validation — runs in a thread via the ASGI wrapper."""
-    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    """Resolve a bearer credential -- runs in a thread via the ASGI wrapper.
+
+    The name predates workload tokens and is kept because tests and docstrings cite it.
+    It no longer holds its own copy of the PAT lookup: it calls ``api/auth.resolve_bearer``
+    so a PAT, a login JWT and an OAuth workload token are accepted here exactly when the
+    REST API accepts them. The User comes back DETACHED, which ``effective_permissions_dict``
+    is written to survive -- including the token scope, a plain attribute on the instance.
+    """
+    from .auth import resolve_bearer
+    from fastapi import HTTPException
+
     db = SessionLocal()
     try:
-        pat = (
-            db.query(PersonalAccessToken)
-            .filter(
-                PersonalAccessToken.token_hash == token_hash,
-                PersonalAccessToken.is_active == True,  # noqa: E712
-            )
-            .first()
-        )
-        if not pat:
+        try:
+            return resolve_bearer(raw_token, db)
+        except HTTPException:
             return None
-        if pat.expires_at and pat.expires_at < datetime.utcnow():
-            return None
-        pat.last_used_at = datetime.utcnow()
-        db.commit()
-        user = (
-            db.query(User)
-            .filter(User.id == pat.user_id, User.is_active == True)  # noqa: E712
-            .first()
-        )
-        return user
     finally:
         db.close()
 
@@ -924,8 +917,8 @@ class _MCPAuth:
             await self._send_401(send, scope)
             return
 
-        raw_token = auth[7:]
-        if not raw_token.startswith("vmcli_"):
+        raw_token = auth[7:].strip()
+        if not raw_token:
             await self._send_401(send, scope)
             return
 
@@ -955,7 +948,7 @@ class _MCPAuth:
     async def _send_401(cls, send: Callable, scope: dict) -> None:
         await cls._send_json(
             send, scope, 401,
-            b'{"detail":"Missing or invalid PAT. Create one at /settings."}',
+            b'{"detail":"Missing or invalid token. Use a PAT from /settings or an OAuth access token from /api/oauth/token."}',
             [[b"www-authenticate", b'Bearer realm="vm-dashboard"']],
         )
 
@@ -970,7 +963,49 @@ class _MCPAuth:
 # ── Public factory ────────────────────────────────────────────────────────────
 
 
+# Where main.py mounts this app, and the two paths under it. One constant, because the
+# message endpoint the server ADVERTISES has to include the mount and nothing else here
+# can see it.
+MOUNT_PATH = "/mcp"
+SSE_PATH = "/sse"
+MESSAGE_PATH = "/messages/"
+
+
+def _sse_app():
+    """The SSE transport, built here rather than by ``FastMCP.sse_app()``.
+
+    ``sse_app()`` in the mcp SDK this repo can install (1.6 -- newer releases need a
+    newer FastAPI/Starlette and httpx than requirements.txt pins) advertises its message
+    endpoint as the bare ``/messages/``. Mounted at ``/mcp`` that is the wrong URL: every
+    client opened the stream, POSTed its first message to ``/messages/`` and got a 404,
+    whatever credential it held. So the transport is given the MOUNTED path, and the
+    route stays relative to the mount, which Starlette strips.
+
+    ``root_path`` is blanked on the scope handed to the SDK because newer releases
+    prefix it themselves; with the mount already in the endpoint that would double it.
+
+    Clients connect to ``/mcp/sse``. Not bare ``/mcp``: Starlette answers a mount's own
+    path with a 307 to ``/mcp/``, and SSE clients do not follow redirects.
+    """
+    from mcp.server.sse import SseServerTransport
+    from starlette.applications import Starlette
+    from starlette.routing import Mount, Route
+
+    sse = SseServerTransport(MOUNT_PATH + MESSAGE_PATH)
+    server = mcp._mcp_server  # what FastMCP.sse_app() itself runs; no public accessor
+
+    async def handle_sse(request) -> None:
+        scope = dict(request.scope, root_path="")
+        async with sse.connect_sse(scope, request.receive, request._send) as streams:
+            await server.run(streams[0], streams[1],
+                             server.create_initialization_options())
+
+    return Starlette(routes=[
+        Route(SSE_PATH, endpoint=handle_sse),
+        Mount(MESSAGE_PATH, app=sse.handle_post_message),
+    ])
+
+
 def get_mcp_asgi_app() -> Callable:
-    """Return the MCP ASGI app wrapped with the feature gate and PAT authentication."""
-    raw_app = mcp.sse_app()
-    return _MCPAuth(raw_app)
+    """Return the MCP ASGI app wrapped with the feature gate and bearer authentication."""
+    return _MCPAuth(_sse_app())

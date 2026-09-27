@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..database import SessionLocal, User
 from ..services import job_service
-from .auth import _PAT_PREFIX, _get_user_from_pat, can_audit_jobs, decode_token
+from .auth import can_audit_jobs, resolve_bearer
 
 router = APIRouter(tags=["websocket"])
 logger = logging.getLogger(__name__)
@@ -34,9 +34,10 @@ def _authenticate(websocket: WebSocket, db: Session) -> Tuple[Optional[User], Op
     """Resolve the offered subprotocol credential to a User.
 
     Returns ``(user, subprotocol_to_echo)``; ``(None, None)`` when the credential is
-    missing or invalid. Delegates to the same JWT/PAT resolution the HTTP dependency
-    uses, so a revoked PAT or an expired JWT is rejected here for the same reasons and
-    at the same moment it would be on a REST call.
+    missing or invalid. Delegates to ``api/auth.resolve_bearer``, the resolver the HTTP
+    dependency uses, so a revoked PAT, an expired JWT or a workload token whose OAuth
+    client was revoked is rejected here for the same reasons and at the same moment it
+    would be on a REST call.
     """
     offered = [p.strip() for p in
                (websocket.headers.get("sec-websocket-protocol") or "").split(",") if p.strip()]
@@ -45,16 +46,7 @@ def _authenticate(websocket: WebSocket, db: Session) -> Tuple[Optional[User], Op
     token = offered[1]
 
     try:
-        if token.startswith(_PAT_PREFIX):
-            pat_user = _get_user_from_pat(token, db)
-            if pat_user.accessor_env_id:
-                logger.warning("websocket auth: refusing a POV accessor's token")
-                return None, None
-            return pat_user, _WS_AUTH_SUBPROTOCOL
-        username = decode_token(token).username
-        user = db.query(User).filter(User.username == username).first()
-        if not user or not user.is_active:
-            return None, None
+        user = resolve_bearer(token, db)
         if user.accessor_env_id:
             # A POV accessor. This resolver is deliberately NOT
             # `api/auth.get_current_user`, so the path allowlist that confines an accessor

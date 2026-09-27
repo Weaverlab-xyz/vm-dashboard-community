@@ -23,7 +23,6 @@ from ..database import User, Fido2Credential, PersonalAccessToken, OAuthGroupMap
 from ..services import config_service
 from ..models.user import (
     TokenResponse,
-    TokenData,
     UserResponse,
     PreAuthResponse,
     MfaLoginRequest,
@@ -38,7 +37,7 @@ from ..services.fido2_service import (
     b64url_encode,
     b64url_decode,
 )
-from ..services import login_guard, personas, public_url
+from ..services import login_guard, personas, public_url, service_accounts
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
@@ -99,26 +98,6 @@ def _decode_pre_auth_token(token: str) -> str:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired MFA token")
 
 
-def decode_token(token: str) -> TokenData:
-    try:
-        payload = jwt.decode(
-            token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm]
-        )
-        # Reject pre_auth tokens from being used as full access tokens
-        if payload.get("type") == "pre_auth":
-            raise JWTError("pre_auth token cannot be used as access token")
-        username: Optional[str] = payload.get("sub")
-        if username is None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-        return TokenData(username=username)
-    except JWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-
 # ── POV accessors ─────────────────────────────────────────────────────────────
 #
 # An accessor is a prospect's ephemeral login, bound to one POV environment. It is a real
@@ -152,6 +131,56 @@ def _accessor_may_reach(path: str) -> bool:
     return any((path or "").startswith(p) for p in _ACCESSOR_ALLOWED_PREFIXES)
 
 
+# ── The one bearer resolver ───────────────────────────────────────────────────
+
+def _unauthorized(detail: str = "Could not validate credentials") -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def resolve_bearer(token: str, db: Session) -> User:
+    """Resolve any bearer credential the dashboard accepts to its principal, or raise 401.
+
+    THREE kinds, and every surface -- ``get_current_user`` (REST), ``api/websocket`` and
+    ``api/mcp_server`` -- resolves through here, so a credential that works on one works
+    on all three and one that is revoked is refused by all three at the same moment. It
+    used to be three copies of the PAT lookup, and ``/mcp`` accepted nothing else.
+
+      * ``vmcli_`` PAT -- a person's (or, if an admin minted one, a service account's)
+        long-lived token;
+      * a login JWT (``type: access``) -- a person, from the sign-in page. One that names
+        a service account is refused: nothing issues such a token, so one is forged or
+        mis-issued, and it would skip the client check below;
+      * a workload JWT (``type: workload``) -- a service account, from
+        ``POST /api/oauth/token``. ``service_accounts.resolve_workload_token`` re-checks
+        the issuing client and attaches the token's scope to the returned instance.
+    """
+    if token.startswith(_PAT_PREFIX):
+        return _get_user_from_pat(token, db)
+    try:
+        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+    except JWTError:
+        raise _unauthorized()
+    kind = payload.get("type")
+    if kind == service_accounts.TOKEN_TYPE:
+        user = service_accounts.resolve_workload_token(db, payload)
+        if not user:
+            raise _unauthorized("Workload token's client is revoked or unknown")
+        return user
+    if kind == "pre_auth" or not payload.get("sub"):
+        raise _unauthorized()
+    user = db.query(User).filter(User.username == payload["sub"]).first()
+    if not user or not user.is_active:
+        raise _unauthorized("User not found or inactive")
+    if user.is_service_account:
+        logger.warning("refusing a login token that names service account %r", user.username)
+        raise _unauthorized()
+    return user
+
+
 # ── Dependencies ──────────────────────────────────────────────────────────────
 
 async def get_current_user(
@@ -159,23 +188,15 @@ async def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
 ) -> User:
-    """FastAPI dependency: accept either a JWT or a vmcli_ PAT.
+    """FastAPI dependency: accept any bearer credential ``resolve_bearer`` accepts -- a
+    login JWT, a vmcli_ PAT, or an OAuth workload token.
 
     Also the one place a POV accessor is confined — see the block above for why that
     cannot be done with permissions. ``request`` is safe to take here: no WebSocket route
     resolves this dependency (``api/websocket`` has its own resolver), and every HTTP
     route has one.
     """
-    if token.startswith(_PAT_PREFIX):
-        user = _get_user_from_pat(token, db)
-    else:
-        token_data = decode_token(token)
-        user = db.query(User).filter(User.username == token_data.username).first()
-        if not user or not user.is_active:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User not found or inactive",
-            )
+    user = resolve_bearer(token, db)
 
     if user.accessor_env_id and not _accessor_may_reach(request.url.path):
         # 403 and not 404: the credential is valid, and pretending the route does not
@@ -185,6 +206,22 @@ async def get_current_user(
             detail="This login can only reach its own POV environment.",
         )
     return user
+
+
+def require_person(current_user: User = Depends(get_current_user)) -> User:
+    """FastAPI dependency: refuse a service account.
+
+    For the routes where a caller mints a NEW CREDENTIAL FOR ITSELF -- a PAT, a FIDO2
+    key. A workload token is short-lived and may carry a scope; letting it mint itself a
+    PAT would trade both away for a standing credential with the account's full
+    permissions. An administrator can still issue one deliberately, from the Users page.
+    """
+    if current_user.is_service_account:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="A service account cannot mint its own credentials. An administrator "
+                   "manages them under Users → Service accounts.")
+    return current_user
 
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
@@ -685,6 +722,17 @@ def login(
 
     user = db.query(User).filter(User.username == form_data.username).first()
 
+    # A service account has no password and no sign-in: it gets tokens from
+    # /api/oauth/token. Same generic answer as a wrong password, so this route does not
+    # confirm which usernames are workloads.
+    if user and user.is_service_account:
+        login_guard.record_failure(db, username=form_data.username, ip=ip)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     # Block OAuth-only users from password login
     if user and user.auth_provider != "local":
         login_guard.record_failure(db, username=form_data.username, ip=ip)
@@ -947,6 +995,13 @@ def _complete_oauth_login(db, *, subject, email, display_name, groups, provider)
         user = db.query(User).filter(User.oauth_subject == subject).first()
     if not user:
         user = db.query(User).filter(User.email == email).first()
+
+    if user and user.is_service_account:
+        # An IdP identity must never land on a workload principal -- an email an admin
+        # typed on a service account would otherwise make it a person's login.
+        logger.warning("SSO login for %r matched service account %r; refused",
+                       email, user.username)
+        return RedirectResponse(url="/login?error=not_authorized", status_code=302)
 
     if user:
         if not user.is_active:

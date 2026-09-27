@@ -298,8 +298,17 @@ def test_the_websocket_resolver_rejects_an_accessor():
     and job Live Output is the last thing a prospect should be able to tail."""
     src = _read(os.path.join(_API, "websocket.py"))
     body = src.split("def _authenticate(", 1)[1].split("\nclass ", 1)[0]
-    assert body.count("accessor_env_id") >= 2, \
-        "the websocket resolver does not refuse an accessor on both the JWT and PAT paths"
+    # There used to be a JWT path and a PAT path, each needing its own refusal. Both now
+    # resolve through api/auth.resolve_bearer (as do workload tokens), so ONE refusal after
+    # it covers every credential kind -- and it has to come after it, not before.
+    assert "resolve_bearer(" in body, (
+        "the websocket resolver no longer delegates to resolve_bearer, so each credential "
+        "path needs its own accessor refusal again")
+    assert "accessor_env_id" in body.split("resolve_bearer(", 1)[1], \
+        "the websocket resolver does not refuse an accessor after resolving the credential"
+    assert "_get_user_from_pat" not in body and "decode_token" not in body, (
+        "a second credential path is back beside resolve_bearer; it would need its own "
+        "accessor refusal")
 
 
 def test_an_accessor_is_hidden_from_the_users_page_and_cannot_be_edited_there():

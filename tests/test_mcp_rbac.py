@@ -482,6 +482,46 @@ def test_valid_pat_populates_the_context_var():
         feature_flags.enabled = orig
 
 
+def test_the_advertised_message_endpoint_includes_the_mount():
+    """The SDK's own sse_app() advertised a bare /messages/, so under the /mcp mount every
+    client's first POST 404'd, whatever credential it held. Drive the SSE route as a
+    mounted request would arrive (root_path set) and read the endpoint event."""
+    app = mcp._sse_app()
+    chunks, got = [], asyncio.Event()
+
+    async def receive():
+        await asyncio.Event().wait()   # the client never sends a body on the stream
+
+    async def send(message):
+        if message["type"] == "http.response.body":
+            chunks.append(message.get("body", b"").decode())
+            if "event: endpoint" in "".join(chunks):
+                got.set()
+
+    scope = {"type": "http", "method": "GET", "path": mcp.SSE_PATH,
+             "raw_path": mcp.SSE_PATH.encode(), "root_path": mcp.MOUNT_PATH,
+             "query_string": b"", "headers": [], "scheme": "http",
+             "server": ("t", 80), "client": ("c", 1)}
+
+    async def run():
+        task = asyncio.ensure_future(app(scope, receive, send))
+        try:
+            await asyncio.wait_for(got.wait(), 5)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except BaseException:  # noqa: BLE001 -- cancellation of a live stream
+                pass
+
+    asyncio.run(run())
+    stream = "".join(chunks)
+    data = stream.split("data: ", 1)[1].split("\r\n", 1)[0].split("\n", 1)[0]
+    assert data.startswith(mcp.MOUNT_PATH + mcp.MESSAGE_PATH + "?session_id="), (
+        f"the server advertises {data!r}; a client POSTs there and must reach the "
+        f"{mcp.MOUNT_PATH} mount -- and must not see the mount twice")
+
+
 if __name__ == "__main__":
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

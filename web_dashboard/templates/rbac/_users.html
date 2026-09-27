@@ -9,7 +9,13 @@
 
 <div x-data="usersPage()" x-init="init()">
 
-  <div class="flex justify-end mb-3">
+  <div class="flex justify-end gap-2 mb-3">
+    <!-- A workload principal: no password, never admin, authenticates with an OAuth
+         client (client_credentials) instead of signing in. See docs/service-accounts.md. -->
+    <button @click="openCreateServiceAccount()"
+            class="bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 text-sm font-medium px-4 py-2 rounded-lg transition">
+      + New Service Account
+    </button>
     <button @click="openCreate()"
             class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition">
       + New User
@@ -50,8 +56,8 @@
               </div>
             </td>
             <td class="px-4 py-3">
-              <span x-text="u.auth_provider === 'azure_ad' ? 'Azure AD' : 'Local'"
-                    :class="u.auth_provider === 'azure_ad' ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-600'"
+              <span x-text="u.is_service_account ? 'Service' : (u.auth_provider === 'azure_ad' ? 'Azure AD' : 'Local')"
+                    :class="u.is_service_account ? 'bg-teal-100 text-teal-700' : (u.auth_provider === 'azure_ad' ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-600')"
                     class="text-xs px-2 py-0.5 rounded-full"></span>
             </td>
             <td class="px-4 py-3">
@@ -83,6 +89,8 @@
                         class="text-blue-600 hover:text-blue-800 text-xs font-medium">Edit</button>
                 <button @click="openTokens(u)"
                         class="text-gray-500 hover:text-gray-700 text-xs font-medium">Tokens</button>
+                <button x-show="u.is_service_account" @click="openClients(u)"
+                        class="text-teal-600 hover:text-teal-800 text-xs font-medium">OAuth clients</button>
                 <button x-show="u.is_active && u.id !== currentUserId"
                         @click="deactivate(u)"
                         class="text-red-500 hover:text-red-700 text-xs font-medium">Deactivate</button>
@@ -119,11 +127,18 @@
          x-transition:leave-start="translate-x-0" x-transition:leave-end="translate-x-full">
       <form @submit.prevent="saveUser()" class="flex flex-col h-full min-h-0">
       <div class="flex items-center justify-between px-6 py-4 border-b flex-shrink-0">
-        <h2 class="font-semibold text-gray-900" x-text="editingUser ? 'Edit User' : 'New User'"></h2>
+        <h2 class="font-semibold text-gray-900"
+            x-text="(editingUser ? 'Edit ' : 'New ') + (form.is_service_account ? 'Service Account' : 'User')"></h2>
         <button type="button" @click="showUserModal = false"
                 class="text-gray-400 hover:text-gray-600">✕</button>
       </div>
       <div class="flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-4 space-y-4">
+        <p x-show="form.is_service_account" class="text-xs text-teal-700 bg-teal-50 border border-teal-200 rounded-lg px-3 py-2">
+          A service account is a workload, not a person: it has no password, cannot sign in,
+          can never be an administrator, and holds <strong>nothing</strong> until a role or
+          the grid below grants it. It authenticates with an OAuth client — create one from
+          its <em>OAuth clients</em> button once it exists.
+        </p>
         <!-- Username (create only) -->
         <div x-show="!editingUser">
           <label class="block text-sm font-medium text-gray-700 mb-1">Username <span class="text-red-500">*</span></label>
@@ -137,18 +152,18 @@
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
         </div>
         <!-- Email -->
-        <div>
+        <div x-show="!form.is_service_account">
           <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
           <input x-model="form.email" type="email"
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
         </div>
-        <!-- Password -->
-        <div>
+        <!-- Password. Never for a service account: the API refuses one. -->
+        <div x-show="!form.is_service_account">
           <label class="block text-sm font-medium text-gray-700 mb-1">
             Password <span x-show="!editingUser" class="text-red-500">*</span>
             <span x-show="editingUser" class="text-gray-400 font-normal">(leave blank to keep current)</span>
           </label>
-          <input x-model="form.password" type="password" :required="!editingUser"
+          <input x-model="form.password" type="password" :required="!editingUser && !form.is_service_account"
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
         </div>
         <!-- Workgroups -->
@@ -193,7 +208,7 @@
 
         <!-- Flags -->
         <div class="flex gap-6">
-          <label class="flex items-center gap-2 text-sm cursor-pointer">
+          <label x-show="!form.is_service_account" class="flex items-center gap-2 text-sm cursor-pointer">
             <input type="checkbox" x-model="form.is_admin" @change="onAdminToggled()"
                    class="rounded border-gray-300 text-yellow-500">
             <span>Admin</span>
@@ -225,7 +240,7 @@
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-1
                          focus:outline-none focus:ring-2 focus:ring-blue-500">
             <option value="">No role &mdash; use the grid below only</option>
-            <template x-for="r in availableRoles" :key="r.id">
+            <template x-for="r in selectableRoles()" :key="r.id">
               <option :value="r.id" x-text="r.name + (r.is_builtin ? '' : ' (custom)')"></option>
             </template>
           </select>
@@ -235,9 +250,15 @@
         <div x-show="!form.is_admin">
           {{ permission_matrix(
                "Permissions",
-               "User has unrestricted access to all sections (stored as NULL permissions).") }}
+               "User has unrestricted access to all sections (stored as NULL permissions).",
+               hide_unrestricted_when="form.is_service_account") }}
 
-          <p x-show="!form.permissionsUnrestricted && permGrantedCount() === 0"
+          <p x-show="form.is_service_account && permGrantedCount() === 0 && !form.role_id"
+             class="text-xs text-amber-600 mt-1">
+            This service account will hold no access at all. Grant a role or at least one
+            section — there is no “unrestricted” for a workload.
+          </p>
+          <p x-show="!form.is_service_account && !form.permissionsUnrestricted && permGrantedCount() === 0"
              class="text-xs text-amber-600 mt-1">
             This user will be able to sign in and see nothing. Grant at least one section,
             or tick “Full access (unrestricted)”.
@@ -400,6 +421,113 @@
     </div>
   </div>
 
+  <!-- ── OAuth Clients Modal (service accounts only) ──────────────────────── -->
+  <!-- The workload's credential. The secret is exchanged at /api/oauth/token for an
+       access token that lives minutes; it is never presented to the API itself. -->
+  <div x-show="showClientsModal" x-cloak
+       class="fixed inset-0 bg-black/50 flex items-center justify-center z-40 p-4"
+       @keydown.escape.window="showClientsModal = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto" @click.stop>
+      <div class="flex items-center justify-between px-6 py-4 border-b">
+        <h2 class="font-semibold text-gray-900">
+          OAuth clients — <span x-text="clientsUser?.username"></span>
+        </h2>
+        <button @click="showClientsModal = false" class="text-gray-400 hover:text-gray-600">✕</button>
+      </div>
+
+      <!-- One-time secret reveal -->
+      <div x-show="newClientSecret" class="mx-6 mt-4 p-4 bg-green-50 border border-green-200 rounded-lg space-y-2">
+        <p class="text-sm font-medium text-green-800">Client secret issued — copy it now. It won't be shown again.</p>
+        <div class="text-xs text-gray-600">Client ID</div>
+        <code class="block text-xs bg-white border border-green-300 rounded px-3 py-2 font-mono break-all select-all"
+              x-text="newClientId"></code>
+        <div class="text-xs text-gray-600">Client secret</div>
+        <div class="flex items-center gap-2">
+          <code class="flex-1 text-xs bg-white border border-green-300 rounded px-3 py-2 font-mono break-all select-all"
+                x-text="newClientSecret"></code>
+          <button @click="copyText(newClientSecret)"
+                  class="shrink-0 text-xs bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded font-medium">
+            Copy
+          </button>
+        </div>
+        <p class="text-xs text-gray-600">
+          Exchange it for an access token:
+          <code class="font-mono">curl -u "$CLIENT_ID:$CLIENT_SECRET" -d grant_type=client_credentials <span x-text="tokenEndpoint()"></span></code>
+        </p>
+      </div>
+
+      <!-- Create client form -->
+      <div class="px-6 pt-4 pb-2">
+        <form @submit.prevent="createClient()" class="flex flex-wrap items-end gap-3">
+          <div class="flex-1 min-w-[10rem]">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Client name</label>
+            <input x-model="newClientName" type="text" placeholder="e.g. mcp-agent-prod" required
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+          <div class="w-32">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Secret expires (days)</label>
+            <input x-model="newClientDays" type="number" min="1" max="365" placeholder="90"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+          <div class="w-32">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Token TTL (sec)</label>
+            <input x-model="newClientTtl" type="number" min="60" max="3600" placeholder="900"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+          <button type="submit"
+                  class="shrink-0 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg">
+            Create
+          </button>
+        </form>
+      </div>
+
+      <!-- Client list -->
+      <div class="px-6 py-4 overflow-x-auto">
+        <template x-if="userClients.length === 0">
+          <p class="text-gray-400 text-sm text-center py-4">No OAuth clients yet</p>
+        </template>
+        <table x-show="userClients.length > 0" class="w-full text-sm">
+          <thead class="text-gray-500 text-xs uppercase">
+            <tr>
+              <th class="pb-2 text-left">Name</th>
+              <th class="pb-2 text-left">Client ID</th>
+              <th class="pb-2 text-left">Secret expires</th>
+              <th class="pb-2 text-left">Last used</th>
+              <th class="pb-2 text-left">Status</th>
+              <th class="pb-2"></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            <template x-for="c in userClients" :key="c.id">
+              <tr>
+                <td class="py-2 font-medium" x-text="c.name"></td>
+                <td class="py-2 font-mono text-xs text-gray-600" x-text="c.client_id"></td>
+                <td class="py-2 text-gray-500" x-text="fmtDate(c.secret_expires_at)"></td>
+                <td class="py-2 text-gray-500" x-text="c.last_used_at ? fmtDate(c.last_used_at) : '—'"></td>
+                <td class="py-2">
+                  <span :class="c.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'"
+                        class="text-xs px-2 py-0.5 rounded-full"
+                        x-text="c.is_active ? 'Active' : 'Revoked'"></span>
+                </td>
+                <td class="py-2 text-right whitespace-nowrap">
+                  <button x-show="c.is_active" @click="rotateClient(c)"
+                          class="text-blue-600 hover:text-blue-800 text-xs font-medium mr-2">Rotate</button>
+                  <button x-show="c.is_active" @click="revokeClient(c)"
+                          class="text-red-500 hover:text-red-700 text-xs font-medium">Revoke</button>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="px-6 pb-4 flex justify-end border-t pt-4">
+        <button @click="showClientsModal = false"
+                class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Close</button>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -459,6 +587,24 @@ function usersPage() {
     newTokenName: '',
     newTokenExpiry: '',
     newTokenValue: '',
+
+    // OAuth clients modal (service accounts)
+    showClientsModal: false,
+    clientsUser: null,
+    userClients: [],
+    newClientName: '',
+    newClientDays: '',
+    newClientTtl: '',
+    newClientId: '',
+    newClientSecret: '',
+
+    // A service account can never hold the Administrator role; the API refuses it, so
+    // the picker does not offer it.
+    selectableRoles() {
+      const roles = this.availableRoles || [];
+      if (!this.form.is_service_account) return roles;
+      return roles.filter(r => !(r.permissions && r.permissions.is_admin));
+    },
 
     isAdminRole(id) {
       const r = (this.availableRoles || []).find(x => x.id === id);
@@ -524,6 +670,11 @@ function usersPage() {
       this.users = data || [];
     },
 
+    openCreateServiceAccount() {
+      this.openCreate();
+      this.form.is_service_account = true;
+    },
+
     openCreate() {
       this.editingUser = null;
       // Restricted with nothing granted, NOT unrestricted. The old create form sent no
@@ -538,6 +689,7 @@ function usersPage() {
         // No role by default. A new account therefore starts with the grid alone, and the
         // grid starts at nothing granted -- least privilege on both axes.
         role_id: '',
+        is_service_account: false,
       };
       this.permFilter = '';
       this.roleWasAdmin = false;
@@ -557,7 +709,8 @@ function usersPage() {
         is_admin: u.is_admin,
         is_active: u.is_active,
         permissions: hasPerms ? JSON.parse(JSON.stringify(u.permissions)) : {},
-        permissionsUnrestricted: !hasPerms,
+        permissionsUnrestricted: !hasPerms && !u.is_service_account,
+        is_service_account: !!u.is_service_account,
         // Which POVs this user is narrowed to. Empty = every POV their `pov` scope
         // allows, which is what every existing user has.
         povEnvIds: [...(u.pov_env_ids || [])],
@@ -669,6 +822,17 @@ function usersPage() {
           body.pov_env_ids = this.form.povEnvIds || [];
           await API.request('PATCH', `/api/users/${this.editingUser.id}`, body);
           toast('User updated', 'success');
+        } else if (this.form.is_service_account) {
+          // No password, no admin flag, no email: the API has no field for any of them.
+          // An empty grid is sent as-is and means NOTHING for a service account.
+          await API.post('/api/users/service-accounts', {
+            username: this.form.username,
+            full_name: this.form.full_name || null,
+            workgroups: this.form.workgroups,
+            permissions: this.buildPermissionsPayload(),
+            role_id: this.form.role_id || '',
+          });
+          toast('Service account created — add an OAuth client next', 'success');
         } else {
           await API.post('/api/users', {
             username: this.form.username,
@@ -768,6 +932,80 @@ function usersPage() {
       } catch (e) {
         toast('Error: ' + e.message, 'error');
       }
+    },
+
+    async openClients(u) {
+      this.clientsUser = u;
+      this.userClients = [];
+      this.newClientName = '';
+      this.newClientDays = '';
+      this.newClientTtl = '';
+      this.newClientId = '';
+      this.newClientSecret = '';
+      this.showClientsModal = true;
+      await this.loadClients();
+    },
+
+    async loadClients() {
+      try {
+        this.userClients = await API.get(`/api/users/${this.clientsUser.id}/oauth-clients`) || [];
+      } catch (e) {
+        toast('Could not load OAuth clients: ' + e.message, 'error');
+      }
+    },
+
+    tokenEndpoint() {
+      return window.location.origin + '/api/oauth/token';
+    },
+
+    showSecret(result) {
+      this.newClientId = result.client_id;
+      this.newClientSecret = result.client_secret;
+    },
+
+    async createClient() {
+      try {
+        const body = { name: this.newClientName };
+        if (this.newClientDays) body.secret_days = parseInt(this.newClientDays);
+        if (this.newClientTtl) body.token_ttl_seconds = parseInt(this.newClientTtl);
+        this.showSecret(await API.post(`/api/users/${this.clientsUser.id}/oauth-clients`, body));
+        this.newClientName = '';
+        this.newClientDays = '';
+        this.newClientTtl = '';
+        await this.loadClients();
+      } catch (e) {
+        toast('Error creating OAuth client: ' + e.message, 'error');
+      }
+    },
+
+    async rotateClient(c) {
+      if (!confirm(`Rotate the secret for "${c.name}"? The current secret keeps working for 60 minutes.`)) return;
+      try {
+        this.showSecret(await API.post(
+          `/api/users/${this.clientsUser.id}/oauth-clients/${c.id}/rotate`, {}));
+        await this.loadClients();
+      } catch (e) {
+        toast('Error: ' + e.message, 'error');
+      }
+    },
+
+    async revokeClient(c) {
+      if (!confirm(`Revoke OAuth client "${c.name}"? Every access token it issued stops working immediately.`)) return;
+      try {
+        await API.del(`/api/users/${this.clientsUser.id}/oauth-clients/${c.id}`);
+        this.newClientId = '';
+        this.newClientSecret = '';
+        toast('OAuth client revoked', 'success');
+        await this.loadClients();
+      } catch (e) {
+        toast('Error: ' + e.message, 'error');
+      }
+    },
+
+    copyText(value) {
+      navigator.clipboard.writeText(value)
+        .then(() => toast('Copied to clipboard', 'success'))
+        .catch(() => toast('Copy failed — select and copy manually', 'error'));
     },
 
     fmtDate(iso) {

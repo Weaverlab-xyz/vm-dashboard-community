@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..database import get_db, Fido2Credential
-from ..api.auth import get_current_user
+from ..api.auth import get_current_user, require_person
 from ..models.user import (
     Fido2RegisterBeginResponse,
     Fido2RegisterCompleteRequest,
@@ -39,7 +39,7 @@ router = APIRouter(prefix="/api/mfa", tags=["mfa"])
 
 @router.post("/register/begin", response_model=Fido2RegisterBeginResponse)
 def register_begin(
-    current_user=Depends(get_current_user),
+    current_user=Depends(require_person),
     db: Session = Depends(get_db),
 ):
     """Generate WebAuthn creation options and store challenge in memory."""
@@ -81,7 +81,7 @@ def register_begin(
 @router.post("/register/complete", response_model=Fido2CredentialResponse)
 def register_complete(
     body: Fido2RegisterCompleteRequest,
-    current_user=Depends(get_current_user),
+    current_user=Depends(require_person),
     db: Session = Depends(get_db),
 ):
     """Verify attestation and store the new FIDO2 credential."""

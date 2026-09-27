@@ -75,7 +75,7 @@ Edit the config file for your platform:
 {
   "mcpServers": {
     "vm-dashboard": {
-      "url": "http://localhost:8001/mcp",
+      "url": "http://localhost:8001/mcp/sse",
       "headers": {
         "Authorization": "Bearer vmcli_<your-token>"
       }
@@ -90,7 +90,7 @@ selector.
 #### Claude Code (CLI)
 
 ```bash
-claude mcp add --transport http vm-dashboard http://localhost:8001/mcp \
+claude mcp add --transport sse vm-dashboard http://localhost:8001/mcp/sse \
   --header "Authorization: Bearer vmcli_<your-token>"
 ```
 
@@ -98,10 +98,15 @@ Run `claude mcp list` to confirm the server was added.
 
 #### Cursor / Continue / other clients
 
-Point the client at `http://<host>:8001/mcp` with an
-`Authorization: Bearer vmcli_<token>` header. The server uses the **HTTP
-Streamable transport** (SSE-based), which is the MCP standard transport for
-remote servers.
+Point the client at `http://<host>:8001/mcp/sse` with an
+`Authorization: Bearer vmcli_<token>` header, using the **SSE transport**. The
+full path matters: bare `/mcp` answers with a redirect that SSE clients do not
+follow. (Streamable HTTP is not served yet — the MCP SDK version the dashboard's
+FastAPI pin allows predates it.)
+
+A workload can use an OAuth access token instead of a PAT: create a
+[service account](../service-accounts.md), exchange its client credentials at
+`/api/oauth/token`, and send `Authorization: Bearer <access_token>`.
 
 If the dashboard is running on a remote machine (not `localhost`), replace
 `localhost:8001` with the hostname or IP of that machine.

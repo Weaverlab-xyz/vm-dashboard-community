@@ -144,6 +144,7 @@ def merge_permission_maps(*maps) -> dict:
     return out
 
 
+
 class User(Base):
     """User model for authentication and authorization"""
     __tablename__ = "users"
@@ -276,6 +277,21 @@ class User(Base):
     # confined by a path allowlist and gets nothing else in the dashboard; a user with
     # pov_env_ids is an ordinary user whose POV pages happen to show one POV.
     pov_env_ids = Column(Text, nullable=True)
+
+    # ── Service account (a workload principal, not a person) ─────────────────
+    # True means this row is a WORKLOAD: it has no password, cannot sign in interactively,
+    # can never be an administrator, and authenticates only with the OAuth 2.0
+    # client_credentials grant (`api/oauth`) or a PAT. See services/service_accounts.
+    #
+    # It flips the empty-map default. Every other row reads "no permissions at all" as
+    # UNRESTRICTED for the pre-OIDC users; a service account reads it as NOTHING, in
+    # `effective_permissions_dict` below -- the same column-read guard `role_id` uses, so it
+    # holds on the detached instance `api/mcp_server` reads. A workload created and then
+    # forgotten must hold no access, not all of it.
+    #
+    # No DEFAULT in the retrofit ALTER for the PostgreSQL reason on `is_admin`; NULL reads
+    # as False everywhere, which is every existing row.
+    is_service_account = Column(Boolean, default=False, nullable=True)
 
     fido2_credentials = relationship("Fido2Credential", back_populates="user", cascade="all, delete-orphan")
     personal_access_tokens = relationship("PersonalAccessToken", back_populates="user", cascade="all, delete-orphan")
@@ -415,10 +431,11 @@ class User(Base):
         jit = self.jit_permissions_dict
         role = self.role_permissions_dict
         if not baseline and not session and not jit and not role:
-            if self.role_id:
+            if self.role_id or self.is_service_account:
                 return dict(_ROLE_UNRESOLVED)
             return {}
-        return merge_permission_maps(role, baseline, session, jit)
+        merged = merge_permission_maps(role, baseline, session, jit)
+        return narrow_to_token_scope(merged, getattr(self, "_token_scope", None))
 
     @property
     def is_effective_admin(self) -> bool:
@@ -431,7 +448,13 @@ class User(Base):
         denied everything. `services/role_service` refuses ``is_admin`` on any role but
         that one frozen built-in, which is what keeps "can edit a role" from becoming
         "can mint an administrator".
+
+        A service account is never an administrator, whatever any column says:
+        `services/service_accounts` refuses to set it, and this refuses to read it, so a
+        role edit or a hand-written row cannot turn a workload into one.
         """
+        if self.is_service_account:
+            return False
         if bool(self.is_admin):
             return True
         return (bool(self.session_permissions_dict.get("is_admin", False))
@@ -471,6 +494,45 @@ class PersonalAccessToken(Base):
     is_active = Column(Boolean, default=True)
 
     user = relationship("User", back_populates="personal_access_tokens")
+
+
+class OAuthClient(Base):
+    """An OAuth 2.0 client_credentials client, bound to exactly one service account.
+
+    The WORKLOAD's credential, where a PAT is a person's. Two things differ, and both are
+    the point of it existing:
+
+      * it is not a bearer credential for the API. The secret is exchanged at
+        ``POST /api/oauth/token`` for an access token that lives minutes
+        (``token_ttl_seconds``), so what crosses the wire on every call expires on its own;
+      * the access token names this row (``client_id`` claim), and ``api/auth`` re-reads
+        ``is_active`` on every request -- so deactivating a client ends every token it
+        issued at once, not when the last one happens to expire.
+
+    SECRET HASH ONLY, and a SHA-256 rather than bcrypt for the reason ``hash_pat`` gives: the
+    secret is 256 bits of randomness, so there is nothing for a slow hash to protect, and
+    the token endpoint must not be a CPU amplifier. Two hashes so a rotation has no gap:
+    ``rotate`` moves the live one to ``previous_secret_hash`` and it keeps working until
+    ``previous_expires_at``.
+    """
+    __tablename__ = "oauth_clients"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # Public. Sent in the clear on every token request, so it carries no secret material.
+    client_id = Column(String(64), nullable=False, unique=True, index=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    secret_hash = Column(String(64), nullable=False, index=True)
+    # When the CURRENT secret stops being accepted. Never NULL from the dashboard: a
+    # workload secret with no end date is the PAT problem again.
+    secret_expires_at = Column(DateTime, nullable=True)
+    previous_secret_hash = Column(String(64), nullable=True)
+    previous_expires_at = Column(DateTime, nullable=True)
+    token_ttl_seconds = Column(Integer, nullable=False, default=900)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by = Column(String(100), nullable=True)
+    last_used_at = Column(DateTime, nullable=True)
+    is_active = Column(Boolean, default=True)
 
 
 class LoginAttempt(Base):
@@ -599,6 +661,30 @@ class RemoteAgent(Base):
     @property
     def reported_job_types_list(self) -> list:
         return _json_list(self.reported_job_types)
+
+
+def narrow_to_token_scope(perms: dict, token_scope) -> dict:
+    """Intersect a permission map with the ``scope`` an OAuth access token was issued for.
+
+    ``token_scope`` is None for every credential that carries no scope -- a human's login
+    JWT, a PAT, a workload token requested without one -- and then this is the identity.
+    Otherwise it is ``{scope: [levels]}`` from ``services/service_accounts.parse_scope``
+    and the result is the per-scope INTERSECTION: a token can only ever narrow what its
+    principal holds, never widen it.
+
+    ``is_admin`` never survives, and an intersection that leaves nothing at all answers
+    ``_ROLE_UNRESOLVED`` rather than ``{}`` -- the empty map is UNRESTRICTED, and a token
+    that asked for less must not be read as one that asked for everything.
+    """
+    if token_scope is None:
+        return perms
+    out = {}
+    for key, val in (perms or {}).items():
+        if key == "is_admin" or not isinstance(val, list):
+            continue
+        allowed = token_scope.get(key, [])
+        out[key] = [lvl for lvl in sorted(val) if lvl in allowed]
+    return out or dict(_ROLE_UNRESOLVED)
 
 
 def _json_list(raw) -> list:
@@ -2524,6 +2610,10 @@ class AgentCell(Base):
     # is the thing this demo argues against, so agentcell_service refuses to mint one.
     pat_expires_at = Column(DateTime, nullable=True)
     pat_revoked_at = Column(DateTime, nullable=True)
+    # The OAuth client the worker authenticates with, when the cell minted one instead of
+    # a PAT. Its id only -- the secret was returned once and is not here. Revoking the cell
+    # deactivates that client, which ends every access token it issued on the next call.
+    oauth_client_id = Column(String(36), nullable=True)
 
     # ── What this agent is answerable for in the Workload Lab ───────────────
     # Which lab identity an operator has made this agent answerable for, so that "what
@@ -4606,6 +4696,13 @@ def init_db():
             # no DEFAULT for the PostgreSQL reason described on users.is_admin.
             "ALTER TABLE workgroups ADD COLUMN change_window_id VARCHAR(36)",
             "ALTER TABLE workgroups ADD COLUMN require_change_window BOOLEAN",
+
+            # Service accounts and their OAuth clients (services/service_accounts). A bare
+            # BOOLEAN for the PostgreSQL reason on users.is_admin; NULL reads as "a person",
+            # which is every existing row. `oauth_clients` itself is new, so create_all
+            # builds it.
+            "ALTER TABLE users ADD COLUMN is_service_account BOOLEAN",
+            "ALTER TABLE agent_cells ADD COLUMN oauth_client_id VARCHAR(36)",
         ]
         # Migrations that never applied because of LOCK CONTENTION rather than because
         # the column was already there. Collected rather than raised: one contended

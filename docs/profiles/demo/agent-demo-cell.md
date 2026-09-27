@@ -59,6 +59,14 @@ Every loop leaves one line carrying both:
 
 Who it is, what it spent, what it saw.
 
+**Pick a service account as the token user.** When you do, the cell mints an **OAuth
+client** instead of a PAT ([Service accounts](../../service-accounts.md)): the `token` in
+the create response is the `client_id:secret` pair, it goes wherever the PAT would have,
+and the worker exchanges it for access tokens that live minutes. What reaches `/mcp` then
+expires on its own, the principal behind it can never be an administrator, and revoking the
+cell still refuses the very next call. A person-shaped token user still gets a PAT, exactly
+as before.
+
 **The token is named, not shown.** That is the PAT's *name* in the line — the one
 **Settings → API Tokens** lists, and the one you are about to revoke. No part of the
 credential reaches a log, and an error from the MCP client is scrubbed of anything

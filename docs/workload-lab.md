@@ -33,7 +33,7 @@ where the credential eventually reaches a person.
 | **SPIRE** | [SPIFFE and SPIRE](workload-lab/spiffe.md) | an SVID issued in a trust domain, to a workload that attested itself | Password Safe |
 | **Kubernetes** | [Workload access to Kubernetes](workload-lab/kubernetes.md) | a bound ServiceAccount token for a machine *outside* the cluster | Password Safe |
 | **Cloud** | [Short-lived cloud credentials](workload-lab/cloud.md) | an AWS or Azure credential minted per run and leased | Workload Credentials |
-| **Agent** | [Agent Demo Cell](profiles/demo/agent-demo-cell.md) | a Personal Access Token against a deliberately narrow user — held by a worker, not a person | this dashboard's own token store |
+| **Agent** | [Agent Demo Cell](profiles/demo/agent-demo-cell.md) | an OAuth client on a [service account](service-accounts.md) (or, for a person-shaped token user, a Personal Access Token) — held by a worker, not a person | this dashboard's own token store |
 
 The first four are the way in, and the fifth is what you point at them. Two of the four
 carry more than one page, because two of them carry an argument that is not the tab's own:

@@ -27,6 +27,9 @@ class UserResponse(BaseModel):
     is_admin: bool = False
     auth_provider: str = "local"
     mfa_required: bool = False
+    # A workload principal (services/service_accounts): no password, no sign-in, never
+    # admin, and an empty permission map means NOTHING rather than everything.
+    is_service_account: bool = False
     permissions: Optional[dict] = None
     # Set on a POV accessor: the one environment this login may reach. Present so the
     # client can send them there instead of a dashboard that would refuse every call.
