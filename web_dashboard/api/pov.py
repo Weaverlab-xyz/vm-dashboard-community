@@ -77,6 +77,7 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         pov_ps_config, pov_resource_broker, pov_setup_steps,
                         suspend_schedule, pov_share, spend_policy, pov_summary,
                         pov_use_cases, pov_vendor_access, pov_wireup)
+from . import pov_gates
 from .auth import (get_current_user, has_explicit_permission, has_permission,
                    pov_env_scope, require_permission, require_pov_env_access)
 
@@ -106,7 +107,14 @@ router = APIRouter(
 # stops and suspends as readily as it starts; the start-only wake is the accessor's
 # /self/wake, which names no environment because its session already does.
 _POV_WRITE = [Depends(require_permission("pov", "write"))]
-_POV_DELETE = [Depends(require_permission("pov", "delete"))]
+
+# Create, and write/destroy on ONE POV: the general level, or `pov_own` on a POV the caller
+# owns (created by them, or assigned in their picker). See api/pov_gates.py. Routes that act
+# on no single POV -- reconcile, the raw platform listing -- stay on plain `_POV_WRITE`: a
+# presenter's own POVs are not a licence to operate on the whole platform.
+_POV_CREATE = [Depends(pov_gates.require_create)]
+_POV_WRITE_OWN = [Depends(pov_gates.require_write_on_env)]
+_POV_DELETE_OWN = [Depends(pov_gates.require_delete_on_env)]
 _POV_USE = [Depends(require_permission("pov", "use"))]
 
 _DEFAULT_PLATFORM = "skytap"
@@ -388,7 +396,11 @@ async def list_platforms(current_user: User = Depends(get_current_user)):
         # else; asking the user endpoint would be a second round trip to learn the same
         # thing. It hides UI, it does not grant anything -- every write route still
         # checks for itself.
-        "can_provision": has_permission(current_user, "pov", "write"),
+        "can_provision": pov_gates.may_create(current_user),
+        # The platform-wide controls -- "Re-check platform" and the table of EVERY
+        # environment on the platform account -- are `pov:write` only. A presenter may create
+        # and run their own POVs; that is not a licence to list or reconcile everyone's.
+        "can_manage_platform": has_permission(current_user, "pov", "write"),
         # Blueprints live on a DIFFERENT permission from POVs -- authoring a recipe is a
         # `pov_templates` write, and plenty of users who may build a POV may not write
         # one. Sent for the same reason and with the same caveat as `can_provision`: it
@@ -408,7 +420,7 @@ async def list_platforms(current_user: User = Depends(get_current_user)):
     }
 
 
-@router.get("/templates", dependencies=_POV_WRITE)
+@router.get("/templates", dependencies=_POV_CREATE)
 async def list_templates(platform: str = Query(_DEFAULT_PLATFORM),
                          refresh: bool = Query(False),
                          db: Session = Depends(get_db),
@@ -424,7 +436,7 @@ async def list_templates(platform: str = Query(_DEFAULT_PLATFORM),
                                     "templates", refresh=refresh)}
 
 
-@router.get("/templates/{template_id}/vms", dependencies=_POV_WRITE)
+@router.get("/templates/{template_id}/vms", dependencies=_POV_CREATE)
 async def list_template_vms(template_id: str, platform: str = Query(_DEFAULT_PLATFORM),
                             current_user: User = Depends(get_current_user)):
     """The VMs inside one template, so an operator can pick which to copy.
@@ -623,7 +635,7 @@ async def reconcile_now(platform: str = Query(_DEFAULT_PLATFORM),
     return {"reconciled": summary}
 
 
-@router.post("/managed", status_code=202, dependencies=_POV_WRITE)
+@router.post("/managed", status_code=202, dependencies=_POV_CREATE)
 async def provision(payload: ProvisionRequest,
                     db: Session = Depends(get_db),
                     current_user: User = Depends(get_current_user)):
@@ -804,13 +816,22 @@ async def provision(payload: ProvisionRequest,
             "suspend_on_idle_seconds": int(payload.suspend_on_idle_seconds or 0),
         })
     env.provision_job_id = job.id
+    # A creator whose POV access picker is NARROWED sees only the POVs it names, so the
+    # one they just made would vanish from their own list and 404 on their next click.
+    # Add it. An empty picker already means "every POV", and adding one id would narrow
+    # them to it, so that case is left alone. Visibility then stays in ONE place: the
+    # picker, which the router gate, the list, the archive and the dashboard all read.
+    picker = list(current_user.pov_env_ids_list or [])
+    if picker and not current_user.is_effective_admin and env.id not in picker:
+        creator = db.merge(current_user)
+        creator.pov_env_ids_list = picker + [env.id]
     db.commit()
     return {"environment": _serialize(env), "job_id": job.id,
             "blueprint": blueprint.name if blueprint else "",
             "prefilled": prefilled}
 
 
-@router.post("/managed/{env_id}/power", status_code=202, dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/power", status_code=202, dependencies=_POV_WRITE_OWN)
 def power(env_id: str, payload: PowerRequest,
                 db: Session = Depends(get_db),
                 current_user: User = Depends(get_current_user)):
@@ -836,7 +857,7 @@ class TenantSelection(BaseModel):
     entitle_tenant_id: str | None = None
 
 
-@router.post("/managed/{env_id}/tenants", dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/tenants", dependencies=_POV_WRITE_OWN)
 def set_tenants(env_id: str, payload: TenantSelection,
                       db: Session = Depends(get_db),
                       current_user: User = Depends(get_current_user)):
@@ -893,7 +914,7 @@ class BrokerRequest(BaseModel):
     install: bool = True
 
 
-@router.post("/managed/{env_id}/broker", status_code=202, dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/broker", status_code=202, dependencies=_POV_WRITE_OWN)
 def broker(env_id: str, payload: BrokerRequest | None = None,
                  db: Session = Depends(get_db),
                  current_user: User = Depends(get_current_user)):
@@ -974,7 +995,7 @@ async def gateway_status(env_id: str, db: Session = Depends(get_db),
     return {"gateway": await pov_gateway.status(db, env)}
 
 
-@router.post("/managed/{env_id}/gateway", status_code=202, dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/gateway", status_code=202, dependencies=_POV_WRITE_OWN)
 def gateway(env_id: str, payload: GatewayRequest,
                   db: Session = Depends(get_db),
                   current_user: User = Depends(get_current_user)):
@@ -1035,7 +1056,7 @@ class ResourceBrokerRequest(BaseModel):
     install: bool = True
 
 
-@router.post("/managed/{env_id}/resource-broker", status_code=202, dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/resource-broker", status_code=202, dependencies=_POV_WRITE_OWN)
 def resource_broker(env_id: str, payload: ResourceBrokerRequest,
                           db: Session = Depends(get_db),
                           current_user: User = Depends(get_current_user)):
@@ -1096,7 +1117,7 @@ class GuestStepRequest(BaseModel):
     run: bool = False
 
 
-@router.post("/managed/{env_id}/guest-step", status_code=202, dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/guest-step", status_code=202, dependencies=_POV_WRITE_OWN)
 def guest_step(env_id: str, payload: GuestStepRequest,
                      db: Session = Depends(get_db),
                      current_user: User = Depends(get_current_user)):
@@ -1158,7 +1179,7 @@ async def ps_smart_rules(env_id: str, db: Session = Depends(get_db),
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/managed/{env_id}/ps-smart-rules/{rule_id}/process", dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/ps-smart-rules/{rule_id}/process", dependencies=_POV_WRITE_OWN)
 async def ps_process_smart_rule(env_id: str, rule_id: int,
                                 db: Session = Depends(get_db),
                                 current_user: User = Depends(get_current_user)):
@@ -1205,7 +1226,7 @@ class AddVmsRequest(BaseModel):
     power_on: bool = True
 
 
-@router.post("/managed/{env_id}/vms", status_code=202, dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/vms", status_code=202, dependencies=_POV_WRITE_OWN)
 def add_vms(env_id: str, payload: AddVmsRequest,
                   db: Session = Depends(get_db),
                   current_user: User = Depends(get_current_user)):
@@ -1263,7 +1284,7 @@ class ApplicationHostRequest(BaseModel):
     application_host_id: int = 0
 
 
-@router.post("/managed/{env_id}/application-host", dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/application-host", dependencies=_POV_WRITE_OWN)
 def application_host(env_id: str, payload: ApplicationHostRequest,
                            db: Session = Depends(get_db),
                            current_user: User = Depends(get_current_user)):
@@ -1301,7 +1322,7 @@ class VmLoginRequest(BaseModel):
     login_username: str = ""
 
 
-@router.post("/managed/{env_id}/vms/{vm_id}/login", dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/vms/{vm_id}/login", dependencies=_POV_WRITE_OWN)
 def set_vm_login(env_id: str, vm_id: str, payload: VmLoginRequest,
                        db: Session = Depends(get_db),
                        current_user: User = Depends(get_current_user)):
@@ -1339,7 +1360,7 @@ class VmOsRequest(BaseModel):
     os_family: str = ""
 
 
-@router.post("/managed/{env_id}/vms/{vm_id}/os", dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/vms/{vm_id}/os", dependencies=_POV_WRITE_OWN)
 def set_vm_os(env_id: str, vm_id: str, payload: VmOsRequest,
                     db: Session = Depends(get_db),
                     current_user: User = Depends(get_current_user)):
@@ -1374,7 +1395,7 @@ class EntitleAgentRequest(BaseModel):
     install: bool = True
 
 
-@router.post("/managed/{env_id}/entitle-agent", status_code=202, dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/entitle-agent", status_code=202, dependencies=_POV_WRITE_OWN)
 async def entitle_agent(env_id: str, payload: EntitleAgentRequest,
                         db: Session = Depends(get_db),
                         current_user: User = Depends(get_current_user)):
@@ -1405,7 +1426,7 @@ async def entitle_agent(env_id: str, payload: EntitleAgentRequest,
             "environment": _serialize(env, broker=pov_broker.describe(db, env))}
 
 
-@router.post("/managed/{env_id}/wireup", status_code=202, dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/wireup", status_code=202, dependencies=_POV_WRITE_OWN)
 def wireup(env_id: str, db: Session = Depends(get_db),
                  current_user: User = Depends(get_current_user)):
     """Wire every VM in this POV into PRA, and into Password Safe and Entitle when it has
@@ -1446,7 +1467,7 @@ def wireup(env_id: str, db: Session = Depends(get_db),
 
 
 @router.post("/managed/{env_id}/jump-group/move", status_code=202,
-             dependencies=_POV_WRITE)
+             dependencies=_POV_WRITE_OWN)
 def move_jump_group(env_id: str, db: Session = Depends(get_db),
                           current_user: User = Depends(get_current_user)):
     """Rebuild this POV's jump items in a Jump Group of its own.
@@ -1512,7 +1533,7 @@ class EntitleKeyRequest(BaseModel):
     private_key: str = ""
 
 
-@router.post("/managed/{env_id}/entitle-key", dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/entitle-key", dependencies=_POV_WRITE_OWN)
 def entitle_key(env_id: str, payload: EntitleKeyRequest,
                       db: Session = Depends(get_db),
                       current_user: User = Depends(get_current_user)):
@@ -1544,7 +1565,7 @@ def _share_or_400(exc: pov_share.ShareError) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc))
 
 
-@router.post("/managed/{env_id}/share", dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/share", dependencies=_POV_WRITE_OWN)
 async def share(env_id: str, payload: ShareRequest,
                 db: Session = Depends(get_db),
                 current_user: User = Depends(get_current_user)):
@@ -1577,7 +1598,7 @@ async def share(env_id: str, payload: ShareRequest,
             "environment": _serialize(env, broker=pov_broker.describe(db, env))}
 
 
-@router.delete("/managed/{env_id}/share", dependencies=_POV_WRITE)
+@router.delete("/managed/{env_id}/share", dependencies=_POV_WRITE_OWN)
 async def unshare(env_id: str, db: Session = Depends(get_db),
                   current_user: User = Depends(get_current_user)):
     """Revoke the link without touching the environment."""
@@ -1600,7 +1621,7 @@ async def unshare(env_id: str, db: Session = Depends(get_db),
     return {"environment": _serialize(env, broker=pov_broker.describe(db, env))}
 
 
-@router.post("/managed/{env_id}/share/reveal", dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/share/reveal", dependencies=_POV_WRITE_OWN)
 def reveal_share_password(env_id: str, db: Session = Depends(get_db),
                                 current_user: User = Depends(get_current_user)):
     """Show the share link's password.
@@ -1640,7 +1661,7 @@ class ExpiryRequest(BaseModel):
     never: bool = False
 
 
-@router.post("/managed/{env_id}/expiry", dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/expiry", dependencies=_POV_WRITE_OWN)
 def set_expiry(env_id: str, payload: ExpiryRequest,
                      db: Session = Depends(get_db),
                      current_user: User = Depends(get_current_user)):
@@ -1672,7 +1693,7 @@ def set_expiry(env_id: str, payload: ExpiryRequest,
         extend_hours=payload.extend_hours,
         absolute=payload.absolute or None,
         never=payload.never,
-        is_admin=bool(getattr(current_user, "is_admin", False)),
+        is_admin=bool(getattr(current_user, "is_effective_admin", False)),
         actor=getattr(current_user, "username", "") or "")
     if result["failed"]:
         raise HTTPException(status_code=400, detail=result["failed"][0]["error"])
@@ -1715,7 +1736,7 @@ class ScheduleRequest(BaseModel):
     schedule_days: str = ""
 
 
-@router.post("/managed/{env_id}/schedule", dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/schedule", dependencies=_POV_WRITE_OWN)
 def set_schedule(env_id: str, payload: ScheduleRequest,
                        db: Session = Depends(get_db),
                        current_user: User = Depends(get_current_user)):
@@ -1765,7 +1786,7 @@ class SpendCapRequest(BaseModel):
     cap_usd: float | None = None
 
 
-@router.post("/managed/{env_id}/spend-cap", dependencies=_POV_WRITE)
+@router.post("/managed/{env_id}/spend-cap", dependencies=_POV_WRITE_OWN)
 def set_spend_cap(env_id: str, payload: SpendCapRequest,
                         db: Session = Depends(get_db),
                         current_user: User = Depends(get_current_user)):
@@ -1870,7 +1891,7 @@ def get_summary(env_id: str, db: Session = Depends(get_db),
     return pov_summary.build(db, env)
 
 
-@router.delete("/managed/{env_id}", status_code=202, dependencies=_POV_DELETE)
+@router.delete("/managed/{env_id}", status_code=202, dependencies=_POV_DELETE_OWN)
 def destroy(env_id: str, db: Session = Depends(get_db),
                   current_user: User = Depends(get_current_user)):
     """Destroy the environment and reap the platform side.

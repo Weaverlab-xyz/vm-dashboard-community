@@ -41,20 +41,22 @@ from fastapi import Request
 from ..database import PovEnvironment, User, get_db
 from ..services import (pov_accessor_entitle, pov_accessor_service, pov_env_service,
                         pov_use_cases)
-from .auth import get_current_user, require_permission, require_pov_env_access
+from . import pov_gates
+from .auth import get_current_user, require_pov_env_access
 
 logger = logging.getLogger(__name__)
 
 # The SE half rides the POV router's prefix, so it inherits that gate at mount time.
 #
-# Minting and revoking a prospect's login is POV WRITE, not read: it hands out a
-# credential. The instance gate goes on too, so an SE narrowed to one POV cannot mint an
-# accessor into somebody else's -- every route here names an {env_id}.
+# Minting and revoking a prospect's login is POV WRITE on THIS POV: the general `pov:write`,
+# or `pov_own:write` on a POV the caller owns (api/pov_gates.py). The visibility gate runs
+# FIRST, so a POV the caller cannot see is a 404 before the write check could answer 403 and
+# confirm it exists.
 router = APIRouter(
     prefix="/api/pov",
     tags=["pov-accessors"],
-    dependencies=[Depends(require_permission("pov", "write")),
-                  Depends(require_pov_env_access)],
+    dependencies=[Depends(require_pov_env_access),
+                  Depends(pov_gates.require_write_on_env)],
 )
 # The accessor's own half. A separate router only so the allowlisted path is spelled in
 # one obvious place; it is mounted with the same gate.

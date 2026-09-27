@@ -55,6 +55,26 @@ def get(db: Session, env_id: str) -> PovEnvironment | None:
     return db.query(PovEnvironment).filter(PovEnvironment.id == env_id).first()
 
 
+def owned_by(env: PovEnvironment, user) -> bool:
+    """Is this POV the user's OWN: assigned to them, or created by them?
+
+    The one definition behind the `pov_own` scope (api/pov_gates.py), so "own" cannot mean
+    one thing for writing and another for destroying.
+
+      * Assigned: named in the user's POV access picker (`User.pov_env_ids`). An EMPTY
+        picker assigns nothing -- the opposite of what it means for visibility, where empty
+        is "every POV", and deliberately so.
+      * Created: `created_by` is their username. That is what lets a presenter run the POV
+        they just made without anyone editing their picker first.
+    """
+    if env is None or user is None:
+        return False
+    if env.id in (getattr(user, "pov_env_ids_list", None) or []):
+        return True
+    username = getattr(user, "username", None)
+    return bool(username) and env.created_by == username
+
+
 def _adapter(env: PovEnvironment):
     return lab_platforms.adapter(env.platform)
 

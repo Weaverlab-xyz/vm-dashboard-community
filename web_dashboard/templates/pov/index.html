@@ -67,7 +67,8 @@
            nav entry: the nav already overflows at 1280px with every integration on, and
            this is a secondary view that only exists when a cloud is selected — which the
            nav has no way to know. -->
-      <a x-show="cloudPlatform" x-cloak href="/pov/cloud"
+      {# /pov/cloud reads the instance-wide cloud overview, which is pov:write only. #}
+      <a x-show="cloudPlatform && canManagePlatform" x-cloak href="/pov/cloud"
          :title="'What this instance has running on ' + cloudPlatform.toUpperCase() + ', including orphans'"
          class="px-3 py-2 text-sm rounded-lg border border-gray-300 hover:bg-gray-50">
         Cloud
@@ -79,7 +80,7 @@
       <!-- Both are pov:write routes. Hidden rather than disabled for a read-only
            stakeholder: a disabled control says "not yet", and the honest answer is that
            this POV is not theirs to create or reconcile. -->
-      <button x-show="canProvision" @click="recheck()" :disabled="notConfigured || rechecking"
+      <button x-show="canManagePlatform" @click="recheck()" :disabled="notConfigured || rechecking"
               class="px-3 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
               x-text="rechecking ? 'Checking…' : 'Re-check platform'"></button>
       <!-- Secondary now: the one-click strip below is the primary way in, and this opens
@@ -968,7 +969,7 @@
        load by every SE, all on one instance-wide credential. Hence `envAsOf`: the same
        rule the managed rows follow with `platform_seen_at`, which is that presenting a
        stale answer as current is the bug the cache must not introduce. -->
-  <div x-show="canProvision && !loading && !notConfigured" class="space-y-3">
+  <div x-show="canManagePlatform && !loading && !notConfigured" class="space-y-3">
     <div class="flex items-baseline justify-between">
       <h2 class="text-lg font-medium text-gray-900">All environments on the platform</h2>
       <span class="text-xs text-gray-400" x-text="environments.length + ' found'"></span>
@@ -1040,6 +1041,10 @@ function povPage() {
     // before the server has said it may be: the wrong way round would flash a New POV
     // button at a stakeholder and then take it away.
     canProvision: false,
+    // Separate from canProvision on purpose. A POV Presenter may CREATE (pov_own:write) but
+    // may not list or reconcile every environment on the platform account, which stays
+    // pov:write -- so "Re-check platform" and the platform-wide table follow this one.
+    canManagePlatform: false,
     canSaveBlueprints: false,
     platform: '',
     cloudPlatform: '',
@@ -1285,6 +1290,7 @@ function povPage() {
         // pov:write, so a read-only stakeholder must not be shown it or made to fetch
         // it. The server decides; this only draws what it was told.
         this.canProvision = !!data.can_provision;
+        this.canManagePlatform = !!data.can_manage_platform;
         // A separate permission -- see the endpoint's own note.
         this.canSaveBlueprints = !!data.can_save_blueprints;
       } catch (e) {
@@ -1320,6 +1326,11 @@ function povPage() {
       // (403)" across the top of a page that is otherwise fine. Their only consumers are
       // the create form and the live platform table, both hidden below without write.
       if (!this.canProvision) { this.environments = []; this.resetTemplates(); this.loading = false; return; }
+      if (!this.canManagePlatform) {
+        // A presenter: the create form (templates, behind its button) is theirs, the
+        // platform-wide listing below is not, and asking for it would only be a 403.
+        this.environments = []; this.resetTemplates(); this.loading = false; this.schedulePoll(); return;
+      }
       // The template listing used to be fetched here alongside this one. It is not any
       // more: its only consumer is the create form's picker, which is behind a button,
       // and the two reads together were a paged platform GET each -- against ONE

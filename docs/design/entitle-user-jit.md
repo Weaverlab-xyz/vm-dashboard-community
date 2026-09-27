@@ -568,6 +568,12 @@ in the first place." Both layers can be active simultaneously:
   delete-secret endpoint → 403 from the dashboard's RBAC →
   never reaches the approval gate.
 
+> **Note, 2026-09.** The example is the design intent, not what shipped: the Secrets
+> endpoints were always administrator-only, so `secrets:write` never reached them, and it
+> has since been retired as a level nothing enforced (see
+> [Permissions → The sections](../permissions.md#the-sections)). The layering argument
+> holds for any scope that does gate a route, `aws:delete` for instance.
+
 Defence in depth: authorization is gated; action is gated.
 Compromised credential gets reduced blast radius from both
 sides.

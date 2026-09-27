@@ -4,13 +4,12 @@ This endpoint replaces ~33 per-tile requests with one, so it now owns the filter
 spread across a dozen list endpoints. Getting that wrong is not a performance bug: it either
 shows an operator resources they may not see, or hides ones they own.
 
-The subtle part, and the reason this file exists: **the app has two different admin rules,
-and they must not be unified here.** The four cloud modules key on `user.is_admin`;
-inventory, databases and k8s key on `user.is_effective_admin`, which is a SUPERSET — it also
-honours a session-permissions row and a live Entitle JIT grant. A JIT-granted admin
-therefore already sees everything on /inventory and only their own workgroups on
-/api/aws/instances. That predates this endpoint. Reproducing it tile by tile is correct;
-"tidying" it would silently change somebody's access in a place nobody would look.
+The subtle part, and the reason this file exists: each tile must filter through the SAME
+accessor its live page uses. The app once had two admin rules -- the cloud modules read the
+raw `is_admin` column while inventory, databases and k8s used `is_effective_admin` -- and
+this file used to pin that split. It was a bug (a role- or Entitle-granted administrator saw
+only their own workgroups on /aws), and every module now uses `is_effective_admin`; the
+test below now pins the one rule.
 
 Also pinned:
   * the endpoint makes NO cloud call — asserted structurally, by scanning its imports,
@@ -159,18 +158,18 @@ def test_a_blank_workgroup_does_not_match_an_ownerless_row():
     assert _tile("aws_instances", _User(workgroups=[""]))["value"] == 0
 
 
-def test_the_two_admin_rules_are_kept_apart():
-    """A JIT-granted admin (is_effective_admin, not is_admin) must see the CLOUD tiles as a
-    non-admin and the DB tiles as an admin — which is what the live endpoints already do."""
+def test_one_admin_rule_for_every_tile():
+    """A role- or Entitle-granted admin (is_effective_admin without the is_admin column)
+    sees the CLOUD tiles and the DB tiles as an admin -- the same answer require_admin
+    gives. This used to assert the opposite for the cloud tiles; see the module docstring."""
     _reset()
     _write("aws_instances", _rows(("hydra", "running", "us-east-2"),
                                   ("weaverlab", "running", "eu-west-1")))
     jit = _User(is_admin=False, effective=True, workgroups=["hydra"])
 
-    assert _tile("aws_instances", jit)["value"] == 1, (
-        "the cloud tile used is_effective_admin. api/aws.py::_accessible_workgroups keys on "
-        "the raw is_admin column, so a JIT admin sees only their workgroups there — "
-        "unifying the two rules here silently widens their access")
+    assert _tile("aws_instances", jit)["value"] == 2, (
+        "the cloud tile scoped an effective administrator to their own workgroups -- "
+        "api/aws.py::_accessible_workgroups is reading the raw is_admin column again")
 
     # And the DB-tile side of the same user resolves through the effective rule.
     from web_dashboard.services import inventory_service

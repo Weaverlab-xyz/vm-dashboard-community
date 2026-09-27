@@ -583,10 +583,8 @@ def test_every_schedulable_cloud_has_a_power_job_and_a_metadata_shape():
 
 
 class _Admin:
-    """Passes both rules the suspend API applies: `has_permission` (satisfied by
-    is_effective_admin) and api/azure's `_assert_can_act` (which keys on is_admin). Set
-    independently on purpose — see tests/test_dashboard_stats_api.py for why the two admin
-    rules in this app must not be unified."""
+    """An administrator: passes `has_permission` and api/azure's `_assert_can_act`, both of
+    which decide admin with is_effective_admin (tests/test_admin_is_effective.py)."""
     username = "alice"
     is_admin = True
     is_effective_admin = True

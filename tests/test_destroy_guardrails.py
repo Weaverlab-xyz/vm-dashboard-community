@@ -18,9 +18,10 @@ Pinned here:
     with one.
   * **The four modules answer identically** — a rule that holds on AWS and not on OCI is
     the shape of bug this file exists to stop.
-  * **`is_admin`, not `is_effective_admin`.** The cloud consoles key on the raw column;
-    api/vms.py keys on the property. Both are correct and they must not be unified —
-    tests/test_dashboard_stats_api.py pins the same split for the dashboard tiles.
+  * **`is_effective_admin`, one rule.** The cloud consoles used to key on the raw
+    `is_admin` column while api/vms.py used the property, so a role- or Entitle-granted
+    administrator could not reach another workgroup's instance. Every module now uses the
+    property, as `require_admin` does; tests/test_admin_is_effective.py pins it app-wide.
   * **Structurally, every destroy handler calls both guards**, so a fifth cloud added
     later fails here by name rather than shipping ungated.
   * **The Rego treats teardowns differently from creates.** Region and size caps
@@ -78,9 +79,9 @@ DESTROY_ACTIONS = {
 
 
 class _User:
-    """`is_admin` and `is_effective_admin` are independent on purpose — the cloud
-    consoles read the first, api/vms.py reads the second, and one test below is only
-    meaningful because they can disagree."""
+    """`is_admin` and `is_effective_admin` are independent on purpose: a user who is an
+    administrator by role or Entitle grant has the second without the first, and the test
+    below is only meaningful because they can disagree."""
 
     def __init__(self, username="alice", is_admin=False, effective=None, workgroups=()):
         self.username = username
@@ -122,14 +123,16 @@ def test_workgroup_match_is_case_insensitive():
         assert not _denied(mod, alice, "Team-A"), mod.__name__
 
 
-def test_the_cloud_consoles_key_on_is_admin_not_effective_admin():
-    """A JIT-elevated user is effective-admin but not `is_admin`, and the cloud consoles
-    scope them to their workgroups — matching each module's `_accessible_workgroups` and
-    therefore its instance listing. Unifying the two rules would silently widen destroy."""
+def test_an_effective_admin_is_an_admin_to_destroy():
+    """An administrator by role or Entitle grant (effective-admin, not the `is_admin`
+    column) may act across workgroups and on untagged rows, exactly as the column-admin
+    may -- and still through each module's own `_accessible_workgroups` (next test), so
+    Destroy and the listing agree. This used to assert they were scoped; that was the
+    raw-column bug."""
     jit = _User("jit", is_admin=False, effective=True, workgroups=["team-a"])
     for mod, _ in CONSOLES:
-        assert _denied(mod, jit, "team-b"), f"{mod.__name__}: effective-admin must not widen destroy"
-        assert _denied(mod, jit, None), f"{mod.__name__}: effective-admin must not reach untagged"
+        assert not _denied(mod, jit, "team-b"), f"{mod.__name__}: effective-admin was scoped"
+        assert not _denied(mod, jit, None), f"{mod.__name__}: effective-admin refused untagged"
 
 
 def test_the_check_reads_the_modules_own_accessible_workgroups():

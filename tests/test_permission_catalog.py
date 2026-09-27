@@ -549,23 +549,19 @@ def test_the_use_level_has_a_bootstrap_tier():
 
 def test_no_scope_offers_a_level_no_route_enforces():
     """The inverse of the enforcement sweep: a level in the catalog that nothing checks is
-    a checkbox that grants nothing, which is how the `images` row spent its life.
-
-    The four original scopes keep unenforced levels on purpose (narrowing them would hide
-    a checkbox for a grant already stored, and nothing prunes stored keys), so they are
-    listed here rather than silently tolerated.
+    a checkbox that grants nothing, which is how the `images` row spent its life -- and, until
+    2026-09, how thirty-odd levels on the original fourteen scopes spent theirs. Those were
+    retired (auth.RETIRED_LEVELS) rather than grandfathered, so there is no scope-wide
+    exemption here any more, only the two pairs enforced by a predicate the AST sweep does
+    not see.
     """
-    enforced = {(s, l) for s, l, _, _ in _enforced_pairs()}
-    grandfathered = {
-        # `secrets` is checked as `secrets:use` in config_mgmt._can_use_secrets, not via
-        # require_permission; read/write/delete are documented as unused for it.
-        "secrets",
-        # `jobs` is a predicate inside auth.can_audit_jobs, not a route gate.
-        "jobs",
-        # Kept at four levels because grants already exist against them.
-        "vms", "aws", "azure", "gcp", "oci", "containers", "workgroups",
-        "cloud_database", "k8s", "cloud_function", "config_mgmt", "images",
+    enforced = {(s, l) for s, l, _, _ in _enforced_pairs()} | {
+        # config_mgmt._can_use_secrets: `"use" in perms.get("secrets", [])`.
+        ("secrets", "use"),
+        # auth.can_audit_jobs: `"read" in perms.get("jobs", [])`.
+        ("jobs", "read"),
     }
+    grandfathered = set()
     dead = sorted(
         f"{scope}:{level}"
         for scope, levels in PERMISSION_SCOPE_LEVELS.items()

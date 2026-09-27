@@ -428,7 +428,7 @@ def reschedule_job(
     job = job_service.get_job(db, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.created_by != current_user.username and not current_user.is_admin:
+    if job.created_by != current_user.username and not current_user.is_effective_admin:
         raise HTTPException(status_code=403, detail="Access denied")
     if job.status == "running":
         raise HTTPException(status_code=409,
@@ -491,7 +491,7 @@ def cancel_job(
     job = job_service.get_job(db, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.created_by != current_user.username and not current_user.is_admin:
+    if job.created_by != current_user.username and not current_user.is_effective_admin:
         raise HTTPException(status_code=403, detail="Access denied")
     # `queued` included: a job assigned to a remote agent that never came back would
     # otherwise be uncancellable, and it is the one an operator most wants to clear.

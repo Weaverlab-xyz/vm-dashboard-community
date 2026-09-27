@@ -41,7 +41,7 @@ def _validate_workgroup(db: Session, user: User, workgroup: str) -> str:
     if not wg:
         raise HTTPException(status_code=400, detail=f"Unknown workgroup '{workgroup}'")
     canonical = wg.name
-    if not user.is_admin and canonical not in [w.lower() for w in user.workgroups_list]:
+    if not user.is_effective_admin and canonical not in [w.lower() for w in user.workgroups_list]:
         raise HTTPException(status_code=403, detail=f"You do not have access to workgroup '{canonical}'")
     return canonical
 
@@ -131,7 +131,7 @@ async def get_vms(
         if vm_name and j.workgroup:
             job_workgroups[vm_name] = j.workgroup
 
-    accessible = None if current_user.is_admin else [w.lower() for w in current_user.workgroups_list]
+    accessible = None if current_user.is_effective_admin else [w.lower() for w in current_user.workgroups_list]
     out = []
     for vm in vms:
         wg = overrides.get(_override_key(vm))

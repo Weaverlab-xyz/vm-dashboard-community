@@ -9,6 +9,12 @@ Two independent questions, and keeping them apart is the whole model:
 | What may this user **do**? | a **role**, or a **scope** and a **level** | RBAC &rarr; Users / Groups / Roles |
 | Which **objects** may they do it to? | a workgroup tag, or a POV grant | RBAC &rarr; Workgroups; the POV access picker |
 
+**Administrator**, on this page and in the app, means any one of four things: the **Admin**
+flag on the user, the built-in **Administrator** role, a group mapping whose role or
+permissions confer admin, or an admin grant from Entitle. Every admin check honours all
+four. (Until September 2026 the cloud consoles, the hypervisor pages, job cancel and
+reschedule, and the Secrets page honoured only the flag.)
+
 A scope is a feature area — roughly one per section in the navigation. A level is
 `read`, `write`, `delete` or `use`. A grant is a scope plus a level: `pov:read`,
 `storage:write`, `cloud_database:delete`.
@@ -60,6 +66,27 @@ Before this, the create form had no grid at all and saved no map, which left the
 the NULL state above — every section, every level, for anyone the admin added. Tick
 "Full access (unrestricted)" if that is genuinely what you want.
 
+## Removing admin leaves nothing granted
+
+Unticking **Admin** on a user, or moving them off the **Administrator** role, leaves them
+with **no permissions** until you grant some, either by assigning a role or by ticking
+boxes in the grid. The grid resets to nothing ticked, with "Full access (unrestricted)"
+unticked, and the panel warns that the user will see nothing. Grant what they need in the
+same save, or later.
+
+Two things behind it are worth knowing:
+
+- **The server enforces it too.** A demotion through the API that does not send
+  permissions stores "nothing granted". Permissions sent in the same request are used
+  as sent, and a role assigned in the same request still grants.
+- **Old grants do not come back.** The Admin flag bypasses the grid, so anything stored
+  there before the user became an admin has gone unseen since. Demotion clears it rather
+  than silently restoring it.
+
+An administrator is also created with nothing granted underneath the flag. Before this,
+an admin was stored with no permissions at all, which the server reads as unrestricted,
+so unticking Admin left the user with every section.
+
 **Group mappings are the opposite.** A new mapping on RBAC → Groups starts with "Full
 access (unrestricted)" ticked, and the panel says auto-provisioned users will have
 unrestricted access. An OIDC user whose only source is such a mapping (no role on the
@@ -75,8 +102,8 @@ a role, before members sign in.
 | `delete` | destroy |
 | `use` | take part without managing — see below |
 
-`use` exists for the cases where "read" is too little and "write" is far too much. It
-does something on exactly three scopes:
+`use` exists for the cases where "read" is too little and "write" is far too much. Three
+scopes offer it:
 
 - **`secrets:use`** — run an Ansible playbook that reads a secret out of a vault, without
   ever being shown the value.
@@ -91,41 +118,44 @@ does something on exactly three scopes:
   different authority from `change_windows:write`, which maintains the calendar. See
   [Change Windows](scheduling/change-windows.md).
 
-On every other scope that offers it, `use` is currently a checkbox that grants nothing —
-see the next section.
-
-Not every scope offers every level. The scopes added one per navigation section offer
-only the levels something enforces: vSphere has nothing to delete, so it shows no Delete
-checkbox. If you send a level a scope does not offer through the API you get a `422`
-naming the levels it does offer.
-
-The original fourteen are the exception — see the next section.
+**Every scope offers exactly the levels something enforces**, so every checkbox on the grid
+does something. vSphere has nothing to delete, so it shows no Delete checkbox. If you send a
+level a scope does not offer through the API you get a `422` naming the levels it does
+offer. The one exception is a *retired* level (see the next section), which is dropped
+silently, because it never granted anything.
 
 ## The sections
 
-The fourteen original scopes — `vms`, the four clouds, `images`, `containers`,
-`config_mgmt`, `jobs`, `workgroups`, `secrets`, `cloud_database`, `k8s` and
-`cloud_function` — all offer all four levels, whether or not anything checks them. These
-checkboxes save and then **grant nothing**, because no route or check reads them:
+The fourteen original scopes:
 
-| Scope | Levels that currently do nothing |
-|---|---|
-| `vms` | `delete`, `use` |
-| `aws`, `azure`, `gcp`, `oci`, `images`, `containers`, `cloud_database`, `k8s`, `cloud_function` | `use` |
-| `config_mgmt` | `delete`, `use` |
-| `jobs` | `write`, `delete`, `use` — cancelling and rescheduling a job are decided by ownership (the job's creator, or the Admin flag), not by scope |
-| `workgroups` | `delete`, `use` — deleting a workgroup needs the Admin flag |
-| `secrets` | `read`, `write`, `delete` — the Secrets page is admin-only throughout; only `use` does anything |
+| Scope | Levels | Notes |
+|---|---|---|
+| `vms` | read, write | |
+| `aws`, `azure`, `gcp`, `oci` | read, write, delete | |
+| `images`, `containers`, `cloud_database`, `k8s`, `cloud_function` | read, write, delete | |
+| `config_mgmt` | read, write | |
+| `jobs` | read | read sees every job; cancelling and rescheduling are decided by ownership (the job's creator, or an administrator) |
+| `workgroups` | read, write | deleting a workgroup needs an administrator |
+| `secrets` | use | the Secrets page itself is administrator-only |
 
-They are kept because narrowing an offered level would make every stored map that holds it
-fail validation (`422`) the next time an admin saved it. Granting them is harmless; just do
-not rely on them.
+**Retired levels.** Until September 2026 these fourteen offered all four levels whether or
+not anything checked them, so the grid showed about thirty checkboxes that saved and
+granted nothing, for example `vms:delete`, `jobs:write` and `secrets:read`. Those levels
+are retired:
+- A one-time migration removed them from every stored permission map, role and group
+  mapping. Nobody's access changed, because they never granted anything.
+- A grid or script that still sends one has it dropped instead of refused.
+- An Entitle revoke of one succeeds.
+
+If you ran `bootstrap_entitle_groups.py` before then, its Entra groups for those levels
+(for example `dashboard-vms-delete`) are orphaned and can be deleted.
 
 The rest are one per navigation section:
 
 | Scope | Levels | Covers |
 |---|---|---|
-| `pov` | read, write, delete, use | POV environments, their use cases, wiring, sharing and accessors |
+| `pov` | read, write, delete, use | POV environments, their use cases, wiring, sharing and accessors. `delete` destroys any POV the user's POV access picker allows, and every POV when the picker is empty |
+| `pov_own` | write, delete | your **own** POVs: ones **you created**, or ones **assigned to you** in your POV access picker. `write` lets you create a POV and set up, run, power and share your own; `delete` lets you destroy your own. Nothing on anyone else's POV, and nothing platform-wide (re-checking the platform, listing every environment on it). What the POV Presenter role carries |
 | `pov_templates` | read, write, delete | template builds, blueprints, and the BeyondTrust tenant registry |
 | `proxmox` | read, write, delete | Proxmox: browse, deploy, import an image, delete a VM |
 | `nutanix` | read, write, delete | Nutanix: the same |
@@ -149,7 +179,7 @@ Preview features, and each is gated like this:
 
 | Preview feature | Gate |
 |---|---|
-| Virtual Desktops | Admin flag |
+| Virtual Desktops | administrator |
 | Certificate Lab, SPIRE Lab | `cloud_function:read` to see, `cloud_function:write` to change |
 | Agent Cell | `config_mgmt:write` |
 
@@ -171,6 +201,11 @@ not exist, because confirming that somebody else's POV exists is itself a leak.
 
 Leave the POV access picker **empty** and they see every POV. That is the default, and it
 is what every pre-existing user has.
+
+The picker also decides what a POV Presenter **owns** for changing and destroying, along
+with the POVs they create themselves. An empty picker lets a presenter *see* every POV but
+*own* only the ones they created. When a presenter whose picker names some POVs creates a
+new one, it is added to their picker automatically, so it doesn't vanish from their own list.
 
 `use` is the important half. With `read` alone they can look but not tick, and a use-case
 checklist nobody can tick is a screenshot. With `write` they could provision and destroy.
@@ -234,8 +269,8 @@ Eight roles ship with the dashboard:
 |---|---|
 | **Administrator** | Everything, including the admin-only pages. The grid is not consulted. |
 | **Operator** | Day-to-day work: deploy, run and use, but delete nothing. It does not include the audit log or change windows. |
-| **Read-Only** | Every section at its read level, and nothing else. `change_windows` offers no read level, so it is not included. |
-| **POV Presenter** | Run a proof of value — tick use cases, and read the environments and estate behind them. Pair it with the POV access picker. It holds `pov:read` and `pov:use` but not `pov:write`, so it **cannot wake or power** an environment. The role's own description in the app says it can; that description is wrong. |
+| **Read-Only** | Every section at its read level, and nothing else. `secrets` and `change_windows` offer no read level, so neither is included. |
+| **POV Presenter** | Run a proof of value end to end: **create POVs**, then set up, run, power, share and destroy **their own**, meaning ones they created or ones assigned to them in the POV access picker, and tick use cases. Nothing on anyone else's POV, and not the platform-wide controls. It holds `pov:read`, `pov:use` and `pov_own:write`/`delete`, but not the general `pov:write` or `pov:delete`. |
 | **Auditor** | The audit trail, job history and inventory. No writes. |
 | **Cloud Admin** | Full control of the cloud accounts and what runs in them. |
 | **DBA** | Cloud databases end to end, plus the secrets a database run needs. |
@@ -280,12 +315,11 @@ a way to become an administrator:
 Two more have no scope for narrower reasons:
 
 - **The auto-delete timer.** Authorization there is visibility: anyone who can see a
-  resource may change its timer. Extending by a number of hours only ever delays a
-  deletion. Setting an **absolute date** is also open to them, though, and that date may be
-  *earlier* than the current one — no sooner than 60 minutes from now. So seeing a resource
-  is enough to bring its deletion forward. Clearing a timer outright needs an administrator
-  **and** the `resource_expiry_allow_never` setting. See
-  [Auto-delete Timer](auto-delete-timer.md).
+  resource may **delay** its deletion, by extending it or setting a later date. Only an
+  administrator may bring a deletion forward: an earlier date, a timer on a resource that
+  had none, or an extend the lifetime ceiling would clamp below the current expiry.
+  Clearing a timer outright needs an administrator **and** the
+  `resource_expiry_allow_never` setting. See [Auto-delete Timer](auto-delete-timer.md).
 - **The Dashboard home page**, which is an aggregate of things you already have access to.
 
 ## Objects, not just areas
@@ -299,7 +333,7 @@ A scope says *what*, not *which*. Two mechanisms narrow the *which*:
 
   Unlike the other RBAC tabs, Workgroups is **not admin-only**: it has a real `workgroups`
   scope, so a user granted `workgroups:read` sees that tab and nothing else on the page.
-  Deleting a workgroup still needs the Admin flag.
+  Deleting a workgroup still needs an administrator.
 - **POV access** narrows the POV pages to named environments, as described above.
 
 "Untagged resources are visible to whoever deployed them" is the whole rule, and it is

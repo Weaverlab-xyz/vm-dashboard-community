@@ -412,7 +412,11 @@ def _require_admin(request: Request) -> str:
             .filter(User.username == username, User.is_active == True)
             .first()
         )
-        if not user or not user.is_admin:
+        # is_effective_admin, the rule require_admin applies: the flag, an Entitle JIT grant,
+        # or the Administrator role. The accessor refusal mirrors require_admin's too -- this
+        # check decodes its own token rather than resolving through get_current_user, so
+        # the path allowlist that normally confines a POV accessor never ran.
+        if not user or user.accessor_env_id or not user.is_effective_admin:
             raise HTTPException(status_code=403, detail="Admin access required")
     finally:
         db.close()

@@ -241,7 +241,7 @@ async def list_inventory(
     items = [dict(i) for i in items]
     await _attach_cloud_tags(items)
     ps_envelope = await _attach_ps_attributes(
-        items, is_admin=bool(getattr(current_user, "is_admin", False)))
+        items, is_admin=bool(getattr(current_user, "is_effective_admin", False)))
 
     # Auto-delete state travels with the listing so /inventory's Expires badge and the
     # dashboard's "expiring soon" warning read ONE threshold instead of hardcoding two

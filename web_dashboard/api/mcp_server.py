@@ -35,12 +35,13 @@ Two rules keep that from coming back, and both matter more than they look:
 * **Never re-derive a rule — call the one the HTTP twin calls.** Each tool below names its
   twin. The imports are function-local because ``api.aws`` and friends pull in the world.
 
-The rule a reader is most likely to "tidy" and must not: **the app has two admin rules.**
-The four cloud consoles key on ``user.is_admin``; inventory, databases, k8s, functions and
-expiry key on ``user.is_effective_admin``, which is a superset that also honours a
-session-permissions row and a live Entitle JIT grant. Unifying them here would silently
-change somebody's access in a place nobody would look. ``tests/test_dashboard_stats_api.py``
-pins the same split for the dashboard tiles, and ``tests/test_mcp_rbac.py`` pins it here.
+**One admin rule.** Every tool decides admin with ``is_effective_admin`` -- the admin flag, a
+session-permissions row, a live Entitle JIT grant, or the Administrator role -- which is
+what ``api/auth.require_admin`` uses. The cloud consoles used to read the raw ``is_admin``
+column instead, so a role- or Entitle-granted administrator was scoped to their own
+workgroups on exactly the pages an administrator most needs. That was a bug;
+``tests/test_admin_is_effective.py`` forbids the raw read anywhere in the app, and
+``tests/test_mcp_rbac.py`` pins the tools' side.
 """
 import contextvars
 import hashlib
@@ -103,12 +104,12 @@ def _has_permission(user: User, scope: str, level: str) -> bool:
 
 
 def _cloud_workgroups(user: User):
-    """Workgroups for the four cloud consoles, or None for admins.
+    """Workgroups for the four cloud consoles, or None for administrators.
 
-    Keyed on ``is_admin``, matching ``api/aws.py``, ``api/azure.py``, ``api/gcp.py`` and
-    ``api/oci.py``. NOT ``is_effective_admin`` — see the module docstring.
+    ``is_effective_admin``, matching ``api/aws.py``, ``api/azure.py``, ``api/gcp.py`` and
+    ``api/oci.py`` -- see the module docstring.
     """
-    if getattr(user, "is_admin", False):
+    if getattr(user, "is_effective_admin", False):
         return None
     return [w.lower() for w in (user.workgroups_list or [])]
 

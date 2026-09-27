@@ -82,8 +82,9 @@ _ALL = ["read", "write", "delete", "use"]
 _RWD = ["read", "write", "delete"]
 _RW = ["read", "write"]
 _R = ["read"]
-_RWU = ["read", "write", "use"]
+_RWU = ["read", "write", "use"]   # `pov` still offers all four
 _RU = ["read", "use"]
+_U = ["use"]
 
 _BUILTIN_ROLES = (
     {
@@ -101,13 +102,13 @@ _BUILTIN_ROLES = (
         "description": "Day-to-day operation: deploy, run and use everything, but delete "
                        "nothing.",
         "permissions": {
-            "vms": _RWU, "jobs": _RW, "workgroups": _R, "inventory": _R,
-            "aws": _RWU, "azure": _RWU, "gcp": _RWU, "oci": _RWU, "costs": _R,
+            "vms": _RW, "jobs": _R, "workgroups": _R, "inventory": _R,
+            "aws": _RW, "azure": _RW, "gcp": _RW, "oci": _RW, "costs": _R,
             "proxmox": _RW, "vsphere": _RW, "hyperv": _RW, "nutanix": _RW, "xcpng": _RW,
             "connections": _RW,
-            "images": _RWU, "containers": _RWU, "k8s": _RWU,
-            "cloud_function": _RWU, "cloud_database": _RWU,
-            "storage": _RW, "secrets": _RU, "config_mgmt": _RWU,
+            "images": _RW, "containers": _RW, "k8s": _RW,
+            "cloud_function": _RW, "cloud_database": _RW,
+            "storage": _RW, "secrets": _U, "config_mgmt": _RW,
             "pov": _RWU, "pov_templates": _R,
             "gateways": _RW, "agents": _RW, "notifications": _RW, "epml": _RW, "ot": _RW,
         },
@@ -116,14 +117,15 @@ _BUILTIN_ROLES = (
         "slug": "read-only",
         "name": "Read-Only",
         "description": "See everything, change nothing. Every section at its read level.",
-        # All 31 scopes offer `read`, so this one is exhaustive by construction.
+        # Every scope that offers `read`. Two do not: `secrets` (use only) and
+        # `change_windows` (write and use).
         "permissions": {
             "vms": _R, "jobs": _R, "workgroups": _R, "inventory": _R, "audit": _R,
             "aws": _R, "azure": _R, "gcp": _R, "oci": _R, "costs": _R,
             "proxmox": _R, "vsphere": _R, "hyperv": _R, "nutanix": _R, "xcpng": _R,
             "connections": _R,
             "images": _R, "containers": _R, "k8s": _R, "cloud_function": _R,
-            "cloud_database": _R, "storage": _R, "secrets": _R, "config_mgmt": _R,
+            "cloud_database": _R, "storage": _R, "config_mgmt": _R,
             "pov": _R, "pov_templates": _R,
             "gateways": _R, "agents": _R, "notifications": _R, "epml": _R, "ot": _R,
         },
@@ -131,13 +133,19 @@ _BUILTIN_ROLES = (
     {
         "slug": "pov-presenter",
         "name": "POV Presenter",
-        "description": "Run a proof of value: tick use cases, wake environments, and read "
-                       "the estate behind them. Narrow it further with the POV access "
-                       "picker on the user.",
-        # `pov:use` is the level that carries use-case ticking and wake -- see
-        # docs/permissions.md. Create/destroy/share stay on write/delete, which this omits.
+        # No "wake": powering an environment, waking included, is `pov:write`, which this
+        # role deliberately omits. A stakeholder who must wake their own POV needs write or
+        # a POV accessor alongside -- see docs/permissions.md.
+        "description": "Run a proof of value: create POVs, then set up, run, share and "
+                       "destroy your own -- created by you or assigned to you -- and tick "
+                       "use cases. Nothing on anyone else's POV.",
+        # `pov:use` carries use-case ticking. `pov_own` is the rest, on the presenter's
+        # OWN POVs only (created by them, or assigned in their picker); the general
+        # `pov:write` / `pov:delete`, which reach every visible POV, stay off.
         "permissions": {
             "pov": _RU, "pov_templates": _R,
+            # Create; set up, run and destroy their own. See api/pov_gates.py.
+            "pov_own": ["write", "delete"],
             "vms": _R, "jobs": _R, "inventory": _R, "connections": _R,
         },
     },
@@ -157,8 +165,8 @@ _BUILTIN_ROLES = (
         "description": "Full control of the cloud accounts and what runs in them, without "
                        "the admin-only pages.",
         "permissions": {
-            "aws": _ALL, "azure": _ALL, "gcp": _ALL, "oci": _ALL, "costs": _RW,
-            "vms": _RWD, "images": _RWD, "jobs": _RW, "inventory": _R, "workgroups": _R,
+            "aws": _RWD, "azure": _RWD, "gcp": _RWD, "oci": _RWD, "costs": _RW,
+            "vms": _RW, "images": _RWD, "jobs": _R, "inventory": _R, "workgroups": _R,
         },
     },
     {
@@ -166,8 +174,8 @@ _BUILTIN_ROLES = (
         "name": "DBA",
         "description": "Cloud databases end to end, plus the secrets a database run needs.",
         "permissions": {
-            "cloud_database": _ALL,
-            "secrets": _RU, "jobs": _RW, "connections": _R, "inventory": _R,
+            "cloud_database": _RWD,
+            "secrets": _U, "jobs": _R, "connections": _R, "inventory": _R,
         },
     },
     {
@@ -176,9 +184,9 @@ _BUILTIN_ROLES = (
         "description": "Clusters, containers and functions, plus the images and "
                        "configuration they are built from.",
         "permissions": {
-            "k8s": _ALL, "containers": _ALL, "cloud_function": _ALL,
-            "images": _RWD, "storage": _RWD, "config_mgmt": _RWD,
-            "jobs": _RW, "inventory": _R,
+            "k8s": _RWD, "containers": _RWD, "cloud_function": _RWD,
+            "images": _RWD, "storage": _RWD, "config_mgmt": _RW,
+            "jobs": _R, "inventory": _R,
         },
     },
 )
@@ -460,22 +468,36 @@ def delete(db: Session, role: AccessRole, *, force: bool = False) -> dict:
 # ── Seeding ───────────────────────────────────────────────────────────────────
 
 def seed_builtins(db: Session) -> int:
-    """Insert any missing built-in role. Returns how many were created.
+    """Insert any missing built-in role, and refresh the WORDING of the ones present.
+    Returns how many were created.
 
     Keyed on SLUG PRESENCE, not on the table being empty. ``workgroup_service.seed_if_empty``
     uses emptiness and it is the wrong key here: a ninth built-in shipped in a later release
     would never appear on an install that already has the first eight.
 
-    **Never updates an existing row**, which is what makes this safe without a
-    ``schema_markers`` entry. A marker guards a backfill whose re-run would re-grant
+    **Never updates an existing row's permissions**, which is what makes this safe without
+    a ``schema_markers`` entry. A marker guards a backfill whose re-run would re-grant
     something an administrator had deliberately removed; an insert-if-absent cannot
     re-grant, because the row it would touch is the row it skips. Combined with built-ins
     being undeletable, there is no state in which this resurrects something a person removed
     on purpose.
+
+    The name and description ARE refreshed, and only on ``is_builtin`` rows. Built-ins
+    cannot be edited (``update`` refuses them), so a stored description that differs from
+    the literal is never an administrator's choice -- it is a release that corrected the
+    wording, and without this the correction reached new installs only. POV Presenter's
+    said "wake environments" for a role that cannot wake one.
     """
     created = 0
+    refreshed = False
     for spec in _BUILTIN_ROLES:
-        if get_by_slug(db, spec["slug"]) is not None:
+        existing = get_by_slug(db, spec["slug"])
+        if existing is not None:
+            if existing.is_builtin and (existing.name != spec["name"]
+                                        or existing.description != spec["description"]):
+                existing.name = spec["name"]
+                existing.description = spec["description"]
+                refreshed = True
             continue
         role = AccessRole(
             id=str(uuid.uuid4()),
@@ -487,6 +509,6 @@ def seed_builtins(db: Session) -> int:
         role.permissions_dict = spec["permissions"]
         db.add(role)
         created += 1
-    if created:
+    if created or refreshed:
         db.commit()
     return created

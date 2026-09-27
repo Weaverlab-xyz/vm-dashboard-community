@@ -28,7 +28,8 @@ from sqlalchemy.orm import Session
 from ..database import PovEnvironment, User, get_db
 from ..services import pov_env_service, pov_vendor_access
 from ..services.pra_tenant_api import PRATenantError
-from .auth import get_current_user, require_permission, require_pov_env_access
+from . import pov_gates
+from .auth import get_current_user, require_pov_env_access
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +51,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/api/pov",
     tags=["pov-vendors"],
-    dependencies=[Depends(require_permission("pov", "write")),
-                  Depends(require_pov_env_access)],
+    dependencies=[Depends(require_pov_env_access),
+                  Depends(pov_gates.require_write_on_env)],
 )
 
 

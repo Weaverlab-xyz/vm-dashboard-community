@@ -40,9 +40,9 @@ work to stop at the boundary, make the window long enough for the work, or split
 | Config Management runs | **When to run** on the run form (single and bulk) |
 | Cloud VM deploys — AWS, Azure, GCP, OCI | **When to run** in the deploy dialog |
 | Bulk cloud VM deploys — AWS, Azure, GCP, OCI | **When to run** in the bulk deploy dialog; see [below](#bulk-deploys-book-as-a-unit) |
-| Image promotion | the promote request — API only, no form control yet |
-| Packer image builds — AWS, Azure, GCP, OCI | the build request — API only, no form control yet |
-| Image export / capture / AMI copy — export and capture on AWS, Azure, GCP; AMI copy on AWS | the request — API only, no form control yet |
+| Image promotion | **When to run** in the Promote dialog on **Images** — the automated promote only; *Show manual steps* creates no job |
+| Packer image builds — AWS, Azure, GCP, OCI | **When to run** on each cloud page's **Build** tab |
+| Image export / capture / AMI copy — export and capture on AWS, Azure, GCP; AMI copy on AWS | **When to run** in the Export VHD, Capture/Create Image and Copy to Private AMI dialogs |
 | Bulk power — cloud: AWS, Azure, GCP, OCI | **Schedule** on the selection toolbar |
 | Bulk power — on-premises: Proxmox, vSphere, Hyper-V, XCP-ng, VMware Workstation | **Schedule** on the selection toolbar — **agent-bound connections only**; see [below](#scheduling-power-operations) |
 | Cloud VM destroys — AWS, Azure, GCP, OCI | offered when a window refuses one; or `?run_at=` on the API |

@@ -86,7 +86,7 @@ async def get_vms(
     keys = [_override_key(vm) for vm in vms]
     overrides = workgroup_override_service.get_many(db, PROVIDER, keys)
 
-    accessible = None if current_user.is_admin else [w.lower() for w in current_user.workgroups_list]
+    accessible = None if current_user.is_effective_admin else [w.lower() for w in current_user.workgroups_list]
     out = []
     for vm in vms:
         vm["workgroup"] = overrides.get(_override_key(vm))

@@ -76,12 +76,9 @@ class TileSpec:
     # with no per-row RBAC. It lives on the spec so the read endpoint needs no second table
     # that could drift from this one.
     #
-    # NOT unified on purpose. The four cloud modules key on `user.is_admin`; inventory,
-    # databases and k8s key on `user.is_effective_admin`, which is a SUPERSET (it also
-    # honours a session-permission row and a live Entitle JIT grant). A JIT-admin therefore
-    # sees everything on /inventory and only their own workgroups on /api/aws/instances.
-    # That inconsistency predates this table; reproducing it per tile is correct, and
-    # "fixing" it here would silently widen or narrow somebody's access.
+    # Per tile so each borrows exactly the accessor its live page uses. Every accessor now
+    # decides admin with `is_effective_admin` -- the cloud modules used to read the raw
+    # `is_admin` column, which ignored role and Entitle grants; see api/dashboard.py.
     rbac: str = ""
 
 

@@ -13,11 +13,11 @@ What is pinned here, in rough order of how badly it would hurt to lose:
   * **Fail closed.** With no caller in the ContextVar, EVERY tool returns the
     unauthenticated error and touches no data. The tool list is discovered by reflection,
     so a tool added later cannot quietly skip this.
-  * **The two admin rules stay two.** The four cloud consoles key on `is_admin`;
-    inventory, databases, k8s and functions key on `is_effective_admin`, a superset that
-    also honours a session-permissions row and a live Entitle JIT grant. A user who is one
-    and not the other is the test case that catches a well-meaning unification —
-    `tests/test_dashboard_stats_api.py` pins the same split for the dashboard tiles.
+  * **One admin rule.** Every tool decides admin with `is_effective_admin`, as
+    `require_admin` does. A user who holds admin through a role or an Entitle grant but
+    not the column is the case that would catch the raw `is_admin` read coming back --
+    the cloud consoles had exactly that bug. `tests/test_dashboard_stats_api.py` pins the
+    same rule for the dashboard tiles.
   * **Redaction is an allowlist**, and no allowlisted key reads as a credential.
   * Two latent bugs found while doing the above: `list_azure_vms` filtered on job type
     `"azure_vm_deploy"`, which is not a job type anywhere in this repo (the real one is
@@ -297,7 +297,7 @@ def test_list_amis_never_passes_a_none_region():
         api_aws._aws_region = orig_region
 
 
-# ── Cloud instances: workgroup-scoped on is_admin ─────────────────────────────
+# ── Cloud instances: workgroup-scoped unless an (effective) admin ─────────────────────────────
 
 def test_ec2_is_workgroup_scoped():
     _reset()
@@ -331,18 +331,18 @@ def test_gcp_and_oci_are_workgroup_scoped():
     assert [i["ocid"] for i in oci] == ["ocid-a"], oci
 
 
-def test_cloud_tools_key_on_is_admin_not_effective_admin():
-    """THE unification test. JIT is effective-admin but not is_admin, so the four cloud
-    consoles still scope it to its workgroups — matching api/aws.py:_accessible_workgroups.
-    Deleting this test is how the two rules quietly become one."""
+def test_cloud_tools_honour_an_effective_admin():
+    """JIT is an administrator by Entitle grant (or role), not by the column. The cloud
+    consoles used to scope it to its workgroups -- the raw-is_admin bug -- and must now see
+    everything, as require_admin and api/aws.py:_accessible_workgroups do."""
     _reset()
     _job("j1", "ec2_deploy", "alice", "team-a", {"instance_id": "i-a"})
     _job("j2", "ec2_deploy", "bob", "team-b", {"instance_id": "i-b"})
 
-    assert mcp._cloud_workgroups(JIT) == [], "JIT must NOT be admin for the cloud consoles"
+    assert mcp._cloud_workgroups(JIT) is None, "an effective admin was workgroup-scoped"
     assert mcp._cloud_workgroups(ADMIN) is None
     got = _as(JIT, mcp.list_ec2_instances)["instances"]
-    assert got == [], f"effective-admin must not widen a cloud console: {got}"
+    assert len(got) == 2, f"an effective admin saw only part of a cloud console: {got}"
 
 
 def test_effective_admin_does_widen_creator_scoped_resources():

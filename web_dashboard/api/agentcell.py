@@ -407,7 +407,7 @@ def build_options(
         # term means such a row is still visible to whoever minted it, so this is about
         # not quietly handing an agent away rather than about not losing it.
         "workgroups": (workgroup_service.list_names(db)
-                       if bool(getattr(current_user, "is_admin", False))
+                       if bool(getattr(current_user, "is_effective_admin", False))
                        else sorted(current_user.workgroups_list or [])),
         "pat_hours": {"default": agentcell_service.DEFAULT_PAT_HOURS,
                       "max": agentcell_service.MAX_PAT_HOURS},

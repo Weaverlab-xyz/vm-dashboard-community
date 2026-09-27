@@ -185,8 +185,118 @@ def test_the_use_case_routes_are_gated_on_use_and_destroy_on_delete():
             assert "_POV_USE" in line, f"use-case route not on the use level: {line.strip()}"
     destroy = [l for l in src.split("\n")
                if l.strip().startswith('@router.delete("/managed/{env_id}"')]
-    assert destroy and "_POV_DELETE" in destroy[0], (
-        f"destroy is not on the delete level: {destroy}")
+    # `pov:delete` as ever, or `pov_own:delete` on a POV the caller owns. The behaviour is
+    # pinned below; this pins that the route is still gated by it.
+    assert destroy and "_POV_DELETE_OWN" in destroy[0], (
+        f"destroy is not on its gate: {destroy}")
+
+
+# ── your OWN POVs: `pov_own` write/delete on POVs created by you or assigned to you ──
+#
+# api/pov_gates.py. `pov:write`/`pov:delete` reach every visible POV; `pov_own` reaches only
+# the caller's own, which is what the POV Presenter role carries.
+
+class _Env:
+    def __init__(self, env_id, created_by):
+        self.id, self.created_by = env_id, created_by
+
+
+_ENVS = {"env-assigned": _Env("env-assigned", "someone-else"),
+         "env-mine": _Env("env-mine", None),          # created_by filled per test
+         "env-theirs": _Env("env-theirs", "someone-else")}
+
+
+def _may(user, env_id, level):
+    from web_dashboard.api import pov_gates
+    from web_dashboard.services import pov_env_service
+    orig = pov_env_service.get
+    pov_env_service.get = lambda db, i: _ENVS.get(i)
+    try:
+        return pov_gates.may_on_env(user, None, env_id, level)
+    finally:
+        pov_env_service.get = orig
+
+
+def _presenter(env_ids):
+    """Holds the POV Presenter role's map as the role grants it (through role_permissions,
+    the way an assigned role reaches a user), plus a POV access picker."""
+    from web_dashboard.services import role_service
+    spec = next(r for r in role_service._BUILTIN_ROLES if r["slug"] == "pov-presenter")
+    u = _user(env_ids=env_ids)
+    u.role_id = "role-pov-presenter"
+    u.role_permissions_dict = spec["permissions"]
+    _ENVS["env-mine"].created_by = u.username
+    return u
+
+
+def test_a_presenter_may_create_a_pov():
+    from web_dashboard.api import pov_gates
+    assert pov_gates.may_create(_presenter([]))
+    assert not pov_gates.may_create(_user(perms={"pov": ["read", "use"]}))
+
+
+def test_a_presenter_owns_what_they_created_and_what_was_assigned():
+    u = _presenter(["env-assigned"])
+    for level in ("write", "delete"):
+        assert _may(u, "env-mine", level), f"{level} refused on a POV they created"
+        assert _may(u, "env-assigned", level), f"{level} refused on a POV assigned to them"
+        assert not _may(u, "env-theirs", level), f"{level} allowed on someone else's POV"
+
+
+def test_an_empty_picker_assigns_nothing_but_created_still_counts():
+    """Empty means "every POV" for VISIBILITY. For ownership it assigns nothing -- otherwise
+    an unassigned presenter would own every POV on the instance."""
+    u = _presenter([])
+    assert not _may(u, "env-theirs", "write") and not _may(u, "env-theirs", "delete")
+    assert _may(u, "env-mine", "write")
+
+
+def test_the_presenter_role_carries_own_and_not_the_general_levels():
+    from web_dashboard.services import role_service
+    spec = next(r for r in role_service._BUILTIN_ROLES if r["slug"] == "pov-presenter")
+    assert sorted(spec["permissions"].get("pov_own", [])) == ["delete", "write"]
+    assert "write" not in spec["permissions"]["pov"]
+    assert "delete" not in spec["permissions"]["pov"]
+
+
+def test_a_customer_stakeholder_still_cannot_change_or_destroy_their_pov():
+    """`pov:read` + `use` with the POV assigned -- the documented customer shape. Ticking
+    use cases must not have become setting up or tearing down the POV."""
+    u = _user(perms={"pov": ["read", "use"]}, env_ids=["env-assigned"])
+    assert not _may(u, "env-assigned", "write") and not _may(u, "env-assigned", "delete")
+
+
+def test_the_general_levels_are_unchanged():
+    for level in ("write", "delete"):
+        assert _may(_user(perms={"pov": ["read", level]}), "env-theirs", level)
+        assert _may(_user(admin=True), "env-theirs", level)
+        # A legacy NULL-permission user passes the permissive general branch, as before.
+        assert _may(_user(), "env-theirs", level)
+
+
+def test_platform_wide_operations_stay_on_general_write():
+    """A presenter's own POVs are not a licence to list or reconcile the whole platform."""
+    with open(os.path.join(_ROOT, "web_dashboard", "api", "pov.py"), encoding="utf-8") as fh:
+        src = fh.read()
+    for route in ('@router.post("/managed/reconcile", dependencies=_POV_WRITE)',
+                  '@router.get("/environments", dependencies=_POV_WRITE)',
+                  '@router.get("/environments/{platform_env_id}", dependencies=_POV_WRITE)'):
+        assert route in src, f"moved off plain pov:write: {route}"
+    # And every route that names ONE POV uses the own-aware gate, not plain write.
+    for line in src.split("\n"):
+        if line.startswith('@router.') and '"/managed/{env_id}' in line:
+            assert "_POV_WRITE)" not in line, f"per-POV route on plain write: {line}"
+
+
+def test_the_accessor_and_vendor_routers_check_visibility_before_write():
+    """The write gate looks the POV up; run first, it would answer 403 for a POV the
+    caller cannot see and confirm it exists. Visibility (404) has to come first."""
+    for name in ("pov_accessor.py", "pov_vendor.py"):
+        with open(os.path.join(_ROOT, "web_dashboard", "api", name), encoding="utf-8") as fh:
+            src = fh.read()
+        a, b = src.index("Depends(require_pov_env_access)"), src.index(
+            "Depends(pov_gates.require_write_on_env)")
+        assert a < b, f"{name}: write gate runs before the visibility gate"
 
 
 def test_pov_offers_use_in_the_catalog():
@@ -325,9 +435,14 @@ def test_the_registry_is_read_and_the_pickers_are_write():
         "GET /api/pov/platforms is back on pov:write -- it is the first call index.html "
         "makes and init() returns early on a 403, so this blanks the page for every "
         "read-only stakeholder")
-    for path in ("/templates", "/environments"):
-        assert "_POV_WRITE" in _decorator(path), (
-            f"{path} lists platform-side names and must stay on pov:write")
+    # The platform-wide listing is pov:write only. The template picker is the create
+    # form's, so it follows create: pov:write, or pov_own:write for a presenter building
+    # their own POV. Neither is reachable with read+use.
+    assert "dependencies=_POV_WRITE)" in _decorator("/environments"), (
+        "/environments lists every environment on the platform and must stay on pov:write")
+    assert "dependencies=_POV_CREATE)" in _decorator("/templates"), (
+        "/templates lists platform-side names; it must sit on the create gate (write or "
+        "own-write), never on the pov:read floor")
 
 
 def test_the_platform_environment_id_is_not_called_env_id():
@@ -421,15 +536,17 @@ def test_every_pov_route_in_the_whole_app_carries_a_permission_gate():
 
 
 def test_the_vendor_router_mints_credentials_and_is_gated_like_the_accessor_one():
-    """Both hand a third party a login into the customer's environment, so both are
-    pov:write plus the instance gate -- not the router's pov:read floor."""
+    """Both hand a third party a login into the customer's environment, so both are on the
+    write gate (pov:write, or pov_own:write on your own POV) plus the instance gate -- not
+    the router's pov:read floor."""
     with open(os.path.join(_ROOT, "web_dashboard", "api", "pov_vendor.py"),
               encoding="utf-8") as fh:
         src = fh.read()
     decl = src.split("router = APIRouter(")[1].split("\n)")[0]
-    assert 'require_permission("pov", "write")' in decl, (
-        "the vendor router is not on pov:write -- minting a vendor login is not a read, "
-        "and a stakeholder holding read+use would reach it")
+    # pov:write, or pov_own:write on a POV the caller owns -- never read+use.
+    assert "pov_gates.require_write_on_env" in decl, (
+        "the vendor router is not on the write gate -- minting a vendor login is not a "
+        "read, and a stakeholder holding read+use would reach it")
     assert "require_pov_env_access" in decl, (
         "the vendor router has no instance gate, so an SE narrowed to one POV can open a "
         "vendor group on another")

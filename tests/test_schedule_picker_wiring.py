@@ -138,6 +138,53 @@ def test_every_page_with_the_picker_gates_its_submit():
                      "scheduleReady():\n  " + "\n  ".join(bad))
 
 
+# ── Per endpoint ─────────────────────────────────────────────────────────────
+#
+# The page-level check above passes as soon as ONE post on a page spreads the payload, and
+# the cloud pages post to several booking endpoints each. The per-page check stayed green
+# while every image and Packer form on those pages sent no booking at all. So each endpoint
+# that accepts one is named here with the template that posts to it, and its OWN call site
+# must spread `schedulePayload()`.
+
+_BOOKING_POSTS = {
+    "aws/index.html": [r"/api/aws/amis/copy", r"/api/aws/amis/\$\{[^}]+\}/export",
+                       r"/api/aws/instances/\$\{[^}]+\}/create-image",
+                       r"/api/packer/aws/build"],
+    "azure/index.html": [r"/api/azure/images/\$\{[^}]+\}/export",
+                         r"/api/azure/vms/\$\{[^}]+\}/create-image",
+                         r"/api/packer/azure/build"],
+    "gcp/index.html": [r"/api/gcp/images/\$\{[^}]+\}/export",
+                       r"/api/gcp/instances/\$\{[^}]+\}/create-image",
+                       r"/api/packer/gcp/build"],
+    "oci/index.html": [r"/api/packer/oci/build"],
+    "images/index.html": [r"/api/images/\$\{[^}]+\}/promote"],
+}
+_SPREAD = re.compile(r"\.\.\.\s*this\.schedulePayload\s*\(\)")
+# A method header inside an Alpine component object: `  async name(args) {` or `  name(args) {`.
+_METHOD = re.compile(r"\n\s+(?:async\s+)?[A-Za-z_]\w*\s*\([^)\n]*\)\s*\{")
+
+
+def test_every_booking_endpoint_call_site_sends_the_booking():
+    bad = []
+    for rel, patterns in _BOOKING_POSTS.items():
+        src = _read(os.path.join(_TPL, rel))
+        for pat in patterns:
+            # The URL LITERAL, not `API.post(` -- images/index.html builds it into a
+            # `path` variable first. Either way the spread must be in the same method.
+            calls = [m for m in re.finditer(r"[`'\"]" + pat, src)]
+            if not calls:
+                bad.append(f"{rel}: no request to {pat} -- the form moved or was renamed")
+                continue
+            for m in calls:
+                starts = [h.start() for h in _METHOD.finditer(src, 0, m.start())]
+                body = src[starts[-1] if starts else 0:m.end() + 600]
+                if not _SPREAD.search(body):
+                    line = src[:m.start()].count("\n") + 1
+                    bad.append(f"{rel}:{line}: POST {pat} does not spread schedulePayload()")
+    assert not bad, ("these accept a change-window booking and their form never sends it:\n  "
+                     + "\n  ".join(bad))
+
+
 # ── The server half ───────────────────────────────────────────────────────────
 
 def test_the_shared_helper_is_what_routers_call():

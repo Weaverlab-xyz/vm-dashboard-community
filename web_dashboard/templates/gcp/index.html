@@ -650,13 +650,14 @@
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                  placeholder="Optional description">
         </div>
+        {{ schedule_picker() }}
         <div x-show="captureError" class="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700"
              x-text="captureError"></div>
       </div>
       <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
         <button @click="captureModal = false" class="px-4 py-2 text-sm text-gray-600 font-medium">Cancel</button>
         <button @click="submitCapture()"
-                :disabled="capturing || !captureForm.image_name"
+                :disabled="capturing || !captureForm.image_name || !scheduleReady()"
                 class="flex items-center gap-2 px-5 py-2 bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition">
           <svg x-show="capturing" class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -666,6 +667,40 @@
         </button>
       </div>
     </div>
+  </div>
+
+  <!-- ── Export VHD modal ──────────────────────────────────────────────────── -->
+  <div x-show="exportDialog.open" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="exportDialog.open = false">
+    <form class="bg-white rounded-2xl shadow-2xl w-full max-w-md" @submit.prevent="submitExport()">
+      <div class="px-6 py-5 border-b border-gray-100">
+        <h2 class="text-lg font-semibold text-gray-900">Export to portable VHD</h2>
+      </div>
+      <div class="px-6 py-5 space-y-4">
+        <p class="text-sm text-gray-600">
+          Export <span class="font-mono" x-text="exportDialog.label"></span> to a VHD on the hub
+          backend. This may take 30+ minutes; the VHD is registered in the image registry under
+          the name below.
+        </p>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Registry name <span class="text-red-500">*</span></label>
+          <input type="text" x-model="exportDialog.name" required
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        {{ schedule_picker() }}
+        <div x-show="exportDialog.error" x-cloak
+             class="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700"
+             x-text="exportDialog.error"></div>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+        <button type="button" @click="exportDialog.open = false" class="px-4 py-2 text-sm text-gray-600 font-medium">Cancel</button>
+        <button type="submit" :disabled="exportDialog.submitting || !scheduleReady()"
+                class="px-5 py-2 bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition">
+          <span x-text="exportDialog.submitting ? 'Queuing…' : 'Start Export'"></span>
+        </button>
+      </div>
+    </form>
   </div>
 
   <!-- ── Bulk Deploy modal (one VM per selected image) ─────────────────────── -->
@@ -1015,11 +1050,13 @@
         </div>
 
         <!-- Error -->
+        {{ schedule_picker() }}
+
         <div x-show="gcpPackerError" x-cloak class="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700" x-text="gcpPackerError"></div>
 
         <!-- Submit -->
         <button @click="submitGcpPackerBuild()"
-                :disabled="gcpPackerBuilding || !gcpPackerForm.image_name || (gcpPackerSourceMode === 'custom' ? !gcpPackerForm.source_image_name : !gcpPackerForm.source_image)"
+                :disabled="gcpPackerBuilding || !gcpPackerForm.image_name || (gcpPackerSourceMode === 'custom' ? !gcpPackerForm.source_image_name : !gcpPackerForm.source_image) || !scheduleReady()"
                 class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition">
           <span x-show="!gcpPackerBuilding">Start Packer Build</span>
           <span x-show="gcpPackerBuilding" x-cloak>Queuing build…</span>
@@ -1652,6 +1689,7 @@ function gcpDashboard() {
       submitting: false, error: '',
     },
     exportingImages: new Set(),
+    exportDialog: { open: false, target: null, label: '', name: '', error: '', submitting: false },
     instances:      [],
     networkOpts:    { zones: [], machine_types: [], subnetworks: [], region: '', ssh_key_configured: false },
 
@@ -1788,6 +1826,8 @@ function gcpDashboard() {
 
     async init() {
       this.loadChangeWindows();
+      // One schedule state for the page: dialogs reset it on open, the Build tab on entry.
+      this.$watch('activeTab', t => { if (t === 'build') this.scheduleReset(); });
       this.loadSecretBackends();
       // Deep links (the home page's OT tile lands on /gcp#ot). switchToOT, not a
       // bare activeTab write, so the tab's lazy data load runs. The ot branch is
@@ -2523,6 +2563,7 @@ function gcpDashboard() {
 
     openCaptureModal(inst) {
       this.captureTarget = inst;
+      this.scheduleReset();
       this.captureForm   = { image_name: '', description: '' };
       this.captureError  = '';
       this.capturing     = false;
@@ -2536,7 +2577,7 @@ function gcpDashboard() {
       try {
         const res = await API.post(
           `/api/gcp/instances/${this.captureTarget.instance_name}/create-image`,
-          this.captureForm,
+          { ...this.captureForm, ...this.schedulePayload() },
         );
         this.captureModal = false;
         this.showToast(`Image capture started — Job ${res.job_id}`);
@@ -2559,23 +2600,33 @@ function gcpDashboard() {
       }
     },
 
-    async exportImage(img) {
-      const defaultName = (img.name || '').replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 64);
-      const imageName = prompt(
-        `Export "${img.name}" to a portable VHD on the hub backend?\n\n` +
-        `This may take 30+ minutes. The exported VHD will be registered in the image registry under the name below.\n\n` +
-        `Registry name:`,
-        defaultName,
-      );
-      if (!imageName) return;
+    // A dialog rather than the prompt() it replaces: an export can be booked into a change
+    // window, and a browser prompt has nowhere to put the picker.
+    exportImage(img) {
+      this.scheduleReset();
+      this.exportDialog = {
+        open: true, target: img, error: '', submitting: false, label: img.name,
+        name: (img.name || '').replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 64),
+      };
+    },
+
+    async submitExport() {
+      const d = this.exportDialog, img = d.target;
+      if (!d.name.trim()) { d.error = 'A registry name is required.'; return; }
+      d.submitting = true;
+      d.error = '';
       this.exportingImages = new Set([...this.exportingImages, img.self_link]);
       try {
-        const resp = await API.post(`/api/gcp/images/${encodeURIComponent(img.name)}/export`, { image_name: imageName.trim() });
+        const resp = await API.post(`/api/gcp/images/${encodeURIComponent(img.name)}/export`,
+                                    { image_name: d.name.trim(), ...this.schedulePayload() });
+        d.open = false;
         this.showToast(`Export job queued. Redirecting…`);
         setTimeout(() => { window.location.href = `/jobs/${resp.job_id}`; }, 600);
       } catch (e) {
-        this.showToast(`Export failed to queue: ${e.message}`, 'error');
+        d.error = e.message;
         this.exportingImages = new Set([...this.exportingImages].filter(s => s !== img.self_link));
+      } finally {
+        d.submitting = false;
       }
     },
 
@@ -2627,6 +2678,7 @@ function gcpDashboard() {
           source_image:         custom ? '' : this.gcpPackerForm.source_image,
           source_image_name:    custom ? this.gcpPackerForm.source_image_name : '',
           source_image_project: custom ? this.gcpPackerForm.source_image_project : '',
+          ...this.schedulePayload(),
         };
         const resp = await API.post('/api/packer/gcp/build', payload);
         toast('Packer GCP build queued!', 'success');

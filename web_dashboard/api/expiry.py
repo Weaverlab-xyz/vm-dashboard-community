@@ -90,8 +90,11 @@ async def set_expiry(
 ) -> dict:
     """Set, extend or clear the auto-delete timer on the named resources.
 
-    Authorization is visibility: anyone who can see a resource may extend it, because
-    extending only ever DELAYS a deletion. That matches how ``api/jobs.py`` and
+    Authorization is visibility: anyone who can see a resource may DELAY its deletion.
+    That is only safe because nothing else is open to them -- an earlier absolute date,
+    arming a timer on an untimed row, or a ceiling clamp below the current expiry would
+    each schedule a destruction, and ``expiry_policy.resolve_expiry`` refuses all three
+    for a non-administrator (``_refuse_unless_later``). That matches how ``api/jobs.py`` and
     ``api/k8s.py`` already treat ownerless rows, and avoids inventing a permission scope
     — a new entry in ``PERMISSION_SCOPES`` would silently strip this ability from every
     user who has explicit (non-NULL) permissions.
