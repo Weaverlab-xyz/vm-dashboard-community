@@ -83,8 +83,9 @@ token-shaped on its way to one.
 >
 > What stays unbuilt is the *other* bridge — the SVID minting a credential **inside
 > Password Safe** via the SPIFFE SVID plugin, whose configuration question
-> `spire_lab_service` records as unresolved. `/mcp` itself still has no mTLS path; the SVID
-> is exchanged for a bearer token rather than presented on the connection.
+> `spire_lab_service` records as unresolved. And the SVID **does not authenticate to `/mcp`
+> directly** — `/mcp` has no mTLS path; the SVID is exchanged at the token endpoint for a
+> bearer token, and that token is what `/mcp` sees.
 >
 > Without a service account or a captured bundle, the cell behaves as before: a PAT or
 > client secret is the authorization, and the SVID proves identity beside it in the log.
