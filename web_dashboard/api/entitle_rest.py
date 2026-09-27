@@ -40,7 +40,7 @@ from ..config import settings
 from ..database import User, get_db
 from ..services import config_service
 from ..services import entitle_user_grants as grants
-from .auth import PERMISSION_LEVELS, PERMISSION_SCOPE_LEVELS, PERMISSION_SCOPES
+from .auth import PERMISSION_LEVELS, PERMISSION_SCOPE_LEVELS, PERMISSION_SCOPES, is_retired
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/entitle/rest", tags=["entitle-rest"])
@@ -159,6 +159,12 @@ def _apply(db: Session, payload: dict, *, grant: bool) -> dict:
         raise HTTPException(
             status_code=400,
             detail=f"unknown role_code {role!r} (expected one of {PERMISSION_LEVELS})")
+    elif not grant and is_retired(scope, role):
+        # A level the catalog retired (auth.RETIRED_LEVELS) but Entitle may still hold a
+        # grant of from before. Revoking it has to SUCCEED: revoke_access is idempotent by
+        # contract, and a revoke Entitle cannot complete is standing access it retries
+        # forever. It still goes through `grants.revoke` below, so a stale copy is removed.
+        pass
     elif role not in PERMISSION_SCOPE_LEVELS.get(scope, ()):
         # A real level, but not one this scope offers. Checked separately from the line
         # above so the message names the actual problem: "inventory has no delete" is

@@ -81,8 +81,8 @@ a role, before members sign in.
 | `delete` | destroy |
 | `use` | take part without managing — see below |
 
-`use` exists for the cases where "read" is too little and "write" is far too much. It
-does something on exactly three scopes:
+`use` exists for the cases where "read" is too little and "write" is far too much. Three
+scopes offer it:
 
 - **`secrets:use`** — run an Ansible playbook that reads a secret out of a vault, without
   ever being shown the value.
@@ -97,35 +97,37 @@ does something on exactly three scopes:
   different authority from `change_windows:write`, which maintains the calendar. See
   [Change Windows](scheduling/change-windows.md).
 
-On every other scope that offers it, `use` is currently a checkbox that grants nothing —
-see the next section.
-
-Not every scope offers every level. The scopes added one per navigation section offer
-only the levels something enforces: vSphere has nothing to delete, so it shows no Delete
-checkbox. If you send a level a scope does not offer through the API you get a `422`
-naming the levels it does offer.
-
-The original fourteen are the exception — see the next section.
+**Every scope offers exactly the levels something enforces**, so every checkbox on the grid
+does something. vSphere has nothing to delete, so it shows no Delete checkbox. If you send a
+level a scope does not offer through the API you get a `422` naming the levels it does
+offer. The one exception is a *retired* level (see the next section), which is dropped
+silently, because it never granted anything.
 
 ## The sections
 
-The fourteen original scopes — `vms`, the four clouds, `images`, `containers`,
-`config_mgmt`, `jobs`, `workgroups`, `secrets`, `cloud_database`, `k8s` and
-`cloud_function` — all offer all four levels, whether or not anything checks them. These
-checkboxes save and then **grant nothing**, because no route or check reads them:
+The fourteen original scopes:
 
-| Scope | Levels that currently do nothing |
-|---|---|
-| `vms` | `delete`, `use` |
-| `aws`, `azure`, `gcp`, `oci`, `images`, `containers`, `cloud_database`, `k8s`, `cloud_function` | `use` |
-| `config_mgmt` | `delete`, `use` |
-| `jobs` | `write`, `delete`, `use` — cancelling and rescheduling a job are decided by ownership (the job's creator, or an administrator), not by scope |
-| `workgroups` | `delete`, `use` — deleting a workgroup needs an administrator |
-| `secrets` | `read`, `write`, `delete` — the Secrets page is admin-only throughout; only `use` does anything |
+| Scope | Levels | Notes |
+|---|---|---|
+| `vms` | read, write | |
+| `aws`, `azure`, `gcp`, `oci` | read, write, delete | |
+| `images`, `containers`, `cloud_database`, `k8s`, `cloud_function` | read, write, delete | |
+| `config_mgmt` | read, write | |
+| `jobs` | read | read sees every job; cancelling and rescheduling are decided by ownership (the job's creator, or an administrator) |
+| `workgroups` | read, write | deleting a workgroup needs an administrator |
+| `secrets` | use | the Secrets page itself is administrator-only |
 
-They are kept because narrowing an offered level would make every stored map that holds it
-fail validation (`422`) the next time an admin saved it. Granting them is harmless; just do
-not rely on them.
+**Retired levels.** Until September 2026 these fourteen offered all four levels whether or
+not anything checked them, so the grid showed about thirty checkboxes that saved and
+granted nothing, for example `vms:delete`, `jobs:write` and `secrets:read`. Those levels
+are retired:
+- A one-time migration removed them from every stored permission map, role and group
+  mapping. Nobody's access changed, because they never granted anything.
+- A grid or script that still sends one has it dropped instead of refused.
+- An Entitle revoke of one succeeds.
+
+If you ran `bootstrap_entitle_groups.py` before then, its Entra groups for those levels
+(for example `dashboard-vms-delete`) are orphaned and can be deleted.
 
 The rest are one per navigation section:
 
@@ -240,7 +242,7 @@ Eight roles ship with the dashboard:
 |---|---|
 | **Administrator** | Everything, including the admin-only pages. The grid is not consulted. |
 | **Operator** | Day-to-day work: deploy, run and use, but delete nothing. It does not include the audit log or change windows. |
-| **Read-Only** | Every section at its read level, and nothing else. `change_windows` offers no read level, so it is not included. |
+| **Read-Only** | Every section at its read level, and nothing else. `secrets` and `change_windows` offer no read level, so neither is included. |
 | **POV Presenter** | Run a proof of value — tick use cases, and read the environments and estate behind them. Pair it with the POV access picker. It holds `pov:read` and `pov:use` but not `pov:write`, so it **cannot wake or power** an environment. |
 | **Auditor** | The audit trail, job history and inventory. No writes. |
 | **Cloud Admin** | Full control of the cloud accounts and what runs in them. |

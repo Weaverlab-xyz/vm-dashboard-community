@@ -3988,6 +3988,99 @@ def _backfill_new_permission_scopes(db) -> int:
     return changed
 
 
+_RETIRE_LEVELS_MARKER = "rbac_retire_unenforced_levels_v1"
+
+
+def _strip_retired(perms: dict, retired: dict) -> dict:
+    """``perms`` without any retired (scope, level) pair. Never removes a KEY.
+
+    That is the invariant the whole migration rests on. An empty map means UNRESTRICTED
+    (``api/auth.has_permission``), so `{"secrets": ["read"]}` must become
+    `{"secrets": []}` -- a strict allowlist that grants nothing, exactly what it granted
+    before -- and never `{}`, which would grant everything. ``is_admin`` and any non-list
+    value pass through untouched.
+    """
+    out = dict(perms)
+    for scope, levels in perms.items():
+        gone = retired.get(scope)
+        if gone and isinstance(levels, list):
+            kept = [lv for lv in levels if lv not in gone]
+            if kept != levels:
+                out[scope] = kept
+    return out
+
+
+def _retire_unenforced_levels(db) -> int:
+    """Strip the levels in ``api/auth.RETIRED_LEVELS`` from every stored permission map.
+
+    Those levels were offered by the original fourteen scopes and enforced by nothing, so
+    removing them changes no one's access. That is the point, and the reason this is safe
+    to run unattended. What it fixes is the stored copies, because a map holding a pair the
+    catalog no longer offers:
+      * shows as a grant the grid cannot display;
+      * would 422 on its next save, were the validator not tolerant of exactly these
+        pairs.
+
+    Five places hold maps, and all five are cleaned:
+      * users.permissions, session_permissions and jit_permissions;
+      * access_roles.permissions, built-in and custom alike;
+      * oauth_group_mappings.default_permissions.
+
+    ``users.role_permissions`` is left to ``role_service.reconcile``, which rewrites it
+    from the cleaned roles, which is why this runs BEFORE that call in ``init_db``.
+    ``jit_permissions`` is the one column this file otherwise refuses to touch, because
+    Entitle owns it. Stripping is different from granting: it removes only grants that did
+    nothing, and ``api/entitle_rest`` answers Entitle's later revoke of one with success.
+
+    Marker-guarded, so it runs once. A re-run would be harmless anyway, because it only
+    ever removes pairs nothing can grant any more.
+    """
+    if db.query(SchemaMarker).filter(SchemaMarker.key == _RETIRE_LEVELS_MARKER).first():
+        return 0
+    from .api.auth import RETIRED_LEVELS
+
+    changed = 0
+
+    def _clean_json(raw):
+        """(new_raw, changed?) for one JSON-in-Text column value."""
+        if not raw:
+            return raw, False
+        try:
+            perms = json.loads(raw)
+        except Exception:
+            return raw, False  # malformed is skipped wherever it is read, not repaired here
+        if not isinstance(perms, dict) or not perms:
+            return raw, False  # {} at rest is unrestricted; nothing to narrow
+        cleaned = _strip_retired(perms, RETIRED_LEVELS)
+        if cleaned == perms:
+            return raw, False
+        return json.dumps(cleaned), True
+
+    for user in db.query(User).all():
+        for col in ("permissions", "session_permissions", "jit_permissions"):
+            new, did = _clean_json(getattr(user, col))
+            if did:
+                setattr(user, col, new)
+                changed += 1
+    for role in db.query(AccessRole).all():
+        new, did = _clean_json(role.permissions)
+        if did:
+            role.permissions = new
+            changed += 1
+    for mapping in db.query(OAuthGroupMapping).all():
+        new, did = _clean_json(mapping.default_permissions)
+        if did:
+            mapping.default_permissions = new
+            changed += 1
+
+    db.add(SchemaMarker(
+        key=_RETIRE_LEVELS_MARKER,
+        detail=f"stripped retired levels from {changed} stored map(s)",
+    ))
+    db.commit()
+    return changed
+
+
 def init_db():
     """Initialize database — create all tables and run lightweight migrations.
 
@@ -4559,6 +4652,16 @@ def init_db():
         # deploy) and clears a `role_id` whose role is gone. Neither needs a schema marker:
         # the seed cannot re-grant because it skips the row it would touch, and reconcile
         # only ever writes what the role already says.
+        # Before the seed and reconcile, not after: reconcile rewrites every user's copy of
+        # their role FROM the role row, so the rows have to be clean first. Own try, so a
+        # failure here cannot skip the seed that follows.
+        try:
+            _retire_unenforced_levels(_seed_db)
+        except Exception:  # noqa: BLE001 — a migration must never stop the app booting
+            _seed_db.rollback()
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "retired permission level cleanup skipped", exc_info=True)
         try:
             from .services import role_service
             role_service.seed_builtins(_seed_db)

@@ -132,7 +132,11 @@ def test_assets_are_scopes_plus_administrator():
     assert "dashboard:scope:aws" in identifiers
     assert "dashboard:admin" in identifiers
     scope_asset = next(a for a in assets if a["identifier"] == "dashboard:scope:aws")
-    assert {o["code"] for o in scope_asset["role_options"]} == set(entitle_rest.PERMISSION_LEVELS)
+    # The scope's OWN levels, not all four: Entitle must not publish a requestable role the
+    # dashboard would refuse (aws:use was retired for enforcing nothing).
+    assert ({o["code"] for o in scope_asset["role_options"]}
+            == set(entitle_rest.PERMISSION_SCOPE_LEVELS["aws"]))
+    assert "use" not in {o["code"] for o in scope_asset["role_options"]}
 
 
 def test_actors_include_local_users_not_just_entra_ones():
@@ -231,6 +235,29 @@ def test_revoking_what_is_not_held_is_success_not_a_404():
     client, _ = _client([user])
     resp = _take(client)
     assert resp.status_code == 200 and resp.json()["data"]["changed"] is False
+
+
+def test_revoking_a_retired_level_is_success_and_removes_any_stale_copy():
+    """`aws:use` was offered, and so grantable through Entitle, until it was retired for
+    enforcing nothing. Entitle may still hold such a grant and will eventually revoke it;
+    answering that with a 400 would leave Entitle retrying a revoke forever."""
+    user = _user()
+    user.jit_permissions_dict = {"aws": ["read", "use"]}      # granted before retirement
+    client, _ = _client([user])
+    resp = _take(client, role="use")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["changed"] is True
+    assert user.jit_permissions_dict == {"aws": ["read"]}
+    again = _take(client, role="use")
+    assert again.status_code == 200 and again.json()["data"]["changed"] is False
+
+
+def test_granting_a_retired_level_is_still_refused():
+    user = _user()
+    client, _ = _client([user])
+    resp = _give(client, role="use")
+    assert resp.status_code == 400 and "does not offer" in resp.text
+    assert user.jit_permissions_dict == {}
 
 
 def test_admin_is_its_own_asset_and_round_trips():

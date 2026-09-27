@@ -209,7 +209,7 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
 # ── Permission constants ───────────────────────────────────────────────────────
 
 # "use" grants using a Secrets-Management secret inside an Ansible run without ever
-# seeing its value (scope "secrets"); read/write/delete are unused for that scope. On
+# seeing its value (scope "secrets"); the only level that scope offers. On
 # scope "pov" it means "take part in this POV" — tick a use case — without being able to
 # create, destroy, share or power one. Powering is `write` and not `use` on purpose:
 # POST /managed/{env_id}/power carries a runstate, so it suspends and stops as readily as
@@ -226,27 +226,32 @@ _R = ["read"]
 # asset catalog and bootstrap_entitle_groups.py all derive from this, so a scope cannot
 # advertise a level nothing enforces.
 #
-# The FOURTEEN ORIGINAL SCOPES keep all four levels deliberately, even where a level
-# enforces nothing. Narrowing one would hide a checkbox for a grant that is already
-# stored in somebody's permissions JSON, and there is no normalization pass that prunes
-# stored keys — see the hazard note under `has_permission`. New scopes are free to be
-# tight because nothing is stored against them yet.
+# Every scope offers exactly the levels something enforces --
+# tests/test_permission_levels_enforced.py walks the app's routes and fails on a level
+# nothing checks. The fourteen original scopes used to offer all four regardless, which put
+# a checkbox on the grid (and a requestable role in Entitle) that granted nothing; those
+# levels are in RETIRED_LEVELS below, and `database._retire_unenforced_levels` stripped them
+# from every stored map.
 PERMISSION_SCOPE_LEVELS = {
     # ── the original fourteen ──────────────────────────────────────────────────
-    "vms": _ALL,
-    "aws": _ALL,
-    "azure": _ALL,
-    "gcp": _ALL,
-    "oci": _ALL,
-    "images": _ALL,
-    "containers": _ALL,
-    "config_mgmt": _ALL,
-    "jobs": _ALL,
-    "workgroups": _ALL,
-    "secrets": _ALL,
-    "cloud_database": _ALL,
-    "k8s": _ALL,
-    "cloud_function": _ALL,
+    "vms": _RW,
+    "aws": _RWD,
+    "azure": _RWD,
+    "gcp": _RWD,
+    "oci": _RWD,
+    "images": _RWD,
+    "containers": _RWD,
+    "config_mgmt": _RW,
+    # Cancel and reschedule are decided by ownership (creator or administrator), not scope.
+    "jobs": _R,
+    # Deleting a workgroup is administrator-only.
+    "workgroups": _RW,
+    # The Secrets page is administrator-only throughout; `use` -- read a secret inside an
+    # Ansible run without seeing it -- is the only thing this scope grants.
+    "secrets": ["use"],
+    "cloud_database": _RWD,
+    "k8s": _RWD,
+    "cloud_function": _RWD,
     # ── one per shipped nav section ────────────────────────────────────────────
     # "use" is what a POV's own customer stakeholder gets: read their POV and tick
     # their use cases, with create/destroy/share refused. See api/pov.py.
@@ -288,6 +293,29 @@ PERMISSION_SCOPE_LEVELS = {
     # permissive form would hand it to every legacy NULL-permission user.
     "change_windows": ["write", "use"],
 }
+
+# Levels the original fourteen offered and nothing ever enforced, retired in 2026-09. Kept
+# rather than forgotten, because stored maps, cached grids and Entitle all still name them:
+#   * `validate_permissions_payload` DROPS one silently instead of answering 422 -- the
+#     grant was a no-op, so a grid loaded before the upgrade must still save;
+#   * `api/entitle_rest` answers a revoke of one with success -- a revoke Entitle cannot
+#     complete is standing access it keeps retrying;
+#   * `database._retire_unenforced_levels` stripped them from every stored map, once.
+RETIRED_LEVELS = {
+    "vms": ("delete", "use"),
+    "aws": ("use",), "azure": ("use",), "gcp": ("use",), "oci": ("use",),
+    "images": ("use",), "containers": ("use",), "cloud_database": ("use",),
+    "k8s": ("use",), "cloud_function": ("use",),
+    "config_mgmt": ("delete", "use"),
+    "jobs": ("write", "delete", "use"),
+    "workgroups": ("delete", "use"),
+    "secrets": ("read", "write", "delete"),
+}
+
+
+def is_retired(scope: str, level: str) -> bool:
+    return level in RETIRED_LEVELS.get(scope, ())
+
 
 # Kept as a list under its original name: api/entitle_rest.py, main.py's page context,
 # scripts/bootstrap_entitle_groups.py and the Users/Groups grids all iterate it, and the
@@ -342,7 +370,13 @@ def levels_for_scope(scope: str) -> list:
 
 
 def validate_permissions_payload(payload) -> dict:
-    """Return ``payload`` unchanged, or raise 422 explaining why it is not permissions.
+    """Return ``payload``, or raise 422 explaining why it is not permissions.
+
+    A RETIRED level (see ``RETIRED_LEVELS``) is removed from its scope's list **in place**
+    rather than refused: it granted nothing, and a grid or script from before the retirement
+    must keep saving. In place because every caller keeps using the object it passed. The
+    scope key stays even if its list empties, so this can never turn a restricted map into
+    an empty -- unrestricted -- one.
 
     The admin UI path stored whatever dict it was handed for the whole life of the
     feature, while the machine path (``api/entitle_rest.py``) validated. That asymmetry is
@@ -373,6 +407,8 @@ def validate_permissions_payload(payload) -> dict:
             raise HTTPException(
                 status_code=422,
                 detail=f"Levels for '{scope}' must be a list, not {type(levels).__name__}.")
+        if any(is_retired(scope, lv) for lv in levels):
+            levels[:] = [lv for lv in levels if not is_retired(scope, lv)]
         for level in levels:
             if level not in PERMISSION_LEVELS:
                 raise HTTPException(
