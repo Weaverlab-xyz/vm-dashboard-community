@@ -256,6 +256,13 @@ PERMISSION_SCOPE_LEVELS = {
     # "use" is what a POV's own customer stakeholder gets: read their POV and tick
     # their use cases, with create/destroy/share refused. See api/pov.py.
     "pov": _ALL,
+    # Destroy a POV ASSIGNED to you -- one named in your POV access picker -- without the
+    # general `pov:delete`, which reaches every POV your picker does not narrow away (and
+    # all of them when it is empty). What the POV Presenter role carries: a presenter can
+    # tear down the POVs they were given and nobody else's. An empty picker grants nothing.
+    # Always checked in the explicit form, so a legacy NULL-permission user does not gain
+    # it -- they already hold `pov:delete` anyway. See api/pov.py::_may_destroy.
+    "pov_own": ["delete"],
     "pov_templates": _RWD,
     # Proxmox and Nutanix have real deploy / image-import / delete-VM routes. vSphere,
     # Hyper-V and XCP-ng are read-plus-power only in this dashboard -- there is no route
@@ -337,7 +344,7 @@ PERMISSION_SCOPE_GROUPS = {
     "Hypervisors": ["proxmox", "vsphere", "hyperv", "nutanix", "xcpng", "connections"],
     "Platform": ["images", "containers", "k8s", "cloud_function", "cloud_database",
                  "storage", "secrets", "config_mgmt"],
-    "POV": ["pov", "pov_templates"],
+    "POV": ["pov", "pov_own", "pov_templates"],
     "Operations": ["gateways", "agents", "notifications", "epml", "ot",
                    "change_windows"],
 }

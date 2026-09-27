@@ -1192,6 +1192,7 @@ function permissionScopeLabel(scope) {
         // One entry per nav section. Casing matters here: these are product names, and
         // the CSS `capitalize` fallback renders "hyperv" as "Hyperv".
         pov:            'POV',
+        pov_own:        'POV — assigned to you',
         pov_templates:  'POV Templates',
         proxmox:        'Proxmox',
         vsphere:        'vSphere',

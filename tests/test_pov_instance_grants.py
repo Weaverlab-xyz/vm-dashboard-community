@@ -185,8 +185,65 @@ def test_the_use_case_routes_are_gated_on_use_and_destroy_on_delete():
             assert "_POV_USE" in line, f"use-case route not on the use level: {line.strip()}"
     destroy = [l for l in src.split("\n")
                if l.strip().startswith('@router.delete("/managed/{env_id}"')]
-    assert destroy and "_POV_DELETE" in destroy[0], (
-        f"destroy is not on the delete level: {destroy}")
+    # `_may_destroy`: `pov:delete` as ever, or `pov_own:delete` on an assigned POV. The
+    # behaviour is pinned below; this pins that the route is still gated by it.
+    assert destroy and "Depends(_may_destroy)" in destroy[0], (
+        f"destroy is not on its gate: {destroy}")
+
+
+# ── destroying a POV: `pov:delete`, or `pov_own:delete` on an ASSIGNED one ──────
+
+def _may_destroy(user, env_id):
+    from web_dashboard.api import pov as pov_api
+    try:
+        pov_api._may_destroy(env_id, user)
+        return True
+    except HTTPException as exc:
+        assert exc.status_code == 403, exc.status_code
+        return False
+
+
+def _presenter(env_ids):
+    """Holds the POV Presenter role's map as the role grants it (through role_permissions,
+    the way an assigned role reaches a user), plus a POV access picker."""
+    from web_dashboard.services import role_service
+    spec = next(r for r in role_service._BUILTIN_ROLES if r["slug"] == "pov-presenter")
+    u = _user(env_ids=env_ids)
+    u.role_id = "role-pov-presenter"
+    u.role_permissions_dict = spec["permissions"]
+    return u
+
+
+def test_a_presenter_may_destroy_a_pov_assigned_to_them_and_no_other():
+    u = _presenter(["env-a"])
+    assert _may_destroy(u, "env-a")
+    assert not _may_destroy(u, "env-b"), "a presenter destroyed a POV not assigned to them"
+
+
+def test_a_presenter_with_no_assigned_pov_may_destroy_nothing():
+    """An empty picker means "every POV" for VISIBILITY. For destroy-your-own it must mean
+    nothing -- otherwise an unassigned presenter could destroy every POV."""
+    assert not _may_destroy(_presenter([]), "env-a")
+
+
+def test_the_presenter_role_carries_own_delete_and_not_general_delete():
+    from web_dashboard.services import role_service
+    spec = next(r for r in role_service._BUILTIN_ROLES if r["slug"] == "pov-presenter")
+    assert spec["permissions"].get("pov_own") == ["delete"]
+    assert "delete" not in spec["permissions"]["pov"]
+
+
+def test_a_customer_stakeholder_still_cannot_destroy_their_pov():
+    """`pov:read` + `use` with the POV assigned -- the documented customer shape. Ticking
+    use cases must not have become tearing the POV down."""
+    assert not _may_destroy(_user(perms={"pov": ["read", "use"]}, env_ids=["env-a"]), "env-a")
+
+
+def test_general_delete_is_unchanged():
+    assert _may_destroy(_user(perms={"pov": ["read", "delete"]}), "anything")
+    assert _may_destroy(_user(admin=True), "anything")
+    # A legacy NULL-permission user passes the permissive `pov:delete` branch, as before.
+    assert _may_destroy(_user(), "anything")
 
 
 def test_pov_offers_use_in_the_catalog():

@@ -136,12 +136,17 @@ _BUILTIN_ROLES = (
         # No "wake": powering an environment, waking included, is `pov:write`, which this
         # role deliberately omits. A stakeholder who must wake their own POV needs write or
         # a POV accessor alongside -- see docs/permissions.md.
-        "description": "Run a proof of value: tick use cases and read the estate behind "
-                       "them. Narrow it further with the POV access picker on the user.",
-        # `pov:use` is the level that carries use-case ticking and wake -- see
-        # docs/permissions.md. Create/destroy/share stay on write/delete, which this omits.
+        "description": "Run a proof of value: tick use cases, read the estate behind them, "
+                       "and destroy the POVs assigned to them in the POV access picker on "
+                       "the user.",
+        # `pov:use` carries use-case ticking. Create and share stay on `pov:write`, and
+        # destroying ANY POV on `pov:delete`, both omitted; `pov_own:delete` is the
+        # assigned-only destroy.
         "permissions": {
             "pov": _RU, "pov_templates": _R,
+            # Destroy the POVs assigned to them -- never anyone else's, and nothing at all
+            # with an empty POV access picker. General `pov:delete` stays off.
+            "pov_own": ["delete"],
             "vms": _R, "jobs": _R, "inventory": _R, "connections": _R,
         },
     },

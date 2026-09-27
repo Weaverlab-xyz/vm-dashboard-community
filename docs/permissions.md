@@ -154,7 +154,8 @@ The rest are one per navigation section:
 
 | Scope | Levels | Covers |
 |---|---|---|
-| `pov` | read, write, delete, use | POV environments, their use cases, wiring, sharing and accessors |
+| `pov` | read, write, delete, use | POV environments, their use cases, wiring, sharing and accessors. `delete` destroys any POV the user's POV access picker allows, and every POV when the picker is empty |
+| `pov_own` | delete | destroy a POV **assigned to you**, meaning one named in your POV access picker, and no other. With nothing in the picker it grants nothing. What the POV Presenter role carries |
 | `pov_templates` | read, write, delete | template builds, blueprints, and the BeyondTrust tenant registry |
 | `proxmox` | read, write, delete | Proxmox: browse, deploy, import an image, delete a VM |
 | `nutanix` | read, write, delete | Nutanix: the same |
@@ -264,7 +265,7 @@ Eight roles ship with the dashboard:
 | **Administrator** | Everything, including the admin-only pages. The grid is not consulted. |
 | **Operator** | Day-to-day work: deploy, run and use, but delete nothing. It does not include the audit log or change windows. |
 | **Read-Only** | Every section at its read level, and nothing else. `secrets` and `change_windows` offer no read level, so neither is included. |
-| **POV Presenter** | Run a proof of value — tick use cases, and read the environments and estate behind them. Pair it with the POV access picker. It holds `pov:read` and `pov:use` but not `pov:write`, so it **cannot wake or power** an environment. |
+| **POV Presenter** | Run a proof of value — tick use cases, read the environments and estate behind them, and **destroy the POVs assigned to them**. Assign POVs with the POV access picker on the user: a presenter can destroy those and no others, and with nothing assigned, none. It holds `pov:read`, `pov:use` and `pov_own:delete`, but not `pov:write` or `pov:delete`, so it **cannot create, wake or power** an environment, or destroy one it was not given. |
 | **Auditor** | The audit trail, job history and inventory. No writes. |
 | **Cloud Admin** | Full control of the cloud accounts and what runs in them. |
 | **DBA** | Cloud databases end to end, plus the secrets a database run needs. |

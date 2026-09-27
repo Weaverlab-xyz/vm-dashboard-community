@@ -106,7 +106,29 @@ router = APIRouter(
 # stops and suspends as readily as it starts; the start-only wake is the accessor's
 # /self/wake, which names no environment because its session already does.
 _POV_WRITE = [Depends(require_permission("pov", "write"))]
-_POV_DELETE = [Depends(require_permission("pov", "delete"))]
+
+
+def _may_destroy(env_id: str, current_user: User = Depends(get_current_user)) -> User:
+    """Who may destroy a POV: `pov:delete` as ever, or `pov_own:delete` on an ASSIGNED one.
+
+    `pov:delete` reaches every POV the router-level `require_pov_env_access` leaves
+    visible, which is all of them when the user's POV access picker is empty. Unchanged.
+
+    `pov_own:delete` is narrower by construction, and it is what the POV Presenter role
+    carries: only a POV named in the user's OWN picker. An empty picker grants nothing
+    here, which is the opposite of what it means for visibility, and that is the point --
+    "assigned to you" needs something to have been assigned. Explicit form, so a legacy
+    NULL-permission user does not gain it (they already pass the first branch).
+    """
+    if has_permission(current_user, "pov", "delete"):
+        return current_user
+    if (has_explicit_permission(current_user, "pov_own", "delete")
+            and env_id in (current_user.pov_env_ids_list or [])):
+        return current_user
+    raise HTTPException(
+        status_code=403,
+        detail="Requires 'pov:delete' permission, or 'pov_own:delete' on a POV assigned "
+               "to you.")
 _POV_USE = [Depends(require_permission("pov", "use"))]
 
 _DEFAULT_PLATFORM = "skytap"
@@ -1870,7 +1892,7 @@ def get_summary(env_id: str, db: Session = Depends(get_db),
     return pov_summary.build(db, env)
 
 
-@router.delete("/managed/{env_id}", status_code=202, dependencies=_POV_DELETE)
+@router.delete("/managed/{env_id}", status_code=202, dependencies=[Depends(_may_destroy)])
 def destroy(env_id: str, db: Session = Depends(get_db),
                   current_user: User = Depends(get_current_user)):
     """Destroy the environment and reap the platform side.
