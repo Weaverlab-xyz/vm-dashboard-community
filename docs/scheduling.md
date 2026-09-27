@@ -1,6 +1,6 @@
 # Scheduling
 
-> **Audience:** operator · **Profile:** `both` · **Read this when:** you want a change to run later, run repeatedly, or run only inside an approved window — and you are not sure which of the dashboard's three "schedule" features that is.
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you want a change to run later, run repeatedly, or run only inside an approved window — or blocked before it starts — and you are not sure which of the dashboard's features that is.
 
 "Schedule" means three different things in this dashboard. They are separate features
 with separate controls, and picking the wrong one is the usual reason a schedule "did not
@@ -8,10 +8,18 @@ work". This page tells them apart and sends you to the page with the detail. The
 pages live in the `scheduling/` folder beside this one, the way `workload-lab/` sits beside
 its hub.
 
+Two pages decide whether a change may start at all, and they are two halves of one control:
+[Change Windows](scheduling/change-windows.md) decide **when**, and
+[Action Guardrails](scheduling/policy-guardrails.md) decide **whether**, by evaluating the
+request against OPA policy before a job exists. They share one list of gated actions, and
+a guardrail's `needs_approval` verdict can hold a change for the same approver a window
+uses.
+
 | You want to… | Use | Where | Detail |
 |---|---|---|---|
 | run **one** change later — at a time, or in the next approved window | a **booking** | **When to run** on the form, or **Schedule** on a selection toolbar | [Change Windows — Scheduling one job](scheduling/change-windows.md#scheduling-one-job) |
 | run the **same** change on every occurrence of a window | a **recurring schedule** (Repeat) | **Repeat in a change window** on a finished job's page; listed at **Schedules** (`/schedules`) | [Change Windows — Repeating a change](scheduling/change-windows.md#repeating-a-change) |
+| block a disallowed change before it starts — wrong region, oversized, a change freeze | an **Action Guardrail** | Settings → Action Guardrails | [Action Guardrails](scheduling/policy-guardrails.md) |
 | stop cloud VMs out of business hours to save money | a **suspend schedule** | Settings, per cloud | [Cloud VMs — Suspend schedules](cloud-vms.md#suspend-schedules-all-four-clouds) |
 
 The first two share one engine — the job queue holds a booked job `pending` until its
@@ -67,6 +75,8 @@ on-premises power booking needs an agent is under
 
 * [Change Windows](scheduling/change-windows.md) — the full reference for bookings, repeats, approval
   and the per-workgroup requirement.
+* [Action Guardrails](scheduling/policy-guardrails.md) — the policy half: what is refused,
+  or held for approval, before it is ever queued.
 * [Cloud VMs](cloud-vms.md) — suspend schedules and spend caps.
 * [Job Worker](job-worker.md) — how a booked job gets a turn once its time arrives.
 * [Remote Agents — hypervisors](remote-agents/hypervisors.md) — binding a hypervisor

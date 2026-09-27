@@ -12,8 +12,9 @@
 #   * changes web_dashboard/templates/, web_dashboard/api/, web_dashboard/models/,
 #     web_dashboard/main.py or web_dashboard/services/feature_flags.py, or
 #   * carries a `feat:` / `feat(scope):` commit.
-# It PASSES when it also changes docs/, README.md or a runners/**/README.md, or when any
-# commit on it carries a trailer line
+# It PASSES when it also changes docs/, README.md, CONTRIBUTING.md (where a change to how
+# contributors work is documented) or a runners/**/README.md, or when any commit on it
+# carries a trailer line
 #
 #     Docs: none — <reason>
 #
@@ -51,7 +52,7 @@ if [ -z "$surface" ] && [ -z "$feats" ]; then
   exit 0
 fi
 
-docs="$(printf '%s\n' "$changed" | grep -E '^(docs/.*\.md|README\.md|runners/.*README\.md)$' || true)"
+docs="$(printf '%s\n' "$changed" | grep -E '^(docs/.*\.md|README\.md|CONTRIBUTING\.md|runners/.*README\.md)$' || true)"
 if [ -n "$docs" ]; then
   echo "docs gate: passed — docs changed alongside the code:"
   printf '  %s\n' $docs

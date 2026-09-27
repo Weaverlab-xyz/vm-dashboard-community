@@ -18,7 +18,7 @@ The companion docs:
   artefacts (playbooks, Packer manifests) live
 - [Secrets Management](secrets-management.md) — credentials feeding
   the IaC layer
-- [Policy Guardrails](policy-guardrails.md) — optional pre-action OPA
+- [Policy Guardrails](scheduling/policy-guardrails.md) — optional pre-action OPA
   checks that can block a deploy before it starts (allowed regions,
   instance-size caps, change-freeze windows)
 
@@ -300,7 +300,7 @@ build/deploy split natively but doesn't enforce naming hygiene.
 
 Remote state with locking already ships in community (see
 [State](#state-the-thing-that-makes-iac-work) above), as do pre-action
-policy guardrails ([Policy Guardrails](policy-guardrails.md)). A few
+policy guardrails ([Policy Guardrails](scheduling/policy-guardrails.md)). A few
 things the community edition still leaves to the hosted edition — see
 [docs/saas-comparison.md](saas-comparison.md) for the philosophy.
 
@@ -317,7 +317,7 @@ things the community edition still leaves to the hosted edition — see
   offer for config management.
 - **Post-apply compliance-as-code.** Community enforces policy
   *pre-action* — the OPA guardrails block a disallowed deploy before it
-  starts ([Policy Guardrails](policy-guardrails.md)). SaaS adds the
+  starts ([Policy Guardrails](scheduling/policy-guardrails.md)). SaaS adds the
   *post-apply* half: continuously evaluating already-deployed
   infrastructure against policy and flagging resources that have drifted
   out of compliance. Pre-action gate + post-apply scan = one policy

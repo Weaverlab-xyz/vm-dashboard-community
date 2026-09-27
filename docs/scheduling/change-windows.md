@@ -80,7 +80,8 @@ A booked job appears on **Jobs** with a second badge next to its status. It is s
 
 ### Destroys
 
-A teardown is the operation a change window most needs to cover — the guardrails make
+A teardown is the operation a change window most needs to cover — the
+[guardrails](policy-guardrails.md) make
 the same argument, which is why the change-freeze policy is the one that deliberately
 applies to teardowns as well as deploys.
 
@@ -216,7 +217,8 @@ requirement. A booking *outside* it does not; a booking is not a bypass.
 
 ### Which actions it covers
 
-The same list as the guardrails: **Settings → Action Guardrails → Gated actions**. One
+The same list as the [guardrails](policy-guardrails.md): **Settings → Action Guardrails →
+Gated actions**. One
 list, not two — if an action is worth gating on policy, it is the kind of action a
 change window is about. Two consequences worth knowing:
 

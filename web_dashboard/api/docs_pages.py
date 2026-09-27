@@ -15,7 +15,7 @@ import re
 from pathlib import Path, PurePosixPath
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 # Everything GitHub's slugger deletes outright: anything that isn't a word
 # character, a literal ASCII hyphen, or a space.
@@ -139,6 +139,49 @@ router = APIRouter(tags=["docs"])
 # and is COPYed into the image — see Dockerfile).
 _DOCS_DIR = (Path(__file__).resolve().parents[2] / "docs").resolve()
 
+# Pages that moved, old route -> new route, both without ".md". A move repoints every link
+# in the repo, but not a bookmark, a PRA jump-item note or a message somebody pasted
+# months ago, and without this those are a bare 404 that reads as "the doc was deleted".
+# doc_page consults this only after both real lookups miss, so an entry can never shadow a
+# live page, and the target comes from this literal and never from the request, so it is
+# no way round the traversal guard. Entries stay forever; tests/test_docs_moved_redirects
+# pins that every target exists and that no source has come back to life.
+#
+# A key that names a FOLDER also covers every page under it -- see _moved_to. The browser
+# carries a #fragment across the 301 itself, so deep links keep their section.
+_MOVED = {
+    # Hub folders, 2026-09 (docs/scheduling/, docs/integrations/beyondtrust/, ot-demo-cell/)
+    "change-windows":                            "scheduling/change-windows",
+    "policy-guardrails":                         "scheduling/policy-guardrails",
+    "integrations/password-safe":                "integrations/beyondtrust/password-safe",
+    "integrations/privileged-remote-access":     "integrations/beyondtrust/privileged-remote-access",
+    "integrations/gateways":                     "integrations/beyondtrust/gateways",
+    "integrations/entitle":                      "integrations/beyondtrust/entitle",
+    "integrations/entitle-dashboard-permissions": "integrations/beyondtrust/entitle-dashboard-permissions",
+    "integrations/epml":                         "integrations/beyondtrust/epml",
+    "integrations/databases":                    "integrations/beyondtrust/databases",
+    "profiles/demo/ot-protocol-clients":         "profiles/demo/ot-demo-cell/ot-protocol-clients",
+    # The Workload Lab folder, 2026-09. certificates.md was split three ways; its opening
+    # section, the plugin reference, is what kept the name.
+    "integrations/workload-cloud":               "workload-lab/cloud",
+    "integrations/workload-kubernetes":          "workload-lab/kubernetes",
+    "integrations/spiffe":                       "workload-lab/spiffe",
+    "integrations/workload-credentials":         "workload-lab/workload-credentials",
+    "integrations/certificates":                 "workload-lab/certificates",
+}
+
+
+def _moved_to(rel: str):
+    """Where a moved page lives now, or None. An exact key wins; otherwise the longest key
+    that is a folder prefix of ``rel`` carries the rest of the path with it, so
+    integrations/databases/password-safe-gcp follows its folder."""
+    if rel in _MOVED:
+        return _MOVED[rel]
+    for old in sorted(_MOVED, key=len, reverse=True):
+        if rel.startswith(old + "/"):
+            return _MOVED[old] + rel[len(old):]
+    return None
+
 # Only these sections are surfaced on the /docs index. Other subdirectories
 # (design/, notes/, runbooks/, profiles/pov/design/) still render if you know the path —
 # they're just internal enough that we don't want them cluttering the operator-facing index.
@@ -239,6 +282,8 @@ _TITLE_OVERRIDES = {
     "integrations/beyondtrust/entitle-dashboard-permissions": "Entitle dashboard permissions",
     "integrations/beyondtrust/gateways": "Gateway hosts",
     "profiles/demo/ot-demo-cell/ot-protocol-clients": "OT protocol clients on Windows",
+    # The filename predates the product name; Settings and the page's own H1 say this.
+    "scheduling/policy-guardrails":      "Action Guardrails",
     # The Workload Lab folder. Derived titles read as filenames here -- "Spiffe", "Cloud",
     # "Kubernetes", "Subordinate Ca" -- and the last of those is simply wrong. "Cloud" and
     # "Kubernetes" are also the short names of two unrelated top-level pages, so without
@@ -488,6 +533,9 @@ async def doc_page(page: str) -> HTMLResponse:
         except ValueError:
             raise HTTPException(status_code=404, detail="doc not found")
         if not candidate.is_file():
+            moved = _moved_to(rel)
+            if moved is not None:
+                return RedirectResponse(f"/docs/{moved}", status_code=301)
             raise HTTPException(status_code=404, detail="doc not found")
         source = f"{rel}/README"
 
