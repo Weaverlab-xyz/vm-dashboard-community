@@ -18,14 +18,14 @@ and the code is arranged so nobody can miss it:
     revoked from Settings -> API Tokens while the loop is running. The log line carries
     its NAME and no part of its value -- see ``token_label``.
 
-THE SVID DOES NOT AUTHENTICATE TO /mcp, AND NOTHING HERE PRETENDS IT DOES. The MCP
-server takes a Bearer PAT (api/mcp_server.py) and has no mTLS path. Bridging the two --
-having the SVID mint the PAT -- needs the Password Safe SPIFFE SVID plugin, whose
-configuration question services/spire_lab_service.py records as unresolved. So the
-worker proves its identity and spends its authorization in the same log line, and the
-gap between them stays visible instead of being papered over.
+WITH --token-source spiffe, THE SVID MINTS THE AUTHORIZATION. The worker presents a
+JWT-SVID (audience: the dashboard's /api/oauth/token) as an OAuth client assertion, and
+the dashboard -- which holds the trust domain's JWT keys -- returns a short-lived access
+token for the service account bound to that SPIFFE ID (``SpiffeCredentials``). Nothing is
+stored on the host. In every OTHER mode the two credentials stay separate as below: the
+SVID proves identity in the log line, and a PAT or client secret is what /mcp accepts.
 
-THREE TOKEN SOURCES, AND TWO OF THEM LEAVE NOTHING ON THIS HOST.
+FOUR TOKEN SOURCES, AND THREE OF THEM LEAVE NOTHING ON THIS HOST (spiffe is above).
 
   * ``--token-source file`` (default) reads a 0600 file. An env var would be readable
     from /proc/<pid>/environ by anything running as the same user and shows up in a
@@ -191,6 +191,57 @@ class ClientCredentials:
         basic = base64.b64encode(f"{self.client_id}:{self._secret}".encode()).decode()
         body = _post_json(self.token_url, {"Authorization": f"Basic {basic}"},
                           form={"grant_type": "client_credentials"})
+        self._access = body.get("access_token") or ""
+        if not self._access:
+            raise RuntimeError("the token endpoint returned no access_token")
+        self._expires = time.time() + int(body.get("expires_in") or 300)
+        return self._access
+
+
+class SpiffeCredentials:
+    """A service account's OAuth client authenticated by this workload's JWT-SVID.
+
+    NOTHING IS STORED ON THIS HOST. Each exchange fetches a fresh JWT-SVID from the local
+    SPIRE agent, audience-bound to the dashboard's token endpoint, and presents it as the
+    client assertion (the IETF OAuth SPIFFE profile, ``jwt-spiffe``). The dashboard verifies
+    it against the trust domain's keys and returns an access token that lives minutes.
+    An assertion is single-use there, which is why one is fetched per exchange rather than
+    cached.
+
+    This is the bridge the module docstring used to name as missing: the SVID now MINTS
+    the authorization, instead of standing beside a PAT in the log line.
+    """
+
+    REFRESH_MARGIN = 60
+    ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe"
+
+    def __init__(self, token_url: str, socket_path: str, client_id: str = ""):
+        self.token_url = token_url
+        self.socket_path = socket_path
+        self.client_id = client_id
+        self._access = ""
+        self._expires = 0.0
+
+    def __repr__(self) -> str:
+        return f"SpiffeCredentials({self.client_id or 'svid'})"
+
+    __str__ = __repr__
+
+    def bearer(self) -> str:
+        if self._access and time.time() < self._expires - self.REFRESH_MARGIN:
+            return self._access
+        try:
+            svid = _spire_jwt_svid(self.token_url, self.socket_path)
+        except SystemExit as exc:
+            # A fatal at startup, but mid-run the agent may just be restarting: surface it
+            # as a failed call so the loop logs it and tries again next interval.
+            raise RuntimeError(str(exc)) from None
+        form = {"grant_type": "client_credentials",
+                "client_assertion_type": self.ASSERTION_TYPE,
+                "client_assertion": svid}
+        if self.client_id:
+            form["client_id"] = self.client_id
+        body = _post_json(self.token_url, {}, form=form)
         self._access = body.get("access_token") or ""
         if not self._access:
             raise RuntimeError("the token endpoint returned no access_token")
@@ -1821,7 +1872,7 @@ async def call_once(url: str, token: str, tool: str) -> dict:
     from mcp import ClientSession
     from mcp.client.sse import sse_client
 
-    bearer = token.bearer() if isinstance(token, ClientCredentials) else token
+    bearer = token.bearer() if isinstance(token, (ClientCredentials, SpiffeCredentials)) else token
     headers = {"Authorization": f"Bearer {bearer}"}
     async with sse_client(url, headers=headers) as (reader, writer):
         async with ClientSession(reader, writer) as session:
@@ -1859,6 +1910,7 @@ SOURCE_HOLDS = {
     "file": "a static secret on this host",
     "wlc": "nothing on this host",
     "ps": "nothing on this host",
+    "spiffe": "nothing on this host — a JWT-SVID from the local SPIRE agent",
 }
 
 
@@ -2352,7 +2404,10 @@ def main(argv=None) -> int:
     ap.add_argument("--oauth-token-url", default=os.environ.get("AGENT_OAUTH_TOKEN_URL", ""),
                     help="where an OAuth client pair (vmsa_…:vmss_…) is exchanged for "
                          "access tokens. Default: /api/oauth/token on --url's origin.")
-    ap.add_argument("--token-source", choices=("file", "wlc", "ps"),
+    ap.add_argument("--oauth-client-id", default=os.environ.get("AGENT_OAUTH_CLIENT_ID", ""),
+                    help="with --token-source spiffe: the SVID-bound OAuth client id "
+                         "(optional; the dashboard resolves the client from the SVID).")
+    ap.add_argument("--token-source", choices=("file", "wlc", "ps", "spiffe"),
                     default=os.environ.get("AGENT_TOKEN_SOURCE", "file"),
                     help="where the dashboard PAT comes from. 'wlc' reads it out of "
                          "Workload Credentials' own store; 'ps' reads the Password Safe "
@@ -2573,9 +2628,13 @@ def main(argv=None) -> int:
             ps_api_url=args.ps_api_url, account_id=args.ps_account_id,
             system_id=args.ps_system_id, duration_min=args.ps_duration,
             reason=args.ps_reason, **wlc)
+    elif args.token_source == "spiffe":
+        token = SpiffeCredentials(args.oauth_token_url or oauth_token_url(args.url),
+                                  args.spiffe_socket, args.oauth_client_id)
     else:
         token = read_token(args.token_file)
-    token = as_credential(token, args.oauth_token_url or oauth_token_url(args.url))
+    if isinstance(token, str):
+        token = as_credential(token, args.oauth_token_url or oauth_token_url(args.url))
 
     return run(args.url, token, args.tool, args.spiffe_socket, args.interval,
                token_source=args.token_source, label=args.token_label)

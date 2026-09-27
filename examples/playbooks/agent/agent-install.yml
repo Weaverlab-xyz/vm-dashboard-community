@@ -25,7 +25,13 @@
 #
 # extra_vars:
 #   agent_mcp_url:      https://dashboard.example/mcp/sse   # REQUIRED
-#   agent_token_source: file | wlc | ps                 # default file
+#   agent_token_source: file | wlc | ps | spiffe        # default file
+#
+#   # `spiffe` holds NOTHING AT ALL: the worker authenticates to the dashboard's token
+#   # endpoint with a JWT-SVID from the local SPIRE agent. The agent cell prints the
+#   # client id when it mints an SVID-bound client; the trust domain's keys must be
+#   # registered on the dashboard (the SPIRE lab's "Capture JWT bundle").
+#   agent_oauth_client_id: vmsa_…                       # optional, for `spiffe`
 #   agent_token:        vmcli_<64hex>                   # REQUIRED when source is `file`
 #   agent_token_label:  mcp-reader-pat                  # the PAT's NAME, as the cell's
 #                                                       # create response returns it and
@@ -69,6 +75,7 @@
   vars:
     agent_token_source: file
     agent_token_label: ""
+    agent_oauth_client_id: ""
     agent_wlc_base_url: ""
     agent_wlc_site_id: ""
     agent_wlc_service_name: ""
@@ -106,6 +113,8 @@
       {% if agent_token_label %}--token-label "{{ agent_token_label }}"{% endif %}
       {% if agent_token_source == 'file' %}
       --token-file {{ agent_conf }}/token
+      {% elif agent_token_source == 'spiffe' %}
+      {% if agent_oauth_client_id %}--oauth-client-id {{ agent_oauth_client_id }}{% endif %}
       {% else %}
       --identity-platform {{ agent_identity_platform }}
       {% if agent_identity_token_file %}--identity-token-file {{ agent_identity_token_file }}{% endif %}

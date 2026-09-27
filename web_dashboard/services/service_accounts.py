@@ -141,10 +141,28 @@ def service_account_problem(user) -> Optional[str]:
 
 def create_client(db: Session, user, *, name: str, secret_days: Optional[int] = None,
                   token_ttl_seconds: Optional[int] = None,
-                  created_by: str = "") -> Tuple[object, str]:
+                  created_by: str = "", spiffe_id: str = "") -> Tuple[object, str]:
     """Mint an OAuth client for a service account. Returns ``(row, raw_secret)``; the raw
-    secret is not stored and cannot be retrieved again."""
+    secret is not stored and cannot be retrieved again.
+
+    With ``spiffe_id`` the client authenticates with a JWT-SVID for that ID instead
+    (``services/spiffe_assertion``) and the returned secret is "": one is still generated
+    so the column has a value, but it is never shown and ``authenticate_client`` refuses
+    secret auth for such a client anyway.
+    """
     from ..database import OAuthClient
+    from . import spiffe_assertion
+
+    spiffe_id = (spiffe_id or "").strip()
+    if spiffe_id:
+        if not spiffe_assertion.valid_spiffe_id(spiffe_id):
+            raise ServiceAccountError(f"{spiffe_id!r} is not a SPIFFE ID (spiffe://<trust-domain>/<path>).")
+        if (db.query(OAuthClient)
+                .filter(OAuthClient.spiffe_id == spiffe_id, OAuthClient.is_active == True)  # noqa: E712
+                .first()):
+            raise ServiceAccountError(
+                f"{spiffe_id} already authenticates an active OAuth client. One identity, "
+                "one client -- revoke that one first.")
 
     problem = service_account_problem(user)
     if problem:
@@ -166,10 +184,12 @@ def create_client(db: Session, user, *, name: str, secret_days: Optional[int] = 
         token_ttl_seconds=ttl,
         created_by=created_by or None,
         is_active=True,
+        auth_method=spiffe_assertion.AUTH_METHOD if spiffe_id else None,
+        spiffe_id=spiffe_id or None,
     )
     db.add(row)
     db.flush()
-    return row, raw
+    return row, ("" if spiffe_id else raw)
 
 
 def rotate_client(db: Session, client, *, secret_days: Optional[int] = None,
@@ -177,6 +197,9 @@ def rotate_client(db: Session, client, *, secret_days: Optional[int] = None,
     """Issue a new secret; the old one keeps working for ``grace_minutes``."""
     if not client.is_active:
         raise ServiceAccountError("That client is revoked. Create a new one instead.")
+    if client.auth_method == "spiffe_jwt":
+        raise ServiceAccountError(
+            "That client authenticates with a SPIFFE JWT-SVID and has no secret to rotate.")
     days = _bounded(secret_days, DEFAULT_SECRET_DAYS, 1, MAX_SECRET_DAYS,
                     "Secret lifetime (days)")
     grace = _bounded(grace_minutes, DEFAULT_ROTATION_GRACE_MINUTES, 0,
@@ -213,6 +236,10 @@ def authenticate_client(db: Session, client_id: str, secret: str,
     now = now or datetime.utcnow()
     client = db.query(OAuthClient).filter(OAuthClient.client_id == client_id).first()
     if not client or not client.is_active:
+        return None
+    if client.auth_method == "spiffe_jwt":
+        # Its secret was generated and discarded; refusing here as well means that stays
+        # true even if the column were ever filled in by hand.
         return None
     presented = hash_secret(secret)
     ok = False

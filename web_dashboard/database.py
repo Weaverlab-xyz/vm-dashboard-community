@@ -533,6 +533,74 @@ class OAuthClient(Base):
     created_by = Column(String(100), nullable=True)
     last_used_at = Column(DateTime, nullable=True)
     is_active = Column(Boolean, default=True)
+    # How the client authenticates at the token endpoint. NULL/"secret" = the secret above.
+    # "spiffe_jwt" = a JWT-SVID for `spiffe_id`, verified against that trust domain's keys
+    # (services/spiffe_assertion) -- the client then has NO usable secret: `secret_hash`
+    # holds the hash of a value that was generated and never shown, and
+    # `authenticate_client` refuses secret auth for it regardless.
+    auth_method = Column(String(20), nullable=True)
+    spiffe_id = Column(String(500), nullable=True, index=True)
+
+
+class ExternalWorkloadIdentity(Base):
+    """An identity at an external IdP that authenticates AS a service account.
+
+    The workload keeps no dashboard secret at all: it presents an access token its own IdP
+    issued (Entra, Okta, Keycloak -- client credentials, or a managed identity), and
+    ``services/external_workload`` verifies it against that IdP's JWKS and resolves the
+    service account mapped here.
+
+    KEYED ON ``(issuer, subject)`` -- the token's ``sub`` -- AND NEVER ON ``azp``/``appid``.
+    In a client-credentials token ``sub`` is the client's own identity (Entra: the service
+    principal's object id; Okta: the client id; Keycloak: the client's service-account
+    user). A PERSON signing in through the same app registration gets a token with the
+    same ``azp`` and their OWN ``sub``, so a mapping on ``azp`` would let every user of that
+    app act as the workload. ``expected_client`` is a second, optional check on top.
+    """
+    __tablename__ = "external_workload_identities"
+    __table_args__ = (UniqueConstraint("issuer", "subject", name="uq_external_workload_iss_sub"),)
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    issuer = Column(String(500), nullable=False)
+    subject = Column(String(255), nullable=False)
+    # If set, the token's azp / appid / client_id / cid must equal it as well.
+    expected_client = Column(String(255), nullable=True)
+    name = Column(String(100), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by = Column(String(100), nullable=True)
+    last_used_at = Column(DateTime, nullable=True)
+    is_active = Column(Boolean, default=True)
+
+
+class SpiffeTrustDomain(Base):
+    """Where the dashboard gets a SPIFFE trust domain's JWT-SVID signing keys.
+
+    Two sources, and a row uses whichever it has -- the URL when set, else the bundle:
+
+      * ``jwks_url`` -- fetched live and cached (SPIRE's OIDC Discovery Provider ``/keys``,
+        or any JWKS endpoint), with ``ca_pem`` pinning its TLS when it is served by a
+        private CA. Always current across SPIRE's key rotation;
+      * ``bundle_json`` -- a stored SPIFFE bundle (``spire-server bundle show -format
+        spiffe``), pasted or captured from a SPIRE lab row (``spire_lab_id``). It goes
+        stale when SPIRE rotates its JWT keys, which is why ``bundle_captured_at`` is
+        kept and shown.
+
+    Only keys marked ``use: jwt-svid`` are used from a bundle; its X.509 roots are not
+    signing keys for a JWT.
+    """
+    __tablename__ = "spiffe_trust_domains"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    trust_domain = Column(String(255), nullable=False, unique=True, index=True)
+    jwks_url = Column(String(500), nullable=True)
+    ca_pem = Column(Text, nullable=True)
+    bundle_json = Column(Text, nullable=True)
+    bundle_captured_at = Column(DateTime, nullable=True)
+    spire_lab_id = Column(String(36), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by = Column(String(100), nullable=True)
+    updated_at = Column(DateTime, nullable=True)
 
 
 class LoginAttempt(Base):
@@ -4703,6 +4771,12 @@ def init_db():
             # builds it.
             "ALTER TABLE users ADD COLUMN is_service_account BOOLEAN",
             "ALTER TABLE agent_cells ADD COLUMN oauth_client_id VARCHAR(36)",
+            # OAuth clients that authenticate with a SPIFFE JWT-SVID instead of a secret
+            # (services/spiffe_assertion). NULL auth_method reads as "secret", which is
+            # every client that predates this. `spiffe_trust_domains` is new: create_all.
+            "ALTER TABLE oauth_clients ADD COLUMN auth_method VARCHAR(20)",
+            "ALTER TABLE oauth_clients ADD COLUMN spiffe_id VARCHAR(500)",
+            "CREATE INDEX ix_oauth_clients_spiffe_id ON oauth_clients(spiffe_id)",
         ]
         # Migrations that never applied because of LOCK CONTENTION rather than because
         # the column was already there. Collected rather than raised: one contended

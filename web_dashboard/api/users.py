@@ -558,6 +558,8 @@ class OAuthClientCreateRequest(BaseModel):
     name: str
     secret_days: Optional[int] = None
     token_ttl_seconds: Optional[int] = None
+    # Set = the client authenticates with a JWT-SVID for this SPIFFE ID and has no secret.
+    spiffe_id: Optional[str] = None
 
 
 class OAuthClientRotateRequest(BaseModel):
@@ -576,6 +578,8 @@ class OAuthClientItem(BaseModel):
     token_ttl_seconds: int
     last_used_at: Optional[datetime] = None
     is_active: bool
+    auth_method: str = "secret"
+    spiffe_id: Optional[str] = None
 
 
 class OAuthClientSecretResponse(OAuthClientItem):
@@ -590,6 +594,7 @@ def _client_item(c) -> dict:
         previous_expires_at=c.previous_expires_at,
         token_ttl_seconds=c.token_ttl_seconds or 0, last_used_at=c.last_used_at,
         is_active=bool(c.is_active),
+        auth_method=c.auth_method or "secret", spiffe_id=c.spiffe_id,
     )
 
 
@@ -679,14 +684,16 @@ def create_oauth_client(
     try:
         client, raw = service_accounts.create_client(
             db, user, name=body.name, secret_days=body.secret_days,
-            token_ttl_seconds=body.token_ttl_seconds, created_by=admin.username)
+            token_ttl_seconds=body.token_ttl_seconds, created_by=admin.username,
+            spiffe_id=body.spiffe_id or "")
     except service_accounts.ServiceAccountError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     db.commit()
     db.refresh(client)
     job_service.log_audit(db, admin.username, "service_account.client_create",
                           details={"service_account": user.username,
-                                   "client_id": client.client_id, "name": client.name})
+                                   "client_id": client.client_id, "name": client.name,
+                                   "spiffe_id": client.spiffe_id or ""})
     return OAuthClientSecretResponse(**_client_item(client), client_secret=raw)
 
 
@@ -731,3 +738,120 @@ def revoke_oauth_client(
     job_service.log_audit(db, admin.username, "service_account.client_revoke",
                           details={"user_id": user_id, "client_id": client.client_id})
     return {"detail": "OAuth client revoked"}
+
+
+# ── External IdP identities mapped to a service account ───────────────────────
+# services/external_workload verifies the IdP's token; these rows say which service
+# account a verified (issuer, sub) acts as. Keyed on `sub`, never `azp` -- see the model.
+
+class ExternalIdentityCreateRequest(BaseModel):
+    subject: str
+    name: str
+    issuer: Optional[str] = None           # blank = the configured workload issuer
+    expected_client: Optional[str] = None  # optional azp/appid/client_id/cid check
+
+
+class ExternalIdentityItem(BaseModel):
+    id: str
+    issuer: str
+    subject: str
+    expected_client: Optional[str] = None
+    name: str
+    created_at: datetime
+    created_by: Optional[str] = None
+    last_used_at: Optional[datetime] = None
+    is_active: bool
+
+
+def _external_item(r) -> ExternalIdentityItem:
+    return ExternalIdentityItem(
+        id=r.id, issuer=r.issuer, subject=r.subject, expected_client=r.expected_client,
+        name=r.name, created_at=r.created_at, created_by=r.created_by,
+        last_used_at=r.last_used_at, is_active=bool(r.is_active))
+
+
+@router.get("/{user_id}/external-identities", response_model=List[ExternalIdentityItem])
+def list_external_identities(
+    user_id: str,
+    _admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    from ..database import ExternalWorkloadIdentity
+    if not db.query(User).filter(User.id == user_id).first():
+        raise HTTPException(status_code=404, detail="User not found")
+    rows = (db.query(ExternalWorkloadIdentity)
+            .filter(ExternalWorkloadIdentity.user_id == user_id)
+            .order_by(ExternalWorkloadIdentity.created_at.desc()).all())
+    return [_external_item(r) for r in rows]
+
+
+@router.post("/{user_id}/external-identities", response_model=ExternalIdentityItem,
+             status_code=201)
+def create_external_identity(
+    user_id: str,
+    body: ExternalIdentityCreateRequest,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Let an IdP identity act as this service account."""
+    from ..database import ExternalWorkloadIdentity
+    from ..services import external_workload, job_service
+    user = _service_account_or_404(db, user_id)
+    subject = (body.subject or "").strip()
+    name = (body.name or "").strip()
+    issuer = (body.issuer or "").strip() or external_workload.issuer()
+    if not subject or not name:
+        raise HTTPException(status_code=400, detail="A subject and a name are required.")
+    if not issuer:
+        raise HTTPException(
+            status_code=400,
+            detail="No issuer given and none configured. Set the workload issuer (or the "
+                   "SSO issuer) under Settings → Single sign-on first.")
+    if issuer not in external_workload.accepted_issuers():
+        raise HTTPException(
+            status_code=400,
+            detail=f"{issuer!r} is not an issuer this dashboard accepts workload tokens "
+                   "from. Add it under Settings → Single sign-on → Workload tokens.")
+    if (db.query(ExternalWorkloadIdentity)
+            .filter(ExternalWorkloadIdentity.issuer == issuer,
+                    ExternalWorkloadIdentity.subject == subject).first()):
+        raise HTTPException(status_code=409,
+                            detail="That issuer and subject are already mapped.")
+    row = ExternalWorkloadIdentity(
+        user_id=user.id, issuer=issuer, subject=subject[:255], name=name[:100],
+        expected_client=(body.expected_client or "").strip()[:255] or None,
+        created_by=admin.username, is_active=True)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    job_service.log_audit(db, admin.username, "service_account.external_identity_create",
+                          details={"service_account": user.username, "issuer": issuer,
+                                   "subject": subject})
+    return _external_item(row)
+
+
+@router.delete("/{user_id}/external-identities/{identity_id}", status_code=200)
+def revoke_external_identity(
+    user_id: str,
+    identity_id: str,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Stop accepting this IdP identity. Its next request is refused.
+
+    Deleted rather than flagged: the unique (issuer, subject) key would otherwise leave a
+    dead row that blocks mapping the same identity again. The audit log keeps the record.
+    """
+    from ..database import ExternalWorkloadIdentity
+    from ..services import job_service
+    row = (db.query(ExternalWorkloadIdentity)
+           .filter(ExternalWorkloadIdentity.id == identity_id,
+                   ExternalWorkloadIdentity.user_id == user_id).first())
+    if not row:
+        raise HTTPException(status_code=404, detail="External identity not found")
+    details = {"user_id": user_id, "issuer": row.issuer, "subject": row.subject}
+    db.delete(row)
+    db.commit()
+    job_service.log_audit(db, admin.username, "service_account.external_identity_revoke",
+                          details=details)
+    return {"detail": "External identity revoked"}

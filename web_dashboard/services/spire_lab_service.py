@@ -1679,3 +1679,108 @@ async def run_ps_register(db: Session, *, lab_id: str, job_id: str,
         db.commit()
         logger.error("spire-lab: Password Safe %s failed for %s: %s", action, lab_id, exc)
         job_service.set_failed(db, job_id, str(exc))
+
+
+# ── JWT-SVID bundle capture (for the dashboard's own token endpoint) ──────────
+# The dashboard accepts a JWT-SVID as an OAuth client assertion (services/
+# spiffe_assertion), so an agent in this trust domain can authenticate holding no secret.
+# Verifying one needs the trust domain's JWT signing keys. A production install points a
+# SpiffeTrustDomain at a JWKS URL; a lab cannot, because its OIDC Discovery Provider is
+# firewalled to the k3s node and serves a certificate for a name only that node resolves.
+# So the lab captures its SPIFFE bundle over the same SSH path every stage uses, and the
+# dashboard stores it -- re-captured when SPIRE rotates the keys (within ca_ttl).
+
+JWT_BUNDLE_JOB_TYPE = "spirelab_jwt_bundle"
+JWT_BUNDLE_TITLE = "jwt-bundle-spiffe"
+
+
+def _jwt_bundle_vars(row: SpireLab) -> dict:
+    return {"trust_domain": row.trust_domain,
+            "admin_secret_folder": row.admin_secret_folder or "",
+            "ps_safe": row.ps_safe or _cfg("spire_lab_ps_safe", "Automation")}
+
+
+JWT_BUNDLE_STAGE = {
+    "key": "jwt_bundle", "asset": "spire-jwt-bundle.yml", "vars_for": _jwt_bundle_vars,
+    "pct": 40, "label": "Reading the trust domain's JWT-SVID keys…",
+}
+
+
+def start_jwt_bundle_capture(db: Session, *, lab_id: str, created_by: str) -> dict:
+    """Enqueue a capture. Refused up front when the lab cannot have a bundle to give."""
+    row = get_lab(db, lab_id)
+    if not row:
+        raise SpireLabError(f"SPIRE lab {lab_id} not found")
+    if row.status != "available":
+        raise SpireLabError(
+            f"{row.name} is {row.status}, not available — there is no running server to "
+            f"read a bundle from")
+    if not (row.admin_secret_folder or "").strip("/"):
+        raise SpireLabError(
+            f"{row.name} has no Secrets Safe folder recorded, so the bundle would have no "
+            f"channel back to the dashboard")
+    job = job_service.create_job(
+        db, JWT_BUNDLE_JOB_TYPE, created_by, workgroup=row.workgroup,
+        metadata={"lab_id": row.id, "trust_domain": row.trust_domain})
+    db.commit()
+    logger.info("spire-lab: queued JWT bundle capture for %r as job %s", row.name, job.id)
+    return {"lab_id": row.id, "job_id": job.id}
+
+
+def store_jwt_bundle(db: Session, row: SpireLab, bundle_json: str) -> dict:
+    """Upsert the lab's trust domain with a captured bundle. Split out of the job so the
+    read-back and the upsert are testable without an Ansible run.
+
+    A trust domain that already has a JWKS URL keeps it -- the URL is the better source
+    and wins at verification time; the bundle is stored beside it as a fallback.
+    """
+    from ..database import SpiffeTrustDomain
+    from . import spiffe_assertion
+
+    keys = spiffe_assertion.bundle_keys(bundle_json)
+    if not keys:
+        raise SpireLabError("the captured bundle has no JWT-SVID keys (use: jwt-svid)")
+    td = (row.trust_domain or "").lower()
+    rec = db.query(SpiffeTrustDomain).filter(SpiffeTrustDomain.trust_domain == td).first()
+    if not rec:
+        rec = SpiffeTrustDomain(trust_domain=td, created_by=row.created_by or "system")
+        db.add(rec)
+    rec.bundle_json = bundle_json.strip()
+    rec.bundle_captured_at = datetime.utcnow()
+    rec.spire_lab_id = row.id
+    rec.updated_at = datetime.utcnow()
+    db.commit()
+    spiffe_assertion.clear_state()
+    return {"trust_domain": td, "jwt_keys": [k.get("kid") for k in keys]}
+
+
+async def run_jwt_bundle_capture(db: Session, *, lab_id: str, job_id: str) -> None:
+    """Worker entry point for ``spirelab_jwt_bundle``."""
+    import asyncio
+    from ..api.websocket import broadcast_progress
+    from . import secrets_backend_service, storage_service
+
+    row = get_lab(db, lab_id)
+    if not row:
+        logger.warning("spire-lab: row %s vanished before the JWT bundle capture", lab_id)
+        return
+    job_service.set_running(db, job_id)
+    try:
+        asset_backend = _cfg("spire_lab_asset_backend") or storage_service.active_backend()
+        status = await _run_stage(db, row=row, stage=JWT_BUNDLE_STAGE,
+                                  actor=row.created_by or "system",
+                                  asset_backend=asset_backend, parent_job_id=job_id)
+        if status != "completed":
+            raise SpireLabError(
+                f"{JWT_BUNDLE_STAGE['asset']} {status} — see job "
+                f"{stage_jobs(row).get(JWT_BUNDLE_STAGE['key'], '')} for the Ansible output")
+        await broadcast_progress(job_id, 80, "Reading the bundle back from Secrets Safe…")
+        ref = f"{(row.admin_secret_folder or '').strip('/')}/{JWT_BUNDLE_TITLE}"
+        bundle = await asyncio.to_thread(secrets_backend_service.read_bt_secrets_safe, ref)
+        result = store_jwt_bundle(db, row, bundle or "")
+        job_service.set_completed(db, job_id, result={"lab_id": row.id, **result})
+        logger.info("spire-lab: captured JWT bundle for %r (%d key(s))",
+                    row.name, len(result["jwt_keys"]))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("spire-lab: JWT bundle capture failed for %s: %s", lab_id, exc)
+        job_service.set_failed(db, job_id, str(exc))

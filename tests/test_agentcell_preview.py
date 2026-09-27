@@ -302,7 +302,10 @@ def test_the_page_carries_a_preview_blockquote():
 
 def test_the_page_states_the_svid_to_pat_gap():
     """The honest claim this whole feature rests on. If it disappears, the page starts
-    implying an identity-to-authorization bridge that does not exist."""
+    implying a bridge that does not exist. Since the token endpoint accepts SVID client
+    assertions the SVID CAN mint the dashboard token -- but it still does not authenticate
+    to /mcp directly, and the Password Safe bridge is still unresolved; both must stay
+    stated."""
     doc = _read("docs", "profiles", "demo", "agent-demo-cell.md")
     assert "does not authenticate" in doc, \
         "the page no longer states that the SVID does not authenticate to /mcp"

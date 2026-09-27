@@ -1850,6 +1850,11 @@ class OidcFeatureConfig(BaseModel):
     oidc_provider_name: str = ""
     oidc_scopes: str = ""
     oidc_groups_claim: str = ""
+    # Workload tokens from this (or another) IdP, mapped to service accounts. Off until
+    # the audience is set -- see services/external_workload for what each one means.
+    workload_idp_issuer: str = ""
+    workload_idp_audience: str = ""
+    workload_idp_extra_issuers: str = ""
 
 
 class CloudFunctionsFeatureConfig(BaseModel):
@@ -2301,8 +2306,9 @@ def _write_feature(feature: str, payload_dict: dict, touched: set | None = None)
         # Discovery + JWKS are cached for an hour; without this an operator who
         # fixes a typo'd issuer would keep hitting the old one until it expired.
         try:
-            from ..services import oidc_service
+            from ..services import external_workload, oidc_service
             oidc_service.clear_cache()
+            external_workload.clear_state()
         except Exception:
             pass
 
@@ -2464,6 +2470,45 @@ def test_oidc_discovery(request: Request):
         # emit groups without advertising them, so absence is not a failure.
         "groups_claim": groups_claim,
         "groups_claim_advertised": (groups_claim in supported) if supported else None,
+    }
+
+
+@router.post("/oidc/workload-test")
+def test_workload_idp(request: Request):
+    """Probe the workload-token trust: discovery and signing keys for the workload
+    issuer, and whether the issuer the provider reports is one the dashboard accepts.
+
+    Separate from the SSO probe because workload tokens need no SSO client at all -- an
+    install can trust an IdP for workloads without letting anyone sign in through it.
+    """
+    _require_admin(request)
+    from ..services import external_workload, oidc_service
+    if not external_workload.is_configured():
+        raise HTTPException(
+            status_code=400,
+            detail="Set a workload audience (and an issuer, or the SSO issuer), then save.")
+    oidc_service.clear_cache()
+    external_workload.clear_state()
+    issuer = external_workload.issuer()
+    try:
+        doc = oidc_service.discovery_for(issuer)
+        keys = oidc_service.jwks_for(issuer).get("keys", [])
+    except oidc_service.OIDCError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:  # noqa: BLE001 -- the JWKS fetch itself failed
+        raise HTTPException(status_code=502, detail=f"Could not fetch signing keys: {e}")
+    accepted = list(external_workload.accepted_issuers())
+    return {
+        "ok": True,
+        "issuer": issuer,
+        "discovered_issuer": doc.get("issuer", ""),
+        # A provider whose discovery issuer differs from what its tokens carry (Entra v1
+        # vs v2) is the usual reason a correct-looking token is refused.
+        "discovered_issuer_accepted": doc.get("issuer", "") in accepted,
+        "accepted_issuers": accepted,
+        "audiences": list(external_workload.audiences()),
+        "jwks_uri": doc.get("jwks_uri", ""),
+        "signing_keys": len(keys),
     }
 
 

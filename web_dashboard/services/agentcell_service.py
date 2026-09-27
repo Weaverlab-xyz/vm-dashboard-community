@@ -12,14 +12,15 @@ should accept. The SPIRE lab made exactly this call for exactly this reason, and
 payoff is the same: the host keeps its auto-delete timer, its Password Safe onboarding
 and its Destroy button, so this feature owns no teardown beyond revoking what it issued.
 
-*Identity and authorization stay two things.* The worker attests itself to SPIRE and
-gets an SVID — that is who it is, and it holds nothing. It calls ``/mcp`` with a
-Personal Access Token — that is what it may do here, bounded by the token user's RBAC.
-**Nothing mints one from the other**, because ``api/mcp_server`` takes a Bearer PAT and
-has no mTLS path; the bridge would need the Password Safe SPIFFE SVID plugin, whose
-configuration question ``spire_lab_service``'s own docstring records as unresolved.
-Writing that bridge here would be betting on the answer, so the cell shows both halves
-and names the gap.
+*Identity and authorization.* The worker attests itself to SPIRE and gets an SVID —
+that is who it is, and it holds nothing. What it may do here is bounded by the token
+user's RBAC. With a PAT or a client secret the two stay separate credentials, shown side
+by side in the log. With a SERVICE ACCOUNT and the trust domain's JWT keys registered
+(``svid_client_available``), the SVID itself mints the authorization: the cell binds an
+OAuth client to the agent's SPIFFE ID and the worker exchanges a fresh JWT-SVID at the
+dashboard's token endpoint (``services/spiffe_assertion``). What stays unbuilt is the
+OTHER bridge — the SVID minting a credential inside Password Safe via the SPIFFE SVID
+plugin, whose configuration question ``spire_lab_service`` records as unresolved.
 
 The refusals below are the module's real content. They follow
 ``ot_service.in_plant_agent_problem``'s shape — a remedy string the route turns into a
@@ -589,8 +590,42 @@ def is_wired(row) -> bool:
     return set(STAGES).issubset(set(stages_done(row)))
 
 
-def deploy_notes(hours: int = DEFAULT_PAT_HOURS, oauth: bool = False) -> list:
+def svid_client_available(db, trust_domain: str) -> str:
+    """The SPIFFE ID to bind an SVID-authenticated client to, or "" to use a secret.
+
+    SVID when the dashboard can verify this trust domain's JWT-SVIDs (a SpiffeTrustDomain
+    row -- the lab's "Capture JWT bundle", or a JWKS URL) AND the agent's SPIFFE ID is not
+    already bound to an active client. The ID is fixed per trust domain
+    (``AGENT_SPIFFE_PATH``), so a second cell in the same domain falls back to a secret
+    rather than failing: one identity authenticates one client.
+    """
+    from ..database import OAuthClient, SpiffeTrustDomain
+    td = (trust_domain or "").lower()
+    if not td or not db.query(SpiffeTrustDomain).filter(
+            SpiffeTrustDomain.trust_domain == td).first():
+        return ""
+    sid = spiffe_id_for(td)
+    if db.query(OAuthClient).filter(OAuthClient.spiffe_id == sid,
+                                    OAuthClient.is_active == True).first():  # noqa: E712
+        return ""
+    return sid
+
+
+def deploy_notes(hours: int = DEFAULT_PAT_HOURS, oauth: bool = False,
+                 svid: bool = False, client_id: str = "") -> list:
     """What the form says back, so the shape of the demo is read before it is run."""
+    if svid:
+        return [
+            "The agent holds NO SECRET. It authenticates with its JWT-SVID: run the install "
+            f"playbook with agent_token_source=spiffe and agent_oauth_client_id={client_id}. "
+            "The worker exchanges a fresh SVID at /api/oauth/token for an access token that "
+            "lives minutes; revoking the cell refuses its very next exchange.",
+            "Identity and authorization are now one chain: the SVID from SPIRE is what mints "
+            "the dashboard token. Keep the trust domain's JWT keys current (Capture JWT bundle "
+            "after SPIRE rotates them, within ca_ttl) or new SVIDs will be refused.",
+            "The worker attaches to a VM you already deployed. Destroying that VM reaps the "
+            "worker with it; this cell adds no teardown of its own beyond revoking the client.",
+        ]
     first = (
         f"The agent runs as a service account with an OAuth client whose secret expires "
         f"in {hours}h. The worker exchanges it for access tokens that live minutes; "

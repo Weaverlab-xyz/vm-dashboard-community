@@ -157,6 +157,7 @@ admin-granted ones, see the [Entitle user-JIT design doc](../design/entitle-user
 | **Auto-provisioning** | Users in a mapped group are created automatically on first login. |
 | **Group-driven access** | Workgroups and permissions are derived from IdP group membership and re-synced on every login. |
 | **Permission enforcement** | Derived permissions feed the dashboard's scope/level checks (`vms`, `aws`, `k8s`, `cloud_database`, …). |
+| **Workload tokens** | Optional, separate from sign-in: the same (or another) IdP's *access tokens* for workloads, mapped to [service accounts](../service-accounts.md#tokens-from-your-own-idp-no-dashboard-secret). Configured under **Workload tokens** in this panel; needs an audience, not a client id. |
 
 ---
 

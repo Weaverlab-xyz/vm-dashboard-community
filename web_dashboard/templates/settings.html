@@ -7063,6 +7063,70 @@
               </p>
             </div>
           </div>
+
+          <!-- Workload tokens: an IdP's access tokens accepted for service accounts.
+               Independent of SSO -- needs no client id, and lets nobody sign in. -->
+          <div class="border-t border-gray-100 pt-4 space-y-4">
+            <div>
+              <p class="text-sm font-medium text-gray-800">Workload tokens</p>
+              <p class="text-[11px] text-gray-500 leading-snug mt-1">
+                Accept access tokens this IdP issues to <em>workloads</em> (client credentials,
+                managed identities) and map them to
+                <a href="/docs/service-accounts" class="underline" target="_blank">service accounts</a>
+                under Users → OAuth clients → External identities. Off until an audience is set.
+                Works without SSO: no client id is needed here.
+              </p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Workload issuer</label>
+              <input type="text" x-model="panelCfg.workload_idp_issuer"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="blank = the issuer above">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Audience</label>
+              <input type="text" x-model="panelCfg.workload_idp_audience"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="api://vm-dashboard">
+              <p class="text-[11px] text-gray-400 mt-1">
+                What the token's <code>aud</code> must be, so a token minted for another API at the
+                same IdP is refused. Space-separate to accept several (Entra: <code>api://&lt;app-id&gt;</code>
+                and the bare app id).
+              </p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Extra accepted issuers</label>
+              <input type="text" x-model="panelCfg.workload_idp_extra_issuers"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="https://sts.windows.net/<tenant-id>/">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Optional. Other <code>iss</code> values signed by the same keys — Entra v1 tokens carry
+                <code>https://sts.windows.net/&lt;tenant&gt;/</code> (with the slash) unless the app's
+                <code>accessTokenAcceptedVersion</code> is 2.
+              </p>
+            </div>
+            <div>
+              <button type="button" @click="testWorkloadIdp()" :disabled="wkTest.running"
+                      class="text-sm border border-gray-300 hover:bg-gray-50 disabled:opacity-50 px-3 py-2 rounded-lg font-medium transition-colors">
+                <span x-show="!wkTest.running">Test workload trust</span>
+                <span x-show="wkTest.running" x-cloak>Contacting provider…</span>
+              </button>
+              <div x-show="wkTest.ok === false" x-cloak
+                   class="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-700"
+                   x-text="wkTest.error"></div>
+              <div x-show="wkTest.ok === true" x-cloak
+                   class="mt-3 rounded-lg border border-green-200 bg-green-50 px-3 py-2.5 text-[11px] text-green-900 space-y-1">
+                <p class="font-medium">Signing keys fetched (<span x-text="wkTest.doc?.signing_keys"></span>)</p>
+                <p>Accepted issuers: <code class="break-all" x-text="(wkTest.doc?.accepted_issuers || []).join(', ')"></code></p>
+                <p>Audience: <code class="break-all" x-text="(wkTest.doc?.audiences || []).join(', ')"></code></p>
+                <p x-show="wkTest.doc && !wkTest.doc.discovered_issuer_accepted" class="text-amber-800">
+                  The provider reports its issuer as <code x-text="wkTest.doc?.discovered_issuer"></code>,
+                  which is not in the accepted list. Tokens carrying it will be refused — add it above
+                  if that is what your tokens say.
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
       </template>
 
@@ -7273,6 +7337,7 @@ function settingsPage() {
 
     // OIDC discovery probe result (Test connection in the SSO panel).
     oidcTest: { running: false, ok: null, error: '', doc: null },
+    wkTest: { running: false, ok: null, error: '', doc: null },
     // Which credential posture each cloud is actually on. Explicitly fetched rather
     // than polled: it is a diagnostic an operator asks for after flipping a flag.
     wlcSources: { running: false, error: '', clouds: [] },
@@ -8591,6 +8656,16 @@ function settingsPage() {
         this.wlcSources = { running: false, error: '', clouds: r.clouds || [] };
       } catch (e) {
         this.wlcSources = { running: false, error: e.message || String(e), clouds: [] };
+      }
+    },
+
+    async testWorkloadIdp() {
+      this.wkTest = { running: true, ok: null, error: '', doc: null };
+      try {
+        const doc = await API.post('/api/setup/oidc/workload-test', {});
+        this.wkTest = { running: false, ok: true, error: '', doc };
+      } catch (e) {
+        this.wkTest = { running: false, ok: false, error: e.message || String(e), doc: null };
       }
     },
 
