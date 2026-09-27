@@ -575,7 +575,7 @@ shows "tunnel established" with the listen port) and point your client at
 port, so client configs read naturally. The session is audited/recorded like any other
 jump; closing it closes the listener.
 
-**Setting up a rep machine:** [OT protocol clients on Windows](ot-protocol-clients.md) walks through installing the four Python clients and
+**Setting up a rep machine:** [OT protocol clients on Windows](ot-demo-cell/ot-protocol-clients.md) walks through installing the four Python clients and
 running [`scripts/ot/verify_tunnels.py`](../../../scripts/ot/verify_tunnels.py), which
 reads every protocol through its tunnel and tells you which are live *before* you
 share your screen.
@@ -761,7 +761,7 @@ the bake fails on a platform the script has not met.
 
    `python scripts/ot/verify_tunnels.py` does all four in one pass and distinguishes
    "no listener" from "listener, no answer" from "answers but frozen" — see
-   [OT protocol clients on Windows](ot-protocol-clients.md).
+   [OT protocol clients on Windows](ot-demo-cell/ot-protocol-clients.md).
    - **4a. The cluster, through PRA.** With the cell deployed with **Kubernetes API
      (KubeSolo)** ticked: the jump item `ot-<cell>-kubesolo` exists, and with it
      started, `kubectl --kubeconfig <the cell's /var/lib/ot-sim/kubeconfig-via-tunnel.yaml>

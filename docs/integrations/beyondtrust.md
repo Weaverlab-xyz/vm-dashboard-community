@@ -6,6 +6,8 @@
 
 The dashboard integrates with four BeyondTrust products. Each has its own page and its
 own feature flag; this page is the map, plus the parts that belong to no single product.
+The product pages live in the `beyondtrust/` folder beside this page, so the set reads
+as one set when you browse `integrations/`.
 
 - **Password Safe / Secrets Safe** — on-demand checkout of SSH keys and passwords.
   Target credentials (AWS keys, Azure service principal secrets, SSH private keys) are
@@ -13,7 +15,7 @@ own feature flag; this page is the map, plus the parts that belong to no single 
   stored in the dashboard's encrypted database. It also **onboards** resources the
   dashboard builds — VMs, cloud databases, Kubernetes ServiceAccount tokens — as managed
   systems + accounts. Driven by `ps-cli`. `password_safe_enabled`. See
-  [Password Safe](password-safe.md).
+  [Password Safe](beyondtrust/password-safe.md).
 - **Privileged Remote Access (PRA/SRA)** — brokered access to everything the dashboard
   builds. The dashboard creates and tears down **Shell Jump**, **Web Jump**, **Remote
   RDP** and **Protocol Tunnel** jump items, plus PRA Vault accounts, so operators reach
@@ -21,13 +23,13 @@ own feature flag; this page is the map, plus the parts that belong to no single 
   direct network exposure. Driven by the `sra` Terraform provider plus a small REST
   client for the few calls the provider can't make. It also runs the **Gateway hosts**
   those jumps are brokered through. `pra_enabled`. See
-  [Privileged Remote Access](privileged-remote-access.md) and
-  [Gateway hosts](gateways.md).
+  [Privileged Remote Access](beyondtrust/privileged-remote-access.md) and
+  [Gateway hosts](beyondtrust/gateways.md).
 - **Endpoint Privilege Management for Linux (EPM-L)** — agent package builds, sync to
   asset storage, and installation tokens, through the BeyondTrust Pathfinder API.
-  `epml_enabled`. See [EPM-L](epml.md).
+  `epml_enabled`. See [EPM-L](beyondtrust/epml.md).
 - **Entitle** — just-in-time cloud identity and access requests. `entitle_enabled`. See
-  [Entitle](entitle.md).
+  [Entitle](beyondtrust/entitle.md).
 
 ---
 
@@ -35,10 +37,10 @@ own feature flag; this page is the map, plus the parts that belong to no single 
 
 | Product | Flag | Settings panel | Page |
 |---|---|---|---|
-| Password Safe / Secrets Safe | `password_safe_enabled` | Settings → Integrations → **Password Safe** | [password-safe.md](password-safe.md) |
-| Privileged Remote Access | `pra_enabled` | Settings → Integrations → **Privileged Remote Access** | [privileged-remote-access.md](privileged-remote-access.md) |
-| EPM for Linux | `epml_enabled` | Settings → Integrations → **EPM for Linux** | [epml.md](epml.md) |
-| Entitle | `entitle_enabled` | Settings → Integrations → **Entitle** | [entitle.md](entitle.md) |
+| Password Safe / Secrets Safe | `password_safe_enabled` | Settings → Integrations → **Password Safe** | [password-safe.md](beyondtrust/password-safe.md) |
+| Privileged Remote Access | `pra_enabled` | Settings → Integrations → **Privileged Remote Access** | [privileged-remote-access.md](beyondtrust/privileged-remote-access.md) |
+| EPM for Linux | `epml_enabled` | Settings → Integrations → **EPM for Linux** | [epml.md](beyondtrust/epml.md) |
+| Entitle | `entitle_enabled` | Settings → Integrations → **Entitle** | [entitle.md](beyondtrust/entitle.md) |
 
 Password Safe, PRA and EPM-L used to share a single `beyondtrust_enabled` flag and a
 single Settings panel. They are now independent, because customers routinely license one
@@ -56,7 +58,7 @@ reads from the database only; exporting an equivalently-named env var has no eff
 
 > **Independently *gated* is not independently *behaved*.** Some paths genuinely need two
 > products live, and enabling only one leaves them inert rather than broken:
-> [Kubernetes token rotation](password-safe.md#kubernetes-serviceaccount-token-rotation)
+> [Kubernetes token rotation](beyondtrust/password-safe.md#kubernetes-serviceaccount-token-rotation)
 > rotates a token whose ServiceAccount PRA injects; a database tunnel is PRA, while the
 > credential it carries can be Password Safe-managed; and
 > `bt_ps_deploy_key_title` stores a PRA Gateway's Docker deploy key in Password Safe.
@@ -68,14 +70,16 @@ reads from the database only; exporting an equivalently-named env var has no eff
 
 | I want to… | Page |
 |---|---|
-| Check out a secret or managed-account credential at runtime | [Password Safe](password-safe.md) |
-| Onboard a VM or cloud database as a managed system | [Password Safe](password-safe.md#password-safe-vm-onboarding-managed-systems) |
-| Rotate a Kubernetes ServiceAccount token | [Password Safe](password-safe.md#kubernetes-serviceaccount-token-rotation) |
-| Create Shell Jump / Web Jump / RDP / tunnel jump items | [Privileged Remote Access](privileged-remote-access.md) |
-| Mint PRA Vault accounts for tunnel credentials | [Privileged Remote Access](privileged-remote-access.md) |
-| Deploy or inventory more Gateway hosts | [Gateway hosts](gateways.md) |
-| Build EPM-L agent packages or mint installation tokens | [EPM-L](epml.md) |
-| Request just-in-time cloud access | [Entitle](entitle.md) |
+| Check out a secret or managed-account credential at runtime | [Password Safe](beyondtrust/password-safe.md) |
+| Onboard a VM or cloud database as a managed system | [Password Safe](beyondtrust/password-safe.md#password-safe-vm-onboarding-managed-systems) |
+| Rotate a Kubernetes ServiceAccount token | [Password Safe](beyondtrust/password-safe.md#kubernetes-serviceaccount-token-rotation) |
+| Create Shell Jump / Web Jump / RDP / tunnel jump items | [Privileged Remote Access](beyondtrust/privileged-remote-access.md) |
+| Mint PRA Vault accounts for tunnel credentials | [Privileged Remote Access](beyondtrust/privileged-remote-access.md) |
+| Deploy or inventory more Gateway hosts | [Gateway hosts](beyondtrust/gateways.md) |
+| Build EPM-L agent packages or mint installation tokens | [EPM-L](beyondtrust/epml.md) |
+| Request just-in-time cloud access | [Entitle](beyondtrust/entitle.md) |
+| Grant dashboard permissions just-in-time, instead of standing admins | [Entitle dashboard permissions](beyondtrust/entitle-dashboard-permissions.md) |
+| Hand a database credential's rotation to Password Safe | [Password Safe for databases](beyondtrust/databases/) — one page per cloud |
 | Pre-condition an image for any of the above | [below](#preparing-images-for-bt-management) |
 
 ---
@@ -99,7 +103,7 @@ Images built by the dashboard's Packer flow (`/images/aws`, `/images/azure`, `/i
 ### What the Linux scripts prepare
 
 - **PRA Shell Jump connectivity** — sshd hardened (key-only, no root password, sensible client-alive), passwordless sudo wired to the cloud-default user via a `/etc/sudoers.d/90-bt-ready` drop-in, host clock synced. The sshd drop-in is written as `00-bt-ready.conf` so it loads lex-first and wins against any later compliance drop-ins (sshd is first-occurrence-wins). On OpenSSH &lt; 8.2 — no `Include` for `sshd_config.d` — the directives are written into `/etc/ssh/sshd_config` directly instead.
-- **A Password Safe / Entitle SSH bootstrap account** — `adminuser` by default (`BT_ADMIN_USER`). This is the account the Azure and GCP [Password Safe onboarding paths](password-safe.md#password-safe-vm-onboarding-managed-systems) expect to exist: their plugins write a key *to* it, they don't create it.
+- **A Password Safe / Entitle SSH bootstrap account** — `adminuser` by default (`BT_ADMIN_USER`). This is the account the Azure and GCP [Password Safe onboarding paths](beyondtrust/password-safe.md#password-safe-vm-onboarding-managed-systems) expect to exist: their plugins write a key *to* it, they don't create it.
 - **Optional EPM-L package install** — set `BT_EPML_URL` to a presigned URL for the `.deb` / `.rpm`.
 - **Optional PRA SSH certificate login** — see below.
 - **Conservative baseline hygiene** — security updates applied, persistent journald, opt-in unattended security updates (`BT_AUTOPATCH=1`), image cleaned for re-launch (host keys + machine-id + cloud-init state stripped).
@@ -122,10 +126,10 @@ accounts NOPASSWD sudo (default: none).
 
 - **No Password Safe onboarding.** They *create* `adminuser`; registering it as a Managed
   Account (Smart Rule / rotation) is out-of-band — or done by the dashboard's own
-  [VM onboarding](password-safe.md#password-safe-vm-onboarding-managed-systems).
+  [VM onboarding](beyondtrust/password-safe.md#password-safe-vm-onboarding-managed-systems).
 - **No EPM-L activation.** Package install only. `pbactivate` runs post-deploy with a
   short-lived token from the EPM-L integration, because registration tokens expire 8h
-  after issue and can't be baked into an image. See [EPM-L](epml.md).
+  after issue and can't be baked into an image. See [EPM-L](beyondtrust/epml.md).
 - **No host firewall.** Cloud security groups / NSGs / GCP firewall rules are the source
   of truth; layering `ufw` / `firewalld` on top risks lockouts.
 
@@ -138,7 +142,7 @@ Set these as Packer build env on the build page. Full detail and a smoke-test re
 |---|---|
 | `BT_TARGET_USER` | Force the sudoers-target user; default autodetects the cloud-default (`ubuntu`/`debian`/`admin`, `ec2-user`/`rocky`/`centos`/`almalinux`/`cloud-user`) |
 | `BT_ADMIN_USER` | The Password-Safe-managed bootstrap account (default `adminuser`) |
-| `BT_SEED_ADMIN_KEY=1` | Seed `adminuser`'s `authorized_keys` with a throwaway key **so the AWS Systems Manager plugin has one to rotate** — the private half is discarded. Relevant to the [AWS SSM path](password-safe.md#aws--aws-systems-manager-custom-plugin-cloud-native-default), where the credential is minted on first change |
+| `BT_SEED_ADMIN_KEY=1` | Seed `adminuser`'s `authorized_keys` with a throwaway key **so the AWS Systems Manager plugin has one to rotate** — the private half is discarded. Relevant to the [AWS SSM path](beyondtrust/password-safe.md#aws--aws-systems-manager-custom-plugin-cloud-native-default), where the credential is minted on first change |
 | `BT_ADMIN_NOPASSWD_ALL=1` | Full `NOPASSWD: ALL` sudo for `adminuser` instead of the scoped set — **required for Ansible Config-Management `become`**, which runs sudo's `/bin/sh` |
 | `BT_PRA_CA_PUBKEY` | PRA Vault SSH CA public key (enables certificate login) |
 | `BT_PRA_USERS` | Accounts to create for certificate login; names must match the PRA vault accounts |
@@ -169,7 +173,7 @@ Set these as Packer build env on the build page. Full detail and a smoke-test re
 
 | Doc | What it covers |
 |---|---|
-| [Gateway hosts](gateways.md) | The managed-vs-requested Gateway lifecycle, placement, naming and node firewalls |
+| [Gateway hosts](beyondtrust/gateways.md) | The managed-vs-requested Gateway lifecycle, placement, naming and node firewalls |
 | [Databases](../databases.md) | Cloud-DB provisioning, PRA tunnels, and Password Safe database onboarding |
 | [Kubernetes](../kubernetes.md) | Cluster provisioning, PRA k8s tunnels, and access identity |
 | [Cloud VMs](../cloud-vms.md) | The full VM deploy story — provisioning, Shell Jump, onboarding, Entitle |

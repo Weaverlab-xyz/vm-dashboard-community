@@ -184,7 +184,7 @@ a batch is never split across a window boundary.
 
 Nothing about the run itself changes: the job row is identical, the same validation happens
 at submit time, and credentials are still resolved at execution time rather than stored. See
-[Change Windows](change-windows.md).
+[Change Windows](scheduling/change-windows.md).
 
 ## Bulk runs from the inventory
 

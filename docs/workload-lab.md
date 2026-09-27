@@ -166,7 +166,7 @@ rendering fault.
 
 ## Related
 
-* [Password Safe](integrations/password-safe.md) — the authority behind three of the five
+* [Password Safe](integrations/beyondtrust/password-safe.md) — the authority behind three of the five
   tabs. The Cloud tab's is [Workload Credentials](workload-lab/workload-credentials.md),
   and the Agent tab's is this dashboard itself.
 * [Agent Demo Cell](profiles/demo/agent-demo-cell.md) — the feature guide for the fifth

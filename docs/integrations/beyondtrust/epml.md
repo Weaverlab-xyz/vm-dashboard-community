@@ -18,7 +18,7 @@ integrates with the EPM-L public API on the BeyondTrust Pathfinder gateway to:
 The EPM-L routes (`/api/epml/*`) are gated behind `epml_enabled` — enable
 **EPM for Linux** under Settings → Integrations to activate them. This is one of three
 independently-gated BeyondTrust products, so EPM-L can be on with Password Safe and PRA
-off, or the other way round; see [BeyondTrust Integrations](beyondtrust.md).
+off, or the other way round; see [BeyondTrust Integrations](../beyondtrust.md).
 
 ### How the API is addressed
 
@@ -44,7 +44,7 @@ with session cookies and returns 401 for every Bearer request.
 | BeyondTrust EPM for Linux subscription | EPM-L enabled on your Pathfinder site |
 | Personal Access Token (PAT) | Created in Pathfinder (see Step 1). PAT support may require org-level enablement by BeyondTrust. |
 | Your Pathfinder Site ID | A UUID — see Step 2 |
-| **For package sync:** Ansible asset storage | Any one of S3, Azure Blob Storage, or GCS configured — the sync uses whichever backend is active. See [docs/integrations/ansible.md](ansible.md) Step 1 for storage setup. |
+| **For package sync:** Ansible asset storage | Any one of S3, Azure Blob Storage, or GCS configured — the sync uses whichever backend is active. See [docs/integrations/ansible.md](../ansible.md) Step 1 for storage setup. |
 
 ---
 
@@ -181,7 +181,7 @@ time**, binds it to that variable, and scrubs it from the job output. The token 
 reaches the browser, and the job stores only the variable *name* — not the token — so
 nothing expired or sensitive is left behind in the job record.
 
-[`examples/playbooks/linux/epml-activate.yml`](../../examples/playbooks/linux/epml-activate.yml)
+[`examples/playbooks/linux/epml-activate.yml`](../../../examples/playbooks/linux/epml-activate.yml)
 is the matching playbook: it checks the agent is installed, refuses with an actionable
 message if no token was bound, and skips `pbactivate` when the host is already
 activated.
@@ -268,7 +268,7 @@ left off.
 **"No asset storage configured"** — the sync requires at least one Ansible
 storage backend. Set `ANSIBLE_S3_BUCKET`, `ANSIBLE_AZURE_STORAGE_ACCOUNT`, or
 `ANSIBLE_GCS_BUCKET` in Settings → Integrations → Ansible before running the
-sync. See [docs/integrations/ansible.md](ansible.md) Step 1 for setup instructions.
+sync. See [docs/integrations/ansible.md](../ansible.md) Step 1 for setup instructions.
 
 **Packages appear in the list but are wrong architecture** — EPM-L builds
 `.rpm` (x86_64) and `.deb` (amd64) variants of both the standard and the

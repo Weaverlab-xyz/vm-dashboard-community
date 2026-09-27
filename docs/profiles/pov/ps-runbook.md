@@ -181,7 +181,7 @@ Because the API does not let it. This is worth stating plainly so nobody plans a
 What *is* creatable — user groups with their permissions and Smart Group access (step 11),
 a directory managed system (step 8), an API registration (use cases 15 and 16), workgroups
 and assets — is not built yet, and would be writing to a customer's tenant on objects this
-dashboard did not previously own. See `docs/integrations/password-safe.md`.
+dashboard did not previously own. See `docs/integrations/beyondtrust/password-safe.md`.
 
 ## One thing worth knowing about reachability
 

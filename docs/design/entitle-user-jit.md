@@ -13,14 +13,14 @@
 > any OIDC) immediately. Both can run at once.
 >
 > **Start here instead:**
-> [`integrations/entitle-dashboard-permissions.md`](../integrations/entitle-dashboard-permissions.md)
+> [`integrations/beyondtrust/entitle-dashboard-permissions.md`](../integrations/beyondtrust/entitle-dashboard-permissions.md)
 > — it compares the two, and covers migrating from this one.
 
 > **Status:** Design + execution plan, v1.
 > **Written for:** enterprise operators wiring the dashboard into an
 > existing Entra ID + Entitle deployment. Community/dev installs
 > that don't run Entra can skip it; the feature is purely additive.
-> **Companion to** [`integrations/entitle.md`](../integrations/entitle.md)
+> **Companion to** [`integrations/beyondtrust/entitle.md`](../integrations/beyondtrust/entitle.md)
 > (the human-approval-gate feature already shipping) and
 > [`design/cloud-identity-jit.md`](cloud-identity-jit.md) (the
 > machine-identity story). This doc is the third leg: user-level
@@ -35,7 +35,7 @@
 
 The dashboard already has two pieces of Entitle integration:
 
-1. **Approval gate** ([integrations/entitle.md](../integrations/entitle.md))
+1. **Approval gate** ([integrations/beyondtrust/entitle.md](../integrations/beyondtrust/entitle.md))
    — a human operator hits a privileged endpoint, the dashboard
    opens an Entitle request, and the endpoint executes once
    approved. Per-action.
@@ -457,7 +457,7 @@ real second tenant).
 
 **Goal:** operator-facing playbook.
 
-- Update `integrations/entitle.md` with a new "User JIT" section
+- Update `integrations/beyondtrust/entitle.md` with a new "User JIT" section
   documenting the bootstrap + day-2 operations.
 - Migration guide: how to convert a dashboard with static
   permissions into the JIT model.
@@ -552,7 +552,7 @@ real Entitle tenant.
 ## Appendix — Why this complements (doesn't replace) the
 approval gate
 
-Today's [approval gate](../integrations/entitle.md) makes the
+Today's [approval gate](../integrations/beyondtrust/entitle.md) makes the
 dashboard ask Entitle for permission on each privileged
 *action*: "Operator A is trying to delete secret X — is this
 approved?" Entitle says yes / no, the action proceeds or 403s.

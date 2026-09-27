@@ -843,7 +843,7 @@ def probe_summary(result: dict) -> str:
 # Retrieving one without the other yields nothing usable, which is the point of the split.
 #
 # WHY NOT ps-cli, WHICH IS WHAT THE DASHBOARD USES. Because it cannot carry these bytes.
-# docs/integrations/password-safe.md establishes it and services/secrets_backend_service
+# docs/integrations/beyondtrust/password-safe.md establishes it and services/secrets_backend_service
 # REFUSES on it: the endpoint returns application/octet-stream faithfully, but every route
 # ps-cli offers decodes the body to text before anyone sees it -- the library hands back
 # `response.text`, and `raw` falls through its JSON parse to print `response.text` too. A

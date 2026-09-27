@@ -266,7 +266,17 @@ def test_every_index_links_its_immediate_subfolders():
         index = _index_of(folder)
         if index is None:
             continue
-        linked = {h.split("#")[0].rstrip("/") for h in _LINK.findall(_read(index))}
+        base = os.path.dirname(os.path.relpath(index, _DOCS)).replace("\\", "/")
+        linked = set()
+        for href in _LINK.findall(_read(index)):
+            href = href.split("#")[0].rstrip("/")
+            # As above: a sibling hub's hrefs carry its folder's name. Until a hub's
+            # folder held a folder of its own (integrations/beyondtrust/databases/) this
+            # check never met one.
+            if base != folder and href.lower().startswith(
+                    f"{os.path.basename(folder).lower()}/"):
+                href = href.split("/", 1)[1]
+            linked.add(href)
         children = {f for f in _folders()
                     if os.path.dirname(f) == folder and f != folder}
         for child in sorted(children):

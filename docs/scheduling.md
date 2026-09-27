@@ -4,12 +4,14 @@
 
 "Schedule" means three different things in this dashboard. They are separate features
 with separate controls, and picking the wrong one is the usual reason a schedule "did not
-work". This page tells them apart and sends you to the page with the detail.
+work". This page tells them apart and sends you to the page with the detail. The detail
+pages live in the `scheduling/` folder beside this one, the way `workload-lab/` sits beside
+its hub.
 
 | You want to… | Use | Where | Detail |
 |---|---|---|---|
-| run **one** change later — at a time, or in the next approved window | a **booking** | **When to run** on the form, or **Schedule** on a selection toolbar | [Change Windows — Scheduling one job](change-windows.md#scheduling-one-job) |
-| run the **same** change on every occurrence of a window | a **recurring schedule** (Repeat) | **Repeat in a change window** on a finished job's page; listed at **Schedules** (`/schedules`) | [Change Windows — Repeating a change](change-windows.md#repeating-a-change) |
+| run **one** change later — at a time, or in the next approved window | a **booking** | **When to run** on the form, or **Schedule** on a selection toolbar | [Change Windows — Scheduling one job](scheduling/change-windows.md#scheduling-one-job) |
+| run the **same** change on every occurrence of a window | a **recurring schedule** (Repeat) | **Repeat in a change window** on a finished job's page; listed at **Schedules** (`/schedules`) | [Change Windows — Repeating a change](scheduling/change-windows.md#repeating-a-change) |
 | stop cloud VMs out of business hours to save money | a **suspend schedule** | Settings, per cloud | [Cloud VMs — Suspend schedules](cloud-vms.md#suspend-schedules-all-four-clouds) |
 
 The first two share one engine — the job queue holds a booked job `pending` until its
@@ -55,15 +57,15 @@ and schedules you are allowed to see.
 | EPM for Linux package sync | — | yes |
 
 Why the exceptions exist, and what happens when a window is missed, needs approval, or
-is required for a whole workgroup, is all in [Change Windows](change-windows.md). Why an
+is required for a whole workgroup, is all in [Change Windows](scheduling/change-windows.md). Why an
 on-premises power booking needs an agent is under
-[Scheduling power operations](change-windows.md#scheduling-power-operations).
+[Scheduling power operations](scheduling/change-windows.md#scheduling-power-operations).
 
 ---
 
 ## See also
 
-* [Change Windows](change-windows.md) — the full reference for bookings, repeats, approval
+* [Change Windows](scheduling/change-windows.md) — the full reference for bookings, repeats, approval
   and the per-workgroup requirement.
 * [Cloud VMs](cloud-vms.md) — suspend schedules and spend caps.
 * [Job Worker](job-worker.md) — how a booked job gets a turn once its time arrives.

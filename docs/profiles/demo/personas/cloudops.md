@@ -42,7 +42,7 @@ Rotate the admin credential on a VM with no agent and no inbound port, over the 
 control plane — Systems Manager on AWS, Run Command on Azure, ssh-keys metadata on GCP. The
 objection this answers is "we cannot install anything on those images".
 
-**Guide:** [Password Safe](../../../integrations/password-safe.md)
+**Guide:** [Password Safe](../../../integrations/beyondtrust/password-safe.md)
 
 ### Time-boxed access to the cloud console itself
 

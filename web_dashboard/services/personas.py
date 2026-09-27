@@ -259,7 +259,7 @@ _CLOUDOPS = Persona(
                     "Command on Azure, ssh-keys metadata on GCP.",
             target="/aws#instances",
             minutes=8,
-            docs="integrations/password-safe",
+            docs="integrations/beyondtrust/password-safe",
             requires_flags=("password_safe_enabled",),
             requires_clouds=("aws", "azure", "gcp"),
         ),
@@ -456,7 +456,7 @@ _HYPERVISOR = Persona(
                     "the work and never learns the password.",
             target="/vsphere",
             minutes=8,
-            docs="integrations/privileged-remote-access",
+            docs="integrations/beyondtrust/privileged-remote-access",
             requires_flags=("pra_enabled", "vsphere_enabled"),
         ),
         UseCase(
@@ -467,7 +467,7 @@ _HYPERVISOR = Persona(
                     "manager shared by six people.",
             target="/connections",
             minutes=10,
-            docs="integrations/password-safe",
+            docs="integrations/beyondtrust/password-safe",
             requires_flags=("password_safe_enabled", "vsphere_enabled"),
         ),
         UseCase(
@@ -477,7 +477,7 @@ _HYPERVISOR = Persona(
                     "Gateway that only ever makes outbound connections.",
             target="/connections",
             minutes=8,
-            docs="integrations/privileged-remote-access",
+            docs="integrations/beyondtrust/privileged-remote-access",
             requires_flags=("pra_enabled",),
             # /connections guards itself on any-of these six, inline in the route body.
             requires_any_flag=("proxmox_enabled", "vsphere_enabled", "hyperv_enabled",
@@ -490,7 +490,7 @@ _HYPERVISOR = Persona(
                     "that makes every other item on this list possible.",
             target="/containers#gateways",
             minutes=12,
-            docs="integrations/gateways",
+            docs="integrations/beyondtrust/gateways",
             requires_flags=("pra_enabled",),
         ),
         UseCase(
@@ -526,7 +526,7 @@ _ITOPS = Persona(
                     "— no sudo entry, no local admin group, and a record of what ran.",
             target="/settings",
             minutes=10,
-            docs="integrations/epml",
+            docs="integrations/beyondtrust/epml",
             requires_flags=("epml_enabled",),
         ),
         UseCase(
@@ -536,7 +536,7 @@ _ITOPS = Persona(
                     "— with the session recorded and no credential shared.",
             target="/desktops",
             minutes=12,
-            docs="integrations/privileged-remote-access",
+            docs="integrations/beyondtrust/privileged-remote-access",
             requires_flags=("vdesktops_enabled", "pra_enabled"),
         ),
         UseCase(
@@ -546,7 +546,7 @@ _ITOPS = Persona(
                     "since imaging, brought under management and rotated per machine.",
             target="/vms",
             minutes=8,
-            docs="integrations/password-safe",
+            docs="integrations/beyondtrust/password-safe",
             requires_flags=("password_safe_enabled", "vmware_enabled"),
         ),
         UseCase(
@@ -566,7 +566,7 @@ _ITOPS = Persona(
                     "through an outbound-only broker.",
             target="/vms",
             minutes=8,
-            docs="integrations/privileged-remote-access",
+            docs="integrations/beyondtrust/privileged-remote-access",
             requires_flags=("pra_enabled", "vmware_enabled"),
         ),
     ),
@@ -666,7 +666,7 @@ _OT = Persona(
                     "a diagram.",
             target="/containers#gateways",
             minutes=8,
-            docs="integrations/gateways",
+            docs="integrations/beyondtrust/gateways",
             requires_flags=("pra_enabled",),
         ),
     ),
@@ -714,7 +714,7 @@ _DBA = Persona(
                     "rotation projects.",
             target="/databases",
             minutes=10,
-            docs="integrations/password-safe",
+            docs="integrations/beyondtrust/password-safe",
             requires_flags=("cloud_database_enabled", "password_safe_enabled"),
         ),
         UseCase(
@@ -920,7 +920,7 @@ _NETADMIN = Persona(
                     "so there is nothing inbound to attack.",
             target="/containers#gateways",
             minutes=8,
-            docs="integrations/gateways",
+            docs="integrations/beyondtrust/gateways",
             requires_flags=("pra_enabled",),
         ),
         UseCase(
@@ -1013,7 +1013,7 @@ _FINOPS = Persona(
                     "permanent owner.",
             target="/rbac",
             minutes=12,
-            docs="integrations/entitle-dashboard-permissions",
+            docs="integrations/beyondtrust/entitle-dashboard-permissions",
             requires_flags=("entitle_user_jit_enabled",),
         ),
         UseCase(

@@ -197,7 +197,7 @@ The gap is sharper than "no cloud VDI" — cloud VDI is built and reasonably mat
 **"remove local admin from a Windows endpoint and elevate per-application" — among the
 most recognisable demos BeyondTrust has — has no home in this dashboard**, because
 `epml_enabled` is the only EPM flag in the registry and
-[`integrations/epml.md`](../integrations/epml.md) is EPM **for Linux**.
+[`integrations/beyondtrust/epml.md`](../integrations/beyondtrust/epml.md) is EPM **for Linux**.
 
 **To be clear about what that is and is not.** EPM for Windows is a shipping BeyondTrust
 product and there is nothing preventing its use — what is missing is the *dashboard
@@ -215,7 +215,7 @@ than it looks, because **every surrounding piece is already here**:
 
 The agent goes **into the image**, and this is a settled pattern rather than a new idea.
 EPM-L states the constraint and the resolution in one sentence
-([`integrations/epml.md`](../integrations/epml.md#getting-an-installation-token)):
+([`integrations/beyondtrust/epml.md`](../integrations/beyondtrust/epml.md#getting-an-installation-token)):
 
 > Because the package is installed at build time but activation can't be — a token
 > expires hours after issue, so one baked into an image is already dead — activation is a
@@ -384,7 +384,7 @@ Three named gaps, none of them a property of the design:
   they are.
 * **The Password Safe account has to exist and be requestable.** The `ps` source needs an
   API-enabled managed account, the Requestor role, and an access policy that auto-releases
-  — the same out-of-band prerequisites `docs/integrations/password-safe.md` already
+  — the same out-of-band prerequisites `docs/integrations/beyondtrust/password-safe.md` already
   records for every other request path.
 
 So `file` stays the default, and every line the worker logs names which mode produced its
@@ -525,7 +525,7 @@ both certificate packages:
    else — no `Text`, no `Password`. `--decrypt` cannot help, because it only adds a
    query parameter and there is no payload field for it to fill. The body comes from a
    separate call that takes **only a GUID**, so even the happy path is two round trips.
-   See [Password Safe → Troubleshooting](../integrations/password-safe.md#troubleshooting).
+   See [Password Safe → Troubleshooting](../integrations/beyondtrust/password-safe.md#troubleshooting).
 2. **On the leaf package it is binary — which rules out ps-cli, not the API.** `bundle`
    defaults to `Pkcs12` for `Certificate` and `PemBundle` for `Subordinate CA`. The
    endpoint returns `application/octet-stream` and is byte-faithful; every route ps-cli

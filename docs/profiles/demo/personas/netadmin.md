@@ -60,7 +60,7 @@ The cell has no public address and no port open to anything. The Gateway dials *
 so the path in exists without an attack surface — the answer to "so we open 22 to your
 cloud?", which is the question that usually ends these conversations.
 
-**Guide:** [Gateways](../../../integrations/gateways.md)
+**Guide:** [Gateways](../../../integrations/beyondtrust/gateways.md)
 
 ### The credential dies when the window closes
 

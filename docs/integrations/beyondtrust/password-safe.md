@@ -14,7 +14,7 @@ Kubernetes ServiceAccount tokens — as managed systems + accounts, so their cre
 rotate on the tenant's schedule instead of living forever as whatever the deploy minted.
 
 Gated by `password_safe_enabled`. This is one of three independently-gated BeyondTrust
-products; see [BeyondTrust Integrations](beyondtrust.md) for the map, and
+products; see [BeyondTrust Integrations](../beyondtrust.md) for the map, and
 [Privileged Remote Access](privileged-remote-access.md) for the jump-item and Gateway
 half of the story.
 
@@ -38,8 +38,8 @@ half of the story.
   `beyondtrust.secrets_safe` Galaxy collection. The dashboard reuses this same OAuth
   client (`pscli_*`) — auto-injecting it into the runner as `PASSWORD_SAFE_*` — so no
   separate credential is needed. See
-  [integrations/ansible.md](ansible\secrets.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe)
-  and [examples/playbooks/password-safe/](../../examples/playbooks/password-safe/).
+  [integrations/ansible.md](../ansible\secrets.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe)
+  and [examples/playbooks/password-safe/](../../../examples/playbooks/password-safe/).
 
 ---
 
@@ -110,7 +110,7 @@ Integrations** once you have logged in.
 | **Resource onboarding** | VMs and cloud databases the dashboard builds are onboarded as Password Safe managed systems + accounts, and removed again on destroy |
 | **Hypervisor credentials for a remote agent** | An on-prem agent brokering vCenter/Proxmox/Hyper-V can hold no credential at all: the dashboard checks one out per job, seals it to that agent, checks it back in and rotates it on release. See [below](#hypervisor-credentials-for-a-remote-agent) |
 | **Secret audit log** | Every checkout creates an immutable record in Password Safe |
-| **Attributes on Inventory** | Each matched resource's Password Safe attributes (`Status = Online`, `Business Unit = Finance`) as a filterable column on `/inventory`. Admins can assign and remove them, for one resource or up to 50 at once, and re-run the Smart Rule that uses them. See [Inventory — Password Safe attributes](../inventory.md#password-safe-attributes) |
+| **Attributes on Inventory** | Each matched resource's Password Safe attributes (`Status = Online`, `Business Unit = Finance`) as a filterable column on `/inventory`. Admins can assign and remove them, for one resource or up to 50 at once, and re-run the Smart Rule that uses them. See [Inventory — Password Safe attributes](../../inventory.md#password-safe-attributes) |
 
 PRA Vault accounts minted for tunnels can themselves be onboarded here for rotation —
 see [Privileged Remote Access](privileged-remote-access.md).
@@ -124,7 +124,7 @@ details are worth knowing because they are not obvious:
 - **Across many hosts, the account is matched by name.** A managed account reference
   pins a system id *and* an account id, both specific to one managed system — reusing
   one across a fleet would check out a single machine's credential and connect to every
-  host with it. A [bulk run](../config-management.md#bulk-runs-from-the-inventory)
+  host with it. A [bulk run](../../config-management.md#bulk-runs-from-the-inventory)
   therefore sends the account **name**, and each job resolves it against the host it is
   configuring, so every host checks out its own credential.
 - **On the ECS / Cloud Run runners it needs an opt-in.** Those runners *reference* a
@@ -134,11 +134,11 @@ details are worth knowing because they are not obvious:
   RBAC-locked secret and force-deleted after the run.
 
 Full walkthrough in
-[Ansible → Managed-account checkout](ansible\secrets.md#managed-account-checkout-beyondtrust-password-safe).
+[Ansible → Managed-account checkout](../ansible\secrets.md#managed-account-checkout-beyondtrust-password-safe).
 
 ### Hypervisor credentials for a remote agent
 
-A [remote agent](../remote-agents.md) brokering hypervisor operations inside a private network
+A [remote agent](../../remote-agents.md) brokering hypervisor operations inside a private network
 has two ways to use Password Safe, and they differ in which host holds the OAuth client:
 
 | | Agent-side checkout | Dashboard-side checkout |
@@ -191,11 +191,11 @@ resolves them over the public API and creates the managed system/account with Te
 > reference an operator-created account. **Cloud-database** onboarding does too, but only
 > when `clouddb_ps_functional_account_mode` is `reference`; its default, `create`, mints one
 > per database and deletes it on decommission. See
-> [Databases → Layer 2](../databases.md#layer-2--password-safe-aws--azure--gcp). Easy to conflate,
+> [Databases → Layer 2](../../databases.md#layer-2--password-safe-aws--azure--gcp). Easy to conflate,
 > so check the mode before hunting for a missing account.
 
 > This section is the authoritative reference for **VM** onboarding methods. For the full
-> cloud-VM deploy story (provisioning, PRA Shell Jump, Entitle) see [Cloud VMs](../cloud-vms.md).
+> cloud-VM deploy story (provisioning, PRA Shell Jump, Entitle) see [Cloud VMs](../../cloud-vms.md).
 
 Three onboarding methods, chosen per cloud:
 
@@ -394,7 +394,7 @@ destroys the PRA Vault account, and only then off-boards the VM's own managed sy
 ## Kubernetes ServiceAccount token rotation
 
 A cluster's PRA k8s tunnel can inject a ServiceAccount bearer token at session launch
-([Kubernetes → Access & identity](../kubernetes.md#access--identity)). The dashboard used to
+([Kubernetes → Access & identity](../../kubernetes.md#access--identity)). The dashboard used to
 mint that token once and never touch it again. This makes it a Password Safe **managed
 account** so it rotates on the tenant's schedule, and keeps the PRA Vault copy current.
 
@@ -635,7 +635,7 @@ path proven immediately, remembering that LongLived revokes the token a live ses
 The **OT demo cell** uses the same primitive for its `adminuser` credential — parent on the
 GCP VM SSH Rotation platform, subscriber on the **PRA Vault Username Password** plugin, PRA
 Vault account associated to the cell's Jump Group for checkout/injection. See
-[cloud-ot.md](../profiles/demo/ot-demo-cell.md#pra-checkout-of-the-cells-admin-credential).
+[cloud-ot.md](../../profiles/demo/ot-demo-cell.md#pra-checkout-of-the-cells-admin-credential).
 
 **The LongLived break window.** Rotation revokes the old token immediately. Password Safe
 applies the new value to the subscriber as part of the same change, but change operations are
@@ -708,7 +708,7 @@ PRA owns that identity, Password Safe rotates its token.
 
 Off-boarding removes both managed systems and the rotator RBAC; it runs automatically when the
 cluster is decommissioned or deregistered. Design rationale, including why each of these
-choices is what it is: [k8s-sa-token-rotation](../design/k8s-sa-token-rotation.md).
+choices is what it is: [k8s-sa-token-rotation](../../design/k8s-sa-token-rotation.md).
 
 ---
 
@@ -724,7 +724,7 @@ Server through a small Cloud Run service you deploy. It ships off — every chan
 implemented plugin-side now, but none has been exercised against a live Cloud SQL
 instance. That whole feature — base provisioning, per-cloud
 prerequisites, and the Password Safe onboarding — is documented separately in
-**[Databases](../databases.md)**. The tunnel half needs
+**[Databases](../../databases.md)**. The tunnel half needs
 [Privileged Remote Access](privileged-remote-access.md).
 
 Onboarding is asked for **per database**, in one of two places: the **Onboard into Password
@@ -763,7 +763,7 @@ Two things worth knowing here rather than in the feature doc:
 Configuration keys (Settings → Integrations → Password Safe → *Database Import*):
 `clouddb_ps_import_workgroup`, `clouddb_ps_import_default_cloud`,
 `clouddb_ps_import_max_systems`, `clouddb_ps_import_platform_map`. All optional and all
-documented in **[Databases → Importing from Password Safe](../databases.md#importing-from-password-safe)**.
+documented in **[Databases → Importing from Password Safe](../../databases.md#importing-from-password-safe)**.
 
 ---
 
@@ -833,7 +833,7 @@ directly and keep the bytes, the way the agent worker already calls `Requests` a
 
 In a playbook none of this applies for text bundles — the `beyondtrust.secrets_safe`
 lookup resolves all three types in one call by `folder/title` (it decodes as text too, so
-the PEM-only caveat carries over). See [Secrets in a Remote Worker run](ansible/secrets.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe).
+the PEM-only caveat carries over). See [Secrets in a Remote Worker run](../ansible/secrets.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe).
 
 **A checkout returns `4031` / 403** — usually the API identity is missing the **Requestor**
 role or an access policy granting View on a Smart Rule containing the account. There is no
@@ -883,7 +883,7 @@ a plan that assumes "we can automate the console" gets corrected before it is wr
 
 | Object | State |
 |---|---|
-| Resource zones, resource brokers | **no endpoint of any kind.** Independently confirms why `ps_application_host_id` was never the broker handle — see [`docs/profiles/pov/design/resource-broker.md`](../profiles/pov/design/resource-broker.md) §6 |
+| Resource zones, resource brokers | **no endpoint of any kind.** Independently confirms why `ps_application_host_id` was never the broker handle — see [`docs/profiles/pov/design/resource-broker.md`](../../profiles/pov/design/resource-broker.md) §6 |
 | Discovery credentials | no endpoint |
 | Discovery scans | no endpoint; run from the console |
 | Directory queries | no endpoint |
@@ -905,7 +905,7 @@ shows up as readable instead of broken.
 ### Assets and attributes — verified live, 2026-09-23
 
 *This is contributor-level API evidence. For using attributes, see
-[Inventory — Password Safe attributes](../inventory.md#password-safe-attributes).*
+[Inventory — Password Safe attributes](../../inventory.md#password-safe-attributes).*
 
 Building the `/inventory` attributes column settled four of these against a real tenant.
 All four were guesses before, and two of them were wrong:

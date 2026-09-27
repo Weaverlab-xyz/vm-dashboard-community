@@ -24,7 +24,7 @@ still supported, so nothing breaks if you are already on it.
 | Revoke takes effect | **immediately** | at the user's next login |
 | Needs | `entitle_rest_secret`, dashboard reachable from Entitle | Entra tenant, group provisioning, OIDC `groups` claim |
 | Config flag | `entitle_user_jit_enabled` + `entitle_rest_secret` | `entitle_user_jit_enabled` |
-| Detail | this document | [design](../design/entitle-user-jit.md) + [runbooks](../runbooks/entitle-user-jit-phase-1-bootstrap-entra.md) |
+| Detail | this document | [design](../../design/entitle-user-jit.md) + [runbooks](../../runbooks/entitle-user-jit-phase-1-bootstrap-entra.md) |
 
 **Both can run at once.** They write different columns and are unioned into a user's
 effective permissions, so moving from groups to REST is a gradual change rather than
@@ -37,7 +37,7 @@ when you are ready.
 > Entitle-side setup looks identical. But those exist because Entitle needs an
 > endpoint and the target is somewhere else; here the dashboard **is** the target, so
 > a function hop would add a round trip, a second credential and a second thing to
-> deploy, and buy nothing. See [cloud-functions.md](cloud-functions.md) for the
+> deploy, and buy nothing. See [cloud-functions.md](../cloud-functions.md) for the
 > adapters that *are* functions.
 
 ---
@@ -107,7 +107,7 @@ an explicit act.
 **`pov` is worth calling out.** Its `use` role is what lets a customer stakeholder tick
 off their own use cases without being able to create, destroy or share a POV. Which POVs
 they can reach is a separate, non-Entitle setting on the user — see
-[Permissions](../permissions.md).
+[Permissions](../../permissions.md).
 
 **Actors** are dashboard users — local and OIDC alike. An actor resolves by username
 *or* email, case-insensitively.
@@ -206,10 +206,10 @@ remains usable until they do.
 
 Setup lives in its own documents, which remain accurate:
 
-- [Design](../design/entitle-user-jit.md) — the full model and its phases
-- [Runbook: bootstrap Entra groups](../runbooks/entitle-user-jit-phase-1-bootstrap-entra.md)
-- [Runbook: bootstrap Entitle](../runbooks/entitle-user-jit-phase-2-bootstrap-entitle.md)
-- [Runbook: the permission resolver](../runbooks/entitle-user-jit-phase-0-resolver.md)
+- [Design](../../design/entitle-user-jit.md) — the full model and its phases
+- [Runbook: bootstrap Entra groups](../../runbooks/entitle-user-jit-phase-1-bootstrap-entra.md)
+- [Runbook: bootstrap Entitle](../../runbooks/entitle-user-jit-phase-2-bootstrap-entitle.md)
+- [Runbook: the permission resolver](../../runbooks/entitle-user-jit-phase-0-resolver.md)
 
 ## Migrating to REST
 

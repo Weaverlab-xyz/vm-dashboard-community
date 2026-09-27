@@ -229,7 +229,7 @@ recorded catalog to scope grants to (RDS SQL Server creates no user database, an
 The fourth integration is not a function at all: granting **dashboard permissions**
 happens on a dashboard-hosted endpoint, because there the dashboard *is* the target
 system and there is no function to deploy. See
-[entitle-dashboard-permissions.md](entitle-dashboard-permissions.md).
+[entitle-dashboard-permissions.md](beyondtrust/entitle-dashboard-permissions.md).
 
 ### db_grant
 

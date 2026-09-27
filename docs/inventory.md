@@ -63,7 +63,7 @@ and how editing works, is in [Cloud VMs — Tags and labels](cloud-vms.md#tags-a
 
 ## Password Safe attributes
 
-When the [Password Safe integration](integrations/password-safe.md) is enabled
+When the [Password Safe integration](integrations/beyondtrust/password-safe.md) is enabled
 (`password_safe_enabled`) and has API credentials, the **Password Safe** column shows each
 matched resource's **attributes** as `Type = Value` chips — `Status = Online`,
 `Business Unit = Finance`. Attributes are how Password Safe's **Smart Rules** decide which
@@ -141,7 +141,7 @@ before enabling it: it destroys infrastructure.
 ## See also
 
 * [Cloud VMs](cloud-vms.md) — tags, power and deploys per cloud.
-* [Password Safe](integrations/password-safe.md) — setup, and the API behaviour behind the
+* [Password Safe](integrations/beyondtrust/password-safe.md) — setup, and the API behaviour behind the
   attributes column.
 * [Scheduling](scheduling.md) — running a change later or on a window.
 * [Permissions](permissions.md) — workgroups, and who sees which rows.

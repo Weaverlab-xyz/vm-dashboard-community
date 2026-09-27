@@ -751,7 +751,7 @@ For tenants who lock the node behind CIDRs that Entitle can't traverse, set
 The agent reaches the node from inside, so no inbound ranges are opened at all and
 `entitle_source_cidrs` is irrelevant. It is an env/config-only switch today — it
 appears in neither the Settings panel nor `EntitleFeatureConfig`. See the
-[Entitle guide](entitle.md) for enabling resource registration.
+[Entitle guide](beyondtrust/entitle.md) for enabling resource registration.
 
 ### A sync fails with `Expecting value: line 1 column 1 (char 0)`
 

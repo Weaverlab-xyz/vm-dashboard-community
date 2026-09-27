@@ -168,7 +168,7 @@ Name the platform — it is one word and never wrong.
 > nothing else) — the worker has all five platforms, the app has one. The `ps` source
 > additionally needs an API-enabled managed account with the Requestor role and an access
 > policy that auto-releases, the usual out-of-band prerequisites in
-> [password-safe.md](../../integrations/password-safe.md). The worker names its token
+> [password-safe.md](../../integrations/beyondtrust/password-safe.md). The worker names its token
 > source on every line it logs, so which mode is in play is never in doubt.
 
 Re-running the install play with `agent_token_source: wlc` or `ps` **removes** any token a
@@ -311,7 +311,7 @@ session that released the passphrase reaches the bundle unchanged. No second sig
 second credential, and nothing on this host that was not there a moment ago.
 
 **Not through `ps-cli`, though it is what the dashboard uses.** It cannot carry these
-bytes. [password-safe.md](../../integrations/password-safe.md) establishes it and
+bytes. [password-safe.md](../../integrations/beyondtrust/password-safe.md) establishes it and
 `secrets_backend_service` refuses on it: the endpoint returns `application/octet-stream`
 faithfully, but every route ps-cli offers decodes the body to text first, so a PEM bundle
 survives and **a `.pfx` is corrupted rather than refused**. That is the worst of the three

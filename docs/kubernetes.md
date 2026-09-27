@@ -282,7 +282,7 @@ secrets)**, and **Entitle + Entra federation (Layer 3 — time-boxed access)**.
   unlinks the pair and off-boards both managed systems. **In the default LongLived mode
   rotation revokes the old token**, so use Bound mode (Settings → token mode) on clusters
   whose tunnel must not break, since Bound never revokes. Full detail and the operator
-  prerequisites: [Password Safe k8s token rotation](integrations/password-safe.md#kubernetes-serviceaccount-token-rotation)
+  prerequisites: [Password Safe k8s token rotation](integrations/beyondtrust/password-safe.md#kubernetes-serviceaccount-token-rotation)
   and the [design note](design/k8s-sa-token-rotation.md).
 - **PRA API (TCP) tunnel** — `POST /clusters/{id}/api-tunnel` creates a `tunnel_type=tcp` jump
   straight to the API server on a pinned local port (`k8s_api_tunnel_local_port`, `6443`).
@@ -309,7 +309,7 @@ secrets)**, and **Entitle + Entra federation (Layer 3 — time-boxed access)**.
   `users`; Entitle JIT-binds `<prefix>:<sanitized-email>` → a role, and the user runs
   `kubectl --as=<prefix>:<sanitized-email>`). Config: `entitle_k8s_user_prefix`
   (`entitle`). Agent bootstrap via `POST /clusters/{id}/entitle-agent`. See the
-  [Entitle integration](integrations/entitle.md) + [design/entitle-resource-registration.md](design/entitle-resource-registration.md).
+  [Entitle integration](integrations/beyondtrust/entitle.md) + [design/entitle-resource-registration.md](design/entitle-resource-registration.md).
   - **GKE needs BOTH halves — CONFIRMED LIVE 2026-07-30** with a real Entra-federated
     workforce identity on `gcp-east`. GKE does **not** honor the Kubernetes `impersonate`
     verb: with the `entitle-impersonator` ClusterRole/Binding correctly in place and *no*

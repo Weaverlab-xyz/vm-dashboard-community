@@ -119,7 +119,7 @@ the next things queued for QA.
 ### Approval / change-control gate for destructive automation
 
 > **Shipped in community (was fully on this list):** a **two-person approval gate**.
-> A change booked into a [change window](change-windows.md) can require sign-off from
+> A change booked into a [change window](scheduling/change-windows.md) can require sign-off from
 > a second user holding `change_windows:use` before the worker will claim it; the
 > requester cannot approve their own, rescheduling clears the approval, and the
 > decision is recorded in the audit trail. An Action-Guardrails policy emitting

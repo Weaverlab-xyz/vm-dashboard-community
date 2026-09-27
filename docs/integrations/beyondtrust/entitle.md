@@ -30,7 +30,7 @@ Terraform provider:
 | MySQL database | **MySQL** ([docs](https://docs.beyondtrust.com/entitle/docs/entitle-integration-mysql)) |
 | SQL Server database | **Microsoft SQL Server** ([docs](https://docs.beyondtrust.com/entitle/docs/entitle-integration-microsoft-sql-server)) — **not currently registerable on any managed flavor**, see below |
 | Kubernetes cluster (EKS / AKS / GKE, and Rancher-managed) | **Kubernetes** ([docs](https://docs.beyondtrust.com/entitle/docs/entitle-integration-kubernetes)) — see [Kubernetes clusters](#kubernetes-clusters) |
-| Portainer (managed node, or one you pointed the dashboard at) | **REST API** in Ephemeral Accounts mode, served by the `portainer_access` Cloud Function. Portainer has no Entitle connector at all, so an adapter is the only route; deploy it from the Portainer page's **Just-in-time access (Entitle)** card. Assets are Portainer **teams**. See [portainer.md](portainer.md#just-in-time-access-via-entitle-optional) |
+| Portainer (managed node, or one you pointed the dashboard at) | **REST API** in Ephemeral Accounts mode, served by the `portainer_access` Cloud Function. Portainer has no Entitle connector at all, so an adapter is the only route; deploy it from the Portainer page's **Just-in-time access (Entitle)** card. Assets are Portainer **teams**. See [portainer.md](../portainer.md#just-in-time-access-via-entitle-optional) |
 
 > **Managed SQL Server is gated off.** The Entitle SQL Server connector needs
 > `sysadmin` / `CONTROL SERVER`, which RDS-standard, Azure SQL Database and Cloud SQL
@@ -47,7 +47,7 @@ Terraform provider:
 > rows first, whatever the engine, with a message naming the missing credential rather
 > than the SQL Server one above.
 
-Registration is done by [`entitle_registration_service.py`](../../web_dashboard/services/entitle_registration_service.py),
+Registration is done by [`entitle_registration_service.py`](../../../web_dashboard/services/entitle_registration_service.py),
 mirroring `terraform_pra_service`: it generates HCL, runs `terraform apply`, records
 the new integration id, and stashes the Terraform state on the provisioning job so
 decommission can `terraform destroy` it. The teardown is wired into VM termination and
@@ -71,10 +71,10 @@ environment** (not per build).
 > outside the plant both misrepresents the architecture and, with the cell's Purdue
 > zoning on, cannot reach it at all: the registration succeeds, the grant approves, and
 > the login fails. See
-> [Who brokers identity in the plant](../profiles/demo/ot-demo-cell.md#who-brokers-identity-in-the-plant).
+> [Who brokers identity in the plant](../../profiles/demo/ot-demo-cell.md#who-brokers-identity-in-the-plant).
 
 "Only in a Kubernetes cluster" does not have to mean a real one. For an edge or
-plant-floor host that will not carry a cluster, [KubeSolo](../kubesolo.md) is a
+plant-floor host that will not carry a cluster, [KubeSolo](../../kubesolo.md) is a
 single-node, etcd-free distribution that takes the same chart unmodified — Config
 Management playbooks install it and the agent on an on-prem host through a remote
 agent. That page also covers what the chart's defaults get wrong on one node, and why
@@ -84,7 +84,7 @@ the agent needs port 8080 as well as 443.
 > private network, so the shared one above cannot reach them. The POV page installs a
 > single-node k3s on a Linux guest and Helm-installs the agent there, minting the token in
 > that POV's own Entitle tenant — see
-> [the POV instance guide](../profiles/pov/wiring.md#the-entitle-agent). The keys on this page
+> [the POV instance guide](../../profiles/pov/wiring.md#the-entitle-agent). The keys on this page
 > describe the *instance-wide* agent used by managed clusters and stay untouched by it. A registration for a private target fails (non-fatally)
 with a clear message if no agent is configured. The Entitle agent is the *management*
 plane (it mints/revokes the ephemeral SSH account or DB role); the **PRA tunnel** the
@@ -111,7 +111,7 @@ dashboard already brokers is the separate *access* path the user connects throug
 > tied to the agent's: the `remove` action and the decommission of the hosting cluster
 > **destroy the auto-minted token** (freeing the name for the next mint) — an
 > operator-supplied `entitle_agent_token_ref` is never touched. See
-> [`docs/design/entitle-resource-registration.md`](../design/entitle-resource-registration.md).
+> [`docs/design/entitle-resource-registration.md`](../../design/entitle-resource-registration.md).
 
 ### Kubernetes clusters
 
@@ -141,12 +141,12 @@ before then, or install the agent and use In-Cluster access.
 credentials, `POST /api/k8s/clusters/{id}/impersonator` grants the Entra group
 cluster-wide `impersonate` on `users`. Entitle then JIT-binds `<prefix>:<email>` to a
 role, and the operator runs `kubectl --as=<prefix>:<email>` over the
-[API tunnel](../kubernetes.md). The prefix is `entitle_k8s_user_prefix` (default
+[API tunnel](../../kubernetes.md). The prefix is `entitle_k8s_user_prefix` (default
 `entitle`).
 
 Note that impersonation needs the **API (TCP) tunnel**, not the Web Jump — a browser
 jump can't carry impersonation headers. Full context in
-[Kubernetes](../kubernetes.md).
+[Kubernetes](../../kubernetes.md).
 
 ### Per-build opt-in (VMs and databases)
 
@@ -170,7 +170,7 @@ opt in. Clusters differ: they are registered on demand after the fact
 | Terraform Provider API Key | `entitleio/entitle` provider key (`ENTITLE_API_KEY`); falls back to the API Token. |
 | Registration enabled | Master capability switch for this track. |
 | `entitle_owner_id` / `entitle_workflow_id` | **Required** — Entitle user UUID that owns created integrations + the default approval workflow UUID. |
-| `entitle_agent_token_name` | **Auto-minted** — installing the Entitle agent mints a token via the provider, stashes its value in the secrets backend, and records this name (used to attach **private**/PRA-only targets during registration). Shown read-only in the panel; you don't set it by hand. See [the design doc](../design/entitle-resource-registration.md#agent-token--server-side-secret--helm-reuses-the-runner-primitives). |
+| `entitle_agent_token_name` | **Auto-minted** — installing the Entitle agent mints a token via the provider, stashes its value in the secrets backend, and records this name (used to attach **private**/PRA-only targets during registration). Shown read-only in the panel; you don't set it by hand. See [the design doc](../../design/entitle-resource-registration.md#agent-token--server-side-secret--helm-reuses-the-runner-primitives). |
 | `entitle_allowed_durations` | JIT durations offered on created integrations (seconds). |
 | SSH sudo user | **Optional override.** Each VM deploy automatically registers with its image's cloud-default login user (`ubuntu` / `ec2-user` / `azureuser` / `gcp-user` — the `provisioners/beyondtrust/` bt-ready user cloud-init set up with passwordless sudo). Set this only to force a different sudo user for **all** SSH registrations. |
 
@@ -180,7 +180,7 @@ opt in. Clusters differ: they are registered on demand after the fact
 > `azure_ssh_keypair_secret_name`, AWS `ec2_ssh_key_secret` / `ec2/keypairs/<name>`, GCP
 > `gcp_ssh_key_secret_name`) — *not* a separately-configured Entitle key.
 > `entitle_ssh_private_key_ref` exists only as an optional global fallback/override. See
-> the [design doc](../design/entitle-resource-registration.md#ssh-key-sourcing--from-the-vms-own-keypair-not-config).
+> the [design doc](../../design/entitle-resource-registration.md#ssh-key-sourcing--from-the-vms-own-keypair-not-config).
 
 > **Application slugs:** `application.name` is a lowercase catalog slug — `postgresql`
 > is confirmed; `mysql` / `mssql` / `ssh` are best-effort. Confirm against the
@@ -213,7 +213,7 @@ No long-lived keys in the dashboard.
 
 ### Further reading
 
-- [`docs/design/cloud-identity-jit.md`](../design/cloud-identity-jit.md) — full design, threat model, per-cloud trade-offs.
+- [`docs/design/cloud-identity-jit.md`](../../design/cloud-identity-jit.md) — full design, threat model, per-cloud trade-offs.
 - `docs/runbooks/cloud-identity-jit-phase-1-entitle-submit.md` — first end-to-end Entitle submit-and-poll loop; **requires a configured Entitle tenant**.
 
 ---
@@ -238,13 +238,13 @@ login or token refresh (via Entra group membership).
 | OAuth group mapping | Same panel + `/api/admin/oauth-group-mappings` | Maps `dashboard-aws-write` → scope `aws:write`. |
 | Resource ID map | Same panel (JSON) | Maps each scope to the Entitle resource ID for the 403-page request-access deep link. |
 
-The Terraform module under [`terraform/entitle_user_jit/`](../../terraform/entitle_user_jit)
+The Terraform module under [`terraform/entitle_user_jit/`](../../../terraform/entitle_user_jit)
 covers the Entitle side (one application + workflows + resources + policies). The Entra
 bootstrap is a separate script: `python -m web_dashboard.scripts.bootstrap_entra_groups`.
 
 ### Further reading
 
-- [`docs/design/entitle-user-jit.md`](../design/entitle-user-jit.md) — full design, operation matrix, OAuth resolution flow.
+- [`docs/design/entitle-user-jit.md`](../../design/entitle-user-jit.md) — full design, operation matrix, OAuth resolution flow.
 - `docs/runbooks/entitle-user-jit-phase-2-bootstrap-entitle.md` — Entitle virtual-application provisioner.
 
 ---

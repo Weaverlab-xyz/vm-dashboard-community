@@ -16,7 +16,7 @@ those jumps are brokered through — one auto-managed per cloud, plus any you de
 carry session load. See [Gateway hosts](gateways.md).
 
 Gated by `pra_enabled`. This is one of three independently-gated BeyondTrust products; see
-[BeyondTrust Integrations](beyondtrust.md) for the map, and
+[BeyondTrust Integrations](../beyondtrust.md) for the map, and
 [Password Safe](password-safe.md) for the credential-vaulting half of the story.
 
 ---
@@ -110,7 +110,7 @@ Remote Access** on there — that step carries toggles only, so fill in the fiel
 ## Kubernetes tunnel identity
 
 A cluster's PRA k8s tunnel injects a ServiceAccount bearer token at session launch
-([Kubernetes → Access & identity](../kubernetes.md#access--identity)). PRA mints that
+([Kubernetes → Access & identity](../../kubernetes.md#access--identity)). PRA mints that
 ServiceAccount in-cluster; `pra_k8s_namespace` / `pra_k8s_sa_name` name it, and
 `bt_vault_account_group_id` is the vault account group injected Kubernetes, database and
 Web Jump credentials land in.
@@ -128,7 +128,7 @@ Shell Jump connectivity is baked at image-build time — sshd hardening, passwor
 and optional SSH certificate-authority trust so accounts accept certificates PRA issues
 instead of needing a static key. Because those scripts also prepare Password Safe and
 EPM-L in the same pass, they are documented once on the hub:
-[BeyondTrust Integrations → Preparing images for BT management](beyondtrust.md#preparing-images-for-bt-management).
+[BeyondTrust Integrations → Preparing images for BT management](../beyondtrust.md#preparing-images-for-bt-management).
 
 ---
 
@@ -179,7 +179,7 @@ CA store.
 **Shell Jump connects but authentication fails** — the target account has to exist on the
 VM with the right key. Images built with the `bt-ready` provisioner create `adminuser` and
 harden sshd; see
-[Preparing images](beyondtrust.md#preparing-images-for-bt-management).
+[Preparing images](../beyondtrust.md#preparing-images-for-bt-management).
 
 **A session times out reaching a private resource** — the Gateway host needs network
 line-of-sight to the target, and its node firewall has to allow the source. Both are

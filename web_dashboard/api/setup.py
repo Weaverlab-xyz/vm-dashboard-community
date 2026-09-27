@@ -947,7 +947,7 @@ class PasswordSafeFeatureConfig(BaseModel):
     ot_ps_pravault_platform: str = ""
     ot_ps_pravault_functional_account: str = ""
     # Cloud VM → PRA Vault key sync: the key the cloud-native SSH plugins rotate, mirrored
-    # into a PRA Vault Private Key account via SyncedAccounts (docs/integrations/password-safe.md).
+    # into a PRA Vault Private Key account via SyncedAccounts (docs/integrations/beyondtrust/password-safe.md).
     passwordsafe_vault_sync_enabled: bool = False
     passwordsafe_vault_sync_converge: bool = True   # one Change through the new link, so PRA holds a real key now
     passwordsafe_vault_sync_platform: str = "PRA Vault Private Key"

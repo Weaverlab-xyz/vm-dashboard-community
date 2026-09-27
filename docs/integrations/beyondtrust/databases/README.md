@@ -4,7 +4,7 @@
 
 Handing a **database** credential to Password Safe, so the vault owns the password and
 rotates it rather than this dashboard storing one. This is Layer 2 of the
-[Databases](../../databases.md) stack, split out per cloud because the three clouds reach a
+[Databases](../../../databases.md) stack, split out per cloud because the three clouds reach a
 managed database three different ways — and the way in is what decides the setup.
 
 | Page | Read this when |

@@ -47,7 +47,7 @@ _WEB = os.path.join(_ROOT, "web_dashboard")
 _MAIN = os.path.join(_WEB, "main.py")
 _NAV = os.path.join(_WEB, "templates", "_nav_links.html")
 _FLAGS = os.path.join(_WEB, "services", "feature_flags.py")
-_CHANGE_WINDOWS = os.path.join(_DOCS, "change-windows.md")
+_CHANGE_WINDOWS = os.path.join(_DOCS, "scheduling", "change-windows.md")
 _INDEX = os.path.join(_DOCS, "README.md")
 
 # Page routes that are not a feature an operator reads about. Each needs a reason.
@@ -96,7 +96,7 @@ for _path, _cls, _word in (("web_dashboard/models/aws.py", "CreateImageRequest",
                            ("web_dashboard/models/aws.py", "CopyAMIRequest", "AMI copy")):
     _SCHEDULABLE[(_path, _cls)] = ("Image export", _word)
 
-_HUBS = ("scheduling.md", "inventory.md", "change-windows.md")
+_HUBS = ("scheduling.md", "inventory.md")
 
 
 def _read(path):
@@ -238,7 +238,7 @@ def test_every_schedulable_request_is_mapped():
         "tests/test_docs_coverage.py::_SCHEDULABLE:\n"
         + "\n".join(f"  {p}::{c}" for p, c in unmapped)
         + "\nAdd a row for the surface to the 'Where you can book one' table in "
-          "docs/change-windows.md (and docs/scheduling.md's matrix), then map it here.")
+          "docs/scheduling/change-windows.md (and docs/scheduling.md's matrix), then map it here.")
     gone = sorted(set(_SCHEDULABLE) - found)
     assert not gone, ("_SCHEDULABLE maps classes that no longer take a booking -- drop them "
                       "and check the docs table still tells the truth:\n"
@@ -255,7 +255,7 @@ def test_every_schedulable_surface_has_a_booking_row():
             problems.append(f"  no row starting '{label}' (for {path}::{cls})")
         elif not any(word in " | ".join(r) for r in matches):
             problems.append(f"  row '{label}' does not name {word} (for {path}::{cls})")
-    assert not problems, ("docs/change-windows.md 'Where you can book one' is behind the code:\n"
+    assert not problems, ("docs/scheduling/change-windows.md 'Where you can book one' is behind the code:\n"
                           + "\n".join(problems))
 
 

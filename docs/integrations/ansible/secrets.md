@@ -163,7 +163,7 @@ Two constraints bite the file type only:
   certificate material as PEM if a play has to read it.
 - **`ps-cli` is not equivalent here.** At the CLI the file type *is* a special case —
   `secrets get` returns only the filename and hash, and the contents need a second,
-  GUID-only call. See [Password Safe → Troubleshooting](../password-safe.md#troubleshooting).
+  GUID-only call. See [Password Safe → Troubleshooting](../beyondtrust/password-safe.md#troubleshooting).
 
 **Auto-injected credentials.** The lookup runs on the Ansible controller (the runner
 container) and reads `PASSWORD_SAFE_API_URL` / `PASSWORD_SAFE_CLIENT_ID` /

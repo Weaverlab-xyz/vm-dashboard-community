@@ -49,7 +49,7 @@ Rotate the account an application depends on, and show the application keep work
 live: it is the objection that stops most rotation projects, and a demo answers it better than
 an argument.
 
-**Guide:** [Password Safe](../../../integrations/password-safe.md)
+**Guide:** [Password Safe](../../../integrations/beyondtrust/password-safe.md)
 
 ### Reach a private database with no public endpoint
 

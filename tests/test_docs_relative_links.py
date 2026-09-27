@@ -71,9 +71,9 @@ def test_the_fragment_survives_the_rewrite():
     """The fragment is the whole value of a deep link. Dropping it silently leaves the
     reader at the top of a 700-line page, which is the failure test_docs_anchors exists
     for -- reintroducing it in the renderer would be a fine joke."""
-    html = _render("[k8s](../../integrations/password-safe.md#kubernetes-serviceaccount-token-rotation)")
+    html = _render("[k8s](../../integrations/beyondtrust/password-safe.md#kubernetes-serviceaccount-token-rotation)")
     assert _hrefs(html) == [
-        "/docs/integrations/password-safe#kubernetes-serviceaccount-token-rotation"]
+        "/docs/integrations/beyondtrust/password-safe#kubernetes-serviceaccount-token-rotation"]
 
 
 def test_a_directory_link_lands_on_that_folders_index():

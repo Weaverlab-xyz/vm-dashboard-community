@@ -29,7 +29,7 @@ _VERIFY = os.path.join(_ROOT, "scripts", "ot", "verify_tunnels.py")
 _SVC = os.path.join(_ROOT, "web_dashboard", "services", "ot_service.py")
 _DOCS = [
     os.path.join(_ROOT, "docs", "profiles", "demo", "ot-demo-cell.md"),
-    os.path.join(_ROOT, "docs", "profiles", "demo", "ot-protocol-clients.md"),
+    os.path.join(_ROOT, "docs", "profiles", "demo", "ot-demo-cell", "ot-protocol-clients.md"),
     os.path.join(_ROOT, "provisioners", "ot", "README.md"),
 ]
 
