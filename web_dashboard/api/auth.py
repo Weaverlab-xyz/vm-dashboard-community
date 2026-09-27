@@ -37,7 +37,7 @@ from ..services.fido2_service import (
     b64url_encode,
     b64url_decode,
 )
-from ..services import login_guard, personas, public_url, service_accounts
+from ..services import external_workload, login_guard, personas, public_url, service_accounts
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
@@ -156,10 +156,20 @@ def resolve_bearer(token: str, db: Session) -> User:
         mis-issued, and it would skip the client check below;
       * a workload JWT (``type: workload``) -- a service account, from
         ``POST /api/oauth/token``. ``service_accounts.resolve_workload_token`` re-checks
-        the issuing client and attaches the token's scope to the returned instance.
+        the issuing client and attaches the token's scope to the returned instance;
+      * an EXTERNAL IdP's access token (asymmetrically signed) -- a service account mapped
+        by ``(iss, sub)`` in ``services/external_workload``.
     """
     if token.startswith(_PAT_PREFIX):
         return _get_user_from_pat(token, db)
+    if external_workload.is_candidate(token):
+        # Asymmetrically signed: never one of ours (HS256 under jwt_secret_key), so it is
+        # an external IdP's workload token or nothing. Routed on the header alone, which
+        # is also what keeps an IdP public key from ever being tried as an HMAC secret.
+        user = external_workload.resolve(token, db)
+        if not user:
+            raise _unauthorized("External workload token not accepted")
+        return user
     try:
         payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
     except JWTError:

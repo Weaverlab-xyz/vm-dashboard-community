@@ -521,6 +521,65 @@
         </table>
       </div>
 
+      <!-- External identities: an IdP's own workload tokens, mapped to this account by the
+           token's issuer and SUBJECT (never azp -- a person signing in through the same app
+           shares that). Trust is configured under Settings → Single sign-on. -->
+      <div class="px-6 py-4 border-t">
+        <h3 class="text-sm font-semibold text-gray-800">External identities</h3>
+        <p class="text-xs text-gray-500 mt-1 mb-3">
+          Let a workload call with an access token from your IdP instead of a secret from
+          this dashboard. The subject is the token's <code>sub</code>: Entra — the service
+          principal's object id; Okta — the client id; Keycloak — the client's service-account
+          user id. Requires workload tokens under Settings → Single sign-on.
+        </p>
+        <form @submit.prevent="createExternal()" class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+          <input x-model="extForm.name" type="text" placeholder="Name, e.g. build-pipeline" required
+                 class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <input x-model="extForm.subject" type="text" placeholder="Subject (sub claim)" required
+                 class="border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+          <input x-model="extForm.expected_client" type="text" placeholder="Expected client id (optional)"
+                 class="border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+          <input x-model="extForm.issuer" type="text" placeholder="Issuer (blank = configured)"
+                 class="border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+          <div class="sm:col-span-2 flex justify-end">
+            <button type="submit"
+                    class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg">
+              Add
+            </button>
+          </div>
+        </form>
+        <template x-if="userExternal.length === 0">
+          <p class="text-gray-400 text-sm text-center py-2">No external identities</p>
+        </template>
+        <div x-show="userExternal.length > 0" class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead class="text-gray-500 text-xs uppercase">
+              <tr>
+                <th class="pb-2 text-left">Name</th>
+                <th class="pb-2 text-left">Subject</th>
+                <th class="pb-2 text-left">Issuer</th>
+                <th class="pb-2 text-left">Last used</th>
+                <th class="pb-2"></th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+              <template x-for="x in userExternal" :key="x.id">
+                <tr>
+                  <td class="py-2 font-medium" x-text="x.name"></td>
+                  <td class="py-2 font-mono text-xs text-gray-600 break-all" x-text="x.subject"></td>
+                  <td class="py-2 font-mono text-xs text-gray-500 break-all" x-text="x.issuer"></td>
+                  <td class="py-2 text-gray-500" x-text="x.last_used_at ? fmtDate(x.last_used_at) : '—'"></td>
+                  <td class="py-2 text-right">
+                    <button @click="revokeExternal(x)"
+                            class="text-red-500 hover:text-red-700 text-xs font-medium">Remove</button>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <div class="px-6 pb-4 flex justify-end border-t pt-4">
         <button @click="showClientsModal = false"
                 class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Close</button>
@@ -597,6 +656,8 @@ function usersPage() {
     newClientTtl: '',
     newClientId: '',
     newClientSecret: '',
+    userExternal: [],
+    extForm: { name: '', subject: '', expected_client: '', issuer: '' },
 
     // A service account can never hold the Administrator role; the API refuses it, so
     // the picker does not offer it.
@@ -943,7 +1004,42 @@ function usersPage() {
       this.newClientId = '';
       this.newClientSecret = '';
       this.showClientsModal = true;
-      await this.loadClients();
+      this.userExternal = [];
+      this.extForm = { name: '', subject: '', expected_client: '', issuer: '' };
+      await Promise.all([this.loadClients(), this.loadExternal()]);
+    },
+
+    async loadExternal() {
+      try {
+        this.userExternal = await API.get(`/api/users/${this.clientsUser.id}/external-identities`) || [];
+      } catch (e) {
+        toast('Could not load external identities: ' + e.message, 'error');
+      }
+    },
+
+    async createExternal() {
+      try {
+        const body = { name: this.extForm.name, subject: this.extForm.subject };
+        if (this.extForm.expected_client) body.expected_client = this.extForm.expected_client;
+        if (this.extForm.issuer) body.issuer = this.extForm.issuer;
+        await API.post(`/api/users/${this.clientsUser.id}/external-identities`, body);
+        this.extForm = { name: '', subject: '', expected_client: '', issuer: '' };
+        toast('External identity added', 'success');
+        await this.loadExternal();
+      } catch (e) {
+        toast('Error: ' + e.message, 'error');
+      }
+    },
+
+    async revokeExternal(x) {
+      if (!confirm(`Stop accepting "${x.name}"? Its next request is refused.`)) return;
+      try {
+        await API.del(`/api/users/${this.clientsUser.id}/external-identities/${x.id}`);
+        toast('External identity removed', 'success');
+        await this.loadExternal();
+      } catch (e) {
+        toast('Error: ' + e.message, 'error');
+      }
     },
 
     async loadClients() {

@@ -535,6 +535,37 @@ class OAuthClient(Base):
     is_active = Column(Boolean, default=True)
 
 
+class ExternalWorkloadIdentity(Base):
+    """An identity at an external IdP that authenticates AS a service account.
+
+    The workload keeps no dashboard secret at all: it presents an access token its own IdP
+    issued (Entra, Okta, Keycloak -- client credentials, or a managed identity), and
+    ``services/external_workload`` verifies it against that IdP's JWKS and resolves the
+    service account mapped here.
+
+    KEYED ON ``(issuer, subject)`` -- the token's ``sub`` -- AND NEVER ON ``azp``/``appid``.
+    In a client-credentials token ``sub`` is the client's own identity (Entra: the service
+    principal's object id; Okta: the client id; Keycloak: the client's service-account
+    user). A PERSON signing in through the same app registration gets a token with the
+    same ``azp`` and their OWN ``sub``, so a mapping on ``azp`` would let every user of that
+    app act as the workload. ``expected_client`` is a second, optional check on top.
+    """
+    __tablename__ = "external_workload_identities"
+    __table_args__ = (UniqueConstraint("issuer", "subject", name="uq_external_workload_iss_sub"),)
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    issuer = Column(String(500), nullable=False)
+    subject = Column(String(255), nullable=False)
+    # If set, the token's azp / appid / client_id / cid must equal it as well.
+    expected_client = Column(String(255), nullable=True)
+    name = Column(String(100), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by = Column(String(100), nullable=True)
+    last_used_at = Column(DateTime, nullable=True)
+    is_active = Column(Boolean, default=True)
+
+
 class LoginAttempt(Base):
     """One FAILED password login. Successes are not recorded here — a successful login
     deletes the username's rows, so the table only ever holds the evidence of failure.

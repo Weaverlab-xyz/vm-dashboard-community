@@ -64,13 +64,24 @@ def _fetch(url: str) -> dict:
 
 
 def discovery() -> dict:
-    """The provider's OIDC discovery document (cached).
+    """The SSO provider's OIDC discovery document (cached). See ``discovery_for``."""
+    issuer = _cfg("oidc_issuer").rstrip("/")
+    if not issuer:
+        raise OIDCError("No OIDC issuer configured.")
+    return discovery_for(issuer)
+
+
+def discovery_for(issuer: str) -> dict:
+    """Any issuer's OIDC discovery document (cached).
+
+    Issuer-parametrised so the workload-token path (``services/external_workload``) can
+    trust an IdP that is not the SSO one, with the same cache and the same checks.
 
     Raises ``OIDCError`` with the issuer in the message — a typo'd issuer is the
     single most common misconfiguration, and the bare httpx error doesn't say
     which URL failed.
     """
-    issuer = _cfg("oidc_issuer").rstrip("/")
+    issuer = (issuer or "").rstrip("/")
     if not issuer:
         raise OIDCError("No OIDC issuer configured.")
     hit = _cache.get(issuer)
@@ -89,10 +100,19 @@ def discovery() -> dict:
 
 
 def _jwks() -> dict:
-    doc = discovery()
-    uri = doc["jwks_uri"]
+    return _jwks_from(discovery()["jwks_uri"])
+
+
+def jwks_for(issuer: str, force: bool = False) -> dict:
+    """An issuer's signing keys (cached). ``force`` refetches -- for a token whose
+    ``kid`` is not in the cached set, which is what a key rotation looks like. The
+    caller rate-limits ``force``; this does not."""
+    return _jwks_from(discovery_for(issuer)["jwks_uri"], force=force)
+
+
+def _jwks_from(uri: str, force: bool = False) -> dict:
     hit = _cache.get(uri)
-    if hit and hit["expires"] > time.time():
+    if hit and hit["expires"] > time.time() and not force:
         return hit["doc"]
     keys = _fetch(uri)
     _cache[uri] = {"doc": keys, "expires": time.time() + _DISCOVERY_TTL}
