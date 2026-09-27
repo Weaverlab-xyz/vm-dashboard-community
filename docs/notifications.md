@@ -152,7 +152,7 @@ reference; it is resolved at send time.
 
 1. **Add an endpoint** and press **Test**. This ignores dry-run and sends immediately,
    returning the verbatim error — which is the whole point of the button.
-2. **Enable the feature**, leave **Dry run** on. Set the **Dashboard URL**.
+2. **Enable the feature** (`notifications_enabled`), leave **Dry run** on. Set the **Dashboard URL**.
 3. Watch **Recent deliveries** for a day. Everything appears with status `dry-run`,
    rendered exactly as it would be sent.
 4. Turn **Dry run** off.

@@ -4,7 +4,8 @@
 
 > **Preview.** All three clouds provision and broker seats, but the feature has not been
 > run end to end on AWS or GCP against a live PRA appliance. Off by default; turn it on
-> with the **Virtual Desktops** preview toggle in Settings.
+> with the **Virtual Desktops** preview toggle in Settings (`vdesktops_enabled`). The pools
+> page is `/desktops`.
 
 A **desktop pool** is *N* private VMs built from one desktop image, tagged so the pool is
 recoverable from the cloud itself rather than only from this database. Seats are created,

@@ -48,11 +48,13 @@ demoing, running a lab, or running production.
 | [Storage Management](storage-management.md) | you are enabling a feature that needs a storage backend, which several of them do. |
 | [Remote Agents](remote-agents.md) | your hypervisors, databases or clusters live somewhere the dashboard cannot reach. |
 | [Auto-delete Timer](auto-delete-timer.md) | you want lab resources to clean themselves up — read it before enabling it, because it deletes infrastructure. |
+| [Inventory](inventory.md) | you want one list of everything across every cloud and hypervisor, to filter it by tag or Password Safe attribute, or to act on a selection. |
 | [Notifications](notifications.md) | you want to hear about expiring resources and failed jobs without opening the dashboard. |
 | [Action Guardrails](policy-guardrails.md) | you want disallowed deploys blocked before they start rather than reviewed after. |
 | [Permissions](permissions.md) | you are deciding what a user may see or do — and especially before ticking "Full access", or handing a POV to a customer stakeholder. |
 | [Audit Log](audit-log.md) | you need to show who did what, or to satisfy yourself that the record has not been edited. |
-| [Change Windows](change-windows.md) | a job must not start the moment somebody presses the button — it has to wait for an approved maintenance period, or for a second person to sign it off. |
+| [Scheduling](scheduling.md) | you want a change to run later, run repeatedly, or run only inside an approved window — the one page that tells the three kinds of "schedule" apart. |
+| [Change Windows](change-windows.md) | a job must not start the moment somebody presses the button. You want to schedule it for later, or it has to wait for an approved maintenance period, or for a second person to sign it off. |
 | [Job Worker](job-worker.md) | a long job is sitting queued, or you are sizing the worker for more of them. |
 | [Cloud Hosting](cloud-hosting.md) | you want the dashboard reachable from outside your LAN, or fronting remote agents. |
 | [Config Migration](config-migration.md) | you are standing up a second instance and do not want to re-type months of configuration. |

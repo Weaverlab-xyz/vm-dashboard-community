@@ -5,6 +5,9 @@
 The dashboard connects to **Prism Central** (or Prism Element) via the Nutanix REST API v3
 to list and control AHV virtual machines.
 
+Enable it in **Settings → Integrations**. That sets the `nutanix_enabled` feature flag,
+and the **Nutanix** page appears in the navigation at `/nutanix`.
+
 ---
 
 ## Prerequisites
@@ -59,6 +62,16 @@ across a selection.
 **Nutanix Guest Tools (NGT)** is the equivalent of VMware Tools. Install it inside the VM to
 enable ACPI-based graceful shutdown and reboot. Without NGT the graceful buttons are shown but
 will return an error from Prism if the VM does not respond to the ACPI signal.
+
+**Tags.** Nutanix categories are not read yet, so VMs here show no tag chips and do not
+appear under [Inventory](../inventory.md)'s **Tag** filter. Proxmox is the only hypervisor
+that reports tags today; see
+[Cloud VMs — Tags and labels](../cloud-vms.md#tags-and-labels).
+
+**Scheduling power is not available on Nutanix.** A Nutanix power change is a full VM spec
+write carrying a version number, so there is no agent power path, and every target runs
+immediately. The toolbar does not offer **Schedule** here. See
+[Scheduling](../scheduling.md).
 
 ---
 

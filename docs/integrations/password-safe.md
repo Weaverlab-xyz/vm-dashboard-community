@@ -110,6 +110,7 @@ Integrations** once you have logged in.
 | **Resource onboarding** | VMs and cloud databases the dashboard builds are onboarded as Password Safe managed systems + accounts, and removed again on destroy |
 | **Hypervisor credentials for a remote agent** | An on-prem agent brokering vCenter/Proxmox/Hyper-V can hold no credential at all: the dashboard checks one out per job, seals it to that agent, checks it back in and rotates it on release. See [below](#hypervisor-credentials-for-a-remote-agent) |
 | **Secret audit log** | Every checkout creates an immutable record in Password Safe |
+| **Attributes on Inventory** | Each matched resource's Password Safe attributes (`Status = Online`, `Business Unit = Finance`) as a filterable column on `/inventory`. Admins can assign and remove them, for one resource or up to 50 at once, and re-run the Smart Rule that uses them. See [Inventory — Password Safe attributes](../inventory.md#password-safe-attributes) |
 
 PRA Vault accounts minted for tunnels can themselves be onboarded here for rotation —
 see [Privileged Remote Access](privileged-remote-access.md).
@@ -902,6 +903,9 @@ serve that endpoint" rather than as a failure, so a tenant that *does* serve one
 shows up as readable instead of broken.
 
 ### Assets and attributes — verified live, 2026-09-23
+
+*This is contributor-level API evidence. For using attributes, see
+[Inventory — Password Safe attributes](../inventory.md#password-safe-attributes).*
 
 Building the `/inventory` attributes column settled four of these against a real tenant.
 All four were guesses before, and two of them were wrong:

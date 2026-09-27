@@ -5,6 +5,9 @@
 The dashboard connects to an **XCP-ng** or **XenServer** host or pool master via the
 **XAPI XML-RPC API** using Python's built-in `xmlrpc.client` — no external SDK required.
 
+Enable it in **Settings → Integrations**. That sets the `xcpng_enabled` feature flag, and
+the **XCP-ng** page appears in the navigation at `/xcpng`.
+
 ---
 
 ## Prerequisites
@@ -50,6 +53,15 @@ fifty per operation is the cap. See
 Those four only. The rest of the table above stays per-VM: each of them depends on the
 state the VM is in right now — Resume needs a suspended VM, Unpause a paused one — which
 is a judgement to make one machine at a time rather than across a selection.
+
+**Tags.** XCP-ng tags are not read yet, so VMs here show no tag chips and do not appear
+under [Inventory](../inventory.md)'s **Tag** filter. Proxmox is the only hypervisor that
+reports tags today; see [Cloud VMs — Tags and labels](../cloud-vms.md#tags-and-labels).
+
+**Scheduling power.** On a connection bound to a
+[remote agent](../remote-agents/hypervisors.md), the bulk power toolbar's **Schedule**
+tick books the operation for a time or a change window. A directly dialled connection
+cannot be booked, and each of its VMs is refused by name. See [Scheduling](../scheduling.md).
 
 ---
 

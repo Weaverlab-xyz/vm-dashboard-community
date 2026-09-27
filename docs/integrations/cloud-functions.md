@@ -2,8 +2,9 @@
 
 > **Audience:** operator · **Profile:** `demo` · **Read this when:** you need a stable HTTPS endpoint external systems can call to act inside your network.
 
-> Enable it in **Settings → Integrations → Cloud Functions**, then configure a
-> package store in the same panel.
+> Enable it in **Settings → Integrations → Cloud Functions** (`cloud_functions_enabled`),
+> then configure a package store in the same panel. The **Functions** page is at
+> `/functions`.
 > Design notes: [docs/design/cloud-functions.md](../design/cloud-functions.md).
 
 ## What is it?

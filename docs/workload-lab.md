@@ -157,6 +157,10 @@ stand the page up on their own. Making them do so would mean putting non-preview
 into the derived set, at which point the page stops resolving as all-preview and needs an
 RBAC scope of its own.
 
+The labs' old standalone addresses, `/cert-lab` and `/spire-lab`, now redirect to their
+tabs. Each stays behind its own flag, so `/spire-lab` does not resolve on an instance that
+enabled only the Certificate Lab.
+
 The tab bar is suppressed when only one tab is on — a bar holding a single pill reads as a
 rendering fault.
 

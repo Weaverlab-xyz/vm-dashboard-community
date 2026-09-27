@@ -65,6 +65,9 @@ For a standalone ESXi host:
 
 ### Step 2 — Enable and configure in the dashboard
 
+Turning it on sets the `vsphere_enabled` feature flag, and the **vSphere** page appears in
+the navigation at `/vsphere`.
+
 **Option A — Settings → Integrations → VMware vSphere / ESXi**
 
 Toggle **VMware vSphere / ESXi** on. Fill in the connection fields:
@@ -104,6 +107,15 @@ host tabs and a table of VMs within a few seconds.
 | **Bulk power** | Tick several rows and send Power On, Shutdown, Force Off or Reset to the whole selection from the toolbar — one job per VM, sharing a batch you watch on one page. VMs already in the target state are skipped and the dialog says how many; fifty per operation is the cap. See [Powering a selection](../remote-agents/hypervisors.md#powering-a-selection) |
 
 Templates are automatically excluded from the VM list.
+
+**Tags.** vSphere tags are not read yet, so VMs here show no tag chips and do not appear
+under [Inventory](../inventory.md)'s **Tag** filter. Proxmox is the only hypervisor that
+reports tags today; see [Cloud VMs — Tags and labels](../cloud-vms.md#tags-and-labels).
+
+**Scheduling power.** On a connection bound to a
+[remote agent](../remote-agents/hypervisors.md), the bulk power toolbar's **Schedule**
+tick books the operation for a time or a change window. A directly dialled connection
+cannot be booked, and each of its VMs is refused by name. See [Scheduling](../scheduling.md).
 
 ---
 

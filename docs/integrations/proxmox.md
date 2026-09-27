@@ -70,6 +70,9 @@ Assign via **Datacenter → Permissions → Add → API Token Permission**:
 
 ### Step 3 — Enable and configure in the dashboard
 
+Turning it on sets the `proxmox_enabled` feature flag, and the **Proxmox** page appears in
+the navigation at `/proxmox`.
+
 **Option A — Settings → Integrations → Proxmox VE**
 
 Toggle **Proxmox VE** on. Fill in the connection fields:
@@ -105,6 +108,24 @@ your nodes as tabs and all VMs and containers listed within a few seconds.
 | **Bulk power** | Tick several rows and send Start, Shutdown, Force Off or Reboot to the whole selection from the toolbar — one job per VM, sharing a batch you watch on one page. VMs already in the target state are skipped and the dialog says how many; fifty per operation is the cap. See [Powering a selection](../remote-agents/hypervisors.md#powering-a-selection) |
 
 Templates are automatically hidden from the resource list.
+
+### Tags
+
+Proxmox tags show as chips under each VM's name, and the **Filter by tag** box narrows the
+list, select-all and bulk power with it. The same tags appear on
+[Inventory](../inventory.md), where one filter covers every provider at once.
+
+**Tags** on a row, or **Edit tags** on the bulk toolbar, adds and removes them. A directly
+dialled connection is written immediately. An agent-bound one is queued as a job for the
+agent. Proxmox tags are bare labels with no values. Chip colours, the refused
+dashboard-owned keys, and the audit entry are all in
+[Cloud VMs — Editing tags](../cloud-vms.md#editing-tags). The agent path is described in
+[Agent-brokered hypervisors](../remote-agents/hypervisors.md#the-verbs).
+
+**Scheduling power.** On a connection bound to a
+[remote agent](../remote-agents/hypervisors.md), the bulk power toolbar's **Schedule**
+tick books the operation for a time or a change window. A directly dialled connection
+cannot be booked, and each of its VMs is refused by name. See [Scheduling](../scheduling.md).
 
 ---
 
