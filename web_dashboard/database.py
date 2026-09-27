@@ -595,6 +595,11 @@ class SpiffeTrustDomain(Base):
     trust_domain = Column(String(255), nullable=False, unique=True, index=True)
     jwks_url = Column(String(500), nullable=True)
     ca_pem = Column(Text, nullable=True)
+    # The name the JWKS URL's certificate is checked against, and the Host sent, when it
+    # differs from the URL's host. A Workload Lab registers https://<ip>:8443/keys with
+    # tls_server_name=oidc.<trust-domain>: that name is the provider's certificate SAN and
+    # its `domains` entry, and it resolves only on the lab's own hosts.
+    tls_server_name = Column(String(255), nullable=True)
     bundle_json = Column(Text, nullable=True)
     bundle_captured_at = Column(DateTime, nullable=True)
     spire_lab_id = Column(String(36), nullable=True)
@@ -2473,6 +2478,11 @@ class SpireLab(Base):
     # The `ansible_local` job ids, in order, so the page can link each stage's Live
     # Output. A failed stage's log is the only place its Ansible error exists.
     stage_job_ids = Column(Text, nullable=True)
+    # How SPIRE runs on the lab host: "vm" (tarball + systemd, the original), "docker"
+    # (the official images under Docker Compose) or "k8s" (k3s + the official Helm
+    # charts). NULL reads as "vm", which is every lab built before this existed. See
+    # spire_lab_service.stages_for and the CLI-prefix note there.
+    deployment_mode = Column(String(16), nullable=True)
 
     # ── The Kubernetes half ──────────────────────────────────────────────────
     # A SECOND HOST on the same row rather than a second row: the trust domain is still
@@ -4776,6 +4786,11 @@ def init_db():
             # every client that predates this. `spiffe_trust_domains` is new: create_all.
             "ALTER TABLE oauth_clients ADD COLUMN auth_method VARCHAR(20)",
             "ALTER TABLE oauth_clients ADD COLUMN spiffe_id VARCHAR(500)",
+            # SPIRE lab deployment modes (vm | docker | k8s); NULL = vm, every older lab.
+            "ALTER TABLE spire_labs ADD COLUMN deployment_mode VARCHAR(16)",
+            # Verify a JWKS URL's TLS for this name (the lab's oidc.<td>) while connecting
+            # to the URL's address -- the name only resolves on the lab itself.
+            "ALTER TABLE spiffe_trust_domains ADD COLUMN tls_server_name VARCHAR(255)",
             "CREATE INDEX ix_oauth_clients_spiffe_id ON oauth_clients(spiffe_id)",
         ]
         # Migrations that never applied because of LOCK CONTENTION rather than because

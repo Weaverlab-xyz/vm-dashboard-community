@@ -1,0 +1,97 @@
+# Remove the SPIRE server software from a Workload Lab host — optional teardown step
+# Target: the SPIRE lab VM. Idempotent; a host with nothing installed is a no-op.
+#
+# OFF BY DEFAULT. The Workload Lab's teardown is closing the cloud ACL (tcp/8081 and
+# tcp/8443) — that is what stops the trust domain minting for anybody — and the VM is
+# left alone because it is an ordinary VM with its own timer and its own Destroy. This
+# play runs only when the operator ticks "also remove SPIRE from the host", for someone
+# who wants to reuse the VM rather than destroy it.
+#
+# WHAT IT REMOVES, BY deployment_mode:
+#   vm      stops and disables spire-server and spire-oidc-provider, removes their units
+#   docker  `docker compose down -v` — containers, and the socket volume
+#   k8s     `helm uninstall` of spire and spire-crds, and this lab's two Services
+# and in every mode deletes /opt/spire — INCLUDING THE CA KEY AND THE DATASTORE. That is
+# the point: a retired trust domain whose signing key survives on disk can be revived.
+#
+# k3s itself and Docker Engine are left installed: other things on the host may use them.
+#
+# extra_vars:
+#   deployment_mode: vm | docker | k8s    # REQUIRED
+- name: Remove SPIRE from the lab host
+  hosts: all
+  become: true
+  vars:
+    deployment_mode: ""
+    spire_root: /opt/spire
+    compose_file: /opt/spire/compose.yml
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+  tasks:
+    - name: Require a deployment mode
+      ansible.builtin.assert:
+        that:
+          - deployment_mode in ['vm', 'docker', 'k8s']
+        fail_msg: "deployment_mode must be vm, docker or k8s."
+
+    # ── vm ──────────────────────────────────────────────────────────────────
+    - name: Stop and disable the systemd units
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop: [spire-oidc-provider, spire-server]
+      failed_when: false
+      when: deployment_mode == 'vm'
+
+    - name: Remove the unit files
+      ansible.builtin.file:
+        path: "/etc/systemd/system/{{ item }}.service"
+        state: absent
+      loop: [spire-oidc-provider, spire-server]
+      when: deployment_mode == 'vm'
+
+    # ── docker ──────────────────────────────────────────────────────────────
+    - name: Detect the compose file
+      ansible.builtin.stat:
+        path: "{{ compose_file }}"
+      register: compose_stat
+      when: deployment_mode == 'docker'
+
+    - name: Take the containers and the socket volume down
+      ansible.builtin.command: >-
+        docker compose -f {{ compose_file }} --profile oidc down -v
+      register: compose_down
+      changed_when: compose_down.rc == 0
+      when:
+        - deployment_mode == 'docker'
+        - compose_stat.stat.exists
+
+    # ── k8s ─────────────────────────────────────────────────────────────────
+    - name: Remove this lab's Services
+      ansible.builtin.command: >-
+        k3s kubectl delete -n spire-server service spire-server-lab spire-oidc-lab
+        --ignore-not-found
+      register: svc_delete
+      changed_when: "'deleted' in svc_delete.stdout"
+      when: deployment_mode == 'k8s'
+
+    - name: Uninstall the SPIRE charts
+      ansible.builtin.command: "helm uninstall {{ item }} --namespace spire-mgmt --ignore-not-found --wait"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: helm_uninstall
+      changed_when: "'uninstalled' in helm_uninstall.stdout"
+      loop: [spire, spire-crds]
+      when: deployment_mode == 'k8s'
+
+    # ── every mode ──────────────────────────────────────────────────────────
+    - name: Delete the SPIRE directory, CA key and datastore included
+      ansible.builtin.file:
+        path: "{{ spire_root }}"
+        state: absent
+
+    - name: What was removed
+      ansible.builtin.debug:
+        msg:
+          - "SPIRE ({{ deployment_mode }} mode) removed from this host, including {{ spire_root }}."
+          - "k3s and Docker Engine, if present, were left installed."

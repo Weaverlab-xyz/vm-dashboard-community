@@ -92,7 +92,7 @@ _BUNDLE = json.dumps({"keys": [_jwk(_PUB, "jwt1"),
 _URL = {"keys": [_jwk(_PUB, "u1", use="sig")], "fetches": 0}
 
 
-def _fake_fetch(url, ca_pem=""):
+def _fake_fetch(url, ca_pem="", server_name=""):
     _URL["fetches"] += 1
     return {"keys": list(_URL["keys"])}
 

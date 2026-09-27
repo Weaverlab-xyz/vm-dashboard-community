@@ -1,0 +1,197 @@
+# Run the SPIRE server (and, later, its OIDC Discovery Provider) as Docker containers
+# Target: the SPIRE lab VM, after install-docker.yml. Idempotent.
+#
+# The Workload Lab's `docker` deployment mode. Everything AFTER this play is shared with
+# the `vm` mode: seed entries, the administrative credential, the JWT bundle, the OIDC
+# provider and the k3s link all reach the CLI through `spire_cli_prefix`
+# (`docker exec spire-server `), and the official image keeps the binary at the same
+# /opt/spire/bin/spire-server path as the VM install, so the commands are otherwise the
+# same.
+#
+# NEVER LIVE-VALIDATED — written against the ghcr.io/spiffe images' documented layout
+# (entrypoint `/opt/spire/bin/spire-server run`, `/opt/spire/bin/oidc-discovery-provider`).
+# Treat the first build as the validation.
+#
+# THE SERVER CONFIG MIRRORS spire-server-install.yml ON PURPOSE. Assets are fetched by
+# filename, one file each, so the two cannot share a template; tests/test_spire_lab_modes.py
+# asserts they agree on everything the rest of the lab depends on (trust domain, bind
+# port, ca_ttl, SVID TTLs, admin_ids, the sqlite datastore and disk key manager).
+#
+# THE OIDC PROVIDER SERVICE IS DEFINED HERE BUT NOT STARTED. It needs a serving
+# certificate and a config file, which spire-oidc-provider.yml writes (oidc_runtime=docker)
+# and then brings the container up. Until then a compose `up` starts only the server.
+#
+# ROOT IN THE CONTAINERS. Both run as uid 0 so they can read the bind-mounted config and
+# certificate files this play and the OIDC play write as root with 0640. A lab choice; a
+# production deployment would run them as a dedicated uid and chown the files to it.
+#
+# extra_vars:
+#   trust_domain: weaverlab.test          # REQUIRED
+#   admin_spiffe_id: ""                   # default spiffe://<td>/password-safe/admin
+#   bind_port: 8081
+#   oidc_port: 8443
+#   ca_ttl: 168h
+#   spire_version: 1.15.3                 # the image tag, for both containers
+- name: Run the SPIRE server in Docker
+  hosts: all
+  become: true
+  vars:
+    trust_domain: ""
+    admin_spiffe_id: ""
+    bind_port: 8081
+    oidc_port: 8443
+    ca_ttl: "168h"
+    default_x509_svid_ttl: "1h"
+    default_jwt_svid_ttl: "5m"
+    spire_version: "1.15.3"
+    spire_root: /opt/spire
+    spire_data: /opt/spire/data
+    compose_file: /opt/spire/compose.yml
+  tasks:
+    - name: Require a trust domain
+      ansible.builtin.assert:
+        that:
+          - trust_domain | length > 0
+          - "'/' not in trust_domain"
+        fail_msg: >-
+          trust_domain is required, and is a bare DNS-style name such as
+          'weaverlab.test' — not a spiffe:// URI.
+
+    - name: Resolve the administrative SPIFFE ID
+      ansible.builtin.set_fact:
+        _admin_id: >-
+          {{ admin_spiffe_id | default('spiffe://' ~ trust_domain ~ '/password-safe/admin', true) }}
+
+    # Refuse a host that already runs the VM-mode server: both bind 8081, and the
+    # container would fail to start with a port conflict that reads like a Docker fault.
+    - name: Check for a systemd spire-server on this host
+      ansible.builtin.command: systemctl is-active spire-server
+      register: systemd_spire
+      changed_when: false
+      failed_when: false
+
+    - name: Refuse to run beside the VM-mode server
+      ansible.builtin.assert:
+        that:
+          - systemd_spire.stdout != "active"
+        fail_msg: >-
+          This host already runs spire-server under systemd (a `vm`-mode lab). One
+          deployment mode per host — use another VM, or stop and disable that unit first.
+
+    - name: Confirm Docker Compose is available
+      ansible.builtin.command: docker compose version
+      register: compose_version
+      changed_when: false
+
+    - name: Create the SPIRE directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0750"
+      loop:
+        - "{{ spire_root }}/conf"
+        - "{{ spire_data }}"
+        - "{{ spire_root }}/oidc"
+
+    - name: Write the server configuration
+      ansible.builtin.copy:
+        dest: "{{ spire_root }}/conf/server.conf"
+        mode: "0640"
+        content: |
+          server {
+              bind_address = "0.0.0.0"
+              bind_port    = "{{ bind_port }}"
+              trust_domain = "{{ trust_domain }}"
+              data_dir     = "{{ spire_data }}"
+              log_level    = "INFO"
+              ca_ttl       = "{{ ca_ttl }}"
+              default_x509_svid_ttl = "{{ default_x509_svid_ttl }}"
+              default_jwt_svid_ttl  = "{{ default_jwt_svid_ttl }}"
+
+              # An entry-level admin=true does NOT apply to an SVID produced by
+              # "spire-server x509 mint". Only admin_ids grants administrative rights
+              # to a minted SVID, which is what the plugin authenticates with.
+              admin_ids = ["{{ _admin_id }}"]
+          }
+
+          plugins {
+              DataStore "sql" {
+                  plugin_data {
+                      database_type     = "sqlite3"
+                      connection_string = "{{ spire_data }}/datastore.sqlite3"
+                  }
+              }
+              NodeAttestor "join_token" { plugin_data {} }
+              KeyManager  "disk"        { plugin_data { keys_path = "{{ spire_data }}/keys.json" } }
+          }
+      register: server_conf
+
+    # The API socket lives in a named volume both containers mount at the server's default
+    # path, so the provider (and `docker exec` CLI calls) reach it exactly as on a VM.
+    - name: Write the compose file
+      ansible.builtin.copy:
+        dest: "{{ compose_file }}"
+        mode: "0640"
+        content: |
+          services:
+            spire-server:
+              image: ghcr.io/spiffe/spire-server:{{ spire_version }}
+              container_name: spire-server
+              user: "0:0"
+              command: ["-config", "{{ spire_root }}/conf/server.conf"]
+              ports:
+                - "{{ bind_port }}:{{ bind_port }}"
+              volumes:
+                - {{ spire_root }}/conf/server.conf:{{ spire_root }}/conf/server.conf:ro
+                - {{ spire_data }}:{{ spire_data }}
+                - spire-server-socket:/tmp/spire-server/private
+              restart: unless-stopped
+            oidc-discovery-provider:
+              image: ghcr.io/spiffe/oidc-discovery-provider:{{ spire_version }}
+              container_name: spire-oidc-provider
+              user: "0:0"
+              command: ["-config", "{{ spire_root }}/conf/oidc-discovery-provider.conf"]
+              ports:
+                - "{{ oidc_port }}:{{ oidc_port }}"
+              volumes:
+                - {{ spire_root }}/conf/oidc-discovery-provider.conf:{{ spire_root }}/conf/oidc-discovery-provider.conf:ro
+                - {{ spire_root }}/oidc:{{ spire_root }}/oidc:ro
+                - spire-server-socket:/tmp/spire-server/private
+              depends_on: [spire-server]
+              restart: unless-stopped
+              # Started by spire-oidc-provider.yml once its certificate and config exist.
+              profiles: ["oidc"]
+          volumes:
+            spire-server-socket: {}
+      register: compose_written
+
+    - name: Start (or reconcile) the server container
+      ansible.builtin.command: >-
+        docker compose -f {{ compose_file }} up -d
+        {{ '--force-recreate' if (server_conf.changed or compose_written.changed) else '' }}
+        spire-server
+      register: compose_up
+      changed_when: compose_up.rc == 0
+
+    - name: Wait for the API port to accept connections
+      ansible.builtin.wait_for:
+        port: "{{ bind_port }}"
+        host: 127.0.0.1
+        timeout: 120
+
+    - name: Health check
+      ansible.builtin.command: "docker exec spire-server {{ spire_root }}/bin/spire-server healthcheck"
+      register: spire_health
+      changed_when: false
+      retries: 10
+      delay: 3
+      until: spire_health.rc == 0
+
+    - name: What was built
+      ansible.builtin.debug:
+        msg:
+          - "SPIRE server {{ spire_version }} running in Docker for trust domain '{{ trust_domain }}'."
+          - "API: tcp/{{ bind_port }} (published). Admin ID: {{ _admin_id }}"
+          - "CLI: docker exec spire-server {{ spire_root }}/bin/spire-server <command>"
+          - "Data: {{ spire_data }} on the host (survives container recreation)."
+          - "The OIDC Discovery Provider starts when spire-oidc-provider.yml runs with oidc_runtime=docker."

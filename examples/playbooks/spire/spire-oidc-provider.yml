@@ -48,6 +48,37 @@
     spire_extras_sha256: ""
     svid_ttl: "168h"
     spire_root: /opt/spire
+    # How the SPIRE CLI is reached. Empty on a VM (the systemd install). The Workload Lab
+    # sets it for the container modes -- `docker exec spire-server ` or
+    # `k3s kubectl exec -n spire-server spire-server-0 -c spire-server -- ` -- and the
+    # official images keep the binary at the same /opt/spire/bin path, so the rest of
+    # every command is identical in all three modes.
+    spire_cli_prefix: ""
+    # true when the server runs in a container: `x509 mint -write` would write INSIDE the
+    # container, so mint to stdout and split the PEM blocks on the host instead.
+    spire_mint_stdout: false
+    # systemd = the provider binary under a unit (VM mode); docker = the
+    # `oidc-discovery-provider` service in spire-docker-server.yml's compose file, which
+    # this play (re)creates so a renewed certificate is picked up.
+    oidc_runtime: systemd
+    compose_file: /opt/spire/compose.yml
+    # Split `x509 mint` stdout into svid.pem / key.pem / bundle.pem. BY POSITION, not by
+    # section header: certificates before the private key are the SVID, the key is the
+    # key, certificates after it are the bundle -- which holds whatever headers the
+    # pinned SPIRE version prints. Written 0600 straight from stdin; nothing is echoed.
+    _pem_split: |
+      import os, re, sys
+      d = sys.argv[1]
+      t = sys.stdin.read()
+      b = [m.group(0) for m in re.finditer(r"-----BEGIN ([A-Z ]+)-----.*?-----END \1-----", t, re.S)]
+      k = [i for i, x in enumerate(b) if "PRIVATE KEY" in x.splitlines()[0]]
+      if len(k) != 1 or k[0] == 0 or k[0] == len(b) - 1:
+          sys.exit("x509 mint output was not certificate(s), one private key, then the bundle")
+      i = k[0]
+      for name, parts in (("svid.pem", b[:i]), ("key.pem", [b[i]]), ("bundle.pem", b[i + 1:])):
+          fd = os.open(os.path.join(d, name), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+          os.write(fd, ("\n".join(parts) + "\n").encode())
+          os.close(fd)
     oidc_dir: /opt/spire/oidc
     # The server's default socket_path. spire-server-install.yml does not override it, so
     # the provider reads the admin API here to fetch the JWKS.
@@ -73,7 +104,7 @@
         _issuer: "https://{{ oidc_domain }}:{{ oidc_port }}"
 
     - name: Confirm the server is up
-      ansible.builtin.command: "{{ spire_root }}/bin/spire-server healthcheck"
+      ansible.builtin.command: "{{ spire_cli_prefix }}{{ spire_root }}/bin/spire-server healthcheck"
       register: oidc_health
       changed_when: false
 
@@ -84,11 +115,14 @@
         _arch_map:
           x86_64: amd64
           aarch64: arm64
+      when: oidc_runtime == 'systemd'
 
     - name: Fail on an architecture SPIRE does not publish
       ansible.builtin.fail:
         msg: "no spire-extras release asset for architecture {{ ansible_facts['architecture'] }}"
-      when: _arch | length == 0
+      when:
+        - oidc_runtime == 'systemd'
+        - _arch | length == 0
 
     - name: Create the provider directory
       ansible.builtin.file:
@@ -104,6 +138,7 @@
       ansible.builtin.stat:
         path: "{{ oidc_dir }}/oidc-discovery-provider"
       register: oidc_bin
+      when: oidc_runtime == 'systemd'
 
     - name: Download the spire-extras release
       ansible.builtin.get_url:
@@ -112,7 +147,9 @@
         dest: "/tmp/spire-extras-{{ spire_version }}.tar.gz"
         checksum: "{{ ('sha256:' ~ spire_extras_sha256) if spire_extras_sha256 | length > 0 else omit }}"
         mode: "0640"
-      when: not oidc_bin.stat.exists
+      when:
+        - oidc_runtime == 'systemd'
+        - not oidc_bin.stat.exists
 
     - name: Warn when the download was not checksummed
       ansible.builtin.debug:
@@ -120,6 +157,7 @@
           spire_extras_sha256 was blank, so the tarball was taken on TLS alone. The
           release page publishes a checksum — set it for anything you intend to keep.
       when:
+        - oidc_runtime == 'systemd'
         - spire_extras_sha256 | length == 0
         - not oidc_bin.stat.exists
 
@@ -130,7 +168,9 @@
         remote_src: true
         extra_opts: ["--strip-components=2", "--wildcards", "*/bin/oidc-discovery-provider"]
         mode: "0750"
-      when: not oidc_bin.stat.exists
+      when:
+        - oidc_runtime == 'systemd'
+        - not oidc_bin.stat.exists
 
     - name: Remove the downloaded tarball
       ansible.builtin.file:
@@ -140,15 +180,37 @@
     # -dns puts oidc_domain in the certificate's SAN. Without it the cert carries only the
     # SPIFFE URI, and Go's TLS stack rejects the connection on hostname mismatch before
     # any of the trust-bundle configuration is consulted — which reads like a bad CA.
+      when: oidc_runtime == 'systemd'
+
     - name: Mint the provider's serving SVID
       ansible.builtin.command: >-
-        {{ spire_root }}/bin/spire-server x509 mint
+        {{ spire_cli_prefix }}{{ spire_root }}/bin/spire-server x509 mint
         -spiffeID {{ _oidc_id }}
         -dns {{ oidc_domain }}
         -ttl {{ svid_ttl }}
         -write {{ oidc_dir }}
       register: oidc_mint
       changed_when: oidc_mint.rc == 0
+      when: not spire_mint_stdout | bool
+
+    - name: Mint the provider's serving SVID (to stdout, server in a container)
+      ansible.builtin.command: >-
+        {{ spire_cli_prefix }}{{ spire_root }}/bin/spire-server x509 mint
+        -spiffeID {{ _oidc_id }}
+        -dns {{ oidc_domain }}
+        -ttl {{ svid_ttl }}
+      register: oidc_mint_stdout
+      changed_when: oidc_mint_stdout.rc == 0
+      no_log: true
+      when: spire_mint_stdout | bool
+
+    - name: Split the serving SVID into the provider directory
+      ansible.builtin.command:
+        argv: [python3, -c, "{{ _pem_split }}", "{{ oidc_dir }}"]
+        stdin: "{{ oidc_mint_stdout.stdout }}"
+      changed_when: true
+      no_log: true
+      when: spire_mint_stdout | bool
 
     - name: Secure the minted key
       ansible.builtin.file:
@@ -206,6 +268,7 @@
           [Install]
           WantedBy=multi-user.target
       notify: Restart spire-oidc-provider
+      when: oidc_runtime == 'systemd'
 
     - name: Enable and start the provider
       ansible.builtin.systemd:
@@ -213,6 +276,16 @@
         enabled: true
         state: started
         daemon_reload: true
+      when: oidc_runtime == 'systemd'
+
+    # Recreated rather than restarted: the container mounts the certificate files, and a
+    # recreate is what guarantees it reads the renewed ones.
+    - name: (Re)create the provider container
+      ansible.builtin.command: >-
+        docker compose -f {{ compose_file }} up -d --force-recreate oidc-discovery-provider
+      register: oidc_compose
+      changed_when: oidc_compose.rc == 0
+      when: oidc_runtime == 'docker'
 
     - name: Apply any pending restart before probing
       ansible.builtin.meta: flush_handlers
@@ -268,3 +341,4 @@
         name: spire-oidc-provider
         state: restarted
         daemon_reload: true
+      when: oidc_runtime == 'systemd'

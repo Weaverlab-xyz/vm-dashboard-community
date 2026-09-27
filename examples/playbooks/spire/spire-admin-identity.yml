@@ -48,6 +48,32 @@
     admin_ttl: "720h"
     remint: false
     spire_root: /opt/spire
+    # How the SPIRE CLI is reached. Empty on a VM (the systemd install). The Workload Lab
+    # sets it for the container modes -- `docker exec spire-server ` or
+    # `k3s kubectl exec -n spire-server spire-server-0 -c spire-server -- ` -- and the
+    # official images keep the binary at the same /opt/spire/bin path, so the rest of
+    # every command is identical in all three modes.
+    spire_cli_prefix: ""
+    # true when the server runs in a container: `x509 mint -write` would write INSIDE the
+    # container, so mint to stdout and split the PEM blocks on the host instead.
+    spire_mint_stdout: false
+    # Split `x509 mint` stdout into svid.pem / key.pem / bundle.pem. BY POSITION, not by
+    # section header: certificates before the private key are the SVID, the key is the
+    # key, certificates after it are the bundle -- which holds whatever headers the
+    # pinned SPIRE version prints. Written 0600 straight from stdin; nothing is echoed.
+    _pem_split: |
+      import os, re, sys
+      d = sys.argv[1]
+      t = sys.stdin.read()
+      b = [m.group(0) for m in re.finditer(r"-----BEGIN ([A-Z ]+)-----.*?-----END \1-----", t, re.S)]
+      k = [i for i, x in enumerate(b) if "PRIVATE KEY" in x.splitlines()[0]]
+      if len(k) != 1 or k[0] == 0 or k[0] == len(b) - 1:
+          sys.exit("x509 mint output was not certificate(s), one private key, then the bundle")
+      i = k[0]
+      for name, parts in (("svid.pem", b[:i]), ("key.pem", [b[i]]), ("bundle.pem", b[i + 1:])):
+          fd = os.open(os.path.join(d, name), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+          os.write(fd, ("\n".join(parts) + "\n").encode())
+          os.close(fd)
     ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
     ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
     ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
@@ -118,13 +144,32 @@
 
     - name: Mint the administrative X509-SVID
       ansible.builtin.command: >-
-        {{ spire_root }}/bin/spire-server x509 mint
+        {{ spire_cli_prefix }}{{ spire_root }}/bin/spire-server x509 mint
         -spiffeID {{ _admin_id }}
         -ttl {{ admin_ttl }}
         -write {{ _work }}
       register: mint_result
       changed_when: mint_result.rc == 0
-      when: _mint | bool
+      when: _mint | bool and not spire_mint_stdout | bool
+
+    # no_log: the private key is in this task's stdout.
+    - name: Mint the administrative X509-SVID (to stdout, server in a container)
+      ansible.builtin.command: >-
+        {{ spire_cli_prefix }}{{ spire_root }}/bin/spire-server x509 mint
+        -spiffeID {{ _admin_id }}
+        -ttl {{ admin_ttl }}
+      register: mint_stdout
+      changed_when: mint_stdout.rc == 0
+      no_log: true
+      when: _mint | bool and spire_mint_stdout | bool
+
+    - name: Split the minted PEM blocks into the working directory
+      ansible.builtin.command:
+        argv: [python3, -c, "{{ _pem_split }}", "{{ _work }}"]
+        stdin: "{{ mint_stdout.stdout }}"
+      changed_when: true
+      no_log: true
+      when: _mint | bool and spire_mint_stdout | bool
 
     - name: Generate the PKCS#12 passphrase on the host
       ansible.builtin.shell: "set -o pipefail && openssl rand -base64 24 | tr -d '\\n'"
@@ -213,7 +258,7 @@
 
     # ── The public half ─────────────────────────────────────────────────────
     - name: Read the trust bundle
-      ansible.builtin.command: "{{ spire_root }}/bin/spire-server bundle show"
+      ansible.builtin.command: "{{ spire_cli_prefix }}{{ spire_root }}/bin/spire-server bundle show"
       register: bundle_show
       changed_when: false
 

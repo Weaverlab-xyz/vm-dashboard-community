@@ -133,6 +133,10 @@ async def lifespan(app: FastAPI):
     warmers.append(
         asyncio.create_task(_pov_reconcile_loop(), name="pov_reconcile_loop")
     )
+    # SPIRE lab key refresh — always launched; a no-op while no lab is available.
+    warmers.append(
+        asyncio.create_task(_spire_refresh_loop(), name="spire_refresh_loop")
+    )
     # Cost-summary warmer — always launched; no-ops (no billable calls) while the
     # cost feature is off, so flipping the flag in Settings warms the next pass.
     warmers.append(
@@ -400,6 +404,29 @@ async def _expiry_sweeper_loop() -> None:
         return expiry_policy.sweep_interval_seconds()
 
     await _sweeper_loop("auto-delete sweep enqueue", work, interval, fallback=30 * 60)
+
+
+# ── SPIRE lab key refresh loop ───────────────────────────────────────────────
+
+async def _spire_refresh_loop() -> None:
+    """Enqueue a key refresh for any Workload Lab SPIRE lab whose pinned trust material
+    (the CA the dashboard pins for its OIDC provider, and on vm/docker labs the provider's
+    serving certificate) is older than ca_ttl/3 -- see
+    ``spire_lab_service.enqueue_refresh_if_due``.
+
+    Same shape as the sweepers above: this ONLY enqueues, off the event loop via
+    ``_sweeper_loop``, and the per-lab active + recency guards keep it to one refresh per
+    lab across both app workers. A no-op when there are no labs.
+    """
+    def work(db):
+        from .services import spire_lab_service
+        spire_lab_service.enqueue_refresh_if_due(db)
+
+    def interval():
+        from .services import spire_lab_service
+        return spire_lab_service.REFRESH_LOOP_INTERVAL
+
+    await _sweeper_loop("spire lab key refresh", work, interval, fallback=60 * 60)
 
 
 # ── POV reconcile loop ───────────────────────────────────────────────────────
