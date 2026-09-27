@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/schedule_picker.html" import schedule_picker %}
 
 {% block title %}Images{% endblock %}
 
@@ -307,8 +308,12 @@ flowchart LR
           </p>
         </div>
 
+        {# Books the AUTOMATED promote only. "Show manual steps" creates no job, so there
+           is nothing to schedule and it sends no booking. #}
+        {{ schedule_picker() }}
+
         <div class="flex items-center gap-3">
-          <button @click="submitPromote(false)" :disabled="!promoteTarget || promoting"
+          <button @click="submitPromote(false)" :disabled="!promoteTarget || promoting || !scheduleReady()"
                   class="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg">
             <span x-show="!promoting || manualMode">Promote</span>
             <span x-show="promoting && !manualMode" x-cloak>Starting…</span>
@@ -363,6 +368,9 @@ flowchart LR
 <script>
 function imagesPage() {
   return {
+    // Change-window booking for the Promote dialog. See partials/schedule_picker.html;
+    // the schedulePayload() spread in submitPromote() is what makes it do anything.
+    ...scheduleState(),
     images: [],
     loading: true,
     showRegister: false,
@@ -383,6 +391,7 @@ function imagesPage() {
 
     async init() {
       requireAuth();
+      this.loadChangeWindows();
       await this.loadImages();
     },
 
@@ -441,6 +450,7 @@ function imagesPage() {
     },
 
     openPromote(img) {
+      this.scheduleReset();
       this.promoteImage = img;
       this.promoteTarget = '';
       this.promoteRegion = '';
@@ -506,6 +516,8 @@ function imagesPage() {
           target_region: this.promoteRegion || null,
           target_resource_group: this.promoteResourceGroup || null,
         };
+        // The automated promote only: the manual path creates no job to schedule.
+        if (!manual) Object.assign(body, { ...this.schedulePayload() });
         const data = await API.post(path, body);
         if (data && data.automated && data.job_id) {
           // Automated path — kick off, refresh list so the row flips to

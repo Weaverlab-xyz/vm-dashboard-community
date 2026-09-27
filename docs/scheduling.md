@@ -58,9 +58,9 @@ and schedules you are allowed to see.
 | Power — AWS, Azure, GCP, OCI | yes — selection toolbar | yes |
 | Power — Proxmox, vSphere, Hyper-V, XCP-ng, VMware Workstation | **agent-bound connections only** — selection toolbar | no: not on the repeat allowlist yet — book each occurrence |
 | Power — Nutanix | no, never | no |
-| Image export, capture, AMI copy | API only | exports only |
-| Image promotion | API only | yes |
-| Packer builds | API only | no: a provisioner variable may hold a literal value |
+| Image export, capture, AMI copy | yes — dialog | exports only |
+| Image promotion | yes — Promote dialog (automated path) | yes |
+| Packer builds | yes — Build tab | no: a provisioner variable may hold a literal value |
 | Kubernetes cluster / cloud database provisioning | no | no |
 | EPM for Linux package sync | — | yes |
 

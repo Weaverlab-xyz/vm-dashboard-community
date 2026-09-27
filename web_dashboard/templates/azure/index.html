@@ -836,17 +836,46 @@
             </div>
           </div>
         </label>
+        {{ schedule_picker() }}
       </div>
       <div class="flex justify-end gap-3 mt-5">
         <button @click="createImageModal.open = false"
                 class="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
-        <button @click="submitCreateImage()"
+        <button @click="submitCreateImage()" :disabled="!scheduleReady()"
                 :class="createImageModal.generalize ? 'bg-orange-600 hover:bg-orange-700' : 'bg-blue-600 hover:bg-blue-700'"
                 class="px-4 py-2 text-sm font-medium text-white rounded-lg">
           Capture Image
         </button>
       </div>
     </div>
+  </div>
+
+  <!-- ── Export VHD modal ── -->
+  <div x-show="exportDialog.open" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40"
+       @click.self="exportDialog.open = false">
+    <form class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md mx-4" @submit.prevent="submitExport()">
+      <h2 class="text-lg font-bold text-gray-900 mb-1">Export to portable VHD</h2>
+      <p class="text-sm text-gray-500 mb-4">
+        Export <span class="font-mono" x-text="exportDialog.label"></span> to a VHD on the hub
+        backend. This may take 30+ minutes; the VHD is registered in the image registry under
+        the name below.
+      </p>
+      <label class="block text-xs font-medium text-gray-700 mb-1">Registry name <span class="text-red-500">*</span></label>
+      <input x-model="exportDialog.name" type="text" required
+             class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm mb-3">
+      {{ schedule_picker() }}
+      <p x-show="exportDialog.error" x-cloak class="mt-3 text-sm text-red-600" x-text="exportDialog.error"></p>
+      <div class="flex justify-end gap-3 mt-5">
+        <button type="button" @click="exportDialog.open = false"
+                class="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
+        <button type="submit" :disabled="exportDialog.submitting || !scheduleReady()"
+                class="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg">
+          <span x-show="!exportDialog.submitting">Start Export</span>
+          <span x-show="exportDialog.submitting" x-cloak>Queuing…</span>
+        </button>
+      </div>
+    </form>
   </div>
 
   <!-- ── SSH Key modal — retrieves the private key matching the deployed VM ── -->
@@ -1139,11 +1168,13 @@
         </div>
 
         <!-- Error -->
+        {{ schedule_picker() }}
+
         <div x-show="azurePackerError" x-cloak class="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700" x-text="azurePackerError"></div>
 
         <!-- Submit -->
         <button @click="submitAzurePackerBuild()"
-                :disabled="azurePackerBuilding || !azurePackerForm.image_name || !azurePackerForm.image_publisher"
+                :disabled="azurePackerBuilding || !azurePackerForm.image_name || !azurePackerForm.image_publisher || !scheduleReady()"
                 class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition">
           <span x-show="!azurePackerBuilding">Start Packer Build</span>
           <span x-show="azurePackerBuilding" x-cloak>Queuing build…</span>
@@ -1612,6 +1643,7 @@ function azureDashboard() {
     imagesLoading: false,
     selectedImages: [],
     exportingImages: new Set(),
+    exportDialog: { open: false, target: null, label: '', name: '', error: '', submitting: false },
     vms: [],
     vmsLoading: false,
 
@@ -1740,6 +1772,8 @@ function azureDashboard() {
     async init() {
       requireAuth();
       this.loadChangeWindows();
+      // One schedule state for the page: dialogs reset it on open, the Build tab on entry.
+      this.$watch('activeTab', t => { if (t === 'build') this.scheduleReset(); });
       this.loadSecretBackends();
       const hash = window.location.hash.slice(1);
       {% if pra_enabled %}
@@ -2481,6 +2515,7 @@ function azureDashboard() {
     },
 
     openCreateImageModal(vm) {
+      this.scheduleReset();
       this.createImageModal = {
         open: true, vm, name: `${vm.name}-image`, description: '', generalize: false,
       };
@@ -2547,6 +2582,7 @@ function azureDashboard() {
           name: m.name,
           description: m.description,
           generalize: m.generalize,
+          ...this.schedulePayload(),
         });
         m.open = false;
         toast(`Image capture queued: ${m.name}`, 'success');
@@ -2571,25 +2607,35 @@ function azureDashboard() {
       }
     },
 
-    async exportImage(img) {
-      const defaultName = (img.name || '').replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 64);
-      const imageName = prompt(
-        `Export "${img.name}" to a portable VHD on the hub backend?\n\n` +
-        `This may take 30+ minutes. The exported VHD will be registered in the image registry under the name below.\n\n` +
-        `Registry name:`,
-        defaultName,
-      );
-      if (!imageName) return;
+    // A dialog rather than the prompt() it replaces: an export can be booked into a change
+    // window, and a browser prompt has nowhere to put the picker.
+    exportImage(img) {
+      this.scheduleReset();
+      this.exportDialog = {
+        open: true, target: img, error: '', submitting: false, label: img.name,
+        name: (img.name || '').replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 64),
+      };
+    },
+
+    async submitExport() {
+      const d = this.exportDialog, img = d.target;
+      if (!d.name.trim()) { d.error = 'A registry name is required.'; return; }
+      d.submitting = true;
+      d.error = '';
       this.exportingImages = new Set([...this.exportingImages, img.resource_id]);
       try {
-        const body = { image_name: imageName.trim(), os_type: img.os_type || 'Linux' };
+        const body = { image_name: d.name.trim(), os_type: img.os_type || 'Linux',
+                       ...this.schedulePayload() };
         if (img.resource_group) body.resource_group = img.resource_group;
         const resp = await API.post(`/api/azure/images/${encodeURIComponent(img.name)}/export`, body);
+        d.open = false;
         toast(`Export job queued. Redirecting to job detail…`, 'success');
         setTimeout(() => { window.location.href = `/jobs/${resp.job_id}`; }, 600);
       } catch (e) {
-        toast(`Export failed to queue: ${e.message}`, 'error');
+        d.error = e.message;
         this.exportingImages = new Set([...this.exportingImages].filter(id => id !== img.resource_id));
+      } finally {
+        d.submitting = false;
       }
     },
 
@@ -2724,7 +2770,8 @@ function azureDashboard() {
       if (!this.azurePackerForm.image_publisher) { this.azurePackerError = 'Source image publisher is required.'; return; }
       this.azurePackerBuilding = true;
       try {
-        const resp = await API.post('/api/packer/azure/build', this.azurePackerForm);
+        const resp = await API.post('/api/packer/azure/build',
+                                    { ...this.azurePackerForm, ...this.schedulePayload() });
         toast('Packer Azure build queued!', 'success');
         setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
       } catch (e) {

@@ -534,6 +534,8 @@
             You'll be redirected to the job page to track progress.
           </div>
 
+          <div class="mb-4">{{ schedule_picker() }}</div>
+
           <!-- Error -->
           <div x-show="copyError" class="mb-4 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700"
                x-text="copyError"></div>
@@ -543,7 +545,7 @@
                     class="flex-1 py-2 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 transition">
               Cancel
             </button>
-            <button type="submit" :disabled="copying"
+            <button type="submit" :disabled="copying || !scheduleReady()"
                     class="flex-1 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50
                            text-white text-sm font-medium rounded-lg transition">
               <span x-show="!copying">Start Copy</span>
@@ -552,6 +554,45 @@
           </div>
         </form>
       </div>
+    </div>
+  </div>
+
+  <!-- ── Export VHD Modal ──────────────────────────────────────────────── -->
+  <div x-show="exportDialog.open" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="exportDialog.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+      <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+        <h3 class="text-lg font-semibold text-gray-800">Export to portable VHD</h3>
+        <button @click="exportDialog.open = false" class="text-gray-400 hover:text-gray-600 text-xl">×</button>
+      </div>
+      <form class="px-6 py-5" @submit.prevent="submitExport()">
+        <p class="text-sm text-gray-600 mb-4">
+          Export <span class="font-mono" x-text="exportDialog.label"></span> to a VHD on the hub
+          backend. This may take 30+ minutes; the VHD is registered in the image registry under
+          the name below.
+        </p>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Registry name *</label>
+        <input type="text" x-model="exportDialog.name" required
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-4
+                      focus:outline-none focus:ring-2 focus:ring-indigo-500">
+        <div class="mb-4">{{ schedule_picker() }}</div>
+        <div x-show="exportDialog.error" x-cloak
+             class="mb-4 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700"
+             x-text="exportDialog.error"></div>
+        <div class="flex gap-3">
+          <button type="button" @click="exportDialog.open = false"
+                  class="flex-1 py-2 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 transition">
+            Cancel
+          </button>
+          <button type="submit" :disabled="exportDialog.submitting || !scheduleReady()"
+                  class="flex-1 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50
+                         text-white text-sm font-medium rounded-lg transition">
+            <span x-show="!exportDialog.submitting">Start Export</span>
+            <span x-show="exportDialog.submitting" x-cloak>Queuing…</span>
+          </button>
+        </div>
+      </form>
     </div>
   </div>
 
@@ -731,6 +772,8 @@
             The new AMI will appear in your Private AMIs tab when ready.
           </div>
 
+          <div class="mb-4">{{ schedule_picker() }}</div>
+
           <!-- Error -->
           <div x-show="createImageError"
                class="mb-4 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700"
@@ -741,7 +784,7 @@
                     class="flex-1 py-2 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 transition">
               Cancel
             </button>
-            <button type="submit" :disabled="creatingImage"
+            <button type="submit" :disabled="creatingImage || !scheduleReady()"
                     class="flex-1 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50
                            text-white text-sm font-medium rounded-lg transition">
               <span x-show="!creatingImage">Create Image</span>
@@ -1485,12 +1528,14 @@
           </label>
         </div>
 
+        {{ schedule_picker() }}
+
         <!-- Error -->
         <div x-show="packerError" x-cloak class="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700" x-text="packerError"></div>
 
         <!-- Submit -->
         <button @click="submitAwsPackerBuild()"
-                :disabled="packerBuilding || !packerForm.image_name || !(packerForm.source_ami || packerForm.source_ami_family)"
+                :disabled="packerBuilding || !packerForm.image_name || !(packerForm.source_ami || packerForm.source_ami_family) || !scheduleReady()"
                 class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition">
           <span x-show="!packerBuilding">Start Packer Build</span>
           <span x-show="packerBuilding" x-cloak>Queuing build…</span>
@@ -2059,6 +2104,7 @@
       // ENA enablement
       enablingEna: new Set(),
       exportingAmis: new Set(),
+      exportDialog: { open: false, target: null, label: '', name: '', error: '', submitting: false },
       // Instance type prefixes that require ENA
       enaRequiredPrefixes: ['t3.', 't4g.', 'm5.', 'm6i.', 'c5.', 'c6i.', 'r5.', 'r6i.', 'x2.'],
 
@@ -2125,6 +2171,10 @@
       async init() {
         requireAuth();
         this.loadChangeWindows();
+        // The page has one schedule state, shared by every form on it; each dialog resets
+        // it on open, and the Build tab (a tab, not a dialog) resets it on entry, so a time
+        // left from a cancelled deploy never books a Packer build.
+        this.$watch('activeTab', t => { if (t === 'build') this.scheduleReset(); });
         this.loadSecretBackends();
         this.loadDefaultRegion();
         const hash = window.location.hash.slice(1);
@@ -2363,6 +2413,7 @@
           description: '',
         };
         this.copyError = '';
+        this.scheduleReset();
         this.showCopyModal = true;
       },
 
@@ -2380,6 +2431,7 @@
             source_ami_id: this.selectedCommunityAmi.ami_id,
             name: this.copyForm.name,
             description: this.copyForm.description,
+            ...this.schedulePayload(),
           });
           this.showCopyModal = false;
           toast('AMI copy started!', 'success');
@@ -2704,23 +2756,34 @@
         }
       },
 
-      async exportAmi(ami) {
-        const defaultName = (ami.name || ami.ami_id).replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 64);
-        const imageName = prompt(
-          `Export "${ami.name || ami.ami_id}" to a portable VHD on the hub backend?\n\n` +
-          `This may take 30+ minutes. The exported VHD will be registered in the image registry under the name below.\n\n` +
-          `Registry name:`,
-          defaultName,
-        );
-        if (!imageName) return;
+      // A dialog rather than the prompt() it replaces: an export can be booked into a
+      // change window, and a browser prompt has nowhere to put the picker.
+      exportAmi(ami) {
+        this.scheduleReset();
+        this.exportDialog = {
+          open: true, target: ami, error: '', submitting: false,
+          label: ami.name || ami.ami_id,
+          name: (ami.name || ami.ami_id).replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 64),
+        };
+      },
+
+      async submitExport() {
+        const d = this.exportDialog, ami = d.target;
+        if (!d.name.trim()) { d.error = 'A registry name is required.'; return; }
+        d.submitting = true;
+        d.error = '';
         this.exportingAmis = new Set([...this.exportingAmis, ami.ami_id]);
         try {
-          const resp = await API.post(`/api/aws/amis/${ami.ami_id}/export`, { image_name: imageName.trim() });
+          const resp = await API.post(`/api/aws/amis/${ami.ami_id}/export`,
+                                      { image_name: d.name.trim(), ...this.schedulePayload() });
+          d.open = false;
           toast(`Export job queued. Redirecting to job detail…`, 'success');
           setTimeout(() => { window.location.href = `/jobs/${resp.job_id}`; }, 600);
         } catch (e) {
-          toast(`Export failed to queue: ${e.message}`, 'error');
+          d.error = e.message;
           this.exportingAmis = new Set([...this.exportingAmis].filter(id => id !== ami.ami_id));
+        } finally {
+          d.submitting = false;
         }
       },
 
@@ -3078,7 +3141,8 @@
         if (!this.packerForm.source_ami && !this.packerForm.source_ami_family) { this.packerError = 'Pick a source preset or paste an AMI ID.'; return; }
         this.packerBuilding = true;
         try {
-          const resp = await API.post('/api/packer/aws/build', this.packerForm);
+          const resp = await API.post('/api/packer/aws/build',
+                                      { ...this.packerForm, ...this.schedulePayload() });
           toast('Packer build queued!', 'success');
           setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
         } catch (e) {
@@ -3096,6 +3160,7 @@
           no_reboot: true,
         };
         this.createImageError = '';
+        this.scheduleReset();
         this.showCreateImageModal = true;
       },
 
@@ -3115,6 +3180,7 @@
               name: this.createImageForm.name,
               description: this.createImageForm.description,
               no_reboot: this.createImageForm.no_reboot,
+              ...this.schedulePayload(),
             }
           );
           this.showCreateImageModal = false;

@@ -472,11 +472,13 @@
         </div>
 
         <!-- Error -->
+        {{ schedule_picker() }}
+
         <div x-show="ociPackerError" x-cloak class="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700" x-text="ociPackerError"></div>
 
         <!-- Submit -->
         <button @click="submitOciPackerBuild()"
-                :disabled="ociPackerBuilding || !ociPackerForm.image_name || !ociPackerForm.base_image_ocid || !ociPackerForm.availability_domain"
+                :disabled="ociPackerBuilding || !ociPackerForm.image_name || !ociPackerForm.base_image_ocid || !ociPackerForm.availability_domain || !scheduleReady()"
                 class="w-full py-2.5 bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition">
           <span x-show="!ociPackerBuilding">Start Packer Build</span>
           <span x-show="ociPackerBuilding" x-cloak>Queuing build…</span>
@@ -952,6 +954,8 @@ function ociDashboard() {
     async init() {
       if (typeof requireAuth === 'function') requireAuth();
       this.loadChangeWindows();
+      // One schedule state for the page: dialogs reset it on open, the Build tab on entry.
+      this.$watch('activeTab', t => { if (t === 'build') this.scheduleReset(); });
       API.get('/api/groups/workgroups')
         .then(r => { this.availableWorkgroups = r || []; })
         .catch(() => { this.availableWorkgroups = []; });
@@ -1420,6 +1424,7 @@ function ociDashboard() {
           ocpus:          flex ? (Number(this.ociPackerForm.ocpus) || 1) : null,
           memory_gb:      flex ? (Number(this.ociPackerForm.memory_gb) || 8) : null,
           boot_volume_gb: Number(this.ociPackerForm.boot_volume_gb) || null,
+          ...this.schedulePayload(),
         };
         delete payload.loaded_from;
         const r = await API.post('/api/packer/oci/build', payload);
