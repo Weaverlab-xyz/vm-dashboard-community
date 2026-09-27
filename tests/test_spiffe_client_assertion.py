@@ -137,6 +137,13 @@ def _app() -> TestClient:
     return TestClient(app)
 
 
+# The test client carries no client address, and with none the token endpoint falls back
+# to one shared failure budget -- which this file's deliberate refusals would exhaust.
+# Throttling is tested in test_service_account_oauth; here each request is its own source.
+import itertools  # noqa: E402
+_SRC = itertools.count(1)
+oauth_api._client_ip = lambda request: "10.77.%d.%d" % divmod(next(_SRC) % 65536, 256)
+
 _C = _app()
 _C.put("/api/oauth/spiffe-trust-domains", json={"trust_domain": TD, "bundle_json": _BUNDLE})
 _C.put("/api/oauth/spiffe-trust-domains",
