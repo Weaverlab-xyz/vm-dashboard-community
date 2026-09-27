@@ -91,7 +91,8 @@
               <div class="flex items-center gap-2">
                 <button @click="openEdit(u)"
                         class="text-blue-600 hover:text-blue-800 text-xs font-medium">Edit</button>
-                <button @click="openTokens(u)"
+                <!-- Not for a service account: it cannot hold a PAT (api/users.create_user_token). -->
+                <button x-show="!u.is_service_account" @click="openTokens(u)"
                         class="text-gray-500 hover:text-gray-700 text-xs font-medium">Tokens</button>
                 <button x-show="u.is_service_account" @click="openClients(u)"
                         class="text-teal-600 hover:text-teal-800 text-xs font-medium">OAuth clients</button>

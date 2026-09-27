@@ -27,7 +27,6 @@ from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
-from jose import jwt as jose_jwt
 from sqlalchemy.orm import Session
 
 from ..database import User, get_db
@@ -112,21 +111,24 @@ async def token(request: Request, db: Session = Depends(get_db)):
         return _error("invalid_client", "Client authentication is required.", 401,
                       basic=basic is not None)
 
-    # The same failure budget the sign-in page uses, keyed so a client id and a username
-    # can never share one. Checked before any verification, so a throttled caller costs
-    # nothing. An assertion is keyed on its (unverified) subject, so garbage presented
-    # for one SPIFFE ID does not spend another's budget.
+    # Throttled by SOURCE ADDRESS ONLY -- never by the client id or SPIFFE ID the caller
+    # claims. The sign-in page keys on the username because a password is guessable and
+    # the username is the thing under attack. Here neither holds: a client secret is 256
+    # random bits and an assertion is a signature, so a per-identity budget protects
+    # nothing -- and because the claimed identity is unverified when the failure is
+    # recorded, it let anyone name a real agent's client id or SPIFFE ID in ten garbage
+    # requests and lock that agent out of the token endpoint for the whole window.
+    # So only the per-IP cap applies (``ip_only``, shared with the sign-in page); rows are
+    # still recorded, under an address key, so a spray leaves a trace. Checked before any
+    # verification, so a throttled caller costs nothing. Nothing clears it on success:
+    # behind a shared NAT, a working agent would otherwise reset the budget of whoever
+    # is spraying from the same address -- login_guard.clear refuses the same thing.
     ip = _client_ip(request)
-    if using_assertion:
-        try:
-            _sub = str(jose_jwt.get_unverified_claims(assertion).get("sub", ""))[:100]
-        except Exception:  # noqa: BLE001 -- malformed; still throttled, by address
-            _sub = "?"
-        throttle_key = f"oauth-svid:{_sub}"
-    else:
-        throttle_key = f"oauth-client:{client_id[:100]}"
+    throttle_key = f"oauth-src:{ip or '-'}"
     try:
-        login_guard.check(db, username=throttle_key, ip=ip)
+        # ip_only only when there IS an address: with none known the per-IP cap cannot
+        # apply, and the source key's own cap is then the only bound left.
+        login_guard.check(db, username=throttle_key, ip=ip, ip_only=bool(ip))
     except login_guard.LoginThrottled as exc:
         resp = _error("invalid_client", "Too many failed attempts. Try again shortly.", 429)
         resp.headers["Retry-After"] = str(exc.retry_after)
@@ -167,7 +169,6 @@ async def token(request: Request, db: Session = Depends(get_db)):
 
     access_token, expires_in = service_accounts.issue_access_token(user, client, granted)
     service_accounts.touch_client(db, client)
-    login_guard.clear(db, username=throttle_key)
     db.commit()
     logger.info("oauth token issued to %s via client %s (scope=%s, ttl=%ss)",
                 user.username, client.client_id,
