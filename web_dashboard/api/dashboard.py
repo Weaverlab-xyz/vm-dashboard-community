@@ -32,17 +32,18 @@ Collecting them needs the per-connection ``scope`` the table reserves but nothin
 yet. The contract is therefore "tiles I can answer for": the client keeps its own fetcher
 for any key this response omits.
 
-RBAC IS PER TILE, DELIBERATELY NOT UNIFIED
-------------------------------------------
-The four cloud modules decide admin with ``user.is_admin``. Inventory, databases and k8s use
-``user.is_effective_admin``, which is a **superset** — it also honours a session-permissions
-row and a live Entitle JIT grant. So a JIT-admin already sees everything on ``/inventory``
-and only their own workgroups on ``/api/aws/instances``.
+RBAC IS PER TILE: EACH TILE BORROWS ITS OWN MODULE'S ACCESSOR
+-------------------------------------------------------------
+Every tile filters through the same function its live page does, named on
+``TileSpec.rbac``, so this endpoint can never show a row the page would hide or hide one it
+would show.
 
-That inconsistency predates this endpoint. Reproducing it tile by tile is correct;
-"tidying" it here would silently widen or narrow somebody's access, in a place nobody would
-think to look. Each tile therefore borrows its own module's accessor rather than a shared
-one, and the choice is recorded on ``TileSpec.rbac``.
+There used to be a second reason: the four cloud modules decided admin with the raw
+``user.is_admin`` column while inventory, databases and k8s used ``is_effective_admin``, so
+a role- or Entitle-granted administrator saw everything on ``/inventory`` and only their
+own workgroups on ``/api/aws/instances``. That split was a bug, not a policy --
+``require_admin`` itself honours all four sources -- and every module now uses
+``is_effective_admin``. ``tests/test_admin_is_effective.py`` keeps it that way.
 """
 import logging
 
@@ -66,8 +67,8 @@ UNAVAILABLE = -1
 def _accessible_for(rbac: str, user: User):
     """The workgroup list this tile's own api module would use.
 
-    Borrowed rather than reimplemented, and per module rather than shared — see the module
-    docstring on why the two admin rules must not be unified here.
+    Borrowed rather than reimplemented, and per module rather than shared, so a tile can
+    never disagree with its page -- see the module docstring.
     """
     if rbac == "aws":
         from . import aws as mod

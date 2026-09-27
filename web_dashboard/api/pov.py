@@ -1672,7 +1672,7 @@ def set_expiry(env_id: str, payload: ExpiryRequest,
         extend_hours=payload.extend_hours,
         absolute=payload.absolute or None,
         never=payload.never,
-        is_admin=bool(getattr(current_user, "is_admin", False)),
+        is_admin=bool(getattr(current_user, "is_effective_admin", False)),
         actor=getattr(current_user, "username", "") or "")
     if result["failed"]:
         raise HTTPException(status_code=400, detail=result["failed"][0]["error"])

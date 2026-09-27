@@ -9,6 +9,12 @@ Two independent questions, and keeping them apart is the whole model:
 | What may this user **do**? | a **role**, or a **scope** and a **level** | RBAC &rarr; Users / Groups / Roles |
 | Which **objects** may they do it to? | a workgroup tag, or a POV grant | RBAC &rarr; Workgroups; the POV access picker |
 
+**Administrator**, on this page and in the app, means any one of four things: the **Admin**
+flag on the user, the built-in **Administrator** role, a group mapping whose role or
+permissions confer admin, or an admin grant from Entitle. Every admin check honours all
+four. (Until September 2026 the cloud consoles, the hypervisor pages, job cancel and
+reschedule, and the Secrets page honoured only the flag.)
+
 A scope is a feature area — roughly one per section in the navigation. A level is
 `read`, `write`, `delete` or `use`. A grant is a scope plus a level: `pov:read`,
 `storage:write`, `cloud_database:delete`.
@@ -113,8 +119,8 @@ checkboxes save and then **grant nothing**, because no route or check reads them
 | `vms` | `delete`, `use` |
 | `aws`, `azure`, `gcp`, `oci`, `images`, `containers`, `cloud_database`, `k8s`, `cloud_function` | `use` |
 | `config_mgmt` | `delete`, `use` |
-| `jobs` | `write`, `delete`, `use` — cancelling and rescheduling a job are decided by ownership (the job's creator, or the Admin flag), not by scope |
-| `workgroups` | `delete`, `use` — deleting a workgroup needs the Admin flag |
+| `jobs` | `write`, `delete`, `use` — cancelling and rescheduling a job are decided by ownership (the job's creator, or an administrator), not by scope |
+| `workgroups` | `delete`, `use` — deleting a workgroup needs an administrator |
 | `secrets` | `read`, `write`, `delete` — the Secrets page is admin-only throughout; only `use` does anything |
 
 They are kept because narrowing an offered level would make every stored map that holds it
@@ -149,7 +155,7 @@ Preview features, and each is gated like this:
 
 | Preview feature | Gate |
 |---|---|
-| Virtual Desktops | Admin flag |
+| Virtual Desktops | administrator |
 | Certificate Lab, SPIRE Lab | `cloud_function:read` to see, `cloud_function:write` to change |
 | Agent Cell | `config_mgmt:write` |
 
@@ -298,7 +304,7 @@ A scope says *what*, not *which*. Two mechanisms narrow the *which*:
 
   Unlike the other RBAC tabs, Workgroups is **not admin-only**: it has a real `workgroups`
   scope, so a user granted `workgroups:read` sees that tab and nothing else on the page.
-  Deleting a workgroup still needs the Admin flag.
+  Deleting a workgroup still needs an administrator.
 - **POV access** narrows the POV pages to named environments, as described above.
 
 "Untagged resources are visible to whoever deployed them" is the whole rule, and it is

@@ -63,7 +63,7 @@ def _row_or_404(db: Session, lab_id: str):
 
 def _visible(row, user: User) -> bool:
     """Creator-scoped for non-admins, exactly like the Certificate Lab and functions."""
-    return bool(getattr(user, "is_admin", False)) or row.created_by == user.username
+    return bool(getattr(user, "is_effective_admin", False)) or row.created_by == user.username
 
 
 def _visible_or_404(db: Session, lab_id: str, user: User):

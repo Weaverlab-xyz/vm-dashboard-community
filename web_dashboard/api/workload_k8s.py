@@ -64,7 +64,7 @@ def _require_enabled() -> None:
 
 def _visible(row, user: User) -> bool:
     """Creator-scoped for non-admins, exactly like both sibling labs."""
-    return bool(getattr(user, "is_admin", False)) or row.created_by == user.username
+    return bool(getattr(user, "is_effective_admin", False)) or row.created_by == user.username
 
 
 def _visible_or_404(db: Session, row_id: str, user: User):

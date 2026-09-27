@@ -784,10 +784,8 @@ def row_visible_to(row: dict, accessible, username: str) -> bool:
     list tools, which each carried their own copy of the creator comparison and so could
     drift apart one at a time.
 
-    ``accessible`` must already be resolved by the caller (``None`` = admin). That is on
-    purpose: api/mcp_server.py documents a deliberate ``is_admin`` vs
-    ``is_effective_admin`` divergence between the cloud pages and the inventory pages, and
-    a helper that resolved admin-ness itself would quietly pick a side."""
+    ``accessible`` must already be resolved by the caller (``None`` = admin), so this stays a
+    pure row predicate. Every caller resolves admin with ``is_effective_admin``."""
     if accessible is None:
         return True
     wg = row.get("workgroup")

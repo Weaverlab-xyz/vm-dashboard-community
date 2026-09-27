@@ -63,14 +63,15 @@ def _validate_workgroup(db: Session, user: User, workgroup: str) -> str:
     if not wg:
         raise HTTPException(status_code=400, detail=f"Unknown workgroup '{workgroup}'")
     canonical = wg.name
-    if not user.is_admin and canonical not in [w.lower() for w in user.workgroups_list]:
+    if not user.is_effective_admin and canonical not in [w.lower() for w in user.workgroups_list]:
         raise HTTPException(status_code=403, detail=f"You do not have access to workgroup '{canonical}'")
     return canonical
 
 
 def _accessible_workgroups(user: User) -> Optional[List[str]]:
-    """Return the canonical workgroup names the user can see, or None for admins."""
-    if user.is_admin:
+    """Return the canonical workgroup names the user can see, or None for administrators
+    (flag, role or Entitle grant -- `is_effective_admin`, the same rule as require_admin)."""
+    if user.is_effective_admin:
         return None
     return [w.lower() for w in user.workgroups_list]
 
@@ -86,10 +87,8 @@ def _assert_can_act(user: User, workgroup, what: str) -> None:
     can see" holds by construction rather than by two rules being kept in step.
 
     An untagged resource is admin-only, which is exactly what the list endpoint already
-    does with it (``inst_wg is None`` is filtered out for non-admins). Note this keys on
-    ``is_admin`` like the rest of this module, NOT ``is_effective_admin`` — see
-    api/vms.py for the other rule and tests/test_dashboard_stats_api.py for why the two
-    must not be unified.
+    does with it (``inst_wg is None`` is filtered out for non-admins). "Admin" is
+    ``is_effective_admin``, through ``_accessible_workgroups``, as everywhere in the app.
     """
     accessible = _accessible_workgroups(user)
     if accessible is None:
