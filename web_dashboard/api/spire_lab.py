@@ -87,7 +87,8 @@ def _shape(row) -> dict:
         "firewall_name": row.firewall_name or "",
         "stages_done": [s for s in (row.stages_done or "").split(",") if s],
         "stages": [{"key": s["key"], "asset": s["asset"]}
-                   for s in spire_lab_service.STAGES],
+                   for s in spire_lab_service.stages_for(row)],
+        "deployment_mode": spire_lab_service.deployment_mode(row),
         "stage_job_ids": spire_lab_service.stage_jobs(row),
         "entries_seeded": row.entries_seeded,
         "discovery_expected": row.discovery_expected,

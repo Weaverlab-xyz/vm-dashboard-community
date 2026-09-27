@@ -161,6 +161,49 @@ Then run *Verify Functional Account* and read the `Attributes received:` line.
 [The standup runbook](../runbooks/spire-lab-standup.md) §5 is that procedure and what each
 answer means.
 
+### Deployment modes: VM, Docker or Kubernetes
+
+The build form's **Deployment** select picks how SPIRE runs on the lab host. Everything
+downstream — seed entries, the admin credential, Govern, the Kubernetes link, the agent
+cell, JWT-SVID client assertions — is the same in all three.
+
+| Mode | Install stages | then |
+|---|---|---|
+| `vm` (default) | `spire-server-install.yml` — SPIRE under systemd | ports, seed, identity, oidc |
+| `docker` | `linux/install-docker.yml`, `spire-docker-server.yml` — `ghcr.io/spiffe/spire-server` and the OIDC Discovery Provider under Docker Compose | ports, seed, identity, oidc |
+| `k8s` | `k3s/k3s-server-init.yml`, `spire-helm.yml` — k3s on the lab host and the `spiffe/helm-charts-hardened` charts (server, agent, CSI driver, controller manager, OIDC provider) | ports, seed, identity |
+
+A mode whose playbooks are not on the Storage page is disabled in the select and names
+them. The shared stages reach the server through a command prefix (`docker exec
+spire-server` / `k3s kubectl exec … spire-server-0`), and in the container modes the admin
+credential is minted to stdout and split on the host, so no key is written inside a
+container. One mode per host: the Docker play refuses a host already running the `vm`-mode
+systemd server.
+
+**Every mode publishes the OIDC Discovery Provider on `tcp/8443`**, and the build opens it
+on the cloud ACL and the host firewall to the same sources as 8081. After a successful
+build the lab **registers its trust domain with the dashboard by JWKS URL** —
+`https://<host>:8443/keys`, verified as `oidc.<trust-domain>` (the row's *TLS name*) against
+the lab's own trust bundle — so the token endpoint verifies JWT-SVIDs with current keys. A
+trust domain another lab or an operator already registered is never re-pointed.
+
+**Refresh keys** on a lab's row re-reads the JWT and X.509 bundles, renews the provider's
+serving certificate (`vm`/`docker`; the chart rotates its own) and updates the registration.
+The dashboard also runs it hourly-checked, for any available lab whose registration is
+older than a third of `ca_ttl`. If the URL cannot be fetched, a stored bundle is used as a
+fallback.
+
+**Destroy** closes 8081 and 8443 and deletes the lab's own trust-domain registration. The
+host is still left alone unless you confirm **also remove SPIRE from the host**, which runs
+`spire-remove.yml`: systemd units / `docker compose down -v` / `helm uninstall`, and deletes
+`/opt/spire` including the CA key. k3s and Docker Engine stay installed.
+
+**Not yet live-validated:** the Docker and Kubernetes modes. Two things to confirm on the
+first run — the `x509 mint` stdout layout the container modes split, and that the pinned
+chart version takes `adminIDs` (the Helm play reads the server config back and fails
+loudly if not). Pin the charts with `spire_lab_helm_chart_version` /
+`spire_lab_helm_crds_chart_version`; extra values go in `spire_lab_helm_values_extra`.
+
 ### By hand
 
 Full detail, including what each playbook proves, is in

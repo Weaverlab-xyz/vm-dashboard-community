@@ -642,6 +642,8 @@
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
           <input x-model="tdForm.jwks_url" type="text" placeholder="JWKS URL (https://…/keys) — optional"
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+          <input x-model="tdForm.tls_server_name" type="text" placeholder="TLS name, if the URL is an address (e.g. oidc.example.org) — optional"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
           <textarea x-model="tdForm.ca_pem" rows="2" placeholder="CA certificate (PEM) the JWKS URL is served under — optional, for a private CA"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono"></textarea>
           <textarea x-model="tdForm.bundle_json" rows="3" placeholder="SPIFFE bundle JSON — optional"
@@ -662,7 +664,7 @@
               <tr>
                 <td class="py-2 font-mono" x-text="t.trust_domain"></td>
                 <td class="py-2 text-xs text-gray-600">
-                  <span x-show="t.source === 'url'" class="break-all" x-text="t.jwks_url + (t.ca_pinned ? ' (CA pinned)' : '')"></span>
+                  <span x-show="t.source === 'url'" class="break-all" x-text="t.jwks_url + (t.tls_server_name ? ' as ' + t.tls_server_name : '') + (t.ca_pinned ? ' (CA pinned)' : '') + (t.spire_lab_id ? ' — Workload Lab' : '')"></span>
                   <span x-show="t.source === 'bundle'" x-text="'bundle, ' + t.bundle_jwt_keys + ' JWT key(s), captured ' + fmtDate(t.bundle_captured_at)"></span>
                   <span x-show="t.stale" class="ml-1 text-amber-700 font-medium">— stale, re-capture</span>
                 </td>
@@ -751,7 +753,7 @@ function usersPage() {
     newClientSpiffeId: '',
     showTdModal: false,
     trustDomains: [],
-    tdForm: { trust_domain: '', jwks_url: '', ca_pem: '', bundle_json: '' },
+    tdForm: { trust_domain: '', jwks_url: '', tls_server_name: '', ca_pem: '', bundle_json: '' },
     extForm: { name: '', subject: '', expected_client: '', issuer: '' },
 
     // A service account can never hold the Administrator role; the API refuses it, so
@@ -1148,7 +1150,7 @@ function usersPage() {
     },
 
     async openTrustDomains() {
-      this.tdForm = { trust_domain: '', jwks_url: '', ca_pem: '', bundle_json: '' };
+      this.tdForm = { trust_domain: '', jwks_url: '', tls_server_name: '', ca_pem: '', bundle_json: '' };
       this.showTdModal = true;
       await this.loadTrustDomains();
     },
@@ -1164,7 +1166,7 @@ function usersPage() {
     async saveTrustDomain() {
       try {
         await API.request('PUT', '/api/oauth/spiffe-trust-domains', this.tdForm);
-        this.tdForm = { trust_domain: '', jwks_url: '', ca_pem: '', bundle_json: '' };
+        this.tdForm = { trust_domain: '', jwks_url: '', tls_server_name: '', ca_pem: '', bundle_json: '' };
         toast('Trust domain saved', 'success');
         await this.loadTrustDomains();
       } catch (e) {
