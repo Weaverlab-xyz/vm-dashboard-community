@@ -995,7 +995,7 @@ from .api import expiry as expiry_api  # noqa: E402
 from .api import notifications as notifications_api  # noqa: E402
 from .api import agent as agent_api  # noqa: E402
 from .api import worker as worker_api  # noqa: E402
-from .api.mcp_server import get_mcp_asgi_app  # noqa: E402
+from .api.mcp_server import MOUNT_PATH as MCP_MOUNT_PATH, get_mcp_asgi_app  # noqa: E402
 
 
 def _feature_gate(flag: str):
@@ -1216,7 +1216,7 @@ app.include_router(packer.router,
                    dependencies=[_profile_page_gate("cloud_pages")])
 
 # MCP server — mounted as a sub-ASGI app so SSE streams pass through unmodified
-app.mount("/mcp", get_mcp_asgi_app())
+app.mount(MCP_MOUNT_PATH, get_mcp_asgi_app())
 
 try:
     from .api import vms  # noqa: E402

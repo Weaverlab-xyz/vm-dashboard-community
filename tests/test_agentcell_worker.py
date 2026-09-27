@@ -154,7 +154,19 @@ def test_an_error_is_scrubbed_before_it_is_logged():
     assert "redacted" in out, "the scrub leaves no sign that something was removed"
     code = _code(_WORKER)
     run_body = code.split("def run(", 1)[1]
-    assert "scrub(str(exc))" in run_body, "the error text is logged unscrubbed"
+    assert "scrub(error_text(exc))" in run_body, "the error text is logged unscrubbed"
+
+
+def test_a_401_inside_an_exception_group_is_recognised():
+    """The MCP client wraps the transport's HTTP error in a TaskGroup exception group, so
+    str(exc) alone never says 401 and a revoked token never stopped the worker."""
+    m = _worker_module()
+    inner = RuntimeError("Client error '401 Unauthorized' for url 'http://h/mcp/sse'")
+    group = BaseExceptionGroup("unhandled errors in a TaskGroup", [inner])
+    assert "401" not in str(group), "the premise of this test no longer holds"
+    assert "401" in m.error_text(group)
+    raw = "vmcli_" + ("ab12" * 16)
+    assert raw not in m.scrub(m.error_text(BaseExceptionGroup("g", [RuntimeError(raw)])))
 
 
 # -- identity is re-proved, never cached --------------------------------------

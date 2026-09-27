@@ -24,7 +24,7 @@
 # NEVER LIVE-VALIDATED — see docs/profiles/demo/agent-demo-cell.md.
 #
 # extra_vars:
-#   agent_mcp_url:      https://dashboard.example/mcp   # REQUIRED
+#   agent_mcp_url:      https://dashboard.example/mcp/sse   # REQUIRED
 #   agent_token_source: file | wlc | ps                 # default file
 #   agent_token:        vmcli_<64hex>                   # REQUIRED when source is `file`
 #   agent_token_label:  mcp-reader-pat                  # the PAT's NAME, as the cell's

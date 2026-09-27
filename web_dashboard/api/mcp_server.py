@@ -1,7 +1,8 @@
 """
 MCP (Model Context Protocol) server — exposes dashboard read-only tools to AI clients.
 
-Transport: HTTP Streamable (SSE), mounted at /mcp in main.py.
+Transport: SSE, mounted at /mcp in main.py -- the stream at /mcp/sse, messages
+           POSTed to /mcp/messages/. See ``_sse_app`` for why it is built here.
 Auth:      Bearer PAT (vmcli_<64hex>), or an OAuth workload access token from
            ``POST /api/oauth/token`` -- both via ``api/auth.resolve_bearer``.
 Gate:      ``mcp_server_enabled`` (default off) — checked in :class:`_MCPAuth` before auth.
@@ -11,7 +12,7 @@ Any MCP-compatible client (Claude Desktop, Claude Code, Cursor, etc.) can connec
     {
       "mcpServers": {
         "vm-dashboard": {
-          "url": "http://localhost:8001/mcp",
+          "url": "http://localhost:8001/mcp/sse",
           "headers": {"Authorization": "Bearer vmcli_<your-pat>"}
         }
       }
@@ -962,7 +963,49 @@ class _MCPAuth:
 # ── Public factory ────────────────────────────────────────────────────────────
 
 
+# Where main.py mounts this app, and the two paths under it. One constant, because the
+# message endpoint the server ADVERTISES has to include the mount and nothing else here
+# can see it.
+MOUNT_PATH = "/mcp"
+SSE_PATH = "/sse"
+MESSAGE_PATH = "/messages/"
+
+
+def _sse_app():
+    """The SSE transport, built here rather than by ``FastMCP.sse_app()``.
+
+    ``sse_app()`` in the mcp SDK this repo can install (1.6 -- newer releases need a
+    newer FastAPI/Starlette and httpx than requirements.txt pins) advertises its message
+    endpoint as the bare ``/messages/``. Mounted at ``/mcp`` that is the wrong URL: every
+    client opened the stream, POSTed its first message to ``/messages/`` and got a 404,
+    whatever credential it held. So the transport is given the MOUNTED path, and the
+    route stays relative to the mount, which Starlette strips.
+
+    ``root_path`` is blanked on the scope handed to the SDK because newer releases
+    prefix it themselves; with the mount already in the endpoint that would double it.
+
+    Clients connect to ``/mcp/sse``. Not bare ``/mcp``: Starlette answers a mount's own
+    path with a 307 to ``/mcp/``, and SSE clients do not follow redirects.
+    """
+    from mcp.server.sse import SseServerTransport
+    from starlette.applications import Starlette
+    from starlette.routing import Mount, Route
+
+    sse = SseServerTransport(MOUNT_PATH + MESSAGE_PATH)
+    server = mcp._mcp_server  # what FastMCP.sse_app() itself runs; no public accessor
+
+    async def handle_sse(request) -> None:
+        scope = dict(request.scope, root_path="")
+        async with sse.connect_sse(scope, request.receive, request._send) as streams:
+            await server.run(streams[0], streams[1],
+                             server.create_initialization_options())
+
+    return Starlette(routes=[
+        Route(SSE_PATH, endpoint=handle_sse),
+        Mount(MESSAGE_PATH, app=sse.handle_post_message),
+    ])
+
+
 def get_mcp_asgi_app() -> Callable:
     """Return the MCP ASGI app wrapped with the feature gate and bearer authentication."""
-    raw_app = mcp.sse_app()
-    return _MCPAuth(raw_app)
+    return _MCPAuth(_sse_app())

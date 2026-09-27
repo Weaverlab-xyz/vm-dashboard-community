@@ -253,6 +253,21 @@ def scrub(text: str) -> str:
     return AWS_KEY_RE.sub("<aws key id redacted>", out)
 
 
+def error_text(exc: BaseException) -> str:
+    """An exception's text, including what an exception GROUP holds.
+
+    The MCP client runs its transport in an anyio TaskGroup, so a 401 from /mcp arrives
+    as "unhandled errors in a TaskGroup (1 sub-exception)" -- no status code in sight.
+    ``run`` matched on "401" in ``str(exc)``, so a revoked token never ended the loop: the
+    worker logged that line every interval forever, which is the demo's closing beat
+    failing silently. The leaves are joined in, so the refusal is recognisable again.
+    """
+    parts = [str(exc)]
+    for sub in getattr(exc, "exceptions", None) or ():
+        parts.append(error_text(sub))
+    return " | ".join(p for p in parts if p)
+
+
 def token_label(label: str) -> str:
     """What the log line calls this worker's authorization.
 
@@ -1859,7 +1874,7 @@ def run(url: str, token: str, tool: str, socket_path: str, interval: int,
         try:
             payload = asyncio.run(call_once(url, token, tool))
         except Exception as exc:  # noqa: BLE001
-            text = scrub(str(exc))
+            text = scrub(error_text(exc))
             # 401 is the demo's closing beat, not an error to ride out.
             if "401" in text or "Unauthorized" in text or "unauthorized" in text:
                 print(f"[agent] {spiffe_id} · token {named} · REFUSED — the token "
@@ -2327,7 +2342,7 @@ def _wait_out_the_lease(minted: dict, max_wait: int, spiffe_id: str) -> bool:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--url", default=os.environ.get("AGENT_MCP_URL", ""),
-                    help="the dashboard's MCP endpoint, e.g. https://host/mcp")
+                    help="the dashboard's MCP SSE endpoint, e.g. https://host/mcp/sse")
     ap.add_argument("--token-file", default=os.environ.get("AGENT_TOKEN_FILE",
                                                            "/etc/mcp-agent/token"))
     ap.add_argument("--token-label", default=os.environ.get("AGENT_TOKEN_LABEL", ""),
