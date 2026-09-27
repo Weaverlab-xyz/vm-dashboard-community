@@ -11,7 +11,7 @@ Two independent questions, and keeping them apart is the whole model:
 
 A scope is a feature area — roughly one per section in the navigation. A level is
 `read`, `write`, `delete` or `use`. A grant is a scope plus a level: `pov:read`,
-`storage:write`, `databases:delete`.
+`storage:write`, `cloud_database:delete`.
 
 ---
 
@@ -19,15 +19,21 @@ A scope is a feature area — roughly one per section in the navigation. A level
 
 **An empty permission map means unrestricted, not "nothing".**
 
-A user with no permissions set at all can do everything except the things that need the
-Admin flag. This is deliberate backward compatibility: the permission columns were added
+A user with no permissions from **any** source can do everything except the things that
+need the Admin flag. "Any source" matters: a user's effective permissions are the union of
+four maps (see [below](#where-a-users-permissions-actually-come-from)), and only when all
+four are empty is the result unrestricted. This is deliberate backward compatibility: the permission columns were added
 long after the first users were, and treating "unset" as "denied" would have locked those
 accounts out of work they were already doing.
 
 The consequence is that the grid has two very different empty states:
 
-- **"Full access (unrestricted)" ticked** — the map is NULL. Every scope is allowed, now
-  and for every scope added in future.
+- **"Full access (unrestricted)" ticked** — the user's own map is NULL. If nothing else
+  grants them anything, every scope is allowed, now and for every scope added in future.
+  **But if they also hold a role, a group mapping's permissions or an Entitle grant, they
+  get exactly that union and nothing more** — the ticked box contributes nothing, it does
+  not widen them to everything. To give such a user full access, use the Admin flag or
+  the Administrator role.
 - **Unticked with nothing checked** — the map lists every section with nothing granted
   against any of them. Every scope is denied.
 
@@ -54,6 +60,12 @@ Before this, the create form had no grid at all and saved no map, which left the
 the NULL state above — every section, every level, for anyone the admin added. Tick
 "Full access (unrestricted)" if that is genuinely what you want.
 
+**Group mappings are the opposite.** A new mapping on RBAC → Groups starts with "Full
+access (unrestricted)" ticked, and the panel says auto-provisioned users will have
+unrestricted access. An OIDC user whose only source is such a mapping (no role on the
+mapping, nothing granted on their own row) is unrestricted. Untick it, or give the mapping
+a role, before members sign in.
+
 ## Levels
 
 | Level | Means |
@@ -63,7 +75,8 @@ the NULL state above — every section, every level, for anyone the admin added.
 | `delete` | destroy |
 | `use` | take part without managing — see below |
 
-`use` exists for two cases where "read" is too little and "write" is far too much:
+`use` exists for the cases where "read" is too little and "write" is far too much. It
+does something on exactly three scopes:
 
 - **`secrets:use`** — run an Ansible playbook that reads a secret out of a vault, without
   ever being shown the value.
@@ -74,16 +87,41 @@ the NULL state above — every section, every level, for anyone the admin added.
   wake of its own — see [Customer access to a POV](profiles/pov/customer-access.md) — and
   a stakeholder who must be able to wake their own POV needs `write` or an accessor
   alongside.
+- **`change_windows:use`** — approve a change booked into a change window. Deliberately a
+  different authority from `change_windows:write`, which maintains the calendar. See
+  [Change Windows](scheduling/change-windows.md).
 
-Not every scope offers every level. A scope that has nothing to delete shows no Delete
-checkbox, rather than a checkbox that saves and then enforces nothing. If you send a level
-a scope does not offer through the API you get a `422` naming the levels it does offer.
+On every other scope that offers it, `use` is currently a checkbox that grants nothing —
+see the next section.
+
+Not every scope offers every level. The scopes added one per navigation section offer
+only the levels something enforces: vSphere has nothing to delete, so it shows no Delete
+checkbox. If you send a level a scope does not offer through the API you get a `422`
+naming the levels it does offer.
+
+The original fourteen are the exception — see the next section.
 
 ## The sections
 
 The fourteen original scopes — `vms`, the four clouds, `images`, `containers`,
 `config_mgmt`, `jobs`, `workgroups`, `secrets`, `cloud_database`, `k8s` and
-`cloud_function` — all offer four levels. The rest are one per navigation section:
+`cloud_function` — all offer all four levels, whether or not anything checks them. These
+checkboxes save and then **grant nothing**, because no route or check reads them:
+
+| Scope | Levels that currently do nothing |
+|---|---|
+| `vms` | `delete`, `use` |
+| `aws`, `azure`, `gcp`, `oci`, `images`, `containers`, `cloud_database`, `k8s`, `cloud_function` | `use` |
+| `config_mgmt` | `delete`, `use` |
+| `jobs` | `write`, `delete`, `use` — cancelling and rescheduling a job are decided by ownership (the job's creator, or the Admin flag), not by scope |
+| `workgroups` | `delete`, `use` — deleting a workgroup needs the Admin flag |
+| `secrets` | `read`, `write`, `delete` — the Secrets page is admin-only throughout; only `use` does anything |
+
+They are kept because narrowing an offered level would make every stored map that holds it
+fail validation (`422`) the next time an admin saved it. Granting them is harmless; just do
+not rely on them.
+
+The rest are one per navigation section:
 
 | Scope | Levels | Covers |
 |---|---|---|
@@ -104,9 +142,16 @@ The fourteen original scopes — `vms`, the four clouds, `images`, `containers`,
 | `notifications` | read, write | outbound webhook endpoints and delivery history |
 | `epml` | read, write | EPM for Linux package builds |
 | `ot` | read, write, delete | the OT demo cell and its protocol tunnels. Building a cell also needs the cloud's own `write` |
+| `change_windows` | write, use | `write` defines change windows and recurring schedules; `use` approves a booked change. No `read`: every run form reads windows. Both levels need an **explicit** grant — see [If a user reports a 403](#if-a-user-reports-a-403) |
 
-Preview features — Virtual Desktops, Certificate Lab and SPIRE Lab — have no scope yet and
-keep their existing gating. They are turned on and off in Settings → Preview features.
+Preview features have no scope of their own. They are turned on and off in Settings →
+Preview features, and each is gated like this:
+
+| Preview feature | Gate |
+|---|---|
+| Virtual Desktops | Admin flag |
+| Certificate Lab, SPIRE Lab | `cloud_function:read` to see, `cloud_function:write` to change |
+| Agent Cell | `config_mgmt:write` |
 
 ## Giving a customer read access to their own POV
 
@@ -164,9 +209,15 @@ role, and a default permission set. **Not Entra-only** — any OIDC provider wor
 stored column is still called `entra_group_id`, which is why you will see that name in the
 API and in the database.
 
-Two things to know:
+Things to know:
 
-- Its permissions are re-applied to every member **at each login**, so a mistake in a
+- **If any mappings exist, signing in requires a match.** An OIDC user in none of the
+  mapped groups is refused at sign-in (`not_authorized`). With no mappings configured,
+  only users who already have an account can sign in.
+- **A login also rewrites the user's workgroups** to the matched mappings' workgroups.
+  Workgroups set by hand on an OIDC user do not survive their next sign-in.
+- The grid is labelled "Default Permissions for new users", but it is not only for new
+  users. Its permissions are re-applied to every member **at each login**, so a mistake in a
   mapping keeps reasserting itself until the mapping is fixed — and a change you make
   reaches existing members at their *next sign-in*, not immediately.
 - That includes the role. Editing a role changes it immediately for users who hold it
@@ -182,9 +233,9 @@ Eight roles ship with the dashboard:
 | Role | For |
 |---|---|
 | **Administrator** | Everything, including the admin-only pages. The grid is not consulted. |
-| **Operator** | Day-to-day work: deploy, run and use, but delete nothing. |
-| **Read-Only** | Every section at its read level, and nothing else. |
-| **POV Presenter** | Run a proof of value — tick use cases, wake environments. Pair it with the POV access picker. |
+| **Operator** | Day-to-day work: deploy, run and use, but delete nothing. It does not include the audit log or change windows. |
+| **Read-Only** | Every section at its read level, and nothing else. `change_windows` offers no read level, so it is not included. |
+| **POV Presenter** | Run a proof of value — tick use cases, and read the environments and estate behind them. Pair it with the POV access picker. It holds `pov:read` and `pov:use` but not `pov:write`, so it **cannot wake or power** an environment. The role's own description in the app says it can; that description is wrong. |
 | **Auditor** | The audit trail, job history and inventory. No writes. |
 | **Cloud Admin** | Full control of the cloud accounts and what runs in them. |
 | **DBA** | Cloud databases end to end, plus the secrets a database run needs. |
@@ -220,14 +271,20 @@ a way to become an administrator:
   scopes *objects* rather than actions, so it has a grantable `workgroups` scope. The page
   is `/rbac`. `/users`, `/groups` and `/workgroups` still resolve, straight to their tab,
   so older bookmarks and runbook links keep working.
-- **Settings / first-run setup**, and the **secret vault registry**.
+- **Settings / first-run setup**, and **Secrets Management** — the whole page, including
+  the vault registry. The `secrets` scope's `read`, `write` and `delete` levels do not open
+  it (see [The sections](#the-sections)).
+- **Virtual Desktops**, while it is a preview.
 - **Worker concurrency and preflight**, which are instance-wide plumbing.
 
 Two more have no scope for narrower reasons:
 
 - **The auto-delete timer.** Authorization there is visibility: anyone who can see a
-  resource may extend its timer, because extending only ever *delays* a deletion. Clearing
-  a timer outright still needs an administrator. See
+  resource may change its timer. Extending by a number of hours only ever delays a
+  deletion. Setting an **absolute date** is also open to them, though, and that date may be
+  *earlier* than the current one — no sooner than 60 minutes from now. So seeing a resource
+  is enough to bring its deletion forward. Clearing a timer outright needs an administrator
+  **and** the `resource_expiry_allow_never` setting. See
   [Auto-delete Timer](auto-delete-timer.md).
 - **The Dashboard home page**, which is an aggregate of things you already have access to.
 
@@ -262,8 +319,11 @@ you created, and that is not configurable.
 
 ## If a user reports a 403
 
-1. Is **"Full access (unrestricted)"** ticked? If so the grid below it is not being read,
-   and the refusal is coming from the Admin flag or a workgroup, not from a scope.
+1. Is **"Full access (unrestricted)"** ticked? If the user has **no** role, group mapping
+   or Entitle grant, the grid is not being read, and the refusal is coming from the Admin
+   flag or a workgroup, not from a scope. If they do have one of those, they are not
+   unrestricted at all: they hold exactly what those sources grant. Check the role and
+   group mappings.
 2. Does the message name a scope and level (*"Requires 'storage:write' permission"*)? Grant
    that pair. If the message says *"or administrator"*, the grant must be explicit — an
    unrestricted map will **not** satisfy it, because that route used to require the Admin
@@ -283,9 +343,15 @@ scope needs, in the same change:
 
 1. an entry in `PERMISSION_SCOPE_LEVELS` (`web_dashboard/api/auth.py`) listing only the
    levels something actually enforces;
-2. a display label in `permissionScopeLabel` (`web_dashboard/static/js/app.js`);
+2. a display label in `permissionScopeLabel` (`web_dashboard/static/js/app.js`), and a
+   place in `PERMISSION_SCOPE_GROUPS` (`web_dashboard/api/auth.py`), which lays out the
+   grid (`tests/test_permission_catalog.py` asserts every scope is in exactly one group);
 3. a **backfill** in `web_dashboard/database.py` granting exactly the levels a non-admin
-   with an explicit map could already reach;
+   with an explicit map could already reach. It must widen three places:
+   `users.permissions`, `oauth_group_mappings.default_permissions`, and the **built-in
+   roles** in `web_dashboard/services/role_service.py`. Built-in roles are seeded once and
+   never updated, so a new scope is missing from every existing install's copy until the
+   backfill adds it and `role_service.reconcile` runs;
 4. the right *form* of the check — see the table below;
 5. an entry in `_NAV_SCOPE` or `_NAV_EXEMPT` in `tests/test_permission_catalog.py`, which fails if a nav
    section has no scope or a route enforces a scope the catalog does not contain.
@@ -306,6 +372,6 @@ permissive form *and* no backfill, a combination that looks like an oversight an
 other, so a mismatch fails the build rather than silently revoking or silently granting.
 
 Scope **keys** are persisted in every user's and group's permissions JSON and are turned
-into Entra group names by `scripts/bootstrap_entitle_groups.py`. Renaming one un-grants
+into Entra group names by `web_dashboard/scripts/bootstrap_entitle_groups.py`. Renaming one un-grants
 everyone who had it, and the symptom is a locked-out user rather than an error — so if a
 display name needs to change, change the label map, not the key.
