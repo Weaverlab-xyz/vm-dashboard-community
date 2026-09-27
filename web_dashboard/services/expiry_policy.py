@@ -462,7 +462,33 @@ def resolve_expiry(*, created_at, current, extend_hours_req=None, absolute=None,
     # Compare in whole minutes: a sub-minute difference is float noise from the
     # timestamp arithmetic, not a clamp the operator should be told about.
     clamped = int(allowed_h * 60) < int(requested_h * 60)
-    return expiry_from_now(allowed_h, now=now), clamped
+    target = expiry_from_now(allowed_h, now=now)
+    if not is_admin:
+        _refuse_unless_later(current, target)
+    return target, clamped
+
+
+def _refuse_unless_later(current, target) -> None:
+    """A non-administrator may only move a deletion LATER. Raises ValueError otherwise.
+
+    ``api/expiry.set_expiry`` authorizes by visibility -- anyone who can see a resource may
+    change its timer -- and that is only safe while every change it allows is a delay. An
+    absolute date can be EARLIER than the current one, and the lifetime ceiling can clamp an
+    extend below it; either way somebody who may merely see a resource would be scheduling
+    its destruction.
+
+    ``current is None`` is "never" (see the module docstring), the latest deadline there is,
+    so arming a timer on an untimed resource is refused here too: it creates a deletion
+    where there was none. Compared in whole minutes, like ``clamped`` above, so float noise
+    in the arithmetic cannot turn a same-time request into a refusal.
+    """
+    if current is None:
+        raise ValueError("Only an administrator may put an auto-delete timer on a "
+                         "resource that has none.")
+    if int(target.timestamp() // 60) < int(current.timestamp() // 60):
+        raise ValueError("Only an administrator may bring a deletion forward; this would "
+                         f"move it from {current:%Y-%m-%d %H:%M} to "
+                         f"{target:%Y-%m-%d %H:%M} UTC.")
 
 
 # ── Stamping new resources ───────────────────────────────────────────────────

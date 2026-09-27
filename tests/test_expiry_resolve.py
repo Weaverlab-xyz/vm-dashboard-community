@@ -85,8 +85,10 @@ def test_extend_adds_to_the_current_expiry_not_to_now():
 
 
 def test_extend_from_no_timer_starts_at_now():
+    """Arming a timer where there was none is an administrator's call -- see the
+    later-only section below -- so this is the admin's view of the arithmetic."""
     _cfg()
-    got, _ = _resolve(current=None, extend_hours_req=24)
+    got, _ = _resolve(current=None, extend_hours_req=24, is_admin=True)
     assert got == NOW + timedelta(hours=24)
 
 
@@ -137,9 +139,10 @@ def test_clamped_is_false_for_sub_minute_float_noise():
 
 def test_an_absolute_expiry_is_honoured_and_clamped():
     _cfg(resource_expiry_max_total_hours=100)
-    got, clamped = _resolve(current=None, absolute=NOW + timedelta(hours=20))
+    soon = NOW + timedelta(hours=2)
+    got, clamped = _resolve(current=soon, absolute=NOW + timedelta(hours=20))
     assert clamped is False and got == NOW + timedelta(hours=20)
-    got, clamped = _resolve(current=None, absolute=NOW + timedelta(hours=500))
+    got, clamped = _resolve(current=soon, absolute=NOW + timedelta(hours=500))
     assert clamped is True and got == NOW + timedelta(hours=90)   # 100 - 10 elapsed
 
 
@@ -147,13 +150,15 @@ def test_an_absolute_expiry_in_the_past_is_raised_to_the_floor():
     """Setting a deadline in the past must not mean "delete on the next sweep" — it
     collapses to the soonest legal expiry, so there is always time to notice."""
     _cfg()
-    got, _ = _resolve(current=None, absolute=NOW - timedelta(days=3))
+    overdue = NOW - timedelta(hours=1)
+    got, _ = _resolve(current=overdue, absolute=NOW - timedelta(days=3))
     assert got == NOW + timedelta(minutes=pol.MIN_TTL_MINUTES_FLOOR)
 
 
 def test_a_nearby_absolute_expiry_is_raised_to_the_floor():
     _cfg()
-    got, _ = _resolve(current=None, absolute=NOW + timedelta(minutes=5))
+    got, _ = _resolve(current=NOW + timedelta(minutes=10),
+                      absolute=NOW + timedelta(minutes=5))
     assert got == NOW + timedelta(minutes=pol.MIN_TTL_MINUTES_FLOOR)
 
 
@@ -162,8 +167,66 @@ def test_a_timezone_aware_absolute_is_normalised_to_naive_utc():
     from datetime import timezone
     _cfg()
     aware = (NOW + timedelta(hours=24)).replace(tzinfo=timezone.utc)
-    got, _ = _resolve(current=None, absolute=aware)
+    got, _ = _resolve(current=NOW, absolute=aware)
     assert got.tzinfo is None and got == NOW + timedelta(hours=24)
+
+
+# ── later only, for a non-administrator ──────────────────────────────────────
+#
+# api/expiry authorizes by visibility, which is safe only while every change it allows is
+# a delay. These pin the three ways a request could otherwise bring a deletion forward.
+
+def _refused(**kw):
+    try:
+        _resolve(**kw)
+    except ValueError as exc:
+        return str(exc)
+    raise AssertionError(f"should have been refused: {kw}")
+
+
+def test_a_non_admin_cannot_set_an_earlier_absolute_date():
+    _cfg()
+    msg = _refused(current=NOW + timedelta(hours=48), absolute=NOW + timedelta(hours=2))
+    assert "administrator" in msg and "forward" in msg
+
+
+def test_a_non_admin_cannot_arm_a_timer_on_an_untimed_resource():
+    """None is "never": the latest deadline there is. Arming one creates a deletion."""
+    _cfg()
+    for kw in ({"absolute": NOW + timedelta(hours=500)}, {"extend_hours_req": 500}):
+        assert "has none" in _refused(current=None, **kw)
+
+
+def test_the_ceiling_cannot_shorten_a_non_admins_timer():
+    """An extend the ceiling clamps BELOW the current expiry was silently a shortening.
+    Here the timer is already past the 100h ceiling (an admin set it); a non-admin's
+    extend would have clamped it back to 90h from now."""
+    _cfg(resource_expiry_max_total_hours=100)
+    assert "forward" in _refused(current=NOW + timedelta(hours=200), extend_hours_req=1)
+
+
+def test_a_non_admin_may_still_move_a_deadline_later():
+    _cfg()
+    got, _ = _resolve(current=NOW + timedelta(hours=2), absolute=NOW + timedelta(hours=30))
+    assert got == NOW + timedelta(hours=30)
+    got, _ = _resolve(current=NOW + timedelta(hours=2), extend_hours_req=1)
+    assert got == NOW + timedelta(hours=3)
+
+
+def test_the_same_deadline_is_not_a_shortening():
+    _cfg()
+    same = NOW + timedelta(hours=5)
+    got, _ = _resolve(current=same, absolute=same)
+    assert got == same
+
+
+def test_an_admin_may_do_all_three():
+    _cfg(resource_expiry_max_total_hours=100)
+    got, _ = _resolve(current=NOW + timedelta(hours=48), absolute=NOW + timedelta(hours=2),
+                      is_admin=True)
+    assert got == NOW + timedelta(hours=2)
+    got, _ = _resolve(current=None, absolute=NOW + timedelta(hours=5), is_admin=True)
+    assert got == NOW + timedelta(hours=5)
 
 
 # ── never / pin ──────────────────────────────────────────────────────────────

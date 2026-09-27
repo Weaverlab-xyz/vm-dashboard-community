@@ -280,12 +280,11 @@ a way to become an administrator:
 Two more have no scope for narrower reasons:
 
 - **The auto-delete timer.** Authorization there is visibility: anyone who can see a
-  resource may change its timer. Extending by a number of hours only ever delays a
-  deletion. Setting an **absolute date** is also open to them, though, and that date may be
-  *earlier* than the current one — no sooner than 60 minutes from now. So seeing a resource
-  is enough to bring its deletion forward. Clearing a timer outright needs an administrator
-  **and** the `resource_expiry_allow_never` setting. See
-  [Auto-delete Timer](auto-delete-timer.md).
+  resource may **delay** its deletion, by extending it or setting a later date. Only an
+  administrator may bring a deletion forward: an earlier date, a timer on a resource that
+  had none, or an extend the lifetime ceiling would clamp below the current expiry.
+  Clearing a timer outright needs an administrator **and** the
+  `resource_expiry_allow_never` setting. See [Auto-delete Timer](auto-delete-timer.md).
 - **The Dashboard home page**, which is an aggregate of things you already have access to.
 
 ## Objects, not just areas

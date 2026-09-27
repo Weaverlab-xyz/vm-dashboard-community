@@ -117,8 +117,9 @@ Deliberately excluded, and not oversights:
   ran and merely told the dashboard about is never stamped and never swept. The dashboard
   did not create it and will not delete it.
 
-Resources that predate the feature are never stamped either. To put a timer on one, set it
-by hand from **Inventory**.
+Resources that predate the feature are never stamped either. An administrator can put a
+timer on one by hand from **Inventory**; nobody else can, because arming a timer creates a
+deletion where there was none.
 
 ---
 
@@ -218,15 +219,29 @@ Three semantics worth knowing:
 
 - **An extend is relative to the resource's current expiry, not to now.** Twelve hours left
   plus twenty-four is thirty-six, not twenty-four. Extending something with no timer starts
-  from now.
+  from now (administrators only — see below).
 - **A request over the ceiling is clamped, not rejected.** You get the longest permitted
   expiry and a notice saying so, rather than a 400. The 60-minute floor applies to admins
   too; only the ceiling is admin-bypassable.
 - **Extending resets the warning latch**, so the new deadline warns again.
 
-Anyone who can see a resource may extend it. That is deliberate: extending only ever
-*delays* a deletion, so there is no expiry permission scope, and adding one would silently
-strip the ability from every user who has explicit permissions. Authorization is visibility
+Anyone who can see a resource may **delay** its deletion — extend it, or set a later date.
+That is deliberate: there is no expiry permission scope, and adding one would silently
+strip the ability from every user who has explicit permissions.
+
+What makes that safe is the other half of the rule: **only an administrator may bring a
+deletion forward.** For anyone else, a change that would leave the resource expiring
+earlier than it does now is refused for that row, with the reason, and nothing is written.
+That covers three cases:
+
+- **An absolute date earlier than the current one.**
+- **Arming a timer on a resource that has none.** No timer means "never", the latest
+  deadline there is.
+- **An extend the lifetime ceiling would clamp below the current expiry.** An
+  administrator can set a timer past the ceiling; a non-admin's extend is refused rather
+  than silently pulling it back.
+
+Authorization is visibility
 — an id you can't see returns 404 rather than 403, so the API doesn't confirm that something
 exists. Running a sweep on demand is admin-only, and `?force=true` there bypasses only the
 "a sweep is already running" check, never observe-only, arming or the per-pass cap.
