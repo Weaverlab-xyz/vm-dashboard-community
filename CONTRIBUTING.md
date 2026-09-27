@@ -85,7 +85,8 @@ without a page is a feature nobody can find. Two CI checks hold that line:
   failure says what is missing and which page it most likely belongs on.
 - **The `docs-gate` job** fails a PR that has a `feat:` commit, or that changes
   `web_dashboard/templates/`, `api/`, `models/`, `main.py` or
-  `services/feature_flags.py`, without also changing `docs/` or a README. If
+  `services/feature_flags.py`, without also changing `docs/`, a README or this
+  file. If
   the change really has nothing for a reader (a refactor, or a fix that
   restores documented behaviour), add a trailer to any commit on the branch:
 
@@ -99,6 +100,11 @@ without a page is a feature nobody can find. Two CI checks hold that line:
 A new page needs the one-line header block under its H1 and a row in
 [docs/README.md](docs/README.md); `tests/test_docs_conventions.py` enforces
 both.
+
+Moving or renaming a page? Repoint the links in the repo, and add the old path to
+`_MOVED` in [web_dashboard/api/docs_pages.py](web_dashboard/api/docs_pages.py) so
+bookmarks and links outside the repo get a 301 instead of a 404. A folder entry covers
+every page under it. `tests/test_docs_moved_redirects.py` checks every target exists.
 
 ### Faster lab infra for testing
 
