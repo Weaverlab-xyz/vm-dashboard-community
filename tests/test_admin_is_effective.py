@@ -43,6 +43,10 @@ _ALLOWED = {
     ("web_dashboard/api/users.py", "is_admin=u.is_admin"),
     ("web_dashboard/api/users.py", "is_admin=user.is_admin"),
     ("web_dashboard/api/users.py", "body.is_admin"),
+    # Demotion detection: "does THIS page's flag or role make them admin?", compared
+    # before and after the PATCH. Session and Entitle admin are deliberately out of it --
+    # this page cannot change them, so they must not mask or fake a demotion.
+    ("web_dashboard/api/users.py", "return bool(user.is_admin) or bool(user.role_permissions_dict"),
 }
 
 # `.is_admin` not followed by `_` (is_admin_groups) and not an assignment; and the getattr

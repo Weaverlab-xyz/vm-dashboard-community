@@ -194,7 +194,8 @@
         <!-- Flags -->
         <div class="flex gap-6">
           <label class="flex items-center gap-2 text-sm cursor-pointer">
-            <input type="checkbox" x-model="form.is_admin" class="rounded border-gray-300 text-yellow-500">
+            <input type="checkbox" x-model="form.is_admin" @change="onAdminToggled()"
+                   class="rounded border-gray-300 text-yellow-500">
             <span>Admin</span>
           </label>
           <label x-show="editingUser" class="flex items-center gap-2 text-sm cursor-pointer">
@@ -220,7 +221,7 @@
           <label class="block text-sm font-medium text-gray-700 mb-1">
             Role <span class="text-gray-400 font-normal">(optional)</span>
           </label>
-          <select x-model="form.role_id"
+          <select x-model="form.role_id" @change="onRoleChanged()"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-1
                          focus:outline-none focus:ring-2 focus:ring-blue-500">
             <option value="">No role &mdash; use the grid below only</option>
@@ -452,11 +453,40 @@ function usersPage() {
 
     // tokens modal
     showTokensModal: false,
+    roleWasAdmin: false,
     tokenUser: null,
     userTokens: [],
     newTokenName: '',
     newTokenExpiry: '',
     newTokenValue: '',
+
+    isAdminRole(id) {
+      const r = (this.availableRoles || []).find(x => x.id === id);
+      return !!(r && r.permissions && r.permissions.is_admin);
+    },
+
+    // Losing administrator means NO access until something grants it -- a role, or boxes
+    // ticked in the grid. So the grid is reset to nothing granted with "Full access"
+    // UNTICKED, and the "will see nothing" warning shows. Without this, an admin created
+    // with no stored map opened with "Full access" pre-ticked, and saving the demotion
+    // left them with every section. The server applies the same rule to any request that
+    // demotes without sending permissions (api/users.update_user).
+    resetToNothingGranted() {
+      this.form.permissions = {};
+      this.form.permissionsUnrestricted = false;
+    },
+
+    onAdminToggled() {
+      if (!this.form.is_admin) this.resetToNothingGranted();
+    },
+
+    onRoleChanged() {
+      // Moving OFF the Administrator role is a demotion too, when the flag is not set.
+      if (this.roleWasAdmin && !this.isAdminRole(this.form.role_id) && !this.form.is_admin) {
+        this.resetToNothingGranted();
+      }
+      this.roleWasAdmin = this.isAdminRole(this.form.role_id);
+    },
 
     roleHint() {
       const r = (this.availableRoles || []).find(x => x.id === this.form.role_id);
@@ -510,6 +540,7 @@ function usersPage() {
         role_id: '',
       };
       this.permFilter = '';
+      this.roleWasAdmin = false;
       this.showUserModal = true;
       this.loadPovEnvironments();
     },
@@ -538,6 +569,7 @@ function usersPage() {
         // both are editable independently and neither implies the other.
         role_id: u.role_id || '',
       };
+      this.roleWasAdmin = this.isAdminRole(this.form.role_id);
       this.permFilter = '';
       this.showUserModal = true;
       this.loadPovEnvironments();

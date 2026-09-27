@@ -66,6 +66,27 @@ Before this, the create form had no grid at all and saved no map, which left the
 the NULL state above — every section, every level, for anyone the admin added. Tick
 "Full access (unrestricted)" if that is genuinely what you want.
 
+## Removing admin leaves nothing granted
+
+Unticking **Admin** on a user, or moving them off the **Administrator** role, leaves them
+with **no permissions** until you grant some, either by assigning a role or by ticking
+boxes in the grid. The grid resets to nothing ticked, with "Full access (unrestricted)"
+unticked, and the panel warns that the user will see nothing. Grant what they need in the
+same save, or later.
+
+Two things behind it are worth knowing:
+
+- **The server enforces it too.** A demotion through the API that does not send
+  permissions stores "nothing granted". Permissions sent in the same request are used
+  as sent, and a role assigned in the same request still grants.
+- **Old grants do not come back.** The Admin flag bypasses the grid, so anything stored
+  there before the user became an admin has gone unseen since. Demotion clears it rather
+  than silently restoring it.
+
+An administrator is also created with nothing granted underneath the flag. Before this,
+an admin was stored with no permissions at all, which the server reads as unrestricted,
+so unticking Admin left the user with every section.
+
 **Group mappings are the opposite.** A new mapping on RBAC → Groups starts with "Full
 access (unrestricted)" ticked, and the panel says auto-provisioned users will have
 unrestricted access. An OIDC user whose only source is such a mapping (no role on the

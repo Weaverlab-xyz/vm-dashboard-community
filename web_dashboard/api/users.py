@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session
 from ..database import User, Fido2Credential, PersonalAccessToken, get_db, get_password_hash
 from ..models.user import UserResponse
 from ..services import role_service
-from .auth import (get_current_user, require_admin, validate_permissions_payload)
+from .auth import (PERMISSION_SCOPES, get_current_user, require_admin,
+                   validate_permissions_payload)
 from .tokens import _generate_raw, hash_pat, TokenCreateResponse
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -88,6 +89,23 @@ class UserTokenItem(BaseModel):
 # keystrokes and no audit line naming what happened. So every mutation route refuses one
 # and says where the real control is.
 _NOT_AN_ACCESSOR = User.accessor_env_id.is_(None)
+
+
+def _nothing_granted() -> dict:
+    """Every scope, no levels: a restricted map that grants nothing.
+
+    NOT ``{}``. An empty map is stored as NULL, and NULL means UNRESTRICTED in
+    ``has_permission`` -- every section in the dashboard. This is the only way to write
+    "no access yet" that the server reads as no access.
+    """
+    return {scope: [] for scope in PERMISSION_SCOPES}
+
+
+def _admin_here(user: User) -> bool:
+    """Administrator by the two things this page controls: the Admin flag, or the
+    Administrator role. Session and Entitle grants are not set here, so a request on this
+    page cannot remove them and they are left out of the comparison."""
+    return bool(user.is_admin) or bool(user.role_permissions_dict.get("is_admin"))
 
 
 def _refuse_accessor(user: User) -> None:
@@ -177,6 +195,11 @@ def create_user(
         # non-empty map and so a strict allowlist.
         validate_permissions_payload(body.permissions)
         user.permissions_dict = body.permissions if body.permissions else None
+    elif body.is_admin:
+        # The form sends no map for an administrator, because the flag bypasses it. Stored
+        # as NULL that would mean UNRESTRICTED, silently, the day the flag came off -- so an
+        # administrator is created with nothing granted underneath instead.
+        user.permissions_dict = _nothing_granted()
     if body.pov_env_ids is not None:
         user.pov_env_ids_list = body.pov_env_ids
     if body.role_id is not None:
@@ -220,6 +243,7 @@ def update_user(
     # Prevent admins from removing their own admin flag
     if user.id == admin.id and body.is_admin is False:
         raise HTTPException(status_code=400, detail="Cannot remove your own admin privilege")
+    was_admin = _admin_here(user)
 
     if body.full_name is not None:
         user.full_name = body.full_name
@@ -283,6 +307,15 @@ def update_user(
         # something whose meaning depends on which guard reads it first.
         _refuse_accessor(user)
         user.pov_env_ids_list = body.pov_env_ids
+
+    # Losing administrator -- the flag cleared, or the Administrator role removed -- leaves
+    # the user with NOTHING until access is granted by a role or by permissions. Unless
+    # this same request sends permissions, whatever map sat under the admin is replaced:
+    # a NULL one would read as unrestricted, and an old explicit one is a grant nobody has
+    # looked at since the admin flag started bypassing it. A role assigned in the same
+    # request still grants, because roles and the per-user map are unioned.
+    if was_admin and not _admin_here(user) and body.permissions is None:
+        user.permissions_dict = _nothing_granted()
 
     db.commit()
     db.refresh(user)
