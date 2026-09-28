@@ -196,6 +196,8 @@
         # the binaries owned by whoever that uid is on this host.
         owner: root
         group: root
+      # A new binary on disk changes nothing until the running process is replaced.
+      notify: Restart spire-server
       when: spire_version not in _installed
 
     - name: Keep the binaries root-owned

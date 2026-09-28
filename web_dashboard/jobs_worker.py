@@ -70,7 +70,7 @@ HANDLED_TYPES = (
     "clouddb_adapter_pair", "clouddb_dbops_deploy",
     "certca_provision", "certca_decommission", "cert_ps_register",
     "spirelab_provision", "spirelab_decommission", "spirelab_k8s_link",
-    "spirelab_ps_register", "spirelab_jwt_bundle",
+    "spirelab_ps_register", "spirelab_jwt_bundle", "spirelab_upgrade",
     "workload_k8s_token", "workload_cloud_credential",
     "ansible_cloud_run", "ansible_local", "epml_sync",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
@@ -238,6 +238,9 @@ LIGHT_TYPES = (
     # Same shape as the three above: one `ansible_local` child it awaits (the bundle read),
     # then a Secrets Safe read-back. A parent waiting on a HEAVY child, so LIGHT.
     "spirelab_jwt_bundle",
+    # Re-runs the install stages as awaited `ansible_local` children, so LIGHT for the
+    # same deadlock reason.
+    "spirelab_upgrade",
     # One or two HTTPS calls to Workload Credentials and a row update. No local process, no
     # terraform, no children. The one tier note here that is about COST rather than
     # concurrency: `generate` is BILLED PER ISSUANCE, so this job must never be retried
@@ -604,6 +607,11 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             from .services import spire_lab_service
             await spire_lab_service.run_jwt_bundle_capture(
                 db, lab_id=meta["lab_id"], job_id=job_id)
+        elif job_type == "spirelab_upgrade":
+            # Re-runs the install stages (server, OIDC provider, linked agent) at the
+            # configured, pinned release.
+            from .services import spire_lab_service
+            await spire_lab_service.run_upgrade(db, lab_id=meta["lab_id"], job_id=job_id)
         elif job_type == "workload_cloud_credential":
             # Mints, revokes or retires a dynamic AWS/Azure credential. `issue` is the
             # metered call; `revoke` is refused up front on AWS, where STS will not withdraw

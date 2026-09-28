@@ -95,6 +95,10 @@
             <td class="px-4 py-2 align-top">
               <span class="text-xs font-medium px-2 py-0.5 rounded-full"
                     :class="statusClass(lab.status)" x-text="lab.status"></span>
+              <div class="text-[11px] text-gray-500 mt-1 font-mono"
+                   x-show="lab.status === 'available'" x-cloak
+                   x-text="(lab.spire_version || 'version unknown')
+                           + (lab.upgrade_active ? ' → ' + lab.target_release + ' (upgrading…)' : '')"></div>
               <div x-show="lab.error_message" x-cloak
                    class="text-xs text-red-600 mt-1 max-w-xs break-words"
                    x-text="lab.error_message"></div>
@@ -144,6 +148,16 @@
                       class="text-teal-700 hover:underline text-xs mr-2 disabled:opacity-50"
                       title="Re-read the trust domain's JWT keys and CA, renew the OIDC provider's certificate, and update the dashboard's trust. Runs on its own every ca_ttl/3; this runs it now.">
                 Refresh keys</button>
+              <!-- Re-runs the install stages at the release Settings names now. Shown only
+                   when there is something to move to (or the lab predates the record). -->
+              <button @click="upgrade(lab)"
+                      x-show="lab.status === 'available' && !lab.upgrade_active
+                              && lab.spire_version !== lab.target_release"
+                      x-cloak :disabled="busy"
+                      class="text-amber-700 hover:underline text-xs mr-2 disabled:opacity-50"
+                      :title="'Upgrade ' + (lab.spire_version || 'this lab') + ' to ' + lab.target_release
+                              + ': the server, the OIDC provider, then a linked node\'s agent.'">
+                Upgrade</button>
               <button @click="govern(lab)" x-show="lab.status === 'available' && !lab.ps_governed"
                       x-cloak :disabled="busy"
                       class="text-blue-600 hover:underline text-xs mr-2 disabled:opacity-50">
@@ -1073,6 +1087,26 @@ function spireLabPage() {
                     + 'SPIFFE trust domains. This also runs on its own every ca_ttl/3.');
       } catch (e) {
         this.notify('Could not capture: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+
+    async upgrade(lab) {
+      const from = lab.spire_version || 'an unrecorded version';
+      const linked = lab.k8s_status === 'linked'
+        ? ' Its linked k3s node\'s agent follows the server.' : '';
+      if (!confirm('Upgrade ' + lab.name + ' from ' + from + ' to ' + lab.target_release + '?\n\n'
+                   + 'This re-runs the install playbooks: the server restarts onto the new '
+                   + 'release, then the OIDC provider.' + linked + ' Identities and the trust '
+                   + 'domain are kept. A version the playbooks hold no checksum pin for is '
+                   + 'refused.')) return;
+      this.busy = true;
+      try {
+        await API.post('/api/spire-lab/' + lab.id + '/upgrade', {});
+        this.notify('Upgrading ' + lab.name + ' to ' + lab.target_release
+                    + ' — follow it in Jobs; each playbook has its own job row.');
+        await this.load();
+      } catch (e) {
+        this.notify('Could not upgrade: ' + (e.message || e), 'error');
       } finally { this.busy = false; }
     },
 

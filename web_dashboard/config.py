@@ -2219,6 +2219,18 @@ class Settings(BaseSettings):
     spire_lab_ps_safe: str = "Automation"
     spire_lab_secret_root: str = "spire"
     spire_lab_asset_backend: str = ""                # blank → the active storage backend
+    # Deployment modes and supply chain (docs/workload-lab/spiffe.md). Blank chart versions
+    # fall back to the pins in spire_lab_service (SPIRE_CHART_VERSION, 0.30.2 / 0.6.1),
+    # never to "latest"; blank k3s version is whatever get.k3s.io serves (>= 1.34 enforced).
+    spire_lab_k3s_version: str = ""
+    spire_lab_helm_chart_version: str = ""
+    spire_lab_helm_crds_chart_version: str = ""
+    spire_lab_helm_values_extra: str = ""            # YAML merged over the play's chart values
+    spire_lab_helm_sha256: str = ""                  # helm tarball SHA-256; blank warns
+    # Every SPIRE download is pinned per version and an unpinned one is REFUSED. True takes
+    # an unpinned version on TLS alone -- a deliberate opt-out for a version the plays
+    # hold no pin for yet.
+    spire_lab_allow_unpinned: bool = False
 
     entitle_allowed_durations: str = "3600,43200,86400"  # JIT durations (seconds) offered on created integrations
     entitle_ssh_sudo_user: str = ""                 # OPTIONAL override — each VM deploy passes its image's cloud-default login user (ubuntu/ec2-user/azureuser/gcp-user) automatically; set this only to force a different sudo user for ALL registrations

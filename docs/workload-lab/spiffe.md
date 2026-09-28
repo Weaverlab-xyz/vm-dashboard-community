@@ -224,6 +224,33 @@ set `spire_lab_allow_unpinned` to take it on TLS alone, deliberately. The charts
 too (below). Helm itself publishes checksums only on `get.helm.sh`, so none is shipped:
 set `spire_lab_helm_sha256` to verify it.
 
+All of these are on **Settings → SPIRE Lab**: the chart and CRDs versions (blank = the pins),
+the k3s version, extra chart values, the Helm checksum and **Allow unpinned downloads** (off).
+
+**Upgrading SPIRE.** Change the SPIRE version on **Settings → SPIRE Lab** (and, for `k8s`,
+the chart pins with it), then press **Upgrade** on the lab's row. It appears whenever the
+lab's recorded release differs from the configured one, and the row shows both. It re-runs
+the stages that install software, server before agents, as SPIRE requires:
+
+1. the mode's install play — `spire-server-install.yml` restarts onto the new binary,
+   `spire-docker-server.yml` recreates on the new pinned image, `spire-helm.yml` is a
+   `helm upgrade` to the pinned chart;
+2. the OIDC provider (vm/docker): each version installs into `/opt/spire/oidc/bin/<version>/`
+   behind the symlink the unit runs, the link is re-pointed with a restart, and the old
+   version is pruned only after the new one has served the discovery document;
+3. a linked k3s node's agent — the entry stage first, since the agent play needs a fresh
+   one-use join token.
+
+Seeded entries, the admin credential, the trust domain and the ACL are kept. The first
+failed stage stops the upgrade (an agent is never moved past a server that did not make
+it); the lab stays available so it can be retried, and its row names the stages that
+completed and the job holding the failure. A version the playbooks hold no checksum pin
+for is refused. While an upgrade runs, **Refresh keys**, a second upgrade and **Destroy**
+are refused; an auto-delete timer simply retries on its next pass.
+
+The VM-mode provider also follows the configured version on its own at the next **Refresh
+keys**, which re-runs its stage.
+
 **What has been run:** the Docker mode, end to end, against images built from the 1.15.3
 release binaries exactly as upstream's Dockerfile builds them — server, seed entries, the
 OIDC provider as uid 1001 reaching the socket, the discovery document and JWKS over TLS,

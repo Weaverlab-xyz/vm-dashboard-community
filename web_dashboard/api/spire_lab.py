@@ -73,6 +73,12 @@ def _visible_or_404(db: Session, lab_id: str, user: User):
     return row
 
 
+def _upgrade_active(row) -> bool:
+    from sqlalchemy.orm import object_session
+    db = object_session(row)
+    return bool(db) and spire_lab_service.upgrade_active(db, row.id)
+
+
 def _shape(row) -> dict:
     return {
         "id": row.id, "name": row.name, "trust_domain": row.trust_domain,
@@ -89,6 +95,11 @@ def _shape(row) -> dict:
         "stages": [{"key": s["key"], "asset": s["asset"]}
                    for s in spire_lab_service.stages_for(row)],
         "deployment_mode": spire_lab_service.deployment_mode(row),
+        # What it runs, what an upgrade would install, and whether one is running now --
+        # read from the job table rather than a row status a dead worker could strand.
+        "spire_version": row.spire_version or "",
+        "target_release": spire_lab_service.target_release(row),
+        "upgrade_active": _upgrade_active(row),
         "stage_job_ids": spire_lab_service.stage_jobs(row),
         "entries_seeded": row.entries_seeded,
         "discovery_expected": row.discovery_expected,
@@ -524,6 +535,19 @@ def capture_jwt_bundle(lab_id: str, db: Session = Depends(get_db),
     try:
         return spire_lab_service.start_jwt_bundle_capture(
             db, lab_id=lab_id, created_by=user.username)
+    except SpireLabError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/{lab_id}/upgrade")
+def upgrade_lab(lab_id: str, db: Session = Depends(get_db),
+                user: User = Depends(require_permission("cloud_function", "write"))):
+    """Re-run the lab's install stages at the release Settings → SPIRE Lab names now:
+    the server (or chart), the OIDC provider, then a linked k3s node's agent."""
+    _require_enabled()
+    _visible_or_404(db, lab_id, user)
+    try:
+        return spire_lab_service.start_upgrade(db, lab_id=lab_id, created_by=user.username)
     except SpireLabError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
