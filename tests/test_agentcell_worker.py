@@ -558,6 +558,36 @@ def test_the_entry_play_is_rerunnable():
         "a second run of the entry play would fail on a duplicate rather than no-op"
 
 
+
+def test_the_workload_api_socket_is_passed_to_spire_agent_as_a_path():
+    """`spire-agent api fetch -socketPath` takes a PLAIN PATH. The worker's default, and
+    what agent-install.yml passes, is the SPIFFE URI form -- and handed that, spire-agent
+    dials a relative file named `unix:/tmp/...`, so every loop logged `unattested` and
+    `--token-source spiffe` never got an SVID. Found by running these fetches against a
+    SPIRE 1.15.3 agent, where both forms now attest."""
+    import subprocess
+    m = _worker_module()
+    assert m.spire_socket_path("unix:///tmp/spire-agent/public/api.sock") == \
+        "/tmp/spire-agent/public/api.sock"
+    assert m.spire_socket_path("/run/spire/api.sock") == "/run/spire/api.sock"
+    seen = []
+
+    def fake_run(argv, **kw):
+        seen.append(argv[argv.index("-socketPath") + 1])
+        return subprocess.CompletedProcess(argv, 0, stdout="SPIFFE ID:\tspiffe://t/a\n", stderr="")
+
+    orig = m.subprocess.run
+    m.subprocess.run = fake_run
+    try:
+        m.fetch_spiffe_id(m.DEFAULT_SOCKET)
+        try:
+            m._spire_jwt_svid("aud", m.DEFAULT_SOCKET)
+        except SystemExit:
+            pass    # no JWT in the fake output; the argv is what is under test
+    finally:
+        m.subprocess.run = orig
+    assert seen == ["/tmp/spire-agent/public/api.sock"] * 2, seen
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
