@@ -33,8 +33,10 @@
 #   bind_port: 8081
 #   oidc_port: 8443
 #   helm_version: 3.16.2
-#   spire_chart_version: ""               # pin! blank = latest, and a warning
-#   spire_crds_chart_version: ""
+#   spire_chart_version: 0.30.2           # pinned: ships SPIRE 1.15.3, as the other modes do
+#   spire_crds_chart_version: 0.6.1       # blank = latest, with a warning
+#   ca_subject_country: US                # the CA subject; strict mode refuses the chart's
+#   ca_subject_organization: Workload Lab #   placeholders
 #   helm_values_extra: ""                 # YAML merged over the values below
 - name: Install SPIRE on k3s with Helm
   hosts: all
@@ -51,8 +53,10 @@
     oidc_port: 8443
     helm_version: "3.16.2"
     spire_chart_repo: "https://spiffe.github.io/helm-charts-hardened/"
-    spire_chart_version: ""
-    spire_crds_chart_version: ""
+    spire_chart_version: "0.30.2"
+    spire_crds_chart_version: "0.6.1"
+    ca_subject_country: "US"
+    ca_subject_organization: "Workload Lab"
     helm_values_extra: ""
     kubeconfig: /etc/rancher/k3s/k3s.yaml
     values_file: /opt/spire/helm-values.yaml
@@ -106,7 +110,7 @@
       ansible.builtin.debug:
         msg: >-
           spire_chart_version / spire_crds_chart_version are blank, so the LATEST charts
-          were installed. Pin them (spire_lab_helm_chart_version in Settings) for anything
+          were installed. Pin them (spire_lab_helm_chart_version / spire_lab_helm_crds_chart_version) for anything
           you intend to keep — the value keys this play relies on can change.
       when: spire_chart_version | length == 0 or spire_crds_chart_version | length == 0
 
@@ -123,23 +127,48 @@
         content: |
           global:
             spire:
+              # Upstream's production settings, and the only switch that applies the
+              # chart's security contexts: non-root 1000:1000, read-only root, all
+              # capabilities dropped, no privilege escalation, RuntimeDefault seccomp. It
+              # also lays the server out in the spire-server namespace (the CLI prefix and
+              # every task below depend on that), labels the namespaces with Pod Security
+              # Standards, sets priority classes, and turns on strict mode -- which refuses
+              # the chart's placeholder trust domain, cluster name, issuer and CA subject.
+              recommendations:
+                enabled: true
               trustDomain: "{{ trust_domain }}"
               clusterName: "{{ cluster_name }}"
               jwtIssuer: "{{ _issuer }}"
+              caSubject:
+                country: "{{ ca_subject_country }}"
+                organization: "{{ ca_subject_organization }}"
+                commonName: "{{ trust_domain }}"
               namespaces:
                 create: true
           spire-server:
             caTTL: "{{ ca_ttl }}"
-            defaultX509SVIDTTL: "{{ default_x509_svid_ttl }}"
-            defaultJWTSVIDTTL: "{{ default_jwt_svid_ttl }}"
+            # Key names as chart 0.30.2 spells them. A misspelt key is silently ignored,
+            # and the chart's defaults (4h / 1h) would replace the lab's.
+            defaultX509SvidTTL: "{{ default_x509_svid_ttl }}"
+            defaultJwtSvidTTL: "{{ default_jwt_svid_ttl }}"
             adminIDs:
               - "{{ _admin_id }}"
             controllerManager:
               enabled: true
+              # The provider's serving certificate is an SVID from this ClusterSPIFFEID.
+              # The chart names it oidc-discovery.<td>; the dashboard (tls_server_name) and
+              # the check below verify oidc.<td>, as in the vm and docker modes.
+              identities:
+                clusterSPIFFEIDs:
+                  oidc-discovery-provider:
+                    dnsNameTemplates:
+                      - "{{ oidc_domain }}"
           spiffe-oidc-discovery-provider:
             enabled: true
             config:
-              domains:
+              # The chart derives one domain from jwtIssuer's host (port included);
+              # the bare name is what a Host header without a port carries.
+              additionalDomains:
                 - "{{ oidc_domain }}"
 
     - name: Write the extra values

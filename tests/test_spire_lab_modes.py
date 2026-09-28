@@ -172,17 +172,60 @@ def test_the_helm_play_reads_back_admin_ids_and_fetches_the_discovery_document()
     assert "Fetch the discovery document through the published port" in names
     code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
     assert "--cacert" in code and " -k " not in code, "the check must not skip TLS verification"
-    for key in ("trustDomain", "jwtIssuer", "adminIDs", "domains", "helm_values_extra"):
-        assert key in src, f"the Helm values no longer set {key}"
     assert "spire-server-lab" in src and "spire-oidc-lab" in src
 
 
-def test_the_helm_stage_passes_pinnable_chart_versions():
+def _helm_values():
+    return yaml.safe_load(_rendered(
+        "spire-helm.yml", "Write the chart values", trust_domain="lab.test",
+        oidc_domain="oidc.lab.test", _issuer="https://oidc.lab.test:8443",
+        _admin_id="spiffe://lab.test/password-safe/admin"))
+
+
+def test_the_helm_values_use_the_pinned_charts_key_names():
+    """Checked by rendering chart 0.30.2 with these values (`helm template`): a misspelt
+    key is silently ignored, so these are pinned by exact path."""
+    v = _helm_values()
+    g = v["global"]["spire"]
+    assert g["trustDomain"] == "lab.test" and g["jwtIssuer"] == "https://oidc.lab.test:8443"
+    server = v["spire-server"]
+    assert server["adminIDs"] == ["spiffe://lab.test/password-safe/admin"]
+    assert server["caTTL"] == "168h"
+    assert server["defaultX509SvidTTL"] == "1h" and server["defaultJwtSvidTTL"] == "5m", (
+        "the chart spells these defaultX509SvidTTL / defaultJwtSvidTTL")
+    assert "defaultJWTSVIDTTL" not in server and "defaultX509SVIDTTL" not in server
+    oidc = v["spiffe-oidc-discovery-provider"]["config"]
+    assert oidc["additionalDomains"] == ["oidc.lab.test"], "config.domains is not a chart key"
+    csid = server["controllerManager"]["identities"]["clusterSPIFFEIDs"]
+    assert csid["oidc-discovery-provider"]["dnsNameTemplates"] == ["oidc.lab.test"], (
+        "the chart names the provider's certificate oidc-discovery.<td>; the dashboard "
+        "verifies oidc.<td>")
+
+
+def test_the_helm_values_turn_on_upstreams_hardening():
+    g = _helm_values()["global"]["spire"]
+    assert g["recommendations"]["enabled"] is True, (
+        "the chart's security contexts, and the spire-server namespace the CLI prefix "
+        "execs into, both hang off recommendations.enabled")
+    subj = g["caSubject"]
+    assert subj["commonName"] == "lab.test"
+    assert subj["country"] != "ARPA" and subj["organization"] != "Example", (
+        "strict mode refuses the chart's placeholder CA subject")
+
+
+def test_the_helm_stage_passes_pinned_chart_versions():
     v = svc._helm_vars(_row(deployment_mode="k8s"))
-    for key in ("spire_chart_version", "spire_crds_chart_version", "helm_values_extra",
-                "oidc_domain", "trust_domain"):
+    for key in ("helm_values_extra", "oidc_domain", "trust_domain"):
         assert key in v
     assert v["oidc_domain"] == "oidc.modes.test"
+    assert v["spire_chart_version"] == svc.SPIRE_CHART_VERSION == "0.30.2"
+    assert v["spire_crds_chart_version"] == svc.SPIRE_CRDS_CHART_VERSION == "0.6.1"
+    play = _play("spire-helm.yml")["vars"]
+    assert play["spire_chart_version"] == svc.SPIRE_CHART_VERSION
+    assert play["spire_crds_chart_version"] == svc.SPIRE_CRDS_CHART_VERSION
+    # 0.30.2 ships SPIRE 1.15.3: the three modes run the same server.
+    assert _play("spire-server-install.yml")["vars"]["spire_version"] == "1.15.3"
+    assert _play("spire-docker-server.yml")["vars"]["spire_version"] == "1.15.3"
 
 
 # ── the stdout PEM split, run for real ───────────────────────────────────────

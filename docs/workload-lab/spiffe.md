@@ -204,25 +204,34 @@ host is still left alone unless you confirm **also remove SPIRE from the host**,
 |---|---|---|
 | `vm` | `spire` system user; systemd sandbox (no capabilities, `ProtectSystem=strict`, writable only `/opt/spire/data` and its socket directory, syscall filter) | `spire-oidc`, in the `spire` group only to reach the socket; same sandbox, writes nothing |
 | `docker` | uid 1000 (the image's own user); read-only root, all capabilities dropped, `no-new-privileges`, pid limit | uid 1001 with group 1000; same restrictions |
-| `k8s` | the hardened chart's own non-root security contexts | same |
+| `k8s` | the chart's recommended settings (`global.spire.recommendations.enabled`): 1000:1000, read-only root, all capabilities dropped, no privilege escalation, RuntimeDefault seccomp; the `spire-server` namespace enforces the *restricted* Pod Security Standard | same |
 
 The server makes its API socket `0770`, so the provider reaches it through the group and
 nothing else can. The datastore and CA keys are `0700` to the server user; the provider's
 serving key is root-owned and readable by the provider's group only. Binaries are
 root-owned. `systemd-analyze security spire-server` scores the VM units. For anything you
 keep, pin the images by digest (`spire_server_image` / `spire_oidc_image` in
-`spire-docker-server.yml`) and the charts by version.
+`spire-docker-server.yml`). The charts are pinned by default (below).
 
 **What has been run:** the Docker mode, end to end, against images built from the 1.15.3
 release binaries exactly as upstream's Dockerfile builds them — server, seed entries, the
 OIDC provider as uid 1001 reaching the socket, the discovery document and JWKS over TLS,
 a JWT-SVID minted by SPIRE and verified by the dashboard through the JWKS URL by address
 and TLS name, and `spire-remove.yml`. That also confirmed the `x509 mint` stdout layout the
-container modes split. **Not yet run:** the VM units' sandbox under a real systemd, and the
-Kubernetes mode — confirm on the first build that the pinned chart version takes `adminIDs`
-(the Helm play reads the server config back and fails loudly if not). Pin the charts with
-`spire_lab_helm_chart_version` / `spire_lab_helm_crds_chart_version`; extra values go in
+container modes split.
+
+**The Kubernetes mode is pinned** to `spire` chart **0.30.2** and `spire-crds` **0.6.1** —
+0.30.2 ships SPIRE 1.15.3, the version the other two modes install, so all three run the
+same server. `spire_lab_helm_chart_version` / `spire_lab_helm_crds_chart_version` override
+the pin (blank falls back to it); move them together with `spire_version`. The play's
+values were checked by rendering 0.30.2 with `helm template`: `adminIDs`, `caTTL` and the
+SVID TTLs reach `server.conf`, the provider's domains include `oidc.<trust-domain>`, and its
+serving certificate is issued for that name (the chart's default is
+`oidc-discovery.<trust-domain>`, which the dashboard would refuse). Extra values go in
 `spire_lab_helm_values_extra`.
+
+**Not yet run:** the VM units' sandbox under a real systemd, and a Kubernetes build on a
+real k3s node.
 
 ### By hand
 

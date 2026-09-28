@@ -2048,6 +2048,13 @@ def _docker_server_vars(row: SpireLab) -> dict:
     return out
 
 
+# spiffe/helm-charts-hardened releases checked against spire-helm.yml's values: chart
+# 0.30.2 ships SPIRE 1.15.3 (appVersion), the version the vm and docker modes install, so
+# all three modes run the same server. Move all three together.
+SPIRE_CHART_VERSION = "0.30.2"
+SPIRE_CRDS_CHART_VERSION = "0.6.1"
+
+
 def _helm_vars(row: SpireLab) -> dict:
     out = {"trust_domain": row.trust_domain,
            "oidc_domain": oidc_domain_for(row),
@@ -2055,10 +2062,12 @@ def _helm_vars(row: SpireLab) -> dict:
            "bind_port": row.bind_port or BIND_PORT,
            "oidc_port": OIDC_PORT,
            "ca_ttl": _cfg("spire_lab_ca_ttl", "168h"),
-           # Pin these. Blank installs the latest charts, and the value keys spire-helm.yml
-           # relies on (admin IDs, provider domains) are exactly what a chart release moves.
-           "spire_chart_version": _cfg("spire_lab_helm_chart_version", ""),
-           "spire_crds_chart_version": _cfg("spire_lab_helm_crds_chart_version", ""),
+           # Pinned by default: the value keys spire-helm.yml relies on (admin IDs, SVID
+           # TTLs, provider domains) are exactly what a chart release moves. The config keys
+           # override; a blank one falls back to the pin, never to "latest".
+           "spire_chart_version": _cfg("spire_lab_helm_chart_version", "") or SPIRE_CHART_VERSION,
+           "spire_crds_chart_version": (_cfg("spire_lab_helm_crds_chart_version", "")
+                                        or SPIRE_CRDS_CHART_VERSION),
            "helm_values_extra": _cfg("spire_lab_helm_values_extra", "")}
     if row.admin_spiffe_id:
         out["admin_spiffe_id"] = row.admin_spiffe_id
