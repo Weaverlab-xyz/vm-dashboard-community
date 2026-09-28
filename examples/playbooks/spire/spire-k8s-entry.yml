@@ -51,6 +51,12 @@
     jwt_svid_ttl: 300
     join_token_ttl: 600
     spire_root: /opt/spire
+    # How the SPIRE CLI is reached. Empty on a VM (the systemd install). The Workload Lab
+    # sets it for the container modes -- `docker exec spire-server ` or
+    # `k3s kubectl exec -n spire-server spire-server-0 -c spire-server -- ` -- and the
+    # official images keep the binary at the same /opt/spire/bin path, so the rest of
+    # every command is identical in all three modes.
+    spire_cli_prefix: ""
     node_token_secret: ""
     token_safe: "Automation"
     ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
@@ -87,7 +93,7 @@
         _workload_id: "spiffe://{{ trust_domain }}{{ workload_path }}"
 
     - name: Confirm the server is up
-      ansible.builtin.command: "{{ spire_root }}/bin/spire-server healthcheck"
+      ansible.builtin.command: "{{ spire_cli_prefix }}{{ spire_root }}/bin/spire-server healthcheck"
       register: entry_health
       changed_when: false
 
@@ -106,7 +112,7 @@
     # documented 8-of-11 count does not move.
     - name: Generate a join token, which also creates the node entry
       ansible.builtin.command: >-
-        {{ spire_root }}/bin/spire-server token generate
+        {{ spire_cli_prefix }}{{ spire_root }}/bin/spire-server token generate
         -spiffeID {{ _node_id }}
         -ttl {{ join_token_ttl }}
       register: join_token_raw
@@ -137,7 +143,7 @@
     # node entry the token above created.
     - name: Create the workload entry
       ansible.builtin.command: >-
-        {{ spire_root }}/bin/spire-server entry create
+        {{ spire_cli_prefix }}{{ spire_root }}/bin/spire-server entry create
         -parentID {{ _node_id }}
         -spiffeID {{ _workload_id }}
         -selector unix:uid:{{ workload_uid }}
@@ -149,7 +155,7 @@
         - "'already exists' not in (k8s_workload_entry.stdout + k8s_workload_entry.stderr)"
 
     - name: Read the trust bundle
-      ansible.builtin.command: "{{ spire_root }}/bin/spire-server bundle show"
+      ansible.builtin.command: "{{ spire_cli_prefix }}{{ spire_root }}/bin/spire-server bundle show"
       register: k8s_bundle
       changed_when: false
 

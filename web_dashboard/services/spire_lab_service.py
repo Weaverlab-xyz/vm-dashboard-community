@@ -43,7 +43,7 @@ different resource on each of the three.
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -137,16 +137,19 @@ def _ports_vars(row: SpireLab) -> dict:
     # The same source set the cloud ACL got, so the two gates cannot disagree. They fail
     # identically — a gRPC timeout on Verify Functional Account — so a lab where one is
     # narrower than the other is the hardest version of this to debug.
+    # 8443 to the same sources: every lab publishes its OIDC Discovery Provider so the
+    # dashboard can fetch the trust domain's JWKS (register_trust_domain).
     return {"bind_port": row.bind_port or BIND_PORT,
+            "extra_ports": [OIDC_PORT],
             "spire_source_cidrs": _row_cidrs(row)}
 
 
 def _seed_vars(row: SpireLab) -> dict:
-    return {"trust_domain": row.trust_domain}
+    return {"trust_domain": row.trust_domain, **cli_vars(row)}
 
 
 def _identity_vars(row: SpireLab) -> dict:
-    out = {"trust_domain": row.trust_domain,
+    out = {"trust_domain": row.trust_domain, **cli_vars(row),
            "admin_secret_folder": row.admin_secret_folder or "",
            "ps_safe": row.ps_safe or _cfg("spire_lab_ps_safe", "Automation"),
            "admin_ttl": _cfg("spire_lab_admin_ttl", "720h")}
@@ -535,7 +538,7 @@ def provision(db: Session, *, name: str, trust_domain: str, cloud: str, host: st
               secret_ssh_key_source: str = "",
               managed_account: Optional[dict] = None,
               managed_become_self: bool = False,
-              login_user: str = "") -> dict:
+              login_user: str = "", deployment_mode: str = "vm") -> dict:
     """Record the lab and enqueue its build. Returns ``{lab_id, job_id}``.
 
     The four credential arguments default to "choose nothing", which is the pre-existing
@@ -545,6 +548,11 @@ def provision(db: Session, *, name: str, trust_domain: str, cloud: str, host: st
     """
     cloud = (cloud or "azure").lower()
     require_backend(cloud)                    # fail here, not in the worker
+    deployment_mode = (deployment_mode or "vm").strip().lower()
+    if deployment_mode not in DEPLOYMENT_MODES:
+        raise SpireLabError(
+            f"deployment mode must be one of {', '.join(DEPLOYMENT_MODES)} — "
+            f"not {deployment_mode!r}")
     name = (name or "").strip()
     trust_domain = (trust_domain or "").strip().lower()
     if not name:
@@ -618,6 +626,7 @@ def provision(db: Session, *, name: str, trust_domain: str, cloud: str, host: st
         ansible_managed_become_self=bool(managed_become_self) or None,
         login_user=login_user or None,
         workgroup=workgroup, created_by=created_by,
+        deployment_mode=deployment_mode,
         # NULL would mean "never" and never "inherit the default", so the timer is
         # stamped here, in the provision's own transaction. Extending or pinning it
         # afterwards is the existing /api/expiry/set path.
@@ -645,7 +654,8 @@ def provision(db: Session, *, name: str, trust_domain: str, cloud: str, host: st
     job = job_service.create_job(
         db, PROVISION_JOB_TYPE, created_by, workgroup=workgroup,
         metadata={"lab_id": row.id, "name": name, "cloud": cloud,
-                  "trust_domain": trust_domain, "host": host_info["name"]})
+                  "trust_domain": trust_domain, "host": host_info["name"],
+                  "deployment_mode": deployment_mode})
     row.deploy_job_id = job.id
     db.commit()
     logger.info("spire-lab: queued %s lab %r (trust domain %s) on %s as job %s",
@@ -825,10 +835,12 @@ async def run_provision(db: Session, *, lab_id: str, job_id: str) -> None:
                 f"own ACL.")
 
         # ── the cloud gate ────────────────────────────────────────────────────
-        await broadcast_progress(job_id, 8, f"Opening tcp/{row.bind_port} on the "
-                                            f"{backend.acl_label}…")
+        await broadcast_progress(job_id, 8, f"Opening tcp/{row.bind_port} and "
+                                            f"tcp/{OIDC_PORT} on the {backend.acl_label}…")
         if cidrs:
-            res = await backend.apply_ingress(placement, [row.bind_port], cidrs)
+            # 8443 beside 8081, to the same sources: the OIDC Discovery Provider is how
+            # the dashboard fetches this trust domain's JWT keys (register_trust_domain).
+            res = await backend.apply_ingress(placement, [row.bind_port, OIDC_PORT], cidrs)
             if not res.get("opened"):
                 raise SpireLabError(
                     f"the {backend.acl_label} was not opened, so nothing can reach "
@@ -838,7 +850,7 @@ async def run_provision(db: Session, *, lab_id: str, job_id: str) -> None:
             await broadcast_progress(
                 job_id, 12,
                 f"{backend.acl_label} {row.firewall_name} allows tcp/{row.bind_port} "
-                f"from {', '.join(cidrs)}.")
+                f"and tcp/{OIDC_PORT} from {', '.join(cidrs)}.")
         else:
             # Not fail-open: nothing was opened. Said out loud because it is the first
             # thing to check when the plugin later times out, and because a broker
@@ -852,7 +864,7 @@ async def run_provision(db: Session, *, lab_id: str, job_id: str) -> None:
         # ── the four playbooks ────────────────────────────────────────────────
         asset_backend = _cfg("spire_lab_asset_backend") or storage_service.active_backend()
         done = _stages_done(row)
-        for stage in STAGES:
+        for stage in stages_for(row):
             if stage["key"] in done:
                 continue
             status = await _run_stage(
@@ -873,6 +885,8 @@ async def run_provision(db: Session, *, lab_id: str, job_id: str) -> None:
         # ── the two public artifacts ──────────────────────────────────────────
         await broadcast_progress(job_id, 92, "Reading back the trust bundle…")
         read_public_artifacts(db, row)
+        await broadcast_progress(job_id, 96, "Registering the trust domain's JWKS URL…")
+        register_trust_domain(db, row)
 
         row.status = "available"
         row.error_message = None
@@ -950,9 +964,13 @@ def _parse_openssl_date(raw: str) -> Optional[datetime]:
 
 # ── Teardown ──────────────────────────────────────────────────────────────────
 
-def start_decommission(db: Session, *, lab_id: str, created_by: str) -> dict:
+def start_decommission(db: Session, *, lab_id: str, created_by: str,
+                       remove_software: bool = False) -> dict:
     """Enqueue teardown. The same entry point the auto-delete sweep calls, so a timer
-    that runs out ends in exactly the teardown the button runs — no second code path."""
+    that runs out ends in exactly the teardown the button runs — no second code path.
+
+    ``remove_software`` (off by default, and never set by the sweep) also removes SPIRE
+    from the host — see spire-remove.yml — for an operator who wants the VM back."""
     row = get_lab(db, lab_id)
     if not row:
         raise SpireLabError(f"SPIRE lab {lab_id} not found")
@@ -966,14 +984,16 @@ def start_decommission(db: Session, *, lab_id: str, created_by: str) -> dict:
     job = job_service.create_job(
         db, DECOMMISSION_JOB_TYPE, created_by, workgroup=row.workgroup,
         metadata={"lab_id": row.id, "name": row.name, "cloud": row.cloud,
-                  "trust_domain": row.trust_domain})
+                  "trust_domain": row.trust_domain,
+                  "remove_software": bool(remove_software)})
     db.commit()
     logger.info("spire-lab: queued teardown of %r (trust domain %s) as job %s",
                 row.name, row.trust_domain, job.id)
     return {"lab_id": row.id, "job_id": job.id}
 
 
-async def run_decommission(db: Session, *, lab_id: str, job_id: str) -> None:
+async def run_decommission(db: Session, *, lab_id: str, job_id: str,
+                           remove_software: bool = False) -> None:
     """Worker entry point for ``spirelab_decommission``.
 
     **Closing the ACL is the teardown**, and it is why this feature has a timer at all:
@@ -1026,14 +1046,39 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str) -> None:
 
         backend = require_backend(row.cloud)
         placement = json.loads(row.vm_resource_id or "{}")
-        await broadcast_progress(job_id, 30, f"Closing tcp/{row.bind_port} on the "
-                                             f"{backend.acl_label}…")
+        await broadcast_progress(job_id, 30, f"Closing tcp/{row.bind_port} and "
+                                             f"tcp/{OIDC_PORT} on the {backend.acl_label}…")
         # An empty source set is the fail-closed contract on all three clouds: the rule
-        # is removed (or every permission revoked), and `opened` comes back False.
-        res = await backend.apply_ingress(placement, [row.bind_port], [])
+        # is removed (or every permission revoked), and `opened` comes back False. Both
+        # ports, because every build now opens both.
+        res = await backend.apply_ingress(placement, [row.bind_port, OIDC_PORT], [])
         if res.get("opened"):
             raise SpireLabError(
                 f"the {backend.acl_label} still allows tcp/{row.bind_port}")
+
+        # The dashboard stops trusting this trust domain's SVIDs too -- only the row this
+        # lab registered, never one an operator pointed at a production provider.
+        if unregister_trust_domain(db, row):
+            job_service.append_job_log(
+                db, job_id, f"removed the dashboard's trust in {row.trust_domain}")
+
+        # Optional, and NON-FATAL like the unlink above: the ACL is already closed, which
+        # is the part that matters.
+        if remove_software:
+            await broadcast_progress(job_id, 60, REMOVE_STAGE["label"])
+            try:
+                status = await _run_stage(
+                    db, row=row, stage=REMOVE_STAGE, actor=row.created_by or "system",
+                    asset_backend=(_cfg("spire_lab_asset_backend")
+                                   or storage_service.active_backend()),
+                    parent_job_id=job_id)
+                if status != "completed":
+                    job_service.append_job_log(
+                        db, job_id, "removing SPIRE from the host did not complete — run "
+                                    "examples/playbooks/spire/spire-remove.yml by hand.")
+            except Exception as exc:  # noqa: BLE001
+                job_service.append_job_log(
+                    db, job_id, f"removing SPIRE from the host could not run ({exc})")
         row.source_cidrs = ""
         row.status = "deleted"
         row.error_message = None
@@ -1041,10 +1086,12 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str) -> None:
         db.commit()
         await broadcast_progress(
             job_id, 95,
-            f"tcp/{row.bind_port} is closed. The VM {row.vm_name} is untouched — it "
-            f"has its own auto-delete timer and its own Destroy. The SPIRE server is "
-            f"still installed and still holds its CA key, so a lab that is being retired "
-            f"for good should have its host destroyed too.")
+            (f"tcp/{row.bind_port} and tcp/{OIDC_PORT} are closed and SPIRE was removed "
+             f"from {row.vm_name}, CA key included." if remove_software else
+             f"tcp/{row.bind_port} and tcp/{OIDC_PORT} are closed. The VM {row.vm_name} "
+             f"is untouched — it has its own auto-delete timer and its own Destroy. The "
+             f"SPIRE server is still installed and still holds its CA key, so a lab that "
+             f"is being retired for good should have its host destroyed too."))
         job_service.set_completed(db, job_id, result={
             "lab_id": row.id, "trust_domain": row.trust_domain,
             "vm_name": row.vm_name, "vm_destroyed": False})
@@ -1159,11 +1206,13 @@ def _oidc_vars(row: SpireLab) -> dict:
     return {"trust_domain": row.trust_domain,
             "oidc_domain": oidc_domain_for(row),
             "oidc_port": OIDC_PORT,
-            "spire_version": _cfg("spire_lab_version", "1.15.3")}
+            "spire_version": _cfg("spire_lab_version", "1.15.3"),
+            "oidc_runtime": "docker" if deployment_mode(row) == "docker" else "systemd",
+            **cli_vars(row)}
 
 
 def _k8s_entry_vars(row: SpireLab) -> dict:
-    return {"trust_domain": row.trust_domain,
+    return {"trust_domain": row.trust_domain, **cli_vars(row),
             "audience": row.k8s_audience or K8S_AUDIENCE,
             "workload_uid": row.k8s_workload_uid or K8S_WORKLOAD_UID,
             "workload_path": K8S_WORKLOAD_PATH,
@@ -1410,6 +1459,11 @@ async def run_k8s_link(db: Session, *, lab_id: str, job_id: str) -> None:
         done = k8s_stages_done(row)
         for stage in K8S_STAGES:
             if stage["key"] in done and not stage.get("always"):
+                continue
+            if stage["key"] == "oidc" and oidc_published(row):
+                # The build already published the provider (every mode now does), or the
+                # chart runs it (k8s). Re-running the systemd install beside it would
+                # fight a container for 8443.
                 continue
             status = await _run_k8s_stage(
                 db, row=row, stage=stage, actor=row.created_by or "system",
@@ -1695,7 +1749,7 @@ JWT_BUNDLE_TITLE = "jwt-bundle-spiffe"
 
 
 def _jwt_bundle_vars(row: SpireLab) -> dict:
-    return {"trust_domain": row.trust_domain,
+    return {"trust_domain": row.trust_domain, **cli_vars(row),
             "admin_secret_folder": row.admin_secret_folder or "",
             "ps_safe": row.ps_safe or _cfg("spire_lab_ps_safe", "Automation")}
 
@@ -1742,6 +1796,10 @@ def store_jwt_bundle(db: Session, row: SpireLab, bundle_json: str) -> dict:
         raise SpireLabError("the captured bundle has no JWT-SVID keys (use: jwt-svid)")
     td = (row.trust_domain or "").lower()
     rec = db.query(SpiffeTrustDomain).filter(SpiffeTrustDomain.trust_domain == td).first()
+    if rec and rec.spire_lab_id and rec.spire_lab_id != row.id:
+        raise SpireLabError(
+            f"trust domain {td} is registered by another lab ({rec.spire_lab_id}); "
+            f"two labs cannot share one trust domain's keys")
     if not rec:
         rec = SpiffeTrustDomain(trust_domain=td, created_by=row.created_by or "system")
         db.add(rec)
@@ -1755,14 +1813,26 @@ def store_jwt_bundle(db: Session, row: SpireLab, bundle_json: str) -> dict:
 
 
 async def run_jwt_bundle_capture(db: Session, *, lab_id: str, job_id: str) -> None:
-    """Worker entry point for ``spirelab_jwt_bundle``."""
+    """Worker entry point for ``spirelab_jwt_bundle`` -- the lab's KEY REFRESH.
+
+    Named for what it first did (capture the JWT bundle) and kept under that job type so
+    queued rows and history stay readable; it now refreshes everything the dashboard
+    pins about the lab, because all of it lives within ca_ttl:
+
+      1. the JWT bundle and the X.509 trust bundle (spire-jwt-bundle.yml publishes both);
+      2. the OIDC provider's serving certificate, for vm/docker labs (re-running the
+         `oidc` stage re-mints it; the k8s chart's spiffe-helper rotates its own);
+      3. the registered trust domain (register_trust_domain), so the pinned CA is current.
+
+    Run by the "Refresh keys" button and by the scheduler (enqueue_refresh_if_due).
+    """
     import asyncio
     from ..api.websocket import broadcast_progress
     from . import secrets_backend_service, storage_service
 
     row = get_lab(db, lab_id)
     if not row:
-        logger.warning("spire-lab: row %s vanished before the JWT bundle capture", lab_id)
+        logger.warning("spire-lab: row %s vanished before the key refresh", lab_id)
         return
     job_service.set_running(db, job_id)
     try:
@@ -1774,13 +1844,283 @@ async def run_jwt_bundle_capture(db: Session, *, lab_id: str, job_id: str) -> No
             raise SpireLabError(
                 f"{JWT_BUNDLE_STAGE['asset']} {status} — see job "
                 f"{stage_jobs(row).get(JWT_BUNDLE_STAGE['key'], '')} for the Ansible output")
-        await broadcast_progress(job_id, 80, "Reading the bundle back from Secrets Safe…")
+        await broadcast_progress(job_id, 55, "Reading the bundles back from Secrets Safe…")
         ref = f"{(row.admin_secret_folder or '').strip('/')}/{JWT_BUNDLE_TITLE}"
         bundle = await asyncio.to_thread(secrets_backend_service.read_bt_secrets_safe, ref)
         result = store_jwt_bundle(db, row, bundle or "")
-        job_service.set_completed(db, job_id, result={"lab_id": row.id, **result})
-        logger.info("spire-lab: captured JWT bundle for %r (%d key(s))",
-                    row.name, len(result["jwt_keys"]))
+        read_public_artifacts(db, row)          # the X.509 PEM -> row.trust_bundle_pem
+
+        renewed = False
+        if deployment_mode(row) in ("vm", "docker") and "oidc" in _stages_done(row):
+            await broadcast_progress(job_id, 70, "Renewing the OIDC provider's certificate…")
+            status = await _run_stage(db, row=row, stage=OIDC_BUILD_STAGE,
+                                      actor=row.created_by or "system",
+                                      asset_backend=asset_backend, parent_job_id=job_id)
+            renewed = status == "completed"
+            if not renewed:
+                # Not fatal: the new keys are stored and the bundle fallback covers the
+                # URL until the certificate is renewed. Said so the operator can act.
+                job_service.append_job_log(
+                    db, job_id, "the OIDC provider certificate was NOT renewed — the "
+                                "dashboard falls back to the stored bundle until it is")
+        registered = register_trust_domain(db, row)
+        job_service.set_completed(db, job_id, result={
+            "lab_id": row.id, **result, "oidc_certificate_renewed": renewed,
+            "jwks_url": registered.get("jwks_url", "")})
+        logger.info("spire-lab: refreshed keys for %r (%d JWT key(s), cert renewed: %s)",
+                    row.name, len(result["jwt_keys"]), renewed)
     except Exception as exc:  # noqa: BLE001
-        logger.error("spire-lab: JWT bundle capture failed for %s: %s", lab_id, exc)
+        logger.error("spire-lab: key refresh failed for %s: %s", lab_id, exc)
         job_service.set_failed(db, job_id, str(exc))
+
+
+# ── Scheduled refresh ─────────────────────────────────────────────────────────
+# The JWKS URL keeps the JWT keys current by itself, but the pinned CA and (vm/docker)
+# the provider's serving certificate both live within ca_ttl. So the refresh above is
+# enqueued automatically for any available lab whose registered trust domain was last
+# refreshed more than ca_ttl/3 ago -- three chances before anything expires.
+#
+# Two guards, for the reason expiry_reaper.enqueue_sweep_if_due documents at length: an
+# ACTIVE refresh for the lab blocks a new one, and so does one CREATED recently even if it
+# already finished -- a liveness check alone lets both gunicorn workers' ticks enqueue.
+
+REFRESH_MIN_GAP = timedelta(hours=1)
+REFRESH_LOOP_INTERVAL = 3600
+
+
+def _duration_seconds(raw: str, default: int = 168 * 3600) -> int:
+    """'168h' / '7d' / '90m' / '3600s' / '3600' -> seconds."""
+    raw = (raw or "").strip().lower()
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    try:
+        if raw and raw[-1] in units:
+            return int(float(raw[:-1]) * units[raw[-1]])
+        return int(float(raw)) if raw else default
+    except ValueError:
+        return default
+
+
+def refresh_due(db: Session, row: SpireLab, now: Optional[datetime] = None) -> bool:
+    """Whether this lab's pinned material is old enough to refresh."""
+    from ..database import SpiffeTrustDomain
+    if row.status != "available" or not oidc_published(row):
+        return False
+    now = now or datetime.utcnow()
+    rec = db.query(SpiffeTrustDomain).filter(
+        SpiffeTrustDomain.trust_domain == (row.trust_domain or "").lower(),
+        SpiffeTrustDomain.spire_lab_id == row.id).first()
+    if rec is None:
+        # Built but never registered (the read-back failed, say): a refresh registers it.
+        return True
+    last = rec.updated_at or rec.created_at
+    age = timedelta(seconds=_duration_seconds(_cfg("spire_lab_ca_ttl", "168h")) / 3)
+    return last is None or now - last >= age
+
+
+def _refresh_blocked(db: Session, lab_id: str, now: datetime) -> bool:
+    recent = (db.query(Job)
+              .filter(Job.job_type == JWT_BUNDLE_JOB_TYPE,
+                      (Job.status.in_(job_service.ACTIVE_STATUSES))
+                      | (Job.created_at >= now - REFRESH_MIN_GAP))
+              .all())
+    return any((j.metadata_dict or {}).get("lab_id") == lab_id for j in recent)
+
+
+def enqueue_refresh_if_due(db: Session, now: Optional[datetime] = None) -> list:
+    """Enqueue a key refresh for every lab that needs one. Returns the job ids."""
+    now = now or datetime.utcnow()
+    out = []
+    for row in db.query(SpireLab).filter(SpireLab.status == "available").all():
+        try:
+            if not refresh_due(db, row, now) or _refresh_blocked(db, row.id, now):
+                continue
+            out.append(start_jwt_bundle_capture(
+                db, lab_id=row.id, created_by="system")["job_id"])
+        except Exception as exc:  # noqa: BLE001 -- one lab must not stop the others
+            logger.warning("spire-lab: could not enqueue a key refresh for %s: %s",
+                           row.id, exc)
+    return out
+
+
+# ── JWKS URL registration ─────────────────────────────────────────────────────
+# Every lab publishes its OIDC Discovery Provider on tcp/8443 (the build's `oidc` stage,
+# or the chart in k8s mode) and opens it to the same sources as 8081. Registering that
+# URL means the dashboard's token endpoint verifies this trust domain's JWT-SVIDs with
+# CURRENT keys -- no "Capture JWT bundle" after each rotation.
+#
+# The URL is by ADDRESS and the certificate names oidc.<trust-domain>, which only resolves
+# on the lab's own hosts, so the row carries `tls_server_name`; the pinned CA is the lab's
+# own X.509 trust bundle, which is what the provider's serving SVID chains to.
+
+def jwks_url_for(row: SpireLab) -> str:
+    host = row.public_ip or row.private_ip or ""
+    return f"https://{host}:{OIDC_PORT}/keys" if host else ""
+
+
+def register_trust_domain(db: Session, row: SpireLab) -> dict:
+    """Upsert this lab's trust domain with its JWKS URL. Never fatal to a build: a lab
+    whose server is up is a working lab even if the dashboard cannot trust it yet."""
+    try:
+        from ..database import SpiffeTrustDomain
+        from . import spiffe_assertion
+        url = jwks_url_for(row)
+        if not (url and oidc_published(row) and (row.trust_bundle_pem or "").strip()):
+            return {}
+        td = (row.trust_domain or "").lower()
+        rec = db.query(SpiffeTrustDomain).filter(
+            SpiffeTrustDomain.trust_domain == td).first()
+        if rec and rec.spire_lab_id and rec.spire_lab_id != row.id:
+            # Another lab already owns this name. Two labs with one trust domain would
+            # be two sets of keys under one name; the first registration stands.
+            logger.warning("spire-lab: trust domain %s is registered by lab %s; not "
+                           "re-pointing it at %s", td, rec.spire_lab_id, row.id)
+            return {}
+        if not rec:
+            rec = SpiffeTrustDomain(trust_domain=td, created_by=row.created_by or "system")
+            db.add(rec)
+        rec.jwks_url = url
+        rec.ca_pem = row.trust_bundle_pem.strip()
+        rec.tls_server_name = oidc_domain_for(row)
+        rec.spire_lab_id = row.id
+        rec.updated_at = datetime.utcnow()
+        db.commit()
+        spiffe_assertion.clear_state()
+        return {"trust_domain": td, "jwks_url": url}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("spire-lab: could not register the trust domain for %s: %s",
+                       row.id, exc)
+        return {}
+
+
+def unregister_trust_domain(db: Session, row: SpireLab) -> bool:
+    """Remove the lab's trust domain -- only if THIS lab registered it."""
+    from ..database import SpiffeTrustDomain
+    from . import spiffe_assertion
+    rec = db.query(SpiffeTrustDomain).filter(
+        SpiffeTrustDomain.trust_domain == (row.trust_domain or "").lower(),
+        SpiffeTrustDomain.spire_lab_id == row.id).first()
+    if not rec:
+        return False
+    db.delete(rec)
+    db.commit()
+    spiffe_assertion.clear_state()
+    return True
+
+
+# ── Deployment modes: vm, docker, k8s ─────────────────────────────────────────
+# One lab, three ways SPIRE can run on its host. Only the INSTALL differs; everything
+# after it (host firewall, seed entries, the administrative credential, the OIDC
+# provider, the JWT bundle, the k3s link) is shared, because every shared play reaches the
+# CLI as `{{ spire_cli_prefix }}{{ spire_root }}/bin/spire-server` and the official
+# images keep the binary at that same path. So the prefix is the whole difference:
+#
+#   vm      ""                                    (tarball + systemd, the original)
+#   docker  "docker exec spire-server "           (spire-docker-server.yml, Compose)
+#   k8s     "k3s kubectl exec -n spire-server spire-server-0 -c spire-server -- "
+#                                                  (k3s-server-init.yml + spire-helm.yml)
+#
+# Both container modes also MINT TO STDOUT (`spire_mint_stdout`): `x509 mint -write`
+# would write inside the container, and the server image has no shell to fetch it back.
+
+DEPLOYMENT_MODES = ("vm", "docker", "k8s")
+K8S_CLI_PREFIX = "k3s kubectl exec -n spire-server spire-server-0 -c spire-server -- "
+_CLI_PREFIX = {"vm": "", "docker": "docker exec spire-server ", "k8s": K8S_CLI_PREFIX}
+
+
+def deployment_mode(row) -> str:
+    mode = (getattr(row, "deployment_mode", None) or "vm").lower()
+    return mode if mode in DEPLOYMENT_MODES else "vm"
+
+
+def cli_vars(row) -> dict:
+    mode = deployment_mode(row)
+    return {"spire_cli_prefix": _CLI_PREFIX[mode], "spire_mint_stdout": mode != "vm"}
+
+
+def _docker_server_vars(row: SpireLab) -> dict:
+    out = {"trust_domain": row.trust_domain,
+           "bind_port": row.bind_port or BIND_PORT,
+           "oidc_port": OIDC_PORT,
+           "spire_version": _cfg("spire_lab_version", "1.15.3"),
+           "ca_ttl": _cfg("spire_lab_ca_ttl", "168h")}
+    if row.admin_spiffe_id:
+        out["admin_spiffe_id"] = row.admin_spiffe_id
+    return out
+
+
+# spiffe/helm-charts-hardened releases checked against spire-helm.yml's values: chart
+# 0.30.2 ships SPIRE 1.15.3 (appVersion), the version the vm and docker modes install, so
+# all three modes run the same server. Move all three together.
+SPIRE_CHART_VERSION = "0.30.2"
+SPIRE_CRDS_CHART_VERSION = "0.6.1"
+
+
+def _helm_vars(row: SpireLab) -> dict:
+    out = {"trust_domain": row.trust_domain,
+           "oidc_domain": oidc_domain_for(row),
+           "cluster_name": _slug(row.name) or "workload-lab",
+           "bind_port": row.bind_port or BIND_PORT,
+           "oidc_port": OIDC_PORT,
+           "ca_ttl": _cfg("spire_lab_ca_ttl", "168h"),
+           # Pinned by default: the value keys spire-helm.yml relies on (admin IDs, SVID
+           # TTLs, provider domains) are exactly what a chart release moves. The config keys
+           # override; a blank one falls back to the pin, never to "latest".
+           "spire_chart_version": _cfg("spire_lab_helm_chart_version", "") or SPIRE_CHART_VERSION,
+           "spire_crds_chart_version": (_cfg("spire_lab_helm_crds_chart_version", "")
+                                        or SPIRE_CRDS_CHART_VERSION),
+           "helm_values_extra": _cfg("spire_lab_helm_values_extra", "")}
+    if row.admin_spiffe_id:
+        out["admin_spiffe_id"] = row.admin_spiffe_id
+    return out
+
+
+_VM_INSTALL, _PORTS, _SEED, _IDENTITY = STAGES
+
+OIDC_BUILD_STAGE = {
+    "key": "oidc", "asset": "spire-oidc-provider.yml", "vars_for": _oidc_vars,
+    "pct": 88, "label": "Publishing the trust domain as an OIDC issuer (JWKS)…",
+}
+
+_MODE_STAGES = {
+    "vm": (_VM_INSTALL, _PORTS, _SEED, _IDENTITY, OIDC_BUILD_STAGE),
+    "docker": (
+        {"key": "docker", "asset": "install-docker.yml", "vars_for": lambda row: {},
+         "pct": 15, "label": "Installing Docker Engine…"},
+        {"key": "install", "asset": "spire-docker-server.yml",
+         "vars_for": _docker_server_vars, "pct": 30,
+         "label": "Starting the SPIRE server container…"},
+        _PORTS, _SEED, _IDENTITY, OIDC_BUILD_STAGE),
+    # No oidc stage: the chart runs the provider and spiffe-helper rotates its cert.
+    "k8s": (
+        {"key": "k3s_host", "asset": "k3s-server-init.yml",
+         "vars_for": _k3s_install_vars, "pct": 15, "label": "Installing k3s on the lab host…"},
+        {"key": "install", "asset": "spire-helm.yml", "vars_for": _helm_vars, "pct": 35,
+         "label": "Installing the SPIRE Helm charts…"},
+        _PORTS, _SEED, _IDENTITY),
+}
+
+
+def oidc_published(row) -> bool:
+    """True when the lab's own build published the OIDC Discovery Provider."""
+    return deployment_mode(row) == "k8s" or "oidc" in _stages_done(row)
+
+
+def _remove_vars(row: SpireLab) -> dict:
+    return {"deployment_mode": deployment_mode(row)}
+
+
+REMOVE_STAGE = {
+    "key": "remove", "asset": "spire-remove.yml", "vars_for": _remove_vars,
+    "pct": 60, "label": "Removing SPIRE from the host…",
+}
+
+
+def stages_for(row) -> tuple:
+    """The build stages for this lab's deployment mode, in order."""
+    return _MODE_STAGES[deployment_mode(row)]
+
+
+MODE_ASSETS = {mode: tuple(s["asset"] for s in stages) for mode, stages in _MODE_STAGES.items()}
+# What a VM-mode build fetches. Kept under the old name because /options and the tests
+# read it; the per-mode sets are MODE_ASSETS.
+STAGE_ASSETS = MODE_ASSETS["vm"]

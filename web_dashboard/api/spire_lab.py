@@ -87,7 +87,8 @@ def _shape(row) -> dict:
         "firewall_name": row.firewall_name or "",
         "stages_done": [s for s in (row.stages_done or "").split(",") if s],
         "stages": [{"key": s["key"], "asset": s["asset"]}
-                   for s in spire_lab_service.STAGES],
+                   for s in spire_lab_service.stages_for(row)],
+        "deployment_mode": spire_lab_service.deployment_mode(row),
         "stage_job_ids": spire_lab_service.stage_jobs(row),
         "entries_seeded": row.entries_seeded,
         "discovery_expected": row.discovery_expected,
@@ -175,6 +176,9 @@ class BuildRequest(BaseModel):
     # this sends the same account as managed_become rather than adding a second picker.
     managed_become_self: bool = False
     login_user: str = ""
+    # How SPIRE runs on the host: "vm" (systemd, the original), "docker" (Compose) or
+    # "k8s" (k3s + Helm). See spire_lab_service.stages_for.
+    deployment_mode: str = "vm"
 
 
 class K8sLinkRequest(BaseModel):
@@ -228,6 +232,7 @@ async def build_options(db: Session = Depends(get_db),
 
     cidrs = spire_lab_service.source_cidrs()
     missing = []
+    modes = None
     if not cidrs:
         missing.append(
             "spire_lab_source_cidrs — no cloud ACL change will be made, so the "
@@ -271,6 +276,9 @@ async def build_options(db: Session = Depends(get_db),
         try:
             staged = [a.get("name") for a in
                       (await storage_service.list_assets_in(backend_name) or [])]
+            # Per deployment mode, so the form can offer only the modes that can build.
+            modes = {m: [a for a in assets if a not in staged]
+                     for m, assets in spire_lab_service.MODE_ASSETS.items()}
             absent = [a for a in spire_lab_service.STAGE_ASSETS if a not in staged]
             if absent:
                 missing.append(
@@ -302,6 +310,9 @@ async def build_options(db: Session = Depends(get_db),
             "ca_ttl": config_service.get("spire_lab_ca_ttl") or settings.spire_lab_ca_ttl,
             "ps_safe": config_service.get("spire_lab_ps_safe") or settings.spire_lab_ps_safe,
             "asset_backend": backend_name,
+            # {mode: [playbooks not yet staged]} -- empty = that mode can build. None
+            # when the backend could not be listed (the `missing` note says why).
+            "deployment_modes": modes,
             "missing": missing}
 
 
@@ -435,7 +446,8 @@ def build_lab(req: BuildRequest, db: Session = Depends(get_db),
             managed_account=(req.managed_account.model_dump()
                              if req.managed_account else None),
             managed_become_self=req.managed_become_self,
-            login_user=req.login_user)
+            login_user=req.login_user,
+            deployment_mode=req.deployment_mode)
     except SpireLabError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -589,7 +601,8 @@ async def reapply_acl(lab_id: str, db: Session = Depends(get_db),
 
 
 @router.delete("/{lab_id}")
-def destroy_lab(lab_id: str, db: Session = Depends(get_db),
+def destroy_lab(lab_id: str, remove_software: bool = False,
+                db: Session = Depends(get_db),
                 user: User = Depends(require_permission("cloud_function", "write"))):
     """Close tcp/8081 — the teardown. The same path the auto-delete timer runs, so there
     is exactly one and it is exercised both ways.
@@ -602,6 +615,7 @@ def destroy_lab(lab_id: str, db: Session = Depends(get_db),
     row = _visible_or_404(db, lab_id, user)
     try:
         return spire_lab_service.start_decommission(
-            db, lab_id=row.id, created_by=user.username)
+            db, lab_id=row.id, created_by=user.username,
+            remove_software=remove_software)
     except SpireLabError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

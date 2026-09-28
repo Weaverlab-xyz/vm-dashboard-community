@@ -89,6 +89,8 @@
               <div class="text-xs text-gray-400 font-mono"
                    x-text="(lab.private_ip || lab.public_ip) + ':' + lab.bind_port"></div>
               <div class="text-xs text-gray-400" x-text="lab.cloud + ' ' + (lab.region || '')"></div>
+              <div class="text-xs text-teal-700" x-show="lab.deployment_mode && lab.deployment_mode !== 'vm'" x-cloak
+                   x-text="lab.deployment_mode === 'k8s' ? 'SPIRE on k3s (Helm)' : 'SPIRE in Docker'"></div>
             </td>
             <td class="px-4 py-2 align-top">
               <span class="text-xs font-medium px-2 py-0.5 rounded-full"
@@ -140,8 +142,8 @@
               <button @click="captureJwtBundle(lab)" x-show="lab.status === 'available'"
                       x-cloak :disabled="busy"
                       class="text-teal-700 hover:underline text-xs mr-2 disabled:opacity-50"
-                      title="Store this trust domain's JWT-SVID keys so agents can authenticate to the dashboard with an SVID. Re-run after SPIRE rotates keys (within ca_ttl).">
-                Capture JWT bundle</button>
+                      title="Re-read the trust domain's JWT keys and CA, renew the OIDC provider's certificate, and update the dashboard's trust. Runs on its own every ca_ttl/3; this runs it now.">
+                Refresh keys</button>
               <button @click="govern(lab)" x-show="lab.status === 'available' && !lab.ps_governed"
                       x-cloak :disabled="busy"
                       class="text-blue-600 hover:underline text-xs mr-2 disabled:opacity-50">
@@ -189,6 +191,23 @@
         A bare DNS-style name, <em>not</em> a <code>spiffe://</code> URI. It is baked into
         the server config, every SPIFFE ID and the Managed System, and the plugin asserts
         it on every connect &mdash; so it cannot be changed afterwards.
+      </p>
+
+      <label class="block text-sm font-medium text-gray-700 mb-1">Run SPIRE as</label>
+      <select x-model="form.deployment_mode"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+        <template x-for="m in deploymentModes" :key="m.key">
+          <option :value="m.key" :disabled="modeMissing(m.key).length > 0"
+                  x-text="m.label + (modeMissing(m.key).length ? ' — playbooks not staged' : '')"></option>
+        </template>
+      </select>
+      <p class="text-[11px] text-gray-400 mt-1 mb-3">
+        <span x-text="(deploymentModes.find(m => m.key === form.deployment_mode) || {}).hint"></span>
+        One mode per host. Every mode publishes an OIDC Discovery Provider on tcp/8443 and
+        registers the trust domain with this dashboard by JWKS URL.
+        <span x-show="modeMissing(form.deployment_mode).length" x-cloak class="text-amber-700">
+          Not staged: <span x-text="modeMissing(form.deployment_mode).join(', ')"></span>.
+        </span>
       </p>
 
       <label class="block text-sm font-medium text-gray-700 mb-1">Cloud</label>
@@ -324,18 +343,21 @@
             keypair this VM was deployed with</span>
         </p>
         <ol class="list-decimal list-inside space-y-0.5">
-          <li>Open <code>tcp/<span x-text="options.bind_port || 8081"></span></code> on the
-              cloud ACL to
+          <li>Open <code>tcp/<span x-text="options.bind_port || 8081"></span></code> and
+              <code>tcp/8443</code> on the cloud ACL to
               <span x-show="(options.source_cidrs || []).length" x-cloak
                     class="font-mono" x-text="(options.source_cidrs || []).join(', ')"></span>
               <span x-show="!(options.source_cidrs || []).length" x-cloak>
                 &mdash; <strong>nothing</strong>, because no source CIDRs are configured</span>
           </li>
-          <li>Install SPIRE <span x-text="options.spire_version || ''"></span> under systemd</li>
+          <li x-show="form.deployment_mode === 'vm'">Install SPIRE <span x-text="options.spire_version || ''"></span> under systemd</li>
+          <li x-show="form.deployment_mode === 'docker'" x-cloak>Install Docker, then run SPIRE <span x-text="options.spire_version || ''"></span> from the official images under Compose</li>
+          <li x-show="form.deployment_mode === 'k8s'" x-cloak>Install k3s, then the SPIRE Helm charts</li>
           <li>Open the host firewall on the same sources</li>
           <li>Seed <span x-text="options.entries_seeded || 11"></span> registration entries
               (<span x-text="options.discovery_expected || 8"></span> should be discovered)</li>
           <li>Mint the administrative credential into Secrets Safe</li>
+          <li>Publish the OIDC Discovery Provider and register the trust domain's JWKS URL here</li>
         </ol>
       </div>
 
@@ -714,7 +736,15 @@ function spireLabPage() {
     // Kept in step with blankForm() below. Two initialisers that drifted apart is how a
     // field ends up undefined on the second build of a session.
     form: { name: '', trust_domain: '', cloud: 'azure', host: '', admin_spiffe_id: '',
-            secret_ssh_key_source: '', managed_become_self: false, login_user: '' },
+            secret_ssh_key_source: '', managed_become_self: false, login_user: '',
+            deployment_mode: 'vm' },
+    // One line each, so the choice is read before it is made. Keys match
+    // spire_lab_service.DEPLOYMENT_MODES.
+    deploymentModes: [
+      { key: 'vm',     label: 'VM (systemd)',      hint: 'The SPIRE tarball under systemd, as before.' },
+      { key: 'docker', label: 'Docker',            hint: 'Installs Docker, then the official spire-server and OIDC provider images under Compose.' },
+      { key: 'k8s',    label: 'Kubernetes (k3s)',  hint: 'Installs k3s, then the official SPIRE Helm charts — server, agents, CSI driver, controller manager, OIDC provider.' },
+    ],
 
     // Credential pickers, mirroring the Config-Management page. managedAccountKey lives
     // out here rather than on `form`: what the request needs is the resolved REF, built
@@ -810,7 +840,7 @@ function spireLabPage() {
     blankForm(cloud) {
       return { name: '', trust_domain: '', cloud: cloud || 'azure', host: '',
                admin_spiffe_id: '', secret_ssh_key_source: '',
-               managed_become_self: false, login_user: '' };
+               managed_become_self: false, login_user: '', deployment_mode: 'vm' };
     },
 
     openBuild() {
@@ -915,6 +945,14 @@ function spireLabPage() {
     // shape and the server refuses it here, because a lab has exactly one host.
     resolveManaged() { return this._pin(this._account(this.managedAccountKey)); },
 
+    // Playbooks a mode needs that are not on the storage backend. null from /options means
+    // the backend could not be listed; the `missing` notes already say so, so nothing is
+    // disabled on a guess.
+    modeMissing(mode) {
+      const m = this.options.deployment_modes;
+      return (m && m[mode]) ? m[mode] : [];
+    },
+
     buildPayload() {
       return { ...this.form,
                managed_account: this.canUseSecrets ? this.resolveManaged() : null };
@@ -925,7 +963,7 @@ function spireLabPage() {
       try {
         await API.post('/api/spire-lab', this.buildPayload());
         this.buildOpen = false;
-        this.notify('Building — the four playbooks each get their own job. Follow them in Jobs.');
+        this.notify('Building — each playbook gets its own job. Follow them in Jobs.');
         this.load();
       } catch (e) { this.notify(e.message, 'error'); }
       finally { this.busy = false; }
@@ -1031,9 +1069,8 @@ function spireLabPage() {
       this.busy = true;
       try {
         await API.post('/api/spire-lab/' + lab.id + '/jwt-bundle', {});
-        this.notify('Capturing the JWT-SVID bundle — one playbook; follow it in Jobs. The '
-                    + 'result appears under Users → SPIFFE trust domains. Re-capture after '
-                    + 'SPIRE rotates its JWT key (within ca_ttl).');
+        this.notify('Refreshing keys — follow it in Jobs. The result appears under Users → '
+                    + 'SPIFFE trust domains. This also runs on its own every ca_ttl/3.');
       } catch (e) {
         this.notify('Could not capture: ' + (e.message || e), 'error');
       } finally { this.busy = false; }
@@ -1088,13 +1125,19 @@ function spireLabPage() {
 
     async destroy(lab) {
       const warning = 'Close ' + lab.trust_domain + '?\n\n'
-        + 'This removes the cloud rule allowing tcp/' + lab.bind_port + ', which is the '
-        + 'reachability kill switch. The VM is NOT destroyed — it has its own timer and '
+        + 'This removes the cloud rule allowing tcp/' + lab.bind_port + ' and tcp/8443, which is the '
+        + 'reachability kill switch, and the dashboard stops trusting the trust domain. The VM is NOT destroyed — it has its own timer and '
         + 'its own Destroy — and the SPIRE server stays installed and keeps its CA key, '
         + 'so retire the host too if the lab is finished.';
       if (!confirm(warning)) return;
+      // Opt-in, asked separately so the default stays "close the ports, touch nothing".
+      const remove = confirm('Also REMOVE SPIRE from ' + lab.vm_name + '?\n\n'
+        + 'OK stops and removes the server ('
+        + (lab.deployment_mode === 'k8s' ? 'helm uninstall' : lab.deployment_mode === 'docker' ? 'docker compose down' : 'systemd units')
+        + ') and deletes /opt/spire, CA key included — for reusing the VM. '
+        + 'Cancel leaves it installed and only closes the ports.');
       try {
-        await API.del('/api/spire-lab/' + lab.id);
+        await API.del('/api/spire-lab/' + lab.id + (remove ? '?remove_software=true' : ''));
         this.notify('Closing — follow progress in Jobs.');
         this.load();
       } catch (e) { this.notify(e.message, 'error'); }

@@ -56,6 +56,7 @@ SWEEPERS = (
     "_pov_reconcile_loop",
     "_hypervisor_sync_loop",
     "_schedule_sweeper_loop",
+    "_spire_refresh_loop",
 )
 
 # Coroutines that legitimately hand-roll `while True`. The two warm primitives are the
@@ -282,6 +283,7 @@ EXPECTED_FALLBACKS = {
     "_suspend_sweeper_loop": 600,
     "_spend_sweeper_loop": 600,
     "_schedule_sweeper_loop": 300,
+    "_spire_refresh_loop": 60 * 60,
 }
 
 

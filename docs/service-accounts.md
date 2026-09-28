@@ -113,9 +113,9 @@ All routes are admin-only.
 | `GET` | `/api/users/{id}/external-identities` | list IdP identities mapped to it |
 | `POST` | `/api/users/{id}/external-identities` | map one (`name`, `subject`, `issuer`, `expected_client`) |
 | `DELETE` | `/api/users/{id}/external-identities/{mapping}` | remove the mapping |
-| `GET` / `PUT` | `/api/oauth/spiffe-trust-domains` | list / create-or-replace a trust domain's key source (`trust_domain`, `jwks_url`, `ca_pem`, `bundle_json`) |
+| `GET` / `PUT` | `/api/oauth/spiffe-trust-domains` | list / create-or-replace a trust domain's key source (`trust_domain`, `jwks_url`, `ca_pem`, `tls_server_name`, `bundle_json`) |
 | `DELETE` | `/api/oauth/spiffe-trust-domains/{trust_domain}` | stop trusting it |
-| `POST` | `/api/spire-lab/{lab}/jwt-bundle` | capture a Workload Lab trust domain's JWT bundle |
+| `POST` | `/api/spire-lab/{lab}/jwt-bundle` | refresh a Workload Lab trust domain's keys (JWT bundle, trust bundle, provider cert, registration) |
 | `POST` | `/api/oauth/token` | the token endpoint (unauthenticated; client credentials only) |
 
 Failed token requests are throttled **per source address only** (the sign-in page's per-IP
@@ -226,8 +226,15 @@ from either source:
 | **Stored bundle** | it can't — e.g. the Workload Lab, whose provider is firewalled to its k3s node | SPIRE rotates JWT keys within `ca_ttl`; re-capture before then. The page flags a bundle older than five days. |
 
 Paste a bundle from `spire-server bundle show -format spiffe`, or on a **Workload Lab SPIRE
-row click Capture JWT bundle**: it runs `spire-jwt-bundle.yml` on the SPIRE host over the
-lab's usual SSH path and stores the result. Only `use: jwt-svid` keys are used; X.509
+row click Refresh keys**: it runs `spire-jwt-bundle.yml` on the SPIRE host over the
+lab's usual SSH path and stores the result.
+
+**Workload Lab labs register themselves** by JWKS URL after a build — the provider's address
+on tcp/8443, with **TLS name** `oidc.<trust-domain>` (the name the certificate is verified
+for, and the `Host` sent, while connecting by address) and the lab's trust bundle as the
+pinned CA. A scheduled refresh keeps both current, and destroying the lab removes the row.
+Set **TLS name** yourself for any provider reached by an address its certificate does not
+name. When a URL fetch fails and a stored bundle exists, the bundle is used. Only `use: jwt-svid` keys are used; X.509
 roots in the bundle are ignored.
 
 ### 2. Bind a SPIFFE ID to a service account

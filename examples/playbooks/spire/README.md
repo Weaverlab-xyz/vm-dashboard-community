@@ -12,18 +12,28 @@ network ACL is opened — see [Opening the port](#opening-the-port).
 
 | File | Target | Runner image | What it does |
 |---|---|---|---|
-| `spire-server-install.yml` | Linux VM (SSH) | `ansible-winrm` | SPIRE 1.15.3 under systemd: one trust domain, sqlite datastore, `join_token` attestor, `admin_ids` |
+| `spire-server-install.yml` | Linux VM (SSH) | `ansible-winrm` | SPIRE 1.15.3 under systemd as the `spire` user, sandboxed: one trust domain, sqlite datastore, `join_token` attestor, `admin_ids` |
 | `spire-open-ports.yml` | Linux VM (SSH) | `ansible-winrm` | Opens tcp/8081 on the **host** firewall (firewalld or ufw) |
 | `spire-seed-entries.yml` | Linux VM (SSH) | `ansible-winrm` | The 11 registration entries the demo is built on |
 | `spire-admin-identity.yml` | Linux VM (SSH) | `ansible-winrm` | Mints the admin X509-SVID, packs a PKCS#12, writes it into Password Safe |
 | `spire-oidc-provider.yml` | the SPIRE VM (SSH) | `ansible-winrm` | The OIDC Discovery Provider, serving JWKS over TLS with an SVID SPIRE issued itself. **Never live-validated** |
 | `spire-k8s-entry.yml` | the SPIRE VM (SSH) | `ansible-winrm` | A join token for a k3s node, and the workload entry carrying the `k8s` audience. **Never live-validated** |
 | `spire-agent-install.yml` | the **k3s node** (SSH) | `ansible-winrm` | A SPIRE agent, and a JWT-SVID fetched as the workload to prove the chain. **Never live-validated** |
+| `spire-docker-server.yml` | Linux VM (SSH) | `ansible-winrm` | `docker` mode: the same server config as the VM install, under Docker Compose with the OIDC provider (after `linux/install-docker.yml`); non-root (1000 / 1001), read-only, no capabilities. Run end to end against release-built images |
+| `spire-helm.yml` | Linux VM (SSH) | `ansible-winrm` | `k8s` mode: the hardened Helm charts on k3s (after `k3s/k3s-server-init.yml`), pinned to `spire` 0.30.2 / `spire-crds` 0.6.1 with upstream's recommended (non-root, restricted) settings; 8081/8443 as LoadBalancer Services; reads back `admin_ids` and fetches the discovery document. Values checked with `helm template`; **never run on a live node** |
+| `spire-jwt-bundle.yml` | the SPIRE VM (SSH) | `ansible-winrm` | Publishes the JWT bundle and the X.509 trust bundle PEM for the dashboard's key refresh |
+| `spire-remove.yml` | the SPIRE VM (SSH) | `ansible-winrm` | Optional teardown: removes SPIRE for any mode, **including `/opt/spire` and the CA key** |
 
 All four are `--syntax-check` clean against `chrweav/ansible-winrm`, which is the image
 to use: `spire-open-ports.yml` needs `ansible.posix`, and `spire-admin-identity.yml`
 needs `beyondtrust.secrets_safe`. Neither is in `chrweav/ansible-cloud`, which is the
 Kubernetes/database image.
+
+The shared plays (seed, admin-identity, jwt-bundle, k8s-entry, oidc-provider) take
+`spire_cli_prefix` (empty for `vm`; `docker exec spire-server ` or `k3s kubectl exec -n
+spire-server spire-server-0 -c spire-server -- ` in the container modes) and
+`spire_mint_stdout: true` there, so `x509 mint` writes to stdout and the PEM is split on the
+host. `spire-open-ports.yml` takes `extra_ports` (the dashboard passes 8443).
 
 ## The order to run them in
 

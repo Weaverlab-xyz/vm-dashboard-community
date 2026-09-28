@@ -9,6 +9,15 @@
 #
 # NEEDS EGRESS to github.com to fetch the release tarball.
 #
+# RUNS AS AN UNPRIVILEGED USER, the way upstream ships it. The official image runs the
+# server as uid 1000, and the server makes its API socket 0770 so only its own user or
+# group can connect. Here the server is the `spire` system user (no shell, no home), the
+# binaries are root-owned so that user cannot replace them, the datastore and CA keys
+# are 0700 to it alone, and the unit is sandboxed (no capabilities, read-only system,
+# writable only where it must be). `systemd-analyze security spire-server` scores it.
+# The CLI calls every other play makes run as root through `become`, which reaches the
+# socket regardless.
+#
 # admin_ids IS THE LINE PEOPLE GET WRONG, so this playbook writes it for you. Setting
 # `-admin` on a registration entry grants admin rights to SVIDs the AGENT issues for
 # that entry; it does nothing for an SVID produced by `spire-server x509 mint`, which
@@ -42,6 +51,11 @@
     admin_spiffe_id: ""
     spire_root: /opt/spire
     spire_data: /opt/spire/data
+    spire_user: spire
+    spire_group: spire
+    # The server's default socket directory. Kept at the default so every CLI call in
+    # the other plays reaches it without a -socketPath flag.
+    socket_dir: /tmp/spire-server
   tasks:
     - name: Require a trust domain
       ansible.builtin.assert:
@@ -84,21 +98,48 @@
       ansible.builtin.set_fact:
         _installed: "{{ (spire_installed.stdout | default('')) ~ (spire_installed.stderr | default('')) }}"
 
+    - name: Create the spire group
+      ansible.builtin.group:
+        name: "{{ spire_group }}"
+        system: true
+
+    - name: Create the spire user (no shell, no home)
+      ansible.builtin.user:
+        name: "{{ spire_user }}"
+        group: "{{ spire_group }}"
+        system: true
+        shell: /usr/sbin/nologin
+        home: "{{ spire_data }}"
+        create_home: false
+
     # conf/ is 0755 inside the release tarball, so unarchive resets it every time it
     # runs. Forcing 0750 here made the two fight and the play report changed forever;
-    # the mode below is the one the tarball actually ships. data/ is ours, not the
-    # tarball's, and stays 0750 — it holds the datastore and the CA keys.
+    # the mode below is the one the tarball actually ships (server.conf itself is 0640).
+    # data/ is ours, not the tarball's: the datastore and the CA keys, 0700 to the
+    # server user alone -- not even its group, which the OIDC provider joins for the
+    # socket. The root is group-traversable for the same reason.
     - name: Create the SPIRE directories
       ansible.builtin.file:
         path: "{{ item.path }}"
         state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
         mode: "{{ item.mode }}"
       loop:
-        - {path: "{{ spire_root }}", mode: "0750"}
-        - {path: "{{ spire_root }}/conf", mode: "0755"}
-        - {path: "{{ spire_data }}", mode: "0750"}
+        - {path: "{{ spire_root }}", owner: root, group: "{{ spire_group }}", mode: "0750"}
+        - {path: "{{ spire_root }}/conf", owner: root, group: root, mode: "0755"}
+        - {path: "{{ spire_data }}", owner: "{{ spire_user }}", group: "{{ spire_group }}", mode: "0700"}
       loop_control:
         label: "{{ item.path }}"
+
+    # A lab first built before the server ran unprivileged has a root-owned datastore.
+    - name: Give the datastore and keys to the server user
+      ansible.builtin.file:
+        path: "{{ spire_data }}"
+        state: directory
+        owner: "{{ spire_user }}"
+        group: "{{ spire_group }}"
+        recurse: true
 
     - name: Download the SPIRE release
       ansible.builtin.get_url:
@@ -124,7 +165,19 @@
         dest: "{{ spire_root }}"
         remote_src: true
         extra_opts: ["--strip-components=1"]
+        # The archive's own uids would otherwise survive extraction as root -- leaving
+        # the binaries owned by whoever that uid is on this host.
+        owner: root
+        group: root
       when: spire_version not in _installed
+
+    - name: Keep the binaries root-owned
+      ansible.builtin.file:
+        path: "{{ spire_root }}/bin"
+        state: directory
+        owner: root
+        group: root
+        recurse: true
 
     - name: Remove the downloaded tarball
       ansible.builtin.file:
@@ -136,6 +189,8 @@
     - name: Write the server configuration
       ansible.builtin.copy:
         dest: "{{ spire_root }}/conf/server.conf"
+        owner: root
+        group: "{{ spire_group }}"
         mode: "0640"
         content: |
           server {
@@ -166,6 +221,23 @@
           }
       notify: Restart spire-server
 
+    # The socket stays at the upstream default under /tmp. tmpfiles owns the directory
+    # (created at boot, never aged out, re-owned if a root-run server left it behind), so
+    # the sandbox below can make exactly it writable. 0750: the OIDC provider reaches the
+    # 0770 socket through the group.
+    - name: Declare the socket directory
+      ansible.builtin.copy:
+        dest: /etc/tmpfiles.d/spire-server.conf
+        mode: "0644"
+        content: |
+          d {{ socket_dir }}         0750 {{ spire_user }} {{ spire_group }} -
+          d {{ socket_dir }}/private 0750 {{ spire_user }} {{ spire_group }} -
+      register: tmpfiles_conf
+
+    - name: Create the socket directory now
+      ansible.builtin.command: systemd-tmpfiles --create /etc/tmpfiles.d/spire-server.conf
+      changed_when: tmpfiles_conf.changed
+
     - name: Install the systemd unit
       ansible.builtin.copy:
         dest: /etc/systemd/system/spire-server.service
@@ -178,9 +250,36 @@
 
           [Service]
           ExecStart={{ spire_root }}/bin/spire-server run -config {{ spire_root }}/conf/server.conf
-          WorkingDirectory={{ spire_root }}
+          WorkingDirectory={{ spire_data }}
+          User={{ spire_user }}
+          Group={{ spire_group }}
+          UMask=0027
           Restart=on-failure
           RestartSec=5
+
+          # Sandbox. 8081 is unprivileged, so the process needs no capability at all.
+          NoNewPrivileges=yes
+          CapabilityBoundingSet=
+          AmbientCapabilities=
+          ProtectSystem=strict
+          ReadWritePaths={{ spire_data }} {{ socket_dir }}
+          ProtectHome=yes
+          PrivateDevices=yes
+          ProtectKernelTunables=yes
+          ProtectKernelModules=yes
+          ProtectKernelLogs=yes
+          ProtectControlGroups=yes
+          ProtectClock=yes
+          ProtectHostname=yes
+          RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+          RestrictNamespaces=yes
+          RestrictRealtime=yes
+          RestrictSUIDSGID=yes
+          LockPersonality=yes
+          MemoryDenyWriteExecute=yes
+          SystemCallArchitectures=native
+          SystemCallFilter=@system-service
+          SystemCallErrorNumber=EPERM
 
           [Install]
           WantedBy=multi-user.target
@@ -215,6 +314,7 @@
         msg:
           - "SPIRE {{ spire_version }} serving trust domain '{{ trust_domain }}' on :{{ bind_port }}."
           - "Administrative identity in admin_ids: {{ _admin_id }}"
+          - "Runs as '{{ spire_user }}', sandboxed. Score it: systemd-analyze security spire-server"
           - "ca_ttl is {{ ca_ttl }} and it CAPS the admin credential, whatever x509 mint asks for."
           - "Next: spire-open-ports.yml, spire-seed-entries.yml, then spire-admin-identity.yml."
   handlers:

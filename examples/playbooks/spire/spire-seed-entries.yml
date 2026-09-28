@@ -39,6 +39,12 @@
     trust_domain: ""
     parent_id: ""
     spire_root: /opt/spire
+    # How the SPIRE CLI is reached. Empty on a VM (the systemd install). The Workload Lab
+    # sets it for the container modes -- `docker exec spire-server ` or
+    # `k3s kubectl exec -n spire-server spire-server-0 -c spire-server -- ` -- and the
+    # official images keep the binary at the same /opt/spire/bin path, so the rest of
+    # every command is identical in all three modes.
+    spire_cli_prefix: ""
   tasks:
     - name: Require a trust domain
       ansible.builtin.assert:
@@ -52,7 +58,7 @@
         _parent: "{{ parent_id | default('spiffe://' ~ trust_domain ~ '/node/worker-01', true) }}"
 
     - name: Confirm the server is up
-      ansible.builtin.command: "{{ spire_root }}/bin/spire-server healthcheck"
+      ansible.builtin.command: "{{ spire_cli_prefix }}{{ spire_root }}/bin/spire-server healthcheck"
       register: seed_health
       changed_when: false
 
@@ -61,7 +67,7 @@
     # workload entries a parent and to give discovery a node entry to exclude.
     - name: Create the parent node entry
       ansible.builtin.command: >-
-        {{ spire_root }}/bin/spire-server entry create
+        {{ spire_cli_prefix }}{{ spire_root }}/bin/spire-server entry create
         -spiffeID {{ _parent }}
         -selector join_token:bootstrap
         -node
@@ -73,7 +79,7 @@
 
     - name: Create the workload entries
       ansible.builtin.command: >-
-        {{ spire_root }}/bin/spire-server entry create
+        {{ spire_cli_prefix }}{{ spire_root }}/bin/spire-server entry create
         -parentID {{ _parent }}
         -spiffeID spiffe://{{ trust_domain }}{{ item.path }}
         -selector {{ item.selector }}
@@ -118,7 +124,7 @@
             extra: "-downstream"
 
     - name: Count what is registered
-      ansible.builtin.command: "{{ spire_root }}/bin/spire-server entry count"
+      ansible.builtin.command: "{{ spire_cli_prefix }}{{ spire_root }}/bin/spire-server entry count"
       register: entry_count
       changed_when: false
 

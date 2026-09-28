@@ -30,6 +30,12 @@
     admin_secret_folder: ""
     ps_safe: "Automation"
     spire_root: /opt/spire
+    # How the SPIRE CLI is reached. Empty on a VM (the systemd install). The Workload Lab
+    # sets it for the container modes -- `docker exec spire-server ` or
+    # `k3s kubectl exec -n spire-server spire-server-0 -c spire-server -- ` -- and the
+    # official images keep the binary at the same /opt/spire/bin path, so the rest of
+    # every command is identical in all three modes.
+    spire_cli_prefix: ""
     ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
     ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
     ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
@@ -43,7 +49,7 @@
         fail_msg: "trust_domain and admin_secret_folder are required."
 
     - name: Read the trust domain's SPIFFE bundle
-      ansible.builtin.command: "{{ spire_root }}/bin/spire-server bundle show -format spiffe"
+      ansible.builtin.command: "{{ spire_cli_prefix }}{{ spire_root }}/bin/spire-server bundle show -format spiffe"
       register: spiffe_bundle
       changed_when: false
 
@@ -75,9 +81,34 @@
       become: false
       no_log: true
 
+    # The X.509 roots too, as PEM: the dashboard pins them as the CA for the lab's OIDC
+    # provider (the provider's serving SVID chains to them). SPIRE rotates its X.509 CA
+    # within ca_ttl as well, so a refresh that updated only the JWT keys would leave the
+    # pin going stale. Same title spire-admin-identity.yml publishes it under.
+    - name: Read the trust bundle (PEM)
+      ansible.builtin.command: "{{ spire_cli_prefix }}{{ spire_root }}/bin/spire-server bundle show"
+      register: pem_bundle
+      changed_when: false
+
+    - name: Publish the trust bundle for the dashboard to read back
+      beyondtrust.secrets_safe.secrets_create:
+        api_url: "{{ ps_api_url }}"
+        api_version: "3.1"
+        client_id: "{{ ps_client_id }}"
+        client_secret: "{{ ps_client_secret }}"
+        verify_ca: "{{ ps_verify_ca }}"
+        safe_name: "{{ ps_safe }}"
+        folder_name: "{{ admin_secret_folder }}"
+        title: trust-bundle-pem
+        secret_type: "text"
+        text: "{{ pem_bundle.stdout }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+
     - name: What was published
       ansible.builtin.debug:
         msg:
-          - "Published {{ admin_secret_folder }}/jwt-bundle-spiffe"
+          - "Published {{ admin_secret_folder }}/jwt-bundle-spiffe and trust-bundle-pem"
           - "JWT-SVID keys: {{ (spiffe_bundle.stdout | from_json)['keys'] | selectattr('use', 'equalto', 'jwt-svid') | map(attribute='kid') | list }}"
           - "Re-run before ca_ttl elapses: SPIRE rotates these keys."

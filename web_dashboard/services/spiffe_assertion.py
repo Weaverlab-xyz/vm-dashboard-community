@@ -97,9 +97,25 @@ def valid_spiffe_id(spiffe_id: str) -> bool:
 
 # ── Keys ─────────────────────────────────────────────────────────────────────
 
-def _fetch_jwks(url: str, ca_pem: str = "") -> dict:
+def _fetch_jwks(url: str, ca_pem: str = "", server_name: str = "") -> dict:
+    """GET a JWKS, optionally verifying TLS for ``server_name`` instead of the URL's host.
+
+    ``server_name`` is for a provider reached by address whose certificate names
+    something that only resolves elsewhere -- a Workload Lab's ``oidc.<trust-domain>``.
+    It becomes the TLS SNI and the name the certificate is verified against (httpx's
+    ``sni_hostname`` extension), and the Host header, because the SPIRE OIDC provider
+    refuses a Host that is not in its ``domains``. Verification is never switched off:
+    the pinned CA and the name are both still checked.
+    """
     verify = ssl.create_default_context(cadata=ca_pem) if ca_pem.strip() else True
-    resp = httpx.get(url, timeout=10.0, verify=verify, follow_redirects=False)
+    headers, extensions = {}, {}
+    if server_name:
+        from urllib.parse import urlsplit
+        port = urlsplit(url).port
+        extensions["sni_hostname"] = server_name
+        headers["Host"] = f"{server_name}:{port}" if port and port != 443 else server_name
+    with httpx.Client(verify=verify, timeout=10.0, follow_redirects=False) as client:
+        resp = client.get(url, headers=headers, extensions=extensions)
     resp.raise_for_status()
     return resp.json()
 
@@ -119,7 +135,8 @@ def _url_keys(row, force: bool = False) -> list:
     if hit and hit["expires"] > time.time() and not force:
         return hit["keys"]
     try:
-        doc = _fetch_jwks(row.jwks_url, row.ca_pem or "")
+        doc = _fetch_jwks(row.jwks_url, row.ca_pem or "",
+                          getattr(row, "tls_server_name", None) or "")
     except Exception as exc:  # noqa: BLE001 -- surfaced as a refused assertion
         raise AssertionError_(f"could not fetch JWKS for {row.trust_domain}: {exc}") from exc
     # An OIDC Discovery Provider marks its keys "sig"; a SPIFFE bundle endpoint uses
@@ -131,13 +148,22 @@ def _url_keys(row, force: bool = False) -> list:
 
 def keys_for(row, kid: Optional[str] = None) -> list:
     if row.jwks_url:
-        keys = _url_keys(row)
-        if kid and kid not in {k.get("kid") for k in keys}:
-            now = time.time()
-            if now - _last_forced.get(row.trust_domain, 0) >= _KID_REFETCH_INTERVAL:
-                _last_forced[row.trust_domain] = now
-                keys = _url_keys(row, force=True)
-        return keys
+        try:
+            keys = _url_keys(row)
+            if kid and kid not in {k.get("kid") for k in keys}:
+                now = time.time()
+                if now - _last_forced.get(row.trust_domain, 0) >= _KID_REFETCH_INTERVAL:
+                    _last_forced[row.trust_domain] = now
+                    keys = _url_keys(row, force=True)
+            return keys
+        except AssertionError_ as exc:
+            # The URL is the better source, but a lab's provider can be down or its
+            # certificate lapsed; a stored bundle beside it keeps verification working,
+            # said out loud because it will go stale.
+            if not row.bundle_json:
+                raise
+            logger.warning("JWKS URL for %s failed (%s); using the stored bundle from %s",
+                           row.trust_domain, exc, row.bundle_captured_at)
     if row.bundle_json:
         return bundle_keys(row.bundle_json)
     raise AssertionError_(f"trust domain {row.trust_domain} has neither a JWKS URL nor a bundle")

@@ -284,13 +284,16 @@ def test_the_happy_path_opens_the_acl_then_runs_four_playbooks_in_order():
     # The ACL comes first. Opening it after the install would leave a window where the
     # server is up and unreachable, and the ordering is the whole reachability story.
     kinds = [c[0] for c in CALLS if c[0] in ("folder", "acl", "stage")]
-    assert kinds == ["folder", "acl", "stage", "stage", "stage", "stage"], kinds
+    # FIVE stages for a vm lab since every build publishes its OIDC Discovery Provider
+    # (the dashboard registers the trust domain's JWKS URL from it).
+    assert kinds == ["folder", "acl"] + ["stage"] * len(svc.STAGE_ASSETS), kinds
     assert [c[1] for c in _stages()] == list(svc.STAGE_ASSETS)
-    assert row.stages_done == "install,ports,seed,identity"
+    assert svc.STAGE_ASSETS[-1] == "spire-oidc-provider.yml"
+    assert row.stages_done == "install,ports,seed,identity,oidc"
     assert row.entries_seeded == svc.ENTRIES_SEEDED == 11
     assert row.discovery_expected == svc.DISCOVERY_EXPECTED == 8
     # Each stage got its own job row, so a failure has somewhere to be read.
-    assert sorted(svc.stage_jobs(row)) == ["identity", "install", "ports", "seed"]
+    assert sorted(svc.stage_jobs(row)) == ["identity", "install", "oidc", "ports", "seed"]
     db.close()
 
 
@@ -379,7 +382,7 @@ def test_a_blank_source_set_opens_nothing_but_still_builds_the_lab():
     row = svc.get_lab(db, row.id)
     assert row.status == "available", row.error_message
     assert not [c for c in CALLS if c[0] == "acl"], "no ACL call should be made"
-    assert len(_stages()) == 4, "the lab is still built"
+    assert len(_stages()) == len(svc.STAGE_ASSETS), "the lab is still built"
     said = " ".join(str(c[2]) for c in CALLS if c[0] == "progress")
     assert "spire_lab_source_cidrs" in said, "the blank case must explain itself"
     db.close()
@@ -535,7 +538,7 @@ def test_the_chosen_managed_account_reaches_all_four_stages():
     row, job_id = _provisioned(svc, db, _provision_kw={"managed_account": dict(_PINNED)})
     asyncio.run(svc.run_provision(db, lab_id=row.id, job_id=job_id))
     metas = _metas()
-    assert len(metas) == 4
+    assert len(metas) == len(svc.STAGE_ASSETS)
     for meta in metas:
         assert meta["managed_account"] == _PINNED
         assert meta["secret_ssh_key_source"] == ""
@@ -564,7 +567,7 @@ def test_the_chosen_ssh_key_secret_reaches_all_four_stages():
         "secret_ssh_key_source": "bt_safe://Automation/keys/spire-host"})
     asyncio.run(svc.run_provision(db, lab_id=row.id, job_id=job_id))
     metas = _metas()
-    assert len(metas) == 4
+    assert len(metas) == len(svc.STAGE_ASSETS)
     for meta in metas:
         assert meta["secret_ssh_key_source"] == "bt_safe://Automation/keys/spire-host"
         assert meta["managed_account"] is None and meta["managed_become"] is None
@@ -620,7 +623,8 @@ def test_a_resumed_provision_reuses_the_same_credential():
     asyncio.run(svc.run_provision(db, lab_id=row.id, job_id=job_id))
     metas = _metas()
     assert [m["asset"] for m in metas] == ["spire-seed-entries.yml",
-                                           "spire-admin-identity.yml"]
+                                           "spire-admin-identity.yml",
+                                           "spire-oidc-provider.yml"]
     assert all(m["managed_account"] == _PINNED for m in metas)
     db.close()
 

@@ -580,7 +580,8 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
         elif job_type == "spirelab_decommission":
             from .services import spire_lab_service
             await spire_lab_service.run_decommission(
-                db, lab_id=meta["lab_id"], job_id=job_id)
+                db, lab_id=meta["lab_id"], job_id=job_id,
+                remove_software=bool(meta.get("remove_software")))
         elif job_type == "spirelab_k8s_link":
             # Opens tcp/8081 and tcp/8443 on the SPIRE host to the k3s node, then drives
             # five playbooks ALTERNATING HOSTS: k3s install and the agent on the node, the

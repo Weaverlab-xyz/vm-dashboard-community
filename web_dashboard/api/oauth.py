@@ -215,6 +215,9 @@ class TrustDomainRequest(BaseModel):
     trust_domain: str
     jwks_url: _Opt[str] = None
     ca_pem: _Opt[str] = None
+    # Verify the JWKS URL's TLS for this name (and send it as Host) when it differs from
+    # the URL's host -- a provider reached by address, as every Workload Lab registers.
+    tls_server_name: _Opt[str] = None
     bundle_json: _Opt[str] = None
 
 
@@ -228,6 +231,7 @@ def _td_item(row) -> dict:
         "id": row.id, "trust_domain": row.trust_domain,
         "source": "url" if row.jwks_url else ("bundle" if row.bundle_json else "none"),
         "jwks_url": row.jwks_url or "", "ca_pinned": bool((row.ca_pem or "").strip()),
+        "tls_server_name": row.tls_server_name or "",
         "bundle_jwt_keys": keys,
         "bundle_captured_at": row.bundle_captured_at.isoformat() if row.bundle_captured_at else None,
         "stale": spiffe_assertion.is_stale(row),
@@ -279,6 +283,7 @@ def upsert_trust_domain(body: TrustDomainRequest, admin: User = Depends(require_
         db.add(row)
     row.jwks_url = url or None
     row.ca_pem = (body.ca_pem or "").strip() or None
+    row.tls_server_name = (body.tls_server_name or "").strip().lower() or None
     if bundle:
         row.bundle_json = bundle
         row.bundle_captured_at = datetime.utcnow()

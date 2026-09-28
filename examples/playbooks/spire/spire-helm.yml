@@ -1,0 +1,324 @@
+# Install SPIRE on the lab host's k3s with the official Helm charts
+# Target: the SPIRE lab VM, after k3s-server-init.yml. Idempotent (helm upgrade --install).
+#
+# The Workload Lab's `k8s` deployment mode. The charts are spiffe/helm-charts-hardened:
+# `spire-crds`, then `spire` — the server as a StatefulSet, the agent as a DaemonSet, the
+# SPIFFE CSI driver, the controller manager (ClusterSPIFFEID auto-registration) and the
+# OIDC Discovery Provider, whose serving certificate spiffe-helper rotates from SPIRE
+# itself (so, unlike the `vm` and `docker` modes, nothing here has to renew it).
+#
+# Everything AFTER this play is shared with the other modes through `spire_cli_prefix`
+# (`k3s kubectl exec -n spire-server spire-server-0 -c spire-server -- `). The server
+# image is distroless, so the shared plays mint to stdout (`spire_mint_stdout`).
+#
+# NEVER LIVE-VALIDATED, AND TWO VALUE KEYS ARE THE RISK. The chart's value names for the
+# server's admin IDs and the provider's domains are written from its documentation, not
+# from a run. So this play does not TRUST the values — it READS BACK the rendered server
+# config and asserts admin_ids is there, and fetches the discovery document through the
+# published port with the expected Host, failing with the fix if either is wrong. Extra
+# or corrected values go in `helm_values_extra` without editing this file.
+#
+# EXPOSURE. Two LoadBalancer Services of this play's own, on k3s's built-in ServiceLB,
+# which binds the NODE's address: tcp/8081 → the server (Password Safe, and agents on
+# other hosts such as the k3s-link node, dial it exactly as in `vm` mode) and tcp/8443 →
+# the OIDC provider (the dashboard fetches JWKS from it). Their selectors and target
+# ports are read from the chart's own workloads rather than guessed.
+#
+# extra_vars:
+#   trust_domain: weaverlab.test          # REQUIRED
+#   admin_spiffe_id: ""                   # default spiffe://<td>/password-safe/admin
+#   oidc_domain: oidc.weaverlab.test      # REQUIRED — the provider's name (TLS SAN + Host)
+#   cluster_name: workload-lab
+#   ca_ttl: 168h
+#   bind_port: 8081
+#   oidc_port: 8443
+#   helm_version: 3.16.2
+#   spire_chart_version: 0.30.2           # pinned: ships SPIRE 1.15.3, as the other modes do
+#   spire_crds_chart_version: 0.6.1       # blank = latest, with a warning
+#   ca_subject_country: US                # the CA subject; strict mode refuses the chart's
+#   ca_subject_organization: Workload Lab #   placeholders
+#   helm_values_extra: ""                 # YAML merged over the values below
+- name: Install SPIRE on k3s with Helm
+  hosts: all
+  become: true
+  vars:
+    trust_domain: ""
+    admin_spiffe_id: ""
+    oidc_domain: ""
+    cluster_name: "workload-lab"
+    ca_ttl: "168h"
+    default_x509_svid_ttl: "1h"
+    default_jwt_svid_ttl: "5m"
+    bind_port: 8081
+    oidc_port: 8443
+    helm_version: "3.16.2"
+    spire_chart_repo: "https://spiffe.github.io/helm-charts-hardened/"
+    spire_chart_version: "0.30.2"
+    spire_crds_chart_version: "0.6.1"
+    ca_subject_country: "US"
+    ca_subject_organization: "Workload Lab"
+    helm_values_extra: ""
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    values_file: /opt/spire/helm-values.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  tasks:
+    - name: Require a trust domain and the provider's name
+      ansible.builtin.assert:
+        that:
+          - trust_domain | length > 0
+          - "'/' not in trust_domain"
+          - oidc_domain | length > 0
+        fail_msg: "trust_domain and oidc_domain are required."
+
+    - name: Resolve the administrative SPIFFE ID and issuer
+      ansible.builtin.set_fact:
+        _admin_id: >-
+          {{ admin_spiffe_id | default('spiffe://' ~ trust_domain ~ '/password-safe/admin', true) }}
+        _issuer: "https://{{ oidc_domain }}:{{ oidc_port }}"
+
+    - name: Refuse to run beside the VM-mode server
+      ansible.builtin.command: systemctl is-active spire-server
+      register: systemd_spire
+      changed_when: false
+      failed_when: systemd_spire.stdout == "active"
+
+    - name: Confirm k3s is serving
+      ansible.builtin.command: k3s kubectl get nodes -o name
+      register: k3s_nodes
+      changed_when: false
+
+    - name: Map the CPU architecture to a Helm release asset
+      ansible.builtin.set_fact:
+        _arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts['architecture']] | default('') }}"
+
+    - name: Detect helm
+      ansible.builtin.stat:
+        path: /usr/local/bin/helm
+      register: helm_bin
+
+    - name: Download helm
+      ansible.builtin.unarchive:
+        src: "https://get.helm.sh/helm-v{{ helm_version }}-linux-{{ _arch }}.tar.gz"
+        dest: /usr/local/bin
+        remote_src: true
+        extra_opts: ["--strip-components=1", "linux-{{ _arch }}/helm"]
+        mode: "0755"
+      when: not helm_bin.stat.exists
+
+    - name: Warn about unpinned charts
+      ansible.builtin.debug:
+        msg: >-
+          spire_chart_version / spire_crds_chart_version are blank, so the LATEST charts
+          were installed. Pin them (spire_lab_helm_chart_version / spire_lab_helm_crds_chart_version) for anything
+          you intend to keep — the value keys this play relies on can change.
+      when: spire_chart_version | length == 0 or spire_crds_chart_version | length == 0
+
+    - name: Create the values directory
+      ansible.builtin.file:
+        path: /opt/spire
+        state: directory
+        mode: "0750"
+
+    - name: Write the chart values
+      ansible.builtin.copy:
+        dest: "{{ values_file }}"
+        mode: "0640"
+        content: |
+          global:
+            spire:
+              # Upstream's production settings, and the only switch that applies the
+              # chart's security contexts: non-root 1000:1000, read-only root, all
+              # capabilities dropped, no privilege escalation, RuntimeDefault seccomp. It
+              # also lays the server out in the spire-server namespace (the CLI prefix and
+              # every task below depend on that), labels the namespaces with Pod Security
+              # Standards, sets priority classes, and turns on strict mode -- which refuses
+              # the chart's placeholder trust domain, cluster name, issuer and CA subject.
+              recommendations:
+                enabled: true
+              trustDomain: "{{ trust_domain }}"
+              clusterName: "{{ cluster_name }}"
+              jwtIssuer: "{{ _issuer }}"
+              caSubject:
+                country: "{{ ca_subject_country }}"
+                organization: "{{ ca_subject_organization }}"
+                commonName: "{{ trust_domain }}"
+              namespaces:
+                create: true
+          spire-server:
+            caTTL: "{{ ca_ttl }}"
+            # Key names as chart 0.30.2 spells them. A misspelt key is silently ignored,
+            # and the chart's defaults (4h / 1h) would replace the lab's.
+            defaultX509SvidTTL: "{{ default_x509_svid_ttl }}"
+            defaultJwtSvidTTL: "{{ default_jwt_svid_ttl }}"
+            adminIDs:
+              - "{{ _admin_id }}"
+            controllerManager:
+              enabled: true
+              # The provider's serving certificate is an SVID from this ClusterSPIFFEID.
+              # The chart names it oidc-discovery.<td>; the dashboard (tls_server_name) and
+              # the check below verify oidc.<td>, as in the vm and docker modes.
+              identities:
+                clusterSPIFFEIDs:
+                  oidc-discovery-provider:
+                    dnsNameTemplates:
+                      - "{{ oidc_domain }}"
+          spiffe-oidc-discovery-provider:
+            enabled: true
+            config:
+              # The chart derives one domain from jwtIssuer's host (port included);
+              # the bare name is what a Host header without a port carries.
+              additionalDomains:
+                - "{{ oidc_domain }}"
+
+    - name: Write the extra values
+      ansible.builtin.copy:
+        dest: "{{ values_file }}.extra"
+        mode: "0640"
+        content: "{{ helm_values_extra if helm_values_extra | length > 0 else '{}' }}\n"
+
+    - name: Install the SPIRE CRDs chart
+      ansible.builtin.command: >-
+        helm upgrade --install spire-crds spire-crds
+        --repo {{ spire_chart_repo }}
+        {{ ('--version ' ~ spire_crds_chart_version) if spire_crds_chart_version | length > 0 else '' }}
+        --namespace spire-mgmt --create-namespace --wait
+      register: helm_crds
+      changed_when: helm_crds.rc == 0
+
+    - name: Install the SPIRE chart
+      ansible.builtin.command: >-
+        helm upgrade --install spire spire
+        --repo {{ spire_chart_repo }}
+        {{ ('--version ' ~ spire_chart_version) if spire_chart_version | length > 0 else '' }}
+        --namespace spire-mgmt --create-namespace
+        -f {{ values_file }} -f {{ values_file }}.extra
+        --wait --timeout 10m
+      register: helm_spire
+      changed_when: helm_spire.rc == 0
+
+    - name: Wait for the server pod
+      ansible.builtin.command: >-
+        k3s kubectl -n spire-server wait --for=condition=Ready pod/spire-server-0 --timeout=300s
+      register: server_ready
+      changed_when: false
+
+    # ── Verify what the values were supposed to do ──────────────────────────
+    - name: Read the rendered server configuration
+      ansible.builtin.command: >-
+        k3s kubectl -n spire-server get configmap spire-server -o jsonpath={.data}
+      register: server_cm
+      changed_when: false
+
+    - name: Confirm admin_ids reached the server configuration
+      ansible.builtin.assert:
+        that:
+          - _admin_id in server_cm.stdout
+        fail_msg: >-
+          {{ _admin_id }} is not in the rendered spire-server config, so the chart did not
+          take `spire-server.adminIDs` on this version. The administrative credential would
+          mint but be refused. Set the correct key through helm_values_extra and re-run.
+
+    - name: Read the server workload's selector and API port
+      ansible.builtin.command: >-
+        k3s kubectl -n spire-server get statefulset spire-server -o json
+      register: server_sts
+      changed_when: false
+
+    - name: Read the provider workload's selector and TLS port
+      ansible.builtin.command: >-
+        k3s kubectl -n spire-server get deployment -l app.kubernetes.io/name=spiffe-oidc-discovery-provider -o json
+      register: oidc_deploy
+      changed_when: false
+
+    - name: Work out selectors and target ports
+      ansible.builtin.set_fact:
+        _server_sel: "{{ (server_sts.stdout | from_json).spec.selector.matchLabels }}"
+        _server_port: >-
+          {{ ((server_sts.stdout | from_json).spec.template.spec.containers
+              | selectattr('name', 'equalto', 'spire-server') | first).ports
+             | selectattr('containerPort', 'equalto', 8081) | map(attribute='containerPort')
+             | first | default(8081) }}
+        _oidc_sel: "{{ ((oidc_deploy.stdout | from_json)['items'] | first).spec.selector.matchLabels }}"
+        _oidc_port: >-
+          {{ (((oidc_deploy.stdout | from_json)['items'] | first).spec.template.spec.containers
+              | map(attribute='ports') | select('defined') | flatten
+              | selectattr('name', 'in', ['https', 'tls']) | map(attribute='containerPort')
+              | list + [8443]) | first }}
+
+    - name: Publish the server API and the OIDC provider on the node
+      ansible.builtin.copy:
+        dest: /opt/spire/lab-services.yaml
+        mode: "0640"
+        content: |
+          apiVersion: v1
+          kind: Service
+          metadata: {name: spire-server-lab, namespace: spire-server}
+          spec:
+            type: LoadBalancer
+            selector: {{ _server_sel | to_json }}
+            ports: [{name: grpc, port: {{ bind_port }}, targetPort: {{ _server_port | int }}}]
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: {name: spire-oidc-lab, namespace: spire-server}
+          spec:
+            type: LoadBalancer
+            selector: {{ _oidc_sel | to_json }}
+            ports: [{name: https, port: {{ oidc_port }}, targetPort: {{ _oidc_port | int }}}]
+
+    - name: Apply the lab Services
+      ansible.builtin.command: k3s kubectl apply -f /opt/spire/lab-services.yaml
+      register: svc_apply
+      changed_when: "'configured' in svc_apply.stdout or 'created' in svc_apply.stdout"
+
+    - name: Wait for the API port on the node
+      ansible.builtin.wait_for:
+        port: "{{ bind_port }}"
+        host: 127.0.0.1
+        timeout: 180
+
+    - name: Health check through the CLI prefix the shared plays use
+      ansible.builtin.command: >-
+        k3s kubectl exec -n spire-server spire-server-0 -c spire-server --
+        /opt/spire/bin/spire-server healthcheck
+      register: spire_health
+      changed_when: false
+      retries: 10
+      delay: 3
+      until: spire_health.rc == 0
+
+    # -k is deliberately NOT used: the provider's certificate chains to the trust bundle,
+    # which is what the dashboard will pin. Fetching with the bundle proves both halves.
+    - name: Read the trust bundle for the check below
+      ansible.builtin.command: >-
+        k3s kubectl exec -n spire-server spire-server-0 -c spire-server --
+        /opt/spire/bin/spire-server bundle show
+      register: bundle_show
+      changed_when: false
+
+    - name: Stage the bundle
+      ansible.builtin.copy:
+        dest: /opt/spire/trust-bundle.pem
+        mode: "0644"
+        content: "{{ bundle_show.stdout }}\n"
+
+    - name: Fetch the discovery document through the published port
+      ansible.builtin.command: >-
+        curl -sS --noproxy '*' --cacert /opt/spire/trust-bundle.pem
+        --resolve {{ oidc_domain }}:{{ oidc_port }}:127.0.0.1
+        {{ _issuer }}/.well-known/openid-configuration
+      register: oidc_discovery
+      changed_when: false
+      retries: 20
+      delay: 6
+      until: oidc_discovery.rc == 0 and 'jwks_uri' in oidc_discovery.stdout
+
+    - name: What was built
+      ansible.builtin.debug:
+        msg:
+          - "SPIRE on k3s for trust domain '{{ trust_domain }}' (release spire in spire-mgmt)."
+          - "Server API:      tcp/{{ bind_port }} on this node (Service spire-server-lab)."
+          - "OIDC provider:   {{ _issuer }} → tcp/{{ oidc_port }} (Service spire-oidc-lab)."
+          - "CLI: k3s kubectl exec -n spire-server spire-server-0 -c spire-server -- /opt/spire/bin/spire-server <command>"
+          - "In-cluster workloads get SVIDs through the CSI driver; register them with ClusterSPIFFEID."
