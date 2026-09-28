@@ -762,6 +762,169 @@ def test_a_new_server_or_agent_binary_restarts_the_service():
         assert flush and flush[0] > names.index("Unpack SPIRE"), (
             f"{name}: the restart must land before the play probes the service")
 
+
+# ── the Upgrade action ───────────────────────────────────────────────────────
+
+def _assets(stages):
+    return [(st["asset"], host) for st, host in stages]
+
+
+def test_an_upgrade_runs_the_server_first_then_the_provider_then_a_linked_agent():
+    assert _assets(svc.upgrade_stages(_row(deployment_mode="vm"))) == [
+        ("spire-server-install.yml", "spire"), ("spire-oidc-provider.yml", "spire")]
+    assert _assets(svc.upgrade_stages(_row(deployment_mode="docker"))) == [
+        ("spire-docker-server.yml", "spire"), ("spire-oidc-provider.yml", "spire")]
+    assert _assets(svc.upgrade_stages(_row(deployment_mode="k8s"))) == [
+        ("spire-helm.yml", "spire")], "the chart runs the provider and the agents"
+    # A lab built before the provider was a build stage has none to upgrade.
+    assert _assets(svc.upgrade_stages(
+        _row(deployment_mode="vm", stages_done="install,ports,seed,identity"))) == [
+        ("spire-server-install.yml", "spire")]
+    # Linked: the entry stage first -- the agent play needs a fresh one-use join token.
+    assert _assets(svc.upgrade_stages(_row(deployment_mode="vm", k8s_status="linked"))) == [
+        ("spire-server-install.yml", "spire"), ("spire-oidc-provider.yml", "spire"),
+        ("spire-k8s-entry.yml", "k8s"), ("spire-agent-install.yml", "k8s")]
+
+
+def test_the_target_release_is_the_configured_version_or_the_pinned_chart():
+    orig = svc._cfg
+    try:
+        svc._cfg = lambda key, default="": "1.16.0" if key == "spire_lab_version" else default
+        assert svc.target_release(_row(deployment_mode="docker")) == "1.16.0"
+        assert svc.target_release(_row(deployment_mode="k8s")) == f"chart {svc.SPIRE_CHART_VERSION}"
+    finally:
+        svc._cfg = orig
+
+
+def _stub_websocket():
+    import types
+    ws = types.ModuleType("web_dashboard.api.websocket")
+
+    async def broadcast_progress(*a, **kw):
+        pass
+    ws.broadcast_progress = broadcast_progress
+    prev = sys.modules.get("web_dashboard.api.websocket")
+    sys.modules["web_dashboard.api.websocket"] = ws
+    return prev
+
+
+def _run_upgrade(db, row, job_id, *, fail_on=None):
+    import asyncio
+    ran = []
+
+    async def fake_stage(db_, *, row, stage, actor, asset_backend, parent_job_id):
+        ran.append(stage["asset"])
+        return "failed" if stage["asset"] == fail_on else "completed"
+
+    saved = (svc._run_stage, svc._run_k8s_stage, svc.read_public_artifacts,
+             svc.register_trust_domain, svc._cfg)
+    prev_ws = _stub_websocket()
+    svc._run_stage = svc._run_k8s_stage = fake_stage
+    svc.read_public_artifacts = lambda db_, row_: None
+    svc.register_trust_domain = lambda db_, row_: {}
+    svc._cfg = lambda key, default="": {"spire_lab_version": "1.16.0",
+                                        "spire_lab_asset_backend": "local"}.get(key, default)
+    try:
+        asyncio.run(svc.run_upgrade(db, lab_id=row.id, job_id=job_id))
+    finally:
+        (svc._run_stage, svc._run_k8s_stage, svc.read_public_artifacts,
+         svc.register_trust_domain, svc._cfg) = saved
+        if prev_ws is not None:
+            sys.modules["web_dashboard.api.websocket"] = prev_ws
+    db.expire_all()
+    return ran
+
+
+def test_an_upgrade_records_the_new_release_only_when_every_stage_completes():
+    db, row = _save(_row(trust_domain="up-ok.test", deployment_mode="vm",
+                         k8s_status="linked", spire_version="1.15.3"))
+    try:
+        job = svc.start_upgrade(db, lab_id=row.id, created_by="tester")
+        ran = _run_upgrade(db, row, job["job_id"])
+        assert ran == ["spire-server-install.yml", "spire-oidc-provider.yml",
+                       "spire-k8s-entry.yml", "spire-agent-install.yml"]
+        row = db.query(SpireLab).filter(SpireLab.id == row.id).one()
+        assert row.spire_version == "1.16.0" and row.status == "available"
+        assert db.query(Job).filter(Job.id == job["job_id"]).one().status == "completed"
+    finally:
+        db.close()
+
+
+def test_a_failed_upgrade_stops_keeps_the_lab_available_and_says_what_ran():
+    db, row = _save(_row(trust_domain="up-fail.test", deployment_mode="vm",
+                         k8s_status="linked", spire_version="1.15.3"))
+    try:
+        job = svc.start_upgrade(db, lab_id=row.id, created_by="tester")
+        ran = _run_upgrade(db, row, job["job_id"], fail_on="spire-oidc-provider.yml")
+        assert ran == ["spire-server-install.yml", "spire-oidc-provider.yml"], (
+            "an agent must never be upgraded past a stage that failed")
+        row = db.query(SpireLab).filter(SpireLab.id == row.id).one()
+        assert row.status == "available", "a failed upgrade must stay retryable"
+        assert row.spire_version == "1.15.3", "the release is recorded only on success"
+        assert "spire-oidc-provider.yml failed" in row.error_message
+        assert "spire-server-install.yml" in row.error_message, "names what already ran"
+        assert db.query(Job).filter(Job.id == job["job_id"]).one().status == "failed"
+    finally:
+        db.close()
+
+
+def test_an_upgrade_blocks_a_second_upgrade_a_refresh_and_a_teardown():
+    db, row = _save(_row(trust_domain="up-busy.test", deployment_mode="docker"))
+    try:
+        svc.start_upgrade(db, lab_id=row.id, created_by="tester")
+        assert svc.upgrade_active(db, row.id)
+        for start, needle in ((lambda: svc.start_upgrade(db, lab_id=row.id, created_by="t"),
+                               "spirelab_upgrade job running"),
+                              (lambda: svc.start_jwt_bundle_capture(db, lab_id=row.id,
+                                                                    created_by="t"),
+                               "being upgraded"),
+                              (lambda: svc.start_decommission(db, lab_id=row.id,
+                                                              created_by="t"),
+                               "being upgraded")):
+            try:
+                start()
+                raise AssertionError(f"not refused: expected {needle!r}")
+            except svc.SpireLabError as exc:
+                assert needle in str(exc), exc
+        db.refresh(row)
+        assert row.status == "available", "a refused teardown must not have started"
+    finally:
+        db.close()
+
+
+def test_only_a_running_lab_is_upgraded():
+    db, row = _save(_row(trust_domain="up-state.test", status="failed"))
+    try:
+        try:
+            svc.start_upgrade(db, lab_id=row.id, created_by="t")
+            raise AssertionError("a failed lab was upgraded")
+        except svc.SpireLabError as exc:
+            assert "not available" in str(exc)
+        row.status, row.k8s_status = "available", "linking"
+        db.commit()
+        try:
+            svc.start_upgrade(db, lab_id=row.id, created_by="t")
+            raise AssertionError("upgraded mid-link")
+        except svc.SpireLabError as exc:
+            assert "being linked" in str(exc)
+    finally:
+        db.close()
+
+
+def test_the_upgrade_job_is_wired_into_the_worker_the_api_and_the_page():
+    root = os.path.join(_ROOT, "web_dashboard")
+    worker = open(os.path.join(root, "jobs_worker.py"), encoding="utf-8").read()
+    assert worker.count('"spirelab_upgrade"') >= 3, (
+        "handled, LIGHT tier (it awaits HEAVY children) and dispatched")
+    assert "run_upgrade(db, lab_id=meta[\"lab_id\"], job_id=job_id)" in worker
+    api = open(os.path.join(root, "api", "spire_lab.py"), encoding="utf-8").read()
+    assert '@router.post("/{lab_id}/upgrade")' in api
+    for key in ('"spire_version"', '"target_release"', '"upgrade_active"'):
+        assert key in api, key
+    page = open(os.path.join(root, "templates", "workload_lab", "_spire.html"),
+                encoding="utf-8").read()
+    assert "'/upgrade'" in page and "lab.spire_version !== lab.target_release" in page
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

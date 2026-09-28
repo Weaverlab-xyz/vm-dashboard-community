@@ -2483,6 +2483,10 @@ class SpireLab(Base):
     # charts). NULL reads as "vm", which is every lab built before this existed. See
     # spire_lab_service.stages_for and the CLI-prefix note there.
     deployment_mode = Column(String(16), nullable=True)
+    # The SPIRE release this lab runs, as built or last upgraded: a SPIRE version for vm /
+    # docker, "chart <version>" for k8s (the chart decides SPIRE there). NULL is a lab
+    # built before this was recorded -- unknown, so the page offers the upgrade.
+    spire_version = Column(String(32), nullable=True)
 
     # ── The Kubernetes half ──────────────────────────────────────────────────
     # A SECOND HOST on the same row rather than a second row: the trust domain is still
@@ -4788,6 +4792,7 @@ def init_db():
             "ALTER TABLE oauth_clients ADD COLUMN spiffe_id VARCHAR(500)",
             # SPIRE lab deployment modes (vm | docker | k8s); NULL = vm, every older lab.
             "ALTER TABLE spire_labs ADD COLUMN deployment_mode VARCHAR(16)",
+            "ALTER TABLE spire_labs ADD COLUMN spire_version VARCHAR(32)",
             # Verify a JWKS URL's TLS for this name (the lab's oidc.<td>) while connecting
             # to the URL's address -- the name only resolves on the lab itself.
             "ALTER TABLE spiffe_trust_domains ADD COLUMN tls_server_name VARCHAR(255)",

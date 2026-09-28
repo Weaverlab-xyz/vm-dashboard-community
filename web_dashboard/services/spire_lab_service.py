@@ -899,6 +899,7 @@ async def run_provision(db: Session, *, lab_id: str, job_id: str) -> None:
         await broadcast_progress(job_id, 96, "Registering the trust domain's JWKS URL…")
         register_trust_domain(db, row)
 
+        row.spire_version = target_release(row)
         row.status = "available"
         row.error_message = None
         row.updated_at = datetime.utcnow()
@@ -987,6 +988,10 @@ def start_decommission(db: Session, *, lab_id: str, created_by: str,
         raise SpireLabError(f"SPIRE lab {lab_id} not found")
     if row.status == "decommissioning":
         raise SpireLabError(f"{row.name} is already being torn down")
+    if upgrade_active(db, row.id):
+        # Raised BEFORE the timer is cleared below, so an auto-delete sweep simply retries
+        # on its next pass instead of tearing down a host an upgrade is still writing to.
+        raise SpireLabError(f"{row.name} is being upgraded — destroy it once that finishes")
     row.status = "decommissioning"
     # Cleared in the same transaction that starts the teardown: at-most-once, and it stops
     # the next sweep pass from enqueueing a second teardown for the same row.
@@ -1787,6 +1792,8 @@ def start_jwt_bundle_capture(db: Session, *, lab_id: str, created_by: str) -> di
         raise SpireLabError(
             f"{row.name} has no Secrets Safe folder recorded, so the bundle would have no "
             f"channel back to the dashboard")
+    if upgrade_active(db, row.id):
+        raise SpireLabError(f"{row.name} is being upgraded — refresh its keys afterwards")
     job = job_service.create_job(
         db, JWT_BUNDLE_JOB_TYPE, created_by, workgroup=row.workgroup,
         metadata={"lab_id": row.id, "trust_domain": row.trust_domain})
@@ -2141,3 +2148,140 @@ MODE_ASSETS = {mode: tuple(s["asset"] for s in stages) for mode, stages in _MODE
 # What a VM-mode build fetches. Kept under the old name because /options and the tests
 # read it; the per-mode sets are MODE_ASSETS.
 STAGE_ASSETS = MODE_ASSETS["vm"]
+
+
+# ── Upgrade ───────────────────────────────────────────────────────────────────
+# A built lab never re-runs its install stages, so without this an upgrade meant running
+# playbooks by hand. "Upgrade" re-runs the stages that install software, in SPIRE's
+# supported order -- server before agents:
+#
+#   1. the mode's install stage (spire-server-install.yml / spire-docker-server.yml /
+#      spire-helm.yml): the plays are idempotent, restart onto a new binary or recreate on
+#      a new pinned image, and a k8s lab is a `helm upgrade` to the pinned chart;
+#   2. the OIDC provider (vm/docker, when the build published it): per-version install
+#      behind a symlink, re-pointed with a restart;
+#   3. a LINKED k3s node's agent: the entry stage first, because the agent play needs a
+#      fresh one-use join token (the same reason the link always re-runs it), then the
+#      agent stage.
+#
+# The target is whatever Settings -> SPIRE Lab says now (version, chart pins), and every
+# download is pinned, so an upgrade to a version the plays hold no pin for is refused by
+# the play itself. Seeding, the admin credential and the ACL are untouched.
+#
+# No "upgrading" row status: it would outlive a worker that died mid-run and wedge the
+# lab. "In progress" is read from the job table (upgrade_active), which the stale-job
+# handling already keeps honest; refresh and teardown both check it.
+
+UPGRADE_JOB_TYPE = "spirelab_upgrade"
+_LAB_JOB_TYPES = (UPGRADE_JOB_TYPE, JWT_BUNDLE_JOB_TYPE, "spirelab_k8s_link",
+                  "spirelab_provision", "spirelab_decommission")
+
+
+def target_release(row) -> str:
+    """The release an upgrade would install: the configured SPIRE version, or for a k8s
+    lab the pinned chart (which decides the SPIRE version there)."""
+    if deployment_mode(row) == "k8s":
+        return f"chart {_helm_vars(row)['spire_chart_version']}"
+    return _cfg("spire_lab_version", "1.15.3")
+
+
+def _active_lab_jobs(db: Session, lab_id: str, job_types) -> list:
+    rows = (db.query(Job)
+            .filter(Job.job_type.in_(tuple(job_types)),
+                    Job.status.in_(job_service.ACTIVE_STATUSES))
+            .all())
+    return [j for j in rows if (j.metadata_dict or {}).get("lab_id") == lab_id]
+
+
+def upgrade_active(db: Session, lab_id: str) -> bool:
+    return bool(_active_lab_jobs(db, lab_id, (UPGRADE_JOB_TYPE,)))
+
+
+def upgrade_stages(row) -> list:
+    """``[(stage, host)]`` in the order an upgrade runs them; host "spire" or "k8s"."""
+    install = next(s for s in stages_for(row) if s["key"] == "install")
+    out = [(install, "spire")]
+    if deployment_mode(row) in ("vm", "docker") and "oidc" in _stages_done(row):
+        out.append((OIDC_BUILD_STAGE, "spire"))
+    if row.k8s_status == "linked":
+        by_key = {s["key"]: s for s in K8S_STAGES}
+        out += [(by_key["entry"], "k8s"), (by_key["agent"], "k8s")]
+    return out
+
+
+def start_upgrade(db: Session, *, lab_id: str, created_by: str) -> dict:
+    row = get_lab(db, lab_id)
+    if not row:
+        raise SpireLabError(f"SPIRE lab {lab_id} not found")
+    if row.status != "available":
+        raise SpireLabError(
+            f"{row.name} is {row.status}, not available — only a running lab is upgraded; "
+            f"a failed build resumes from the build form")
+    if row.k8s_status == "linking":
+        raise SpireLabError(f"{row.name} is being linked to Kubernetes — upgrade afterwards")
+    busy = _active_lab_jobs(db, row.id, _LAB_JOB_TYPES)
+    if busy:
+        raise SpireLabError(
+            f"{row.name} already has a {busy[0].job_type} job running ({busy[0].id[:8]}) — "
+            f"upgrade once it finishes")
+    to = target_release(row)
+    job = job_service.create_job(
+        db, UPGRADE_JOB_TYPE, created_by, workgroup=row.workgroup,
+        metadata={"lab_id": row.id, "trust_domain": row.trust_domain,
+                  "from_release": row.spire_version or "", "to_release": to,
+                  "stages": [st["asset"] for st, _ in upgrade_stages(row)]})
+    db.commit()
+    logger.info("spire-lab: queued upgrade of %r (%s -> %s) as job %s",
+                row.name, row.spire_version or "unknown", to, job.id)
+    return {"lab_id": row.id, "job_id": job.id, "from_release": row.spire_version or "",
+            "to_release": to}
+
+
+async def run_upgrade(db: Session, *, lab_id: str, job_id: str) -> None:
+    """Worker entry point for ``spirelab_upgrade``. Stops at the first failed stage: the
+    server goes first precisely so that an agent is never upgraded past a server that
+    did not make it."""
+    from ..api.websocket import broadcast_progress
+    from . import storage_service
+    row = get_lab(db, lab_id)
+    if not row:
+        logger.warning("spire-lab: row %s vanished before the upgrade", lab_id)
+        return
+    job_service.set_running(db, job_id)
+    to = target_release(row)
+    try:
+        asset_backend = _cfg("spire_lab_asset_backend") or storage_service.active_backend()
+        ran = []
+        for stage, host in upgrade_stages(row):
+            runner = _run_k8s_stage if host == "k8s" else _run_stage
+            status = await runner(db, row=row, stage=stage, actor=row.created_by or "system",
+                                  asset_backend=asset_backend, parent_job_id=job_id)
+            if status != "completed":
+                jobs = k8s_stage_jobs(row) if host == "k8s" else stage_jobs(row)
+                raise SpireLabError(
+                    f"{stage['asset']} {status} — see job {jobs.get(stage['key'], '')} for "
+                    f"the Ansible output. Stages already upgraded: "
+                    f"{', '.join(ran) or 'none'}")
+            ran.append(stage["asset"])
+        await broadcast_progress(job_id, 96, "Re-registering the trust domain…")
+        read_public_artifacts(db, row)
+        register_trust_domain(db, row)
+        previous = row.spire_version or ""
+        row.spire_version = to
+        row.error_message = None
+        row.updated_at = datetime.utcnow()
+        db.commit()
+        job_service.set_completed(db, job_id, result={
+            "lab_id": row.id, "from_release": previous, "to_release": to, "stages": ran})
+        logger.info("spire-lab: upgraded %r to %s", row.name, to)
+    except Exception as exc:  # noqa: BLE001
+        # The lab stays `available` so the upgrade can be retried: the plays are
+        # idempotent, and a pin refusal or a failed download stops before anything is
+        # replaced. A stage that fails LATER (a health check after the restart) may have
+        # left the new binary in place -- which is why the message names the stages that
+        # completed and the job holding the failed one's Ansible output.
+        row.error_message = f"upgrade to {to} failed: {exc}"[:2000]
+        row.updated_at = datetime.utcnow()
+        db.commit()
+        logger.error("spire-lab: upgrade failed for %s: %s", lab_id, exc)
+        job_service.set_failed(db, job_id, str(exc))
