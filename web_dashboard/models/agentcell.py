@@ -163,6 +163,20 @@ class AgentCellInfo(BaseModel):
     episode_state: str = ""
     episode_summary: str = ""
     episode_started_at: str = ""
+    # What the Install dialog needs to write commands that actually run. None is secret.
+    # token_mode: "spiffe" (an SVID-bound OAuth client -- nothing on the host), "oauth"
+    # (a client id:secret pair, shown once at mint) or "pat".
+    token_mode: str = ""
+    client_id: str = ""
+    # The SPIRE server's address and how its CLI is reached, for agent-spiffe-entry.yml.
+    spire_host: str = ""
+    spire_cli_prefix: str = ""
+    # The node the worker can attest on: the lab's Kubernetes-linked k3s node, the one
+    # host in this lab that runs a SPIRE agent. Empty when the lab is not linked.
+    agent_node_id: str = ""
+    agent_node_host: str = ""
+    # The worker's host IS that node. Anywhere else there is no SPIRE agent to attest to.
+    worker_on_node: bool = False
 
 
 class AgentCellListResponse(BaseModel):

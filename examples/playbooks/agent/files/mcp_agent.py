@@ -483,6 +483,20 @@ def _projected_token(path: str, what: str) -> str:
     return token
 
 
+def spire_socket_path(socket: str) -> str:
+    """The filesystem path `spire-agent api fetch -socketPath` needs.
+
+    The SPIFFE convention for naming the Workload API is a URI -- SPIFFE_ENDPOINT_SOCKET
+    is `unix:///tmp/spire-agent/public/api.sock`, and that is the form agent-install.yml
+    passes -- but `-socketPath` takes a PLAIN PATH. Handed the URI, spire-agent dials a
+    relative file literally named `unix:/tmp/...` and fails, so every loop logged
+    `unattested` and `--token-source spiffe` could never fetch an SVID. Found by running
+    the worker's own fetches against a SPIRE 1.15.3 agent; both forms are accepted.
+    """
+    socket = (socket or "").strip()
+    return socket[len("unix://"):] if socket.startswith("unix://") else socket
+
+
 def _spire_jwt_svid(audience: str, socket_path: str) -> str:
     """SPIRE: a JWT-SVID for this workload, audience-bound.
 
@@ -494,7 +508,7 @@ def _spire_jwt_svid(audience: str, socket_path: str) -> str:
     try:
         out = subprocess.run(
             ["spire-agent", "api", "fetch", "jwt", "-audience", audience,
-             "-socketPath", socket_path],
+             "-socketPath", spire_socket_path(socket_path)],
             capture_output=True, text=True, timeout=10,
         )
     except FileNotFoundError:
@@ -1853,7 +1867,8 @@ def fetch_spiffe_id(socket_path: str) -> str:
     """
     try:
         out = subprocess.run(
-            ["spire-agent", "api", "fetch", "x509", "-socketPath", socket_path],
+            ["spire-agent", "api", "fetch", "x509", "-socketPath",
+             spire_socket_path(socket_path)],
             capture_output=True, text=True, timeout=10,
         )
     except FileNotFoundError:

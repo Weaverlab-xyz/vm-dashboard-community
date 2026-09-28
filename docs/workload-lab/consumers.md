@@ -2,9 +2,11 @@
 
 > **Audience:** operator · **Profile:** `demo` · **Read this when:** someone asks what actually spends what the lab issues, or you need to pick the consumer to run in front of a room.
 
-> **Preview.** Two of the consumers here have never run live: the MCP worker (no live SPIRE
-> trust domain and no live MCP endpoint) and the `wlc` / `ps` token sources it offers (no
-> Workload Credentials tenant, no registered Workload Identity, no federation trust). The
+> **Preview.** Two of the consumers here have not run live end to end: the MCP worker
+> (its SPIRE fetches and the dashboard's acceptance of its JWT-SVID have run against SPIRE
+> 1.15.3 locally; the loop on a real host against a live MCP endpoint has not) and the
+> `wlc` / `ps` token sources it offers (no Workload Credentials tenant, no registered
+> Workload Identity, no federation trust). The
 > shipped playbooks have code behind every claim on this page; whether each has been run
 > against a live authority is stated per tab, and the register at the end is the honest
 > summary.
@@ -72,33 +74,39 @@ from the lab CA would blur which half of the handshake is being demonstrated.
 
 ---
 
-## The SVID is spent as evidence, not as an authenticator
-
-This is the honest part of the page and it gets its own heading rather than a footnote.
+## The SVID: evidence by default, the authenticator with a service account
 
 `examples/playbooks/agent/files/mcp_agent.py` re-fetches its SVID from the SPIRE workload
-API on **every loop** and prints it beside the token it spent:
+API on **every loop** and prints it beside the credential it spent:
 
 ```
 [agent] spiffe://weaverlab.test/agent/mcp-reader · token "mcp-reader-pat" · 14 active jobs, 2 failed today · 14:02:11
 ```
 
-The worker is installed by `examples/playbooks/agent/agent-install.yml`; its registration
-entry comes from `agent-spiffe-entry.yml`.
+The worker is installed by `examples/playbooks/agent/agent-install.yml` on the lab's
+Kubernetes-linked node — the host that runs a SPIRE agent — and its registration entry
+comes from `agent-spiffe-entry.yml` on the SPIRE server.
 
-**The SVID does not authenticate to `/mcp`.** `web_dashboard/api/mcp_server.py` takes a
-Bearer PAT and has no mTLS path. Bridging those two — having the SVID mint the PAT — would
-need the Password Safe **SPIFFE SVID** plugin, whose configuration question
-`services/spire_lab_service.py` records as unresolved. So on the default `file` token
-source the SVID is consumed as *proof of who is running* and the PAT is what is actually
-spent. The worker prints both on one line precisely so that gap stays visible rather than
-being narrated away.
+**With a PAT or a client secret, the SVID is evidence.** It is consumed as *proof of who is
+running*, and the PAT or client pair is what is actually spent. The worker prints both on
+one line precisely so that gap stays visible rather than being narrated away.
 
-There is one path where the SVID **is** an authenticator: `--identity-platform spire` mints
-a JWT-SVID and presents it to Workload Credentials, because
+**With a service account and a registered trust domain, the SVID is the authenticator.**
+`--token-source spiffe` presents a fresh JWT-SVID at the dashboard's `/api/oauth/token` as
+an OAuth client assertion, and the dashboard — which verifies it against the trust domain's
+keys, fetched from the lab's JWKS URL — returns an access token that lives minutes. Nothing
+is stored on the host. It still does not authenticate to `/mcp` *directly*
+(`web_dashboard/api/mcp_server.py` has no mTLS path; it sees the bearer token), and the
+other bridge — the SVID minting a credential inside Password Safe through the **SPIFFE
+SVID** plugin — is still unresolved (`services/spire_lab_service.py`). The exchange has run
+against a real SPIRE 1.15.3 JWT-SVID, with a replay, a wrong audience and a revoked client
+all refused; the full loop on a host has not.
+
+There is one more path where the SVID is an authenticator: `--identity-platform spire`
+mints a JWT-SVID and presents it to Workload Credentials, because
 [the lab already publishes the trust domain as an OIDC issuer](spiffe.md#reaching-a-kubernetes-cluster-with-a-jwt-svid).
 That is the row that covers a bare-metal host with no cloud underneath it. It has never
-been run.
+been run against a Workload Credentials tenant.
 
 The SPIRE lab's own plays in `examples/playbooks/spire/` stand the trust domain up. They do
 not spend an SVID, and this page does not count them as consumers.
@@ -207,12 +215,13 @@ reads as the mechanism working rather than as a fault.
 
 ## The worker itself is the fifth consumer
 
-The MCP worker spends a dashboard PAT against `/mcp` on a loop, and `--token-source`
-decides what sits on the host:
+The MCP worker spends a dashboard credential against `/mcp` on a loop, and
+`--token-source` decides what sits on the host:
 
 | `--token-source` | What sits on the host |
 |---|---|
-| `file` (default) | a 0600 file holding the PAT — a static secret, smaller than an env var but still one |
+| `spiffe` | **nothing.** A JWT-SVID from the local SPIRE agent, exchanged at the dashboard's token endpoint for a minutes-long access token |
+| `file` (default) | a 0600 file holding the PAT or client pair — a static secret, smaller than an env var but still one |
 | `wlc` | **nothing.** The platform vouches for the machine; WC serves the PAT from its own store |
 | `ps` | **nothing.** WC hands over the Password Safe client pair and the worker *requests* the credential |
 
@@ -225,8 +234,11 @@ install left behind, so switching is a migration rather than an accumulation.
 
 The section that keeps this page honest. Each of these is true of a named file or setting.
 
-- **`file` is still the default, because none of the holds-nothing paths has run live.** No
-  Workload Credentials tenant, no registered Workload Identity, no federation trust. The
+- **`file` is still the worker's default, because none of the holds-nothing paths has run
+  live end to end.** `spiffe` is the closest — its exchange has run against a real SVID —
+  and the Agent tab's Install dialog selects it whenever the cell minted an SVID-bound
+  client. `wlc` and `ps` have no Workload Credentials tenant, no registered Workload
+  Identity, no federation trust. The
   strongest claim on this page is implemented and unproven — and `--cloud-episode` now
   puts a **metered** call on that list, which is a sharper thing to have unproven than a
   read.

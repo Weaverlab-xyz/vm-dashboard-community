@@ -19,6 +19,17 @@
 #   agent_node_id:    spiffe://weaverlab.test/node/<host>   # REQUIRED — the parent
 #   agent_workload_uid: 0               # the uid the worker runs as (root via systemd)
 #   agent_workload_path: /agent/mcp-reader
+#   spire_cli_prefix: ""                # how the SPIRE CLI is reached, as in the spire/
+#                                       # shared plays: "" on a vm-mode lab,
+#                                       # "docker exec spire-server " in docker mode,
+#                                       # "k3s kubectl exec -n spire-server spire-server-0
+#                                       #  -c spire-server -- " in k8s mode. The Agent tab's
+#                                       # Install dialog fills it in from the lab.
+#
+# THE PARENT IS THE NODE THE WORKER RUNS ON, and that node must run a SPIRE agent. In
+# this lab the one that does is a Kubernetes-linked k3s node: the link's
+# spire-k8s-entry.yml gives it the node ID spiffe://<td>/node/k3s-01 and
+# spire-agent-install.yml attests it. Put the worker there and pass that ID.
 ---
 - name: Register the MCP agent worker with SPIRE
   hosts: all
@@ -28,6 +39,9 @@
     agent_workload_path: /agent/mcp-reader
     spire_bin: /opt/spire/bin/spire-server
     spire_socket: /tmp/spire-server/private/api.sock
+    # Empty on a VM-mode lab. The container modes keep the binary and the socket at the
+    # same paths inside the container, so only the prefix differs.
+    spire_cli_prefix: ""
 
   tasks:
     - name: Refuse to run without a trust domain and a parent
@@ -43,19 +57,12 @@
     - name: Create the registration entry
       # `entry create` is not idempotent on its own -- a second run errors on a duplicate
       # -- so the similar-entry check turns that into a no-op rather than a failed play.
-      ansible.builtin.command:
-        argv:
-          - "{{ spire_bin }}"
-          - entry
-          - create
-          - -socketPath
-          - "{{ spire_socket }}"
-          - -parentID
-          - "{{ agent_node_id }}"
-          - -spiffeID
-          - "spiffe://{{ trust_domain }}{{ agent_workload_path }}"
-          - -selector
-          - "unix:uid:{{ agent_workload_uid }}"
+      ansible.builtin.command: >-
+        {{ spire_cli_prefix }}{{ spire_bin }} entry create
+        -socketPath {{ spire_socket }}
+        -parentID {{ agent_node_id }}
+        -spiffeID spiffe://{{ trust_domain }}{{ agent_workload_path }}
+        -selector unix:uid:{{ agent_workload_uid }}
       register: entry_create
       changed_when: "'Entry ID' in entry_create.stdout"
       failed_when:
