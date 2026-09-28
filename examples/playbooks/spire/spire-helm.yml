@@ -33,6 +33,7 @@
 #   bind_port: 8081
 #   oidc_port: 8443
 #   helm_version: 3.16.2
+#   helm_sha256: ""                       # the tarball's SHA-256 from get.helm.sh (*.sha256sum)
 #   spire_chart_version: 0.30.2           # pinned: ships SPIRE 1.15.3, as the other modes do
 #   spire_crds_chart_version: 0.6.1       # blank = latest, with a warning
 #   ca_subject_country: US                # the CA subject; strict mode refuses the chart's
@@ -52,6 +53,9 @@
     bind_port: 8081
     oidc_port: 8443
     helm_version: "3.16.2"
+    # Not pinned by default: Helm publishes its checksums only on get.helm.sh, and no
+    # value is shipped here that was not checked against that file. Set it to verify.
+    helm_sha256: ""
     spire_chart_repo: "https://spiffe.github.io/helm-charts-hardened/"
     spire_chart_version: "0.30.2"
     spire_crds_chart_version: "0.6.1"
@@ -97,14 +101,40 @@
         path: /usr/local/bin/helm
       register: helm_bin
 
+    # Fetched, verified when helm_sha256 is set, and only then unpacked -- unarchive
+    # straight from a URL has nowhere to check a checksum.
     - name: Download helm
+      ansible.builtin.get_url:
+        url: "https://get.helm.sh/helm-v{{ helm_version }}-linux-{{ _arch }}.tar.gz"
+        dest: "/tmp/helm-v{{ helm_version }}.tar.gz"
+        checksum: "{{ ('sha256:' ~ helm_sha256) if helm_sha256 | length > 0 else omit }}"
+        mode: "0640"
+      when: not helm_bin.stat.exists
+
+    - name: Warn when helm was not checksummed
+      ansible.builtin.debug:
+        msg: >-
+          helm_sha256 is blank, so helm {{ helm_version }} was taken on TLS alone. Set it
+          from get.helm.sh/helm-v{{ helm_version }}-linux-{{ _arch }}.tar.gz.sha256sum.
+      when:
+        - not helm_bin.stat.exists
+        - helm_sha256 | length == 0
+
+    - name: Unpack helm
       ansible.builtin.unarchive:
-        src: "https://get.helm.sh/helm-v{{ helm_version }}-linux-{{ _arch }}.tar.gz"
+        src: "/tmp/helm-v{{ helm_version }}.tar.gz"
         dest: /usr/local/bin
         remote_src: true
         extra_opts: ["--strip-components=1", "linux-{{ _arch }}/helm"]
+        owner: root
+        group: root
         mode: "0755"
       when: not helm_bin.stat.exists
+
+    - name: Remove the helm tarball
+      ansible.builtin.file:
+        path: "/tmp/helm-v{{ helm_version }}.tar.gz"
+        state: absent
 
     - name: Warn about unpinned charts
       ansible.builtin.debug:

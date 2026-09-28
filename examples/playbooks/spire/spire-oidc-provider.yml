@@ -40,7 +40,7 @@
 #                                   #   SAN and the issuer URL, so it cannot be localhost.
 #   oidc_port: 8443
 #   spire_version: 1.15.3           # match spire-server-install.yml
-#   spire_extras_sha256: ""         # tarball checksum from the release page; blank skips
+#   spire_extras_sha256: ""         # overrides the pinned checksum table
 #   svid_ttl: 168h                  # asked for; ca_ttl is what you actually get
 - name: Install the SPIRE OIDC Discovery Provider
   hosts: all
@@ -51,6 +51,14 @@
     oidc_port: 8443
     spire_version: "1.15.3"
     spire_extras_sha256: ""
+    # SHA-256 of the upstream spire-extras tarballs, checked against the project's own
+    # *_sha256sum.txt. A version not in this table is REFUSED unless
+    # spire_extras_sha256 is given or spire_allow_unpinned is set.
+    spire_extras_checksums:
+      "1.15.3":
+        amd64: 625aff623d620dce459d730565709f12b4d6ce2c18a08aa16eb86df03069ccf1
+        arm64: f4d88eee2df8a4d6dd0e418fa1392172ca8c9922d023f3273249cfc78283a7d7
+    spire_allow_unpinned: false
     svid_ttl: "168h"
     spire_root: /opt/spire
     # How the SPIRE CLI is reached. Empty on a VM (the systemd install). The Workload Lab
@@ -170,12 +178,33 @@
       register: oidc_bin
       when: oidc_runtime == 'systemd'
 
+    - name: Resolve the pinned checksum for this version and architecture
+      ansible.builtin.set_fact:
+        _extras_sha256: >-
+          {{ spire_extras_sha256 if spire_extras_sha256 | length > 0
+             else (spire_extras_checksums[spire_version][_arch] | default('')
+                   if spire_version in spire_extras_checksums else '') }}
+      when: oidc_runtime == 'systemd'
+
+    - name: Refuse an unverified download
+      ansible.builtin.assert:
+        that:
+          - _extras_sha256 | length > 0 or spire_allow_unpinned | bool
+        fail_msg: >-
+          No pinned SHA-256 for the SPIRE {{ spire_version }} spire-extras tarball on {{ _arch }}.
+          Add it to spire_extras_checksums in this play (from the release page's
+          *_sha256sum.txt), pass spire_extras_sha256, or set spire_allow_unpinned to
+          take the download on TLS alone.
+      when:
+        - oidc_runtime == 'systemd'
+        - not oidc_bin.stat.exists
+
     - name: Download the spire-extras release
       ansible.builtin.get_url:
         url: >-
           https://github.com/spiffe/spire/releases/download/v{{ spire_version }}/spire-extras-{{ spire_version }}-linux-{{ _arch }}-musl.tar.gz
         dest: "/tmp/spire-extras-{{ spire_version }}.tar.gz"
-        checksum: "{{ ('sha256:' ~ spire_extras_sha256) if spire_extras_sha256 | length > 0 else omit }}"
+        checksum: "{{ ('sha256:' ~ _extras_sha256) if _extras_sha256 | length > 0 else omit }}"
         mode: "0640"
       when:
         - oidc_runtime == 'systemd'
@@ -184,11 +213,11 @@
     - name: Warn when the download was not checksummed
       ansible.builtin.debug:
         msg: >-
-          spire_extras_sha256 was blank, so the tarball was taken on TLS alone. The
-          release page publishes a checksum — set it for anything you intend to keep.
+          spire_allow_unpinned is set and no checksum is pinned for this version,
+          so the spire-extras tarball was taken on TLS alone.
       when:
         - oidc_runtime == 'systemd'
-        - spire_extras_sha256 | length == 0
+        - _extras_sha256 | length == 0
         - not oidc_bin.stat.exists
 
     - name: Unpack the provider binary

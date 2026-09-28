@@ -234,7 +234,10 @@ on tcp/8443, with **TLS name** `oidc.<trust-domain>` (the name the certificate i
 for, and the `Host` sent, while connecting by address) and the lab's trust bundle as the
 pinned CA. A scheduled refresh keeps both current, and destroying the lab removes the row.
 Set **TLS name** yourself for any provider reached by an address its certificate does not
-name. When a URL fetch fails and a stored bundle exists, the bundle is used. Only `use: jwt-svid` keys are used; X.509
+name. When a URL fetch fails and a stored bundle exists, the bundle is used. A JWKS URL
+whose host is a private, loopback or link-local **address** is fetched directly, ignoring
+`HTTPS_PROXY`: an egress proxy cannot reach a lab's network, and the failure would read like
+a broken lab. A name or a public address still goes through the proxy. Only `use: jwt-svid` keys are used; X.509
 roots in the bundle are ignored.
 
 ### 2. Bind a SPIFFE ID to a service account

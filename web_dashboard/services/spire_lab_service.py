@@ -120,10 +120,21 @@ def source_cidrs() -> list:
 # `vars_for` returns the run's extra_vars; everything it reads comes from the row or
 # from config, never from the request, so a resumed job builds the identical run.
 
+def _pin_vars() -> dict:
+    """Every SPIRE download is verified: the plays pin the release tarballs' SHA-256 and
+    the images' digests per version, and REFUSE a version they hold no pin for. A lab
+    that moves `spire_lab_version` past the pins either adds them to the plays or sets
+    `spire_lab_allow_unpinned` to take the download on TLS alone -- a deliberate,
+    visible opt-out, never a silent one."""
+    return {"spire_allow_unpinned":
+            _cfg("spire_lab_allow_unpinned", "").strip().lower() in ("1", "true", "yes")}
+
+
 def _install_vars(row: SpireLab) -> dict:
     out = {"trust_domain": row.trust_domain,
            "bind_port": row.bind_port or BIND_PORT,
            "spire_version": _cfg("spire_lab_version", "1.15.3"),
+           **_pin_vars(),
            # ca_ttl CAPS every SVID the server issues, including the admin credential:
            # `-ttl 720h` against the 168h default yields ~7 days and SPIRE says so
            # rather than failing. Raising it here is how a lab outlives a week.
@@ -1207,6 +1218,7 @@ def _oidc_vars(row: SpireLab) -> dict:
             "oidc_domain": oidc_domain_for(row),
             "oidc_port": OIDC_PORT,
             "spire_version": _cfg("spire_lab_version", "1.15.3"),
+            **_pin_vars(),
             "oidc_runtime": "docker" if deployment_mode(row) == "docker" else "systemd",
             **cli_vars(row)}
 
@@ -1233,6 +1245,7 @@ def _agent_vars(row: SpireLab) -> dict:
             "spire_server_port": row.bind_port or BIND_PORT,
             "trust_bundle_pem": row.trust_bundle_pem or "",
             "spire_version": _cfg("spire_lab_version", "1.15.3"),
+            **_pin_vars(),
             "workload_user": K8S_WORKLOAD_USER,
             "workload_uid": row.k8s_workload_uid or K8S_WORKLOAD_UID,
             "verify_audience": row.k8s_audience or K8S_AUDIENCE}
@@ -2042,6 +2055,7 @@ def _docker_server_vars(row: SpireLab) -> dict:
            "bind_port": row.bind_port or BIND_PORT,
            "oidc_port": OIDC_PORT,
            "spire_version": _cfg("spire_lab_version", "1.15.3"),
+           **_pin_vars(),
            "ca_ttl": _cfg("spire_lab_ca_ttl", "168h")}
     if row.admin_spiffe_id:
         out["admin_spiffe_id"] = row.admin_spiffe_id
@@ -2068,7 +2082,9 @@ def _helm_vars(row: SpireLab) -> dict:
            "spire_chart_version": _cfg("spire_lab_helm_chart_version", "") or SPIRE_CHART_VERSION,
            "spire_crds_chart_version": (_cfg("spire_lab_helm_crds_chart_version", "")
                                         or SPIRE_CRDS_CHART_VERSION),
-           "helm_values_extra": _cfg("spire_lab_helm_values_extra", "")}
+           "helm_values_extra": _cfg("spire_lab_helm_values_extra", ""),
+           # Helm's checksums live only on get.helm.sh; blank downloads with a warning.
+           "helm_sha256": _cfg("spire_lab_helm_sha256", "")}
     if row.admin_spiffe_id:
         out["admin_spiffe_id"] = row.admin_spiffe_id
     return out

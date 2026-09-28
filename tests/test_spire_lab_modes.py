@@ -491,7 +491,7 @@ def _rendered(play_name, task_name, **extra):
 
 def test_the_containers_run_unprivileged_and_locked_down():
     compose = yaml.safe_load(_rendered("spire-docker-server.yml", "Write the compose file",
-                                       spire_version="1.15.3"))
+                                       spire_version="1.15.3", **_images("1.15.3")))
     server = compose["services"]["spire-server"]
     oidc = compose["services"]["oidc-discovery-provider"]
     assert server["user"] == "1000:1000", "the server must run as the image's own non-root user"
@@ -549,6 +549,173 @@ def test_the_loopback_checks_bypass_any_egress_proxy():
     for name in ("spire-oidc-provider.yml", "spire-helm.yml"):
         assert "curl -sS --noproxy '*' --cacert" in _src(name), (
             f"{name}: an HTTPS_PROXY on the host would intercept the loopback check")
+
+
+# ── every download is pinned, and an unpinned one is refused ─────────────────
+# The tarball checksums were checked against upstream's own *_sha256sum.txt, and the
+# image digests read from ghcr.io and checked against the index bodies (multi-arch:
+# amd64 + arm64). These tests hold the plays and the service to the same version.
+
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _set_fact(play_name, task_name, **env):
+    """Evaluate a play's set_fact expressions with plain Jinja (they use no Ansible-only
+    filters), so the resolution logic itself is under test rather than restated."""
+    import jinja2
+    play = _play(play_name)
+    v = dict(play["vars"])
+    v.update(env)
+    task = next(t for t in play["tasks"] if t.get("name") == task_name)
+    return {k: jinja2.Template(str(x)).render(**v).strip()
+            for k, x in task["ansible.builtin.set_fact"].items()}
+
+
+def _assert_holds(play_name, task_name, **env):
+    import jinja2
+    e = jinja2.Environment()
+    e.filters["bool"] = lambda x: str(x).strip().lower() in ("1", "true", "yes")
+    play = _play(play_name)
+    v = dict(play["vars"])
+    v.update(env)
+    task = next(t for t in play["tasks"] if t.get("name") == task_name)
+    return all(e.from_string("{{ (" + c + ") }}").render(**v) == "True"
+               for c in task["ansible.builtin.assert"]["that"])
+
+
+def _images(version, **env):
+    return _set_fact("spire-docker-server.yml", "Resolve the pinned images",
+                     spire_version=version, **env)
+
+
+def test_the_tarball_pins_agree_across_plays_and_with_the_default_version():
+    default = svc._install_vars(_row())["spire_version"]
+    spire = [_play(n)["vars"]["spire_checksums"]
+             for n in ("spire-server-install.yml", "spire-agent-install.yml")]
+    assert spire[0] == spire[1], "the server and agent plays pin different tarballs"
+    extras = _play("spire-oidc-provider.yml")["vars"]["spire_extras_checksums"]
+    digests = _play("spire-docker-server.yml")["vars"]["spire_image_digests"]
+    for table in (spire[0], extras, digests):
+        assert default in table, f"SPIRE {default} (the lab's default) has no pin"
+    for table in (spire[0], extras):
+        for arch in ("amd64", "arm64"):
+            assert _HEX64.match(table[default][arch]), (table, arch)
+    for role in ("server", "oidc"):
+        assert re.match(r"^sha256:[0-9a-f]{64}$", digests[default][role])
+    for name in ("spire-server-install.yml", "spire-agent-install.yml",
+                 "spire-oidc-provider.yml", "spire-docker-server.yml"):
+        assert _play(name)["vars"]["spire_version"] == default, name
+
+
+def test_the_pinned_checksum_is_the_one_the_download_uses():
+    got = _set_fact("spire-server-install.yml",
+                    "Resolve the pinned checksum for this version and architecture",
+                    spire_version="1.15.3", _arch="arm64")
+    assert got["_spire_sha256"] == "a9982b3ca7de489def22265fd4586d8e13091ecb6fddf6adcea9291313b18886"
+    over = _set_fact("spire-server-install.yml",
+                     "Resolve the pinned checksum for this version and architecture",
+                     spire_version="1.15.3", _arch="amd64", spire_sha256="ab" * 32)
+    assert over["_spire_sha256"] == "ab" * 32, "an explicit spire_sha256 must win"
+    for name in ("spire-server-install.yml", "spire-agent-install.yml"):
+        dl = next(t for t in _play(name)["tasks"] if t.get("name") == "Download the SPIRE release")
+        assert "_spire_sha256" in dl["ansible.builtin.get_url"]["checksum"], name
+
+
+def test_an_unpinned_version_is_refused_unless_explicitly_allowed():
+    task = "Refuse an unverified download"
+    for name, fact in (("spire-server-install.yml", "_spire_sha256"),
+                       ("spire-agent-install.yml", "_spire_sha256"),
+                       ("spire-oidc-provider.yml", "_extras_sha256")):
+        assert not _assert_holds(name, task, **{fact: ""}), f"{name} took an unpinned download"
+        assert _assert_holds(name, task, **{fact: "", "spire_allow_unpinned": True})
+        assert _assert_holds(name, task, **{fact: "ab" * 32})
+    # A host that already has the release downloads nothing, so it is not refused.
+    refuse = next(t for t in _play("spire-server-install.yml")["tasks"] if t.get("name") == task)
+    assert "not in _installed" in str(refuse["when"])
+
+
+def test_the_images_run_by_digest_and_an_unpinned_version_is_refused():
+    img = _images("1.15.3")
+    assert img["_server_image"] == ("ghcr.io/spiffe/spire-server:1.15.3@sha256:"
+                                    "4082f30d3e0ddc4000a171392c4ea174345ee44d161ee917c70b97b2ecfba141")
+    assert img["_oidc_image"].startswith("ghcr.io/spiffe/oidc-discovery-provider:1.15.3@sha256:")
+    task = "Refuse an image that is not pinned by digest"
+    assert _assert_holds("spire-docker-server.yml", task, **img)
+    loose = _images("9.9.9")
+    assert "@" not in loose["_server_image"]
+    assert not _assert_holds("spire-docker-server.yml", task, **loose)
+    assert _assert_holds("spire-docker-server.yml", task, spire_allow_unpinned=True, **loose)
+
+
+def test_the_service_passes_the_opt_out_only_when_configured():
+    orig = svc._cfg
+    try:
+        svc._cfg = lambda key, default="": default
+        for fn in (svc._install_vars, svc._oidc_vars, svc._agent_vars, svc._docker_server_vars):
+            assert fn(_row())["spire_allow_unpinned"] is False, fn.__name__
+        svc._cfg = lambda key, default="": "true" if key == "spire_lab_allow_unpinned" else default
+        assert svc._docker_server_vars(_row())["spire_allow_unpinned"] is True
+        svc._cfg = lambda key, default="": "ab" * 32 if key == "spire_lab_helm_sha256" else default
+        assert svc._helm_vars(_row(deployment_mode="k8s"))["helm_sha256"] == "ab" * 32
+    finally:
+        svc._cfg = orig
+
+
+def test_helm_is_verified_before_it_is_unpacked():
+    tasks = _play("spire-helm.yml")["tasks"]
+    names = [t.get("name") for t in tasks]
+    assert names.index("Download helm") < names.index("Unpack helm")
+    dl = tasks[names.index("Download helm")]["ansible.builtin.get_url"]
+    assert "helm_sha256" in dl["checksum"]
+    assert "get.helm.sh" not in str(tasks[names.index("Unpack helm")]), (
+        "unarchive straight from a URL has nowhere to check a checksum")
+
+
+# ── the key fetch leaves a private address out of the egress proxy ──────────
+
+def test_a_private_address_bypasses_the_proxy_and_a_name_does_not():
+    from web_dashboard.services import spiffe_assertion as sa
+    assert sa._bypass_proxy("https://10.1.2.3:8443/keys")
+    assert sa._bypass_proxy("https://192.168.0.5:8443/keys")
+    assert sa._bypass_proxy("https://127.0.0.1:8443/keys")
+    assert sa._bypass_proxy("https://[fd00::1]:8443/keys")
+    assert not sa._bypass_proxy("https://20.1.2.3:8443/keys"), "a public address is egress"
+    assert not sa._bypass_proxy("https://idp.example.com/keys"), "a name is egress"
+
+
+def test_the_fetch_ignores_proxy_variables_for_a_private_address():
+    from web_dashboard.services import spiffe_assertion as sa
+    seen = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"keys": []}
+
+    class _Client:
+        def __init__(self, **kw):
+            seen.update(kw)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, *a, **kw):
+            return _Resp()
+
+    orig = sa.httpx.Client
+    sa.httpx.Client = _Client
+    try:
+        sa._fetch_jwks("https://10.0.0.4:8443/keys")
+        assert seen["trust_env"] is False
+        sa._fetch_jwks("https://idp.example.com/keys")
+        assert seen["trust_env"] is True
+    finally:
+        sa.httpx.Client = orig
 
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

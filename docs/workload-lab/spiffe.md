@@ -209,9 +209,18 @@ host is still left alone unless you confirm **also remove SPIRE from the host**,
 The server makes its API socket `0770`, so the provider reaches it through the group and
 nothing else can. The datastore and CA keys are `0700` to the server user; the provider's
 serving key is root-owned and readable by the provider's group only. Binaries are
-root-owned. `systemd-analyze security spire-server` scores the VM units. For anything you
-keep, pin the images by digest (`spire_server_image` / `spire_oidc_image` in
-`spire-docker-server.yml`). The charts are pinned by default (below).
+root-owned. `systemd-analyze security spire-server` scores the VM units.
+
+**Every download is verified.** The plays pin, per SPIRE version, the SHA-256 of the
+release tarballs (server and agent, `spire-extras` for the VM provider; amd64 and arm64,
+checked against upstream's own `*_sha256sum.txt`) and the digests of the
+`ghcr.io/spiffe/*` multi-arch images, which the compose file runs as
+`<image>:<tag>@<digest>` — Docker then refuses a re-pointed tag, or any local image with
+that tag. A version with no pin is **refused**, not warned about: add its values to the
+tables in the plays (a test holds all four plays and the lab's default version equal), or
+set `spire_lab_allow_unpinned` to take it on TLS alone, deliberately. The charts are pinned
+too (below). Helm itself publishes checksums only on `get.helm.sh`, so none is shipped:
+set `spire_lab_helm_sha256` to verify it.
 
 **What has been run:** the Docker mode, end to end, against images built from the 1.15.3
 release binaries exactly as upstream's Dockerfile builds them — server, seed entries, the
