@@ -187,6 +187,71 @@ opt in. Clusters differ: they are registered on demand after the fact
 > `entitle_applications` data source for your tenant and adjust `_APP_SLUG` in the
 > service if they differ.
 
+### Connecting to an SSH ephemeral-account grant
+
+When a grant on a registered VM is approved, Entitle delivers it (in Teams, for example)
+as a single bash one-liner:
+
+```bash
+echo -e '<PEM with literal \n>' > user_NNNN.pem && chmod 600 user_NNNN.pem && ssh -i user_NNNN.pem user_NNNN@<private-ip>
+```
+
+Two things about it are easy to miss:
+
+- **Every grant mints a new account.** The username (`karenwalker_8762`, then
+  `karenwalker_8274` on the next grant) and the key are both new. When a grant ends,
+  Entitle deletes that account (`userdel`). A key from an earlier message, or an old
+  username, fails with the same `Permission denied (publickey)` a wrong key gives. Take
+  the key, username **and** host from the **same** grant message.
+- **The host is a private address.** Lab VMs sit on private subnets (`10.99.2.0/24` for
+  the Azure `vm-subnet`). Entitle gets to them through its agent (see
+  [above](#public-vs-private--the-entitle-agent)), but that is the *management* path
+  only. **Your** machine needs its own route, so start a PRA **Network Tunnel** through
+  the gateway (`clouddb-jumpoint` on Azure) before you run `ssh`. Without it, `ssh`
+  reports `Connection timed out`. See
+  [Network tunnels need an address pool](gateways.md#network-tunnels-need-an-address-pool)
+  if the tunnel itself won't come up.
+
+On Linux or macOS, paste the one-liner as it is.
+
+#### From Windows
+
+The one-liner assumes bash and a POSIX filesystem. Neither is true on Windows, and each
+of the obvious workarounds breaks in its own way:
+
+- **WSL, in a `/mnt/c/...` directory:** `chmod` does nothing on a Windows drive, so the
+  file stays `0777`. `ssh` then prints `Permissions 0777 for 'user_NNNN.pem' are too open`
+  and ignores the key. Run the one-liner from your WSL home directory (`cd ~` first)
+  instead, or use PowerShell.
+- **PowerShell ISE:** ISE cannot run `ssh` interactively. The host-key confirmation
+  prompt never shows up, so the session appears to hang, and ssh's normal stderr is
+  displayed as a red `NativeCommandError`. Use a regular PowerShell window or Windows
+  Terminal.
+
+In a regular PowerShell window, paste all of this at once. Put everything between the
+quotes of `echo -e` into `$key`, and the grant's username and host into the `ssh` line:
+
+```powershell
+$key = '<everything between the quotes of echo -e>'
+$path = "$HOME\.ssh\entitle-$(Get-Date -Format yyyyMMdd-HHmmss).pem"
+[IO.File]::WriteAllText($path, ($key -replace '\\n', "`n"))
+icacls $path /inheritance:r /grant:r "$($env:USERNAME):(R)"
+ssh-keygen -lf $path
+ssh -i $path <user>@<host>
+```
+
+What each part is for:
+
+- **`[IO.File]::WriteAllText`, not `Out-File` or `>`.** It writes the key with no byte-order
+  mark and with LF line endings. A BOM or CRLF endings can stop `ssh` from reading the key.
+- **A new, timestamped filename on every run.** After the `icacls` line removes
+  inheritance and leaves you read-only access, you can't overwrite the file, and even
+  `Remove-Item -Force` fails on it. Writing each grant's key to a new file avoids this.
+  Paste the whole block every time, too: a `$key` left over from an earlier paste still
+  holds the previous grant's key.
+- **`ssh-keygen -lf`** prints the key's fingerprint. Compare it with the fingerprint of
+  the key the server actually installed (see [Troubleshooting](#troubleshooting)).
+
 ---
 
 ## Machine identity — JIT cloud credentials via Entitle
@@ -289,6 +354,27 @@ cluster, then re-provision so the peering + lab-VM firewall are created (see *Ne
 reachability* above). Verify from a pod: `nc -vz <target-private-ip> 22`. (For the
 *Kubernetes* connector — not SSH — the same message instead means the agent SA lacks
 cluster RBAC; that's handled by the cluster-admin binding `setup_entitle_agent` applies.)
+
+**`Permission denied (publickey)` or `Connection timed out` connecting to an SSH grant** —
+work through these in order (details in
+[Connecting to an SSH ephemeral-account grant](#connecting-to-an-ssh-ephemeral-account-grant)):
+
+1. **`Connection timed out`**: there's no route from your machine to the private address.
+   Start the PRA Network Tunnel through the gateway first.
+2. **`Permissions 0777 ... are too open`**: you ran the one-liner in WSL from a
+   `/mnt/c/...` directory. Run it from `~` instead, or use the PowerShell steps.
+3. **`Permission denied (publickey)`**: the key, username or host is from a different
+   grant than the other two. Each grant creates a new account, and when a grant ends its
+   account is deleted. The server's `/var/log/auth.log` shows `Invalid user <name>` for
+   an account that no longer exists. When a key really is rejected, the log shows the
+   fingerprint of the key your client offered. Compare that with `ssh-keygen -lf` run on
+   your `.pem` and on the account's `~/.ssh/authorized_keys`. On Azure you can read the
+   log without logging in:
+   `az vm run-command invoke --command-id RunShellScript --scripts "tail -50 /var/log/auth.log"`.
+4. **You can't overwrite or delete the `.pem`**: `icacls` left you read-only access.
+   Write each new grant's key to a new filename.
+5. **The prompt never appears, or the output is red `NativeCommandError`**: you're in
+   PowerShell ISE. Use a regular PowerShell window or Windows Terminal.
 
 **"entitle_owner_id / entitle_workflow_id is not configured"** — both are required to
 create an integration. Fill them in under Settings → Integrations → Entitle.
