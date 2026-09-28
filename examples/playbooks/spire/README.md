@@ -33,7 +33,9 @@ The shared plays (seed, admin-identity, jwt-bundle, k8s-entry, oidc-provider) ta
 `spire_cli_prefix` (empty for `vm`; `docker exec spire-server ` or `k3s kubectl exec -n
 spire-server spire-server-0 -c spire-server -- ` in the container modes) and
 `spire_mint_stdout: true` there, so `x509 mint` writes to stdout and the PEM is split on the
-host. `spire-open-ports.yml` takes `extra_ports` (the dashboard passes 8443).
+host. Downloads are pinned: `spire_checksums` / `spire_extras_checksums` (SHA-256 per
+version and architecture) and `spire_image_digests`; a version with no pin is refused unless
+`spire_allow_unpinned` is set. `spire-open-ports.yml` takes `extra_ports` (the dashboard passes 8443).
 
 ## The order to run them in
 

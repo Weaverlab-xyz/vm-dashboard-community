@@ -25,6 +25,7 @@ Run: python tests/test_playbook_k3s.py   (or under pytest)
 import base64
 import glob
 import os
+import re
 import sys
 
 import yaml
@@ -346,6 +347,63 @@ def test_the_recovery_path_is_documented_in_the_play():
     assert "config.yaml.d" in src and "systemctl restart k3s" in src, \
         "the play does not say how to undo itself"
 
+
+
+# ── the exec credential plugin ───────────────────────────────────────────────
+# The old URL (`…-linux-amd64`, tag v0.1.0) never existed: upstream ships goreleaser
+# archives. The 0.3.0 archives were downloaded, checked against the release's own
+# checksums.txt, and the binary run against a SPIRE 1.15.3 agent on the lab's socket path,
+# where it returned a client.authentication.k8s.io/v1 ExecCredential with a JWT-SVID.
+
+def _task(play, name):
+    return next(t for t in play["tasks"] if t.get("name") == name)
+
+
+def test_the_plugin_is_fetched_from_the_asset_upstream_actually_publishes():
+    play = _spiffe_play()
+    url = _task(play, "Download the exec credential plugin")["ansible.builtin.get_url"]["url"]
+    assert "/releases/download/v{{ exec_auth_version }}/" in url
+    assert "k8s-spiffe-workload-jwt-exec-auth_Linux_{{ _ea_arch }}.tar.gz" in url
+    assert "-linux-amd64" not in url
+    arch = _task(play, "Map the CPU architecture to the plugin's release asset")
+    assert "'x86_64': 'x86_64'" in str(arch) and "'aarch64': 'arm64'" in str(arch), (
+        "goreleaser names the archives by uname, not by Go arch")
+
+
+def test_the_plugin_is_pinned_and_an_unpinned_version_is_refused():
+    play = _spiffe_play()
+    v = play["vars"]
+    pins = v["exec_auth_checksums"][v["exec_auth_version"]]
+    for arch in ("x86_64", "arm64"):
+        assert re.match(r"^[0-9a-f]{64}$", pins[arch]), arch
+    dl = _task(play, "Download the exec credential plugin")
+    assert "_ea_sha256" in dl["ansible.builtin.get_url"]["checksum"]
+    refuse = _task(play, "Refuse an unverified plugin download")["ansible.builtin.assert"]
+    assert any("spire_allow_unpinned" in c for c in refuse["that"])
+
+
+def test_a_failed_plugin_download_fails_the_play():
+    """It used to be swallowed (`failed_when: false`) because the URL was a guess. With
+    the real asset and a pinned checksum, a failure is a network fault or a tampered
+    file."""
+    play = _spiffe_play()
+    dl = _task(play, "Download the exec credential plugin")
+    assert "failed_when" not in dl and "ignore_errors" not in dl
+
+
+def test_each_plugin_version_installs_beside_the_last_behind_a_symlink():
+    play = _spiffe_play()
+    unpack = _task(play, "Unpack the plugin binary")["ansible.builtin.unarchive"]
+    assert unpack["owner"] == "root" and unpack["mode"] == "0755"
+    assert unpack["creates"].startswith("{{ _ea_dir }}/")
+    link = _task(play, "Point the plugin path at this version")["ansible.builtin.file"]
+    assert link["state"] == "link" and link["dest"] == "{{ exec_auth_bin }}"
+
+
+def test_the_kubeconfig_bounds_the_plugins_wait():
+    """The plugin's -timeout defaults to 0, which waits forever for the Workload API."""
+    content = _task(_spiffe_play(), "Write the workload's kubeconfig")["ansible.builtin.copy"]["content"]
+    assert 'args: ["-timeout=10s"]' in content
 
 if __name__ == "__main__":
     _tests = [v for k, v in sorted(globals().items())

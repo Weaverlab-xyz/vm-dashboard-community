@@ -209,9 +209,20 @@ host is still left alone unless you confirm **also remove SPIRE from the host**,
 The server makes its API socket `0770`, so the provider reaches it through the group and
 nothing else can. The datastore and CA keys are `0700` to the server user; the provider's
 serving key is root-owned and readable by the provider's group only. Binaries are
-root-owned. `systemd-analyze security spire-server` scores the VM units. For anything you
-keep, pin the images by digest (`spire_server_image` / `spire_oidc_image` in
-`spire-docker-server.yml`). The charts are pinned by default (below).
+root-owned. `systemd-analyze security spire-server` scores the VM units.
+
+**Every download is verified.** The plays pin, per SPIRE version, the SHA-256 of the
+release tarballs (server and agent, `spire-extras` for the VM provider; amd64 and arm64,
+checked against upstream's own `*_sha256sum.txt`), the Kubernetes exec credential plugin
+(`k8s-spiffe-workload-jwt-exec-auth` 0.3.0, against its release `checksums.txt`) and the
+digests of the
+`ghcr.io/spiffe/*` multi-arch images, which the compose file runs as
+`<image>:<tag>@<digest>` — Docker then refuses a re-pointed tag, or any local image with
+that tag. A version with no pin is **refused**, not warned about: add its values to the
+tables in the plays (a test holds all four plays and the lab's default version equal), or
+set `spire_lab_allow_unpinned` to take it on TLS alone, deliberately. The charts are pinned
+too (below). Helm itself publishes checksums only on `get.helm.sh`, so none is shipped:
+set `spire_lab_helm_sha256` to verify it.
 
 **What has been run:** the Docker mode, end to end, against images built from the 1.15.3
 release binaries exactly as upstream's Dockerfile builds them — server, seed entries, the
@@ -342,8 +353,16 @@ user:
   exec:
     apiVersion: "client.authentication.k8s.io/v1"
     command: "k8s-spiffe-workload-jwt-exec-auth"
+    args: ["-timeout=10s"]
     interactiveMode: Never
 ```
+
+`-timeout` is there because the plugin's default waits forever for the Workload API, and
+`kubectl` would hang rather than fail. The play installs **0.3.0** from upstream's
+goreleaser archive (`…_Linux_x86_64.tar.gz` / `…_Linux_arm64.tar.gz`, pinned by SHA-256),
+into its own version directory behind a symlink. That version was run against a SPIRE
+1.15.3 agent on the lab's socket path and returned a `client.authentication.k8s.io/v1`
+ExecCredential carrying the workload's JWT-SVID.
 
 It also takes `SPIFFE_JWT_SOURCE=server-admin-api` to mint from the server's admin API
 instead. **Do not use that mode here.** It is the same attestation bypass this page spends a

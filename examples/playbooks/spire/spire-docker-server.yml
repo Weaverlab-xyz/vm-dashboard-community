@@ -31,9 +31,12 @@
 # named volume, so its ownership is set here and not by whichever container mounts it
 # first.
 #
-# PIN THE IMAGES BY DIGEST for anything you keep: set spire_server_image and
-# spire_oidc_image to `ghcr.io/spiffe/...@sha256:<digest>`. The tag default is what the
-# lab passes; a tag can be re-pointed, a digest cannot.
+# THE IMAGES ARE PINNED BY DIGEST. A tag can be re-pointed; a digest cannot. The
+# table below maps a SPIRE version to the digests of its multi-arch image indexes (read
+# from ghcr.io and checked against the index bodies), and the compose file uses
+# `<image>:<tag>@<digest>`, so Docker refuses anything else. A version not in the table
+# is REFUSED unless spire_server_image / spire_oidc_image are given or
+# spire_allow_unpinned is set.
 #
 # extra_vars:
 #   trust_domain: weaverlab.test          # REQUIRED
@@ -42,7 +45,8 @@
 #   oidc_port: 8443
 #   ca_ttl: 168h
 #   spire_version: 1.15.3                 # the image tag, for both containers
-#   spire_server_image / spire_oidc_image # override to pin by digest
+#   spire_server_image / spire_oidc_image # full image refs; override the digest table
+#   spire_allow_unpinned: false           # true = take a tag-only image
 #   spire_uid/spire_gid: 1000             # the image's default user
 #   oidc_uid/oidc_gid: 1001
 - name: Run the SPIRE server in Docker
@@ -60,8 +64,15 @@
     spire_root: /opt/spire
     spire_data: /opt/spire/data
     compose_file: /opt/spire/compose.yml
-    spire_server_image: "ghcr.io/spiffe/spire-server:{{ spire_version }}"
-    spire_oidc_image: "ghcr.io/spiffe/oidc-discovery-provider:{{ spire_version }}"
+    spire_server_image: ""
+    spire_oidc_image: ""
+    # Digests of the multi-arch image indexes (amd64 + arm64) per SPIRE version. Move
+    # together with spire_version and the tarball checksums in the other plays.
+    spire_image_digests:
+      "1.15.3":
+        server: "sha256:4082f30d3e0ddc4000a171392c4ea174345ee44d161ee917c70b97b2ecfba141"
+        oidc: "sha256:bb95f13c2b4e8392d6631ff1a45a03554ba050534cd3c1045505cc80d3fb77e2"
+    spire_allow_unpinned: false
     spire_uid: 1000
     spire_gid: 1000
     oidc_uid: 1001
@@ -102,6 +113,28 @@
       ansible.builtin.command: docker compose version
       register: compose_version
       changed_when: false
+
+    - name: Resolve the pinned images
+      ansible.builtin.set_fact:
+        _server_image: >-
+          {{ spire_server_image if spire_server_image | length > 0
+             else 'ghcr.io/spiffe/spire-server:' ~ spire_version
+                  ~ (('@' ~ spire_image_digests[spire_version].server)
+                     if spire_version in spire_image_digests else '') }}
+        _oidc_image: >-
+          {{ spire_oidc_image if spire_oidc_image | length > 0
+             else 'ghcr.io/spiffe/oidc-discovery-provider:' ~ spire_version
+                  ~ (('@' ~ spire_image_digests[spire_version].oidc)
+                     if spire_version in spire_image_digests else '') }}
+
+    - name: Refuse an image that is not pinned by digest
+      ansible.builtin.assert:
+        that:
+          - ('@sha256:' in _server_image and '@sha256:' in _oidc_image) or spire_allow_unpinned | bool
+        fail_msg: >-
+          No pinned digest for the SPIRE {{ spire_version }} images. Add them to
+          spire_image_digests in this play, pass spire_server_image / spire_oidc_image
+          as `<image>@sha256:<digest>`, or set spire_allow_unpinned to run by tag alone.
 
     - name: Create the SPIRE directories
       ansible.builtin.file:
@@ -187,7 +220,7 @@
           services:
             spire-server:
               <<: *hardening
-              image: {{ spire_server_image }}
+              image: {{ _server_image }}
               container_name: spire-server
               user: "{{ spire_uid }}:{{ spire_gid }}"
               command: ["-config", "{{ spire_root }}/conf/server.conf"]
@@ -207,7 +240,7 @@
                 start_period: 20s
             oidc-discovery-provider:
               <<: *hardening
-              image: {{ spire_oidc_image }}
+              image: {{ _oidc_image }}
               container_name: spire-oidc-provider
               user: "{{ oidc_uid }}:{{ oidc_gid }}"
               # Only to reach the server's 0770 API socket.

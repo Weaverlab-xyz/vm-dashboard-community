@@ -31,6 +31,7 @@ What is verified, and why each matters:
     recorded until it expires and a second presentation is refused.
 """
 import hashlib
+import ipaddress
 import json
 import logging
 import ssl
@@ -97,6 +98,22 @@ def valid_spiffe_id(spiffe_id: str) -> bool:
 
 # ── Keys ─────────────────────────────────────────────────────────────────────
 
+def _bypass_proxy(url: str) -> bool:
+    """True when the URL's host is a literal private, loopback or link-local address.
+
+    A Workload Lab registers its provider by address, usually a private one. A dashboard
+    whose host sets HTTPS_PROXY for egress would otherwise hand that request to the
+    proxy, which cannot reach the lab's network -- and the fetch fails as a connection
+    or TLS error that reads like a broken lab. A name, or a public address, keeps the
+    environment's proxy settings: that is egress, and the proxy is how it is allowed."""
+    from urllib.parse import urlsplit
+    try:
+        ip = ipaddress.ip_address(urlsplit(url).hostname or "")
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local
+
+
 def _fetch_jwks(url: str, ca_pem: str = "", server_name: str = "") -> dict:
     """GET a JWKS, optionally verifying TLS for ``server_name`` instead of the URL's host.
 
@@ -114,7 +131,11 @@ def _fetch_jwks(url: str, ca_pem: str = "", server_name: str = "") -> dict:
         port = urlsplit(url).port
         extensions["sni_hostname"] = server_name
         headers["Host"] = f"{server_name}:{port}" if port and port != 443 else server_name
-    with httpx.Client(verify=verify, timeout=10.0, follow_redirects=False) as client:
+    # For a private address trust_env=False drops the proxy variables (and, with no
+    # pinned CA, SSL_CERT_FILE); a lab's row always pins its own CA, so verification is
+    # the explicit `verify` above.
+    with httpx.Client(verify=verify, timeout=10.0, follow_redirects=False,
+                      trust_env=not _bypass_proxy(url)) as client:
         resp = client.get(url, headers=headers, extensions=extensions)
     resp.raise_for_status()
     return resp.json()
