@@ -30,17 +30,20 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_TMPDB}"
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-agent-install")
 
 try:
+    import fastapi  # noqa: F401 -- the optional third-party deps, probed by name
     import yaml
-    from web_dashboard.database import (AgentCell, Base, OAuthClient, SessionLocal,
-                                        SpireLab, engine)
-    from web_dashboard.api import agentcell as api
-except Exception as exc:  # pragma: no cover -- app deps missing
+except ModuleNotFoundError as exc:  # pragma: no cover -- app deps missing
     try:
         import pytest
         pytest.skip(f"app dependencies unavailable: {exc}", allow_module_level=True)
     except ModuleNotFoundError:
         print(f"SKIP: {exc}")
         sys.exit(0)
+
+# First-party imports UNGUARDED: a broken module must fail this file, not skip it.
+from web_dashboard.database import (AgentCell, Base, OAuthClient, SessionLocal,  # noqa: E402
+                                    SpireLab, engine)
+from web_dashboard.api import agentcell as api  # noqa: E402
 
 Base.metadata.create_all(bind=engine)
 
