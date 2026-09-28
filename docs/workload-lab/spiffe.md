@@ -198,11 +198,31 @@ host is still left alone unless you confirm **also remove SPIRE from the host**,
 `spire-remove.yml`: systemd units / `docker compose down -v` / `helm uninstall`, and deletes
 `/opt/spire` including the CA key. k3s and Docker Engine stay installed.
 
-**Not yet live-validated:** the Docker and Kubernetes modes. Two things to confirm on the
-first run — the `x509 mint` stdout layout the container modes split, and that the pinned
-chart version takes `adminIDs` (the Helm play reads the server config back and fails
-loudly if not). Pin the charts with `spire_lab_helm_chart_version` /
-`spire_lab_helm_crds_chart_version`; extra values go in `spire_lab_helm_values_extra`.
+**Nothing runs as root.** In every mode SPIRE runs the way upstream ships it:
+
+| | Server | OIDC provider |
+|---|---|---|
+| `vm` | `spire` system user; systemd sandbox (no capabilities, `ProtectSystem=strict`, writable only `/opt/spire/data` and its socket directory, syscall filter) | `spire-oidc`, in the `spire` group only to reach the socket; same sandbox, writes nothing |
+| `docker` | uid 1000 (the image's own user); read-only root, all capabilities dropped, `no-new-privileges`, pid limit | uid 1001 with group 1000; same restrictions |
+| `k8s` | the hardened chart's own non-root security contexts | same |
+
+The server makes its API socket `0770`, so the provider reaches it through the group and
+nothing else can. The datastore and CA keys are `0700` to the server user; the provider's
+serving key is root-owned and readable by the provider's group only. Binaries are
+root-owned. `systemd-analyze security spire-server` scores the VM units. For anything you
+keep, pin the images by digest (`spire_server_image` / `spire_oidc_image` in
+`spire-docker-server.yml`) and the charts by version.
+
+**What has been run:** the Docker mode, end to end, against images built from the 1.15.3
+release binaries exactly as upstream's Dockerfile builds them — server, seed entries, the
+OIDC provider as uid 1001 reaching the socket, the discovery document and JWKS over TLS,
+a JWT-SVID minted by SPIRE and verified by the dashboard through the JWKS URL by address
+and TLS name, and `spire-remove.yml`. That also confirmed the `x509 mint` stdout layout the
+container modes split. **Not yet run:** the VM units' sandbox under a real systemd, and the
+Kubernetes mode — confirm on the first build that the pinned chart version takes `adminIDs`
+(the Helm play reads the server config back and fails loudly if not). Pin the charts with
+`spire_lab_helm_chart_version` / `spire_lab_helm_crds_chart_version`; extra values go in
+`spire_lab_helm_values_extra`.
 
 ### By hand
 

@@ -276,7 +276,7 @@
 
     - name: Fetch the discovery document through the published port
       ansible.builtin.command: >-
-        curl -sS --cacert /opt/spire/trust-bundle.pem
+        curl -sS --noproxy '*' --cacert /opt/spire/trust-bundle.pem
         --resolve {{ oidc_domain }}:{{ oidc_port }}:127.0.0.1
         {{ _issuer }}/.well-known/openid-configuration
       register: oidc_discovery

@@ -8,7 +8,8 @@
 # who wants to reuse the VM rather than destroy it.
 #
 # WHAT IT REMOVES, BY deployment_mode:
-#   vm      stops and disables spire-server and spire-oidc-provider, removes their units
+#   vm      stops and disables spire-server and spire-oidc-provider, removes their units,
+#           the socket directory and the `spire` / `spire-oidc` users and groups
 #   docker  `docker compose down -v` — containers, and the socket volume
 #   k8s     `helm uninstall` of spire and spire-crds, and this lab's two Services
 # and in every mode deletes /opt/spire — INCLUDING THE CA KEY AND THE DATASTORE. That is
@@ -48,6 +49,27 @@
         path: "/etc/systemd/system/{{ item }}.service"
         state: absent
       loop: [spire-oidc-provider, spire-server]
+      when: deployment_mode == 'vm'
+
+    - name: Remove the socket directory declaration
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: [/etc/tmpfiles.d/spire-server.conf, /tmp/spire-server]
+      when: deployment_mode == 'vm'
+
+    - name: Remove the service users
+      ansible.builtin.user:
+        name: "{{ item }}"
+        state: absent
+      loop: [spire-oidc, spire]
+      when: deployment_mode == 'vm'
+
+    - name: Remove the service groups
+      ansible.builtin.group:
+        name: "{{ item }}"
+        state: absent
+      loop: [spire-oidc, spire]
       when: deployment_mode == 'vm'
 
     # ── docker ──────────────────────────────────────────────────────────────

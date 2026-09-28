@@ -21,9 +21,19 @@
 # certificate and a config file, which spire-oidc-provider.yml writes (oidc_runtime=docker)
 # and then brings the container up. Until then a compose `up` starts only the server.
 #
-# ROOT IN THE CONTAINERS. Both run as uid 0 so they can read the bind-mounted config and
-# certificate files this play and the OIDC play write as root with 0640. A lab choice; a
-# production deployment would run them as a dedicated uid and chown the files to it.
+# NOT ROOT, AND LOCKED DOWN. The server runs as uid:gid 1000:1000 -- the official image's
+# own default user -- and the provider as 1001:1001 with 1000 as a supplementary group,
+# which is only so it can reach the server's API socket (SPIRE makes it 0770). Files on
+# the host are owned to match: the datastore and CA keys 0700 to the server uid, each
+# config root-owned and readable by its one service's group. Both containers run with a
+# read-only root filesystem, every capability dropped, no-new-privileges, a pid limit and
+# bounded logs. The socket is a host directory owned by the server uid rather than a
+# named volume, so its ownership is set here and not by whichever container mounts it
+# first.
+#
+# PIN THE IMAGES BY DIGEST for anything you keep: set spire_server_image and
+# spire_oidc_image to `ghcr.io/spiffe/...@sha256:<digest>`. The tag default is what the
+# lab passes; a tag can be re-pointed, a digest cannot.
 #
 # extra_vars:
 #   trust_domain: weaverlab.test          # REQUIRED
@@ -32,6 +42,9 @@
 #   oidc_port: 8443
 #   ca_ttl: 168h
 #   spire_version: 1.15.3                 # the image tag, for both containers
+#   spire_server_image / spire_oidc_image # override to pin by digest
+#   spire_uid/spire_gid: 1000             # the image's default user
+#   oidc_uid/oidc_gid: 1001
 - name: Run the SPIRE server in Docker
   hosts: all
   become: true
@@ -47,6 +60,13 @@
     spire_root: /opt/spire
     spire_data: /opt/spire/data
     compose_file: /opt/spire/compose.yml
+    spire_server_image: "ghcr.io/spiffe/spire-server:{{ spire_version }}"
+    spire_oidc_image: "ghcr.io/spiffe/oidc-discovery-provider:{{ spire_version }}"
+    spire_uid: 1000
+    spire_gid: 1000
+    oidc_uid: 1001
+    oidc_gid: 1001
+    socket_dir: /opt/spire/sockets
   tasks:
     - name: Require a trust domain
       ansible.builtin.assert:
@@ -85,17 +105,34 @@
 
     - name: Create the SPIRE directories
       ansible.builtin.file:
-        path: "{{ item }}"
+        path: "{{ item.path }}"
         state: directory
-        mode: "0750"
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
       loop:
-        - "{{ spire_root }}/conf"
-        - "{{ spire_data }}"
-        - "{{ spire_root }}/oidc"
+        - {path: "{{ spire_root }}", owner: root, group: root, mode: "0755"}
+        - {path: "{{ spire_root }}/conf", owner: root, group: root, mode: "0755"}
+        - {path: "{{ spire_data }}", owner: "{{ spire_uid }}", group: "{{ spire_gid }}", mode: "0700"}
+        - {path: "{{ socket_dir }}", owner: "{{ spire_uid }}", group: "{{ spire_gid }}", mode: "0750"}
+        - {path: "{{ spire_root }}/oidc", owner: root, group: "{{ oidc_gid }}", mode: "0750"}
+      loop_control:
+        label: "{{ item.path }}"
+
+    # A lab first built with the containers as root has a root-owned datastore.
+    - name: Give the datastore and keys to the server uid
+      ansible.builtin.file:
+        path: "{{ spire_data }}"
+        state: directory
+        owner: "{{ spire_uid }}"
+        group: "{{ spire_gid }}"
+        recurse: true
 
     - name: Write the server configuration
       ansible.builtin.copy:
         dest: "{{ spire_root }}/conf/server.conf"
+        owner: root
+        group: "{{ spire_gid }}"
         mode: "0640"
         content: |
           server {
@@ -126,43 +163,67 @@
           }
       register: server_conf
 
-    # The API socket lives in a named volume both containers mount at the server's default
-    # path, so the provider (and `docker exec` CLI calls) reach it exactly as on a VM.
+    # The API socket directory is a host directory both containers mount at the server's
+    # default path, so the provider (and `docker exec` CLI calls) reach it exactly as on a
+    # VM. The server's own /tmp is a small tmpfs (sqlite's temp files) under the read-only
+    # root; the socket mount sits on top of it.
     - name: Write the compose file
       ansible.builtin.copy:
         dest: "{{ compose_file }}"
-        mode: "0640"
+        owner: root
+        group: root
+        mode: "0644"
         content: |
+          x-hardening: &hardening
+            read_only: true
+            cap_drop: [ALL]
+            security_opt: ["no-new-privileges:true"]
+            pids_limit: 256
+            restart: unless-stopped
+            logging:
+              driver: json-file
+              options: {max-size: "10m", max-file: "3"}
+
           services:
             spire-server:
-              image: ghcr.io/spiffe/spire-server:{{ spire_version }}
+              <<: *hardening
+              image: {{ spire_server_image }}
               container_name: spire-server
-              user: "0:0"
+              user: "{{ spire_uid }}:{{ spire_gid }}"
               command: ["-config", "{{ spire_root }}/conf/server.conf"]
               ports:
                 - "{{ bind_port }}:{{ bind_port }}"
+              tmpfs:
+                - /tmp:rw,noexec,nosuid,nodev,size=64m
               volumes:
                 - {{ spire_root }}/conf/server.conf:{{ spire_root }}/conf/server.conf:ro
                 - {{ spire_data }}:{{ spire_data }}
-                - spire-server-socket:/tmp/spire-server/private
-              restart: unless-stopped
+                - {{ socket_dir }}:/tmp/spire-server/private
+              healthcheck:
+                test: ["CMD", "{{ spire_root }}/bin/spire-server", "healthcheck"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 20s
             oidc-discovery-provider:
-              image: ghcr.io/spiffe/oidc-discovery-provider:{{ spire_version }}
+              <<: *hardening
+              image: {{ spire_oidc_image }}
               container_name: spire-oidc-provider
-              user: "0:0"
+              user: "{{ oidc_uid }}:{{ oidc_gid }}"
+              # Only to reach the server's 0770 API socket.
+              group_add: ["{{ spire_gid }}"]
               command: ["-config", "{{ spire_root }}/conf/oidc-discovery-provider.conf"]
               ports:
                 - "{{ oidc_port }}:{{ oidc_port }}"
               volumes:
                 - {{ spire_root }}/conf/oidc-discovery-provider.conf:{{ spire_root }}/conf/oidc-discovery-provider.conf:ro
                 - {{ spire_root }}/oidc:{{ spire_root }}/oidc:ro
-                - spire-server-socket:/tmp/spire-server/private
-              depends_on: [spire-server]
-              restart: unless-stopped
+                - {{ socket_dir }}:/tmp/spire-server/private:ro
+              depends_on:
+                spire-server:
+                  condition: service_healthy
               # Started by spire-oidc-provider.yml once its certificate and config exist.
               profiles: ["oidc"]
-          volumes:
-            spire-server-socket: {}
       register: compose_written
 
     - name: Start (or reconcile) the server container
@@ -193,5 +254,6 @@
           - "SPIRE server {{ spire_version }} running in Docker for trust domain '{{ trust_domain }}'."
           - "API: tcp/{{ bind_port }} (published). Admin ID: {{ _admin_id }}"
           - "CLI: docker exec spire-server {{ spire_root }}/bin/spire-server <command>"
-          - "Data: {{ spire_data }} on the host (survives container recreation)."
+          - "Data: {{ spire_data }} on the host (survives container recreation), 0700 to uid {{ spire_uid }}."
+          - "Server runs as {{ spire_uid }}:{{ spire_gid }}, provider as {{ oidc_uid }}:{{ oidc_gid }}; read-only, no capabilities."
           - "The OIDC Discovery Provider starts when spire-oidc-provider.yml runs with oidc_runtime=docker."

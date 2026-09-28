@@ -28,6 +28,11 @@
 # workload end. A production topology renews from the Workload API on a timer; this lab
 # does not, deliberately, because a lab that hides the expiry teaches the wrong lesson.
 #
+# UNPRIVILEGED, LIKE THE SERVER. The provider runs as its own user -- `spire-oidc` under
+# systemd, uid 1001 in the container -- which is a member of the server's group only so
+# it can reach the 0770 API socket. It cannot read the server's datastore or CA keys
+# (0700 to the server user), and only it and root can read its own serving key.
+#
 # extra_vars:
 #   trust_domain: weaverlab.test    # REQUIRED — must match the running server
 #   oidc_domain: ""                 # REQUIRED — the DNS name or IP the KUBERNETES API
@@ -80,6 +85,11 @@
           os.write(fd, ("\n".join(parts) + "\n").encode())
           os.close(fd)
     oidc_dir: /opt/spire/oidc
+    # Who the provider runs as. systemd: named users (spire-server-install.yml creates
+    # the `spire` group). docker: numeric ids matching spire-docker-server.yml's compose.
+    spire_group: spire
+    oidc_user: spire-oidc
+    oidc_gid: 1001
     # The server's default socket_path. spire-server-install.yml does not override it, so
     # the provider reads the admin API here to fetch the JWKS.
     server_socket: /tmp/spire-server/private/api.sock
@@ -102,6 +112,24 @@
       ansible.builtin.set_fact:
         _oidc_id: "spiffe://{{ trust_domain }}/oidc-discovery-provider"
         _issuer: "https://{{ oidc_domain }}:{{ oidc_port }}"
+        _oidc_group: "{{ oidc_user if oidc_runtime == 'systemd' else (oidc_gid | string) }}"
+
+    - name: Create the provider group
+      ansible.builtin.group:
+        name: "{{ oidc_user }}"
+        system: true
+      when: oidc_runtime == 'systemd'
+
+    - name: Create the provider user (no shell, no home; in the server's group for the socket)
+      ansible.builtin.user:
+        name: "{{ oidc_user }}"
+        group: "{{ oidc_user }}"
+        groups: ["{{ spire_group }}"]
+        append: true
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+      when: oidc_runtime == 'systemd'
 
     - name: Confirm the server is up
       ansible.builtin.command: "{{ spire_cli_prefix }}{{ spire_root }}/bin/spire-server healthcheck"
@@ -128,6 +156,8 @@
       ansible.builtin.file:
         path: "{{ oidc_dir }}"
         state: directory
+        owner: root
+        group: "{{ _oidc_group }}"
         mode: "0750"
 
     # Guarded on the binary's absence rather than on a version probe: unlike
@@ -167,6 +197,8 @@
         dest: "{{ oidc_dir }}"
         remote_src: true
         extra_opts: ["--strip-components=2", "--wildcards", "*/bin/oidc-discovery-provider"]
+        owner: root
+        group: "{{ _oidc_group }}"
         mode: "0750"
       when:
         - oidc_runtime == 'systemd'
@@ -212,9 +244,13 @@
       no_log: true
       when: spire_mint_stdout | bool
 
+    # Root-owned, readable by the provider's group only: the provider can read its key
+    # but not rewrite it, and the SPIRE server user cannot read it at all.
     - name: Secure the minted key
       ansible.builtin.file:
         path: "{{ oidc_dir }}/{{ item }}"
+        owner: root
+        group: "{{ _oidc_group }}"
         mode: "0640"
       loop: [svid.pem, key.pem, bundle.pem]
 
@@ -230,6 +266,8 @@
     - name: Write the provider configuration
       ansible.builtin.copy:
         dest: "{{ spire_root }}/conf/oidc-discovery-provider.conf"
+        owner: root
+        group: "{{ _oidc_group }}"
         mode: "0640"
         content: |
           log_level = "INFO"
@@ -248,7 +286,8 @@
 
     # PrivateTmp is deliberately absent: the server's API socket lives under /tmp, and a
     # private /tmp namespace would give this unit its own empty one. The provider would
-    # then start cleanly and fail every key fetch.
+    # then start cleanly and fail every key fetch. ProtectSystem=strict is fine: it makes
+    # /tmp read-only, and connecting to a socket is not a write to the filesystem.
     - name: Install the systemd unit
       ansible.builtin.copy:
         dest: /etc/systemd/system/spire-oidc-provider.service
@@ -262,8 +301,35 @@
           [Service]
           ExecStart={{ oidc_dir }}/oidc-discovery-provider -config {{ spire_root }}/conf/oidc-discovery-provider.conf
           WorkingDirectory={{ oidc_dir }}
+          User={{ oidc_user }}
+          Group={{ oidc_user }}
+          SupplementaryGroups={{ spire_group }}
+          UMask=0077
           Restart=on-failure
           RestartSec=5
+
+          # Sandbox. It writes nothing; 8443 is unprivileged, so no capability either.
+          NoNewPrivileges=yes
+          CapabilityBoundingSet=
+          AmbientCapabilities=
+          ProtectSystem=strict
+          ProtectHome=yes
+          PrivateDevices=yes
+          ProtectKernelTunables=yes
+          ProtectKernelModules=yes
+          ProtectKernelLogs=yes
+          ProtectControlGroups=yes
+          ProtectClock=yes
+          ProtectHostname=yes
+          RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+          RestrictNamespaces=yes
+          RestrictRealtime=yes
+          RestrictSUIDSGID=yes
+          LockPersonality=yes
+          MemoryDenyWriteExecute=yes
+          SystemCallArchitectures=native
+          SystemCallFilter=@system-service
+          SystemCallErrorNumber=EPERM
 
           [Install]
           WantedBy=multi-user.target
@@ -300,7 +366,7 @@
     # here would pass on exactly the misconfiguration this endpoint exists to avoid.
     - name: Fetch the discovery document
       ansible.builtin.command: >-
-        curl -sS --cacert {{ oidc_dir }}/bundle.pem
+        curl -sS --noproxy '*' --cacert {{ oidc_dir }}/bundle.pem
         --resolve {{ oidc_domain }}:{{ oidc_port }}:127.0.0.1
         {{ _issuer }}/.well-known/openid-configuration
       register: oidc_discovery

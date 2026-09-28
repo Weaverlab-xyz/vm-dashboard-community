@@ -256,7 +256,9 @@ def test_the_conf_dir_is_not_fought_over_with_the_tarball():
         assert modes.get("conf") == "0755", (
             f"conf/ is created {modes.get('conf')!r}; the tarball ships 0755 and will "
             f"reset anything stricter on every unpack")
-        assert modes.get("{{ spire_data }}".split("/")[-1], "0750") == "0750"
+        # data/ holds the datastore and CA keys: 0700 to the server user alone, not even
+        # its group, which the OIDC provider joins to reach the API socket.
+        assert modes.get("{{ spire_data }}".split("/")[-1]) == "0700"
         return
     raise AssertionError("no task creates the SPIRE directories")
 

@@ -425,6 +425,85 @@ def test_a_failing_url_falls_back_to_a_stored_bundle():
         sa.clear_state()
 
 
+
+# ── least privilege: nothing runs as root ────────────────────────────────────
+# The Docker mode was run end to end against images built from the 1.15.3 release
+# binaries the way upstream's Dockerfile builds them (uid 1000, scratch): server, seed,
+# the OIDC provider as 1001 with group 1000 reaching the 0770 socket, and a JWT-SVID
+# verified by the dashboard through the JWKS URL. These pin what made that work.
+
+def _rendered(play_name, task_name, **extra):
+    import jinja2
+    play = _play(play_name)
+    v = dict(play["vars"])
+    v.update(extra)
+    for _ in range(3):
+        v = {k: (jinja2.Template(x).render(**v) if isinstance(x, str) else x) for k, x in v.items()}
+    task = next(t for t in play["tasks"] if t.get("name") == task_name)
+    return jinja2.Template(task["ansible.builtin.copy"]["content"]).render(**v)
+
+
+def test_the_containers_run_unprivileged_and_locked_down():
+    compose = yaml.safe_load(_rendered("spire-docker-server.yml", "Write the compose file",
+                                       spire_version="1.15.3"))
+    server = compose["services"]["spire-server"]
+    oidc = compose["services"]["oidc-discovery-provider"]
+    assert server["user"] == "1000:1000", "the server must run as the image's own non-root user"
+    assert oidc["user"] == "1001:1001", "the provider gets its own uid"
+    assert oidc["group_add"] == ["1000"], "the provider reaches the 0770 socket through the group"
+    for name, svc_ in (("spire-server", server), ("oidc-discovery-provider", oidc)):
+        assert svc_["read_only"] is True, f"{name}: root filesystem must be read-only"
+        assert svc_["cap_drop"] == ["ALL"], f"{name}: every capability must be dropped"
+        assert "no-new-privileges:true" in svc_["security_opt"], name
+        assert not str(svc_["user"]).startswith("0"), f"{name} runs as root"
+    assert any(v.endswith(":/tmp/spire-server/private") for v in server["volumes"]), (
+        "the socket must be a host directory the play owns, not a named volume")
+    assert oidc["depends_on"]["spire-server"]["condition"] == "service_healthy"
+
+
+def test_the_docker_play_owns_the_files_to_match_the_container_uids():
+    play = _play("spire-docker-server.yml")
+    dirs = next(t for t in play["tasks"] if t.get("name") == "Create the SPIRE directories")
+    by_path = {i["path"]: i for i in dirs["loop"]}
+    assert by_path["{{ spire_data }}"]["mode"] == "0700"
+    assert by_path["{{ spire_data }}"]["owner"] == "{{ spire_uid }}"
+    assert by_path["{{ socket_dir }}"]["owner"] == "{{ spire_uid }}"
+    assert by_path["{{ spire_root }}/oidc"]["group"] == "{{ oidc_gid }}"
+
+
+def test_the_systemd_units_run_as_service_users_in_a_sandbox():
+    server = _rendered("spire-server-install.yml", "Install the systemd unit")
+    oidc = _rendered("spire-oidc-provider.yml", "Install the systemd unit")
+    for name, unit in (("spire-server", server), ("spire-oidc-provider", oidc)):
+        for line in ("NoNewPrivileges=yes", "CapabilityBoundingSet=\n", "ProtectSystem=strict",
+                     "ProtectHome=yes", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+                     "SystemCallFilter=@system-service", "SystemCallErrorNumber=EPERM"):
+            assert line in unit + "\n", f"{name} lacks {line!r}"
+    assert "User=spire\n" in server and "ReadWritePaths=/opt/spire/data /tmp/spire-server" in server
+    assert "User=spire-oidc" in oidc and "SupplementaryGroups=spire" in oidc
+    assert "PrivateTmp" not in oidc.replace("# PrivateTmp", ""), (
+        "a private /tmp would hide the server's API socket from the provider")
+    assert "ReadWritePaths" not in oidc, "the provider writes nothing"
+
+
+def test_the_socket_directory_is_declared_for_the_server_user():
+    tmpfiles = _rendered("spire-server-install.yml", "Declare the socket directory")
+    assert "d /tmp/spire-server         0750 spire spire -" in tmpfiles
+    assert "d /tmp/spire-server/private 0750 spire spire -" in tmpfiles
+
+
+def test_the_provider_key_is_readable_by_the_provider_group_only():
+    play = _play("spire-oidc-provider.yml")
+    t = next(t for t in play["tasks"] if t.get("name") == "Secure the minted key")
+    f = t["ansible.builtin.file"]
+    assert (f["owner"], f["group"], f["mode"]) == ("root", "{{ _oidc_group }}", "0640")
+
+
+def test_the_loopback_checks_bypass_any_egress_proxy():
+    for name in ("spire-oidc-provider.yml", "spire-helm.yml"):
+        assert "curl -sS --noproxy '*' --cacert" in _src(name), (
+            f"{name}: an HTTPS_PROXY on the host would intercept the loopback check")
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
