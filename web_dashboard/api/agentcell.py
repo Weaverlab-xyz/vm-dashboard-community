@@ -222,8 +222,37 @@ def list_agents(
             episode_state=row.episode_state or "",
             episode_summary=agentcell_service.episode_summary(row),
             episode_started_at=_iso(row.episode_started_at),
+            **_install_facts(db, row),
         ))
     return AgentCellListResponse(agents=agents)
+
+
+def _install_facts(db: Session, row) -> dict:
+    """The non-secret values the Install dialog fills its two commands with.
+
+    Read from the cell's OAuth client and its SPIRE lab rather than assumed: which token
+    source the worker must run with depends on what was minted, and how the entry play
+    reaches the SPIRE CLI depends on the lab's deployment mode."""
+    from ..database import OAuthClient, SpireLab
+    from ..services import spire_lab_service
+    out = {"token_mode": "pat", "client_id": "", "spire_host": "", "spire_cli_prefix": "",
+           "agent_node_id": "", "agent_node_host": "", "worker_on_node": False}
+    if row.oauth_client_id:
+        client = db.query(OAuthClient).filter(OAuthClient.id == row.oauth_client_id).first()
+        if client:
+            out.update(token_mode="spiffe" if client.spiffe_id else "oauth",
+                       client_id=client.client_id)
+    lab = (db.query(SpireLab).filter(SpireLab.id == row.spire_lab_id).first()
+           if row.spire_lab_id else None)
+    if lab:
+        out["spire_host"] = lab.public_ip or lab.private_ip or ""
+        out["spire_cli_prefix"] = spire_lab_service.cli_vars(lab)["spire_cli_prefix"]
+        if lab.k8s_status == "linked":
+            out["agent_node_id"] = (f"spiffe://{(lab.trust_domain or '').lower()}"
+                                    f"{spire_lab_service.K8S_NODE_PATH}")
+            out["agent_node_host"] = lab.k8s_public_ip or lab.k8s_private_ip or ""
+            out["worker_on_node"] = bool(row.private_ip) and row.private_ip == lab.k8s_private_ip
+    return out
 
 
 def _lease_state(db: Session, row) -> str:

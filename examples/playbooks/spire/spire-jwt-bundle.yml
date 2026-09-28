@@ -12,7 +12,7 @@
 # THE KEYS ROTATE. SPIRE rolls its JWT signing key within ca_ttl (168h in this lab),
 # publishing the next key ahead of time — so a capture keeps verifying for roughly that
 # long and then starts refusing valid SVIDs. The dashboard flags a capture older than five
-# days; run this again (the lab's "Capture JWT bundle" button does) to refresh it.
+# days; the lab's "Refresh keys" (manual, or scheduled every ca_ttl/3) runs this again.
 #
 # NOTHING HERE IS SECRET. A bundle is public keys. It goes through Secrets Safe only
 # because that is the one channel out of an Ansible run that carries a VALUE rather than a

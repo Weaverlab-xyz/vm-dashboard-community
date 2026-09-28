@@ -594,7 +594,7 @@ def svid_client_available(db, trust_domain: str) -> str:
     """The SPIFFE ID to bind an SVID-authenticated client to, or "" to use a secret.
 
     SVID when the dashboard can verify this trust domain's JWT-SVIDs (a SpiffeTrustDomain
-    row -- the lab's "Capture JWT bundle", or a JWKS URL) AND the agent's SPIFFE ID is not
+    row -- a Workload Lab registers its own JWKS URL when it is built) AND the agent's SPIFFE ID is not
     already bound to an active client. The ID is fixed per trust domain
     (``AGENT_SPIFFE_PATH``), so a second cell in the same domain falls back to a secret
     rather than failing: one identity authenticates one client.
@@ -621,8 +621,9 @@ def deploy_notes(hours: int = DEFAULT_PAT_HOURS, oauth: bool = False,
             "The worker exchanges a fresh SVID at /api/oauth/token for an access token that "
             "lives minutes; revoking the cell refuses its very next exchange.",
             "Identity and authorization are now one chain: the SVID from SPIRE is what mints "
-            "the dashboard token. Keep the trust domain's JWT keys current (Capture JWT bundle "
-            "after SPIRE rotates them, within ca_ttl) or new SVIDs will be refused.",
+            "the dashboard token. The lab registered its trust domain's JWKS URL when it was "
+            "built, so rotated keys are picked up on their own; its scheduled Refresh keys "
+            "keeps the pinned CA current.",
             "The worker attaches to a VM you already deployed. Destroying that VM reaps the "
             "worker with it; this cell adds no teardown of its own beyond revoking the client.",
         ]

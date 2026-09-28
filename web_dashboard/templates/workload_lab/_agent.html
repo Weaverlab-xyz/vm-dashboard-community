@@ -13,10 +13,12 @@
 
      * IDENTITY AND AUTHORIZATION ARE TWO THINGS, and this tab must never draw them as
        one. The worker attests to SPIRE and gets an SVID — that is WHO IT IS, and it holds
-       nothing. It calls /mcp with a Personal Access Token — that is WHAT IT MAY DO.
-       Nothing mints one from the other (api/mcp_server takes a Bearer PAT and has no mTLS
-       path), and the closing beat of the demo is exactly that gap: revoke the token and
-       the worker is still who it was and may no longer do anything.
+       nothing. What it MAY DO is a bearer token for /mcp, bounded by the token user's
+       RBAC: a PAT, or with a service account an OAuth access token — which the SVID
+       itself mints at /api/oauth/token when the trust domain is registered. /mcp still
+       has no mTLS path, so the SVID never authenticates there directly. The closing beat
+       is the same either way: revoke the agent and the worker is still who it was and
+       may no longer do anything.
      * THE TOKEN IS SHOWN ONCE. Same contract as api/tokens.create_token — the row keeps
        the id, the name and the expiry, never the secret. The modal that shows it is
        therefore the only chance, and it says so.
@@ -109,18 +111,24 @@
        mid-demo learns it too late. -->
   <div x-show="!loading" x-cloak
        class="mb-6 border border-gray-200 rounded-lg px-4 py-3 text-xs text-gray-600">
-    <p class="font-medium text-gray-700 mb-1">Two things, and nothing bridges them</p>
+    <p class="font-medium text-gray-700 mb-1">Identity, and authorization</p>
     <p class="mb-0.5">
       <strong>Its identity</strong> is a SPIFFE SVID it re-attests on every loop, holding
-      nothing at rest. <strong>Its authorization</strong> is a Personal Access Token
-      bounded by the RBAC of the user you mint it against.
-      <strong>The SVID does not authenticate to <code>/mcp</code></strong> &mdash; closing
-      that would need the Password Safe SPIFFE SVID plugin, whose configuration question is
-      still unresolved. So the cell shows both halves and names the gap rather than
-      implying a bridge.
+      nothing at rest. <strong>Its authorization</strong> is bounded by the RBAC of the
+      user you mint it against. Mint it against a <strong>service account</strong> and the
+      SVID <em>is</em> the authorization's root: the worker exchanges a fresh JWT-SVID at
+      <code>/api/oauth/token</code> for an access token that lives minutes, and holds no
+      secret at all. Mint it against a person-shaped user and it gets a Personal Access
+      Token, and the two stay separate.
+    </p>
+    <p class="mb-0.5">
+      Either way <strong>the SVID does not authenticate to <code>/mcp</code> directly</strong>
+      &mdash; it is exchanged for a bearer token, and that is what <code>/mcp</code> sees.
+      The other bridge, the SVID minting a credential inside Password Safe through the
+      SPIFFE SVID plugin, is still unresolved.
     </p>
     <p>
-      That gap <em>is</em> the demo: revoke the token and the worker is still who it was,
+      The demo is the same in both: revoke the agent and the worker is still who it was,
       and may no longer do anything.
     </p>
   </div>
@@ -525,7 +533,14 @@
           <span class="text-xs text-gray-500 w-32 shrink-0 pt-1">Expires</span>
           <span class="text-xs pt-1" x-text="fmt(minted?.pat_expires_at)"></span>
         </div>
-        <div class="flex items-start gap-2">
+        <div class="flex items-start gap-2" x-show="!minted?.token && minted?.client_id" x-cloak>
+          <span class="text-xs text-green-700 w-32 shrink-0 pt-1 font-medium">Token</span>
+          <span class="flex-1 text-xs pt-1 text-green-800">
+            None &mdash; this agent holds no secret. It authenticates with its JWT-SVID as
+            OAuth client <code x-text="minted?.client_id"></code>.
+          </span>
+        </div>
+        <div class="flex items-start gap-2" x-show="minted?.token" x-cloak>
           <span class="text-xs text-amber-700 w-32 shrink-0 pt-1 font-medium">Token</span>
           <code class="flex-1 text-xs bg-amber-50 border border-amber-200 rounded px-2 py-1 break-all"
                 x-text="minted?.token"></code>
@@ -544,7 +559,7 @@
       <div class="flex justify-end mt-5">
         <button @click="mintedOpen = false; openInstall(null)"
                 class="text-sm px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded">
-          I have the token — show me the install
+          <span x-text="minted?.token ? 'I have the token — show me the install' : 'Show me the install'"></span>
         </button>
       </div>
     </div>
@@ -557,15 +572,26 @@
       <h3 class="text-lg font-semibold text-gray-800 mb-1">Put the worker on the host</h3>
       <p class="text-xs text-gray-500 mb-4">
         Two playbooks, in this order, from <code>examples/playbooks/agent/</code>. The
-        first creates the SPIRE registration entry so the worker can attest; the second
-        installs the unit and hands it the token.
+        first creates the SPIRE registration entry on the <strong>SPIRE server</strong> so
+        the worker can attest; the second installs the unit on the worker's host.
         <strong>The dashboard does not run these and does not watch them</strong> &mdash;
         which is why there is no progress bar here and why the journal is the record.
       </p>
 
       <div class="space-y-3 text-sm">
         <div>
-          <p class="text-xs text-gray-500 mb-1">1 &mdash; the registration entry</p>
+          <p class="text-xs text-gray-500 mb-1">1 &mdash; the registration entry (on the SPIRE server)</p>
+          <p class="text-xs text-amber-700 mb-1" x-show="installRow && !installRow.agent_node_id" x-cloak>
+            The worker's host must run a SPIRE agent. In this lab the host that does is the
+            SPIRE row's <strong>Kubernetes</strong>-linked k3s node &mdash; link the lab first,
+            and put the worker there.
+          </p>
+          <p class="text-xs text-amber-700 mb-1"
+             x-show="installRow && installRow.agent_node_id && !installRow.worker_on_node" x-cloak>
+            This agent's host is not the lab's k3s node (<code x-text="installRow?.agent_node_host"></code>),
+            the one host that runs a SPIRE agent &mdash; the worker there would log
+            <code>unattested</code>.
+          </p>
           <pre class="text-xs bg-gray-50 border border-gray-200 rounded p-2 overflow-x-auto"
                x-text="entryCommand()"></pre>
         </div>
@@ -573,10 +599,14 @@
           <p class="text-xs text-gray-500 mb-1">2 &mdash; the worker</p>
           <pre class="text-xs bg-gray-50 border border-gray-200 rounded p-2 overflow-x-auto"
                x-text="installCommand()"></pre>
-          <p class="text-xs text-gray-500 mt-1">
-            <code>agent_pat</code> is the token from the mint response. It was shown once;
+          <p class="text-xs text-gray-500 mt-1" x-show="installRow?.token_mode !== 'spiffe'" x-cloak>
+            <code>agent_token</code> is the token from the mint response. It was shown once;
             if it is gone, revoke this agent and mint another rather than reusing a token
             whose owner you are no longer sure of.
+          </p>
+          <p class="text-xs text-green-700 mt-1" x-show="installRow?.token_mode === 'spiffe'" x-cloak>
+            No token: the worker exchanges a fresh JWT-SVID from the host's SPIRE agent at
+            <code>/api/oauth/token</code> for each short-lived access token.
           </p>
         </div>
         <div>
@@ -1101,7 +1131,10 @@ function workloadAgentTab() {
         // sending somebody to a modal full of <placeholders> seconds after issuing a
         // token they can never see again is the worst moment for that.
         this.installRow = { name: out.name, spiffe_id: out.spiffe_id,
-                            host_name: body.host_ref };
+                            host_name: body.host_ref, pat_name: out.pat_name,
+                            client_id: out.client_id || '',
+                            token_mode: out.token ? (out.client_id ? 'oauth' : 'pat')
+                                                  : (out.client_id ? 'spiffe' : 'pat') };
         await this.load();
         const row = this.agents.find(a => a.id === out.id);
         // The listed row is authoritative about the host: `host_ref` was a proposal and
@@ -1131,16 +1164,24 @@ function workloadAgentTab() {
 
     entryCommand() {
       const r = this.installRow || {};
-      return 'ansible-playbook agent-spiffe-entry.yml \\\n'
-           + '  -e spiffe_id=' + (r.spiffe_id || '<spiffe id>') + ' \\\n'
-           + '  -e agent_host=' + (r.host_name || '<host>');
+      const td = r.trust_domain || '<trust domain>';
+      let cmd = 'ansible-playbook -i ' + (r.spire_host || '<spire server>') + ', agent-spiffe-entry.yml \\\n'
+              + '  -e trust_domain=' + td + ' \\\n'
+              + '  -e agent_node_id=' + (r.agent_node_id || ('spiffe://' + td + '/node/<the worker\'s node>'));
+      if (r.spire_cli_prefix) cmd += ' \\\n  -e "spire_cli_prefix=' + r.spire_cli_prefix + '"';
+      return cmd;
     },
     installCommand() {
       const r = this.installRow || {};
-      return 'ansible-playbook agent-install.yml \\\n'
-           + '  -e agent_host=' + (r.host_name || '<host>') + ' \\\n'
-           + '  -e mcp_url=' + window.location.origin + '/mcp \\\n'
-           + '  -e agent_pat=<the token, shown once at mint>';
+      let cmd = 'ansible-playbook -i ' + (r.host_name || '<host>') + ', agent-install.yml \\\n'
+              + '  -e agent_mcp_url=' + window.location.origin + '/mcp/sse \\\n';
+      if (r.token_mode === 'spiffe') {
+        return cmd + '  -e agent_token_source=spiffe \\\n'
+                   + '  -e agent_oauth_client_id=' + (r.client_id || '<client id>') + ' \\\n'
+                   + '  -e agent_token_label=' + (r.pat_name || '<name>');
+      }
+      return cmd + '  -e agent_token=<the token, shown once at mint> \\\n'
+                 + '  -e agent_token_label=' + (r.pat_name || '<token name>');
     },
 
     openLink(row) {
