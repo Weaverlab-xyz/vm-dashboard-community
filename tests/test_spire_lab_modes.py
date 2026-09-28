@@ -426,6 +426,9 @@ def test_the_jwks_fetch_verifies_the_lab_name_while_connecting_by_address():
 
     srv = http.server.HTTPServer(("127.0.0.1", 0), H)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    # Pinned, as tests/test_agentcell_cert_episode.py does: PROTOCOL_TLS_SERVER permits
+    # TLSv1/1.1 by contract, and the provider this stands in for should not.
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(os.path.join(d, "leaf.pem"), os.path.join(d, "key.pem"))
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
