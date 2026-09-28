@@ -2,12 +2,18 @@
 
 > **Audience:** presenter · **Profile:** `demo` · **Read this when:** you are showing what governs a thing that acts on its own, and how to stop it.
 
-> **Preview.** The worker has never been run against a live SPIRE trust domain or a real
-> MCP endpoint. Unobserved: whether `spire-agent api fetch x509` parses as expected on the
-> target release, and whether the MCP SSE client negotiates cleanly through the
-> dashboard's ingress. Off by default; turn it on with the **Agent Demo Cell** preview
+> **Preview.** Off by default; turn it on with the **Agent Demo Cell** preview
 > toggle in Settings. Work through the
 > [E2E verification checklist](#e2e-verification-checklist) before you present it.
+>
+> **What has run, and what has not.** Against a real SPIRE 1.15.3 server and agent: the
+> worker's own `spire-agent api fetch x509` and `fetch jwt` calls (which found and fixed a
+> bug — the worker passed the socket as a `unix://` URI, so every loop would have logged
+> `unattested`), the registration entry play, and a real JWT-SVID authenticating at the
+> dashboard's token endpoint, with a replayed SVID, a wrong audience and a revoked client
+> all refused. **Not yet observed:** the worker on a real host end to end, the MCP SSE
+> client through your ingress, and the Workload Credentials and Password Safe token
+> sources.
 
 The dashboard can install a **non-human principal** onto a Linux VM it already deployed: a
 worker that reads the estate through the dashboard's own MCP server on a loop, proves its
@@ -49,7 +55,20 @@ it.
 | | What it is | Where it lives |
 |---|---|---|
 | **SVID** | the worker's **identity** — it attests itself | nowhere. Re-fetched from the SPIRE workload API every loop, held in memory |
-| **PAT** | the worker's **authorization** to this dashboard | a 0600 file the operator owns; scoped to a user's RBAC, with an expiry the cell always sets, revocable instantly |
+| **Authorization** | what the worker may do on this dashboard, bounded by the token user's RBAC | depends on the token user — see below. Always expires; always revocable instantly |
+
+What the authorization is depends on **who you mint the agent against**:
+
+| Token user | The cell mints | On the host | What reaches `/mcp` |
+|---|---|---|---|
+| a person-shaped user | a **PAT** | a 0600 file | the PAT |
+| a **service account**, trust domain not registered | an **OAuth client** (`client_id:secret`) | a 0600 file holding the pair | an access token that lives minutes |
+| a **service account**, trust domain registered | an OAuth client **bound to the agent's SPIFFE ID** | **nothing** | an access token the **SVID itself** minted |
+
+A SPIRE lab built by the Workload Lab **registers its trust domain with the dashboard
+automatically** (by JWKS URL, kept current by the lab's scheduled **Refresh keys**), so a
+service account against a lab-built trust domain lands in the last row. The mint response
+then shows *Token: None — this agent holds no secret* and the client id.
 
 Every loop leaves one line carrying both:
 
@@ -59,27 +78,26 @@ Every loop leaves one line carrying both:
 
 Who it is, what it spent, what it saw.
 
-**Pick a service account as the token user.** When you do, the cell mints an **OAuth
-client** instead of a PAT ([Service accounts](../../service-accounts.md)): the `token` in
-the create response is the `client_id:secret` pair, it goes wherever the PAT would have,
-and the worker exchanges it for access tokens that live minutes. What reaches `/mcp` then
-expires on its own, the principal behind it can never be an administrator, and revoking the
-cell still refuses the very next call. A person-shaped token user still gets a PAT, exactly
-as before.
+**Pick a service account as the token user.** A service account can never be an
+administrator and can never hold a PAT ([Service accounts](../../service-accounts.md)),
+what reaches `/mcp` expires on its own, and revoking the cell still refuses the very next
+call — the next `/mcp` request, or the next exchange at `/api/oauth/token`, whichever
+comes first. It is the recommended token user, and against a registered trust domain it
+is the one that leaves nothing on the host.
 
-**The token is named, not shown.** That is the PAT's *name* in the line — the one
-**Settings → API Tokens** lists, and the one you are about to revoke. No part of the
-credential reaches a log, and an error from the MCP client is scrubbed of anything
-token-shaped on its way to one.
+**The credential is named, not shown.** That is its *name* in the line — the PAT's name as
+**Settings → API Tokens** lists it, or the client's under **Users → Service accounts** —
+and the thing you are about to revoke. No part of the credential reaches a log, and an
+error from the MCP client is scrubbed of anything token-shaped on its way to one.
 
 ## What is not built
 
 > **The SVID can now mint the authorization — through the dashboard, not Password Safe.**
-> With a service account as the token user and the lab's JWT bundle captured (the SPIRE
-> row's **Capture JWT bundle**), the cell binds an OAuth client to the agent's SPIFFE ID.
-> The worker runs with `--token-source spiffe`: it presents a fresh JWT-SVID at
-> `/api/oauth/token` and gets a minutes-long access token, holding nothing on the host.
-> See [Service accounts → SPIFFE workloads](../../service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing).
+> With a service account as the token user and the trust domain registered with the
+> dashboard (automatic for a Workload Lab SPIRE lab), the cell binds an OAuth client to
+> the agent's SPIFFE ID. The worker runs with `--token-source spiffe`: it presents a fresh
+> JWT-SVID at `/api/oauth/token` and gets a minutes-long access token, holding nothing on
+> the host. See [Service accounts → SPIFFE workloads](../../service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing).
 >
 > What stays unbuilt is the *other* bridge — the SVID minting a credential **inside
 > Password Safe** via the SPIFFE SVID plugin, whose configuration question
@@ -87,20 +105,22 @@ token-shaped on its way to one.
 > directly** — `/mcp` has no mTLS path; the SVID is exchanged at the token endpoint for a
 > bearer token, and that token is what `/mcp` sees.
 >
-> Without a service account or a captured bundle, the cell behaves as before: a PAT or
-> client secret is the authorization, and the SVID proves identity beside it in the log.
+> Without a service account, or against a trust domain the dashboard has not registered,
+> the cell behaves as before: a PAT or client secret is the authorization, and the SVID
+> proves identity beside it in the log.
 
 ## No static secret on the host
 
-The worker has three token sources, and two of them store nothing.
+The worker has four token sources, and three of them store nothing.
 
 | `--token-source` | What sits on the host | Honest name for it |
 |---|---|---|
-| `file` (default) | a 0600 file holding the PAT | a static secret, smaller than an env var but still a static secret |
+| `spiffe` | **nothing** | the SVID is the credential: exchanged at the dashboard's own token endpoint. No cloud, no Workload Credentials — only the SPIRE agent on the host |
+| `file` (default) | a 0600 file holding the PAT or client pair | a static secret, smaller than an env var but still a static secret |
 | `wlc` | **nothing** | the platform vouches for the machine; Workload Credentials serves the PAT from its own store |
 | `ps` | **nothing** | Workload Credentials hands over the Password Safe API client pair, and the worker *requests* the credential from the vault |
 
-In both of the second two, the worker starts the same way:
+`spiffe` is covered above. In `wlc` and `ps`, the worker starts the same way:
 
 1. it asks its platform for **its own identity token**;
 2. it presents that to **Workload Credentials** in place of a PAT, with
@@ -474,12 +494,15 @@ The tab's own *Not ready yet* panel checks most of this at load and names the re
 open **Workload Lab → Agent** first and read it before working down the list.
 
 - [ ] The **Agent Demo Cell preview** on, and **MCP Server** on.
-- [ ] A **SPIRE lab** stood up on the host — the worker attaches to a machine that is
-      already a SPIRE agent node.
-- [ ] A **narrow user** for the agent to be minted against. Not an administrator; the cell
-      refuses that.
-- [ ] The host reachable by the Ansible runner, and the dashboard's `/mcp` reachable from
-      the host.
+- [ ] A **SPIRE lab** (any deployment mode — VM, Docker or Kubernetes) **linked to a k3s
+      node** with its **Kubernetes** action. The worker's host must run a SPIRE agent, and
+      in this lab the host that does is that k3s node — mint the agent **on that node**.
+      The SPIRE lab's own VM runs the *server*, not an agent, and a worker there logs
+      `unattested`. The Install dialog warns when the host is not the node.
+- [ ] A **service account** to mint the agent against (recommended — see above), or at
+      least a narrow user. Not an administrator; the cell refuses that.
+- [ ] The Ansible runner able to reach both the SPIRE server and the node, and the
+      dashboard's `/mcp/sse` and `/api/oauth/token` reachable from the node.
 
 ## The demo, end to end
 
@@ -487,18 +510,24 @@ About twelve minutes, and step 5 is the whole thing.
 
 1. **Ask the question.** How many non-human principals are running in your estate right
    now, and could you stop one in the next sixty seconds?
-2. **Mint the agent** — **Workload Lab → Agent → Mint an agent**. Show the response: a
-   SPIFFE ID, a token name, an expiry — and the raw token exactly once. Point out that the
-   row keeps the first three and never the fourth. Worth saying while the form is open:
-   the user list holds **no administrators**, because the cell refuses one.
+2. **Mint the agent** — **Workload Lab → Agent → Mint an agent**, against a service
+   account. Show the response: a SPIFFE ID, a credential name, an expiry — and **Token:
+   None**, because this agent holds no secret. (Minted against a person-shaped user, the
+   raw token appears here exactly once instead; point out that the row keeps the first
+   three and never the fourth.) Worth saying while the form is open: the user list holds
+   **no administrators**, because the cell refuses one.
 3. **Install it** with the two playbooks in `examples/playbooks/agent/` — the tab's
-   **Install** button has both commands with this agent's values filled in — then
-   `journalctl -u mcp-agent -f`. The dashboard does not run them and does not watch them,
-   which is why the tab shows no progress bar and points at the journal instead.
+   **Install** button has both commands filled in: the entry play aimed at the SPIRE
+   server (with the lab's CLI prefix in Docker or Kubernetes mode, and the node's SPIFFE
+   ID as the parent), then the worker aimed at the node, with
+   `agent_token_source=spiffe` and the client id. Then `journalctl -u mcp-agent -f`. The
+   dashboard does not run them and does not watch them, which is why the tab shows no
+   progress bar and points at the journal instead.
 4. **Read one line aloud.** The SPIFFE ID it proved, the token it spent, what it saw.
-5. **Revoke the token**, with the log still on screen — the tab's **Revoke** button, or
-   Settings → API Tokens if you would rather show it landing among the ordinary human
-   tokens:
+5. **Revoke it**, with the log still on screen — the tab's **Revoke** button, or the
+   client under **Users → Service accounts** (a PAT: Settings → API Tokens, landing among
+   the ordinary human tokens). With `spiffe` the worker's next exchange at the token
+   endpoint is refused even though its SVID is still perfectly valid:
 
    ```
    [agent] spiffe://weaverlab.test/agent/mcp-reader · token "mcp-reader-pat" · REFUSED — the token is revoked or expired · 14:06:41
@@ -512,9 +541,9 @@ About twelve minutes, and step 5 is the whole thing.
 
 ## Lifecycle
 
-**Revoking is not uninstalling, deliberately.** `DELETE /api/agentcell/agent/{id}` clears
-the token and marks the row; the worker keeps running and keeps attesting, and its next
-poll is refused. Tearing it down in the same action would remove the thing worth watching.
+**Revoking is not uninstalling, deliberately.** `DELETE /api/agentcell/agent/{id}` revokes
+the PAT or deactivates the OAuth client and marks the row; the worker keeps running and
+keeps attesting, and its next poll is refused. Tearing it down in the same action would remove the thing worth watching.
 
 The host is an ordinary VM, so **Destroy reaps the worker with it** — this cell adds no
 teardown of its own beyond revoking what it issued.
@@ -524,10 +553,16 @@ teardown of its own beyond revoking what it issued.
 - [ ] The cell **refuses** with MCP off, with no trust domain, with a non-expiring token,
       with an admin user, and with a host the dashboard did not deploy — five refusals,
       each naming its remedy.
-- [ ] The raw token appears **once**, in the create response, and nowhere in the row.
-- [ ] `spire-agent api fetch x509` returns a SPIFFE ID the worker can parse. *(Unproven —
-      see the preview note.)*
-- [ ] The MCP SSE client connects through your ingress. *(Unproven.)*
+- [ ] The raw token appears **once**, in the create response, and nowhere in the row —
+      and against a service account with a registered trust domain, **not at all**.
+- [ ] The Install dialog's two commands run as shown: the entry lands on the SPIRE server
+      with the node as its parent, and the worker installs on the node.
+- [ ] `spire-agent api fetch x509` returns a SPIFFE ID the worker can parse. *(Run against
+      SPIRE 1.15.3 locally; confirm on the node.)*
+- [ ] With `--token-source spiffe`, the first line says the token came from `spiffe` and
+      nothing is on the host, and polls succeed. *(The exchange was run against a real
+      SVID locally; the full loop on a host has not.)*
+- [ ] The MCP SSE client connects to `/mcp/sse` through your ingress. *(Unproven.)*
 - [ ] The log line carries **both** the SPIFFE ID and the token's name, and no part of
       the token's value.
 - [ ] Revoking the token stops the unit, and `systemctl status mcp-agent` shows it stopped
@@ -542,12 +577,28 @@ teardown of its own beyond revoking what it issued.
 
 ## Troubleshooting
 
-**The worker logs `unattested`.** Either no registration entry matches, or the unit has a
-private `/tmp`. The SPIRE workload API socket lives under `/tmp`, so `PrivateTmp=yes`
-hides it — the same trap `spire-agent-install.yml` documents.
+**The worker logs `unattested`.** In order of likelihood:
 
-**Every poll fails with a 404.** The MCP server is off, or `/mcp` is not routed. The cell
-refuses this at mint time, so a 404 here means the flag changed afterwards.
+- **The worker is not on a SPIRE agent node.** In this lab only the Kubernetes-linked k3s
+  node runs an agent; the SPIRE lab's own VM runs the server. The Install dialog says
+  which host the node is.
+- **No registration entry matches** — the entry's parent must be that node's ID
+  (`spiffe://<td>/node/k3s-01`) and its selector the uid the worker runs as.
+- **The unit has a private `/tmp`.** The workload API socket lives under `/tmp`, so
+  `PrivateTmp=yes` hides it — the same trap `spire-agent-install.yml` documents.
+- **An old worker** passed the socket to `spire-agent` as a `unix://` URI, which it cannot
+  dial. Re-run `agent-install.yml` to pick up the fixed worker.
+
+**With `--token-source spiffe`, every poll fails at the token endpoint.** The dashboard
+could not verify the SVID: check **Users → SPIFFE trust domains** shows the lab's trust
+domain with a JWKS URL (a lab registers it when built; **Refresh keys** re-registers it),
+and that the dashboard can reach the lab's `tcp/8443`. A replayed or wrong-audience SVID
+is refused by design — the worker fetches a fresh one per exchange, audience-bound to
+`/api/oauth/token` on the MCP URL's origin.
+
+**Every poll fails with a 404.** The MCP server is off, or `/mcp` is not routed — the
+worker's URL must be the SSE endpoint, `/mcp/sse`. The cell refuses a disabled MCP server
+at mint time, so a 404 here means the flag changed afterwards or the URL is wrong.
 
 **The unit restarts in a loop after a revoke.** `SuccessExitStatus=2` is missing from the
 unit. The worker exits 2 on a refusal deliberately, so systemd must treat that as a stop.

@@ -15,7 +15,8 @@ than on preference.
 
 **The fifth tab is not a fifth answer. It is a consumer.** The Agent tab puts a non-human
 principal on a host, attested by the SPIRE tab's trust domain and authorized by a token
-that expires — and it can hold any one of the other three: mint the Cloud tab's
+that expires — with a service account, a token its own SVID mints, so the host holds no
+secret at all — and it can hold any one of the other three: mint the Cloud tab's
 credential, ask for the Kubernetes tab's token, or use the Certificate tab's identity.
 Until something holds one of these credentials, the other four
 tabs are a description of a mechanism; the Agent tab is where the mechanism gets stopped
@@ -90,9 +91,9 @@ ADCS, or STS — not BeyondTrust. So for each of the four:
 **The authority is not always Password Safe.** Three tabs vault their credential there;
 the Cloud tab's is minted and held by **Workload Credentials**, which has its own issuance
 audit, its own leases and its own per-issuance billing. Governed, by a different
-BeyondTrust product. The Agent tab's is this dashboard itself — it issues a Personal
-Access Token through the same hashing `api/tokens` uses, records the id, the name and the
-expiry, and revoking is a column write. The invariant is "something governs it", not
+BeyondTrust product. The Agent tab's is this dashboard itself — it issues an OAuth client
+on a service account (or a Personal Access Token for a person-shaped user), records the
+id, the name and the expiry, and revoking is a column write. The invariant is "something governs it", not
 "Password Safe governs it".
 
 **And the Agent tab is held to it like the rest**, which is how it earned a tab rather
@@ -124,7 +125,7 @@ Password Safe holding nothing at all.
 [What consumes these credentials](workload-lab/consumers.md) is the register — which file,
 what it has to hold in order to retrieve, and the cases where the answer is still *nothing
 does*. It is deliberately honest in both directions: the SVID does not authenticate to
-`/mcp`, no endpoint on this dashboard returns a cloud credential — the agent mints its
+`/mcp` directly (it is exchanged at the dashboard's token endpoint), no endpoint on this dashboard returns a cloud credential — the agent mints its
 own from Workload Credentials, which is what keeps the dashboard out of that audit
 trail — and no subordinate CA has ever been uploaded to a live PRA.
 

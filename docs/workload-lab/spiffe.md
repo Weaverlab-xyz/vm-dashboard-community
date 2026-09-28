@@ -83,10 +83,11 @@ minting identities that relying services keep accepting, and it appears on no ot
 ## Building it from the dashboard
 
 The **Workload Lab** page's **SPIRE** tab (preview; enable `spire_lab_enabled` under Settings → Preview
-features) does steps 1–5 below as one job. Configure it under **Settings → SPIRE Lab**,
-and upload the four `spire-*.yml` playbooks on the **Storage** page first — a run
+features) does the steps below as one job. Configure it under **Settings → SPIRE Lab**,
+and upload the playbooks on the **Storage** page first — the `spire-*.yml` set, plus
+`install-docker.yml` or `k3s-server-init.yml` for the Docker and Kubernetes modes. A run
 fetches assets *by filename from the storage backend*, never from `examples/`, and the
-build form names the ones that are missing. Storage is where assets are uploaded; Config
+build form names the ones each mode is missing. Storage is where assets are uploaded; Config
 Management only *runs* them.
 
 **It attaches to a VM you already deployed rather than creating one.** That is not a
@@ -104,7 +105,7 @@ a **Secrets-Management SSH-key secret**, plus an optional login user — the sam
 pickers Config Management has, reading the same two endpoints. Two things worth knowing
 before you pick an account:
 
-- All four playbooks run with `become`, and the form has no separate sudo credential, so
+- Every playbook runs with `become`, and the form has no separate sudo credential, so
   tick **"also use this account for sudo"** unless the account is root or has passwordless
   sudo. It reuses the same Password Safe request rather than opening a second one.
 - A `[SSH key]` (DSS-managed) account has a private key and not necessarily a password, so
@@ -121,21 +122,26 @@ like there was none.
 What the build does, in order:
 
 0. Creates the credential's Secrets Safe folder tree (`<root>/<lab>` under the safe) if it
-   is absent — a pre-flight, before anything is touched. The identity playbook is the
-   *last* of the four and writes into a folder it does not create, so without this a
+   is absent — a pre-flight, before anything is touched. The identity playbook runs
+   after the install and seed stages and writes into a folder it does not create, so without this a
    missing folder surfaces only after the server is installed and seeded, as an error that
    reads like a credential fault. The **safe** is never created: it carries its own ACL.
-1. Opens `tcp/8081` on the cloud ACL — an NSG rule on Azure, a VPC firewall rule plus an
-   instance tag on GCP, a security-group permission on AWS — to the sources named in
-   `spire_lab_source_cidrs`. **Blank opens nothing**, which is correct for a broker
-   already inside the VNet and is the first thing to check otherwise.
-2. `spire-server-install.yml` — SPIRE under systemd, one trust domain, and `admin_ids`.
+1. Opens `tcp/8081` and `tcp/8443` on the cloud ACL — an NSG rule on Azure, a VPC
+   firewall rule plus an instance tag on GCP, a security-group permission on AWS — to the
+   sources named in `spire_lab_source_cidrs`. **Blank opens nothing**, which is correct
+   for a broker already inside the VNet and is the first thing to check otherwise.
+2. The mode's install stages (see [Deployment modes](#deployment-modes-vm-docker-or-kubernetes)):
+   `spire-server-install.yml` in `vm` mode — SPIRE under systemd, one trust domain, and
+   `admin_ids`.
 3. `spire-open-ports.yml`, with the same source set, so the two gates cannot disagree.
 4. `spire-seed-entries.yml` — 11 entries, of which discovery should return **8**.
 5. `spire-admin-identity.yml` — mints the admin credential into Secrets Safe.
+6. `spire-oidc-provider.yml` (`vm` and `docker`; the chart runs it in `k8s`) — the OIDC
+   Discovery Provider on `tcp/8443`, after which the lab registers its trust domain with
+   the dashboard by JWKS URL.
 
 Each playbook gets its own job row, so a failed stage's Ansible output is somewhere you
-can read it; the page links all four. The first failure stops the sequence, because every
+can read it; the page links every one. The first failure stops the sequence, because every
 later stage asserts the server is up.
 
 **Govern** writes the managed system. A trust domain nothing governs demonstrates SPIRE
@@ -303,14 +309,20 @@ Safe.
 
 Everything above is about identities that are **minted and vaulted**, which
 [Minting is a deliberate downgrade](#minting-is-a-deliberate-downgrade-and-the-honest-version-matters)
-is explicit about being a downgrade. This is the un-downgraded path, and it is the only
-thing in the dashboard that presents a JWT-SVID to a real relying party: a workload attests
+is explicit about being a downgrade. This is the un-downgraded path: a workload attests
 itself, fetches a token that lives five minutes, and reaches a Kubernetes API server with it.
-Nothing is stored in a vault, on disk, or anywhere else.
+Nothing is stored in a vault, on disk, or anywhere else. (The dashboard's own token
+endpoint is the other relying party — see
+[Service accounts → SPIFFE workloads](../service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing).)
 
-**Preview, and never live-validated.** The playbooks exist and the lab can run them; no
-one has yet watched the whole chain work against a live pair. Treat the first run as the
-validation.
+The linked k3s node is also **the one host in the lab that runs a SPIRE agent**, which
+makes it where the [agent demo cell](../profiles/demo/agent-demo-cell.md)'s worker goes.
+
+**Preview.** Run so far, against SPIRE 1.15.3 locally: the exec credential plugin
+(`k8s-spiffe-workload-jwt-exec-auth` 0.3.0) against a real agent on the lab's socket path
+returned a `client.authentication.k8s.io/v1` ExecCredential carrying the workload's
+JWT-SVID. **Nobody has yet watched the whole chain against a live pair** — the API server
+accepting that token is the part still to prove. Treat the first run as the validation.
 
 ### Building it: one button, two VMs
 

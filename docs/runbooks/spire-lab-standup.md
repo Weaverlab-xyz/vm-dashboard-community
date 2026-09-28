@@ -14,8 +14,10 @@ Playbooks: [`examples/playbooks/spire/`](../../examples/playbooks/spire/README.m
 SSH — so GCP and AWS differ only in §1 and §2. Those sections name what changes.
 
 > **§1–§4 can be done for you.** The **SPIRE** page (preview: `spire_lab_enabled`) runs
-> all four playbooks as one job and opens the cloud ACL first, on any of the three
-> clouds — see [SPIFFE and SPIRE](../workload-lab/spiffe.md#building-it-from-the-dashboard). Its
+> the build as one job and opens the cloud ACL first, on any of the three clouds, and in
+> any of three deployment modes — systemd on the VM (what this runbook does by hand),
+> Docker, or k3s + Helm. It also publishes the trust domain's OIDC provider and registers
+> it with the dashboard — see [SPIFFE and SPIRE](../workload-lab/spiffe.md#building-it-from-the-dashboard). Its
 > *Onboarding* panel then resolves every value §5 asks you to paste. This runbook remains
 > the by-hand path and the explanation of *why* each step is what it is; read §0, §2 and
 > §5 either way.
@@ -82,7 +84,7 @@ That default is now a default rather than the only option. If this host's deploy
 carries no usable keypair, pick a credential in §3's build form instead of rebuilding the
 VM — a Password Safe managed account or a Secrets-Management SSH-key secret, with an
 optional login user. Tick **"also use this account for sudo"** for any account that is
-not root and has no passwordless sudo: all four playbooks run with `become` and there is
+not root and has no passwordless sudo: every playbook runs with `become` and there is
 no separate sudo credential on the form.
 
 **Pass:** the VM reaches `running` and Config Management lists it as a target.

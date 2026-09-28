@@ -12,8 +12,13 @@ is how the VM was created.
 
 | File | Target | What it does |
 |---|---|---|
-| `agent-install.yml` | the worker's host (SSH) | The worker, a systemd unit, and a 0600 token file only in `file` mode |
-| `agent-spiffe-entry.yml` | the **SPIRE server** (SSH) | One registration entry, so the worker can attest |
+| `agent-install.yml` | the worker's host (SSH) — a **SPIRE agent node** | The worker, a systemd unit, and a 0600 token file only in `file` mode |
+| `agent-spiffe-entry.yml` | the **SPIRE server** (SSH) | One registration entry, so the worker can attest. `spire_cli_prefix` reaches the CLI in a Docker or Kubernetes lab, as the `spire/` shared plays do |
+
+**The worker's host must run a SPIRE agent.** In the Workload Lab that is the SPIRE lab's
+Kubernetes-linked k3s node (node ID `spiffe://<td>/node/k3s-01`, the entry's
+`agent_node_id`); the lab's own VM runs the server. The Agent tab's **Install** dialog
+writes both commands with the right hosts, parent, prefix and token source filled in.
 | `files/mcp_agent.py` | — | The worker itself |
 
 ## Two credentials, and they are not the same one
@@ -24,22 +29,32 @@ missed:
 | | What it is | Where it lives |
 |---|---|---|
 | **SVID** | the worker's **identity** — it attests itself | nowhere. Re-fetched from the SPIRE workload API every loop, held in memory |
-| **PAT** | the worker's **authorization** to this dashboard | either a 0600 file, or **nothing at all** — see below. Scoped to a user's RBAC, with an expiry, revocable instantly |
+| **Authorization** | what the worker may do on this dashboard: a PAT, or a service account's OAuth access token | a 0600 file, or **nothing at all** — see below. Scoped to a user's RBAC, with an expiry, revocable instantly |
 
-> **The SVID does not authenticate to `/mcp`, and nothing here pretends it does.** The MCP
-> server takes a Bearer PAT (`api/mcp_server.py`) and has no mTLS path. Bridging the two —
-> having the SVID mint the PAT — needs the Password Safe **SPIFFE SVID** plugin, whose
-> configuration question `services/spire_lab_service.py` records as unresolved. So the
-> worker proves its identity and spends its authorization in the same log line, and the
-> gap between them stays visible rather than papered over.
+> **The SVID can mint the authorization — at the dashboard's token endpoint.** With a
+> service account and a registered trust domain, the cell binds an OAuth client to the
+> agent's SPIFFE ID and the worker runs with `agent_token_source: spiffe`: each exchange
+> presents a fresh JWT-SVID at `/api/oauth/token` for an access token that lives minutes.
+> It still does not authenticate to `/mcp` *directly* — `/mcp` has no mTLS path and sees
+> the bearer token. The other bridge, the SVID minting a credential inside Password Safe
+> via the **SPIFFE SVID** plugin, is still unresolved (`services/spire_lab_service.py`).
 
-## Three token sources, and two of them store nothing
+## Four token sources, and three of them store nothing
+
+`agent_token_source: spiffe` holds **nothing** and needs no cloud and no Workload
+Credentials — only the SPIRE agent on the host:
+
+```
+agent_token_source:    spiffe
+agent_oauth_client_id: vmsa_…       # printed when the cell mints the SVID-bound client
+```
+
 
 `agent_token_source: file` (default) writes a 0600 file. That is a static secret — smaller
 than an env var, which is readable from `/proc/<pid>/environ` and shows up in a `ps e`, but
 a static secret nonetheless.
 
-The other two put **nothing** on the host. Both start the same way: the worker asks its
+`wlc` and `ps` also put **nothing** on the host. Both start the same way: the worker asks its
 platform for its own identity token and presents that to **BeyondTrust Workload
 Credentials** in place of a PAT.
 
@@ -179,10 +194,13 @@ off the host at all.
 
 ## Not yet run against live infrastructure
 
-> The worker has never been run against a real SPIRE trust domain or a live MCP endpoint.
-> Unobserved: whether `spire-agent api fetch x509` parses as expected on the target
-> release, and whether the MCP SSE client negotiates cleanly through the dashboard's
-> ingress. Validate both before demoing. `python3 files/mcp_agent.py --selftest` checks the
+> **Run against SPIRE 1.15.3 locally:** the worker's `spire-agent api fetch x509` and
+> `fetch jwt` calls — which found the worker passing the socket as a `unix://` URI that
+> `spire-agent -socketPath` cannot dial, now fixed — `agent-spiffe-entry.yml`, and a real
+> JWT-SVID authenticating at the dashboard's token endpoint (replay, wrong audience and a
+> revoked client all refused). **Not yet observed:** the worker on a real host end to end,
+> and the MCP SSE client (`/mcp/sse`) through the dashboard's ingress. Validate both
+> before demoing. `python3 files/mcp_agent.py --selftest` checks the
 > argument wiring and touches nothing.
 >
 > **`--cloud-episode` is the least proven of the four modes and the only one that costs

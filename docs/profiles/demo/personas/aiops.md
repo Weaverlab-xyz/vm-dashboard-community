@@ -45,10 +45,11 @@ A worker is reading your estate on a loop, one line per poll. Revoke its token w
 log on screen: the next poll is refused, the worker says so in its own words, and the unit
 stops. Then ask the room how they would do that to an agent they are running today.
 
-Start on **Workload Lab → Agent**, which is where the whole beat lives: mint, the token
-shown exactly once, the install commands with this agent's values already in them, and
-Revoke. Show it from Settings → API Tokens instead if the point you want is that an
-agent's authorization is one more row among everyone else's.
+Start on **Workload Lab → Agent**, which is where the whole beat lives: mint it against a
+service account — the response says **Token: None**, because the worker authenticates with
+its own SVID and the host holds no secret — then the install commands with this agent's
+values already in them, and Revoke. The worker is still exactly who it was, and may no
+longer do anything.
 
 **Guide:** [Agent Demo Cell](../agent-demo-cell.md)
 
@@ -94,7 +95,7 @@ Azure honours the revoke.
 | **`mcp_server_enabled`** | What the worker calls. With it off the cell refuses to deploy rather than installing a worker that would 404 on every poll. |
 | **`spire_lab_enabled`** | The trust domain that attests the worker, and the gate on the Workload Lab page two of these cards point at. |
 | **`workload_credentials_enabled`** | Only for the last card. |
-| A **SPIRE lab on the host** | Stood up before the agent — the worker attaches to a host that is already a SPIRE agent node. |
+| A **SPIRE lab, linked to a k3s node** | Stood up before the agent. The worker's host must run a SPIRE agent, and in this lab that is the Kubernetes-linked node — mint the agent there. |
 
 **Nothing here is a setup-wizard toggle**, which is why picking this focus pre-ticks
 nothing. All four are configured in Settings, so the cards report them as *needs flag* and

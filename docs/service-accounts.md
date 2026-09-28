@@ -223,7 +223,7 @@ from either source:
 | Source | Use when | Caveat |
 |---|---|---|
 | **JWKS URL** | the dashboard can reach SPIRE's OIDC Discovery Provider (`/keys`) or a bundle endpoint | preferred: always current. Pin a private CA with the CA field. |
-| **Stored bundle** | it can't — e.g. the Workload Lab, whose provider is firewalled to its k3s node | SPIRE rotates JWT keys within `ca_ttl`; re-capture before then. The page flags a bundle older than five days. |
+| **Stored bundle** | it can't reach the provider | SPIRE rotates JWT keys within `ca_ttl`; re-capture before then. The page flags a bundle older than five days. Also kept as a fallback beside a JWKS URL. |
 
 Paste a bundle from `spire-server bundle show -format spiffe`, or on a **Workload Lab SPIRE
 row click Refresh keys**: it runs `spire-jwt-bundle.yml` on the SPIRE host over the
