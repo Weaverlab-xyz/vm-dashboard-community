@@ -42,7 +42,9 @@
 #   audience: k8s                              # MUST match the entry and the workload
 #   username_prefix: "spiffe:"
 #   workload_role: view                        # a ClusterRole that already exists
-#   exec_auth_version: v0.1.0                  # spiffe/k8s-spiffe-workload-jwt-exec-auth
+#   exec_auth_version: 0.3.0                   # spiffe/k8s-spiffe-workload-jwt-exec-auth
+#   exec_auth_sha256: ""                       # overrides the pinned checksum table
+#   spire_allow_unpinned: false                # true = take an unpinned version on TLS alone
 #   workload_user: deploy-bot                  # gets the kubeconfig
 - name: Accept SPIFFE JWT-SVIDs at the k3s API server
   hosts: all
@@ -54,7 +56,19 @@
     audience: "k8s"
     username_prefix: "spiffe:"
     workload_role: "view"
-    exec_auth_version: "v0.1.0"
+    # The exec credential plugin. Upstream publishes goreleaser archives
+    # (k8s-spiffe-workload-jwt-exec-auth_Linux_<x86_64|arm64>.tar.gz, tag v<version>), not
+    # bare binaries -- the old `-linux-amd64` URL never existed. SHA-256 per version and
+    # architecture, checked against the release's own <name>_<version>_checksums.txt; a
+    # version not in this table is REFUSED unless exec_auth_sha256 or
+    # spire_allow_unpinned is set.
+    exec_auth_version: "0.3.0"
+    exec_auth_sha256: ""
+    exec_auth_checksums:
+      "0.3.0":
+        x86_64: 0f55d73172b8f18eb4a567f59b3c9e0a84190dca4d5dd536fc90206f0339f2f2
+        arm64: 41ec47018a42910e3723a2c40da872f268a697aa8df1c2cc40d5df42a9900ecd
+    spire_allow_unpinned: false
     workload_user: "deploy-bot"
     # The SPIRE host's address, for the /etc/hosts entry below. Blank skips it, for a lab
     # whose issuer hostname already resolves in DNS.
@@ -66,6 +80,9 @@
     # cannot clobber flags an operator or k3s-server-init.yml already set there.
     dropin: /etc/rancher/k3s/config.yaml.d/10-spiffe-auth.yaml
     exec_auth_bin: /usr/local/bin/k8s-spiffe-workload-jwt-exec-auth
+    # Each version unpacks into its own directory and exec_auth_bin is a symlink to it, so
+    # an upgrade is a new directory plus a re-pointed link, never an overwrite in place.
+    exec_auth_root: /opt/k8s-spiffe-workload-jwt-exec-auth
   tasks:
     - name: Require the issuer, the bundle and the identity
       ansible.builtin.assert:
@@ -227,38 +244,72 @@
       changed_when: "'unchanged' not in rbac_apply.stdout"
 
     # ── the client half ──────────────────────────────────────────────────────
-    - name: Install the exec credential plugin
+    - name: Map the CPU architecture to the plugin's release asset
+      ansible.builtin.set_fact:
+        _ea_arch: "{{ {'x86_64': 'x86_64', 'aarch64': 'arm64'}[ansible_facts['architecture']] | default('') }}"
+
+    - name: Resolve the pinned plugin checksum
+      ansible.builtin.set_fact:
+        _ea_sha256: >-
+          {{ exec_auth_sha256 if exec_auth_sha256 | length > 0
+             else (exec_auth_checksums[exec_auth_version][_ea_arch] | default('')
+                   if exec_auth_version in exec_auth_checksums else '') }}
+        _ea_dir: "{{ exec_auth_root }}/{{ exec_auth_version }}"
+
+    - name: Refuse an unverified plugin download
+      ansible.builtin.assert:
+        that:
+          - _ea_arch | length > 0
+          - _ea_sha256 | length > 0 or spire_allow_unpinned | bool
+        fail_msg: >-
+          No pinned SHA-256 for exec credential plugin {{ exec_auth_version }} on
+          {{ ansible_facts['architecture'] }}. Add it to exec_auth_checksums in this play
+          (from the release's k8s-spiffe-workload-jwt-exec-auth_{{ exec_auth_version }}_checksums.txt),
+          pass exec_auth_sha256, or set spire_allow_unpinned to take it on TLS alone.
+
+    - name: Create the plugin's version directory
+      ansible.builtin.file:
+        path: "{{ _ea_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # A failure here FAILS the play. It used to be swallowed, because the asset URL was a
+    # guess; with the real asset and a pinned checksum, a failed download is a network
+    # fault or a tampered file, and neither should report success.
+    - name: Download the exec credential plugin
       ansible.builtin.get_url:
         url: >-
-          https://github.com/spiffe/k8s-spiffe-workload-jwt-exec-auth/releases/download/{{ exec_auth_version }}/k8s-spiffe-workload-jwt-exec-auth-linux-amd64
-        dest: "{{ exec_auth_bin }}"
-        mode: "0755"
-      register: exec_dl
-      failed_when: false
+          https://github.com/spiffe/k8s-spiffe-workload-jwt-exec-auth/releases/download/v{{ exec_auth_version }}/k8s-spiffe-workload-jwt-exec-auth_Linux_{{ _ea_arch }}.tar.gz
+        dest: "{{ _ea_dir }}/plugin.tar.gz"
+        checksum: "{{ ('sha256:' ~ _ea_sha256) if _ea_sha256 | length > 0 else omit }}"
+        mode: "0640"
 
-    # Checked by stat, not by exec_dl.failed: `failed_when: false` makes Ansible report the
-    # task as succeeded whatever happened, so reading .failed here would always be false and
-    # the note below would never print.
-    - name: Check whether the plugin actually landed
-      ansible.builtin.stat:
-        path: "{{ exec_auth_bin }}"
-      register: exec_bin
-
-    # The release asset naming on a project still badged "Development Phase" is the least
-    # stable thing in this play, so a 404 here does not fail the run: everything the API
-    # server needs is already in place, and the binary can be built from source. Said out
-    # loud rather than swallowed.
-    - name: Note a failed plugin download
+    - name: Warn when the plugin was not checksummed
       ansible.builtin.debug:
-        msg:
-          - "Could not fetch {{ exec_auth_version }} of the exec credential plugin:"
-          - "  {{ exec_dl.msg | default('no message') }}"
-          - "The CLUSTER side is configured and working regardless — this is the client"
-          - "half only. Build it instead with:"
-          - "  go install github.com/spiffe/k8s-spiffe-workload-jwt-exec-auth@latest"
-          - "and place the binary at {{ exec_auth_bin }}. Check the project's release"
-          - "asset names before pinning a different exec_auth_version."
-      when: not exec_bin.stat.exists
+        msg: >-
+          spire_allow_unpinned is set and no checksum is pinned for exec credential plugin
+          {{ exec_auth_version }}, so it was taken on TLS alone.
+      when: _ea_sha256 | length == 0
+
+    - name: Unpack the plugin binary
+      ansible.builtin.unarchive:
+        src: "{{ _ea_dir }}/plugin.tar.gz"
+        dest: "{{ _ea_dir }}"
+        remote_src: true
+        include: [k8s-spiffe-workload-jwt-exec-auth]
+        owner: root
+        group: root
+        mode: "0755"
+        creates: "{{ _ea_dir }}/k8s-spiffe-workload-jwt-exec-auth"
+
+    - name: Point the plugin path at this version
+      ansible.builtin.file:
+        src: "{{ _ea_dir }}/k8s-spiffe-workload-jwt-exec-auth"
+        dest: "{{ exec_auth_bin }}"
+        state: link
+        force: true
 
     - name: Read the cluster CA for the workload's kubeconfig
       ansible.builtin.slurp:
@@ -304,6 +355,9 @@
                 apiVersion: "client.authentication.k8s.io/v1"
                 command: "{{ exec_auth_bin }}"
                 interactiveMode: Never
+                # The plugin's default waits forever for the Workload API; kubectl would
+                # hang with it rather than fail.
+                args: ["-timeout=10s"]
                 env:
                 - name: SPIFFE_JWT_AUDIENCE
                   value: "{{ audience }}"

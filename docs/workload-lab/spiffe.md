@@ -213,7 +213,9 @@ root-owned. `systemd-analyze security spire-server` scores the VM units.
 
 **Every download is verified.** The plays pin, per SPIRE version, the SHA-256 of the
 release tarballs (server and agent, `spire-extras` for the VM provider; amd64 and arm64,
-checked against upstream's own `*_sha256sum.txt`) and the digests of the
+checked against upstream's own `*_sha256sum.txt`), the Kubernetes exec credential plugin
+(`k8s-spiffe-workload-jwt-exec-auth` 0.3.0, against its release `checksums.txt`) and the
+digests of the
 `ghcr.io/spiffe/*` multi-arch images, which the compose file runs as
 `<image>:<tag>@<digest>` — Docker then refuses a re-pointed tag, or any local image with
 that tag. A version with no pin is **refused**, not warned about: add its values to the
@@ -351,8 +353,16 @@ user:
   exec:
     apiVersion: "client.authentication.k8s.io/v1"
     command: "k8s-spiffe-workload-jwt-exec-auth"
+    args: ["-timeout=10s"]
     interactiveMode: Never
 ```
+
+`-timeout` is there because the plugin's default waits forever for the Workload API, and
+`kubectl` would hang rather than fail. The play installs **0.3.0** from upstream's
+goreleaser archive (`…_Linux_x86_64.tar.gz` / `…_Linux_arm64.tar.gz`, pinned by SHA-256),
+into its own version directory behind a symlink. That version was run against a SPIRE
+1.15.3 agent on the lab's socket path and returned a `client.authentication.k8s.io/v1`
+ExecCredential carrying the workload's JWT-SVID.
 
 It also takes `SPIFFE_JWT_SOURCE=server-admin-api` to mint from the server's admin API
 instead. **Do not use that mode here.** It is the same attestation bypass this page spends a

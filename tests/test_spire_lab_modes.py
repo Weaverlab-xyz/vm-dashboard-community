@@ -651,7 +651,8 @@ def test_the_service_passes_the_opt_out_only_when_configured():
     orig = svc._cfg
     try:
         svc._cfg = lambda key, default="": default
-        for fn in (svc._install_vars, svc._oidc_vars, svc._agent_vars, svc._docker_server_vars):
+        for fn in (svc._install_vars, svc._oidc_vars, svc._agent_vars, svc._docker_server_vars,
+                   svc._auth_vars):
             assert fn(_row())["spire_allow_unpinned"] is False, fn.__name__
         svc._cfg = lambda key, default="": "true" if key == "spire_lab_allow_unpinned" else default
         assert svc._docker_server_vars(_row())["spire_allow_unpinned"] is True

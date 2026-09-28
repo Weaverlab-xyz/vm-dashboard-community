@@ -1264,6 +1264,7 @@ def _auth_vars(row: SpireLab) -> dict:
             "username_prefix": K8S_USERNAME_PREFIX,
             "workload_role": row.k8s_workload_role or K8S_WORKLOAD_ROLE,
             "workload_user": K8S_WORKLOAD_USER,
+            **_pin_vars(),
             # Resolves the issuer hostname to the SPIRE host. Without it the API server
             # cannot reach JWKS at all, and see the section note for why the issuer is not
             # simply this address.
