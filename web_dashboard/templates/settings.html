@@ -6411,12 +6411,83 @@
                        placeholder="(blank uses the active backend)">
                 <p class="text-[11px] text-gray-400 mt-1">
                   A run fetches assets <em>by filename from storage</em>, never from the repo, so
-                  the four <code>spire-*.yml</code> playbooks have to be uploaded on the
-                  <strong>Storage</strong> page first &mdash; Config Management only <em>runs</em>
+                  the <code>spire-*.yml</code> playbooks (and, per mode,
+                  <code>install-docker.yml</code> or <code>k3s-server-init.yml</code>) have to be
+                  uploaded on the <strong>Storage</strong> page first &mdash; Config Management only <em>runs</em>
                   them. The build form tells you which are missing.
                 </p>
               </div>
             </div>
+          </div>
+
+          <div>
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Kubernetes mode</p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">SPIRE chart version</label>
+                <input type="text" x-model="panelCfg.spire_lab_helm_chart_version"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="0.30.2 (pinned)">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">SPIRE CRDs chart version</label>
+                <input type="text" x-model="panelCfg.spire_lab_helm_crds_chart_version"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="0.6.1 (pinned)">
+              </div>
+              <p class="col-span-2 text-[11px] text-gray-400 -mt-1">
+                Blank uses the pins, never &ldquo;latest&rdquo;. Chart 0.30.2 ships SPIRE 1.15.3,
+                the version the VM and Docker modes install &mdash; move the chart and the
+                SPIRE version together, because the value keys the playbook sets are exactly
+                what a chart release renames.
+              </p>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">k3s version</label>
+                <input type="text" x-model="panelCfg.spire_lab_k3s_version"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="(blank: get.k3s.io's current)">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  At least 1.34: structured authentication is GA there, and the playbook
+                  refuses anything older.
+                </p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Helm tarball SHA-256</label>
+                <input type="text" x-model="panelCfg.spire_lab_helm_sha256"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="(blank: TLS only, with a warning)">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  From <code>get.helm.sh/helm-v&lt;ver&gt;-linux-&lt;arch&gt;.tar.gz.sha256sum</code>.
+                  Helm publishes checksums only there, so none is shipped.
+                </p>
+              </div>
+              <div class="col-span-2">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Extra chart values (YAML)</label>
+                <textarea x-model="panelCfg.spire_lab_helm_values_extra" rows="4"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                          placeholder="spire-server:&#10;  logLevel: debug"></textarea>
+                <p class="text-[11px] text-gray-400 mt-1">
+                  Merged <em>over</em> the playbook's values, so it can undo them &mdash;
+                  including the upstream hardening the lab turns on.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Supply chain</p>
+            <label class="flex items-start gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="panelCfg.spire_lab_allow_unpinned" class="mt-1">
+              <span>
+                <strong>Allow unpinned downloads</strong>
+                <span class="block text-[11px] text-gray-400 mt-0.5">
+                  Every SPIRE tarball, image and the Kubernetes exec plugin is pinned by SHA-256
+                  or digest for the versions the playbooks know, and any other version is
+                  <strong>refused</strong>. Ticking this takes an unpinned version on TLS alone.
+                  Prefer adding the new version's checksums to the playbooks; leave this off.
+                </span>
+              </span>
+            </label>
           </div>
         </div>
       </template>

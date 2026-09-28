@@ -718,6 +718,50 @@ def test_the_fetch_ignores_proxy_variables_for_a_private_address():
     finally:
         sa.httpx.Client = orig
 
+
+# ── upgrades: a new version replaces the running one ─────────────────────────
+# Run here against real release tarballs: the provider tasks took a host from the old
+# plain-file layout to 1.15.3, upgraded it to 1.15.2 (install beside, re-point, prune),
+# changed nothing on a re-run, and refused the unpinned version without the opt-out.
+
+def test_the_provider_installs_per_version_behind_a_symlink():
+    tasks = {t.get("name"): t for t in _play("spire-oidc-provider.yml")["tasks"]}
+    detect = tasks["Detect this version's provider binary"]["ansible.builtin.stat"]
+    assert detect["path"] == "{{ oidc_dir }}/bin/{{ spire_version }}/oidc-discovery-provider", (
+        "guarding on the binary merely existing is what left upgrades as a no-op")
+    unpack = tasks["Unpack the provider binary"]["ansible.builtin.unarchive"]
+    assert unpack["dest"] == "{{ oidc_dir }}/bin/{{ spire_version }}"
+    link = tasks["Point the provider at this version"]
+    assert link["ansible.builtin.file"]["state"] == "link"
+    assert link["ansible.builtin.file"]["force"] is True, "an old plain file must be replaceable"
+    assert link["notify"] == "Restart spire-oidc-provider"
+    unit = _rendered("spire-oidc-provider.yml", "Install the systemd unit")
+    assert "ExecStart=/opt/spire/oidc/oidc-discovery-provider " in unit, "the unit runs the link"
+
+
+def test_old_provider_versions_are_pruned_only_after_the_new_one_serves():
+    names = [t.get("name") for t in _play("spire-oidc-provider.yml")["tasks"]]
+    assert names.index("Confirm the issuer the document advertises") < \
+        names.index("Prune superseded provider versions"), (
+            "pruning before the new version has served would leave nothing to roll back to")
+    find = next(t for t in _play("spire-oidc-provider.yml")["tasks"]
+                if t.get("name") == "Find superseded provider versions")["ansible.builtin.find"]
+    assert find["excludes"] == ["{{ spire_version }}"] and find["file_type"] == "directory"
+
+
+def test_a_new_server_or_agent_binary_restarts_the_service():
+    for name, handler in (("spire-server-install.yml", "Restart spire-server"),
+                          ("spire-agent-install.yml", "Restart spire-agent")):
+        tasks = _play(name)["tasks"]
+        unpack = next(t for t in tasks if t.get("name") == "Unpack SPIRE")
+        assert unpack.get("notify") == handler, (
+            f"{name}: a version bump unpacks the new binary and leaves the old process running")
+        names = [t.get("name") for t in tasks]
+        flush = [i for i, t in enumerate(tasks)
+                 if t.get("ansible.builtin.meta") == "flush_handlers"]
+        assert flush and flush[0] > names.index("Unpack SPIRE"), (
+            f"{name}: the restart must land before the play probes the service")
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

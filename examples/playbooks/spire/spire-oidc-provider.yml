@@ -168,14 +168,29 @@
         group: "{{ _oidc_group }}"
         mode: "0750"
 
-    # Guarded on the binary's absence rather than on a version probe: unlike
-    # spire-server, oidc-discovery-provider has no --version flag that is stable across
-    # the 1.x line, so a version bump wants the binary removed first. Said out loud in
-    # the output below rather than silently re-downloading every run.
-    - name: Detect the provider binary
+    # VERSIONED, because oidc-discovery-provider has no --version flag that is stable
+    # across the 1.x line to guard on. Each SPIRE version unpacks into its own
+    # <oidc_dir>/bin/<version>/, and <oidc_dir>/oidc-discovery-provider -- what the unit
+    # runs -- is a symlink to the current one. Changing spire_version therefore installs
+    # beside the old binary, re-points the link and restarts the unit; the old version is
+    # pruned only after the new one has served the discovery document below. A host from
+    # before this layout has a plain file there, which the link replaces.
+    - name: Detect this version's provider binary
       ansible.builtin.stat:
-        path: "{{ oidc_dir }}/oidc-discovery-provider"
+        path: "{{ oidc_dir }}/bin/{{ spire_version }}/oidc-discovery-provider"
       register: oidc_bin
+      when: oidc_runtime == 'systemd'
+
+    - name: Create the provider's version directory
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: "{{ _oidc_group }}"
+        mode: "0750"
+      loop:
+        - "{{ oidc_dir }}/bin"
+        - "{{ oidc_dir }}/bin/{{ spire_version }}"
       when: oidc_runtime == 'systemd'
 
     - name: Resolve the pinned checksum for this version and architecture
@@ -223,7 +238,7 @@
     - name: Unpack the provider binary
       ansible.builtin.unarchive:
         src: "/tmp/spire-extras-{{ spire_version }}.tar.gz"
-        dest: "{{ oidc_dir }}"
+        dest: "{{ oidc_dir }}/bin/{{ spire_version }}"
         remote_src: true
         extra_opts: ["--strip-components=2", "--wildcards", "*/bin/oidc-discovery-provider"]
         owner: root
@@ -237,6 +252,15 @@
       ansible.builtin.file:
         path: "/tmp/spire-extras-{{ spire_version }}.tar.gz"
         state: absent
+
+    - name: Point the provider at this version
+      ansible.builtin.file:
+        src: "{{ oidc_dir }}/bin/{{ spire_version }}/oidc-discovery-provider"
+        dest: "{{ oidc_dir }}/oidc-discovery-provider"
+        state: link
+        force: true
+      notify: Restart spire-oidc-provider
+      when: oidc_runtime == 'systemd'
 
     # -dns puts oidc_domain in the certificate's SAN. Without it the cert carries only the
     # SPIFFE URI, and Go's TLS stack rejects the connection on hostname mismatch before
@@ -414,6 +438,24 @@
           mismatch here rejects every token with no useful message. Check oidc_domain
           and oidc_port against the URL Kubernetes will be given.
 
+    # Only now: the new version has served a discovery document with the right issuer.
+    - name: Find superseded provider versions
+      ansible.builtin.find:
+        paths: "{{ oidc_dir }}/bin"
+        file_type: directory
+        excludes: ["{{ spire_version }}"]
+      register: oidc_old_versions
+      when: oidc_runtime == 'systemd'
+
+    - name: Prune superseded provider versions
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ oidc_old_versions.files | default([]) }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      when: oidc_runtime == 'systemd'
+
     - name: What was built
       ansible.builtin.debug:
         msg:
@@ -428,8 +470,8 @@
           - "  curl --cacert <trust-bundle.pem> {{ _issuer }}/.well-known/openid-configuration"
           - "A connection refused there is the firewall; a certificate error is oidc_domain."
           - "Next: spire-k8s-entry.yml on this host, then spire-agent-install.yml on the node."
-          - "To upgrade the provider, remove {{ oidc_dir }}/oidc-discovery-provider first —"
-          - "this play guards on the binary existing, not on its version."
+          - "Provider binary: SPIRE {{ spire_version }} ({{ oidc_runtime }}). Changing spire_version"
+          - "and re-running this play upgrades it in place and restarts it."
   handlers:
     - name: Restart spire-oidc-provider
       ansible.builtin.systemd:

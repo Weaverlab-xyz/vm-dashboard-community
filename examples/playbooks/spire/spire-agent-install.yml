@@ -163,6 +163,8 @@
         dest: "{{ spire_root }}"
         remote_src: true
         extra_opts: ["--strip-components=1"]
+      # A new binary on disk changes nothing until the running process is replaced.
+      notify: Restart spire-agent
       when: spire_version not in _installed
 
     - name: Remove the downloaded tarball

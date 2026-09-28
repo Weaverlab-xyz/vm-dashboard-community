@@ -224,6 +224,24 @@ set `spire_lab_allow_unpinned` to take it on TLS alone, deliberately. The charts
 too (below). Helm itself publishes checksums only on `get.helm.sh`, so none is shipped:
 set `spire_lab_helm_sha256` to verify it.
 
+All of these are on **Settings → SPIRE Lab**: the chart and CRDs versions (blank = the pins),
+the k3s version, extra chart values, the Helm checksum and **Allow unpinned downloads** (off).
+
+**Upgrading SPIRE.** A built lab never re-runs its install stages, so upgrading the server
+(and a linked node's agent) means changing the SPIRE version and running
+`spire-server-install.yml` / `spire-agent-install.yml` from Config Management — both now
+restart onto the new binary instead of leaving the old process running. Move the pins with
+the version, or the plays refuse it.
+
+The VM-mode **OIDC provider** upgrades on its own: **Refresh keys** (manual or the scheduled
+one) re-runs its stage with the current SPIRE version. Each version installs into
+`/opt/spire/oidc/bin/<version>/` behind the `oidc-discovery-provider` symlink the unit runs,
+so an upgrade installs beside the old binary, re-points the link and restarts; the old
+version is pruned only after the new one has served the discovery document. It used to
+guard on the binary merely existing, which made a version change a silent no-op. In Docker
+mode the containers follow the pinned image in the compose file, which the Docker server
+play writes; the Kubernetes mode is a `helm upgrade`.
+
 **What has been run:** the Docker mode, end to end, against images built from the 1.15.3
 release binaries exactly as upstream's Dockerfile builds them — server, seed entries, the
 OIDC provider as uid 1001 reaching the socket, the discovery document and JWKS over TLS,
