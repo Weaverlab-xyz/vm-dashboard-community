@@ -1415,6 +1415,66 @@ async def subnet_availability_zone(region: str, subnet_id: str) -> str:
     return az
 
 
+def _subnet_cidr_sync(region: str, subnet_id: str) -> str:
+    ec2 = _get_ec2(region)
+    subnets = ec2.describe_subnets(SubnetIds=[subnet_id]).get("Subnets") or []
+    return (subnets[0].get("CidrBlock") if subnets else "") or ""
+
+
+async def subnet_cidr(region: str, subnet_id: str) -> str:
+    """The IPv4 CIDR of a subnet, or "" — the range a network-tunnel address pool is
+    carved out of. Best-effort on purpose: a pool we cannot derive must not stop the
+    Gateway from coming up, so this returns "" rather than raising (unlike its sibling
+    ``subnet_availability_zone``, where a wrong answer creates an unmountable volume).
+    """
+    try:
+        return await _to_thread(_subnet_cidr_sync, region, subnet_id)
+    except (ClientError, BotoCoreError, NoCredentialsError) as e:
+        logger.warning("tunnel-pool: cannot read subnet %s in %s: %s", subnet_id, region, e)
+        return ""
+
+
+def _assign_secondary_private_ips_sync(region: str, eni_id: str,
+                                       ips: list) -> list:
+    ec2 = _get_ec2(region)
+    resp = ec2.describe_network_interfaces(NetworkInterfaceIds=[eni_id])
+    enis = resp.get("NetworkInterfaces") or []
+    if not enis:
+        return []
+    have = {a.get("PrivateIpAddress") for a in (enis[0].get("PrivateIpAddresses") or [])}
+    missing = [ip for ip in ips if ip not in have]
+    if not missing:
+        return list(ips)
+    # AllowReassignment=False so we never steal an address off a live host; a
+    # collision raises and the caller degrades to "no network tunnel here".
+    ec2.assign_private_ip_addresses(
+        NetworkInterfaceId=eni_id, PrivateIpAddresses=missing, AllowReassignment=False)
+    return list(ips)
+
+
+async def assign_secondary_private_ips(region: str, eni_id: str, ips: list) -> list:
+    """Register ``ips`` as SECONDARY private addresses on ``eni_id``; return the pool
+    actually present afterwards.
+
+    This is the AWS half of a PRA **Network Tunnel**: the Gateway leases one of these
+    to the operator and ARPs to check the fabric knows it. An address VPC has never
+    heard of gets no reply and the agent refuses the lease.
+
+    Additive and idempotent — only MISSING addresses are assigned, and the primary is
+    never touched. **Never fatal**: protocol tunnels, Web Jumps and every other Gateway
+    function work without a pool, so a failure is logged (with the addresses, so the
+    operator can do it by hand) and reported as an empty pool.
+    """
+    if not ips:
+        return []
+    try:
+        return await _to_thread(_assign_secondary_private_ips_sync, region, eni_id, ips)
+    except (ClientError, BotoCoreError, NoCredentialsError) as e:
+        logger.warning("tunnel-pool: could not assign %s to %s: %s",
+                       ", ".join(ips), eni_id, e)
+        return []
+
+
 def _set_source_dest_check_sync(region: str, instance_id: str, value: bool) -> None:
     ec2 = _get_ec2(region)
     ec2.modify_instance_attribute(InstanceId=instance_id, SourceDestCheck={"Value": value})

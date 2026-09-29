@@ -168,6 +168,10 @@ def test_region_fields_and_unknown_cloud():
         "db_parameter_group_name", "db_mysql_parameter_group_name",
         "nat_security_group_id", "ecs_subnet_id", "ecs_security_group_ids",
         "ecs_cluster", "jumpoint_subnet_id", "jumpoint_security_group_id",
+        # The network-tunnel lease pool is carved out of jumpoint_subnet_id, so it is
+        # per-region for the same reason that subnet is — a pool pinned flat is
+        # outside the prefix in every other region.
+        "jumpoint_tunnel_pool",
         # Where a Cloud Function's ENIs attach. Purpose-specific rather than reusing
         # default_subnet_id, so that "which subnet do functions use" stays a separate
         # question from "in which region" — see _resolved_network.

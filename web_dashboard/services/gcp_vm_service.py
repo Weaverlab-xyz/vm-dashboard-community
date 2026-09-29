@@ -15,7 +15,7 @@ from typing import Optional
 from ..config import settings
 from ..database import Job
 from ..models.gcp import GCPDeployRequest
-from . import cache_service, gcp_service, job_service, region_catalog
+from . import cache_service, gcp_service, job_service, region_catalog, tunnel_pool
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +218,12 @@ async def _acquire_paired_jumpoint(db, job_id: str, payload: GCPDeployRequest,
             subnetwork=subnet or "",
             machine_type=machine,
             create_external_ip=True,
+            # No network-tunnel pool on a PAIRED gateway. This path builds one gateway
+            # PER VM, and every gateway in a subnetwork derives the same alias range —
+            # GCE refuses overlapping ranges, so the second VM's gateway would fail to
+            # insert. Network tunnels are a property of the SHARED host; spelled
+            # explicitly rather than left to the default, which derives.
+            tunnel_pool_spec=tunnel_pool.DISABLED,
         )
         ref = _JumpointRef("paired", name=meta.get("name", ""),
                            zone=meta.get("zone", jp_zone),

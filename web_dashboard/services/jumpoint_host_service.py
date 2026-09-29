@@ -410,6 +410,65 @@ async def _await_ecs_registration(region: str, host_id: str) -> None:
         f"permanently; /var/log/ecs/ecs-agent.log on the host confirms it.")
 
 
+async def _ensure_aws_tunnel_pool(region: str, host_id: str) -> list:
+    """Make the AWS gateway host able to carry a PRA **Network Tunnel**, and return
+    the address pool it can lease from.
+
+    Two fabric-level things, neither of which a protocol tunnel needs (which is why
+    AWS has gone without them unnoticed — its ECS task is already ``networkMode:
+    host``, so the container sees the real ENI):
+
+    * ``SourceDestCheck=false`` — otherwise the VPC drops any packet the gateway
+      forwards on a leased address that is not its own primary;
+    * the pool registered as SECONDARY private IPs on the DeviceIndex-0 ENI —
+      otherwise the fabric never answers ARP for a leased address and the Gateway
+      agent refuses its own lease.
+
+    Resolution order is per-region ``jumpoint_tunnel_pool``, then flat
+    ``bt_ecs_jumpoint_tunnel_pool``, then derived from the subnet — per-region first
+    because a pool only makes sense inside its own subnet's prefix, the trap
+    ``_azure_gateway_location`` documents.
+
+    Called on the reuse paths as well as create (both are live API calls), so a
+    gateway built before this existed picks the pool up without being rebuilt.
+    Entirely best-effort: every other Gateway function works without a pool.
+    """
+    from . import aws_service, tunnel_pool
+    try:
+        rc = _aws_region_cfg(region)
+        spec = rc.get("jumpoint_tunnel_pool") or _cfg("bt_ecs_jumpoint_tunnel_pool") or ""
+        if (spec or "").strip().lower() == tunnel_pool.DISABLED:
+            return []
+        subnet_id = rc.get("jumpoint_subnet_id") or ""
+        cidr = await aws_service.subnet_cidr(region, subnet_id) if subnet_id else ""
+        pool = tunnel_pool.resolve_pool(spec, cidr, "aws")
+    except Exception as e:  # noqa: BLE001 - never fatal, see docstring
+        logger.warning("tunnel-pool: could not resolve a pool for %s: %s", host_id, e)
+        return []
+    if not pool:
+        return []
+    try:
+        await aws_service.set_source_dest_check(region, host_id, False)
+    except Exception as e:  # noqa: BLE001 - never fatal, see docstring
+        logger.warning("tunnel-pool: could not clear source/dest check on %s: %s",
+                       host_id, e)
+        return []
+    try:
+        eni_id = await aws_service.get_instance_primary_eni(region, host_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("tunnel-pool: no ENI for %s: %s", host_id, e)
+        return []
+    got = await aws_service.assign_secondary_private_ips(region, eni_id, pool)
+    if got:
+        # Logged at INFO because it has to be typed into the Pathfinder console by
+        # hand ("Managed IP Addresses for Protocol Tunnel") — the dashboard can
+        # neither read nor write that, so a mismatch shows up only as a failed ARP.
+        logger.info("tunnel-pool: network-tunnel pool on %s (%s) = %s — this must "
+                    "match Managed IP Addresses for Protocol Tunnel on the Gateway "
+                    "in the Pathfinder console", host_id, eni_id, ", ".join(got))
+    return got
+
+
 async def _ensure_jumpoint_host_aws(region: str, name: str = "",
                                     placement: Optional[dict] = None) -> Optional[str]:
     """Ensure an AWS Gateway host (and its task) is up; return its instance id (or
@@ -440,6 +499,9 @@ async def _ensure_jumpoint_host_aws(region: str, name: str = "",
         # The tag match includes `pending`, and a running host may still be mid-ECS
         # registration — wait, or RunTask 400s with "No Container Instances".
         await _await_ecs_registration(region, existing[0]["instance_id"])
+        # Applied on REUSE too: both calls are live, so a gateway built before
+        # network-tunnel support picks up its pool without a rebuild.
+        await _ensure_aws_tunnel_pool(region, existing[0]["instance_id"])
         await _ensure_task(region, deploy_key, existing[0]["instance_id"])
         return existing[0]["instance_id"]
 
@@ -464,6 +526,7 @@ async def _ensure_jumpoint_host_aws(region: str, name: str = "",
                                     managed=not requested)
         # Losing the race means the winner may still be booting — same wait as above.
         await _await_ecs_registration(region, recheck[0]["instance_id"])
+        await _ensure_aws_tunnel_pool(region, recheck[0]["instance_id"])
         await _ensure_task(region, deploy_key, recheck[0]["instance_id"])
         return recheck[0]["instance_id"]
 
@@ -492,6 +555,7 @@ async def _ensure_jumpoint_host_aws(region: str, name: str = "",
                                         managed=not requested)
     except Exception as exc:
         logger.warning("gateway-host: capturing host public IP failed (non-fatal): %s", exc)
+    await _ensure_aws_tunnel_pool(region, host_id)
     await _ensure_task(region, deploy_key, host_id)
     return host_id
 
@@ -1149,10 +1213,26 @@ async def _ensure_jumpoint_host_gcp(region: str, name: str = "", zone: str = "",
             # Lets the launcher try the region's other zones when this one is out of
             # capacity, instead of leaving the deployment with no gateway at all.
             region=region,
+            # Per-region first, flat key second, derive-from-subnetwork third — a pool
+            # only makes sense inside its own subnetwork's prefix, so reading the flat
+            # key first is the mistake `_azure_gateway_location` documents.
+            tunnel_pool_spec=(resolve_region("gcp", region).get("jumpoint_tunnel_pool")
+                              or _cfg("gcp_jumpoint_tunnel_pool") or ""),
         )
         landed_zone = meta.get("zone") or zone
         logger.info("gateway-host(gcp): gateway %s %s in %s",
                     name, "reused" if meta.get("reused") else "started", landed_zone)
+        # The pool has to be typed into the Pathfinder console by hand ("Managed IP
+        # Addresses for Protocol Tunnel"), so surface it rather than leaving the
+        # operator to read it back off the instance. On reuse there may instead be a
+        # warning: `canIpForward` is create-only on GCE, so a gateway predating this
+        # cannot be repaired in place and has to be recreated for network tunnels.
+        if meta.get("tunnel_pool"):
+            logger.info("gateway-host(gcp): network-tunnel pool on %s = %s — this must "
+                        "match Managed IP Addresses for Protocol Tunnel on the Gateway "
+                        "in the Pathfinder console", name, meta["tunnel_pool"])
+        elif meta.get("tunnel_pool_warning"):
+            logger.warning("gateway-host(gcp): %s", meta["tunnel_pool_warning"])
         if placement is not None:
             placement.update({"zone": landed_zone, "egress_ip": meta.get("external_ip") or ""})
         _persist_jumpoint_egress_ip(meta.get("external_ip"), "gcp", name,

@@ -1286,6 +1286,28 @@ def _jumpoint_container_spec_yaml(container_image: str, deploy_key: str) -> str:
     return yaml.safe_dump(spec, default_flow_style=False)
 
 
+def _subnetwork_cidr_sync(project_id: str, region: str, subnetwork: str) -> str:
+    """The ``ipCidrRange`` of ``subnetwork`` (bare name or self-link), or "".
+
+    Best-effort: a pool we cannot derive must never stop the gateway coming up, so
+    every failure returns "" rather than raising.
+    """
+    if not (project_id and subnetwork):
+        return ""
+    name = subnetwork.rstrip("/").split("/")[-1]
+    region = subnetwork_region(subnetwork) or region
+    if not region:
+        return ""
+    try:
+        from google.cloud import compute_v1
+        client = compute_v1.SubnetworksClient(credentials=_gcp_creds())
+        return client.get(project=project_id, region=region,
+                          subnetwork=name).ip_cidr_range or ""
+    except Exception as e:  # noqa: BLE001 - never fatal, see docstring
+        logger.warning("tunnel-pool: cannot read subnetwork %s in %s: %s", name, region, e)
+        return ""
+
+
 def _run_gce_jumpoint_sync(
     project_id: str,
     zone: str,
@@ -1298,6 +1320,7 @@ def _run_gce_jumpoint_sync(
     cos_image_family: str = "cos-stable",
     create_external_ip: bool = True,
     region: str = "",
+    tunnel_pool_spec: str = "",
 ) -> dict:
     """Launch a small COS GCE instance running the BT Jumpoint container.
     Idempotent on existence: if an instance with the same name is already
@@ -1345,12 +1368,33 @@ def _run_gce_jumpoint_sync(
             except Exception as start_err:
                 logger.warning("GCE Jumpoint '%s' start failed (status=%s): %s",
                                name, status, start_err)
+        # NETWORK-TUNNEL READINESS, reported but never repaired. Unlike Azure — whose
+        # NIC is a separately-updatable ARM resource — `canIpForward` is a property of
+        # the GCE instance and is settable only at insert (or on a TERMINATED
+        # instance). Reconciling it here would mean stopping a gateway that deploys,
+        # cloud databases and k8s tunnels all share, dropping every live session, on a
+        # path they call routinely. So say so loudly and leave it alone.
+        nics = list(existing.network_interfaces or [])
+        aliases = list(getattr(nics[0], "alias_ip_ranges", []) or []) if nics else []
+        gaps = []
+        if not getattr(existing, "can_ip_forward", False):
+            gaps.append("canIpForward=false")
+        if not aliases:
+            gaps.append("no alias IP range")
+        warning = ""
+        if gaps:
+            warning = (f"gateway '{name}' predates network-tunnel support "
+                       f"({', '.join(gaps)}) — protocol tunnels are unaffected, but a "
+                       f"NETWORK tunnel needs the VM recreated")
+            logger.warning("tunnel-pool: %s", warning)
         return {
             "name": name, "zone": found_zone, "self_link": existing.self_link,
             "status": status, "reused": True,
             # Surface the ephemeral egress IP even on reuse: the Web-Jump firewall
             # (_jumpoint_cidrs) needs it, and a reclaimed VM's IP may have changed.
             "external_ip": _external_ip_of(existing),
+            "tunnel_pool": "" if gaps else (aliases[0].ip_cidr_range or ""),
+            "tunnel_pool_warning": warning,
         }
     except NotFound:
         pass
@@ -1389,6 +1433,25 @@ def _run_gce_jumpoint_sync(
         nic.access_configs = [compute_v1.AccessConfig(
             name="External NAT", type_="ONE_TO_ONE_NAT",
         )]
+
+    # NETWORK-TUNNEL ADDRESS POOL — both halves are CREATE-ONLY on GCE, which is why
+    # they are here and not in a reconcile step. `can_ip_forward` lets the gateway
+    # emit packets whose source is a leased address rather than its own; the alias
+    # range is what makes the fabric answer ARP for those addresses, without which the
+    # agent rejects its own lease (`No valid ARP reply received`). Spelled as a CIDR
+    # because that is what an alias range is — see services/tunnel_pool.py.
+    pool_cidr = ""
+    if subnetwork:
+        from . import tunnel_pool as _tp
+        pool_cidr = _tp.resolve_pool_cidr(
+            tunnel_pool_spec,
+            _subnetwork_cidr_sync(project_id, region, subnetwork), "gcp")
+    if pool_cidr:
+        instance.can_ip_forward = True
+        nic.alias_ip_ranges = [compute_v1.AliasIpRange(ip_cidr_range=pool_cidr)]
+        logger.info("tunnel-pool: gateway '%s' network-tunnel pool = %s — this must "
+                    "match Managed IP Addresses for Protocol Tunnel on the Gateway in "
+                    "the Pathfinder console", name, pool_cidr)
     instance.network_interfaces = [nic]
 
     # COS reads gce-container-declaration on first boot and runs the container
@@ -1448,6 +1511,10 @@ def _run_gce_jumpoint_sync(
         # The Web-Jump firewall (_jumpoint_cidrs) whitelists this /32 so the Jumpoint
         # host can reach a source-restricted Rancher/Portainer node.
         "external_ip": _external_ip_of(info),
+        # Blank when we lost the race (that instance was built by whoever won, and
+        # may or may not carry a pool) — read back rather than assumed.
+        "tunnel_pool": ("" if reused else pool_cidr),
+        "tunnel_pool_warning": "",
     }
 
 
@@ -1462,14 +1529,21 @@ async def run_gce_jumpoint(
     machine_type: str = "e2-micro",
     create_external_ip: bool = True,
     region: str = "",
+    tunnel_pool_spec: str = "",
 ) -> dict:
-    """Async wrapper for _run_gce_jumpoint_sync."""
+    """Async wrapper for _run_gce_jumpoint_sync.
+
+    ``tunnel_pool_spec`` is the network-tunnel alias range: blank derives one from the
+    gateway's subnetwork, an explicit CIDR pins it, and ``"off"`` disables it — which
+    is what a PER-VM paired gateway must pass, since every gateway in one subnetwork
+    would otherwise derive the same range and GCE refuses overlapping alias ranges.
+    """
     try:
         return await _to_thread(
             _run_gce_jumpoint_sync,
             project_id, zone, name, container_image, deploy_key,
             network, subnetwork, machine_type, "cos-stable", create_external_ip,
-            region,
+            region, tunnel_pool_spec,
         )
     except GCPError:
         raise

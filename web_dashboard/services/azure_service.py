@@ -2111,13 +2111,13 @@ async def pin_private_address(rg: str, nic_name: str) -> dict:
 # cannot read or write that — so the derived value is logged and returned in the
 # ensure metadata for the operator to copy across.
 
-# How many addresses to carve out when deriving. Each is one ipconfig on the NIC, and
-# one concurrent network-tunnel session; 8 is generous for a demo gateway and stays
-# far below Azure's per-NIC ipconfig limit.
-_TUNNEL_POOL_SIZE = 8
-# Hard ceiling for an OPERATOR-SUPPLIED pool. Without it, pasting a /16 into the
-# config field would try to create 65k ipconfigs — a very expensive typo.
-_TUNNEL_POOL_MAX = 32
+# The arithmetic moved to `tunnel_pool` when AWS and GCP grew the same feature — three
+# copies of "which addresses do we take" would drift, and the reserved-address rules
+# differ per cloud in ways that are easy to get subtly wrong. These names stay as thin
+# Azure-bound delegates: they are the vocabulary the rest of this module and its tests
+# already use, and Azure's derived output is unchanged (10.99.5.247-.254 for a /24).
+from .tunnel_pool import POOL_MAX as _TUNNEL_POOL_MAX  # noqa: E402
+from .tunnel_pool import POOL_SIZE as _TUNNEL_POOL_SIZE  # noqa: E402
 
 
 def derive_tunnel_pool(subnet_prefix: str, size: int = _TUNNEL_POOL_SIZE) -> list[str]:
@@ -2125,19 +2125,12 @@ def derive_tunnel_pool(subnet_prefix: str, size: int = _TUNNEL_POOL_SIZE) -> lis
 
     Taken from the TOP of the subnet on purpose: Azure hands out dynamic addresses
     from the bottom (.4 upward), so the top stays clear of real hosts the longest.
-    Azure reserves the first four addresses of every subnet (network, gateway, and
-    two for DNS) plus the broadcast address — ``hosts()`` drops the first and last,
-    and the ``[3:]`` drops .1/.2/.3. A subnet too small to give ``size`` addresses
+    Azure reserves the first four addresses of every subnet (network, gateway and two
+    for DNS) plus the broadcast address. A subnet too small to give ``size`` addresses
     yields however many it can rather than raising; an unparseable prefix yields [].
     """
-    import ipaddress
-    try:
-        net = ipaddress.ip_network(subnet_prefix, strict=False)
-    except ValueError:
-        logger.warning("tunnel-pool: cannot parse subnet prefix %r", subnet_prefix)
-        return []
-    usable = list(net.hosts())[3:]
-    return [str(ip) for ip in usable[-size:]] if usable else []
+    from . import tunnel_pool
+    return tunnel_pool.derive_pool(subnet_prefix, "azure", size)
 
 
 def parse_tunnel_pool(spec: str) -> list[str]:
@@ -2145,35 +2138,15 @@ def parse_tunnel_pool(spec: str) -> list[str]:
     (inclusive), a CIDR, or a single address. Returns [] for anything unparseable —
     the caller falls back to deriving, because refusing to build the Gateway over a
     malformed optional setting would be the worse failure."""
-    import ipaddress
-    spec = (spec or "").strip()
-    if not spec:
-        return []
-    try:
-        if "-" in spec:
-            lo_s, hi_s = (p.strip() for p in spec.split("-", 1))
-            lo, hi = ipaddress.ip_address(lo_s), ipaddress.ip_address(hi_s)
-            if hi < lo:
-                lo, hi = hi, lo
-            out = [str(ipaddress.ip_address(i)) for i in range(int(lo), int(hi) + 1)]
-        elif "/" in spec:
-            out = [str(ip) for ip in ipaddress.ip_network(spec, strict=False).hosts()]
-        else:
-            out = [str(ipaddress.ip_address(spec))]
-    except ValueError:
-        logger.warning("tunnel-pool: cannot parse pool spec %r — deriving instead", spec)
-        return []
-    if len(out) > _TUNNEL_POOL_MAX:
-        logger.warning("tunnel-pool: spec %r expands to %d addresses; capping at %d",
-                       spec, len(out), _TUNNEL_POOL_MAX)
-        out = out[:_TUNNEL_POOL_MAX]
-    return out
+    from . import tunnel_pool
+    return tunnel_pool.parse_pool(spec)
 
 
 def resolve_tunnel_pool(spec: str, subnet_prefix: str) -> list[str]:
     """The pool to register: an explicit ``spec`` when it parses, else derived from
     the subnet. Keeping both behind one call is what stops the two paths drifting."""
-    return parse_tunnel_pool(spec) or derive_tunnel_pool(subnet_prefix)
+    from . import tunnel_pool
+    return tunnel_pool.resolve_pool(spec, subnet_prefix, "azure")
 
 
 def _subnet_parts(subnet_id: str) -> tuple[str, str, str]:
