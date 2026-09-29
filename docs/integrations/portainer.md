@@ -418,6 +418,12 @@ The node's ingress opens **tcp 9443 and 8000** to a merged source set:
   "cannot reach" it seconds later: the readiness poll needs one lucky attempt, the
   bootstrap that follows needs several consecutive ones. On a dropped connect the deploy
   re-detects, re-applies the ingress and retries the bootstrap once.
+- The hosting platform's **published outbound pool**, when the dashboard runs on Azure
+  Container Apps. The recent-`/32` heuristic can't cover a pool of several hundred
+  addresses that picks one per destination, so the dashboard reads the pool from its
+  own Container App and admits all of it. That needs one Reader grant: see
+  [Outbound addresses](../cloud-hosting.md#outbound-addresses-and-the-managed-node-firewalls).
+  Settings shows the pool as a count, or shows the reason it couldn't be read.
 - A `/32` per dashboard-deployed Gateway, when the
   [PRA Web Jump](#pra-web-jump-optional) is on.
 
@@ -708,8 +714,11 @@ answers with a reset). On the managed node, click **Re-apply the node firewall**
 [Re-applying it](#re-applying-it)); **Mint an API token** does the same repair on its
 own way past, so the message you are left with there already says what the rule now
 allows. Compare that with where the dashboard actually egresses from: if it has no
-stable outbound address (Container Apps with no NAT Gateway, a corporate proxy pool),
-set `portainer_dashboard_egress_cidr` to the whole range rather than a single address.
+stable outbound address, set `portainer_dashboard_egress_cidr` to the whole range
+rather than a single address (a corporate proxy pool). On Container Apps the dashboard
+reads its own pool instead, so check *Hosting platform outbound pool* in **Settings →
+Containers**: an error there names the missing grant
+([Outbound addresses](../cloud-hosting.md#outbound-addresses-and-the-managed-node-firewalls)).
 If the message says the URL is **not a node this dashboard deployed**, the firewall
 in front of that Portainer is yours to open.
 

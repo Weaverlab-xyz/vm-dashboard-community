@@ -26,7 +26,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from . import config_service, region_catalog, region_config
+from . import config_service, egress_pool_service, region_catalog, region_config
 
 logger = logging.getLogger(__name__)
 
@@ -278,9 +278,18 @@ def dashboard_cidr(spec: NodeSpec) -> list:
     dropped -- which reads as "the node was serving a second ago and is now
     unreachable". Admitting the recent set closes that window. Bounded, so a genuinely
     roaming address cannot grow the allow-list without limit.
+
+    The hosting platform's PUBLISHED outbound pool comes last (see
+    :mod:`egress_pool_service`). The recent set is a heuristic that only works when the
+    pool is small; an Azure Container Apps environment with no NAT gateway egresses
+    from several hundred addresses and picks one per DESTINATION, so the echo service
+    and the node see different ones and no amount of re-detection converges. Where the
+    platform says which addresses it uses, admitting all of them is the only fix that
+    needs nobody to paste anything.
     """
     vals = [(config_service.get(spec.dashboard_cidr_key) or "").strip()]
     vals += _recent_egress_cidrs(spec)
+    vals += egress_pool_service.pool_cidrs()
     out = []
     for val in vals:
         if val and val not in out:
@@ -299,10 +308,19 @@ def _recent_egress_cidrs(spec: NodeSpec) -> list:
     return [c.strip() for c in csv.split(",") if c.strip()]
 
 
-def _record_recent_egress(spec: NodeSpec, cidr: str) -> None:
-    """Remember ``cidr`` as a recently-seen egress address (most recent first)."""
-    recent = [c for c in _recent_egress_cidrs(spec) if c != cidr]
-    recent.insert(0, cidr)
+def _record_recent_egress(spec: NodeSpec, cidr: str, replaced: str = "") -> None:
+    """Remember ``cidr`` as a recently-seen egress address (most recent first).
+
+    ``replaced`` is the pinned value ``cidr`` is about to overwrite. It is kept too:
+    it IS a recently-seen address, and dropping it is how a rotation between two
+    addresses left the rule admitting only one of them. Only a /32 — a broader
+    operator pin is never replaced by a detection in the first place."""
+    if replaced and "/" not in replaced:
+        replaced = f"{replaced}/32"
+    keep = [cidr]
+    if replaced and replaced != cidr and replaced.endswith("/32"):
+        keep.append(replaced)
+    recent = keep + [c for c in _recent_egress_cidrs(spec) if c not in keep]
     config_service.set(spec.dashboard_recent_key, ",".join(recent[:_RECENT_EGRESS_MAX]))
 
 
@@ -353,6 +371,9 @@ async def ensure_dashboard_egress_cidr(spec: NodeSpec, detect=None) -> str:
     ``detect`` is injectable so each feature module keeps its own patchable seam.
     """
     detector = detect or detect_egress_ip
+    # Every caller is about to APPLY the rule, so this is where the platform's
+    # published pool is re-read too. Never raises; a failure keeps the last good pool.
+    await egress_pool_service.refresh()
     ip = await detector()
     existing = (config_service.get(spec.dashboard_cidr_key) or "").strip()
     if ip:
@@ -367,7 +388,7 @@ async def ensure_dashboard_egress_cidr(spec: NodeSpec, detect=None) -> str:
         cidr = f"{ip}/32"
         # Recorded whether or not it CHANGED: the point is to accumulate the addresses
         # a SNAT pool actually uses, and re-seeing one still makes it current.
-        _record_recent_egress(spec, cidr)
+        _record_recent_egress(spec, cidr, replaced=existing)
         if existing != cidr:
             config_service.set(spec.dashboard_cidr_key, cidr)
             logger.info("%s ingress: dashboard egress IP detected as %s (was %s)",
@@ -719,7 +740,57 @@ async def apply_ingress(cloud: str, spec: NodeSpec, placement: dict,
     point is that the management interface stays restricted while only the challenge
     path is public. Turning it back off revokes it on every cloud, so it tracks
     :func:`acme_domain` rather than latching.
+
+    The dashboard's published egress pool (:mod:`egress_pool_service`) can run to
+    hundreds of addresses, which not every cloud's rule can hold -- see
+    :func:`fit_to_capacity`. The result then carries ``pool_omitted``.
     """
+    source_cidrs, omitted = fit_to_capacity(cloud, spec, source_cidrs, acme_open=acme_open)
+    result = await _apply_ingress(cloud, spec, placement, source_cidrs, acme_open=acme_open)
+    if omitted and isinstance(result, dict):
+        result["pool_omitted"] = omitted
+    return result
+
+
+# How many source entries one node ingress rule can hold, per cloud, counted the way
+# that cloud counts them. AWS counts every (CIDR, port) pair as a rule against a
+# default quota of 60 inbound rules per security group; an Azure NSG holds 4000
+# prefixes; a GCP firewall rule 5000 source ranges.
+_INGRESS_CAPACITY = {"aws": 60, "azure": 4000, "gcp": 5000}
+
+
+def fit_to_capacity(cloud: str, spec: NodeSpec, source_cidrs: list, *,
+                    acme_open: bool = False) -> tuple:
+    """``(cidrs, omitted)`` -- ``source_cidrs`` trimmed to what ``cloud`` can hold.
+
+    Only the platform egress POOL is ever dropped. Everything else in the set was put
+    there by an operator or names a specific host that needs in, and silently losing
+    one of those would be worse than the cloud's own quota error. A pool address that
+    is ALSO the pinned or a recently-detected one stays. When the pool does not fit
+    the node is back to the /32 heuristic, and ``omitted`` says so."""
+    cap = _INGRESS_CAPACITY.get(cloud)
+    per = len(spec.ports) if cloud == "aws" else 1
+    if cap and cloud == "aws" and acme_open:
+        cap -= 1  # the world-open port-80 challenge rule counts against the same quota
+    if not cap or len(source_cidrs) * per <= cap:
+        return list(source_cidrs), 0
+    pool = set(egress_pool_service.pool_cidrs())
+    pinned = {(config_service.get(spec.dashboard_cidr_key) or "").strip()}
+    pinned |= set(_recent_egress_cidrs(spec))
+    pinned = {c if "/" in c else f"{c}/32" for c in pinned if c}
+    kept = [c for c in source_cidrs if c not in pool or c in pinned]
+    omitted = len(source_cidrs) - len(kept)
+    if omitted:
+        logger.warning(
+            "%s ingress: the dashboard's egress pool (%d addresses) does not fit a %s rule "
+            "(capacity %d); admitting only the detected address. Give the dashboard a "
+            "stable outbound address (a NAT gateway) or host the node on another cloud.",
+            spec.label, len(pool), cloud, cap)
+    return kept, omitted
+
+
+async def _apply_ingress(cloud: str, spec: NodeSpec, placement: dict,
+                         source_cidrs: list, *, acme_open: bool = False) -> dict:
     if cloud == "gcp":
         from . import gcp_service
         if spec is RANCHER:
@@ -742,6 +813,17 @@ async def apply_ingress(cloud: str, spec: NodeSpec, placement: dict,
             name=placement["firewall_name"], ports=list(spec.ports),
             source_cidrs=source_cidrs, acme_open=acme_open)
     raise unsupported(cloud, spec, "ingress rules")
+
+
+def summarize_cidrs(cidrs, limit: int = 6) -> str:
+    """``a, b, c and 397 more`` -- a source list short enough for an error message.
+
+    The egress pool puts hundreds of addresses in the merged set; spelling them all out
+    buries the one sentence the operator needs to read."""
+    cidrs = list(cidrs or [])
+    if len(cidrs) <= limit:
+        return ", ".join(cidrs)
+    return f"{', '.join(cidrs[:limit])} and {len(cidrs) - limit} more"
 
 
 async def list_nodes(cloud: str, spec: NodeSpec, placement: dict) -> list:

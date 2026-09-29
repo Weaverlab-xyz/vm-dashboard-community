@@ -3606,6 +3606,18 @@
                       <span class="text-gray-500">Dashboard egress:</span>
                       <code class="bg-white px-1 rounded" x-text="portainerFirewall.dashboard_egress_ip || '(not detected)'"></code>
                     </p>
+                    <!-- The hosting platform's published outbound pool (Azure Container
+                         Apps with no NAT gateway: ~400 addresses). COUNTED, never listed,
+                         and the merged chips below leave it out for the same reason. The
+                         error is nearly always a missing Reader grant and names the fix. -->
+                    <p x-show="(portainerFirewall.dashboard_egress_pool || {}).count">
+                      <span class="text-gray-500">Hosting platform outbound pool:</span>
+                      <span x-text="(portainerFirewall.dashboard_egress_pool || {}).count + ' addresses, read from the platform'"></span>
+                    </p>
+                    <p x-show="(portainerFirewall.dashboard_egress_pool || {}).error" class="text-amber-700">
+                      <span class="text-gray-500">Outbound pool:</span>
+                      <span x-text="(portainerFirewall.dashboard_egress_pool || {}).error"></span>
+                    </p>
                     <p x-show="(portainerFirewall.gateway_cidrs || []).length">
                       <span class="text-gray-500">Web-Jump Gateways:</span>
                       <template x-for="c in portainerFirewall.gateway_cidrs || []" :key="c">
@@ -3623,9 +3635,11 @@
                     <p>
                       <span class="text-gray-500">Merged allow-list:</span>
                       <span x-show="!(portainerFirewall.merged || []).length" class="text-red-600">none</span>
-                      <template x-for="c in portainerFirewall.merged || []" :key="c">
+                      <template x-for="c in (portainerFirewall.merged || []).filter(c => !((portainerFirewall.dashboard_egress_pool || {}).cidrs || []).includes(c))" :key="c">
                         <code class="bg-white px-1 rounded mr-1" x-text="c"></code>
                       </template>
+                      <span x-show="(portainerFirewall.dashboard_egress_pool || {}).count"
+                            x-text="'+ the ' + (portainerFirewall.dashboard_egress_pool || {}).count + '-address outbound pool'"></span>
                     </p>
                     <p>
                       <span class="text-gray-500">Ports:</span>
@@ -5660,6 +5674,16 @@
                   <span class="text-gray-500">Dashboard egress:</span>
                   <span class="ml-1 font-mono text-gray-700" x-text="rancherFirewall.dashboard_egress_ip"></span>
                 </div>
+                <!-- The hosting platform's published outbound pool, counted rather than
+                     listed; the error is nearly always a missing Reader grant. -->
+                <div class="mb-1" x-show="(rancherFirewall.dashboard_egress_pool || {}).count">
+                  <span class="text-gray-500">Hosting platform outbound pool:</span>
+                  <span class="ml-1 text-gray-700" x-text="(rancherFirewall.dashboard_egress_pool || {}).count + ' addresses, read from the platform'"></span>
+                </div>
+                <div class="mb-1 text-amber-700" x-show="(rancherFirewall.dashboard_egress_pool || {}).error">
+                  <span class="text-gray-500">Outbound pool:</span>
+                  <span class="ml-1" x-text="(rancherFirewall.dashboard_egress_pool || {}).error"></span>
+                </div>
                 <!-- Entitle's own egress, added while a directly-registered integration
                      exists. Named so the ranges do not read as unexplained entries. -->
                 <div class="mb-1" x-show="rancherFirewall.entitle_cidrs && rancherFirewall.entitle_cidrs.length">
@@ -5678,7 +5702,7 @@
                   <span class="text-gray-500">Manual:</span>
                   <span class="ml-1 font-mono text-gray-700" x-text="rancherFirewall.manual_cidrs.join(', ')"></span>
                 </div>
-                <p class="text-gray-400 mt-1" x-show="!(rancherFirewall.cluster_egress_ips && rancherFirewall.cluster_egress_ips.length) && !rancherFirewall.dashboard_egress_ip && !(rancherFirewall.gateway_cidrs && rancherFirewall.gateway_cidrs.length) && !(rancherFirewall.manual_cidrs && rancherFirewall.manual_cidrs.length)">
+                <p class="text-gray-400 mt-1" x-show="!(rancherFirewall.cluster_egress_ips && rancherFirewall.cluster_egress_ips.length) && !rancherFirewall.dashboard_egress_ip && !(rancherFirewall.dashboard_egress_pool || {}).count && !(rancherFirewall.gateway_cidrs && rancherFirewall.gateway_cidrs.length) && !(rancherFirewall.manual_cidrs && rancherFirewall.manual_cidrs.length)">
                   No sources yet — provision a cluster, enable the Web Jump, or add a CIDR above.
                 </p>
                 <!-- The list above governs 443 only once ACME is on. Saying so here is
@@ -8265,8 +8289,8 @@ function settingsPage() {
         // exists in the cloud rather than the one it was opened with.
         this.portainerFirewall = data;
         const bits = [];
-        if ((data.added || []).length) bits.push('now allowing ' + data.added.join(', '));
-        if ((data.removed || []).length) bits.push('dropped ' + data.removed.join(', '));
+        if ((data.added || []).length) bits.push('now allowing ' + summarizeCidrs(data.added));
+        if ((data.removed || []).length) bits.push('dropped ' + summarizeCidrs(data.removed));
         // Fail-closed is the contract, so an empty set is a real outcome, not an error
         // — but it means nothing can reach the node, which no "re-applied" can imply.
         if (!data.opened) {

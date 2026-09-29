@@ -1370,6 +1370,15 @@ function permissionGridState() {
     };
 }
 
+// A firewall source list short enough for a toast: "a, b, c and 397 more". The
+// dashboard's published egress pool puts hundreds of /32s in a node's allow-list.
+function summarizeCidrs(list, limit = 6) {
+    const xs = list || [];
+    if (xs.length <= limit) return xs.join(', ');
+    return `${xs.slice(0, limit).join(', ')} and ${xs.length - limit} more`;
+}
+window.summarizeCidrs = summarizeCidrs;
+
 function formatDuration(seconds) {
     if (seconds == null) return '–';
     if (seconds < 60) return `${seconds}s`;
