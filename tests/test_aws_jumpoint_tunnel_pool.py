@@ -37,17 +37,18 @@ _cfg_stub = types.ModuleType("web_dashboard.config")
 _cfg_stub.settings = object()
 sys.modules.setdefault("web_dashboard.config", _cfg_stub)
 
-try:
-    from web_dashboard.services import aws_service as aws
-except Exception as exc:  # pragma: no cover - boto3 absent
-    print(f"SKIP: aws_service unavailable ({exc})")
-    sys.exit(0)
+# Imported unguarded on purpose. aws_service imports boto3 in its own try/except and
+# loads fine without it, so there is nothing here to skip on — and a guard would mean a
+# genuinely broken aws_service exits 0 having tested nothing (tests/test_import_guard_narrowness.py).
+from web_dashboard.services import aws_service as aws  # noqa: E402
 
-
+# boto3 ITSELF is a different question: without botocore, aws_service's
+# `except (ClientError, ...)` clauses cannot even be EVALUATED, so the error-path cases
+# below are unexercisable and say so rather than asserting something untestable.
 try:
-    from botocore.exceptions import ClientError as _ClientError  # noqa: F401
+    from botocore.exceptions import ClientError as _ClientError  # noqa: F401,E402
     _HAVE_BOTO = True
-except Exception:  # pragma: no cover - boto3 absent on some dev machines
+except ModuleNotFoundError:  # pragma: no cover - boto3 absent on some dev machines
     _HAVE_BOTO = False
 
 
