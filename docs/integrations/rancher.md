@@ -269,7 +269,7 @@ and-egg problem. The dashboard now manages the allow-list for you:
   "cannot reach it" seconds apart. On Azure Container Apps the dashboard now reads
   the environment's published outbound pool and admits all of it, given one Reader
   grant. See
-  [Outbound addresses](../cloud-hosting.md#outbound-addresses-let-the-dashboard-read-its-own-pool).
+  [Outbound addresses](../cloud-hosting.md#outbound-addresses-and-the-managed-node-firewalls).
   Elsewhere, the durable fix is a stable egress (a NAT Gateway) or a manual pool CIDR.
 - **API runner** — when `rancher_api_transport=runner` (see
   [Corp TLS inspection](#corp-tls-inspection-api-transport)), the runner's own source
