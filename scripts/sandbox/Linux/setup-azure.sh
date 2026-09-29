@@ -494,6 +494,7 @@ if [[ -n "$GALLERY_RG" ]]; then
     "Microsoft.Compute/galleries/read",
     "Microsoft.Compute/galleries/images/read",
     "Microsoft.Compute/galleries/images/write",
+    "Microsoft.Compute/galleries/images/delete",
     "Microsoft.Compute/galleries/images/versions/read",
     "Microsoft.Compute/galleries/images/versions/write",
     "Microsoft.Compute/galleries/images/versions/delete",
