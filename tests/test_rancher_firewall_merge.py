@@ -379,9 +379,12 @@ def test_reapply_reports_what_changed():
            rancher_dashboard_egress_cidr="9.9.9.9/32")
     out = _run_reapply("198.51.100.7")
     assert out["before"] == sorted(["203.0.113.4/32", "9.9.9.9/32"])
-    assert out["added"] == ["198.51.100.7/32"] and out["removed"] == ["9.9.9.9/32"]
+    # The address the detection REPLACED stays admitted through the bounded recent
+    # set: it is a recently-seen egress, and dropping it is how a rotation between two
+    # SNAT addresses left the rule admitting only one (live 2026-09-29).
+    assert out["added"] == ["198.51.100.7/32"] and out["removed"] == [], out
     assert out["changed"] is True
-    assert "203.0.113.4/32" in out["merged"]
+    assert "203.0.113.4/32" in out["merged"] and "9.9.9.9/32" in out["merged"]
 
 
 def test_reapply_is_idempotent_and_says_so():

@@ -21,6 +21,8 @@ worker and the UI are two apps, and both call the node). When that is missing th
 keeps its last good value and :func:`status` carries a message naming the exact
 ``az`` command to run. Everywhere other than Container Apps this is a no-op.
 """
+from __future__ import annotations
+
 import base64
 import ipaddress
 import json
@@ -33,6 +35,11 @@ import httpx
 from . import config_service
 
 logger = logging.getLogger(__name__)
+
+# Resolved once, defensively: several test files stub httpx with a bare module, and an
+# ``except httpx.HTTPError`` would then raise AttributeError the moment ANY exception
+# reached it -- including this module's own EgressPoolError.
+_HTTP_ERROR = getattr(httpx, "HTTPError", OSError)
 
 # Persisted, feature-NEUTRAL: the pool is a property of the dashboard's host, so
 # Portainer and Rancher share one copy. Written by whichever process refreshed last;
@@ -232,7 +239,7 @@ async def discover(env=None, client: httpx.AsyncClient = None) -> tuple:
     try:
         token = await _aca_token(client, env)
         rid, ips = await _aca_resource(client, token, env)
-    except httpx.HTTPError as exc:
+    except _HTTP_ERROR as exc:
         raise EgressPoolError(f"Could not reach Azure to read the outbound address pool: "
                               f"{type(exc).__name__}: {exc}") from exc
     finally:
