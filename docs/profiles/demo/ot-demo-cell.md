@@ -244,7 +244,10 @@ to run in front of a customer who asks "so what else can this host reach?"
 
 Each of these is refused **before any VM is launched**, with the remedy in the job error:
 
-- a **broker image** baked with `OT_ROLE=broker` (see `provisioners/ot/README.md`);
+- a **broker image** baked with `OT_ROLE=broker` (see `provisioners/ot/README.md`),
+  with `broker` in its name (e.g. `ot-broker`). The image does not record its role, so
+  the pickers go by name: *DMZ broker image* lists names containing `broker`, and the
+  cell's *Image* picker hides them. "Show all private images" lifts both filters;
 - **`ot_purdue_firewall_enabled` on** — the agent's way out is a hole in the plant
   boundary, and without the boundary there is nothing to make a hole in;
 - a **destination set**, per above;
