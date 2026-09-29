@@ -9,7 +9,7 @@ Azure API endpoints:
   POST   /api/azure/bulk-deploy         - Deploy multiple Azure VMs
   DELETE /api/azure/vms/{vm_name}       - Terminate a dashboard-deployed Azure VM
   POST   /api/azure/vms/{vm_name}/create-image - Capture an image from a VM
-  DELETE /api/azure/images/{image_name} - Delete a managed image
+  DELETE /api/azure/images/{image_name} - Delete a gallery or managed image (?source=)
 """
 import asyncio
 import logging
@@ -1698,18 +1698,47 @@ def export_managed_image(
 @router.delete("/images/{image_name}")
 async def delete_image(
     image_name: str,
+    source: str = "managed",
+    resource_group: Optional[str] = None,
+    location: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("azure", "delete")),
 ):
-    """Delete a standalone managed image from the resource group."""
+    """Delete a private image — a gallery image definition (with all its versions) or
+    a standalone managed image.
+
+    The gallery and the RGs come from the same region config the list was built from,
+    never from the caller: ``resource_group`` only picks WHICH of the RGs the list
+    scanned the managed image lives in, and anything else is refused."""
+    from ..services.region_config import resolve_azure_region
+    region = resolve_azure_region(_resolve_location(location))
+    gallery = region["gallery_name"]
+    gallery_rg = region["gallery_resource_group"]
+    vm_rg = region["resource_group"] or "vm-cli-rg"
+
+    if source == "gallery":
+        if not (gallery and gallery_rg):
+            raise HTTPException(status_code=400, detail="No Shared Image Gallery is configured for this region")
+        target_rg = gallery_rg
+    elif source == "managed":
+        target_rg = resource_group or vm_rg
+        if target_rg.lower() not in {r.lower() for r in (gallery_rg, vm_rg) if r}:
+            raise HTTPException(status_code=400, detail=f"Resource group '{target_rg}' is not one this dashboard manages images in")
+    else:
+        raise HTTPException(status_code=400, detail="source must be 'gallery' or 'managed'")
+
     try:
-        await azure_service.delete_image(_rg(), image_name)
+        if source == "gallery":
+            await azure_service.delete_gallery_image(gallery_rg, gallery, image_name)
+        else:
+            await azure_service.delete_image(target_rg, image_name)
     except AzureError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     job_service.log_audit(
         db, current_user.username, "azure_delete_image",
-        details={"image_name": image_name},
+        details={"image_name": image_name, "source": source, "resource_group": target_rg,
+                 "gallery_name": gallery if source == "gallery" else ""},
     )
     # By prefix, not by key: the image list is cached per location now, so an
     # exact-key invalidate would silently clear nothing.

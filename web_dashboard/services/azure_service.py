@@ -1069,6 +1069,39 @@ async def delete_image(rg: str, image_name: str) -> None:
         raise AzureError(f"Failed to delete image {image_name}: {e}") from e
 
 
+def _delete_gallery_image_sync(cred, sub_id: str, gallery_rg: str, gallery: str,
+                               image_def: str) -> None:
+    """Delete a gallery image DEFINITION. Azure refuses to delete a definition that
+    still has versions (409), so every version goes first — started together and then
+    awaited, since each one un-replicates from every target region."""
+    compute = _get_compute(cred, sub_id)
+    pollers = [
+        compute.gallery_image_versions.begin_delete(gallery_rg, gallery, image_def, v.name)
+        for v in compute.gallery_image_versions.list_by_gallery_image(gallery_rg, gallery, image_def)
+    ]
+    for p in pollers:
+        p.result()
+    compute.gallery_images.begin_delete(gallery_rg, gallery, image_def).result()
+
+
+async def delete_gallery_image(gallery_rg: str, gallery: str, image_def: str) -> None:
+    try:
+        cred, sub_id = await _ensure_creds()
+        await _to_thread(_delete_gallery_image_sync, cred, sub_id, gallery_rg, gallery, image_def)
+    except AzureError:
+        raise
+    except Exception as e:
+        status = (getattr(e, "status_code", None)
+                  or getattr(getattr(e, "response", None), "status_code", None))
+        if status == 403:
+            raise AzureError(
+                f"Not authorised to delete gallery image {image_def} in gallery '{gallery}' "
+                f"(resource group '{gallery_rg}'). The dashboard service principal needs "
+                f"Contributor on that resource group, not just Reader: {e}"
+            ) from e
+        raise AzureError(f"Failed to delete gallery image {image_def}: {e}") from e
+
+
 # ── VM quota check ────────────────────────────────────────────────────────────
 
 def _check_quota_sync(cred, sub_id: str, location: str, vm_size: str) -> None:

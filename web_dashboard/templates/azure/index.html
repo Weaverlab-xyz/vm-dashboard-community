@@ -2599,7 +2599,12 @@ function azureDashboard() {
 
     async deleteImage(img) {
       try {
-        await API.del(`/api/azure/images/${img.name}`);
+        // source + RG + region pick the right delete: a gallery row is an image
+        // DEFINITION, and sent down the managed-image path it "succeeded" as a no-op.
+        const q = new URLSearchParams({ source: img.source || 'managed' });
+        if (img.resource_group) q.set('resource_group', img.resource_group);
+        if (this.location) q.set('location', this.location);
+        await API.del(`/api/azure/images/${encodeURIComponent(img.name)}?${q}`);
         toast(`Image "${img.name}" deleted`, 'success');
         await this.loadPrivateImages();
       } catch (e) {

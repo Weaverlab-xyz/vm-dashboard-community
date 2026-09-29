@@ -757,3 +757,22 @@ region to the dashboard's `aws_region` / `azure_location` /
 The build job's storage upload didn't complete (network blip during
 upload, backend swap mid-build). Re-run the build, or manually upload
 the artefact under the expected `images/<name>-<version>/` key prefix.
+
+**Azure: deleting a Gallery image fails with `AuthorizationFailed`.**
+On `/azure` → **Private Images**, Delete on a **Gallery** row removes
+the whole image definition: every version first, then the definition,
+because Azure won't delete a definition that still has versions. Delete
+on a **Managed** row removes that one managed image from the resource
+group it's listed in. The gallery delete needs
+`Microsoft.Compute/galleries/images/versions/delete` **and**
+`Microsoft.Compute/galleries/images/delete` on the gallery RG, which is
+more than the `Reader` that browsing needs. `Contributor` covers both.
+The `Dashboard Image Promoter` role gets both from the setup scripts, but
+a role created before the definition-delete action was added only has
+the version delete. On that older role, the versions are deleted and
+then the definition refuses, which leaves an empty definition in the list.
+Add the action to the existing role, then retry the delete:
+
+```bash
+az role definition update --role-definition "$(az role definition list --name 'Dashboard Image Promoter' --query '[0]' -o json | jq '.permissions[0].actions += ["Microsoft.Compute/galleries/images/delete"] | {Name: .roleName, Id: .name, IsCustom: true, Description: .description, Actions: .permissions[0].actions, NotActions: .permissions[0].notActions, AssignableScopes: .assignableScopes}')"
+```
