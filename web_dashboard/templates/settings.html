@@ -3060,7 +3060,7 @@
               </p>
             </div>
             <div class="mb-3">
-              <label class="block text-sm font-medium text-gray-700 mb-1">OT demo cell: Entitle egress ranges <span class="text-gray-400 font-normal">(GCP)</span></label>
+              <label class="block text-sm font-medium text-gray-700 mb-1">OT demo cell: Entitle egress ranges</label>
               <input type="text" x-model="panelCfg.ot_entitle_egress_cidrs"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                      placeholder="203.0.113.10/32, 203.0.113.11/32">
@@ -3083,8 +3083,9 @@
               </label>
               <p class="text-xs text-gray-400 mt-1">
                 The escape hatch for a site that cannot pin BeyondTrust's addresses. Allows tcp
-                443 and 8080 to <span class="font-mono">0.0.0.0/0</span> <em>from the
-                <span class="font-mono">ot-dmz</span> tag only</em> — the PLC cell keeps its
+                443 and 8080 to <span class="font-mono">0.0.0.0/0</span> <em>from the broker
+                only</em> (the <span class="font-mono">ot-dmz</span> tag on GCP, the broker's
+                security group on AWS, its NSG on Azure) — the PLC cell keeps its
                 true air gap and the broker still gets no other port. It is a weaker claim than
                 an address list, so the job summary and the cell card name which of the two drew
                 the rule; the demo owns the difference out loud rather than implying a pinned
@@ -3092,16 +3093,18 @@
               </p>
             </div>
             <div class="mb-3">
-              <label class="block text-sm font-medium text-gray-700 mb-1">OT demo cell: Config-Management runner range <span class="text-gray-400 font-normal">(GCP)</span></label>
+              <label class="block text-sm font-medium text-gray-700 mb-1">OT demo cell: Config-Management runner range</label>
               <input type="text" x-model="panelCfg.ot_config_runner_source_cidr"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                      placeholder="10.10.0.0/28">
               <p class="text-xs text-gray-400 mt-1">
                 The broker has no public address, so the agent is installed over SSH by the
                 in-cloud Ansible runner — and the broker admits :22 from the PRA Gateway and
-                this range alone. Set it to the range the runner sources from: the direct VPC
-                egress subnet (<span class="font-mono">gcp_run_subnetwork</span>) or the
-                Serverless VPC connector (<span class="font-mono">gcp_ansible_vpc_connector</span>).
+                this range alone. Set it to the CIDR of the subnet the runner sources from:
+                on GCP the direct VPC egress subnet (<span class="font-mono">gcp_run_subnetwork</span>)
+                or the Serverless VPC connector (<span class="font-mono">gcp_ansible_vpc_connector</span>),
+                on AWS the Fargate task's subnet (<span class="font-mono">ansible_ecs_subnet_id</span>),
+                on Azure the ACI subnet (<span class="font-mono">ansible_aci_subnet_id</span>).
                 Unset, the deploy refuses — an agent that cannot be installed also cannot be
                 repaired on a <em>Re-wire</em>.
               </p>
