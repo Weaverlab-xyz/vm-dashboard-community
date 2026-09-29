@@ -251,9 +251,11 @@ Each of these is refused **before any VM is launched**, with the remedy in the j
 - **`ot_purdue_firewall_enabled` on** — the agent's way out is a hole in the plant
   boundary, and without the boundary there is nothing to make a hole in;
 - a **destination set**, per above;
-- an **in-cloud Config-Management runner** (`ansible_runner_gcp`, plus
-  `gcp_run_subnetwork` or `gcp_ansible_vpc_connector`) and
-  **`ot_config_runner_source_cidr`** — the dashboard host has no route to a private
+- an **in-cloud Config-Management runner** — `ansible_runner_gcp` plus
+  `gcp_run_subnetwork` or `gcp_ansible_vpc_connector`; `ansible_runner_aws` = ECS
+  Fargate with `ansible_ecs_subnet_id`; `ansible_runner_azure` = ACI with
+  `ansible_aci_subnet_id` in the cell's VNet — and
+  **`ot_config_runner_source_cidr`**, set to that runner subnet's CIDR — the dashboard host has no route to a private
   broker, so the agent is installed from inside the VPC, and the broker's firewall has
   to admit that runner. **On all three clouds**, deliberately: SSM SendCommand and Azure
   Run Command would drop that inbound rule, but the SSM agent reaches AWS through three
