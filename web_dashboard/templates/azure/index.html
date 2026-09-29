@@ -1415,8 +1415,9 @@
               </template>
             </select>
             <p class="text-xs text-gray-400 mt-1" x-show="otBrokerImages().length === 0">
-              No <span class="font-mono">ot-broker</span> image yet — bake one with
-              <span class="font-mono">OT_ROLE=broker</span> (see provisioners/ot/README.md),
+              No image with <span class="font-mono">broker</span> in its name yet — bake one with
+              <span class="font-mono">OT_ROLE=broker</span> and name it e.g. <span class="font-mono">ot-broker</span>
+              (see provisioners/ot/README.md),
               or tick "show all".
             </p>
           </div>
@@ -2022,14 +2023,20 @@ function azureDashboard() {
 
     otImages() {
       const imgs = this.privateImages || [];
-      return this.otShowAllImages ? imgs : imgs.filter(i => (i.name || '').includes('ot-sim'));
+      return this.otShowAllImages ? imgs : imgs.filter(i => {
+        // The role is a bake-time env var the image does not carry, so the name is all
+        // there is. A broker baked from ot-sim-debian.sh is easily named ot-sim-broker:
+        // keep it out of the cell picker, where it would deploy a cell with no PLCs.
+        const n = (i.name || '').toLowerCase();
+        return n.includes('ot-sim') && !n.includes('broker');
+      });
     },
 
     // The DMZ broker is a different bake: KubeSolo and the Entitle agent's chart, and
     // no simulators — a DMZ host that answers Modbus is a lie about where it sits.
     otBrokerImages() {
       const imgs = this.privateImages || [];
-      return this.otShowAllImages ? imgs : imgs.filter(i => (i.name || '').includes('ot-broker'));
+      return this.otShowAllImages ? imgs : imgs.filter(i => (i.name || '').toLowerCase().includes('broker'));
     },
 
     // Subnets, NSGs and the gallery image list are region-scoped. This page runs a
