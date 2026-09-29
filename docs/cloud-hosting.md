@@ -363,6 +363,54 @@ az containerapp create \
 Full detail, including why the worker is its own Container App rather than
 another sidecar: [job-worker.md](job-worker.md#container-apps).
 
+### Outbound addresses: let the dashboard read its own pool
+
+A Container Apps environment with no NAT gateway has **no single outbound address**.
+It SNATs traffic out of a shared pool of several hundred addresses, and it picks an
+address per *destination*. That breaks anything that admits the dashboard by source
+address, the managed [Portainer](integrations/portainer.md#firewall) and
+[Rancher](integrations/rancher.md) node firewalls above all. The dashboard learns its
+address from an echo service, but the echo service and the node see *different*
+addresses, so the node drops the bootstrap. The job reads "serving", then
+`ConnectTimeout`, then "re-detecting … produced no change".
+
+The platform publishes the pool as `properties.outboundIpAddresses` on the Container
+App, so the dashboard reads it with the app's own managed identity. Whenever a node
+firewall is applied (deploy, **Re-apply**, token mint), the whole pool is admitted on
+tcp 9443/8000 (Portainer) or 80/443 (Rancher) and re-read. There's nothing to paste
+and nothing to go stale. It needs **one read grant**, and one grant on the resource
+group covers both apps:
+
+```bash
+for app in dash dash-worker; do
+  az containerapp identity assign -n $app -g RG-DASH --system-assigned
+  az role assignment create --role Reader --scope "$(az group show -n RG-DASH --query id -o tsv)"     --assignee-principal-type ServicePrincipal     --assignee-object-id "$(az containerapp show -n $app -g RG-DASH --query identity.principalId -o tsv)"
+done
+```
+
+**Settings → Containers** (and **→ Kubernetes**) shows *Hosting platform outbound
+pool: N addresses* once it works. When it doesn't, the readout shows why. That's nearly
+always the missing grant, and the message includes the exact command with the
+identity's object id already filled in.
+
+- **Can't grant roles** (Contributor alone can't write role assignments)? Paste the
+  list into `portainer_allowed_source_cidrs` by hand instead:
+  `az containerapp show -n dash-worker -g RG-DASH --query "join(',', properties.outboundIpAddresses)" -o tsv`.
+  That copy *can* go stale when Azure grows the pool.
+- **Two apps with the same name** visible to the identity, or a user-assigned
+  identity: set `DASHBOARD_HOST_RESOURCE_ID` (the app's full resource id) and/or
+  `DASHBOARD_HOST_IDENTITY_CLIENT_ID` on the app.
+- **A node on AWS** can't hold the pool: a security group allows 60 inbound rules by
+  default, and each address × port is one. The pool is left out there, with a warning,
+  and only the detected address is admitted. Host the node on Azure or GCP, which hold
+  thousands of addresses per rule.
+- The admitted pool is shared Azure address space: other tenants' container apps in
+  the same region can egress from it too. The node's own login still stands between
+  them and the node. For a single address you control, attach a NAT gateway to the
+  environment's subnet (~$33/month plus data) and set `DASHBOARD_EGRESS_POOL=off` on
+  both apps. The next firewall refresh then drops the pool and admits only the
+  detected address.
+
 ### No PAT: authenticate to Pathfinder with a workload identity
 
 > **Applies to:** an install using [Workload Credentials](workload-lab/workload-credentials.md).

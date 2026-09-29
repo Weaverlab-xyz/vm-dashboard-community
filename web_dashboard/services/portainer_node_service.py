@@ -36,8 +36,9 @@ recreate, so ``portainer_url`` is still rewritten each deploy.
 """
 import logging
 
-from . import (aws_service, azure_service, config_service, gcp_service,
-               job_service, managed_node_service, portainer_service, region_catalog)
+from . import (aws_service, azure_service, config_service, egress_pool_service,
+               gcp_service, job_service, managed_node_service, portainer_service,
+               region_catalog)
 # Same strength requirements as the Rancher node (Portainer also enforces a 12-char
 # minimum), so there is one implementation, in the shared module.
 from .managed_node_service import generate_admin_password as _generate_admin_password
@@ -215,6 +216,11 @@ def firewall_status(db=None) -> dict:
         # Named separately so the Settings readout attributes the extra range to the
         # Entitle adapter rather than leaving it looking like an unexplained entry.
         "adapter_cidrs": adapter,
+        # The hosting platform's published outbound pool — hundreds of /32s on Azure
+        # Container Apps. Its own entry so the readout can COUNT it instead of listing
+        # it, and so a discovery failure (usually a missing Reader grant) is visible
+        # beside the allow-list it would have widened.
+        "dashboard_egress_pool": egress_pool_service.status(),
         "merged": merged,
         "cloud": _node_cloud(),
         "allow_open": config_service.get_bool(_SPEC.allow_open_key(_node_cloud()), False),
@@ -552,10 +558,8 @@ async def _readmit_egress_and_retry(db, placement: dict, exc, call, *,
         raise portainer_service.PortainerError(
             f"{exc} {serving or 'The connection to the node is being dropped'}, and "
             f"re-detecting the dashboard's egress address produced no change (allowed: "
-            f"{', '.join(after) or 'none'}). Something between the worker and the node "
-            f"is discarding the packets — check the node's firewall rule, and set "
-            f"portainer_dashboard_egress_cidr manually to the worker's real outbound "
-            f"range if it egresses from a pool."
+            f"{managed_node_service.summarize_cidrs(after) or 'none'}). "
+            f"{_egress_advice(report)}"
         ) from exc.__cause__ or exc
     logger.info("Portainer ingress re-applied (%s → %s) — retrying the %s",
                 before, after, what)
@@ -570,11 +574,35 @@ async def _readmit_egress_and_retry(db, placement: dict, exc, call, *,
             raise
         raise portainer_service.PortainerError(
             f"{again} The node's ingress was re-applied first (now allowing "
-            f"{', '.join(after) or 'nothing'}) and the packets are still being "
-            f"dropped. A host with no stable outbound address egresses from a "
-            f"different one per connection, so set portainer_dashboard_egress_cidr "
-            f"to the whole outbound range rather than a single address."
+            f"{managed_node_service.summarize_cidrs(after) or 'nothing'}) and the "
+            f"packets are still being dropped. {_egress_advice(report)}"
         ) from again.__cause__ or again
+
+
+def _egress_advice(report: dict) -> str:
+    """The last sentence of a still-dropped error: what the operator can DO.
+
+    On Azure Container Apps the dashboard reads its own outbound pool, so the useful
+    advice is whatever stopped that — nearly always a missing Reader grant, and the
+    pool status carries the exact command. Elsewhere it is the manual range."""
+    pool = report.get("dashboard_egress_pool") or {}
+    omitted = (report.get("applied") or {}).get("pool_omitted")
+    if pool.get("error"):
+        return (f"The dashboard runs on a platform with a pool of outbound addresses "
+                f"and could not read it: {pool['error']}")
+    if omitted:
+        return (f"The dashboard's {pool.get('count', 0)}-address outbound pool does not "
+                f"fit a {report.get('cloud', '')} ingress rule, so only the detected "
+                f"address is admitted. Give the dashboard a stable outbound address (a "
+                f"NAT gateway), or host the node on Azure or GCP.")
+    if pool.get("count"):
+        return (f"All {pool['count']} of the hosting platform's published outbound "
+                f"addresses are already admitted, so this is not an address rotation — "
+                f"check the node's firewall rule and anything between the worker and "
+                f"the node.")
+    return ("Something between the worker and the node is discarding the packets — "
+            "check the node's firewall rule, and set portainer_dashboard_egress_cidr "
+            "manually to the worker's real outbound range if it egresses from a pool.")
 
 
 async def mint_api_token(*, username: str = "", password: str = "",

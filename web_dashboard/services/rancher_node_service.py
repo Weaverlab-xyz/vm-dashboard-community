@@ -28,8 +28,9 @@ import logging
 
 import httpx
 
-from . import (aws_service, azure_service, config_service, gcp_service,
-               job_service, managed_node_service, rancher_service, region_catalog)
+from . import (aws_service, azure_service, config_service, egress_pool_service,
+               gcp_service, job_service, managed_node_service, rancher_service,
+               region_catalog)
 
 logger = logging.getLogger(__name__)
 
@@ -316,6 +317,10 @@ def firewall_status(db) -> dict:
         # Named separately so the readout attributes these to Entitle rather than
         # leaving them looking like unexplained entries in the merged list.
         "entitle_cidrs": entitle,
+        # The hosting platform's published outbound pool (hundreds of /32s on Azure
+        # Container Apps) -- its own entry so the readout counts it rather than lists
+        # it, and shows why discovery failed when it did.
+        "dashboard_egress_pool": egress_pool_service.status(),
         "merged": merged,
         "cloud": _node_cloud(),
         # Port 80 is open to the WORLD whenever ACME is on, independently of the

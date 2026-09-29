@@ -266,8 +266,11 @@ and-egg problem. The dashboard now manages the allow-list for you:
   node it just launched. That failure is distinctive: the readiness poll needs only
   **one** attempt to land on the admitted address and passes, then the bootstrap needs
   several **consecutive** calls and is dropped, so the job reports "serving" and
-  "cannot reach it" seconds apart. If you hit it, the durable fix is a stable egress
-  (a NAT Gateway) or a manual pool CIDR.
+  "cannot reach it" seconds apart. On Azure Container Apps the dashboard now reads
+  the environment's published outbound pool and admits all of it, given one Reader
+  grant. See
+  [Outbound addresses](../cloud-hosting.md#outbound-addresses-let-the-dashboard-read-its-own-pool).
+  Elsewhere, the durable fix is a stable egress (a NAT Gateway) or a manual pool CIDR.
 - **API runner** — when `rancher_api_transport=runner` (see
   [Corp TLS inspection](#corp-tls-inspection-api-transport)), the runner's own source
   range (`rancher_runner_source_cidr`) is auto-added so its internal traffic is

@@ -2714,10 +2714,10 @@ function containersDashboard() {
           const parts = [];
           if (data.changed) {
             parts.push('Ingress re-applied.');
-            if ((data.added || []).length) parts.push(`Now also allowing ${data.added.join(', ')}.`);
-            if ((data.removed || []).length) parts.push(`No longer allowing ${data.removed.join(', ')}.`);
+            if ((data.added || []).length) parts.push(`Now also allowing ${summarizeCidrs(data.added)}.`);
+            if ((data.removed || []).length) parts.push(`No longer allowing ${summarizeCidrs(data.removed)}.`);
           } else {
-            parts.push(`Ingress re-applied — no change. Allowing ${(data.merged || []).join(', ') || 'nothing'}.`);
+            parts.push(`Ingress re-applied — no change. Allowing ${summarizeCidrs(data.merged) || 'nothing'}.`);
           }
           // Fail-closed is the contract, so an empty set is a real outcome and not an
           // error. Say it plainly rather than reporting a successful no-op.
@@ -3006,10 +3006,10 @@ function containersDashboard() {
           const parts = [];
           if (data.changed) {
             parts.push('Ingress re-applied.');
-            if ((data.added || []).length) parts.push(`Now also allowing ${data.added.join(', ')}.`);
-            if ((data.removed || []).length) parts.push(`No longer allowing ${data.removed.join(', ')}.`);
+            if ((data.added || []).length) parts.push(`Now also allowing ${summarizeCidrs(data.added)}.`);
+            if ((data.removed || []).length) parts.push(`No longer allowing ${summarizeCidrs(data.removed)}.`);
           } else {
-            parts.push(`Ingress re-applied — no change. Allowing ${(data.merged || []).join(', ') || 'nothing'}.`);
+            parts.push(`Ingress re-applied — no change. Allowing ${summarizeCidrs(data.merged) || 'nothing'}.`);
           }
           // Fail-closed is the contract, so an empty set is a real outcome and not
           // an error. Say it plainly: the node is now reachable by nobody.
