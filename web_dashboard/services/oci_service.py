@@ -717,7 +717,9 @@ async def describe_instances(compartment_id: str, instance_ocids: list[str]) -> 
 # `azure_service.run_vm_jumpoint` uses for the same reason. One shared instance per
 # compartment, reference-counted by `jumpoint_host_service`, so it is not a standing cost.
 
-_JUMPOINT_MANAGED_TAGS = {"managed-by": "vm-dashboard", "purpose": "clouddb-jumpoint"}
+# purpose=gateway, matching Azure's host. Older instances carry "clouddb-jumpoint";
+# nothing matches on the value.
+_JUMPOINT_MANAGED_TAGS = {"managed-by": "vm-dashboard", "purpose": "gateway"}
 
 # Lifecycle states in which an instance is worth reusing rather than launching beside.
 # TERMINATED and TERMINATING are excluded deliberately: a name match on a corpse is what

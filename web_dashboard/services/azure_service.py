@@ -2332,7 +2332,10 @@ def _run_vm_jumpoint_sync(
                 "tunnel_pool": _ensure_tunnel_ipconfigs(
                     network, rg, nic_name, subnet_id, pool)}
 
-    tags = {"managed-by": "vm-dashboard", "purpose": "clouddb-jumpoint"}
+    # "gateway", not the VM's name: VMs, databases and K8s tunnels all share this host.
+    # Hosts created before this still carry purpose=clouddb-jumpoint — nothing matches
+    # on the value, and api/azure.py's Deployed By column accepts both.
+    tags = {"managed-by": "vm-dashboard", "purpose": "gateway"}
     # Standard + Static = secure-by-default (no inbound) egress IP.
     pip = network.public_ip_addresses.begin_create_or_update(
         rg, pip_name,
