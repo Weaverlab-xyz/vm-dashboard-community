@@ -20,15 +20,20 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Probe the third-party deps by name; the first-party import below is unguarded, so a
+# broken api/azure.py fails this file instead of skipping it.
 try:
-    from web_dashboard.api import azure
-except Exception as exc:  # pragma: no cover — deps absent outside CI
+    import fastapi  # noqa: F401
+    import sqlalchemy  # noqa: F401
+except ModuleNotFoundError as exc:  # pragma: no cover — deps absent outside CI
     try:
         import pytest
-        pytest.skip(f"azure api import unavailable: {exc}", allow_module_level=True)
+        pytest.skip(f"third-party dep unavailable: {exc}", allow_module_level=True)
     except ModuleNotFoundError:
         print(f"SKIP: {exc}")
         sys.exit(0)
+
+from web_dashboard.api import azure  # noqa: E402
 
 
 class _FakeQuery:
