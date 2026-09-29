@@ -98,6 +98,10 @@ the install fails. Two consequences worth knowing before debugging a cell:
    load the script from storage, build (~10–15 min).
 3. The result appears under Custom Images and in the OT tab's image picker
    (names containing `ot-sim` are pre-filtered).
+4. For the broker, build again with `OT_ROLE=broker` and put `broker` in the name
+   (e.g. `ot-broker`). The role is not recorded on the image, so the pickers go by
+   name: the *DMZ broker image* picker lists names containing `broker`, and the cell
+   picker hides them. "Show all private images" lifts both filters.
 
 The Packer build VM runs in the project's `default` VPC and has egress — that is
 where the pulls happen. Build-time overrides (Packer env vars): `OT_RUNTIME`,
