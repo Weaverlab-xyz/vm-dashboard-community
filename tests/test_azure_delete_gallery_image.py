@@ -17,8 +17,8 @@ What these pin:
 - a gallery-version delete that ARM refuses with 403 says the SP needs
   Contributor, rather than surfacing a bare AuthorizationFailed.
 
-Heavy cloud deps (fastapi/azure-sdk/…) are only present in CI; when missing the file
-SKIPs cleanly so the per-file runner stays green.
+fastapi/httpx are probed by name and SKIP the file when absent; the first-party
+imports are unguarded, so a broken one fails instead of skipping.
 
 Run: python tests/test_azure_delete_gallery_image.py   (or under pytest)
 """
@@ -29,20 +29,23 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-
-    from web_dashboard.api import azure
-    from web_dashboard.api.auth import get_current_user
-    from web_dashboard.database import get_db
-    from web_dashboard.services import azure_service
-except Exception as exc:  # pragma: no cover — deps absent outside CI
+    import fastapi  # noqa: F401
+    import httpx  # noqa: F401 — TestClient's transport
+except ModuleNotFoundError as exc:  # pragma: no cover — app deps absent outside CI
     try:
         import pytest
-        pytest.skip(f"azure api import unavailable: {exc}", allow_module_level=True)
+        pytest.skip(f"app deps unavailable: {exc}", allow_module_level=True)
     except ModuleNotFoundError:
         print(f"SKIP: {exc}")
         sys.exit(0)
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from web_dashboard.api import azure
+from web_dashboard.api.auth import get_current_user
+from web_dashboard.database import get_db
+from web_dashboard.services import azure_service
 
 
 VM_RG = "vm-cli-rg"
