@@ -67,6 +67,9 @@ global.window = global.window || {};
 global.window.tagChipText = extractWindowAssigned('../static/js/app.js', 'tagChipText');
 global.tagChipText = global.window.tagChipText;
 global.tagMatch = extractWindowAssigned('../static/js/app.js', 'tagMatch');
+// The firewall re-apply toasts shorten long source lists through the bare global
+// `summarizeCidrs` (the dashboard's egress pool is hundreds of /32s).
+global.summarizeCidrs = extractFn('../static/js/app.js', 'summarizeCidrs');
 
 let fail = 0;
 const ok = (n, c) => { console.log((c ? 'ok   ' : 'FAIL ') + n); if (!c) fail++; };
