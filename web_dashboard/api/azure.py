@@ -592,6 +592,47 @@ def _deploy_job_meta(db: Session) -> dict:
     }
 
 
+# The shared BeyondTrust Gateway host is created on demand by whichever VM / database /
+# K8s tunnel first needs it and is reused by the rest, so it has no deployer — naming
+# one would be naming whoever happened to be first. "clouddb-jumpoint" is the tag hosts
+# carried before they were tagged "gateway"; existing hosts still carry it.
+_GATEWAY_PURPOSES = frozenset({"gateway", "clouddb-jumpoint"})
+SHARED_GATEWAY_DEPLOYER = "shared (Gateway)"
+
+
+def _rancher_deployers(db: Session) -> dict:
+    """vm_name → who deployed the Azure Rancher management node.
+
+    Kept out of ``_deploy_job_meta`` on purpose: that map also drives which resource
+    groups the DESTROY fan-out searches and which rows carry a job_id, and the Rancher
+    node has its own teardown. This only answers the Deployed By column. A deploy that
+    REUSED a running node didn't create it, so the newest non-reuse deploy wins; a
+    node only ever seen through reuses falls back to the newest deploy of any kind."""
+    jobs = (
+        db.query(Job)
+        .filter(Job.job_type == "rancher_node_deploy", Job.status == "completed")
+        .order_by(Job.created_at.desc())
+        .all()
+    )
+    created: dict = {}
+    reused: dict = {}
+    for j in jobs:
+        md = j.metadata_dict
+        name = md.get("name")
+        if md.get("cloud") != "azure" or not name or not j.created_by:
+            continue
+        (reused if md.get("reused") else created).setdefault(name, j.created_by)
+    return {**reused, **created}
+
+
+def _deployed_by(vm: dict, meta, rancher: dict) -> str:
+    if meta:
+        return meta["created_by"]
+    if (vm.get("tags") or {}).get("purpose") in _GATEWAY_PURPOSES:
+        return SHARED_GATEWAY_DEPLOYER
+    return rancher.get(vm["name"]) or "unknown"
+
+
 def _suspend_warning(job) -> "str | None":
     """Why suspending this VM may need repairing afterwards, or None.
 
@@ -641,6 +682,7 @@ async def _fetch_vms(db: Session) -> list:
             except Exception:
                 pass
 
+    rancher = _rancher_deployers(db)
     result = []
     for vm in live_vms:
         meta = job_meta.get(vm["name"])
@@ -649,7 +691,7 @@ async def _fetch_vms(db: Session) -> list:
             **vm,
             "workgroup": wg,
             "job_id": meta["id"] if meta else None,
-            "deployed_by": meta["created_by"] if meta else "unknown",
+            "deployed_by": _deployed_by(vm, meta, rancher),
             "suspend_warning": (meta or {}).get("suspend_warning"),
             # Overwrites the raw tag dict `**vm` spread in — the response model takes
             # the chip list, not the provider shape. See api/aws.py for the why.
