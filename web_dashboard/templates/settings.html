@@ -2940,6 +2940,26 @@
                 at the new size. Blank keeps the default (t3.small).
               </p>
             </div>
+            <div class="mb-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Network-tunnel address pool <span class="text-gray-400 font-normal">(AWS)</span></label>
+              <input type="text" x-model="panelCfg.bt_ecs_jumpoint_tunnel_pool"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="derived from the gateway subnet">
+              <p class="text-xs text-gray-400 mt-1">
+                A PRA <strong>Network Tunnel</strong> leases the operator a real address on the
+                target network, and the VPC only answers ARP for addresses registered as
+                secondary private IPs on the gateway host's ENI — so the dashboard registers
+                them, and clears the instance's <span class="font-mono">SourceDestCheck</span>.
+                Blank <strong>derives</strong> the pool from the gateway subnet (last 8 usable
+                addresses, from the top because AWS allocates from the bottom). Set an explicit
+                pool as <span class="font-mono">10.99.5.200-10.99.5.207</span>, a CIDR, or a
+                single address; <span class="font-mono">off</span> disables it. This
+                <strong>must match</strong> “Managed IP Addresses for Protocol Tunnel” on the
+                Gateway in the Pathfinder console — the dashboard cannot read that, and a
+                mismatch shows up only as the Gateway failing its ARP check. A per-region entry
+                wins over this key.
+              </p>
+            </div>
             <p class="text-xs text-gray-400 mb-2">Azure overrides — leave blank to reuse the AWS values above.</p>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
               <div>
@@ -3129,6 +3149,26 @@
                 OOM-killed and the failure looks identical to a blocked firewall. Changing this
                 never resizes a live Gateway: delete the Gateway VM and the next deploy
                 recreates it at the new size. Blank keeps the default (e2-medium).
+              </p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Network-tunnel alias range <span class="text-gray-400 font-normal">(GCP)</span></label>
+              <input type="text" x-model="panelCfg.gcp_jumpoint_tunnel_pool"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="derived from the gateway subnetwork">
+              <p class="text-xs text-gray-400 mt-1">
+                A PRA <strong>Network Tunnel</strong> leases the operator a real address on the
+                target network. GCE only routes addresses declared as an <strong>alias IP
+                range</strong> on the NIC, so the dashboard declares one and sets
+                <span class="font-mono">canIpForward</span>. Blank <strong>derives</strong> it
+                from the gateway subnetwork — for a <span class="font-mono">/24</span>, the
+                highest aligned block of 8 clear of GCE's reserved addresses
+                (<span class="font-mono">x.x.x.240/29</span>). Must be a
+                <strong>CIDR</strong>, not a range, because an alias range is a prefix;
+                <span class="font-mono">off</span> disables it. Both halves are
+                <strong>create-only</strong> on GCE — an existing Gateway VM has to be recreated
+                to carry network tunnels. Must match “Managed IP Addresses for Protocol Tunnel”
+                in the Pathfinder console. A per-region entry wins over this key.
               </p>
             </div>
           </div>

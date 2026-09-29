@@ -129,6 +129,9 @@ class AwsRegionConfig(BaseModel):
     ecs_cluster: str = ""
     jumpoint_subnet_id: str = ""
     jumpoint_security_group_id: str = ""
+    # Network-tunnel lease pool, carved out of jumpoint_subnet_id — per-region for the
+    # same reason that subnet is. Blank derives it from the subnet.
+    jumpoint_tunnel_pool: str = ""
     functions_subnet_ids: str = ""
     functions_security_group_ids: str = ""
     desktops_subnet_id: str = ""
@@ -144,6 +147,8 @@ class GcpRegionConfig(BaseModel):
     network: str = ""
     subnetwork: str = ""
     jumpoint_subnetwork: str = ""
+    # Network-tunnel alias range (a CIDR), carved out of jumpoint_subnetwork.
+    jumpoint_tunnel_pool: str = ""
     db_network: str = ""
     ssh_key_secret: str = ""
     default_network_tag: str = ""
@@ -1118,6 +1123,12 @@ class PRAFeatureConfig(BaseModel):
     # Blank keeps the config.py default (t3.small). Changing it never resizes a live
     # host: terminate the Gateway host instance and the next deploy recreates it.
     bt_ecs_host_instance_type: str = ""
+    # Network-tunnel lease pool for the AWS gateway host. Blank DERIVES it from the
+    # gateway subnet (last 8 usable); set to pin one, or "off" to disable. Registered
+    # as secondary private IPs on the host ENI, alongside clearing SourceDestCheck.
+    # Must match "Managed IP Addresses for Protocol Tunnel" in the Pathfinder
+    # console. Per-region `jumpoint_tunnel_pool` wins over this flat key.
+    bt_ecs_jumpoint_tunnel_pool: str = ""
     # PRA Configuration API account — the few calls the SRA provider can't make
     # (PRA Vault accounts for cloud-DB onboarding). Blank reuses the credentials above.
     pra_config_api_client_id: str = ""              # blank → reuse bt_client_id
@@ -1167,6 +1178,11 @@ class PRAFeatureConfig(BaseModel):
     # it never resizes a live Gateway: delete the Gateway VM and the next deploy
     # recreates it at the new size.
     gcp_jumpoint_machine_type: str = ""
+    # Network-tunnel alias range (a CIDR) for the GCP gateway VM. Blank DERIVES it
+    # from the gateway subnetwork (highest aligned block of 8). A range is refused —
+    # an alias range is a prefix. "off" disables it. BOTH halves are create-only on
+    # GCE, so an existing gateway must be recreated to gain them. Per-region wins.
+    gcp_jumpoint_tunnel_pool: str = ""
     # The identity PRA injects into a managed cluster. Previously env-only, promoted
     # alongside the Password Safe rotation feature that makes them operationally
     # load-bearing (the managed account name is <namespace>/<sa>).

@@ -964,6 +964,26 @@ class Settings(BaseSettings):
     # by scripts/sandbox/Linux/setup-aws.sh; bt_ecs_jumpoint_subnet_id /
     # bt_ecs_jumpoint_security_group_id below are the host's subnet + SG.
     bt_ecs_host_instance_type: str = "t3.small"
+    # Network-tunnel address pool for the AWS gateway host. A PRA Network Tunnel leases
+    # the operator a real address ON the target network, and the VPC only answers ARP
+    # for addresses registered as SECONDARY private IPs on the host's ENI — so the
+    # dashboard registers them, and clears the instance's SourceDestCheck so it may
+    # forward on them. Blank (the default) DERIVES the pool from the gateway subnet:
+    # the last 8 usable addresses, taken from the top because AWS allocates from the
+    # bottom. Set to pin one — "10.99.5.200-10.99.5.207", a CIDR, or a single address;
+    # "off" disables the pool entirely.
+    #
+    # Whatever ends up here MUST match "Managed IP Addresses for Protocol Tunnel" on
+    # the Gateway in the Pathfinder console; the dashboard can neither read nor write
+    # that, so a mismatch shows up only as the agent failing its ARP check. The
+    # resolved pool is logged at INFO for exactly this reason.
+    #
+    # PER-REGION: prefer the `jumpoint_tunnel_pool` field of `aws_region_configs`. This
+    # flat key is the fallback, and on a multi-region install it is the WRONG answer
+    # everywhere but the default region — a pool only makes sense inside its own
+    # subnet's prefix. Named for its `bt_ecs_jumpoint_*` siblings; it is a property of
+    # the EC2 host's ENI, not of the ECS task.
+    bt_ecs_jumpoint_tunnel_pool: str = ""
     # VM size for the managed shared Azure Gateway VM (jumpoint_host_service). Same
     # Web-Jump OOM constraint as gcp_jumpoint_machine_type: headless Chromium renders
     # ON the Gateway and needs ≥2 GB — Standard_B1ms minimum, Standard_B2s preferred.
@@ -1724,6 +1744,24 @@ class Settings(BaseSettings):
     # and AWS already sizes its host t3.small for the same reason. Dial down to e2-small
     # (2 GB) if cost matters more than concurrent Web Jumps.
     gcp_jumpoint_machine_type: str = "e2-medium"
+    # Network-tunnel address pool for the GCP gateway VM, as an ALIAS IP RANGE. A PRA
+    # Network Tunnel leases the operator a real address ON the target network, and GCE
+    # only routes addresses declared as an alias range on the NIC — so the dashboard
+    # declares one, and sets canIpForward so the VM may emit packets sourced from it.
+    # Blank (the default) DERIVES it from the gateway subnetwork: the highest aligned
+    # block of 8, taken from the top because GCE allocates from the bottom (for a /24,
+    # x.x.x.240/29 — clear of GCE's reserved second-to-last address).
+    #
+    # A CIDR, not a range: an alias range is a prefix, so "10.99.5.240/29" is accepted
+    # and "10.99.5.240-10.99.5.247" is refused rather than silently widened. "off"
+    # disables the pool. BOTH halves are CREATE-ONLY on GCE — an existing gateway VM
+    # cannot be repaired in place and must be recreated to carry network tunnels.
+    #
+    # Must match "Managed IP Addresses for Protocol Tunnel" on the Gateway in the
+    # Pathfinder console; the dashboard cannot read that, so a mismatch shows up only
+    # as a failed ARP check. PER-REGION: prefer `jumpoint_tunnel_pool` in
+    # `gcp_region_configs` — a flat pool is wrong in every non-default region.
+    gcp_jumpoint_tunnel_pool: str = ""
     gcp_jumpoint_zone: str = ""          # blank → use the deploy zone
     # Which Jumpoint a SINGLE GCP VM deploy gets. "shared" (default) borrows the
     # ref-counted host that cloud databases, k8s tunnels and VDI seats already use;

@@ -130,6 +130,12 @@ _SPECS: dict[str, _Spec] = {
             "ecs_cluster":                "bt_ecs_cluster",
             "jumpoint_subnet_id":         "bt_ecs_jumpoint_subnet_id",
             "jumpoint_security_group_id": "bt_ecs_jumpoint_security_group_id",
+            # The network-tunnel address pool is carved out of jumpoint_subnet_id, so
+            # it is per-region for the same reason that subnet is: a pool pinned flat
+            # is outside the prefix in every other region, and the only symptom is the
+            # Gateway agent failing its ARP check on a lease. Blank derives from the
+            # subnet, which is region-correct with no configuration at all.
+            "jumpoint_tunnel_pool":       "bt_ecs_jumpoint_tunnel_pool",
             # A Lambda's ENIs are placed in a SUBNET, which is region-scoped, so the
             # functions network ids are per-region like every other subnet here. Kept
             # distinct from default_subnet_id/db_security_group_id because "where a
@@ -164,6 +170,9 @@ _SPECS: dict[str, _Spec] = {
             "network":              "gcp_network",
             "subnetwork":           "gcp_subnetwork",
             "jumpoint_subnetwork":  "gcp_jumpoint_subnetwork",
+            # Alias IP range for network tunnels, carved out of jumpoint_subnetwork —
+            # per-region for the same reason that subnetwork is. Blank derives it.
+            "jumpoint_tunnel_pool": "gcp_jumpoint_tunnel_pool",
             "db_network":           "gcp_db_network",
             "ssh_key_secret":       "gcp_ssh_key_secret_name",
             "default_network_tag":  "gcp_default_network_tag",
