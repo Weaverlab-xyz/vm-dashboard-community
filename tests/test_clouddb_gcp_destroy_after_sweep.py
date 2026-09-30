@@ -52,15 +52,9 @@ def _install_stubs():
 
 
 _install_stubs()
-try:
-    from web_dashboard.services import terraform as tf
-except Exception as exc:  # pragma: no cover — skip if other app deps are missing
-    try:
-        import pytest
-        pytest.skip(f"terraform service import unavailable: {exc}", allow_module_level=True)
-    except ModuleNotFoundError:
-        print(f"SKIP: {exc}")
-        sys.exit(0)
+# Unguarded on purpose: every dependency is stubbed above, so an import failure here
+# is a broken module under test, not a missing package (tests/test_import_guard_narrowness.py).
+from web_dashboard.services import terraform as tf  # noqa: E402
 
 _STATE = """google_sql_database_instance.this
 google_sql_database.this[0]
