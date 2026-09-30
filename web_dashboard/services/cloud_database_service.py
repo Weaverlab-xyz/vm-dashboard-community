@@ -192,6 +192,11 @@ def terraform_available() -> bool:
     return shutil.which(settings.terraform_executable) is not None
 
 
+# Resources of the GCP Cloud SQL modules that live INSIDE the instance and die with it.
+# Once the instance is proven gone, decommission drops these from state (see 4b there).
+_GCP_SQL_CHILD_TYPES = ("google_sql_database", "google_sql_user")
+
+
 def template_dir(engine: str, cloud: str) -> str:
     return _TEMPLATE_DIRS[(engine, cloud)]
 
@@ -4325,6 +4330,8 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
 
     # 4. The RDS instance itself (the long step).
     job_service.update_progress(db, job_id, 60, "Destroying the database instance…")
+    destroy_error: Optional[str] = None
+    destroy_kwargs: dict = {}
     if deploy_job:
         try:
             # terraform destroy still evaluates the module config, so it needs the
@@ -4344,15 +4351,18 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
             # State lives in the active storage backend, so destroy recovers even
             # if the deploy dir was lost to a container recreate — pass template_dir
             # so terraform.destroy rebuilds the module from it + the remote state.
-            await terraform.destroy(
-                _deploy_dir(deploy_job.id), variables=destroy_vars,
+            destroy_kwargs = dict(
+                variables=destroy_vars,
                 env=terraform_provider_env.provider_env(row.cloud),
                 template_dir=template_dir(row.engine, row.cloud),
+            )
+            await terraform.destroy(
+                _deploy_dir(deploy_job.id), **destroy_kwargs,
                 on_line=_job_stream(job_id, 60, "Destroying the database…"),
             )
             logger.info("clouddb instance destroyed db_id=%s cloud=%s", db_id, row.cloud)
         except Exception as exc:
-            errors.append(f"DB destroy: {exc}")
+            destroy_error = f"DB destroy: {exc}"
             logger.warning("clouddb destroy for %s failed: %s", db_id, exc)
     else:
         errors.append("no provisioning job recorded for this database — the instance "
@@ -4366,6 +4376,16 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
     #     never touch anything we didn't create. No-ops (404) after a clean destroy.
     #     (AWS/Azure providers taint the resource in state on the same error, so their
     #     destroy already covers it; only GCP exhibits the state-drop.)
+    #
+    #     The sweep also runs after a FAILED destroy (e.g. Postgres refusing DROP
+    #     DATABASE with "being accessed by other users" — backends of a just-deleted
+    #     forwarder the server has not noticed are dead). Deleting the instance takes
+    #     its databases and users with it, but those stay in Terraform state, and the
+    #     google provider can never refresh or delete them again: Cloud SQL answers
+    #     403 notAuthorized, not 404, for a child of a missing instance. Left there,
+    #     every later decommission fails on that 403 forever (job d2b06e68). So once
+    #     the instance is PROVEN gone, forget the children and destroy again — the
+    #     re-run is what confirms state is really empty, rather than assuming it.
     if row.cloud == "gcp":
         job_service.update_progress(db, job_id, 80, "Checking for an orphaned instance…")
         try:
@@ -4375,11 +4395,29 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
                 project, f"clouddb-{db_id[:8]}", db_id)
             if result == "deleted":
                 logger.warning("clouddb decommission: swept orphaned GCP instance "
-                               "clouddb-%s (Terraform state was lost to a create-wait "
-                               "failure)", db_id[:8])
+                               "clouddb-%s (%s)", db_id[:8],
+                               "Terraform destroy failed" if destroy_error else
+                               "Terraform state was lost to a create-wait failure")
+            if destroy_error and result in ("deleted", "not-found"):
+                job_service.update_progress(
+                    db, job_id, 82, "Instance is gone — clearing its databases from state…")
+                forgot = await terraform.forget_resource_types(
+                    _deploy_dir(deploy_job.id), _GCP_SQL_CHILD_TYPES,
+                    env=destroy_kwargs.get("env"))
+                logger.warning("clouddb decommission: instance clouddb-%s is gone; dropped "
+                               "%s from state", db_id[:8], ", ".join(forgot) or "nothing")
+                await terraform.destroy(
+                    _deploy_dir(deploy_job.id), **destroy_kwargs,
+                    on_line=_job_stream(job_id, 82, "Confirming the teardown…"),
+                )
+                destroy_error = None
+                logger.info("clouddb instance destroyed db_id=%s cloud=gcp (after sweep)",
+                            db_id)
         except Exception as exc:
             errors.append(f"GCP orphan sweep: {exc}")
             logger.warning("clouddb GCP orphan sweep for %s failed: %s", db_id, exc)
+    if destroy_error:
+        errors.insert(0, destroy_error)
 
     # 4c. The db_grant adapter, if this database was ever paired with one: the Cloud
     #     Function, its Entitle integration, and the admin credential staged in the

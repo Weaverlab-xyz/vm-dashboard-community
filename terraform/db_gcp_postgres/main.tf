@@ -155,18 +155,25 @@ resource "google_sql_database_instance" "this" {
   }
 }
 
+# ABANDON: destroy drops this from state and lets the instance delete take it. A real
+# DROP DATABASE fails with "being accessed by other users" while any session is open
+# (e.g. a just-deleted forwarder's backends the server hasn't reaped), and the instance
+# delete removes it regardless.
 resource "google_sql_database" "this" {
-  count    = local.create_database ? 1 : 0
-  name     = var.db_name
-  project  = var.project
-  instance = google_sql_database_instance.this.name
+  count           = local.create_database ? 1 : 0
+  name            = var.db_name
+  project         = var.project
+  instance        = google_sql_database_instance.this.name
+  deletion_policy = "ABANDON"
 }
 
+# ABANDON for the same reason as the database: the instance delete removes it.
 resource "google_sql_user" "master" {
-  name     = var.master_username
-  project  = var.project
-  instance = google_sql_database_instance.this.name
-  password = var.master_password
+  name            = var.master_username
+  project         = var.project
+  instance        = google_sql_database_instance.this.name
+  password        = var.master_password
+  deletion_policy = "ABANDON"
 }
 
 # ── Outputs (match the AWS module contract: instance_id / private_host / port) ─
