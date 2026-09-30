@@ -2416,6 +2416,30 @@ async def register_cluster_in_entitle(cluster_id: str, action: str = "register")
             config_service.set(f"entitle_k8s_integration_id_{cluster_id}", "")
             return
 
+        # A register REPLACES the cluster's recorded integration, so remove that one
+        # first. Only one state slot exists per cluster, and overwriting it orphaned the
+        # previous integration in the tenant with no handle left to delete it. An
+        # orphaned private integration also pins the agent token: Entitle refuses to
+        # delete a token "used by integrations", which failed every later decommission
+        # of the agent's host cluster (gke-east, 2026-09-30: a second Register click
+        # orphaned a1d7dca9). A failed deregister raises and keeps the state, so a
+        # retry converges instead of adding a second integration.
+        prior_state = config_service.get(f"entitle_k8s_tfstate_{cluster_id}")
+        prior_id = config_service.get(f"entitle_k8s_integration_id_{cluster_id}")
+        if prior_state:
+            await ent.deregister(prior_state)
+            config_service.set(f"entitle_k8s_tfstate_{cluster_id}", "")
+            config_service.set(f"entitle_k8s_integration_id_{cluster_id}", "")
+            logger.info("cluster %s: removed its previous Entitle integration %s before "
+                        "re-registering", row.name, prior_id or "(id not recorded)")
+        elif prior_id:
+            raise K8sError(
+                f"cluster {row.name} is already registered as Entitle integration "
+                f"{prior_id}, but its Terraform state was not recorded, so the dashboard "
+                f"cannot remove it. Delete integration {prior_id} in the Entitle console "
+                f"(Integrations), run Deregister on this cluster to clear the record, "
+                f"then register again.")
+
         kubeconfig = resolve_kubeconfig(db, cluster_id)
         in_cluster = config_service.get("entitle_agent_cluster_id") == cluster_id
         if in_cluster:
