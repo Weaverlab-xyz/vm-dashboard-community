@@ -909,6 +909,41 @@ async def destroy(deploy_dir: str, env: Optional[dict] = None,
         raise TerraformError(f"terraform destroy failed:\n{out}")
 
 
+def _forget_resource_types_sync(deploy_dir: str, types: tuple, env: Optional[dict]) -> list[str]:
+    r = _run(["state", "list", "-no-color"], deploy_dir, timeout=120, env=env)
+    if r.returncode != 0:
+        raise TerraformError(f"terraform state list failed:\n{r.stderr}")
+    removed: list[str] = []
+    for addr in (line.strip() for line in r.stdout.splitlines()):
+        # "google_sql_database.this[0]" / "module.x.google_sql_user.master": the type is
+        # the segment before the resource name, data sources are never state-rm'd.
+        parts = addr.split(".")
+        if not addr or "data" in parts[:-2] or len(parts) < 2 or parts[-2] not in types:
+            continue
+        rm = _run(["state", "rm", "-no-color", addr], deploy_dir, timeout=120, env=env)
+        if rm.returncode != 0:
+            raise TerraformError(f"terraform state rm {addr} failed:\n{rm.stderr}")
+        removed.append(addr)
+    return removed
+
+
+async def forget_resource_types(deploy_dir: str, types: tuple,
+                                env: Optional[dict] = None) -> list[str]:
+    """``terraform state rm`` every resource of one of ``types`` in the deployment's
+    state; returns the addresses removed. Nothing in the cloud is touched.
+
+    Only for resources the caller has PROVEN are gone with something else — e.g. the
+    databases and users of a Cloud SQL instance that no longer exists, which the google
+    provider can never refresh or delete (the API answers 403 notAuthorized, not 404,
+    for children of a missing instance) and so wedge every later destroy. Expects the
+    dir already materialized + initialized by a preceding :func:`destroy`; init is
+    re-run anyway so the backend is the right one."""
+    backend_type, backend_config, backend_env = _backend_settings(deploy_dir)
+    merged_env = {**backend_env, **(env or {})}
+    await asyncio.to_thread(_init_sync, deploy_dir, merged_env, backend_type, backend_config)
+    return await asyncio.to_thread(_forget_resource_types_sync, deploy_dir, types, merged_env)
+
+
 async def import_resource(deploy_dir: str, address: str, resource_id: str,
                           env: Optional[dict] = None,
                           template_dir: Optional[str] = None,

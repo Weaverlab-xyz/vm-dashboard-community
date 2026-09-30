@@ -140,11 +140,16 @@ resource "google_sql_database_instance" "this" {
   }
 }
 
+# ABANDON: destroy drops this from state and lets the instance delete take it. A real
+# DROP DATABASE fails with "being accessed by other users" while any session is open
+# (e.g. a just-deleted forwarder's backends the server hasn't reaped), and the instance
+# delete removes it regardless.
 resource "google_sql_database" "this" {
-  count    = local.create_database ? 1 : 0
-  name     = var.db_name
-  project  = var.project
-  instance = google_sql_database_instance.this.name
+  count           = local.create_database ? 1 : 0
+  name            = var.db_name
+  project         = var.project
+  instance        = google_sql_database_instance.this.name
+  deletion_policy = "ABANDON"
 }
 
 # NOTE: no google_sql_user — the admin is the built-in `sqlserver` login set via
