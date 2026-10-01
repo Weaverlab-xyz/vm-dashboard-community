@@ -624,6 +624,16 @@ async def wire_vm(db: Session, env: PovEnvironment, vm: PovEnvironmentVM, *,
     return f"{vm.name}: {kind} jump {jump_id} created{extra}."
 
 
+def ps_system_name(env: PovEnvironment, vm: PovEnvironmentVM) -> str:
+    """The Password Safe managed system's name (its HostName) for one guest.
+
+    One definition, because two readers depend on it agreeing: :func:`onboard_vm` writes
+    it, and ``pov_pra_ps_link`` matches PRA's ``VaultPasswordSafeAccount.system`` against
+    it to find this POV's accounts in PRA.
+    """
+    return f"{env.name}-{vm.name}"
+
+
 async def onboard_vm(db: Session, env: PovEnvironment, vm: PovEnvironmentVM, *,
                      ps: dict) -> str:
     """Onboard one VM as a Password Safe managed system + account. Returns a log line.
@@ -663,7 +673,7 @@ async def onboard_vm(db: Session, env: PovEnvironment, vm: PovEnvironmentVM, *,
         logger.info("POV %s: no seedable credential for %s (%s)", env.id, vm.name,
                     type(exc).__name__)
 
-    label = f"{env.name}-{vm.name}"
+    label = ps_system_name(env, vm)
     try:
         result = await ps_resource_service.register_managed_system(
             name=label,

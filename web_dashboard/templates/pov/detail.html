@@ -399,6 +399,46 @@
           </div>
         </div>
 
+        <!-- ── Password Safe credentials in PRA ───────────────────────────
+             The wire-up puts each guest in both products and never connects them. PRA's
+             Password Safe integration does, and the Config API cannot create it — so Check
+             asks PRA which of this POV's accounts it can see, and Link grants the ones it
+             does to the vendor policy and their guest's jump item. -->
+        <div x-show="env.pra_tenant_id && env.ps_tenant_id"
+             class="border-t border-gray-100 p-4 space-y-2">
+          <div class="flex items-baseline justify-between">
+            <h3 class="text-sm font-medium text-gray-900">Password Safe credentials in PRA</h3>
+            <div class="flex gap-3">
+              <button @click="praPs('check')" :disabled="praPsBusy"
+                      class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline"
+                      x-text="praPsBusy ? 'working…' : 'Check'"></button>
+              <button @click="praPs('link')" :disabled="praPsBusy || !env.pra_ps_matched_count"
+                      :title="env.pra_ps_matched_count ? '' : 'Check first: PRA has to see the accounts before they can be linked'"
+                      class="text-xs text-blue-600 underline disabled:opacity-40 disabled:no-underline">Link</button>
+            </div>
+          </div>
+          <p class="text-xs text-gray-500"
+             x-text="!env.pra_ps_checked ? 'Not checked yet.'
+                   : (env.pra_ps_matched_count + ' of ' + (env.onboarded_count || 0)
+                      + ' onboarded account(s) visible in PRA · '
+                      + (env.pra_ps_linked_count || 0) + ' linked to their jump item')"></p>
+          <template x-if="praPsResult && praPsResult.checklist">
+            <div class="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2 space-y-1">
+              <p x-text="praPsResult.detail"></p>
+              <template x-for="(line, i) in praPsResult.checklist" :key="i">
+                <p class="pl-2" x-text="(i + 1) + '. ' + line"></p>
+              </template>
+            </div>
+          </template>
+          <template x-if="praPsResult && praPsResult.lines">
+            <div class="space-y-0.5">
+              <template x-for="(line, i) in praPsResult.lines" :key="i">
+                <p class="text-[11px] text-gray-600 pl-2" x-text="'· ' + line"></p>
+              </template>
+            </div>
+          </template>
+        </div>
+
         <!-- ── Re-run a Smart Rule ────────────────────────────────────────
              Use case 1 is watching a rule onboard the discovered systems, and use case 18
              is that again once two guests and a batch of AD users arrive. Neither needs a
@@ -1001,6 +1041,8 @@
       psRules: [],
       psRule: '',
       psBusy: false,
+      praPsBusy: false,
+      praPsResult: null,
       busy: '',
       notice: '',
       env: null,
@@ -1105,6 +1147,26 @@
           this.error = 'Could not read this POV\'s Password Safe tenant.';
         } finally {
           this.psBusy = false;
+        }
+      },
+
+      // `which` is 'check' or 'link'. Both answer with the refreshed row, so the counts the
+      // setup ladder reads move with the button rather than on the next reload.
+      async praPs(which) {
+        this.error = ''; this.notice = ''; this.praPsBusy = true;
+        try {
+          const res = await this.apiFetch(`/api/pov/managed/${this.envId}/pra-ps/${which}`,
+                                          { method: 'POST' });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { this.error = data.detail || `Could not ${which} (${res.status}).`; return; }
+          if (data.environment) Object.assign(this.env, data.environment);
+          this.praPsResult = data;
+          this.notice = data.detail || (which === 'link'
+            ? `Linked ${data.linked} of ${data.matched} account(s).` : '');
+        } catch (e) {
+          this.error = 'Could not reach the dashboard API.';
+        } finally {
+          this.praPsBusy = false;
         }
       },
 

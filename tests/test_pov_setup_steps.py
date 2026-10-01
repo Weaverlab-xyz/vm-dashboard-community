@@ -68,6 +68,11 @@ def _row(**over):
         # pov_entitle_agent.describe
         "entitle_agent_installed": True,
         "entitle_agent_ready": True,
+        # pov_wireup.describe (Password Safe half) + pov_pra_ps_link.describe
+        "onboarded_count": 2,
+        "pra_ps_matched_count": 2,
+        "pra_ps_linked_count": 2,
+        "pra_ps_checked": True,
         # pov_share.describe
         "shareable": True,
         "share_url": "https://share.example/x",
@@ -92,7 +97,7 @@ def test_the_ladder_is_the_dependency_order_and_every_step_appears_once():
     result = steps.describe(_row())
     keys = [s["key"] for s in result["steps"]]
     assert keys == ["environment", "guest_os", "broker", "gateway",
-                    "resource_broker", "entitle_agent", "wireup", "share"], keys
+                    "resource_broker", "entitle_agent", "wireup", "pra_ps", "share"], keys
     assert len(set(keys)) == len(keys), "a step key is duplicated"
     assert keys == list(steps.STEP_KEYS), "STEP_KEYS has drifted from STEPS"
     # guest_os ahead of broker is deliberate: broker auto-detection is blind to a guest
@@ -147,6 +152,40 @@ def test_a_platform_that_publishes_no_link_greys_the_share_step():
     by_key = _by_key(result)
     assert by_key["share"]["state"] == steps.SKIPPED
     assert result["complete"] is True, "a cloud POV is finished without a share link"
+
+
+# ── Password Safe credentials in PRA ─────────────────────────────────────────
+
+def test_pra_ps_is_skipped_without_both_tenants():
+    assert _state("pra_ps", ps_tenant_id="") == steps.SKIPPED
+    assert _state("pra_ps", pra_tenant_id="") == steps.SKIPPED
+
+
+def test_pra_ps_waits_for_the_wireup_to_onboard_something():
+    by_key = _by_key(steps.describe(_row(onboarded_count=0, pra_ps_matched_count=0,
+                                         pra_ps_linked_count=0, pra_ps_checked=False)))
+    assert by_key["pra_ps"]["state"] == steps.BLOCKED
+    assert by_key["pra_ps"]["action"] == "wireup"
+
+
+def test_pra_ps_offers_check_before_it_has_ever_looked():
+    by_key = _by_key(steps.describe(_row(pra_ps_matched_count=0, pra_ps_linked_count=0,
+                                         pra_ps_checked=False)))
+    assert by_key["pra_ps"]["state"] == steps.READY
+    assert "Check" in by_key["pra_ps"]["detail"]
+
+
+def test_pra_ps_blocks_on_the_integration_when_pra_sees_nothing():
+    """The integration is a PRA /login setting with no API, so this is the honest state."""
+    by_key = _by_key(steps.describe(_row(pra_ps_matched_count=0, pra_ps_linked_count=0,
+                                         pra_ps_checked=True)))
+    assert by_key["pra_ps"]["state"] == steps.BLOCKED
+    assert "Password Safe integration" in by_key["pra_ps"]["detail"]
+
+
+def test_pra_ps_is_done_only_on_a_linked_count():
+    assert _state("pra_ps", pra_ps_linked_count=0, pra_ps_matched_count=2) == steps.READY
+    assert _state("pra_ps") == steps.DONE
 
 
 # ── the honesty rules ────────────────────────────────────────────────────────

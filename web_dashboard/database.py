@@ -3287,6 +3287,13 @@ class PovEnvironment(Base):
     broker_agent_id = Column(String(36), nullable=True)
     gateway_name = Column(String(255), nullable=True)
     ps_application_host_id = Column(Integer, nullable=True)
+    # PRA <-> Password Safe, as last checked (services/pov_pra_ps_link): how many of this
+    # POV's Password Safe accounts PRA can see, how many are linked to their jump item,
+    # and when. COUNTS so the setup ladder reads them with no network call. NULL checked_at
+    # means "never checked", which the ladder offers as Check rather than calling done.
+    pra_ps_matched_count = Column(Integer, nullable=True)
+    pra_ps_linked_count = Column(Integer, nullable=True)
+    pra_ps_checked_at = Column(DateTime, nullable=True)
 
     # Which BeyondTrust tenant this POV is wired into, one FK per product. Three rather
     # than one because they are independent: PRA and Password Safe are per-customer,
@@ -4593,6 +4600,10 @@ def init_db():
             # account somebody typed on the tenant by hand.
             "ALTER TABLE pov_environments ADD COLUMN ps_linux_functional_account_id INTEGER",
             "ALTER TABLE pov_environments ADD COLUMN ps_windows_functional_account_id INTEGER",
+            # All NULL backfills to "never checked". See PovEnvironment.pra_ps_checked_at.
+            "ALTER TABLE pov_environments ADD COLUMN pra_ps_matched_count INTEGER",
+            "ALTER TABLE pov_environments ADD COLUMN pra_ps_linked_count INTEGER",
+            "ALTER TABLE pov_environments ADD COLUMN pra_ps_checked_at TIMESTAMP",
             "ALTER TABLE pov_blueprints ADD COLUMN suspend_at_local VARCHAR(5)",
             "ALTER TABLE pov_blueprints ADD COLUMN resume_at_local VARCHAR(5)",
             "ALTER TABLE pov_blueprints ADD COLUMN schedule_timezone VARCHAR(64)",

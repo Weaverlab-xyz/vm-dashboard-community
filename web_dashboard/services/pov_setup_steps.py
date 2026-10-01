@@ -254,6 +254,32 @@ def _wireup(p: dict):
     return READY, "", "wireup"
 
 
+def _pra_ps(p: dict):
+    """PRA can inject this POV's Password Safe credentials — judged on the stored COUNTS
+    from ``pov_pra_ps_link``, never on whether a call returned.
+
+    The integration itself is a PRA /login setting with no API, so the honest blocked
+    state is "PRA sees none of them", with the checklist behind the action.
+    """
+    if not p.get("pra_tenant_id") or not p.get("ps_tenant_id"):
+        return SKIPPED, "needs both a PRA and a Password Safe tenant", ""
+    if not _int(p.get("onboarded_count")):
+        return BLOCKED, ("no guest is onboarded into Password Safe yet — run the wire-up "
+                         "first"), "wireup"
+    linked = _int(p.get("pra_ps_linked_count"))
+    matched = _int(p.get("pra_ps_matched_count"))
+    if linked:
+        return DONE, f"{linked} Password Safe account(s) usable from their jump items", ""
+    if matched:
+        return (READY, f"PRA sees {matched} of this POV's Password Safe account(s) — Link "
+                       f"them to their jump items", "pra_ps")
+    if p.get("pra_ps_checked"):
+        return (BLOCKED, ("PRA sees none of this POV's Password Safe accounts. Configure "
+                          "the Password Safe integration in PRA /login, then Check "
+                          "again"), "pra_ps")
+    return READY, "Check whether PRA sees this POV's Password Safe accounts", "pra_ps"
+
+
 def _share(p: dict):
     if not p.get("shareable"):
         return SKIPPED, "this lab platform publishes no share link", ""
@@ -278,6 +304,7 @@ STEPS = (
     ("resource_broker", "Resource Broker",                   _resource_broker),
     ("entitle_agent",   "Entitle agent",                     _entitle_agent),
     ("wireup",          "VMs wired into PRA / PS / Entitle", _wireup),
+    ("pra_ps",          "Password Safe credentials in PRA",  _pra_ps),
     ("share",           "Customer share link",               _share),
 )
 
