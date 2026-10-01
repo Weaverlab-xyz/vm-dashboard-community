@@ -74,7 +74,8 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         pov_accessor_entitle, pov_gateway, pov_platform_cache,
                         pov_reconcile,
                         pov_cloud_cost, pov_entitle_agent, pov_guest_step,
-                        pov_ps_config, pov_resource_broker, pov_setup_steps,
+                        pov_pra_ps_link, pov_ps_config, pov_resource_broker,
+                        pov_setup_steps,
                         suspend_schedule, pov_share, spend_policy, pov_summary,
                         pov_use_cases, pov_vendor_access, pov_wireup)
 from . import pov_gates
@@ -240,6 +241,7 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
     out.update(pov_entitle_agent.describe(_db_of(env), env))
     out.update(pov_guest_step.describe(_db_of(env), env))
     out.update(pov_ps_config.describe(env))
+    out.update(pov_pra_ps_link.describe(env))
     # Kept rather than only spread, so the use-case summary below can be resolved from the
     # numbers this row already paid for. Recomputing it would put a second per-VM query on
     # the list endpoint for counts it is holding in a local variable.
@@ -1209,6 +1211,39 @@ async def ps_config(env_id: str, db: Session = Depends(get_db),
         return await pov_ps_config.read(db, env)
     except pov_ps_config.PsConfigError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/managed/{env_id}/pra-ps/check", dependencies=_POV_WRITE_OWN)
+async def pra_ps_check(env_id: str, db: Session = Depends(get_db),
+                       current_user: User = Depends(get_current_user)):
+    """Which of this POV's Password Safe accounts PRA can see. A live read behind a
+    button; the count is stored for the setup ladder. POST because it writes that count."""
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    try:
+        result = await pov_pra_ps_link.check(db, env)
+    except pov_pra_ps_link.LinkError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {**result, "environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+
+@router.post("/managed/{env_id}/pra-ps/link", dependencies=_POV_WRITE_OWN)
+async def pra_ps_link(env_id: str, db: Session = Depends(get_db),
+                      current_user: User = Depends(get_current_user)):
+    """Grant each of this POV's Password Safe accounts PRA can see to the vendor Group
+    Policy (inject) and associate it with its guest's jump item. Idempotent."""
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+    try:
+        result = await pov_pra_ps_link.link(db, env)
+    except pov_pra_ps_link.LinkError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {**result, "environment": _serialize(env, broker=pov_broker.describe(db, env))}
 
 
 @router.get("/managed/{env_id}/ps-smart-rules")

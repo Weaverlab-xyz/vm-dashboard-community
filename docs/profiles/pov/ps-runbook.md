@@ -149,6 +149,43 @@ leaving them out: the Resource Broker and its zone (step 5), discovery credentia
 the discovery scan (step 10) and directory queries (step 11). A step absent from a checklist
 reads as a step nobody thought about.
 
+## Password Safe credentials in PRA
+
+The wire-up puts each guest into **both** products, as a PRA jump item and as a Password
+Safe managed system with an account, but it does not connect the two. PRA's **Password Safe
+integration** does that, so that a session started from a jump item is offered the
+Password Safe credential. **The PRA Configuration API has no endpoint that creates that
+integration**, so the customer's PRA admin configures it in PRA `/login`. Everything after
+that, the dashboard does.
+
+The **Wired** tab has a **Password Safe credentials in PRA** panel, shown when the POV
+names both a PRA and a Password Safe tenant:
+
+1. **Check** asks PRA which Password Safe accounts it can see, and matches them to this
+   POV's managed systems by name (`<pov name>-<vm name>`, the name the wire-up gives each
+   one). If PRA sees none, the panel shows the checklist for the PRA admin:
+   - configure the Password Safe integration in PRA `/login`;
+   - point it at the same Password Safe tenant this POV onboards into;
+   - make sure the POV's managed accounts are visible to the integration's API user, and
+     wait for PRA to sync them;
+   - press **Check** again.
+2. **Link** does two things for each account PRA sees:
+   - grants it to the POV's vendor Group Policy with the **inject** role. It never grants
+     check-out, because a vendor who can check a credential out can take it away from the
+     session;
+   - associates it with that guest's jump item.
+
+   Re-running **Link** is safe: an account already granted or already associated is left
+   alone. An account a PRA admin has set to **no jump items** is left that way, and the
+   panel says so.
+
+If the vendor group does not exist yet, Link associates the accounts but makes no Group
+Policy grant. Create the vendor group and press **Link** again.
+
+The setup ladder shows this as **Password Safe credentials in PRA**, after the wire-up. It
+goes green only when at least one account is linked. A check that found nothing shows as
+blocked, with the reason, and is never reported as done.
+
 ## Re-running a Smart Rule
 
 Use case 1 is watching a Smart Rule onboard the discovered systems on its own. Use case 18
