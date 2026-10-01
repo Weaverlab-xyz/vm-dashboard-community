@@ -158,6 +158,18 @@ site setting; loosen it, or say so and the generator can be widened.
 
 They sign in to **PRA itself**, not to this dashboard, and see this POV's jump items only.
 
+### Requiring TOTP
+
+Tick **Require TOTP for vendor users** to set the POV's vendor Group Policy to
+`two_factor_type: require_totp`. Each vendor then has to enrol an authenticator app at their
+next PRA sign-in, so tell them to have one ready when you hand over the login.
+
+The box works before or after the vendor group exists. Before, it is recorded and applied
+when you press **Create the vendor group**. After, it changes the live policy in place.
+It never re-creates the group, because PRA deletes a vendor group's users along with it and
+every login you had handed out would stop working. Unticking it sets the policy back to
+PRA's default, `optional`.
+
 If you have built a self-registration portal in `/login`, paste its URL on the PRA tenant
 (Settings → Integrations → tenants) and the card will show it with a Copy button. The
 dashboard cannot create one: **Portal Settings and the Email Domain Allow List are not in

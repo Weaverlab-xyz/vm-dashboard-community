@@ -3286,6 +3286,9 @@ class PovEnvironment(Base):
     broker_vm_id = Column(String(64), nullable=True)
     broker_agent_id = Column(String(36), nullable=True)
     gateway_name = Column(String(255), nullable=True)
+    # Whether this POV's PRA vendor Group Policy requires TOTP (two_factor_type =
+    # require_totp). NULL/False is PRA's default, "optional". See pov_vendor_access.
+    pra_require_totp = Column(Boolean, nullable=True, default=False)
     # The PRA Gateway id, set ONLY when the dashboard created the Gateway itself
     # (pov_gateway.provision). It is the ownership marker teardown reads: a Gateway an
     # operator created and pasted the key for has no id here and is never deleted.
@@ -4621,6 +4624,9 @@ def init_db():
             "ALTER TABLE pov_environments ADD COLUMN spend_warned_at TIMESTAMP",
             "ALTER TABLE pov_environments ADD COLUMN spend_capped_at TIMESTAMP",
             "ALTER TABLE pov_blueprints ADD COLUMN spend_cap_usd FLOAT",
+            # NULL backfills to "optional", PRA's own default, so no existing POV's vendor
+            # policy changes when this lands. See PovEnvironment.pra_require_totp.
+            "ALTER TABLE pov_environments ADD COLUMN pra_require_totp BOOLEAN",
             # NULL backfills to "the operator created this Gateway", so no existing
             # POV's Gateway becomes deletable when this lands. See
             # PovEnvironment.pra_gateway_id.
