@@ -30,6 +30,30 @@ That is [the tenant registry](standing-one-up.md#the-tenant-registry). The platf
 `services/lab_platforms.py`, and `GET /api/pov/platforms` reports what each one can do so
 the UI can degrade visibly rather than offering a button that fails.
 
+## Setting a POV up, step by step
+
+Open a POV and go to its **Setup** tab. A POV that is not finished opens there by default,
+and every row on the POV list has a **Continue setup →** link to it. The tab lists every
+step in order:
+
+1. environment running
+2. every guest's OS known
+3. broker agent enrolled
+4. PRA Gateway
+5. Resource Broker
+6. Entitle agent
+7. VMs wired
+8. Password Safe credentials in PRA
+9. customer share link
+
+Each step has one button. The step to do next is highlighted. A step that depends on one
+that is not finished yet is greyed out and names the step to finish first. Only a real
+dependency locks a step, and the optional parts (Resource Broker, Entitle, Password Safe in
+PRA) never hold up the share link. The tab refreshes itself while a step is running.
+
+Steps that need a form, such as the Resource Broker's installer, zone and key, open that
+form on the POV list page.
+
 ## The pages
 
 | Page | What's in it |
