@@ -966,8 +966,9 @@ def broker(env_id: str, payload: BrokerRequest | None = None,
 class GatewayRequest(BaseModel):
     """Configure and install this POV's Gateway.
 
-    ``name`` is the Gateway as it is named **in the customer's PRA appliance** — the
-    dashboard does not create it there. ``deploy_key`` is that Gateway's key; blank leaves
+    ``name`` is the Gateway as it is named **in the customer's PRA appliance** — this is
+    the manual path, for a Gateway somebody created there by hand; ``/gateway/create`` is
+    the one that makes it. ``deploy_key`` is that Gateway's key; blank leaves
     whatever is stored, so an operator can correct the name without re-pasting a secret
     the form cannot show them.
 
@@ -1032,6 +1033,50 @@ def gateway(env_id: str, payload: GatewayRequest,
         # them into a 500 would lose the only useful part.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"job_id": job.id,
+            "environment": _serialize(env, broker=pov_broker.describe(db, env))}
+
+
+class GatewayCreateRequest(BaseModel):
+    """Create this POV's Gateway in its PRA tenant, then (by default) install it.
+
+    ``name`` blank means the name already on the POV, else ``POV-<pov name>``. The tenant's
+    API account does the creating and the deploy key it returns is stored as if pasted,
+    so nothing about the install differs from the manual path.
+    """
+    name: str = ""
+    install: bool = True
+
+
+@router.post("/managed/{env_id}/gateway/create", status_code=202,
+             dependencies=_POV_WRITE_OWN)
+async def gateway_create(env_id: str, payload: GatewayCreateRequest,
+                         db: Session = Depends(get_db),
+                         current_user: User = Depends(get_current_user)):
+    """Create the Gateway in PRA with the tenant's client credentials, store its deploy
+    key, and queue the install — the three things an SE did by hand in the appliance.
+
+    Async because it is two or three calls to the customer's appliance; the database work
+    either side of them is single-row reads and writes, same as ``gateway_status``.
+    """
+    env = pov_env_service.get(db, env_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail="No such POV environment")
+    ok, why = pov_env_service.may_act_on(env)
+    if not ok:
+        raise HTTPException(status_code=409, detail=why)
+
+    try:
+        created = await pov_gateway.provision(db, env, name=payload.name)
+        job = None
+        if payload.install:
+            job = pov_gateway.queue(db, env, action="install",
+                                    created_by=getattr(current_user, "username", None))
+    except pov_gateway.GatewayInstallError as exc:
+        # The Gateway may exist in PRA by now (an install refusal comes after the create),
+        # which is why the refusal is a 409 carrying the remedy and the row is returned
+        # by the next list load rather than rolled back.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"job_id": job.id if job else None, "gateway": created,
             "environment": _serialize(env, broker=pov_broker.describe(db, env))}
 
 

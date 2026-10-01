@@ -13,19 +13,33 @@ release creates has to name a Gateway that can see them. This installs one: a Be
 Gateway container, on the broker VM from [the broker section](skytap.md#the-broker-vm),
 registered into the PRA tenant [this POV is wired into](standing-one-up.md#the-tenant-registry).
 
-**The dashboard does not create the Gateway in PRA.** You create it in the customer's
-appliance and copy its deploy key — the same thing you already do for the cloud gateway
-hosts, where that key sits in `aws_ecs_docker_deploy_key` and friends. What this adds is
-per-POV: a key per environment, installed on a VM the dashboard cannot reach directly,
-into a tenant it had to be told about.
+**The dashboard creates the Gateway in PRA for you.** It uses the tenant's API account
+(the client id and secret on the tenant) to create a clustered Linux Gateway, reads the
+Docker deploy key PRA returns for it, and installs it on the broker. The sequence is:
 
-So the sequence is:
+1. On the POV, press **edit** in the Gateway column. The name defaults to `POV-<pov name>`;
+   change it if you want.
+2. Press **Create & install**. The dashboard creates the Gateway in the customer's PRA,
+   stores its deploy key, and queues the install. The broker agent starts the container
+   and the job reports what happened on the VM.
+3. Press **check** to ask PRA whether a node of it is connected.
 
-1. In the customer's PRA, create a Gateway and copy its deploy key.
-2. On the POV, set the **Gateway name** — the name you gave it in PRA — and paste the key.
-3. Press **Install**. The broker agent starts the container and the job reports what
-   happened on the VM.
-4. Press **check** to ask PRA whether a node of it is connected.
+The tenant's API account needs **Configuration API** access with permission to manage
+Gateways (PRA **Management > API Configuration**). Without it the create answers 403, and
+the refusal says so.
+
+**A Gateway that already exists under that name is refused, never adopted.** Its deploy key
+would join this POV's broker to a Gateway somebody else made, inside the customer's
+appliance, and a name proves nothing about who owns it. Pick another name, or use the
+manual path below if it really is this POV's Gateway.
+
+**Using a Gateway you created by hand.** Under **use an existing Gateway (paste key)**,
+set the name you gave it in PRA, paste its deploy key and press **Install**. This is the
+same path the cloud gateway hosts use, where the key sits in `aws_ecs_docker_deploy_key`
+and similar settings.
+
+The row shows **created here** when the dashboard made the Gateway. That is the only kind
+it ever deletes. See [Teardown](#teardown).
 
 ### Where the deploy key goes, and where it does not
 
@@ -183,6 +197,11 @@ cleanly, with a line in the job log saying the PRA-side node will linger.
 
 The stored deploy key is cleared synchronously, because that is local state and leaving a
 customer's credential in this database after their POV is gone is the part that matters.
+
+If the dashboard created the Gateway (**created here**), the destroy then deletes it from
+PRA as well. This runs after the POV's jump items are removed, because PRA deletes every
+Asset a Gateway owns along with it. A Gateway you created by hand and pasted the key for
+is never deleted; retire it in the appliance yourself.
 
 ---
 

@@ -135,3 +135,139 @@ async def find_gateway(tenant, name: str) -> dict | None:
         if row["name"] == wanted:
             return row
     return None
+
+
+# ── writes ───────────────────────────────────────────────────────────────────
+
+async def _call(tenant, method: str, path: str, *, json: dict | None = None,
+                allow_404: bool = False):
+    """One authenticated Config API call. Returns ``(status, body)``.
+
+    The refusals name the PRA-side fix. A 403 on a write is nearly always the API
+    account's permissions rather than the credentials — the token request already proved
+    those — and saying "forbidden" alone sends an operator to re-paste a secret that works.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT_S,
+                                     headers={"Accept": "application/json"}) as client:
+            token = await get_token(client, tenant)
+            resp = await client.request(method, f"{tenant.api_base}{path}", json=json,
+                                        headers={"Authorization": f"Bearer {token}"})
+    except PRATenantError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("PRA %s %s for tenant %s failed", method, path, tenant.name,
+                       exc_info=True)
+        raise PRATenantError(
+            f"could not reach PRA at {tenant.api_base} ({type(exc).__name__}) — check the "
+            f"hostname, DNS and any firewall.") from None
+
+    if resp.status_code == 404 and allow_404:
+        return 404, None
+    if resp.status_code == 403:
+        raise PRATenantError(
+            f"PRA refused {method} {path} for tenant {tenant.name!r} (403). The API "
+            f"account needs Configuration API access with permission to manage Gateways "
+            f"(Management > API Configuration).")
+    if resp.status_code == 422:
+        raise PRATenantError(
+            f"PRA rejected {method} {path} for tenant {tenant.name!r} (422): "
+            f"{_detail(resp)}")
+    if resp.status_code >= 400:
+        raise PRATenantError(
+            f"PRA {method} {path} for tenant {tenant.name!r} failed ({resp.status_code}).")
+    try:
+        body = resp.json() if resp.content else None
+    except ValueError:
+        body = None
+    return resp.status_code, body
+
+
+def _detail(resp) -> str:
+    """The field errors from a 422, compact. PRA answers ``{"errors": {field: [msg]}}``
+    or ``{"message": ...}``; anything else is reported by status alone."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return "no detail"
+    if isinstance(body, dict):
+        errors = body.get("errors")
+        if isinstance(errors, dict) and errors:
+            return "; ".join(f"{k}: {', '.join(map(str, v)) if isinstance(v, list) else v}"
+                             for k, v in errors.items())
+        if body.get("message"):
+            return str(body["message"])
+    return "no detail"
+
+
+async def create_gateway(tenant, name: str, *, comments: str = "") -> dict:
+    """Create a clustered Linux Gateway and return the raw resource.
+
+    **Clustered Linux is not a style choice — it is the only shape that has a deploy
+    key.** The spec says ``docker_deploy_key`` "will only be set for Linux Gateways that
+    have clustered set to true", and the POV's Gateway is a container on the broker VM, so
+    any other shape creates a Gateway nothing here can install. It is also the shape the
+    cloud gateway hosts already use, which is why a rebuilt broker VM rejoins as a node.
+
+    Shell Jump and Protocol Tunnel are switched on because the wire-up's jump items need
+    them; PRA's defaults leave Shell Jump off, and the first SSH jump would then fail at
+    session start rather than here.
+    """
+    payload = {
+        "name": name,
+        "platform": "linux-x86",
+        "clustered": True,
+        "enabled": True,
+        "shell_jump_enabled": True,
+        "protocol_tunnel_enabled": True,
+        "comments": (comments or "")[:1024],
+    }
+    _status, body = await _call(tenant, "POST", _GATEWAY_PATH, json=payload)
+    if not isinstance(body, dict) or not body.get("id"):
+        raise PRATenantError(
+            f"PRA created a Gateway for tenant {tenant.name!r} and returned no id for it. "
+            f"Look for {name!r} in the appliance and remove it before trying again.")
+    return body
+
+
+async def get_gateway(tenant, gateway_id) -> dict | None:
+    """The raw Gateway resource, or None when PRA no longer has it."""
+    status, body = await _call(tenant, "GET", f"{_GATEWAY_PATH}/{gateway_id}",
+                               allow_404=True)
+    if status == 404:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+async def delete_gateway(tenant, gateway_id) -> bool:
+    """Delete a Gateway. True when it was deleted, False when it was already gone.
+
+    PRA deletes the Gateway's nodes and every Asset it owns along with it, so the only
+    caller is a teardown that has already removed the POV's jump items and is deleting a
+    Gateway it created itself.
+    """
+    status, _body = await _call(tenant, "DELETE", f"{_GATEWAY_PATH}/{gateway_id}",
+                                allow_404=True)
+    return status != 404
+
+
+async def count_gateway_nodes(tenant, gateway_id) -> int | None:
+    """How many nodes the Gateway has, from ``/jumpoint/{id}/node``.
+
+    The list endpoint does not carry nodes at all ("Node resources are not returned in
+    the response"), so a count read off a list row is always zero. ``None`` means the
+    appliance did not answer, which a caller must not report as zero nodes.
+    """
+    try:
+        status, body = await _call(tenant, "GET", f"{_GATEWAY_PATH}/{gateway_id}/node",
+                                   allow_404=True)
+    except PRATenantError:
+        return None
+    if status == 404:
+        return None
+    if isinstance(body, list):
+        return len(body)
+    if isinstance(body, dict):
+        # The spec types this response as a single JumpointNode; tolerate either shape.
+        return 1 if body.get("id") else 0
+    return None

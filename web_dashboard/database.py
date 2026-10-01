@@ -3286,6 +3286,10 @@ class PovEnvironment(Base):
     broker_vm_id = Column(String(64), nullable=True)
     broker_agent_id = Column(String(36), nullable=True)
     gateway_name = Column(String(255), nullable=True)
+    # The PRA Gateway id, set ONLY when the dashboard created the Gateway itself
+    # (pov_gateway.provision). It is the ownership marker teardown reads: a Gateway an
+    # operator created and pasted the key for has no id here and is never deleted.
+    pra_gateway_id = Column(String(64), nullable=True)
     ps_application_host_id = Column(Integer, nullable=True)
 
     # Which BeyondTrust tenant this POV is wired into, one FK per product. Three rather
@@ -4606,6 +4610,10 @@ def init_db():
             "ALTER TABLE pov_environments ADD COLUMN spend_warned_at TIMESTAMP",
             "ALTER TABLE pov_environments ADD COLUMN spend_capped_at TIMESTAMP",
             "ALTER TABLE pov_blueprints ADD COLUMN spend_cap_usd FLOAT",
+            # NULL backfills to "the operator created this Gateway", so no existing
+            # POV's Gateway becomes deletable when this lands. See
+            # PovEnvironment.pra_gateway_id.
+            "ALTER TABLE pov_environments ADD COLUMN pra_gateway_id VARCHAR(64)",
             # NULL backfills to "choose by guest OS", so no existing POV changes
             # behaviour when this lands. See PovEnvironmentVM.login_username.
             "ALTER TABLE pov_environment_vms ADD COLUMN login_username VARCHAR(104)",

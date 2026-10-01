@@ -180,14 +180,15 @@ def _gateway(p: dict):
         return (CONFIGURED,
                 "configured; Check asks the appliance whether a node is connected",
                 "gateway")
-    missing = []
-    if not p.get("gateway_name"):
-        missing.append("a Gateway name")
-    if not p.get("gateway_has_key"):
-        missing.append("its deploy key")
     if not p.get("broker_agent_id"):
-        missing.append("an enrolled broker agent")
-    return BLOCKED, "needs " + _join(missing), "gateway"
+        return BLOCKED, "needs an enrolled broker agent to run on", "gateway"
+    # A missing name or key is no longer a blocker: Create & install makes the Gateway in
+    # PRA with the tenant's API account and stores the key it returns.
+    if p.get("gateway_name") and not p.get("gateway_has_key"):
+        return (READY, f"{p.get('gateway_name')!r} is named but has no deploy key — "
+                       f"Create & install, or paste its key", "gateway")
+    return (READY, "Create & install creates the Gateway in PRA and installs it on the "
+                   "broker", "gateway")
 
 
 def _resource_broker(p: dict):
