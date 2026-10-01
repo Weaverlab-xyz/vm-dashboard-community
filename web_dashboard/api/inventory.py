@@ -229,6 +229,16 @@ async def list_inventory(
     accessible = _accessible_workgroups(current_user)
     items = [i for i in raw
              if inventory_service.visible_to(i, accessible, current_user.username)]
+    # A POV row is visible by workgroup like everything else here, which would show an
+    # own-only user (auth.pov_owns_only -- the POV Presenter) the names of colleagues' POVs
+    # the POV page itself hides. Narrowed to the same set the POV router uses. In a thread
+    # because pov_env_scope queries, and this route is async.
+    from .auth import pov_env_scope, pov_owns_only
+    if pov_owns_only(current_user):
+        from starlette.concurrency import run_in_threadpool
+        own = await run_in_threadpool(pov_env_scope, current_user)
+        items = [i for i in items
+                 if i.get("kind") != "pov" or i["id"].split(":", 1)[-1] in own]
     if provider:
         items = [i for i in items if i["cloud"] == provider.lower()]
     if kind:

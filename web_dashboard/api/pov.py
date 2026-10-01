@@ -80,14 +80,17 @@ from ..services import (bt_tenant_service, config_service, expiry_policy,
                         pov_use_cases, pov_vendor_access, pov_wireup)
 from . import pov_gates
 from .auth import (get_current_user, has_explicit_permission, has_permission,
-                   pov_env_scope, require_permission, require_pov_env_access)
+                   pov_env_scope, require_permission, require_pov_env_access,
+                   require_pov_read)
 
 logger = logging.getLogger(__name__)
 
 # Two router-level guards, so neither is a thing a new route has to remember:
 #
 #   pov:read          -- the feature-area gate. Every route here needs at least read;
-#                        mutating routes add their own level below.
+#                        mutating routes add their own level below. `pov_own:read` passes
+#                        it too, and narrows what the instance gate lets through to the
+#                        caller's OWN POVs -- see auth.pov_owns_only.
 #   require_pov_env_access -- the INSTANCE gate. Refuses (404) any {env_id} this user was
 #                        not granted. See User.pov_env_ids.
 #
@@ -97,7 +100,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/api/pov",
     tags=["pov"],
-    dependencies=[Depends(require_permission("pov", "read")),
+    dependencies=[Depends(require_pov_read),
                   Depends(require_pov_env_access)],
 )
 
@@ -569,7 +572,7 @@ def list_managed(db: Session = Depends(get_db),
     # The instance gate in require_pov_env_access covers routes that NAME a POV; a list
     # has no env_id to inspect, so it filters here. Without this a narrowed user still saw
     # every POV on the page and only discovered the limit by clicking one.
-    scope = pov_env_scope(current_user)
+    scope = pov_env_scope(current_user, db)
     if scope is not None:
         q = q.filter(PovEnvironment.id.in_(sorted(scope)))
     rows = q.order_by(PovEnvironment.created_at.desc()).all()
@@ -595,7 +598,7 @@ def list_archive(limit: int = Query(pov_summary.DEFAULT_LIMIT),
     you can act on and is why a finished POV had become unreachable without its uuid. The
     record was kept and the way to it was not.
     """
-    return pov_summary.archive(db, limit=limit, env_ids=pov_env_scope(current_user))
+    return pov_summary.archive(db, limit=limit, env_ids=pov_env_scope(current_user, db))
 
 
 @router.get("/managed/{env_id}")

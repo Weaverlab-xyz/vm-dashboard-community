@@ -420,7 +420,7 @@ def test_the_pov_tiles_are_scoped_the_way_the_pov_router_scopes():
     assert m, "_pov_tiles moved or changed shape"
     body = m.group(0)
     assert "pov_env_scope" in body, "_pov_tiles ignores the per-instance grant"
-    assert 'has_permission(user, "pov", "read")' in body, \
+    assert "may_read_pov(user)" in body, \
         "_pov_tiles ignores the pov:read permission its router carries"
     assert "_forbidden()" in body, \
         "_pov_tiles raises rather than degrading -- one permission must not blank a page"
@@ -431,7 +431,7 @@ def test_a_pov_tile_never_reports_zero_for_an_instance_that_has_no_answer():
     instance which does not run POVs is not reported as one running none."""
     m = re.search(r"def _pov_tiles\(.*?\n\n\n", STATS, re.S)
     body = m.group(0)
-    gate = body[:body.index("if not has_permission")]
+    gate = body[:body.index("if not may_read_pov")]
     # Comments stripped, because the code there explains itself by naming the call it
     # does NOT make -- and a guard that reads the explanation as the thing it forbids is
     # the same self-trip the tile catalog carries a note about.

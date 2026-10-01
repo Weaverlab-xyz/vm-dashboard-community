@@ -126,7 +126,7 @@ _BUILTIN_ROLES = (
             "connections": _R,
             "images": _R, "containers": _R, "k8s": _R, "cloud_function": _R,
             "cloud_database": _R, "storage": _R, "config_mgmt": _R,
-            "pov": _R, "pov_templates": _R,
+            "pov": _R, "pov_own": _R, "pov_templates": _R,
             "gateways": _R, "agents": _R, "notifications": _R, "epml": _R, "ot": _R,
         },
     },
@@ -136,16 +136,31 @@ _BUILTIN_ROLES = (
         # No "wake": powering an environment, waking included, is `pov:write`, which this
         # role deliberately omits. A stakeholder who must wake their own POV needs write or
         # a POV accessor alongside -- see docs/permissions.md.
-        "description": "Run a proof of value: create POVs, then set up, run, share and "
-                       "destroy your own -- created by you or assigned to you -- and tick "
-                       "use cases. Nothing on anyone else's POV.",
-        # `pov:use` carries use-case ticking. `pov_own` is the rest, on the presenter's
-        # OWN POVs only (created by them, or assigned in their picker); the general
-        # `pov:write` / `pov:delete`, which reach every visible POV, stay off.
+        "description": "Run a proof of value: create POVs, then see, set up, run, share "
+                       "and destroy your own -- created by you or assigned to you -- and "
+                       "tick use cases. Other people's POVs are not visible.",
+        # `pov_own` is everything, on the presenter's OWN POVs only (created by them, or
+        # assigned in their picker): `read` narrows what they can SEE to those
+        # (auth.pov_owns_only), write and delete act on them. The general `pov:read` /
+        # `pov:write` / `pov:delete`, which reach every POV, stay off -- that is the POV
+        # Manager below. `pov:use` carries use-case ticking, and the instance gate already
+        # confines it to the POVs this user can see.
         "permissions": {
-            "pov": _RU, "pov_templates": _R,
-            # Create; set up, run and destroy their own. See api/pov_gates.py.
-            "pov_own": ["write", "delete"],
+            "pov": _U, "pov_templates": _R,
+            "pov_own": ["read", "write", "delete"],
+            "vms": _R, "jobs": _R, "inventory": _R, "connections": _R,
+        },
+    },
+    {
+        "slug": "pov-manager",
+        "name": "POV Manager",
+        "description": "Oversee every proof of value: see, set up, run, share, power and "
+                       "destroy any POV, and curate the POV templates.",
+        # The general levels, so every POV the picker leaves (all of them when it is empty).
+        # `pov_templates:write` is the explicit, ex-admin level -- granted here on purpose,
+        # because maintaining what presenters build from is this role's job.
+        "permissions": {
+            "pov": _ALL, "pov_templates": _RW,
             "vms": _R, "jobs": _R, "inventory": _R, "connections": _R,
         },
     },
