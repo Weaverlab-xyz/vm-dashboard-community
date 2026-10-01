@@ -312,12 +312,14 @@ PERMISSION_SCOPE_LEVELS = {
     # Your OWN POVs -- created by you, or assigned to you in your POV access picker
     # (pov_env_service.owned_by) -- without the general `pov:write` / `pov:delete`, which
     # reach every POV your picker does not narrow away (all of them when it is empty).
+    #   read    see ONLY your own POVs. `pov:read` sees every POV the picker leaves; a
+    #           holder of this without `pov:read` is narrowed to their own (pov_env_scope)
     #   write   create a POV, and set up / run / share / power your own
     #   delete  destroy your own
     # What the POV Presenter role carries. Always checked in the explicit form, so a legacy
     # NULL-permission user does not gain it -- they already pass the general levels. See
     # api/pov_gates.py.
-    "pov_own": ["write", "delete"],
+    "pov_own": ["read", "write", "delete"],
     "pov_templates": _RWD,
     # Proxmox and Nutanix have real deploy / image-import / delete-VM routes. vSphere,
     # Hyper-V and XCP-ng are read-plus-power only in this dashboard -- there is no route
@@ -639,17 +641,80 @@ def _build_request_access_link(scope: str, level: str):
     return portal
 
 
-def pov_env_scope(user: User):
+def may_read_pov(user: User) -> bool:
+    """The POV feature-area gate: ``pov:read`` (every POV), or ``pov_own:read`` (your own).
+
+    ``pov_own`` in the explicit form, like every other ``pov_own`` check, so a legacy
+    NULL-map user is never narrowed by it -- they pass ``pov:read`` already.
+    """
+    return (has_permission(user, "pov", "read")
+            or has_explicit_permission(user, "pov_own", "read"))
+
+
+def pov_owns_only(user: User) -> bool:
+    """True when this user may see their OWN POVs and no others.
+
+    That is ``pov_own:read`` without ``pov:read`` -- what the POV Presenter role carries.
+    An administrator, a legacy NULL-map user and anyone holding ``pov:read`` sees every POV
+    their picker leaves, exactly as before.
+    """
+    if getattr(user, "is_effective_admin", False):
+        return False
+    if has_permission(user, "pov", "read"):
+        return False
+    return has_explicit_permission(user, "pov_own", "read")
+
+
+def _created_pov_ids(user: User, db=None) -> set:
+    """Ids of the POVs this user created -- the `created_by` half of
+    ``pov_env_service.owned_by``. Uses ``db`` when a caller has one, else a short session
+    of its own, because the router-level gate below has no session to hand."""
+    username = getattr(user, "username", None)
+    if not username:
+        return set()
+    from ..database import PovEnvironment, SessionLocal
+    own = db is None
+    session = SessionLocal() if own else db
+    try:
+        return {row[0] for row in session.query(PovEnvironment.id)
+                .filter(PovEnvironment.created_by == username).all()}
+    finally:
+        if own:
+            session.close()
+
+
+def pov_env_scope(user: User, db=None):
     """The POV ids this user is narrowed to, or ``None`` meaning "not narrowed".
 
     ``None`` for an administrator and for anyone whose list is empty — the same
     "``None`` = everything" convention ``api/aws._accessible_workgroups`` uses, so the two
     read the same way at a call site.
+
+    **Except an own-only user** (:func:`pov_owns_only`), who is narrowed to their own POVs
+    -- assigned in the picker, or created by them, the same two halves as
+    ``pov_env_service.owned_by``. For them an empty picker means "only what I created",
+    and the answer is a SET even when it is empty: ``None`` would read as "every POV",
+    which is exactly the leak this exists to close.
     """
     if getattr(user, "is_effective_admin", False):
         return None
-    ids = getattr(user, "pov_env_ids_list", None) or []
-    return set(ids) if ids else None
+    ids = set(getattr(user, "pov_env_ids_list", None) or [])
+    if pov_owns_only(user):
+        return ids | _created_pov_ids(user, db)
+    return ids if ids else None
+
+
+async def _require_pov_read(current_user: User = Depends(get_current_user)) -> User:
+    if may_read_pov(current_user):
+        return current_user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Requires 'pov:read' permission, or 'pov_own:read' to see your own POVs.")
+
+
+# The POV router's feature-area gate. Tagged as `pov:read`, the general level it stands in
+# for, so the route sweeps that read the tag see what the router is about.
+require_pov_read = _tag(_require_pov_read, "pov", "read", explicit=False)
 
 
 def require_pov_env_access(request: Request, current_user: User = Depends(get_current_user)) -> User:
@@ -668,7 +733,7 @@ def require_pov_env_access(request: Request, current_user: User = Depends(get_cu
     env_id = (request.path_params or {}).get("env_id")
     if not env_id:
         return current_user
-    scope = pov_env_scope(current_user)
+    scope = pov_env_scope(current_user)   # an own-only user's set is never None
     if scope is not None and env_id not in scope:
         raise HTTPException(status_code=404, detail="No such POV environment")
     return current_user

@@ -147,7 +147,9 @@ def test_the_gate_is_attached_to_the_router_not_to_handlers():
     router_decl = src.split("router = APIRouter(")[1].split("\n)")[0]
     assert "require_pov_env_access" in router_decl, (
         "the instance gate left the router declaration in api/pov.py")
-    assert 'require_permission("pov", "read")' in router_decl, (
+    # require_pov_read is pov:read OR the explicit pov_own:read -- the floor, widened
+    # only to the own-only presenter, whom the instance gate then narrows.
+    assert "require_pov_read" in router_decl, (
         "the pov:read floor left the router declaration in api/pov.py")
 
 
@@ -254,7 +256,9 @@ def test_an_empty_picker_assigns_nothing_but_created_still_counts():
 def test_the_presenter_role_carries_own_and_not_the_general_levels():
     from web_dashboard.services import role_service
     spec = next(r for r in role_service._BUILTIN_ROLES if r["slug"] == "pov-presenter")
-    assert sorted(spec["permissions"].get("pov_own", [])) == ["delete", "write"]
+    assert sorted(spec["permissions"].get("pov_own", [])) == ["delete", "read", "write"]
+    # No general read either: a presenter SEES only their own POVs (auth.pov_owns_only).
+    assert "read" not in spec["permissions"]["pov"]
     assert "write" not in spec["permissions"]["pov"]
     assert "delete" not in spec["permissions"]["pov"]
 
@@ -406,6 +410,89 @@ def test_a_pov_they_were_not_granted_is_still_404_through_the_real_router():
                  "/api/pov/managed/env-someone-else/summary",
                  "/api/pov/managed/env-someone-else/use-cases"):
         assert client.get(path).status_code == 404, f"{path} leaked a POV or its existence"
+
+
+# ── own-only visibility: the presenter SEES only their own POVs ─────────────────
+
+def _seed_envs(creator):
+    """Two live POVs: one created by `creator`, one by somebody else."""
+    from web_dashboard.database import PovEnvironment, SessionLocal
+    db = SessionLocal()
+    mine = PovEnvironment(platform="skytap", name="mine-" + uuid.uuid4().hex[:6],
+                          status="active", created_by=creator)
+    theirs = PovEnvironment(platform="skytap", name="theirs-" + uuid.uuid4().hex[:6],
+                            status="active", created_by="someone-else")
+    db.add_all([mine, theirs])
+    db.commit()
+    ids = mine.id, theirs.id
+    db.close()
+    return ids
+
+
+def _listed(client):
+    res = client.get("/api/pov/managed")
+    assert res.status_code == 200, res.text
+    return {e["id"] for e in res.json()["environments"]}
+
+
+def test_a_presenter_lists_only_the_povs_they_own():
+    client, principal = _pov_client()
+    u = _presenter([])
+    principal["user"] = u
+    mine, theirs = _seed_envs(u.username)
+    listed = _listed(client)
+    assert mine in listed
+    assert theirs not in listed, "a presenter saw a colleague's POV"
+
+
+def test_a_presenter_gets_404_on_a_pov_they_do_not_own():
+    client, principal = _pov_client()
+    u = _presenter([])
+    principal["user"] = u
+    mine, theirs = _seed_envs(u.username)
+    assert client.get(f"/api/pov/managed/{mine}").status_code == 200
+    assert client.get(f"/api/pov/managed/{theirs}").status_code == 404
+
+
+def test_an_assigned_pov_is_visible_to_a_presenter_who_did_not_create_it():
+    """The picker is how a colleague's POV is shared for co-presenting."""
+    client, principal = _pov_client()
+    probe = _presenter([])
+    _mine, theirs = _seed_envs(probe.username)
+    u = _presenter([theirs])
+    principal["user"] = u
+    assert theirs in _listed(client)
+
+
+def test_a_presenter_with_nothing_owned_is_narrowed_to_nothing_not_to_everything():
+    """The empty set must stay a set: None reads as "every POV"."""
+    u = _presenter([])
+    u.username = "nobody-" + uuid.uuid4().hex[:6]
+    assert auth_mod.pov_env_scope(u) == set()
+
+
+def test_a_presenter_can_still_paint_the_pov_page():
+    client, principal = _pov_client()
+    principal["user"] = _presenter([])
+    for path in _PAGE_BOOTSTRAP:
+        assert client.get(path).status_code == 200, path
+
+
+def test_general_read_still_sees_every_pov():
+    """pov:read (the POV Manager, Read-Only, an operator) and the legacy NULL map are
+    never narrowed by pov_own."""
+    for u in (_user(perms={"pov": ["read"]}), _user(),
+              _user(perms={"pov": ["read"], "pov_own": ["read"]})):
+        assert not auth_mod.pov_owns_only(u)
+        assert auth_mod.pov_env_scope(u) is None
+
+
+def test_pov_own_read_is_never_granted_by_an_empty_map():
+    """Explicit form: a legacy NULL-map user is unrestricted already and must not be
+    turned into an own-only user by it."""
+    assert not auth_mod.pov_owns_only(_user())
+    assert auth_mod.may_read_pov(_user(perms={"pov_own": ["read"]}))
+    assert not auth_mod.may_read_pov(_user(perms={"pov_own": ["write"]}))
 
 
 def test_platforms_reports_whether_this_caller_may_provision():

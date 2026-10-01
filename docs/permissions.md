@@ -161,7 +161,7 @@ The rest are one per navigation section:
 | Scope | Levels | Covers |
 |---|---|---|
 | `pov` | read, write, delete, use | POV environments, their use cases, wiring, sharing and accessors. `delete` destroys any POV the user's POV access picker allows, and every POV when the picker is empty |
-| `pov_own` | write, delete | your **own** POVs: ones **you created**, or ones **assigned to you** in your POV access picker. `write` lets you create a POV and set up, run, power and share your own; `delete` lets you destroy your own. Nothing on anyone else's POV, and nothing platform-wide (re-checking the platform, listing every environment on it). What the POV Presenter role carries |
+| `pov_own` | read, write, delete | your **own** POVs: ones **you created**, or ones **assigned to you** in your POV access picker. `read` without the general `pov:read` means you **see only your own** POVs, on the POV page, the home page and Inventory alike; `write` lets you create a POV and set up, run, power and share your own; `delete` lets you destroy your own. Nothing on anyone else's POV, and nothing platform-wide (re-checking the platform, listing every environment on it). What the POV Presenter role carries |
 | `pov_templates` | read, write, delete | template builds, blueprints, and the BeyondTrust tenant registry |
 | `proxmox` | read, write, delete | Proxmox: browse, deploy, import an image, delete a VM |
 | `nutanix` | read, write, delete | Nutanix: the same |
@@ -208,10 +208,14 @@ not exist, because confirming that somebody else's POV exists is itself a leak.
 Leave the POV access picker **empty** and they see every POV. That is the default, and it
 is what every pre-existing user has.
 
-The picker also decides what a POV Presenter **owns** for changing and destroying, along
-with the POVs they create themselves. An empty picker lets a presenter *see* every POV but
-*own* only the ones they created. When a presenter whose picker names some POVs creates a
-new one, it is added to their picker automatically, so it doesn't vanish from their own list.
+The picker also decides what a POV Presenter **owns**, along with the POVs they create
+themselves, and a presenter sees only what they own. An empty picker therefore shows a
+presenter only the POVs they created. Add a colleague's POV to their picker to let them
+co-present it. When a presenter whose picker names some POVs creates a new one, it is
+added to their picker automatically.
+
+To let someone see and manage **every** POV, give them the **POV Manager** role, or the
+general `pov` levels.
 
 `use` is the important half. With `read` alone they can look but not tick, and a use-case
 checklist nobody can tick is a screenshot. With `write` they could provision and destroy.
@@ -269,14 +273,15 @@ Things to know:
 A role is a named set of permissions you assign to a person or to a group, instead of
 ticking boxes for each of them. Editing the role changes it for everyone who holds it.
 
-Eight roles ship with the dashboard:
+Nine roles ship with the dashboard:
 
 | Role | For |
 |---|---|
 | **Administrator** | Everything, including the admin-only pages. The grid is not consulted. |
 | **Operator** | Day-to-day work: deploy, run and use, but delete nothing. It does not include the audit log or change windows. |
 | **Read-Only** | Every section at its read level, and nothing else. `secrets` and `change_windows` offer no read level, so neither is included. |
-| **POV Presenter** | Run a proof of value end to end: **create POVs**, then set up, run, power, share and destroy **their own**, meaning ones they created or ones assigned to them in the POV access picker, and tick use cases. Nothing on anyone else's POV, and not the platform-wide controls. It holds `pov:read`, `pov:use` and `pov_own:write`/`delete`, but not the general `pov:write` or `pov:delete`. |
+| **POV Presenter** | Run a proof of value end to end: **create POVs**, then see, set up, run, power, share and destroy **their own**, meaning ones they created or ones assigned to them in the POV access picker, and tick use cases. **Other people's POVs are not visible**, and neither are the platform-wide controls. It holds `pov:use` and `pov_own:read`/`write`/`delete`, but none of the general `pov:read`, `pov:write` or `pov:delete`. |
+| **POV Manager** | Oversee every proof of value: see, set up, run, power, share and destroy **any** POV, and curate the POV templates. It holds every `pov` level plus `pov_templates:read`/`write`. |
 | **Auditor** | The audit trail, job history and inventory. No writes. |
 | **Cloud Admin** | Full control of the cloud accounts and what runs in them. |
 | **DBA** | Cloud databases end to end, plus the secrets a database run needs. |

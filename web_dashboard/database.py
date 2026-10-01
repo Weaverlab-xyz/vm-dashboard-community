@@ -4296,6 +4296,42 @@ def _grant_presenter_own_pov(db) -> int:
     return changed
 
 
+_PRESENTER_OWN_ONLY_MARKER = "rbac_presenter_own_only_v1"
+
+
+def _narrow_presenter_to_own_povs(db) -> int:
+    """Make the built-in POV Presenter see only its own POVs on an existing install.
+
+    Swaps ``pov:read`` (every POV) for ``pov_own:read`` (your own). ``pov:use`` stays. The
+    new levels arrive with the literal in ``services/role_service`` on a fresh install, but
+    ``seed_builtins`` never updates an existing row, so without this an upgraded install
+    would keep showing presenters every POV.
+
+    Same shape as :func:`_grant_presenter_own_pov`: the BUILT-IN row only, by slug and
+    is_builtin -- a role an operator cloned keeps whatever they decided -- before
+    ``role_service.reconcile`` copies it to the role's holders, and marker-guarded so it
+    runs once. Runs after that function, so ``pov_own`` already holds write and delete.
+    """
+    if db.query(SchemaMarker).filter(SchemaMarker.key == _PRESENTER_OWN_ONLY_MARKER).first():
+        return 0
+    changed = 0
+    role = db.query(AccessRole).filter(AccessRole.slug == "pov-presenter",
+                                       AccessRole.is_builtin.is_(True)).first()
+    if role is not None:
+        perms = role.permissions_dict
+        general = perms.get("pov") if isinstance(perms.get("pov"), list) else []
+        own = perms.get("pov_own") if isinstance(perms.get("pov_own"), list) else []
+        if "read" in general or "read" not in own:
+            perms["pov"] = sorted(set(general) - {"read"})
+            perms["pov_own"] = sorted(set(own) | {"read"})
+            role.permissions_dict = perms
+            changed = 1
+    db.add(SchemaMarker(key=_PRESENTER_OWN_ONLY_MARKER,
+                        detail=f"narrowed {changed} built-in presenter role(s) to own POVs"))
+    db.commit()
+    return changed
+
+
 def init_db():
     """Initialize database — create all tables and run lightweight migrations.
 
@@ -4904,6 +4940,13 @@ def init_db():
             import logging as _logging
             _logging.getLogger(__name__).warning(
                 "POV Presenter own-POV grant skipped", exc_info=True)
+        try:
+            _narrow_presenter_to_own_povs(_seed_db)
+        except Exception:  # noqa: BLE001 — a migration must never stop the app booting
+            _seed_db.rollback()
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "POV Presenter own-only narrowing skipped", exc_info=True)
         try:
             from .services import role_service
             role_service.seed_builtins(_seed_db)

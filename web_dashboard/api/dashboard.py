@@ -417,7 +417,7 @@ def _db_tiles(db: Session, user: User) -> dict:
 def _pov_tiles(db: Session, user: User) -> dict:
     """The POV tiles: environments, their guests, and evaluation coverage."""
     from ..services import feature_flags
-    from .auth import has_permission, pov_env_scope
+    from .auth import may_read_pov, pov_env_scope
 
     keys = ("pov_active", "pov_guests", "pov_coverage")
 
@@ -425,7 +425,7 @@ def _pov_tiles(db: Session, user: User) -> dict:
         # NOT _tile(0). Zero is a plausible number and renders as one; an instance that
         # does not run POVs has no answer, which is what the -1 sentinel is for.
         return {k: _unavailable("POV environments are not enabled here") for k in keys}
-    if not has_permission(user, "pov", "read"):
+    if not may_read_pov(user):
         return {k: _forbidden() for k in keys}
 
     from ..database import PovEnvironment, PovEnvironmentVM
@@ -442,7 +442,7 @@ def _pov_tiles(db: Session, user: User) -> dict:
 
     q = db.query(PovEnvironment).filter(
         PovEnvironment.status != pov_env_service.STATUS_DESTROYED)
-    scope = pov_env_scope(user)
+    scope = pov_env_scope(user, db)
     if scope is not None:
         q = q.filter(PovEnvironment.id.in_(sorted(scope)))
     envs = q.all()

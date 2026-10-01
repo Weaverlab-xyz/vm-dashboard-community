@@ -366,6 +366,40 @@ def test_an_existing_install_gives_the_presenter_its_own_pov_levels():
     assert _grant_presenter_own_pov(db) == 0, "the marker did not stop a re-run"
 
 
+def test_an_existing_install_narrows_the_presenter_to_its_own_povs():
+    """The presenter used to hold `pov:read`, which shows every POV. On upgrade the BUILT-IN
+    row swaps it for `pov_own:read`; a clone keeps what its operator decided."""
+    from web_dashboard.database import (SchemaMarker, _PRESENTER_OWN_ONLY_MARKER,
+                                        _narrow_presenter_to_own_povs)
+    db = _session()
+    db.query(SchemaMarker).filter(SchemaMarker.key == _PRESENTER_OWN_ONLY_MARKER).delete()
+    role_service.seed_builtins(db)
+    pp = role_service.get_by_slug(db, "pov-presenter")
+    pp.permissions_dict = {"pov": ["read", "use"], "pov_own": ["delete", "write"],
+                           "pov_templates": ["read"]}         # as the previous release had it
+    clone = role_service.create(db, name="Presenter Clone 2", description="",
+                                permissions={"pov": ["read", "use"]})
+    db.commit()
+
+    assert _narrow_presenter_to_own_povs(db) == 1
+    db.expire_all()
+    perms = role_service.get_by_slug(db, "pov-presenter").permissions_dict
+    assert perms["pov"] == ["use"]
+    assert perms["pov_own"] == ["delete", "read", "write"]
+    assert perms["pov_templates"] == ["read"]
+    assert role_service.get(db, clone.id).permissions_dict == {"pov": ["read", "use"]}
+    assert _narrow_presenter_to_own_povs(db) == 0, "the marker did not stop a re-run"
+
+
+def test_the_pov_manager_sees_and_manages_every_pov():
+    spec = next(r for r in role_service._BUILTIN_ROLES if r["slug"] == "pov-manager")
+    assert sorted(spec["permissions"]["pov"]) == ["delete", "read", "use", "write"]
+    assert "is_admin" not in spec["permissions"]
+    db = _session()
+    role_service.seed_builtins(db)          # per-slug, so it lands on an existing install
+    assert role_service.get_by_slug(db, "pov-manager").is_builtin
+
+
 def test_the_seed_marks_its_rows_builtin():
     db = _session()
     roles = _seeded(db)
