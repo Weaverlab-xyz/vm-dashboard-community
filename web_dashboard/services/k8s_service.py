@@ -2028,21 +2028,78 @@ def _gke_ip_masq_configmap(nonmasq_cidrs: list) -> str:
     return _yaml.safe_dump(manifest, default_flow_style=False)
 
 
-async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
+#: Echoed (to stderr) by the one-shot install command when a best-effort manifest
+#: fails, so the caller can log it without failing the install.
+_ENTITLE_AGENT_BEST_EFFORT_FAILED = "ENTITLE_AGENT_BEST_EFFORT_APPLY_FAILED"
+
+
+def _entitle_agent_install_oneshot_command(helm_args: list, *, secret_manifest_from_stdin: bool,
+                                           manifests: list, best_effort_manifests: list) -> str:
+    """The whole cloud-runner half of an Entitle agent install as ONE shell command:
+    [apply the token Secret from stdin] → ``helm upgrade --install`` → apply each of
+    ``manifests`` (failure fails the install) → apply each of ``best_effort_manifests``
+    (failure only echoes ``_ENTITLE_AGENT_BEST_EFFORT_FAILED``). One command on purpose,
+    like ``_sa_token_oneshot_command``: each runner call is a fresh cloud task, and on
+    Cloud Run the old helm + CRB + ip-masq sequence was three of them — ~15 min, ~11 of
+    it cold starts.
+
+    The non-secret manifests ride the command as quoted literals; stdin is left for the
+    one secret-bearing consumer (the token Secret, or helm's ``-f -`` values). The runner
+    pipes stdin into ``<command>`` and a pipe binds only to the first command of an
+    ``&&`` list, so the whole thing is a ``{ …; }`` group — that hands stdin to the
+    group, where exactly one member reads it."""
+    steps = []
+    if secret_manifest_from_stdin:
+        steps.append("kubectl apply -f - 1>&2")
+    steps.append("helm " + " ".join(shlex.quote(a) for a in helm_args))
+    for m in manifests:
+        steps.append(f"printf '%s' {shlex.quote(m)} | kubectl apply -f -")
+    for m in best_effort_manifests:
+        steps.append(f"{{ printf '%s' {shlex.quote(m)} | kubectl apply -f - "
+                     f"|| echo {_ENTITLE_AGENT_BEST_EFFORT_FAILED} 1>&2; }}")
+    return "{ " + " && ".join(steps) + "; }"
+
+
+def _entitle_agent_remove_oneshot_command(helm_args: list, delete_before: list,
+                                          delete_after: list) -> str:
+    """The cloud-runner half of an Entitle agent remove as ONE shell command:
+    ``kubectl delete --ignore-not-found`` each of ``delete_before`` → ``helm`` →
+    the same for each of ``delete_after``. ``&&``-chained, so the first failure stops
+    the rest — the same stop-at-first-error as the separate calls it replaces. No
+    stdin: every manifest here is non-secret and rides the command as a literal."""
+    def _delete(m: str) -> str:
+        return f"printf '%s' {shlex.quote(m)} | kubectl delete --ignore-not-found -f -"
+    steps = [_delete(m) for m in delete_before]
+    steps.append("helm " + " ".join(shlex.quote(a) for a in helm_args))
+    steps += [_delete(m) for m in delete_after]
+    return "{ " + " && ".join(steps) + "; }"
+
+
+async def setup_entitle_agent(cluster_id: str, action: str = "install",
+                              progress=None) -> None:
     """Install (or remove) the Entitle agent in a managed cluster. Background task.
 
       * ``install`` → resolve the agent token server-side (auto-minting one via the
         entitleio/entitle provider when ``entitle_agent_token_ref`` is unset), apply the
         ``ENTITLE_TOKEN`` Secret via the kubectl runner, then
         ``helm upgrade --install entitle-agent`` referencing it. Records the hosting
-        cluster in ``entitle_agent_cluster_id``.
+        cluster in ``entitle_agent_cluster_id``. On a cloud runner every cluster-side
+        step runs as ONE runner task (``_entitle_agent_install_oneshot_command``).
       * ``remove``  → ``helm uninstall`` + delete the Secret (best-effort); when this
         cluster hosted the agent, also destroy the auto-minted agent token (Entitle
         refuses to re-mint an existing name, so a surviving token wedges every future
         install) and clear ``entitle_agent_cluster_id``.
+
+    ``progress``, when given, is an ``async (pct, message, log_line=None)`` callable
+    the job wrapper uses to move the bar and feed Live Output between steps.
     """
     from ..database import SessionLocal
-    from . import config_service, entitle_registration_service
+    from . import config_service, entitle_registration_service, k8s_runner_service
+
+    async def _progress(pct: int, message: str, log_line: Optional[str] = None) -> None:
+        if progress is not None:
+            await progress(pct, message, log_line)
+
     db = SessionLocal()
     try:
         row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
@@ -2053,15 +2110,25 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
         secret_name = _cfg("entitle_agent_secret_name", "entitle-agent-token")
 
         if action == "remove":
+            await _progress(30, "Uninstalling the entitle-agent chart, RBAC binding and Secret…")
             try:
                 agent_sa = _cfg("entitle_agent_service_account", "entitle-agent-sa")
-                await _delete_manifest_via_runner(
-                    kubeconfig, _entitle_agent_clusterrolebinding_manifest(namespace, agent_sa),
-                    target_cloud=row.cloud)
-                await _helm_via_runner(kubeconfig, ["uninstall", "entitle-agent", "-n", namespace],
-                                       add_eso_repo=False, target_cloud=row.cloud)
-                await _delete_manifest_via_runner(
-                    kubeconfig, _entitle_agent_secret_manifest(namespace, secret_name, "x"), target_cloud=row.cloud)
+                crb_manifest = _entitle_agent_clusterrolebinding_manifest(namespace, agent_sa)
+                helm_args = ["uninstall", "entitle-agent", "-n", namespace]
+                # Placeholder token: a delete matches by name, so no secret is involved.
+                secret_manifest = _entitle_agent_secret_manifest(namespace, secret_name, "x")
+                if k8s_runner_service.mode(row.cloud) == "local":
+                    await _delete_manifest_via_runner(kubeconfig, crb_manifest, target_cloud=row.cloud)
+                    await _helm_via_runner(kubeconfig, helm_args, add_eso_repo=False,
+                                           target_cloud=row.cloud)
+                    await _delete_manifest_via_runner(kubeconfig, secret_manifest, target_cloud=row.cloud)
+                else:
+                    # One cold-started runner task instead of three (see the install).
+                    await k8s_runner_service.run(
+                        kubeconfig=_runner_kubeconfig(kubeconfig),
+                        command=_entitle_agent_remove_oneshot_command(
+                            helm_args, [crb_manifest], [secret_manifest]),
+                        target_cloud=row.cloud, job_id="")
             except Exception as exc:
                 logger.warning("entitle-agent teardown for %s partially failed: %s", cluster_id, exc)
             if config_service.get("entitle_agent_cluster_id") == cluster_id:
@@ -2071,6 +2138,7 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
                 # destroy fails the job loudly and KEEPS the stash + host marker so a
                 # retry converges — clearing them would orphan the tenant-side token,
                 # which is exactly the wedge this destroy exists to prevent.
+                await _progress(80, "Destroying the minted Entitle agent token…")
                 try:
                     destroyed = await entitle_registration_service.destroy_agent_token()
                 except entitle_registration_service.EntitleRegistrationError as exc:
@@ -2093,6 +2161,7 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
         # Resolve the agent token, auto-minting one (via the entitleio/entitle provider)
         # when none is configured yet — so the install stays one-click. Resolved
         # server-side; never persisted on this install's row/TF state.
+        await _progress(25, "Resolving the Entitle agent token…")
         try:
             token = await entitle_registration_service.ensure_agent_token()
         except entitle_registration_service.EntitleRegistrationError as exc:
@@ -2148,11 +2217,11 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
             helm_values_stdin = yaml.safe_dump(
                 _nested_from_dotted(plaintext_key, token), default_flow_style=False)
             helm_args += ["-f", "-"]
-        else:
+        secret_manifest = None
+        if not plaintext_key:
             # Existing-Secret path (for a future chart version): apply the Secret +
             # point the chart at it so the token stays out of Helm values.
-            await _apply_manifest_via_runner(
-                kubeconfig, _entitle_agent_secret_manifest(namespace, secret_name, token), target_cloud=row.cloud)
+            secret_manifest = _entitle_agent_secret_manifest(namespace, secret_name, token)
             helm_args += ["--set",
                           f"{_cfg('entitle_agent_existing_secret_helm_key', 'agent.existingSecret')}={secret_name}"]
 
@@ -2162,32 +2231,69 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
             if extra:
                 helm_args += ["--set", extra]
 
-        await _helm_via_runner(kubeconfig, helm_args, add_eso_repo=False,
-                               values_stdin=helm_values_stdin, target_cloud=row.cloud)
         # Grant the agent ServiceAccount cluster-admin. In-Cluster mode drives this
         # SA to enumerate the cluster and manage JIT (Cluster)RoleBindings, but the
         # chart only gives it a namespace Role — without this the Entitle integration
         # reports "Failed to fetch the resources". The chart creates the SA (name from
-        # entitle_agent_service_account, matching the chart default), so bind it now.
+        # entitle_agent_service_account, matching the chart default), so bind it after.
         agent_sa = _cfg("entitle_agent_service_account", "entitle-agent-sa")
-        await _apply_manifest_via_runner(
-            kubeconfig, _entitle_agent_clusterrolebinding_manifest(namespace, agent_sa),
-            target_cloud=row.cloud)
+        crb_manifest = _entitle_agent_clusterrolebinding_manifest(namespace, agent_sa)
         # Co-located GKE (in the sandbox VPC): SNAT pod→Cloud SQL to the node IP so
         # the PSA peering routes replies back — otherwise the agent's DB resource
         # Sync times out even though nodes can reach the DB. Only for a GCP cluster
         # provisioned in co-location mode (gcp_k8s_subnetwork set). Best-effort.
+        ip_masq_manifest = None
         if row.cloud == "gcp":
             from .region_config import resolve_region
             if (resolve_region("gcp", row.region) or {}).get("k8s_subnetwork"):
                 nonmasq = _cfg_list("gcp_k8s_nonmasq_cidrs") or _GKE_COLOCATE_NONMASQ_CIDRS
+                ip_masq_manifest = _gke_ip_masq_configmap(nonmasq)
+
+        runner = k8s_runner_service.mode(row.cloud)
+        if runner == "local":
+            # In-process kubectl/helm: each call is seconds, so keep them separate
+            # and report each step.
+            if secret_manifest:
+                await _progress(30, "Applying the agent token Secret…")
+                await _apply_manifest_via_runner(kubeconfig, secret_manifest, target_cloud=row.cloud)
+            await _progress(35, "Installing the entitle-agent Helm chart (waits for the pods)…")
+            await _helm_via_runner(kubeconfig, helm_args, add_eso_repo=False,
+                                   values_stdin=helm_values_stdin, target_cloud=row.cloud)
+            await _progress(80, "Granting the agent ServiceAccount cluster-admin…")
+            await _apply_manifest_via_runner(kubeconfig, crb_manifest, target_cloud=row.cloud)
+            if ip_masq_manifest:
+                await _progress(85, "Applying the ip-masq-agent ConfigMap…")
                 try:
-                    await _apply_manifest_via_runner(
-                        kubeconfig, _gke_ip_masq_configmap(nonmasq), target_cloud=row.cloud)
+                    await _apply_manifest_via_runner(kubeconfig, ip_masq_manifest, target_cloud=row.cloud)
                     logger.info("Applied ip-masq-agent ConfigMap on co-located GKE cluster %s", row.name)
                 except Exception as exc:
                     logger.warning("ip-masq-agent ConfigMap apply failed on %s "
                                    "(pod→Cloud SQL reachability may need it): %s", row.name, exc)
+        else:
+            # Cloud runner: every call is a cold-started cloud task, so the whole
+            # sequence runs as ONE (see _entitle_agent_install_oneshot_command).
+            command = _entitle_agent_install_oneshot_command(
+                helm_args, secret_manifest_from_stdin=bool(secret_manifest),
+                manifests=[crb_manifest],
+                best_effort_manifests=[ip_masq_manifest] if ip_masq_manifest else [])
+            await _progress(
+                35, f"Installing the chart + RBAC in one {runner.upper()} runner task "
+                    "(cold start + helm --wait, typically 5–8 min)…")
+            out = await k8s_runner_service.run(
+                kubeconfig=_runner_kubeconfig(kubeconfig), command=command,
+                target_cloud=row.cloud, stdin_text=secret_manifest or helm_values_stdin,
+                job_id="")
+            # Live Output was empty for the whole install; give it the runner's tail.
+            # (Secrets ride stdin and are never echoed — the output is helm's status
+            # + NOTES and kubectl's "configured" lines.)
+            for line in [ln for ln in (out or "").splitlines() if ln.strip()][-40:]:
+                await _progress(85, "Runner task finished", line)
+            if ip_masq_manifest:
+                if _ENTITLE_AGENT_BEST_EFFORT_FAILED in (out or ""):
+                    logger.warning("ip-masq-agent ConfigMap apply failed on %s "
+                                   "(pod→Cloud SQL reachability may need it)", row.name)
+                else:
+                    logger.info("Applied ip-masq-agent ConfigMap on co-located GKE cluster %s", row.name)
         config_service.set("entitle_agent_cluster_id", cluster_id)
         logger.info("Entitle agent installed on cluster %s (ns=%s)", row.name, namespace)
         # If a k8s connector was already registered for this cluster (before the agent
@@ -2195,6 +2301,7 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
         # re-register it In-Cluster (agent-brokered) so it no longer depends on Entitle's
         # cloud reaching the API directly. Best-effort, non-fatal.
         if config_service.get(f"entitle_k8s_integration_id_{cluster_id}"):
+            await _progress(90, "Re-registering the Entitle Kubernetes connector In-Cluster…")
             try:
                 await register_cluster_in_entitle(cluster_id, action="deregister")
                 await register_cluster_in_entitle(cluster_id, action="register")
@@ -2215,7 +2322,11 @@ async def run_entitle_agent(db: Session, *, cluster_id: str, job_id: str,
     job_service.set_running(db, job_id)
     try:
         await broadcast_progress(job_id, 20, f"Entitle agent: {action}…")
-        await setup_entitle_agent(cluster_id, action)
+
+        async def _progress(pct: int, message: str, log_line: Optional[str] = None) -> None:
+            await broadcast_progress(job_id, pct, message, log_line)
+
+        await setup_entitle_agent(cluster_id, action, progress=_progress)
     except Exception as exc:
         job_service.set_failed(db, job_id, str(exc))
         logger.exception("entitle-agent job failed cluster=%s", cluster_id)

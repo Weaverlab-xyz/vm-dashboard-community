@@ -64,6 +64,112 @@ def test_agent_clusterrolebinding_honors_configured_sa_and_namespace():
     assert crb["metadata"]["name"] == "entitle-agent-cluster-admin"
 
 
+def _oneshot(**kw):
+    crb = k._entitle_agent_clusterrolebinding_manifest("entitle", "entitle-agent-sa")
+    masq = k._gke_ip_masq_configmap(["10.99.1.0/24"])
+    args = dict(secret_manifest_from_stdin=False, manifests=[crb], best_effort_manifests=[masq])
+    args.update(kw)
+    return k._entitle_agent_install_oneshot_command(
+        ["upgrade", "--install", "entitle-agent", "entitle-agent", "--set", "a=b c", "-f", "-"], **args)
+
+
+def test_install_oneshot_is_one_group_in_install_order():
+    """The runner pipes stdin into `<command>`, and a pipe binds only to the FIRST
+    command of an && list — so the command must be one { …; } group, or helm's
+    `-f -` (or the Secret apply) would read nothing."""
+    cmd = _oneshot()
+    assert cmd.startswith("{ ") and cmd.endswith("; }")
+    assert cmd.index("helm upgrade") < cmd.index("ClusterRoleBinding") < cmd.index("ip-masq-agent")
+    assert "'a=b c'" in cmd, "helm args must be shell-quoted"
+    assert k._ENTITLE_AGENT_BEST_EFFORT_FAILED in cmd
+
+
+def test_install_oneshot_secret_apply_reads_stdin_before_helm():
+    cmd = _oneshot(secret_manifest_from_stdin=True, best_effort_manifests=[])
+    assert cmd.startswith("{ kubectl apply -f - 1>&2 && helm ")
+    assert k._ENTITLE_AGENT_BEST_EFFORT_FAILED not in cmd
+
+
+def _run_oneshot_with_stubs(cmd, stdin_text, env_extra):
+    """Run ``cmd`` the way the cloud runners do (set -e; decoded stdin piped into it)
+    against stub helm/kubectl that log what they received."""
+    import base64
+    import shutil
+    import subprocess
+    import tempfile
+    tmp = tempfile.mkdtemp()
+    try:
+        bindir = os.path.join(tmp, "bin")
+        os.mkdir(bindir)
+        logf = os.path.join(tmp, "log")
+        stubs = {
+            "helm": '#!/bin/sh\ncase " $* " in *" -f - "*) echo "helm stdin=$(cat)" >> "$LOG";; '
+                    '*) echo "helm" >> "$LOG";; esac\n[ "${FAIL_HELM:-}" = 1 ] && exit 1\nexit 0\n',
+            "kubectl": '#!/bin/sh\nin=$(cat)\necho "kubectl $1 $(printf %s "$in" | grep -m1 "^kind:")" >> "$LOG"\n'
+                       'case "$in" in *ConfigMap*) [ "${FAIL_MASQ:-}" = 1 ] && exit 1;; esac\nexit 0\n',
+        }
+        for name, body in stubs.items():
+            p = os.path.join(bindir, name)
+            with open(p, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(body)
+            os.chmod(p, 0o755)
+        env = dict(os.environ, PATH=bindir + os.pathsep + os.environ.get("PATH", ""), LOG=logf,
+                   STDIN_B64=base64.b64encode(stdin_text.encode()).decode(), **env_extra)
+        full = 'set -e; printf %s "$STDIN_B64" | base64 -d | ' + cmd
+        proc = subprocess.run(["sh", "-c", full], env=env, capture_output=True, text=True)
+        log = open(logf, encoding="utf-8").read() if os.path.exists(logf) else ""
+        return proc.returncode, proc.stderr, log
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _have_posix_sh():
+    import shutil
+    return os.name == "posix" and shutil.which("sh") and shutil.which("base64")
+
+
+def test_install_oneshot_executes_under_sh():
+    if not _have_posix_sh():
+        print("skip (no POSIX sh)")
+        return
+    rc, _, log = _run_oneshot_with_stubs(_oneshot(), "agent: {token: T}", {})
+    assert rc == 0
+    assert log.splitlines() == ["helm stdin=agent: {token: T}",
+                                "kubectl apply kind: ClusterRoleBinding", "kubectl apply kind: ConfigMap"]
+    # A failed best-effort apply flags itself but does not fail the install.
+    rc, err, _ = _run_oneshot_with_stubs(_oneshot(), "v", {"FAIL_MASQ": "1"})
+    assert rc == 0 and k._ENTITLE_AGENT_BEST_EFFORT_FAILED in err
+    # A failed helm stops before the RBAC apply and fails the task.
+    rc, _, log = _run_oneshot_with_stubs(_oneshot(), "v", {"FAIL_HELM": "1"})
+    assert rc != 0 and "kubectl" not in log
+    # Existing-Secret path: the Secret apply consumes stdin, so helm reads nothing.
+    rc, _, log = _run_oneshot_with_stubs(
+        _oneshot(secret_manifest_from_stdin=True, best_effort_manifests=[]), "kind: Secret\n", {})
+    assert rc == 0
+    assert log.splitlines() == ["kubectl apply kind: Secret", "helm stdin=",
+                                "kubectl apply kind: ClusterRoleBinding"]
+
+
+def test_remove_oneshot_deletes_crb_then_uninstalls_then_deletes_secret():
+    crb = k._entitle_agent_clusterrolebinding_manifest("entitle", "entitle-agent-sa")
+    sec = k._entitle_agent_secret_manifest("entitle", "entitle-agent-token", "x")
+    cmd = k._entitle_agent_remove_oneshot_command(
+        ["uninstall", "entitle-agent", "-n", "entitle"], [crb], [sec])
+    assert cmd.startswith("{ ") and cmd.endswith("; }")
+    assert cmd.count("kubectl delete --ignore-not-found -f -") == 2
+    assert cmd.index("ClusterRoleBinding") < cmd.index("helm uninstall") < cmd.index("kind: Secret")
+    if not _have_posix_sh():
+        print("skip (no POSIX sh)")
+        return
+    rc, _, log = _run_oneshot_with_stubs(cmd, "", {})
+    assert rc == 0
+    assert log.splitlines() == ["kubectl delete kind: ClusterRoleBinding", "helm",
+                                "kubectl delete kind: Namespace"]  # Namespace + Secret doc
+    # A failed uninstall stops before the Secret delete (same as the separate calls).
+    rc, _, log = _run_oneshot_with_stubs(cmd, "", {"FAIL_HELM": "1"})
+    assert rc != 0 and log.splitlines() == ["kubectl delete kind: ClusterRoleBinding", "helm"]
+
+
 if __name__ == "__main__":
     fns = [v for k_, v in sorted(globals().items()) if k_.startswith("test_")]
     failures = 0

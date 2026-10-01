@@ -3289,6 +3289,10 @@ class PovEnvironment(Base):
     # Whether this POV's PRA vendor Group Policy requires TOTP (two_factor_type =
     # require_totp). NULL/False is PRA's default, "optional". See pov_vendor_access.
     pra_require_totp = Column(Boolean, nullable=True, default=False)
+    # The PRA Gateway id, set ONLY when the dashboard created the Gateway itself
+    # (pov_gateway.provision). It is the ownership marker teardown reads: a Gateway an
+    # operator created and pasted the key for has no id here and is never deleted.
+    pra_gateway_id = Column(String(64), nullable=True)
     ps_application_host_id = Column(Integer, nullable=True)
 
     # Which BeyondTrust tenant this POV is wired into, one FK per product. Three rather
@@ -4612,6 +4616,10 @@ def init_db():
             # NULL backfills to "optional", PRA's own default, so no existing POV's vendor
             # policy changes when this lands. See PovEnvironment.pra_require_totp.
             "ALTER TABLE pov_environments ADD COLUMN pra_require_totp BOOLEAN",
+            # NULL backfills to "the operator created this Gateway", so no existing
+            # POV's Gateway becomes deletable when this lands. See
+            # PovEnvironment.pra_gateway_id.
+            "ALTER TABLE pov_environments ADD COLUMN pra_gateway_id VARCHAR(64)",
             # NULL backfills to "choose by guest OS", so no existing POV changes
             # behaviour when this lands. See PovEnvironmentVM.login_username.
             "ALTER TABLE pov_environment_vms ADD COLUMN login_username VARCHAR(104)",
