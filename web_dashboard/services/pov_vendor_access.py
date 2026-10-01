@@ -346,7 +346,40 @@ def describe(db: Session, env: PovEnvironment) -> dict:
         "vendor_can_move_jump_group": can_move_jump_group(db, env),
         "vendor_users": [describe_user(r) for r in rows],
         "vendor_user_count": len(rows),
+        "vendor_require_totp": bool(env.pra_require_totp),
     }
+
+
+def _two_factor_type(env: PovEnvironment) -> str:
+    return (pra_vendor_api.TWO_FACTOR_TOTP if env.pra_require_totp
+            else pra_vendor_api.TWO_FACTOR_OPTIONAL)
+
+
+async def set_require_totp(db: Session, env: PovEnvironment, enabled: bool, *,
+                           by: str = "") -> dict:
+    """Turn the TOTP requirement on or off for this POV's vendor users.
+
+    Before the vendor group exists this only records the choice, and :func:`register`
+    applies it. After, it PATCHes the live Group Policy — see
+    ``pra_vendor_api.set_group_policy_two_factor`` for why it is never a re-register.
+
+    The PATCH goes first and the column second, so a refusal from PRA leaves the row
+    saying what the appliance actually enforces.
+    """
+    enabled = bool(enabled)
+    if env.pra_vendor_policy_id:
+        tenant = pov_gateway.pra_tenant(db, env)
+        await pra_vendor_api.set_group_policy_two_factor(
+            tenant, env.pra_vendor_policy_id,
+            pra_vendor_api.TWO_FACTOR_TOTP if enabled
+            else pra_vendor_api.TWO_FACTOR_OPTIONAL)
+    env.pra_require_totp = enabled
+    db.commit()
+    job_service.log_audit(
+        db, by or "system", "pov_vendor_totp_" + ("required" if enabled else "optional"),
+        target_vm=env.name,
+        details={"environment_id": env.id, "policy_id": env.pra_vendor_policy_id or ""})
+    return describe(db, env)
 
 
 # ── register ─────────────────────────────────────────────────────────────────
@@ -462,7 +495,8 @@ async def register(db: Session, env: PovEnvironment, *, by: str = "",
         tenant,
         name=POLICY_NAME_FMT.format(name=env.name),
         perms=_session_perms(db, env),
-        default_jump_item_role_id=role_id)
+        default_jump_item_role_id=role_id,
+        two_factor_type=_two_factor_type(env))
     # An id that came back blank is checked BEFORE the column is written. Committing `""`
     # and then raising is worse than not committing at all: `""` is falsy, so the retry
     # path above does not see this POV as registered, skips the deregister, and creates a

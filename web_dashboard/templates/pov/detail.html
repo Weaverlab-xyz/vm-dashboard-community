@@ -719,6 +719,19 @@
                      placeholder="allowed IP prefixes (optional, comma separated)"
                      class="sm:col-span-3 border border-gray-300 rounded-lg px-3 py-2 text-sm">
             </div>
+            <!-- Applied in place to a live policy (PATCH), so ticking it never deletes the
+                 vendor group and the logins already handed out. -->
+            <label class="flex items-start gap-2 text-sm text-gray-700">
+              <input type="checkbox" class="mt-0.5" :checked="env.vendor_require_totp"
+                     :disabled="vendorBusy" @change="setVendorTotp($event.target)">
+              <span>
+                Require TOTP for vendor users
+                <span class="block text-xs text-gray-400">
+                  Sets the vendor Group Policy to <code class="text-[11px]">require_totp</code>.
+                  Each vendor enrols an authenticator app at their first PRA login.
+                </span>
+              </span>
+            </label>
             <div class="flex items-center gap-2">
               <button @click="registerVendor()" :disabled="vendorBusy"
                       class="px-3 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50 disabled:opacity-50"
@@ -1526,6 +1539,27 @@
           Object.assign(this.env, data);
         } catch (e) {
           this.error = 'Could not create the vendor group.';
+        } finally {
+          this.vendorBusy = false;
+        }
+      },
+
+      async setVendorTotp(box) {
+        // A refusal leaves the box where PRA actually is, not where the click put it.
+        const enabled = !!box.checked;
+        this.vendorBusy = true;
+        try {
+          const res = await this.apiFetch(`/api/pov/managed/${this.envId}/vendor/totp`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { box.checked = !enabled; this.error = data.detail || `Could not change the TOTP setting (${res.status}).`; return; }
+          Object.assign(this.env, data);
+        } catch (e) {
+          box.checked = !enabled;
+          this.error = 'Could not change the TOTP setting.';
         } finally {
           this.vendorBusy = false;
         }

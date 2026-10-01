@@ -3,6 +3,7 @@
     GET    /api/pov/managed/{env_id}/vendor              this POV's vendor state + users
     POST   /api/pov/managed/{env_id}/vendor              create the policy + vendor group
     DELETE /api/pov/managed/{env_id}/vendor              remove both
+    POST   /api/pov/managed/{env_id}/vendor/totp         require TOTP, or not
     POST   /api/pov/managed/{env_id}/vendor/users        mint one vendor login
     DELETE /api/pov/managed/{env_id}/vendor/users/{id}   revoke one
 
@@ -133,6 +134,28 @@ async def remove_vendor(env_id: str, db: Session = Depends(get_db),
     except (pov_vendor_access.VendorAccessError, PRATenantError) as exc:
         raise _refusal(exc) from None
     return pov_vendor_access.describe(db, env)
+
+
+class VendorTotpRequest(BaseModel):
+    """Require TOTP for this POV's vendor users, or go back to PRA's "optional"."""
+    enabled: bool
+
+
+@router.post("/managed/{env_id}/vendor/totp")
+async def set_vendor_totp(env_id: str, payload: VendorTotpRequest,
+                          db: Session = Depends(get_db),
+                          current_user: User = Depends(get_current_user)):
+    """Set the vendor Group Policy's two-factor requirement.
+
+    Applied in place to a live policy, never by re-registering — that would delete the
+    vendor group and every login already handed out with it.
+    """
+    env = _env_or_404(db, env_id)
+    try:
+        return await pov_vendor_access.set_require_totp(
+            db, env, payload.enabled, by=getattr(current_user, "username", "") or "")
+    except (pov_vendor_access.VendorAccessError, PRATenantError) as exc:
+        raise _refusal(exc) from None
 
 
 @router.post("/managed/{env_id}/vendor/users", status_code=201)

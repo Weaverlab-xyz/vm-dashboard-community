@@ -93,11 +93,19 @@ class _FakePRA:
         return self.b.get("role")
 
     async def create_group_policy(self, tenant, *, name, perms,
-                                  default_jump_item_role_id=1):
-        self.calls.append(("create_policy", name, perms, default_jump_item_role_id))
+                                  default_jump_item_role_id=1,
+                                  two_factor_type="optional"):
+        self.calls.append(("create_policy", name, perms, default_jump_item_role_id,
+                           two_factor_type))
         if self.b.get("policy_raises"):
             raise PRATenantError(self.b["policy_raises"])
         return {"id": self.b["policy_id"]} if "policy_id" in self.b else {"id": 12}
+
+    async def set_group_policy_two_factor(self, tenant, policy_id, two_factor_type):
+        self.calls.append(("set_two_factor", policy_id, two_factor_type))
+        if self.b.get("two_factor_raises"):
+            raise PRATenantError(self.b["two_factor_raises"])
+        return {"id": policy_id, "two_factor_type": two_factor_type}
 
     async def add_policy_jump_group(self, tenant, policy_id, jump_group_id,
                                     **kw):
@@ -140,7 +148,8 @@ class _FakePRA:
 
 _PATCHED = ("find_jump_item_role", "create_group_policy", "add_policy_jump_group",
             "create_vendor", "find_vendor", "get_vendor", "delete_vendor",
-            "delete_group_policy", "create_vendor_user", "delete_vendor_user")
+            "delete_group_policy", "create_vendor_user", "delete_vendor_user",
+            "set_group_policy_two_factor")
 
 
 def _install(fake):
@@ -334,6 +343,80 @@ def test_the_policy_grants_only_the_jump_types_this_pov_actually_built():
         perms = [c for c in fake.calls if c[0] == "create_policy"][0][2]
         assert perms["perm_remote_rdp"] is True
         assert perms["perm_shell_jump"] is False
+    finally:
+        _restore(original)
+        db.close()
+
+
+# ── TOTP ─────────────────────────────────────────────────────────────────────
+
+def test_the_policy_is_optional_two_factor_unless_the_pov_requires_totp():
+    db = d.SessionLocal()
+    fake = _FakePRA()
+    original = _install(fake)
+    try:
+        env = _env(db, tenant=_tenant(db))
+        _wire(db, env)
+        asyncio.run(pv.register(db, env, by="se"))
+        assert [c for c in fake.calls if c[0] == "create_policy"][0][4] == "optional"
+
+        totp = _env(db, tenant=_tenant(db), pra_require_totp=True)
+        _wire(db, totp)
+        asyncio.run(pv.register(db, totp, by="se"))
+        assert [c for c in fake.calls if c[0] == "create_policy"][1][4] == "require_totp"
+    finally:
+        _restore(original)
+        db.close()
+
+
+def test_toggling_totp_before_registration_only_records_the_choice():
+    db = d.SessionLocal()
+    fake = _FakePRA()
+    original = _install(fake)
+    try:
+        env = _env(db, tenant=_tenant(db))
+        got = asyncio.run(pv.set_require_totp(db, env, True, by="se"))
+        assert got["vendor_require_totp"] is True
+        assert "set_two_factor" not in _kinds(fake)
+    finally:
+        _restore(original)
+        db.close()
+
+
+def test_toggling_totp_on_a_live_policy_patches_it_and_never_re_registers():
+    """Re-registering deletes the vendor group, and PRA deletes its users with it."""
+    db = d.SessionLocal()
+    fake = _FakePRA()
+    original = _install(fake)
+    try:
+        env = _env(db, tenant=_tenant(db))
+        _wire(db, env)
+        asyncio.run(pv.register(db, env, by="se"))
+        fake.calls.clear()
+        asyncio.run(pv.set_require_totp(db, env, True, by="se"))
+        assert fake.calls == [("set_two_factor", env.pra_vendor_policy_id, "require_totp")]
+        asyncio.run(pv.set_require_totp(db, env, False, by="se"))
+        assert fake.calls[-1] == ("set_two_factor", env.pra_vendor_policy_id, "optional")
+        assert env.pra_require_totp is False
+    finally:
+        _restore(original)
+        db.close()
+
+
+def test_a_refused_totp_patch_leaves_the_row_saying_what_pra_enforces():
+    db = d.SessionLocal()
+    fake = _FakePRA(two_factor_raises="403")
+    original = _install(fake)
+    try:
+        env = _env(db, tenant=_tenant(db))
+        _wire(db, env)
+        asyncio.run(pv.register(db, env, by="se"))
+        try:
+            asyncio.run(pv.set_require_totp(db, env, True, by="se"))
+            raise AssertionError("a refused PATCH was reported as applied")
+        except PRATenantError:
+            pass
+        assert not env.pra_require_totp
     finally:
         _restore(original)
         db.close()

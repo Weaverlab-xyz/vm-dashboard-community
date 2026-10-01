@@ -275,8 +275,15 @@ async def find_jump_item_role(tenant, name: str) -> dict | None:
 
 # ── Group Policies ───────────────────────────────────────────────────────────
 
+# GroupPolicy.two_factor_type. `require_totp` makes every member enrol an authenticator
+# app at their next login; `optional` is PRA's default and lets a user opt in.
+TWO_FACTOR_OPTIONAL = "optional"
+TWO_FACTOR_TOTP = "require_totp"
+
+
 async def create_group_policy(tenant, *, name: str, perms: dict[str, bool],
-                              default_jump_item_role_id: int = 1) -> dict:
+                              default_jump_item_role_id: int = 1,
+                              two_factor_type: str = TWO_FACTOR_OPTIONAL) -> dict:
     """Create a Group Policy that grants sessions and nothing else.
 
     ``access_perm_status="defined"`` is what makes the ``perm_*`` fields apply at all —
@@ -294,9 +301,23 @@ async def create_group_policy(tenant, *, name: str, perms: dict[str, bool],
         "access_perm_status": "defined",
         "perm_access_allowed": True,
         "default_jump_item_role_id": int(default_jump_item_role_id or 1),
+        "two_factor_type": two_factor_type or TWO_FACTOR_OPTIONAL,
     }
     payload.update({k: bool(v) for k, v in perms.items()})
     _status, body, _h = await _request(tenant, "POST", _GROUP_POLICY_PATH, json=payload)
+    return body if isinstance(body, dict) else {}
+
+
+async def set_group_policy_two_factor(tenant, policy_id: str, two_factor_type: str) -> dict:
+    """Change only the policy's two-factor requirement, in place.
+
+    A PATCH of the one field rather than a re-register: re-registering deletes the vendor
+    group, and PRA deletes the group's users with it — every login already handed to the
+    customer would stop working because somebody ticked a box.
+    """
+    _status, body, _h = await _request(
+        tenant, "PATCH", f"{_GROUP_POLICY_PATH}/{policy_id}",
+        json={"two_factor_type": two_factor_type})
     return body if isinstance(body, dict) else {}
 
 
