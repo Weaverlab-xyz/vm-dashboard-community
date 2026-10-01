@@ -742,6 +742,8 @@
                         x-text="(e.setup.next_blocked ? 'Blocked: ' : 'Next: ') + e.setup.next_label"></span>
                   <span class="text-gray-500" x-show="e.setup.next_detail"
                         x-text="' — ' + e.setup.next_detail"></span>
+                  <a :href="'/pov/' + e.id + '#setup'"
+                     class="ml-2 text-blue-600 underline hover:no-underline whitespace-nowrap">Continue setup →</a>
                 </p>
                 <p x-show="e.setup && e.setup.busy" class="mt-1.5 text-xs text-gray-500">
                   Something is running on this POV; the other actions are refused until it
@@ -1322,6 +1324,13 @@ function povPage() {
         this.showTenants = true;
         this.$nextTick(() => document.getElementById('bt-tenants')
           ?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+      }
+      // /pov?edit=rb&env=<id> is where the POV detail page's Setup tab sends the Resource
+      // Broker step: that form (installer picker, zone, key) lives here, so open it.
+      const q = new URLSearchParams(window.location.search);
+      if (q.get('edit') === 'rb') {
+        const row = (this.managed || []).find(e => e.id === q.get('env'));
+        if (row) this.startEditRb(row);
       }
     },
 

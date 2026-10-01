@@ -48,6 +48,10 @@
   <div x-show="error" class="bg-red-50 border border-red-200 rounded-lg px-4 py-3">
     <p class="text-sm text-red-700" x-text="error"></p>
   </div>
+  <!-- The Setup tab's buttons report here; the other panels keep their own inline line. -->
+  <div x-show="notice && tab === 'setup'" class="bg-green-50 border border-green-200 rounded-lg px-4 py-3">
+    <p class="text-sm text-green-800 break-all" x-text="notice"></p>
+  </div>
 
   <template x-if="!loading && env">
     <div class="space-y-6">
@@ -84,6 +88,58 @@
             </button>
           </template>
         </nav>
+      </div>
+
+      <!-- ── Setup: the guided ladder ─────────────────────────────────────
+           One numbered row per step, from pov_setup_steps.describe — the server owns the
+           order, the states and what locks what. Each row has ONE button; the step the
+           cursor points at gets the primary colour, and a step whose dependency is not
+           settled is greyed with the step to finish first named. -->
+      <div x-show="tab === 'setup'" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+        <div class="flex items-baseline justify-between mb-4">
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Set up this POV</h2>
+          <p class="text-xs text-gray-500"
+             x-text="(env.setup ? env.setup.settled : 0) + ' of ' + (env.setup ? env.setup.total : 0) + ' settled'
+                     + (env.setup && env.setup.busy ? ' · working…' : '')"></p>
+        </div>
+        <ol class="space-y-3">
+          <template x-for="(s, i) in (env.setup ? env.setup.steps : [])" :key="s.key">
+            <li class="flex items-start gap-3 rounded-lg border p-3"
+                :class="env.setup.next === s.key ? 'border-blue-300 bg-blue-50/40' : 'border-gray-100'">
+              <span class="shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold"
+                    :class="{
+                      'bg-green-600 text-white': s.state === 'done',
+                      'bg-green-100 text-green-800': s.state === 'configured',
+                      'bg-blue-600 text-white': s.state === 'ready' && env.setup.next === s.key,
+                      'bg-blue-100 text-blue-800': s.state === 'ready' && env.setup.next !== s.key,
+                      'bg-amber-100 text-amber-800': s.state === 'blocked',
+                      'bg-indigo-100 text-indigo-800 animate-pulse': s.state === 'running',
+                      'bg-gray-100 text-gray-400': s.state === 'skipped'
+                    }"
+                    x-text="s.state === 'done' ? '✓' : (i + 1)"></span>
+              <div class="flex-1 min-w-0">
+                <p class="text-sm font-medium"
+                   :class="s.state === 'skipped' ? 'text-gray-400' : 'text-gray-900'" x-text="s.label"></p>
+                <p class="text-xs mt-0.5"
+                   :class="s.state === 'blocked' ? 'text-amber-700' : 'text-gray-500'"
+                   x-text="s.locked ? 'Finish “' + s.locked_by + '” first.'
+                         : (s.detail || (s.state === 'done' ? 'Done.' : s.state === 'configured'
+                              ? 'Configured.' : s.state === 'skipped' ? 'Not part of this POV.' : ''))"></p>
+              </div>
+              <button x-show="stepActionLabel(s)" @click="runStep(s)"
+                      :disabled="s.locked || stepBusy || (env.setup && env.setup.busy)"
+                      :title="s.locked ? 'Finish ' + s.locked_by + ' first' : ''"
+                      class="shrink-0 text-xs px-3 py-1.5 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed"
+                      :class="env.setup.next === s.key
+                              ? 'bg-blue-600 text-white hover:bg-blue-700'
+                              : 'border border-gray-300 text-gray-700 hover:bg-gray-50'"
+                      x-text="stepBusy === s.key ? 'Working…' : stepActionLabel(s)"></button>
+            </li>
+          </template>
+        </ol>
+        <p x-show="env.setup && env.setup.complete" class="text-sm text-green-700 mt-4">
+          Everything this dashboard can set up is in place.
+        </p>
       </div>
 
       <!-- ── Overview ─────────────────────────────────────────────────── -->
@@ -141,9 +197,10 @@
             </div>
           </dl>
           <p class="text-xs text-gray-400 mt-4">
-            Every action on this POV — provision, power, Gateway, Resource Broker, wire-up,
-            share, expiry — lives on <a href="/pov" class="underline hover:no-underline">the POV page</a>.
-            This page reads.
+            Set the POV up step by step on the
+            <button type="button" @click="select('setup')" class="underline hover:no-underline">Setup</button>
+            tab. Power, expiry and the Resource Broker's form live on
+            <a href="/pov" class="underline hover:no-underline">the POV page</a>.
           </p>
         </div>
       </div>
@@ -1079,7 +1136,11 @@
       vendorBusy: false,
       vendorMinted: null,
       tab: 'overview',
+      // The step whose button was just pressed, so only that row says "Working…".
+      stepBusy: '',
+      _stepPoll: null,
       tabs: [
+        { id: 'setup',     label: 'Setup' },
         { id: 'overview',  label: 'Overview' },
         { id: 'vms',       label: 'VMs' },
         { id: 'wired',     label: 'Wired' },
@@ -1101,7 +1162,104 @@
         // After loadEnv, not beside it: the template list is only fetched for a platform
         // that can merge one, and that answer arrives with the environment.
         await this.loadTemplates();
+        // A POV still being set up opens on the guided ladder; a finished one on Overview.
+        // A deep link always wins.
+        if (!this.tabs.some(t => t.id === hash) && this.env && this.env.setup
+            && !this.env.setup.complete) this.tab = 'setup';
+        this.watchSetup();
         this.loading = false;
+      },
+
+      // ── Setup ladder ------------------------------------------------------
+      //
+      // Every handler is HERE, on this component, rather than borrowed from the POV list
+      // page: a method called across components is a dead button (see the Alpine mixin
+      // note in static/js/app.js). Steps that need a form the list page already owns —
+      // the Resource Broker's installer, zone and key — link to it with the editor open.
+
+      stepActionLabel(s) {
+        if (s.state === 'done' || s.state === 'skipped') return '';
+        if (s.key === 'pra_ps') return this.env.pra_ps_matched_count ? 'Link' : 'Check';
+        const labels = {
+          vms: 'Set guest OS', broker: 'Install broker', gateway: 'Create & install',
+          resource_broker: 'Configure', entitle_agent: 'Install agent', wireup: 'Wire up',
+          share: 'Share',
+        };
+        if (s.state === 'configured') return s.key === 'gateway' ? 'Check' : '';
+        return labels[s.action] || '';
+      },
+
+      async stepPost(url, body) {
+        const res = await this.apiFetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `Request failed (${res.status}).`);
+        return data;
+      },
+
+      async runStep(s) {
+        const base = `/api/pov/managed/${this.envId}`;
+        this.error = ''; this.notice = '';
+        if (s.action === 'vms') { this.select('vms'); return; }
+        if (s.action === 'resource_broker') {
+          window.location.href = `/pov?edit=rb&env=${encodeURIComponent(this.envId)}`;
+          return;
+        }
+        if (s.key === 'pra_ps') { await this.praPs(this.env.pra_ps_matched_count ? 'link' : 'check'); return; }
+        this.stepBusy = s.key;
+        try {
+          if (s.key === 'gateway' && s.state === 'configured') {
+            const res = await this.apiFetch(`${base}/gateway`);
+            const data = await res.json().catch(() => ({}));
+            this.notice = (data.gateway || {}).detail || data.detail || '';
+          } else if (s.action === 'broker') {
+            await this.stepPost(`${base}/broker`, null);
+            this.notice = 'Installing the broker agent. It waits for the agent to enrol.';
+          } else if (s.action === 'gateway') {
+            const data = await this.stepPost(`${base}/gateway/create`, { name: '', install: true });
+            this.notice = `Created Gateway ${(data.gateway || {}).gateway_name} in PRA; installing it on the broker.`;
+          } else if (s.action === 'entitle_agent') {
+            const vm = window.prompt(
+              'Which Linux VM should host the Entitle agent? It installs single-node k3s there.',
+              this.env.entitle_agent_vm_name || 'entitle');
+            if (vm === null) return;
+            await this.stepPost(`${base}/entitle-agent`, { vm_name: vm, install: true });
+            this.notice = 'Installing the Entitle agent. This takes minutes.';
+          } else if (s.action === 'wireup') {
+            await this.stepPost(`${base}/wireup`, null);
+            this.notice = 'Wiring the VMs. A VM already wired is skipped, not doubled.';
+          } else if (s.action === 'share') {
+            const answer = window.prompt('How many days should the link last? (blank = default)', '');
+            if (answer === null) return;
+            const days = answer.trim() ? Number(answer.trim()) : null;
+            if (days !== null && !Number.isInteger(days)) { this.error = 'Days must be a whole number.'; return; }
+            const data = await this.stepPost(`${base}/share`, { days });
+            this.notice = `Shared until ${(data.share.share_expires_at || '').slice(0, 10)}. `
+                        + `Password: ${data.share.password}`;
+          }
+        } catch (e) {
+          this.error = e.message;
+        } finally {
+          this.stepBusy = '';
+          await this.loadEnv();
+          this.watchSetup();
+        }
+      },
+
+      // Re-read the row while a step is in flight, so the ladder advances on its own.
+      // Stops itself the moment nothing is running.
+      watchSetup() {
+        if (this._stepPoll || !(this.env && this.env.setup && this.env.setup.busy)) return;
+        this._stepPoll = setInterval(async () => {
+          await this.loadEnv();
+          if (!(this.env && this.env.setup && this.env.setup.busy)) {
+            clearInterval(this._stepPoll);
+            this._stepPoll = null;
+          }
+        }, 5000);
       },
 
       // Same reason every other page carries its own: /api/ authenticates off the

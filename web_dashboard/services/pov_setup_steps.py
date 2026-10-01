@@ -311,6 +311,26 @@ STEPS = (
 
 STEP_KEYS = tuple(key for key, _label, _fn in STEPS)
 
+# What each step genuinely needs settled before its button can do anything. Deliberately
+# NOT "every earlier step": the Resource Broker, the Entitle agent and the PRA<->PS link are
+# optional halves, and locking the share link behind a Password Safe integration the
+# customer has not configured yet would park a working POV forever. A dependency the
+# server would refuse anyway is the only thing that locks a button.
+NEEDS = {
+    "environment":     (),
+    "guest_os":        ("environment",),
+    "broker":          ("environment", "guest_os"),
+    "gateway":         ("broker",),
+    "resource_broker": ("environment",),
+    "entitle_agent":   ("broker",),
+    "wireup":          ("gateway", "guest_os"),
+    "pra_ps":          ("wireup",),
+    "share":           ("environment",),
+}
+
+# A dependency in one of these no longer holds anything up.
+_SETTLED = (DONE, SKIPPED, CONFIGURED)
+
 
 def describe(parts: dict) -> dict:
     """The ladder for one POV row.
@@ -332,6 +352,15 @@ def describe(parts: dict) -> dict:
         if job_key and state == RUNNING:
             step["job_id"] = str(parts.get(job_key) or "")
         steps.append(step)
+
+    # `locked_by` names the first unsettled dependency, so a greyed-out button can say
+    # which step to finish first instead of just refusing.
+    by_key = {s["key"]: s for s in steps}
+    for step in steps:
+        blocker = next((by_key[n] for n in NEEDS.get(step["key"], ())
+                        if n in by_key and by_key[n]["state"] not in _SETTLED), None)
+        step["locked"] = blocker is not None
+        step["locked_by"] = blocker["label"] if blocker else ""
 
     # A step in flight stops the cursor dead rather than pointing past it: `may_act_on`
     # refuses every other action while a POV is mid-job, so offering one would be offering

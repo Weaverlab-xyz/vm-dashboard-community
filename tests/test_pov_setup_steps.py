@@ -105,7 +105,8 @@ def test_the_ladder_is_the_dependency_order_and_every_step_appears_once():
     assert keys.index("guest_os") < keys.index("broker")
     # Every step carries the full contract, so no template has to guard on absence.
     for step in result["steps"]:
-        assert set(step) == {"key", "label", "state", "detail", "action", "job_id"}, step
+        assert set(step) == {"key", "label", "state", "detail", "action", "job_id",
+                             "locked", "locked_by"}, step
         assert step["label"], f"{step['key']} has no label"
 
 
@@ -152,6 +153,62 @@ def test_a_platform_that_publishes_no_link_greys_the_share_step():
     by_key = _by_key(result)
     assert by_key["share"]["state"] == steps.SKIPPED
     assert result["complete"] is True, "a cloud POV is finished without a share link"
+
+
+# ── locking: a button is greyed only behind a dependency it really has ──────
+
+def test_every_step_declares_what_it_needs_and_only_names_real_steps():
+    assert set(steps.NEEDS) == set(steps.STEP_KEYS)
+    for key, needs in steps.NEEDS.items():
+        for n in needs:
+            assert n in steps.STEP_KEYS, (key, n)
+            assert steps.STEP_KEYS.index(n) < steps.STEP_KEYS.index(key), (key, n)
+
+
+def test_a_finished_pov_locks_nothing():
+    assert not any(s["locked"] for s in steps.describe(_row())["steps"])
+
+
+def test_the_gateway_is_locked_until_the_broker_is_enrolled():
+    by_key = _by_key(steps.describe(_row(broker_status="offline", broker_agent_id="",
+                                         gateway_ready=False)))
+    assert by_key["gateway"]["locked"] is True
+    assert by_key["gateway"]["locked_by"] == "Broker agent enrolled"
+    assert by_key["wireup"]["locked"] is True
+
+
+def test_an_optional_half_never_locks_the_share_link():
+    """A Password Safe integration the customer has not configured must not park a
+    working POV: share needs only the environment."""
+    by_key = _by_key(steps.describe(_row(pra_ps_matched_count=0, pra_ps_linked_count=0,
+                                         pra_ps_checked=True, rb_ready=False,
+                                         share_url="")))
+    assert by_key["pra_ps"]["state"] == steps.BLOCKED
+    assert by_key["share"]["locked"] is False
+
+
+def test_every_action_the_ladder_emits_has_a_button_on_the_setup_tab():
+    """An action with no label renders no button: a step the cursor points at that the
+    SE cannot press. Parsed from the template, since the handler lives there."""
+    import re
+    src = open(os.path.join(_ROOT, "web_dashboard", "templates", "pov", "detail.html"),
+               encoding="utf-8").read()
+    body = src.split("stepActionLabel(s) {", 1)[1].split("async stepPost(", 1)[0]
+    labelled = set(re.findall(r"(\w+): \x27", body))
+    emitted = set()
+    for key, _label, resolve in steps.STEPS:
+        for over in ({}, {"broker_agent_id": ""}, {"gateway_ready": False},
+                     {"rb_ready": False}, {"entitle_agent_installed": False},
+                     {"wired_count": 0}, {"share_url": ""}, {"os_unknown_count": 2},
+                     {"onboarded_count": 0}):
+            _s, _d, action = resolve(_row(**over))
+            if action and key != "pra_ps":
+                emitted.add(action)
+    missing = sorted(emitted - labelled)
+    assert not missing, f"the Setup tab has no button for: {missing}"
+    runner = src.split("async runStep(s) {", 1)[1].split("watchSetup()", 1)[0]
+    for action in emitted:
+        assert f"\x27{action}\x27" in runner, f"runStep does not handle {action!r}"
 
 
 # ── Password Safe credentials in PRA ─────────────────────────────────────────
