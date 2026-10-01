@@ -6,11 +6,13 @@ once — it asks that agent to start a Gateway container beside itself, register
 tenant's appliance. Every PRA jump item a later slice creates has to name a Gateway, and
 this is the one that can see the POV's private network.
 
-**What the dashboard does and does not own here.** It does not create the Gateway in PRA.
-An operator creates it in the appliance and copies its deploy key — the same thing they do
-for the cloud gateway hosts, where the key sits in ``aws_ecs_docker_deploy_key`` and
-friends. What this adds is per-POV: a key per environment, installed on a VM the dashboard
-cannot reach directly, into a tenant it had to be told about.
+**What the dashboard does and does not own here.** Two ways in. :func:`provision` creates
+the Gateway in the customer's appliance with the tenant's API account and reads its deploy
+key back — the Config API returns ``docker_deploy_key`` on a clustered Linux Gateway — and
+records the Gateway's id in ``pra_gateway_id``. Or an operator creates it by hand and pastes
+the key, as they do for the cloud gateway hosts, and no id is recorded. That id is the
+whole ownership rule: teardown deletes the PRA Gateway only when it is set, so a Gateway
+somebody else made is never removed from their appliance by this dashboard.
 
 Three properties are worth stating before the code:
 
@@ -199,6 +201,119 @@ def preflight(db: Session, env: PovEnvironment) -> tuple[RemoteAgent, object]:
     return agent, tenant
 
 
+# ── creating the Gateway in PRA ──────────────────────────────────────────────
+
+# PRA caps a Gateway name at 255 characters.
+_NAME_MAX = 255
+
+
+def default_gateway_name(env: PovEnvironment) -> str:
+    return f"POV-{env.name}"[:_NAME_MAX]
+
+
+async def provision(db: Session, env: PovEnvironment, *, name: str = "") -> dict:
+    """Create this POV's Gateway in its PRA tenant and store the deploy key it returns.
+
+    Returns ``{"gateway_name", "gateway_id", "reused"}``. Does not queue the install —
+    the caller does that, through the same :func:`queue` a pasted key goes through, so
+    there is one install path and not two.
+
+    **An existing Gateway of the same name is refused, never adopted.** Its deploy key
+    would register this POV's broker VM as a node of somebody else's Gateway, inside a
+    customer's appliance, and nothing about a name proves who owns it. The one exception
+    is the Gateway this POV itself created, recognised by the id on the row rather than by
+    its name.
+
+    The id is written to the row **before** the key is checked. If PRA creates the
+    Gateway and the key comes back empty, the Gateway still exists in the customer's
+    appliance, and recording its id is what lets teardown — or the next attempt — find it.
+    """
+    tenant = pra_tenant(db, env)
+    wanted = ((name or "").strip() or (env.gateway_name or "").strip()
+              or default_gateway_name(env))[:_NAME_MAX]
+
+    try:
+        if env.pra_gateway_id:
+            mine = await pra_tenant_api.get_gateway(tenant, env.pra_gateway_id)
+            if mine is not None:
+                if str(mine.get("name") or "") != wanted:
+                    raise GatewayInstallError(
+                        f"this POV already created Gateway {mine.get('name')!r} (id "
+                        f"{env.pra_gateway_id}) in {tenant.name!r}. Install that one, or "
+                        f"destroy the POV's Gateway before creating {wanted!r}.")
+                key = str(mine.get("docker_deploy_key") or "")
+                _store(db, env, wanted, env.pra_gateway_id, key)
+                return {"gateway_name": wanted, "gateway_id": env.pra_gateway_id,
+                        "reused": True}
+            # Gone from PRA since we made it. Forget the id and make a new one.
+            env.pra_gateway_id = None
+            db.commit()
+
+        existing = await pra_tenant_api.find_gateway(tenant, wanted)
+        if existing is not None:
+            raise GatewayInstallError(
+                f"PRA tenant {tenant.name!r} already has a Gateway named {wanted!r} (id "
+                f"{existing.get('id')}) that this POV did not create. It will not be "
+                f"adopted — its key would join this POV's broker to somebody else's "
+                f"Gateway. Pick another name, or paste that Gateway's key by hand if it "
+                f"really is this POV's.")
+
+        created = await pra_tenant_api.create_gateway(
+            tenant, wanted,
+            comments=f"Created by the dashboard for POV {env.name} ({env.id}).")
+        gateway_id = str(created.get("id"))
+        env.pra_gateway_id = gateway_id
+        db.commit()
+
+        key = str(created.get("docker_deploy_key") or "")
+        if not key:
+            # Some appliance versions omit read-only fields from the create response.
+            again = await pra_tenant_api.get_gateway(tenant, gateway_id) or {}
+            key = str(again.get("docker_deploy_key") or "")
+    except pra_tenant_api.PRATenantError as exc:
+        raise GatewayInstallError(str(exc)) from None
+
+    _store(db, env, wanted, gateway_id, key)
+    logger.info("POV %s: created Gateway %r (id %s) in PRA tenant %s", env.id, wanted,
+                gateway_id, tenant.name)
+    return {"gateway_name": wanted, "gateway_id": gateway_id, "reused": False}
+
+
+def _store(db: Session, env: PovEnvironment, name: str, gateway_id: str, key: str) -> None:
+    if not key:
+        raise GatewayInstallError(
+            f"PRA has Gateway {name!r} (id {gateway_id}) but returned no deploy key for "
+            f"it. A deploy key exists only on a clustered Linux Gateway — check it in the "
+            f"appliance. Its id is recorded on this POV, so destroying the POV removes it.")
+    set_deploy_key(env, key)
+    env.gateway_name = name
+    db.commit()
+
+
+async def retire(db: Session, env: PovEnvironment) -> str:
+    """Delete the PRA Gateway this POV created, if it created one. Returns a job-log line.
+
+    Only a Gateway whose id is on the row — see :func:`provision`. A Gateway an operator
+    made and pasted the key for is theirs, and stays. Runs after the wire-up teardown:
+    PRA deletes every Asset a Gateway owns along with it, and the jump items must leave
+    through Terraform first, or their state would point at items that are already gone.
+    """
+    gateway_id = (env.pra_gateway_id or "").strip()
+    if not gateway_id:
+        return "No dashboard-created Gateway to delete from PRA."
+    try:
+        tenant = pra_tenant(db, env)
+        deleted = await pra_tenant_api.delete_gateway(tenant, gateway_id)
+    except (GatewayInstallError, pra_tenant_api.PRATenantError) as exc:
+        return (f"WARNING: could not delete Gateway id {gateway_id} from PRA ({exc}). "
+                f"Remove it in the appliance by hand.")
+    env.pra_gateway_id = None
+    db.commit()
+    if not deleted:
+        return f"Gateway id {gateway_id} was already gone from PRA."
+    return f"Deleted Gateway id {gateway_id} from PRA tenant {tenant.name!r}."
+
+
 # ── the job ──────────────────────────────────────────────────────────────────
 
 def queue(db: Session, env: PovEnvironment, *, action: str = "install",
@@ -263,6 +378,13 @@ async def status(db: Session, env: PovEnvironment) -> dict:
         found = await pra_tenant_api.find_gateway(tenant, name)
     except pra_tenant_api.PRATenantError as exc:
         return {"state": "unknown", "detail": str(exc)}
+
+    if found is not None and found.get("id") is not None:
+        # The list row never carries nodes, so its count is always zero. Ask the node
+        # endpoint; when it cannot answer, keep whatever the row said.
+        counted = await pra_tenant_api.count_gateway_nodes(tenant, found["id"])
+        if counted is not None:
+            found = {**found, "nodes": counted}
 
     if found is None:
         return {"state": "missing",
@@ -329,6 +451,9 @@ def describe(db: Session, env: PovEnvironment) -> dict:
     return {
         "gateway_name": env.gateway_name or "",
         "gateway_has_key": has_deploy_key(env),
+        # True when the dashboard created this Gateway in PRA, so destroying the POV
+        # deletes it there too. Lets the UI say so instead of leaving an SE to guess.
+        "gateway_created": bool(env.pra_gateway_id),
         "gateway_ready": bool(env.gateway_name and has_deploy_key(env)
                               and env.broker_agent_id),
     }

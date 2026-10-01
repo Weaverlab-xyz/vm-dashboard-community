@@ -688,6 +688,11 @@ async def run_env_destroy(job_id: str, meta: dict) -> None:
                 f"WARNING: the Gateway could not be removed cleanly ({exc}). The "
                 f"environment delete takes the container; retire the node in PRA by hand.")
 
+        # The PRA Gateway object itself, but only when this dashboard created it — a
+        # pasted-key Gateway is the customer's and stays. After the jump items above,
+        # because PRA deletes every Asset a Gateway owns with it. It never raises.
+        job_service.append_job_log(db, job_id, await pov_gateway.retire(db, env))
+
         # The broker agent goes next. It is an enrolled principal that can lease work;
         # deleting its VM out from under it leaves a row that keeps polling from a machine
         # that no longer exists, and whatever job it holds running nowhere.

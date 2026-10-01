@@ -403,6 +403,8 @@
                        half-configured, and it fails at install rather than at save. -->
                   <p x-show="e.gateway_name && !e.gateway_has_key"
                      class="text-xs text-amber-700">no deploy key</p>
+                  <p x-show="e.gateway_created" class="text-xs text-gray-400"
+                     title="The dashboard created this Gateway in PRA, so destroying the POV deletes it there too.">created here</p>
                   <p x-show="gatewayCheck[e.id]" class="text-xs"
                      :class="{'text-green-700': (gatewayCheck[e.id]||{}).state === 'connected',
                               'text-red-600': ['missing','disconnected'].includes((gatewayCheck[e.id]||{}).state),
@@ -416,15 +418,28 @@
                   </div>
                 </div>
                 <div x-show="editingGateway === e.id" class="space-y-1">
-                  <input type="text" x-model="gatewayEdit.name" placeholder="Gateway name in PRA"
+                  <input type="text" x-model="gatewayEdit.name"
+                         :placeholder="'POV-' + e.name"
                          class="w-full border border-gray-300 rounded px-1 py-0.5 text-xs font-mono">
-                  <input type="password" x-model="gatewayEdit.deploy_key" autocomplete="new-password"
-                         :placeholder="gatewayEdit.has_key ? 'key stored — blank keeps it' : 'deploy key'"
-                         class="w-full border border-gray-300 rounded px-1 py-0.5 text-xs font-mono">
+                  <!-- The default path: the tenant's API account creates the Gateway in PRA
+                       and the deploy key it returns is stored as if pasted. -->
                   <div class="flex gap-1">
-                    <button @click="saveGateway(e, true)" class="text-xs px-2 py-0.5 rounded bg-blue-600 text-white">Install</button>
-                    <button @click="saveGateway(e, false)" class="text-xs px-2 py-0.5 rounded border border-gray-300">Save only</button>
+                    <button @click="createGateway(e)" :disabled="gatewayBusy"
+                            class="text-xs px-2 py-0.5 rounded bg-blue-600 text-white disabled:opacity-40"
+                            x-text="gatewayBusy ? 'Creating…' : 'Create & install'"></button>
                     <button @click="editingGateway = ''" class="text-xs px-2 py-0.5 text-gray-500">Cancel</button>
+                  </div>
+                  <button @click="gatewayEdit.manual = !gatewayEdit.manual" type="button"
+                          class="text-xs text-gray-500 underline"
+                          x-text="gatewayEdit.manual ? 'hide existing-Gateway fields' : 'use an existing Gateway (paste key)'"></button>
+                  <div x-show="gatewayEdit.manual" class="space-y-1">
+                    <input type="password" x-model="gatewayEdit.deploy_key" autocomplete="new-password"
+                           :placeholder="gatewayEdit.has_key ? 'key stored — blank keeps it' : 'deploy key'"
+                           class="w-full border border-gray-300 rounded px-1 py-0.5 text-xs font-mono">
+                    <div class="flex gap-1">
+                      <button @click="saveGateway(e, true)" class="text-xs px-2 py-0.5 rounded border border-blue-600 text-blue-700">Install</button>
+                      <button @click="saveGateway(e, false)" class="text-xs px-2 py-0.5 rounded border border-gray-300">Save only</button>
+                    </div>
                   </div>
                 </div>
               </td>
@@ -1085,7 +1100,8 @@ function povPage() {
     editingTenants: '',
     tenantEdit: {},
     editingGateway: '',
-    gatewayEdit: { name: '', deploy_key: '', has_key: false },
+    gatewayEdit: { name: '', deploy_key: '', has_key: false, manual: false },
+    gatewayBusy: false,
     editingBroker: '',
     brokerEdit: { vm_name: '' },
     editingRb: '',
@@ -1755,8 +1771,28 @@ function povPage() {
 
     startEditGateway(env) {
       this.gatewayEdit = { name: env.gateway_name || '', deploy_key: '',
-                           has_key: !!env.gateway_has_key };
+                           has_key: !!env.gateway_has_key, manual: false };
       this.editingGateway = env.id;
+    },
+
+    async createGateway(env) {
+      this.error = ''; this.notice = '';
+      this.gatewayBusy = true;
+      try {
+        const data = await this.post(`/api/pov/managed/${env.id}/gateway/create`, {
+          name: this.gatewayEdit.name,
+          install: true,
+        });
+        this.editingGateway = '';
+        const gw = data.gateway || {};
+        this.notice = `${env.name}: ${gw.reused ? 'reusing' : 'created'} Gateway `
+          + `${gw.gateway_name} in PRA and installing it on the broker VM — watch job ${data.job_id}.`;
+        await this.load();
+      } catch (e) {
+        this.error = e.message;
+        // A refusal can come after PRA created the Gateway, so the row may have changed.
+        await this.load();
+      } finally { this.gatewayBusy = false; }
     },
 
     async saveGateway(env, install) {

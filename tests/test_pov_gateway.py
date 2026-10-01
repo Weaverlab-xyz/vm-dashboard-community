@@ -342,20 +342,25 @@ def test_teardown_queues_a_removal_when_there_is_a_broker():
 
 # ── status ───────────────────────────────────────────────────────────────────
 
-def _with_gateways(rows):
-    """Swap the PRA read for a canned answer."""
+def _with_gateways(rows, nodes=None):
+    """Swap the PRA reads for canned answers. ``nodes`` is what the node endpoint says;
+    None is "it did not answer", which keeps the list row's count."""
     from web_dashboard.services import pra_tenant_api
 
     async def fake(tenant):
         return rows
-    original = pra_tenant_api.list_gateways
+
+    async def fake_nodes(tenant, gateway_id):
+        return nodes
+    original = (pra_tenant_api.list_gateways, pra_tenant_api.count_gateway_nodes)
     pra_tenant_api.list_gateways = fake
+    pra_tenant_api.count_gateway_nodes = fake_nodes
     return original
 
 
 def _restore_gateways(original):
     from web_dashboard.services import pra_tenant_api
-    pra_tenant_api.list_gateways = original
+    pra_tenant_api.list_gateways, pra_tenant_api.count_gateway_nodes = original
 
 
 def test_status_asks_whether_a_node_is_connected_not_whether_the_name_exists():
@@ -425,8 +430,206 @@ def test_describe_makes_no_network_call_and_never_leaks_the_key():
         _restore_gateways(original)
         db.close()
     assert got == {"gateway_name": "pov-gw", "gateway_has_key": True,
-                   "gateway_ready": True}
+                   "gateway_created": False, "gateway_ready": True}
     assert "dk-123456" not in repr(got)
+
+
+def test_the_node_count_comes_from_the_node_endpoint_not_the_list_row():
+    """The list endpoint never returns nodes ("Node resources are not returned in the
+    response"), so a count read off it is always zero."""
+    db = d.SessionLocal()
+    env, _a, _t = _ready(db)
+    original = _with_gateways([{"id": 7, "name": "pov-gw", "connected": True,
+                                "nodes": 0}], nodes=3)
+    try:
+        got = asyncio.run(pov_gateway.status(db, env))
+    finally:
+        _restore_gateways(original)
+        db.close()
+    assert got["state"] == "connected"
+    assert got["nodes"] == 3
+
+
+# ── creating the Gateway in PRA ──────────────────────────────────────────────
+
+class _FakePRA:
+    """A tiny in-memory appliance standing in for the four pra_tenant_api calls
+    provision/retire make. Records what was created and deleted."""
+
+    def __init__(self, existing=(), key="dk-from-pra", key_on_create=True):
+        self.gateways = {str(g["id"]): dict(g) for g in existing}
+        self.created, self.deleted = [], []
+        self.key, self.key_on_create = key, key_on_create
+        self._next = 100
+
+    def install(self):
+        from web_dashboard.services import pra_tenant_api as api
+        self._orig = {n: getattr(api, n) for n in
+                      ("find_gateway", "create_gateway", "get_gateway", "delete_gateway")}
+
+        async def find_gateway(tenant, name):
+            return next((g for g in self.gateways.values() if g["name"] == name), None)
+
+        async def create_gateway(tenant, name, *, comments=""):
+            self._next += 1
+            gw = {"id": self._next, "name": name, "platform": "linux-x86",
+                  "clustered": True, "docker_deploy_key": self.key}
+            self.gateways[str(gw["id"])] = gw
+            self.created.append(name)
+            body = dict(gw)
+            if not self.key_on_create:
+                body.pop("docker_deploy_key")
+            return body
+
+        async def get_gateway(tenant, gateway_id):
+            return self.gateways.get(str(gateway_id))
+
+        async def delete_gateway(tenant, gateway_id):
+            self.deleted.append(str(gateway_id))
+            return self.gateways.pop(str(gateway_id), None) is not None
+
+        for n, fn in (("find_gateway", find_gateway), ("create_gateway", create_gateway),
+                      ("get_gateway", get_gateway), ("delete_gateway", delete_gateway)):
+            setattr(api, n, fn)
+        return self
+
+    def restore(self):
+        from web_dashboard.services import pra_tenant_api as api
+        for n, fn in self._orig.items():
+            setattr(api, n, fn)
+
+
+def _unconfigured(db):
+    """A POV with a broker and a tenant but no Gateway — what Create & install starts on."""
+    agent = _agent(db)
+    tenant = _tenant(db)
+    env = _env(db, broker_agent_id=agent.id, pra_tenant_id=tenant["id"])
+    return env, agent, tenant
+
+
+def test_provision_creates_the_gateway_stores_its_key_and_records_the_id():
+    db = d.SessionLocal()
+    env, agent, _t = _unconfigured(db)
+    pra = _FakePRA().install()
+    try:
+        got = asyncio.run(pov_gateway.provision(db, env))
+    finally:
+        pra.restore()
+    assert got["reused"] is False
+    assert pra.created == [pov_gateway.default_gateway_name(env)]
+    assert env.gateway_name == pov_gateway.default_gateway_name(env)
+    assert env.pra_gateway_id == got["gateway_id"]
+    assert pov_gateway.has_deploy_key(env)
+    # And the install goes through the same queue a pasted key does.
+    job = pov_gateway.queue(db, env, created_by="t")
+    assert job.agent_id == agent.id
+    assert "dk-from-pra" not in repr(job.metadata_dict)
+    db.close()
+
+
+def test_provision_reads_the_key_back_when_the_create_response_omits_it():
+    db = d.SessionLocal()
+    env, _a, _t = _unconfigured(db)
+    pra = _FakePRA(key_on_create=False).install()
+    try:
+        asyncio.run(pov_gateway.provision(db, env, name="custom-gw"))
+    finally:
+        pra.restore()
+    assert env.gateway_name == "custom-gw"
+    assert pov_gateway.has_deploy_key(env)
+    db.close()
+
+
+def test_a_same_named_gateway_this_pov_did_not_create_is_refused_not_adopted():
+    """Its key would join this POV's broker to somebody else's Gateway."""
+    db = d.SessionLocal()
+    env, _a, _t = _unconfigured(db)
+    pra = _FakePRA(existing=[{"id": 5, "name": "taken", "docker_deploy_key": "theirs"}])
+    pra.install()
+    try:
+        try:
+            asyncio.run(pov_gateway.provision(db, env, name="taken"))
+            raise AssertionError("a stranger's Gateway was adopted")
+        except pov_gateway.GatewayInstallError as exc:
+            assert "will not be adopted" in str(exc)
+    finally:
+        pra.restore()
+    assert pra.created == []
+    assert not pov_gateway.has_deploy_key(env)
+    assert env.pra_gateway_id is None
+    db.close()
+
+
+def test_provision_is_idempotent_on_the_gateway_it_created_itself():
+    db = d.SessionLocal()
+    env, _a, _t = _unconfigured(db)
+    pra = _FakePRA().install()
+    try:
+        first = asyncio.run(pov_gateway.provision(db, env))
+        again = asyncio.run(pov_gateway.provision(db, env))
+    finally:
+        pra.restore()
+    assert again["reused"] is True and again["gateway_id"] == first["gateway_id"]
+    assert len(pra.created) == 1
+    db.close()
+
+
+def test_an_empty_key_is_refused_but_the_created_id_is_kept_for_teardown():
+    """The Gateway exists in the customer's appliance either way; forgetting its id would
+    leave it there with nothing pointing at it."""
+    db = d.SessionLocal()
+    env, _a, _t = _unconfigured(db)
+    pra = _FakePRA(key="").install()
+    try:
+        try:
+            asyncio.run(pov_gateway.provision(db, env))
+            raise AssertionError("a Gateway with no key was accepted")
+        except pov_gateway.GatewayInstallError as exc:
+            assert "no deploy key" in str(exc)
+    finally:
+        pra.restore()
+    assert env.pra_gateway_id
+    assert not pov_gateway.has_deploy_key(env)
+    db.close()
+
+
+def test_retire_deletes_only_a_gateway_the_dashboard_created():
+    db = d.SessionLocal()
+    env, _a, _t = _unconfigured(db)
+    pra = _FakePRA().install()
+    try:
+        asyncio.run(pov_gateway.provision(db, env))
+        gid = env.pra_gateway_id
+        line = asyncio.run(pov_gateway.retire(db, env))
+        assert pra.deleted == [gid] and "Deleted" in line
+        assert env.pra_gateway_id is None
+
+        # A pasted-key Gateway carries no id, so it is the operator's and stays.
+        pasted, _a2, _t2 = _ready(db)
+        line = asyncio.run(pov_gateway.retire(db, pasted))
+        assert pra.deleted == [gid]
+        assert "No dashboard-created Gateway" in line
+    finally:
+        pra.restore()
+    db.close()
+
+
+def test_the_destroy_retires_the_gateway_after_the_jump_items():
+    """PRA deletes every Asset a Gateway owns with it, so the jump items must leave through
+    Terraform first."""
+    src = (pathlib.Path(_ROOT) / "web_dashboard" / "services" /
+           "pov_env_service.py").read_text(encoding="utf-8")
+    body = src.split("async def run_env_destroy", 1)[1]
+    assert body.index("pov_wireup.teardown") < body.index("pov_gateway.retire")
+
+
+def test_the_ladder_offers_create_and_install_instead_of_blocking_on_a_key():
+    from web_dashboard.services import pov_setup_steps as steps
+    state, detail, action = steps._gateway({"pra_tenant_id": "t", "broker_agent_id": "a"})
+    assert state == steps.READY and action == "gateway"
+    assert "Create & install" in detail
+    state, _d, _a = steps._gateway({"pra_tenant_id": "t"})
+    assert state == steps.BLOCKED
 
 
 if __name__ == "__main__":
