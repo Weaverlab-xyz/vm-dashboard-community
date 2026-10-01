@@ -110,14 +110,14 @@ def _run_oneshot_with_stubs(cmd, stdin_text, env_extra):
         }
         for name, body in stubs.items():
             p = os.path.join(bindir, name)
-            with open(p, "w", newline="\n") as fh:
+            with open(p, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(body)
             os.chmod(p, 0o755)
         env = dict(os.environ, PATH=bindir + os.pathsep + os.environ.get("PATH", ""), LOG=logf,
                    STDIN_B64=base64.b64encode(stdin_text.encode()).decode(), **env_extra)
         full = 'set -e; printf %s "$STDIN_B64" | base64 -d | ' + cmd
         proc = subprocess.run(["sh", "-c", full], env=env, capture_output=True, text=True)
-        log = open(logf).read() if os.path.exists(logf) else ""
+        log = open(logf, encoding="utf-8").read() if os.path.exists(logf) else ""
         return proc.returncode, proc.stderr, log
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
