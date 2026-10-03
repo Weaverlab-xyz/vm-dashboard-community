@@ -805,6 +805,51 @@ ok(AG + ' falls back to the user agent string last',
    shellFor({userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}) === 'powershell');
 ok(AG + ' an unreadable navigator opens on the POSIX form', shellFor({}) === 'bash');
 
+// --- agents/_agents.html: the SPIRE recommendation banner ---
+// Which agents the banner names, and whether it tells one to update its image first.
+// versionAtLeast must compare NUMERICALLY: as strings '2.10.0' < '2.6.0', which would tell
+// an operator on a newer image to downgrade-proof an image that is already current.
+const spire = (agents, dismissed) => {
+  const o = {};
+  for (const m of ['versionAtLeast', 'spireCandidates', 'loadSpireDismissed', 'dismissSpire'])
+    Object.assign(o, eval('({' + extract(AG, m) + '})'));
+  o.agents = agents;
+  o.spireDismissed = dismissed || {};
+  return o;
+};
+{
+  const v = spire([]);
+  ok(AG + ' 2.5.2 is older than 2.6.0', v.versionAtLeast('2.5.2', '2.6.0') === false);
+  ok(AG + ' 2.6.0 is new enough', v.versionAtLeast('2.6.0', '2.6.0') === true);
+  ok(AG + ' 2.10.0 is new enough (numeric, not string, comparison)',
+     v.versionAtLeast('2.10.0', '2.6.0') === true);
+  ok(AG + ' 3.0 is new enough', v.versionAtLeast('3.0', '2.6.0') === true);
+  ok(AG + ' an agent reporting no version is not', v.versionAtLeast('', '2.6.0') === false);
+
+  const agents = [
+    {id: 'a', status: 'online', auth_mode: 'ed25519'},
+    {id: 'b', status: 'online', auth_mode: 'spiffe'},
+    {id: 'c', status: 'revoked', auth_mode: 'ed25519'},
+    {id: 'd', status: 'offline', auth_mode: 'ed25519'},
+  ];
+  const ids = s => s.spireCandidates().map(a => a.id).join(',');
+  ok(AG + ' the banner names active Ed25519 agents only', ids(spire(agents)) === 'a,d');
+  ok(AG + ' a dismissed agent leaves the banner', ids(spire(agents, {a: true})) === 'd');
+
+  // Storage that throws — a private window, blocked site data — must not break the page.
+  const realWindow = global.window;
+  global.window = {localStorage: {getItem() { throw new Error('denied'); },
+                                  setItem() { throw new Error('denied'); }}};
+  const t = spire(agents);
+  let threw = false;
+  try { ok(AG + ' unreadable storage reads as nothing dismissed',
+           JSON.stringify(t.loadSpireDismissed()) === '{}');
+        t.dismissSpire('a'); } catch (e) { threw = true; }
+  ok(AG + ' unwritable storage still dismisses for this page view',
+     !threw && ids(t) === 'd');
+  global.window = realWindow;
+}
+
 // ── Bulk power: the eligibility arithmetic ────────────────────────────────────
 //
 // `bulkPowerPlan` decides what a toolbar button will actually do, and the number it

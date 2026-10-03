@@ -380,6 +380,7 @@ class Settings(BaseSettings):
     # Remote agents may attest through SPIRE instead of an enrolment code (opt-in;
     # docs/design/agent-and-human-identity.md). Ed25519 enrolment is unaffected.
     spire_attest_enabled: bool = False
+    spire_server_container: str = "vmdash-spire-server"   # see services/dashboard_spire.py
 
     # Which peers may set X-Forwarded-For / X-Forwarded-Proto.
     #

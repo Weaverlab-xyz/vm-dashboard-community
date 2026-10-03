@@ -5230,6 +5230,19 @@
             </span>
           </label>
 
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">SPIRE server container</label>
+            <input type="text" x-model="panelCfg.spire_server_container"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="vmdash-spire-server">
+            <p class="text-[11px] text-gray-400 mt-1">
+              The dashboard's own SPIRE server from <code class="font-mono">docker-compose.spire.yml</code>.
+              <strong>Migrate to SPIRE</strong> on the Agents page creates the agent's entries and
+              join token in it with <code class="font-mono">docker exec</code>, and its trust bundle
+              is re-read daily so attestation keeps verifying across key rotation.
+            </p>
+          </div>
+
           <!-- ── Signing audience (read-only) ──────────────────────────────────
                A separate box from the field above, because they are separate values and
                conflating them is the bug: Public base URL is what you *state*, the audience

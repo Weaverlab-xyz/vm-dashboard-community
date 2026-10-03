@@ -1,0 +1,211 @@
+"""The dashboard's OWN SPIRE server: one-click agent migration and its trust domain.
+
+docs/design/agent-and-human-identity.md. ``docker-compose.spire.yml`` runs a SPIRE server
+beside the dashboard; this module drives it the way the SPIRE lab drives its Docker-mode
+server (``spire_lab_service._CLI_PREFIX``): ``docker exec <container> spire-server …``,
+over the Docker socket the app already mounts and with the ``docker`` CLI the image
+already ships. No gRPC dependency, and the CLI's own ``-output json`` (protojson with
+proto field names, empty fields emitted) is the contract.
+
+Three jobs:
+
+* **Migrate an agent** (``migrate_agent``): a one-use join token for a node entry named
+  after the agent, the workload entry ``spiffe://<td>/agent/<id>`` selecting
+  ``unix:uid:10001`` under it, the dashboard's trust domain registered so its SVIDs
+  verify, and the agent bound — the four manual steps #996 left, in one call.
+* **Register the trust domain** (``sync_trust_domain``) from ``bundle show -format
+  spiffe``, which is exactly the shape ``SpiffeTrustDomain.bundle_json`` holds.
+* **Keep it current** (``sync_if_due``): SPIRE rotates JWT keys within ca_ttl and
+  publishes the next one ahead of time, so a daily re-sync keeps verification working.
+
+Cloud node attestation (aws_iid / azure_imds / gcp_iit) is not automated: the node's
+SPIFFE ID is derived from the instance and is not known until it attests.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import subprocess
+from datetime import datetime, timedelta
+from typing import Optional
+
+from sqlalchemy.orm import Session
+
+from . import config_service
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_CONTAINER = "vmdash-spire-server"
+SPIRE_BIN = "/opt/spire/bin/spire-server"
+OWNER = "dashboard-spire"           # SpiffeTrustDomain.created_by for the rows we own
+AGENT_UID = 10001                    # runners/agent/Dockerfile USER; the helper runs as it
+JOIN_TOKEN_TTL_S = 900
+JWT_SVID_TTL_S = 300
+SYNC_EVERY = timedelta(hours=24)
+MIN_AGENT_VERSION = "2.6.0"          # first agent with AGENT_SPIFFE_JWT_FILE
+
+
+class DashboardSpireError(Exception):
+    """The dashboard's SPIRE server could not do what was asked. The message is safe to
+    show an operator: it names the cause and never carries a token."""
+
+
+def container() -> str:
+    return (config_service.get("spire_server_container") or "").strip() or DEFAULT_CONTAINER
+
+
+def _run(argv: list, timeout: int) -> subprocess.CompletedProcess:
+    """Indirection so tests can stub the subprocess without touching the parsing."""
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+
+
+def _cli(*args: str, timeout: int = 30) -> str:
+    name = container()
+    argv = ["docker", "exec", name, SPIRE_BIN, *args]
+    try:
+        proc = _run(argv, timeout)
+    except FileNotFoundError as exc:
+        raise DashboardSpireError("the docker CLI is not available to the dashboard") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise DashboardSpireError(f"spire-server {args[0]} timed out after {timeout}s") from exc
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip().splitlines()
+        tail = err[-1][:300] if err else f"exit code {proc.returncode}"
+        if "No such container" in (proc.stderr or "") or "is not running" in (proc.stderr or ""):
+            raise DashboardSpireError(
+                f"the SPIRE server container {name!r} is not running. Start it with "
+                f"docker compose -f docker-compose.yml -f docker-compose.spire.yml up -d, "
+                f"or set its name under Settings → Remote agents.")
+        # Only the subcommand is named, never the full command line.
+        raise DashboardSpireError(f"spire-server {' '.join(args[:2])} failed: {tail}")
+    return proc.stdout
+
+
+def _json(*args: str) -> dict:
+    out = _cli(*args, "-output", "json")
+    try:
+        data = json.loads(out)
+    except ValueError as exc:
+        raise DashboardSpireError(f"spire-server {args[0]} returned output that is not "
+                                  f"JSON — is the container running SPIRE 1.15?") from exc
+    if not isinstance(data, dict):
+        raise DashboardSpireError(f"spire-server {args[0]} returned an unexpected shape")
+    return data
+
+
+# ── the trust domain ──────────────────────────────────────────────────────────
+
+def trust_domain() -> str:
+    td = str(_json("bundle", "show").get("trust_domain") or "").strip().lower()
+    if not td:
+        raise DashboardSpireError("the SPIRE server reported no trust domain")
+    return td
+
+
+def bootstrap_bundle_pem() -> str:
+    """The X.509 trust bundle an agent host saves as spire/bootstrap.crt."""
+    pem = _cli("bundle", "show").strip()
+    if "BEGIN CERTIFICATE" not in pem:
+        raise DashboardSpireError("the SPIRE server returned no X.509 trust bundle")
+    return pem + "\n"
+
+
+def sync_trust_domain(db: Session, td: Optional[str] = None) -> dict:
+    """Register (or refresh) the dashboard's trust domain from its SPIRE server.
+
+    Only ever writes a row this module owns. A row a SPIRE lab registered, or one an
+    admin added by hand, is someone else's statement of whose keys to trust under that
+    name; overwriting it would silently change whose SVIDs verify, so this refuses.
+    """
+    from ..database import SpiffeTrustDomain
+    from . import spiffe_assertion
+    td = td or trust_domain()
+    raw = _cli("bundle", "show", "-format", "spiffe")
+    try:
+        bundle = json.loads(raw)
+    except ValueError as exc:
+        raise DashboardSpireError("the SPIRE server's SPIFFE bundle is not JSON") from exc
+    if not spiffe_assertion.bundle_keys(json.dumps(bundle)):
+        raise DashboardSpireError("the SPIRE server's bundle has no JWT-SVID keys")
+    rec = db.query(SpiffeTrustDomain).filter(SpiffeTrustDomain.trust_domain == td).first()
+    if rec and (rec.spire_lab_id or rec.created_by != OWNER):
+        raise DashboardSpireError(
+            f"the trust domain {td} is already registered "
+            f"({'by a SPIRE lab' if rec.spire_lab_id else 'by hand'}); not overwriting its "
+            f"keys. Remove that registration, or give this SPIRE server another name.")
+    now = datetime.utcnow()
+    if rec is None:
+        rec = SpiffeTrustDomain(trust_domain=td, created_by=OWNER)
+        db.add(rec)
+    rec.bundle_json = json.dumps(bundle)
+    rec.bundle_captured_at = now
+    rec.jwks_url = None
+    rec.updated_at = now
+    db.commit()
+    spiffe_assertion.clear_state()
+    return {"trust_domain": td, "captured_at": now}
+
+
+def sync_if_due(db: Session, now: Optional[datetime] = None) -> bool:
+    """Re-sync the stored bundle once a day while attestation is on. Never raises: this
+    runs from the background refresh loop, and a SPIRE server that is down today must not
+    take the loop with it."""
+    from ..database import SpiffeTrustDomain
+    if not config_service.get_bool("spire_attest_enabled"):
+        return False
+    now = now or datetime.utcnow()
+    try:
+        rec = (db.query(SpiffeTrustDomain)
+               .filter(SpiffeTrustDomain.created_by == OWNER).first())
+        if rec and rec.bundle_captured_at and now - rec.bundle_captured_at < SYNC_EVERY:
+            return False
+        sync_trust_domain(db, rec.trust_domain if rec else None)
+        return True
+    except Exception as exc:  # noqa: BLE001 -- background loop: log and carry on
+        logger.warning("dashboard SPIRE: could not re-sync the trust bundle: %s", exc)
+        return False
+
+
+# ── migrating one agent ───────────────────────────────────────────────────────
+
+def ids_for(td: str, agent_id: str) -> tuple:
+    """(workload SPIFFE ID, node SPIFFE ID) for an agent row."""
+    return f"spiffe://{td}/agent/{agent_id}", f"spiffe://{td}/node/{agent_id}"
+
+
+def _entry_exists(spiffe_id: str) -> bool:
+    return bool(_json("entry", "show", "-spiffeID", spiffe_id).get("entries"))
+
+
+def migrate_agent(db: Session, agent) -> dict:
+    """Everything an agent needs to attest through the dashboard's SPIRE server.
+
+    Idempotent: a second run reuses the workload entry and only mints a new join token
+    (the old one is spent, or expires in fifteen minutes). Binding does not cut the
+    agent's current key off — that happens when it first attests (agent_service.attest).
+    """
+    from . import agent_service
+    td = trust_domain()
+    sid, node = ids_for(td, agent.id)
+
+    token = str(_json("token", "generate", "-spiffeID", node,
+                      "-ttl", str(JOIN_TOKEN_TTL_S)).get("value") or "")
+    if not token:
+        raise DashboardSpireError("the SPIRE server minted no join token")
+
+    if not _entry_exists(sid):
+        res = _json("entry", "create", "-parentID", node, "-spiffeID", sid,
+                    "-selector", f"unix:uid:{AGENT_UID}",
+                    "-jwtSVIDTTL", str(JWT_SVID_TTL_S))
+        results = res.get("results") or []
+        status = (results[0].get("status") or {}) if results else {}
+        if not results or int(status.get("code") or 0) != 0:
+            raise DashboardSpireError(
+                f"the SPIRE server refused the workload entry: "
+                f"{status.get('message') or 'no result returned'}")
+
+    sync_trust_domain(db, td)
+    agent_service.bind_spiffe_id(db, agent, sid)
+    return {"trust_domain": td, "spiffe_id": sid, "node_spiffe_id": node,
+            "join_token": token, "join_token_ttl_s": JOIN_TOKEN_TTL_S,
+            "bootstrap_pem": bootstrap_bundle_pem()}
