@@ -43,7 +43,7 @@
 
 	encode gzip
 
-	# The ONLY thing this vhost serves: the agent protocol itself — enrol, lease,
+	# The agent protocol itself — enrol, lease,
 	# and the per-job routes — every one of which authenticates with an Ed25519
 	# signature. Everything else — the UI, /api/auth, /setup, /swagger, the OAuth
 	# callbacks, and the operator console's own /api/agents (plural) routes, which
@@ -66,6 +66,16 @@
 				read_timeout 120s
 			}
 		}
+	}
+
+	# The dashboard's own SPIFFE issuer: its OIDC discovery document and JWT signing
+	# keys, fetched anonymously by AWS, Azure and GCP when they validate a token the
+	# dashboard minted for itself (docs/design/dashboard-workload-identity.md). Public
+	# keys only, and both routes 404 unless that feature is switched on. Here because
+	# this is the vhost built to be reachable from outside, and the default issuer is
+	# this hostname plus /spiffe. Nothing under it needs a session.
+	handle /spiffe/* {
+		reverse_proxy app:8000
 	}
 
 	# One response for every other path, so this host is not an oracle for which

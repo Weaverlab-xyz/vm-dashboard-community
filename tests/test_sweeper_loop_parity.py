@@ -57,6 +57,7 @@ SWEEPERS = (
     "_hypervisor_sync_loop",
     "_schedule_sweeper_loop",
     "_spire_refresh_loop",
+    "_spiffe_token_loop",
 )
 
 # Coroutines that legitimately hand-roll `while True`. The two warm primitives are the

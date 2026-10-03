@@ -20,6 +20,12 @@
 #   * The admin API is a unix socket on the `spire_admin` volume, mounted only into the
 #     dashboard's own containers. Nothing administrative listens on the network.
 #
+# The dashboard's own identity (optional; docs/design/dashboard-workload-identity.md):
+#   set SPIRE_JWT_ISSUER to the issuer shown under Settings → Remote agents (by default
+#   <agent gateway URL>/spiffe) and tick "Give the dashboard its own SPIFFE identity".
+#   The app then keeps one JWT-SVID per audience in the memory-only `spiffe_tokens`
+#   volume, at /run/spiffe-tokens/<aws|azure|gcp|wlc>.jwt, readable by the worker.
+#
 # Images are pinned by digest, from the same table as the SPIRE lab
 # (examples/playbooks/spire/spire-docker-server.yml); tests/test_spire_overlay.py keeps
 # the two in step. Design: docs/design/agent-and-human-identity.md
@@ -56,6 +62,8 @@ services:
     command: ["-config", "/opt/spire/conf/server.conf", "-expandEnv"]
     environment:
       SPIRE_TRUST_DOMAIN: ${SPIRE_TRUST_DOMAIN:?set SPIRE_TRUST_DOMAIN, e.g. dashboard.example.com}
+      # Blank unless the dashboard has its own identity; see the header.
+      SPIRE_JWT_ISSUER: ${SPIRE_JWT_ISSUER:-}
     ports:
       - "${SPIRE_BIND_PORT:-8081}:8081"
     tmpfs:
@@ -79,15 +87,25 @@ services:
 
   # The dashboard creates agent entries and join tokens through the admin socket. These
   # two mounts are the only change to the base services, and both are additive.
+  # The token volume is writable by the app only: it is the one writer
+  # (services/dashboard_identity.py); the worker reads.
   app:
     volumes:
       - spire_admin:/run/spire-server:ro
+      - spiffe_tokens:/run/spiffe-tokens
   worker:
     volumes:
       - spire_admin:/run/spire-server:ro
+      - spiffe_tokens:/run/spiffe-tokens:ro
 
 volumes:
   # Datastore and CA keys. Persist it: losing it re-keys the trust domain and every
   # attested agent has to attest again from scratch.
   spire_data:
   spire_admin:
+  # The dashboard's own JWT-SVIDs: memory only, never on the host disk.
+  spiffe_tokens:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,mode=0700"

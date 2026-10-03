@@ -5259,6 +5259,77 @@
             </span>
           </label>
 
+          <!-- ── The dashboard's own SPIFFE identity ─────────────────────────────
+               docs/design/dashboard-workload-identity.md. Token files for federated
+               cloud access; a stored cloud key still wins, so turning this on changes
+               nothing until a key is retired on purpose. -->
+          <div class="rounded-lg border border-gray-200 p-3 space-y-2">
+            <label class="flex items-start gap-2">
+              <input type="checkbox" x-model="panelCfg.dashboard_spiffe_identity_enabled"
+                     class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+              <span class="text-sm text-gray-700">
+                Give the dashboard its own SPIFFE identity
+                <span class="block text-[11px] text-gray-500">
+                  Keeps a short-lived JWT-SVID for <code class="font-mono">spiffe://&lt;trust domain&gt;/dashboard</code>
+                  in a file per audience, and publishes the issuer's discovery document and
+                  keys at <code class="font-mono">&lt;issuer&gt;/.well-known/openid-configuration</code>.
+                  A cloud trusts that issuer instead of a stored key. Stored keys still win:
+                  clear one only once its cloud accepts the token. Needs the SPIRE server from
+                  <code class="font-mono">docker-compose.spire.yml</code>.
+                </span>
+              </span>
+            </label>
+            <div x-show="panelCfg.dashboard_spiffe_identity_enabled" class="space-y-2 pl-6">
+              <div>
+                <label class="block text-xs font-medium text-gray-700 mb-1">Issuer</label>
+                <input type="text" x-model="panelCfg.dashboard_spiffe_issuer"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       :placeholder="(spiffeIdentity && spiffeIdentity.issuer) || 'https://agents.example.com/spiffe'">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  Blank uses the pinned agent audience plus <code class="font-mono">/spiffe</code>, which
+                  the agent gateway already publishes. Must equal <code class="font-mono">SPIRE_JWT_ISSUER</code>
+                  exactly, and be reachable from the internet over HTTPS for AWS and Azure.
+                </p>
+              </div>
+              <p class="text-xs font-medium text-gray-700">Audiences (one token file each)</p>
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" x-model="panelCfg.dashboard_spiffe_aud_aws" class="rounded border-gray-300 text-blue-600">
+                AWS <span class="text-[11px] text-gray-500 font-mono">sts.amazonaws.com → aws.jwt</span>
+              </label>
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" x-model="panelCfg.dashboard_spiffe_aud_azure" class="rounded border-gray-300 text-blue-600">
+                Azure <span class="text-[11px] text-gray-500 font-mono">api://AzureADTokenExchange → azure.jwt</span>
+              </label>
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" x-model="panelCfg.dashboard_spiffe_aud_wlc" class="rounded border-gray-300 text-blue-600">
+                Workload Credentials <span class="text-[11px] text-gray-500">its identity audience → <span class="font-mono">wlc.jwt</span></span>
+              </label>
+              <div>
+                <label class="block text-xs text-gray-700 mb-1">GCP workload identity provider <span class="text-gray-400">→ gcp.jwt</span></label>
+                <input type="text" x-model="panelCfg.dashboard_spiffe_aud_gcp"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/x">
+              </div>
+              <div class="rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-900">
+                In every cloud trust policy, pin the subject to this dashboard's exact SPIFFE ID,
+                never to the trust domain: remote agents and service-account workloads share it.
+              </div>
+              <template x-if="spiffeIdentity && spiffeIdentity.enabled">
+                <div class="text-[11px] space-y-1">
+                  <p x-show="spiffeIdentity.error" class="text-red-700" x-text="spiffeIdentity.error"></p>
+                  <template x-for="entry in Object.entries(spiffeIdentity.tokens || {})" :key="entry[0]">
+                    <div>
+                      <span class="font-mono text-gray-800" x-text="entry[1].path"></span>
+                      <span x-show="entry[1].present && !entry[1].error" class="text-green-700"
+                            x-text="'valid until ' + new Date(entry[1].expires_at * 1000).toLocaleTimeString()"></span>
+                      <span x-show="entry[1].error" class="text-red-700" x-text="entry[1].error"></span>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </div>
+
           <!-- ── Signing audience (read-only) ──────────────────────────────────
                A separate box from the field above, because they are separate values and
                conflating them is the bug: Public base URL is what you *state*, the audience
@@ -7575,6 +7646,7 @@ function settingsPage() {
     panelSecretsTouched: [],
     entitleAgentToken: '',   // read-only display of the auto-minted Entitle agent token name
     agentAudience: null,     // read-only view of the pinned agent signing audience (Remote Agents panel)
+    spiffeIdentity: null,    // read-only status of the dashboard's own SPIFFE token files (Remote Agents panel)
     agentAudienceResetting: false,
     // Password Safe panel: the per-region DB-Ops services and the audience each one
     // resolves to. Read-only — never merged into panelCfg, so a stale open panel
@@ -8274,6 +8346,10 @@ function settingsPage() {
           try {
             this.agentAudience = await API.get('/api/agents/audience');
           } catch (e) { /* the router is feature-gated; off means 404, and this panel is where you turn it on */ }
+          this.spiffeIdentity = null;
+          try {
+            this.spiffeIdentity = await API.get('/api/spiffe-identity');
+          } catch (e) { /* read-only status; the panel still saves without it */ }
         }
         // Containers: same read-only breakdown for the managed Portainer node, so the
         // operator can see whether the node is actually reachable and from where.

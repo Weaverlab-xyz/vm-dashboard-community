@@ -10,12 +10,16 @@
 # What this overlay does, and the part worth understanding:
 #
 #   agents.example.com  ->  ONLY /api/agent/*        (public, machine-only)
+#                           and  /spiffe/*            (two public-key documents)
 #   dashboard.internal  ->  everything               (keep this internal)
 #
-# Splitting the vhosts is a large, cheap win. The internet-facing surface becomes one
-# prefix with no HTML, no login form, no session cookies, no OAuth callbacks and no
-# /setup wizard — every route on it authenticates with an Ed25519 signature or gets a
-# 401. It also makes the pen-test scope about a page long.
+# Splitting the vhosts is a large, cheap win. The internet-facing surface becomes two
+# prefixes with no HTML, no login form, no session cookies, no OAuth callbacks and no
+# /setup wizard. Every route under /api/agent/ authenticates with an Ed25519 signature
+# or gets a 401. The two under /spiffe/ are the dashboard's own SPIFFE issuer documents
+# (discovery and JWT signing keys), public by construction and 404 unless that feature
+# is on (docs/design/dashboard-workload-identity.md). It also makes the pen-test scope
+# about a page long.
 #
 # For that claim to hold, the operator routes have to be somewhere the matcher does not
 # reach, and they are: the console half lives on /api/agents (plural) and /api/agentcell,
