@@ -1412,7 +1412,7 @@ def migrate_to_spire(agent_id: str, request: Request,
                           ip_address=_client_ip(request),
                           details={"agent": agent.name, "spiffe_id": out["spiffe_id"],
                                    "trust_domain": out["trust_domain"]})
-    host = urlparse(_pinned_audience() or "").hostname or "<dashboard host>"
+    host = dashboard_spire.server_address() or "<dashboard host>"
     env = (f"SPIRE_SERVER_ADDRESS={host}\n"
            f"SPIRE_TRUST_DOMAIN={out['trust_domain']}\n"
            f"SPIRE_JOIN_TOKEN={out['join_token']}\n")

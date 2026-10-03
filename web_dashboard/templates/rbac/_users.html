@@ -465,6 +465,37 @@
         </p>
       </div>
 
+      <!-- "Create SPIRE entry": the join token, once. Cleared when the modal reopens. -->
+      <div x-show="spireEntry" x-cloak class="mx-6 mt-4 p-4 bg-teal-50 border border-teal-200 rounded-lg space-y-2">
+        <p class="text-sm font-medium text-teal-900">
+          Registered <code class="font-mono" x-text="spireEntry?.spiffe_id"></code> on the
+          dashboard's SPIRE server. The join token is one-use, lasts fifteen minutes and is
+          not shown again.
+        </p>
+        <div class="text-xs text-gray-600">Join token</div>
+        <div class="flex items-center gap-2">
+          <code class="flex-1 text-xs bg-white border border-teal-300 rounded px-3 py-2 font-mono break-all select-all"
+                x-text="spireEntry?.join_token"></code>
+          <button @click="copyText(spireEntry?.join_token)"
+                  class="shrink-0 text-xs bg-teal-600 hover:bg-teal-700 text-white px-3 py-2 rounded font-medium">Copy</button>
+        </div>
+        <div class="text-xs text-gray-600">Trust bundle — save as <code>bootstrap.crt</code></div>
+        <div class="flex items-start gap-2">
+          <pre class="flex-1 text-[10px] bg-white border border-teal-300 rounded px-3 py-2 overflow-x-auto max-h-28"
+               x-text="spireEntry?.bootstrap_pem"></pre>
+          <button @click="copyText(spireEntry?.bootstrap_pem)"
+                  class="shrink-0 text-xs bg-teal-600 hover:bg-teal-700 text-white px-3 py-2 rounded font-medium">Copy</button>
+        </div>
+        <div class="text-xs text-gray-600">Then, on the workload's host (examples/playbooks/spire/)</div>
+        <pre class="text-xs bg-white border border-teal-300 rounded px-3 py-2 overflow-x-auto"
+             x-text="spireEntry?.command"></pre>
+        <p class="text-xs text-gray-600">
+          The host must reach <code x-text="spireEntry?.spire_server_address || 'the dashboard'"></code>
+          on tcp/<span x-text="spireEntry?.spire_server_port"></span>. Revoking this client
+          also deletes the entry and evicts the node.
+        </p>
+      </div>
+
       <!-- Create client form -->
       <div class="px-6 pt-4 pb-2">
         <form @submit.prevent="createClient()" class="flex flex-wrap items-end gap-3">
@@ -485,6 +516,12 @@
             <p class="text-[11px] text-gray-500 mt-1">
               Its trust domain must be registered under <em>SPIFFE trust domains</em>. The workload
               presents a JWT-SVID with audience <code x-text="tokenEndpoint()"></code>.
+              <template x-if="dashboardTrustDomain()">
+                <button type="button" @click="newClientSpiffeId = workloadSpiffeId(dashboardTrustDomain(), clientsUser?.username)"
+                        class="ml-1 text-blue-600 hover:underline">
+                  Use the dashboard's own trust domain
+                </button>
+              </template>
             </p>
           </div>
           <div class="flex-1 min-w-[10rem]">
@@ -541,6 +578,9 @@
                         x-text="c.is_active ? 'Active' : 'Revoked'"></span>
                 </td>
                 <td class="py-2 text-right whitespace-nowrap">
+                  <button x-show="c.is_active && onDashboardWorkloadPath(c.spiffe_id)" @click="createSpireEntry(c)"
+                          class="text-teal-700 hover:text-teal-900 text-xs font-medium mr-2"
+                          title="Register this workload on the dashboard's SPIRE server">Create SPIRE entry</button>
                   <button x-show="c.is_active && !c.spiffe_id" @click="rotateClient(c)"
                           class="text-blue-600 hover:text-blue-800 text-xs font-medium mr-2">Rotate</button>
                   <button x-show="c.is_active" @click="revokeClient(c)"
@@ -751,6 +791,9 @@ function usersPage() {
     userExternal: [],
     newClientAuth: 'secret',
     newClientSpiffeId: '',
+    // The last "Create SPIRE entry" result. Holds a one-use join token, so it is cleared
+    // when the modal closes and never stored anywhere else.
+    spireEntry: null,
     showTdModal: false,
     trustDomains: [],
     tdForm: { trust_domain: '', jwks_url: '', tls_server_name: '', ca_pem: '', bundle_json: '' },
@@ -1105,7 +1148,37 @@ function usersPage() {
       this.showClientsModal = true;
       this.userExternal = [];
       this.extForm = { name: '', subject: '', expected_client: '', issuer: '' };
-      await Promise.all([this.loadClients(), this.loadExternal()]);
+      this.spireEntry = null;
+      await Promise.all([this.loadClients(), this.loadExternal(), this.loadTrustDomains()]);
+    },
+
+    // The dashboard's own trust domain, when its SPIRE server has registered one.
+    dashboardTrustDomain() {
+      const t = (this.trustDomains || []).find(x => x.dashboard_owned);
+      return t ? t.trust_domain : '';
+    },
+    // Service-account workloads live under /workload/ in that trust domain; the rest of
+    // it belongs to remote agents and the dashboard itself (services/dashboard_spire).
+    workloadSpiffeId(td, username) {
+      const name = String(username || '').toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
+      return td ? 'spiffe://' + td + '/workload/' + name : '';
+    },
+    onDashboardWorkloadPath(spiffeId) {
+      const td = this.dashboardTrustDomain();
+      return !!(td && spiffeId && String(spiffeId).startsWith('spiffe://' + td + '/workload/'));
+    },
+
+    async createSpireEntry(c) {
+      const raw = prompt('The uid the workload runs as on its host (the entry selects unix:uid:<uid>):', '1010');
+      if (raw === null) return;
+      const uid = parseInt(raw, 10);
+      if (!(uid >= 0)) { toast('A uid is a whole number, 0 or more.', 'error'); return; }
+      try {
+        this.spireEntry = await API.post(
+          `/api/users/${this.clientsUser.id}/oauth-clients/${c.id}/spire-entry`, { uid });
+      } catch (e) {
+        toast('Error creating the SPIRE entry: ' + e.message, 'error');
+      }
     },
 
     async loadExternal() {

@@ -11,7 +11,8 @@ replaced by a small fake SPIRE that answers in SPIRE 1.15's ``-output json`` sha
   * the synced bundle really verifies an SVID end to end at /api/agent/attest;
   * a trust domain registered by a SPIRE lab, or by hand, is never overwritten;
   * failures are a 502 with a cause and no token; off is a 409; revoked is a 409;
-  * the daily re-sync respects its cadence and its switch, and never raises.
+  * the daily re-sync respects its cadence, keeps a registered trust domain current,
+    and never raises.
 
 Run: python tests/test_dashboard_spire_migrate.py   (or under pytest)
 """
@@ -302,7 +303,11 @@ def test_the_route_needs_agents_write():
 
 # ── the daily re-sync ────────────────────────────────────────────────────────
 
-def test_sync_if_due_respects_its_cadence_and_switch_and_never_raises():
+def test_sync_if_due_respects_its_cadence_and_never_raises():
+    """The cadence, and that it never raises. Switching attestation off does NOT stop it
+    once the trust domain is registered: agent cells and service-account clients bound to
+    it verify against these keys whichever switches are on (tests/
+    test_spire_workloads_on_dashboard_td.py covers the unregistered case)."""
     db = SessionLocal()
     try:
         rec = db.query(SpiffeTrustDomain).filter(SpiffeTrustDomain.trust_domain == TD).first()
@@ -312,7 +317,8 @@ def test_sync_if_due_respects_its_cadence_and_switch_and_never_raises():
         later = datetime.utcnow() + timedelta(hours=25)
         assert dashboard_spire.sync_if_due(db, now=later) is True
         config_service.set("spire_attest_enabled", "0")
-        assert dashboard_spire.sync_if_due(db, now=later + timedelta(days=2)) is False
+        assert dashboard_spire.sync_if_due(db, now=later + timedelta(days=2)) is True, (
+            "a registered trust domain went stale because attestation was switched off")
         config_service.set("spire_attest_enabled", "1")
         SPIRE.down = True
         assert dashboard_spire.sync_if_due(db, now=later + timedelta(days=2)) is False

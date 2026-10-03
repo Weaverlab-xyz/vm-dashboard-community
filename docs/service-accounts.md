@@ -215,6 +215,23 @@ curl -s -d grant_type=client_credentials \
 `urn:ietf:params:oauth:client-assertion-type:jwt-bearer` is accepted too. `client_id` is
 optional (the SVID's SPIFFE ID resolves the client); if sent, it must match.
 
+### 0. Or use the dashboard's own SPIRE server
+
+When the dashboard runs its own SPIRE server (`docker-compose.spire.yml`), its trust domain
+is already registered, and it can register your workload too:
+
+1. **OAuth clients → Create → a SPIFFE JWT-SVID → Use the dashboard's own trust domain.**
+   That fills in `spiffe://<trust domain>/workload/<service account>`. Service-account
+   workloads live under `/workload/`; `/agent/…` and `/dashboard` are reserved for remote
+   agents and the dashboard itself, and are refused.
+2. **Create SPIRE entry** on the new client, with the uid the workload runs as. The
+   dashboard creates the entry and a node of its own, and shows a one-use join token, the
+   trust bundle and the exact `spire-agent-install.yml` command for the workload's host.
+3. Run it. The host's SPIRE agent then issues the JWT-SVIDs the workload exchanges below;
+   the host stores no secret. Revoking the client deletes the entry and evicts the node.
+
+The host must reach the dashboard's SPIRE server on `tcp/8081`.
+
 ### 1. Trust the trust domain
 
 **Users → SPIFFE trust domains** — one row per trust domain, with its JWT-SVID signing keys

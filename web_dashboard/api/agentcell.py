@@ -26,6 +26,7 @@ design removes. It would also spend money on a button. So the dashboard records 
 link, reports the lease state, and mints nothing.
 """
 import logging
+import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -75,10 +76,26 @@ def create_agent(
         if problem:
             raise HTTPException(status_code=400, detail=problem)
 
-    lab = db.query(SpireLab).filter(SpireLab.id == payload.spire_lab_id).first()
-    if not lab:
-        raise HTTPException(status_code=404, detail="No such SPIRE lab.")
-    problem = agentcell_service.trust_domain_problem(lab.trust_domain)
+    # Which SPIRE server attests the worker. Resolved first, and nothing is created on
+    # it until every other check below has passed.
+    cell_id = str(uuid.uuid4())
+    lab = None
+    node_id = ""
+    if payload.trust_source == "dashboard":
+        from ..services import dashboard_spire
+        try:
+            trust_domain = dashboard_spire.trust_domain()
+        except dashboard_spire.DashboardSpireError as exc:
+            raise HTTPException(status_code=502, detail=str(exc))
+        spiffe_id, node_id = agentcell_service.dashboard_ids(trust_domain, cell_id)
+    else:
+        lab = (db.query(SpireLab).filter(SpireLab.id == payload.spire_lab_id).first()
+               if payload.spire_lab_id else None)
+        if not lab:
+            raise HTTPException(status_code=404, detail="No such SPIRE lab.")
+        trust_domain = lab.trust_domain
+        spiffe_id = agentcell_service.spiffe_id_for(lab.trust_domain)
+    problem = agentcell_service.trust_domain_problem(trust_domain)
     if problem:
         raise HTTPException(status_code=400, detail=problem)
 
@@ -102,6 +119,19 @@ def create_agent(
     if problem:
         raise HTTPException(status_code=400, detail=problem)
 
+    # The dashboard's SPIRE server: the entry, a one-use join token for the worker's host,
+    # and the trust domain registered so the cell's SVIDs verify at the token endpoint.
+    join_token = ""
+    spire_facts = {}
+    if payload.trust_source == "dashboard":
+        try:
+            join_token = dashboard_spire.register_workload(node_id, spiffe_id,
+                                                           payload.worker_uid)
+            dashboard_spire.sync_trust_domain(db, trust_domain)
+            spire_facts = dashboard_spire.install_facts(trust_domain)
+        except dashboard_spire.DashboardSpireError as exc:
+            raise HTTPException(status_code=502, detail=str(exc))
+
     expires_at = agentcell_service.pat_expires_at(payload.pat_hours)
     credential_name = agentcell_service.pat_name_for(payload.name)
     oauth_client = None
@@ -113,7 +143,7 @@ def create_agent(
         # `client_id:secret` pair, which is the one string the worker's token file holds,
         # so the install playbook is unchanged.
         from ..services import service_accounts
-        svid_id = agentcell_service.svid_client_available(db, lab.trust_domain)
+        svid_id = agentcell_service.svid_client_available(db, trust_domain, spiffe_id)
         try:
             oauth_client, secret = service_accounts.create_client(
                 db, agent_user, name=credential_name, created_by=current_user.username,
@@ -136,6 +166,7 @@ def create_agent(
         db.flush()
 
     row = AgentCell(
+        id=cell_id,
         name=payload.name,
         status="provisioning",
         created_by=current_user.username,
@@ -145,9 +176,9 @@ def create_agent(
         cloud=payload.cloud,
         private_ip=host.get("private_ip"),
         public_ip=host.get("public_ip"),
-        spire_lab_id=lab.id,
-        trust_domain=lab.trust_domain,
-        spiffe_id=agentcell_service.spiffe_id_for(lab.trust_domain),
+        spire_lab_id=lab.id if lab else None,
+        trust_domain=trust_domain,
+        spiffe_id=spiffe_id,
         pat_id=pat.id if pat else None,
         pat_name=credential_name,
         pat_user_id=agent_user.id,
@@ -158,9 +189,10 @@ def create_agent(
     db.commit()
     db.refresh(row)
 
-    logger.info("agent cell %s created for host %s as %s (%s %s, expires %s)",
+    logger.info("agent cell %s created for host %s as %s (%s %s, expires %s, %s SPIRE)",
                 row.id, row.host_name, row.spiffe_id,
-                "oauth client" if oauth_client else "token", credential_name, expires_at)
+                "oauth client" if oauth_client else "token", credential_name, expires_at,
+                payload.trust_source)
     return AgentCellCreateResponse(
         id=row.id,
         name=row.name,
@@ -174,8 +206,15 @@ def create_agent(
         notes=agentcell_service.deploy_notes(
             payload.pat_hours, oauth=oauth_client is not None,
             svid=bool(oauth_client is not None and oauth_client.spiffe_id),
-            client_id=oauth_client.client_id if oauth_client else ""),
+            client_id=oauth_client.client_id if oauth_client else "",
+            dashboard=payload.trust_source == "dashboard",
+            server=spire_facts.get("server_address", "")),
         client_id=oauth_client.client_id if oauth_client else "",
+        # Once, like `token`. Never on the row and never in a log line.
+        join_token=join_token,
+        bootstrap_pem=spire_facts.get("bootstrap_pem", ""),
+        spire_server_address=spire_facts.get("server_address", ""),
+        spire_server_port=spire_facts.get("server_port", 0),
     )
 
 
@@ -236,14 +275,24 @@ def _install_facts(db: Session, row) -> dict:
     from ..database import OAuthClient, SpireLab
     from ..services import spire_lab_service
     out = {"token_mode": "pat", "client_id": "", "spire_host": "", "spire_cli_prefix": "",
-           "agent_node_id": "", "agent_node_host": "", "worker_on_node": False}
+           "agent_node_id": "", "agent_node_host": "", "worker_on_node": False,
+           "trust_source": "lab", "spire_server_address": "", "spire_server_port": 0}
     if row.oauth_client_id:
         client = db.query(OAuthClient).filter(OAuthClient.id == row.oauth_client_id).first()
         if client:
             out.update(token_mode="spiffe" if client.spiffe_id else "oauth",
                        client_id=client.client_id)
-    lab = (db.query(SpireLab).filter(SpireLab.id == row.spire_lab_id).first()
-           if row.spire_lab_id else None)
+    if not row.spire_lab_id:
+        # The dashboard's own SPIRE server attests this cell: the worker's host runs its
+        # own agent, attested by the join token shown at mint, under the cell's own node.
+        from ..services import dashboard_spire
+        out.update(trust_source="dashboard", worker_on_node=True,
+                   agent_node_id=agentcell_service.dashboard_ids(
+                       row.trust_domain or "", row.id)[1],
+                   spire_server_address=dashboard_spire.server_address(),
+                   spire_server_port=dashboard_spire.SERVER_PORT)
+        return out
+    lab = db.query(SpireLab).filter(SpireLab.id == row.spire_lab_id).first()
     if lab:
         out["spire_host"] = lab.public_ip or lab.private_ip or ""
         out["spire_cli_prefix"] = spire_lab_service.cli_vars(lab)["spire_cli_prefix"]
@@ -329,15 +378,35 @@ def build_options(
             # `spiffe://` + path in JavaScript where the two could drift.
             "spiffe_id": agentcell_service.spiffe_id_for(lab.trust_domain or ""),
         })
-    if not labs:
+    # The dashboard's own SPIRE server, when it answers. A short probe: this is a form's
+    # options call, and a server that is down should cost seconds, not the page.
+    from ..services import dashboard_spire
+    dashboard_option = None
+    try:
+        td = dashboard_spire.trust_domain(timeout=5)
+        dashboard_option = {
+            "trust_domain": td,
+            "server_address": dashboard_spire.server_address(),
+            # The FORM of the ID; the cell id is only known once the row exists.
+            "spiffe_id_pattern": f"spiffe://{td}{dashboard_spire.CELL_PREFIX}<cell id>",
+        }
+    except dashboard_spire.DashboardSpireError as exc:
+        dashboard_spire_problem = str(exc)
+    else:
+        dashboard_spire_problem = ""
+
+    if not labs and not dashboard_option:
         spire_on = feature_flags.enabled("spire_lab_enabled")
         missing.append(
             "no SPIRE trust domain — the worker would have nothing to attest to, so the "
             "identity half of the demo would be an assertion. "
-            + ("Stand one up on the SPIRE tab first."
+            + ("Start the dashboard's own SPIRE server (docker-compose.spire.yml), or "
+               "stand a lab up on the SPIRE tab."
                if spire_on else
-               "Turn on the SPIRE Lab preview under Settings → Features and stand one "
-               "up, then come back."))
+               "Start the dashboard's own SPIRE server (docker-compose.spire.yml), or turn "
+               "on the SPIRE Lab preview under Settings → Features and stand a lab up.")
+            + (f" The dashboard's server did not answer: {dashboard_spire_problem}"
+               if dashboard_spire_problem else ""))
 
     if not feature_flags.enabled("ansible_enabled",
                                  config_service.get_bool("ansible_enabled", True)):
@@ -461,6 +530,8 @@ def build_options(
         "clouds": list(spire_lab_service.PROVISIONING_CLOUDS),
         "hosts": spire_lab_service.deployed_hosts(db),
         "labs": labs,
+        # None when the dashboard's own SPIRE server is not running; see `missing`.
+        "dashboard_spire": dashboard_option,
         "users": users,
         # Through the same service /api/groups/workgroups reads, so the picker here and
         # the one on every other page cannot offer different names — but NARROWED to the
@@ -795,4 +866,47 @@ def revoke_agent(
         "message": (f"{row.name}'s token is revoked. The worker is still attested as "
                     f"{row.spiffe_id or 'its SPIFFE ID'} — its next poll will be refused, "
                     "and the unit will stop. Watch `journalctl -u mcp-agent -f`."),
+    }
+
+
+@router.delete("/agent/{agent_id}/spire-identity")
+def remove_spire_identity(
+    agent_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("config_mgmt", "write")),
+):
+    """Delete a revoked cell's entry on the dashboard's SPIRE server and evict its node.
+
+    **Separate from revoke on purpose.** Revoking ends the worker's authorization while
+    it stays attested — the demo is watching those two come apart — so revoke must not
+    take the identity with it. But the dashboard's trust domain is real and long-lived,
+    unlike a lab that is torn down after the demo, so its leftover entries need a way out.
+    Only a REVOKED cell attested by the dashboard qualifies: a lab owns its own entries,
+    and removing a live cell's identity would turn "revoked" into "unattested" by accident.
+    """
+    from ..services import dashboard_spire
+    row = db.query(AgentCell).filter(AgentCell.id == agent_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="No such agent cell.")
+    if row.spire_lab_id:
+        raise HTTPException(status_code=409, detail=(
+            "This cell is attested by a SPIRE lab, which owns its entries. Destroy the lab, "
+            "or remove the entry on its server."))
+    if row.status != "revoked":
+        raise HTTPException(status_code=409, detail=(
+            "Revoke the cell first. Its identity is removed only once its authorization "
+            "has already ended."))
+    _, node = agentcell_service.dashboard_ids(row.trust_domain or "", row.id)
+    problems = dashboard_spire.remove_workload(row.spiffe_id or "", node)
+    logger.info("agent cell %s: SPIRE identity removed by %s (%d problem(s))",
+                row.id, current_user.username, len(problems))
+    return {
+        "id": row.id,
+        "removed": not problems,
+        "problems": problems,
+        "message": ("The entry is deleted and the node evicted. The worker cannot fetch a "
+                    "new SVID; one it already holds lives out its five minutes."
+                    if not problems else
+                    "Some of the identity could not be removed — see problems. Removing "
+                    "again is safe."),
     }

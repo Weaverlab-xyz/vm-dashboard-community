@@ -15,10 +15,18 @@ is how the VM was created.
 | `agent-install.yml` | the worker's host (SSH) — a **SPIRE agent node** | The worker, a systemd unit, and a 0600 token file only in `file` mode |
 | `agent-spiffe-entry.yml` | the **SPIRE server** (SSH) | One registration entry, so the worker can attest. `spire_cli_prefix` reaches the CLI in a Docker or Kubernetes lab, as the `spire/` shared plays do |
 
-**The worker's host must run a SPIRE agent.** In the Workload Lab that is the SPIRE lab's
-Kubernetes-linked k3s node (node ID `spiffe://<td>/node/k3s-01`, the entry's
-`agent_node_id`); the lab's own VM runs the server. The Agent tab's **Install** dialog
-writes both commands with the right hosts, parent, prefix and token source filled in.
+**The worker's host must run a SPIRE agent.** Two ways to get one:
+
+- **Attested by the dashboard's own SPIRE server** (one VM, no lab): the dashboard creates
+  the entry itself, so `agent-spiffe-entry.yml` is not run. The first step is
+  [`../spire/spire-agent-install.yml`](../spire/spire-agent-install.yml) on the worker's
+  host, with the join token and bundle from the mint response.
+- **Attested by a Workload Lab**: the SPIRE lab's Kubernetes-linked k3s node (node ID
+  `spiffe://<td>/node/k3s-01`, the entry's `agent_node_id`); the lab's own VM runs the
+  server.
+
+The Agent tab's **Install** dialog writes the commands for whichever applies, with the
+hosts, parent, prefix and token source filled in.
 | `files/mcp_agent.py` | — | The worker itself |
 
 ## Two credentials, and they are not the same one

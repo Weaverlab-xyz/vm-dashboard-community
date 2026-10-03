@@ -14,7 +14,8 @@ in one sitting, and because it turns almost entirely on facts about the consumer
 than on preference.
 
 **The fifth tab is not a fifth answer. It is a consumer.** The Agent tab puts a non-human
-principal on a host, attested by the SPIRE tab's trust domain and authorized by a token
+principal on a host, attested by the SPIRE tab's trust domain (or, with one VM and no lab,
+by the dashboard's own SPIRE server) and authorized by a token
 that expires — with a service account, a token its own SVID mints, so the host holds no
 secret at all — and it can hold any one of the other three: mint the Cloud tab's
 credential, ask for the Kubernetes tab's token, or use the Certificate tab's identity.

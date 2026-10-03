@@ -84,6 +84,33 @@ def test_every_variable_the_dialog_passes_is_one_its_playbook_reads():
         assert not unknown, f"{method} passes {sorted(unknown)}, which {play} never reads"
 
 
+_SPIRE_PLAY = os.path.join(_ROOT, "examples", "playbooks", "spire", "spire-agent-install.yml")
+
+
+def test_the_dashboard_install_step_passes_only_what_spire_agent_install_reads():
+    """A cell attested by the dashboard's own SPIRE server has no entry play: its first
+    step installs a SPIRE agent on the worker's host with the join token from the mint."""
+    src = _read(_SPIRE_PLAY)
+    declared = (set(yaml.safe_load(src)[0].get("vars", {}))
+                | set(re.findall(r"^#\s+([a-z_]+):", src, re.M)))
+    body = _dialog_method("spireAgentCommand")
+    passed = set(re.findall(r"-e \"?([a-z_]+)=", body))
+    assert passed, "spireAgentCommand passes no variables -- the scan found nothing"
+    assert not passed - declared, f"passes {sorted(passed - declared)}, which the play never reads"
+    for required in ("trust_domain", "spire_server_address", "join_token", "trust_bundle_pem"):
+        assert required in passed, f"spire-agent-install.yml requires {required}"
+    # The worker runs as root; the entry the dashboard made selects unix:uid:0.
+    assert "workload_uid=0" in body
+
+
+def test_spire_agent_install_never_rewrites_root():
+    """With workload_uid 0 the play's account task would set root's shell to nologin."""
+    play = yaml.safe_load(_read(_SPIRE_PLAY))[0]
+    task = next(t for t in play["tasks"] if t.get("name") == "Create the workload account")
+    assert "workload_uid | int != 0" in str(task.get("when", "")), (
+        "the account task runs for uid 0 and would lock root out of a shell")
+
+
 def test_the_dialog_passes_what_each_playbook_requires():
     entry = _dialog_method("entryCommand")
     for required in ("trust_domain", "agent_node_id"):
