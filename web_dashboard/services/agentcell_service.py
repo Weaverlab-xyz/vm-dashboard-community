@@ -63,6 +63,18 @@ def spiffe_id_for(trust_domain: str) -> str:
     return f"spiffe://{td}{AGENT_SPIFFE_PATH}"
 
 
+def dashboard_ids(trust_domain: str, cell_id: str) -> tuple:
+    """(workload SPIFFE ID, node SPIFFE ID) for a cell attested by the DASHBOARD's own
+    SPIRE server. Per cell, unlike ``spiffe_id_for``: a lab is a disposable demo domain
+    with one worker, but the dashboard's trust domain is real and long-lived, and one
+    identity binds one OAuth client. Under ``/demo/agent-cell/``, never ``/agent/`` —
+    that is the remote agents' namespace (``dashboard_spire.RESERVED_PREFIXES``)."""
+    from . import dashboard_spire
+    td = (trust_domain or "").strip().strip("/").lower()
+    return (f"spiffe://{td}{dashboard_spire.CELL_PREFIX}{cell_id}",
+            f"spiffe://{td}/node/agent-cell-{cell_id}")
+
+
 def mcp_problem(mcp_enabled: bool) -> str:
     """Refuse a worker that would have nothing to call.
 
@@ -89,7 +101,8 @@ def trust_domain_problem(trust_domain: str) -> str:
         return ""
     return ("No SPIRE trust domain. The worker would run, but it could not attest, so it "
             "would log `unattested` and the identity half of the demo would be an "
-            "assertion. Stand up a SPIRE lab on this host first — Workload Lab → SPIRE.")
+            "assertion. Choose the dashboard's own SPIRE server (docker-compose.spire.yml), "
+            "or stand up a SPIRE lab first — Workload Lab → SPIRE.")
 
 
 def pat_expiry_problem(hours) -> str:
@@ -590,7 +603,7 @@ def is_wired(row) -> bool:
     return set(STAGES).issubset(set(stages_done(row)))
 
 
-def svid_client_available(db, trust_domain: str) -> str:
+def svid_client_available(db, trust_domain: str, spiffe_id: str = "") -> str:
     """The SPIFFE ID to bind an SVID-authenticated client to, or "" to use a secret.
 
     SVID when the dashboard can verify this trust domain's JWT-SVIDs (a SpiffeTrustDomain
@@ -604,7 +617,7 @@ def svid_client_available(db, trust_domain: str) -> str:
     if not td or not db.query(SpiffeTrustDomain).filter(
             SpiffeTrustDomain.trust_domain == td).first():
         return ""
-    sid = spiffe_id_for(td)
+    sid = spiffe_id or spiffe_id_for(td)
     if db.query(OAuthClient).filter(OAuthClient.spiffe_id == sid,
                                     OAuthClient.is_active == True).first():  # noqa: E712
         return ""
@@ -612,8 +625,21 @@ def svid_client_available(db, trust_domain: str) -> str:
 
 
 def deploy_notes(hours: int = DEFAULT_PAT_HOURS, oauth: bool = False,
-                 svid: bool = False, client_id: str = "") -> list:
+                 svid: bool = False, client_id: str = "", dashboard: bool = False,
+                 server: str = "") -> list:
     """What the form says back, so the shape of the demo is read before it is run."""
+    notes = _deploy_notes(hours, oauth, svid, client_id)
+    if dashboard:
+        notes.insert(0, (
+            "Attested by the DASHBOARD's own SPIRE server: install a SPIRE agent on the "
+            "worker's host with spire-agent-install.yml and the join token above (one use, "
+            "fifteen minutes; mint the cell again for another). The host must reach "
+            f"{server or 'the dashboard'} on tcp/8081, the same port remote agents use. "
+            "No lab and no second VM."))
+    return notes
+
+
+def _deploy_notes(hours: int, oauth: bool, svid: bool, client_id: str) -> list:
     if svid:
         return [
             "The agent holds NO SECRET. It authenticates with its JWT-SVID: run the install "
@@ -621,9 +647,9 @@ def deploy_notes(hours: int = DEFAULT_PAT_HOURS, oauth: bool = False,
             "The worker exchanges a fresh SVID at /api/oauth/token for an access token that "
             "lives minutes; revoking the cell refuses its very next exchange.",
             "Identity and authorization are now one chain: the SVID from SPIRE is what mints "
-            "the dashboard token. The lab registered its trust domain's JWKS URL when it was "
-            "built, so rotated keys are picked up on their own; its scheduled Refresh keys "
-            "keeps the pinned CA current.",
+            "the dashboard token. The trust domain's JWT keys are registered with this "
+            "dashboard and kept current on a schedule, so rotated keys are picked up on "
+            "their own.",
             "The worker attaches to a VM you already deployed. Destroying that VM reaps the "
             "worker with it; this cell adds no teardown of its own beyond revoking the client.",
         ]

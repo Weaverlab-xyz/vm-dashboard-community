@@ -1,6 +1,10 @@
-# Install a SPIRE Agent on the k3s node
+# Install a SPIRE Agent on the k3s node — or on an agent demo cell's host
 # Target: the k3s host — NOT the SPIRE server. Run spire-k8s-entry.yml first, on the
 # server, and bring its join token and trust bundle here. Idempotent.
+#
+# The same play puts an agent on an agent demo cell's worker host when the cell is attested
+# by the DASHBOARD's own SPIRE server: the Agent tab's mint response carries the join token
+# and bundle, and its Install dialog writes this command (workload_uid 0, the worker's).
 #
 # This is the piece the governance lab has never had. spire-server-install.yml deliberately
 # installs no agent, because the Password Safe plugin only ever talks to the server's API
@@ -176,6 +180,10 @@
     # whatever runs as 1010 and to nothing else, so this account existing with exactly
     # that UID is what makes the entry reachable — and creating it here keeps the two
     # plays' numbers from drifting silently.
+    #
+    # NEVER FOR UID 0. The agent demo cell's worker runs as root (the dashboard's own SPIRE
+    # server attests it under unix:uid:0), and this task would otherwise "create" root by
+    # setting its shell to nologin. Root exists; there is nothing to create.
     - name: Create the workload account
       ansible.builtin.user:
         name: "{{ workload_user }}"
@@ -183,6 +191,7 @@
         shell: /usr/sbin/nologin
         create_home: true
         state: present
+      when: workload_uid | int != 0
 
     - name: Write the bootstrap trust bundle
       ansible.builtin.copy:

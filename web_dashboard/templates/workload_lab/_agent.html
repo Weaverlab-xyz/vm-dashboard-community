@@ -193,6 +193,12 @@
                     class="text-xs border border-gray-300 hover:bg-gray-50 px-2 py-1 rounded disabled:opacity-50">
               Unlink
             </button>
+            <button x-show="row.trust_source === 'dashboard' && row.pat_revoked_at" x-cloak
+                    @click="removeIdentity(row)" :disabled="busy || readOnly"
+                    class="text-xs border border-gray-300 hover:bg-gray-50 px-2 py-1 rounded disabled:opacity-50"
+                    title="Delete the cell's entry on the dashboard's SPIRE server and evict its node">
+              Remove SPIRE identity
+            </button>
             <button @click="revoke(row)" :disabled="busy || readOnly || !!row.pat_revoked_at"
                     class="text-xs border border-red-300 text-red-700 hover:bg-red-50 px-2 py-1 rounded disabled:opacity-50">
               Revoke
@@ -396,19 +402,32 @@
           <label class="block text-xs font-medium text-gray-700 mb-1">SPIRE trust domain</label>
           <select x-model="form.spire_lab_id" @change="labChanged()"
                   class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
-            <option value="">— pick a lab —</option>
+            <option value="">— pick a SPIRE server —</option>
+            <template x-if="options.dashboard_spire">
+              <option value="__dashboard__"
+                      x-text="'This dashboard\'s own SPIRE server — ' + options.dashboard_spire.trust_domain"></option>
+            </template>
             <template x-for="l in options.labs" :key="l.id">
               <option :value="l.id" x-text="l.name + ' — ' + l.trust_domain"></option>
             </template>
           </select>
+          <p x-show="form.spire_lab_id === '__dashboard__'" x-cloak class="text-xs text-gray-500 mt-1">
+            The worker will attest as
+            <code x-text="options.dashboard_spire?.spiffe_id_pattern"></code>, one ID per cell.
+            The dashboard creates the entry itself and hands you a one-use join token; the
+            worker's host runs its own SPIRE agent, so there is no lab and no second VM. The
+            host must reach <code x-text="options.dashboard_spire?.server_address || 'the dashboard'"></code>
+            on tcp/8081.
+          </p>
           <p x-show="selectedLab()" x-cloak class="text-xs text-gray-500 mt-1">
             The worker will attest as
             <code x-text="selectedLab()?.spiffe_id"></code>.
             That path is fixed, so the registration entry the playbook creates and the ID
             the worker expects cannot drift.
           </p>
-          <p x-show="!options.labs.length" x-cloak class="text-xs text-gray-500 mt-1">
-            None yet. Stand one up on
+          <p x-show="!options.labs.length && !options.dashboard_spire" x-cloak class="text-xs text-gray-500 mt-1">
+            None yet. Start the dashboard's own SPIRE server
+            (<code>docker-compose.spire.yml</code>), or stand a lab up on
             <button type="button" @click="mintOpen = false; $dispatch('select-tab', 'spire')"
                     class="text-blue-600 hover:underline">the SPIRE tab</button>
             first &mdash; without a trust domain the worker logs <code>unattested</code> and
@@ -551,6 +570,32 @@
         </div>
       </div>
 
+      <div x-show="minted?.join_token" x-cloak class="space-y-2 text-sm mt-3">
+        <div class="flex items-start gap-2">
+          <span class="text-xs text-amber-700 w-32 shrink-0 pt-1 font-medium">SPIRE join token</span>
+          <code class="flex-1 text-xs bg-amber-50 border border-amber-200 rounded px-2 py-1 break-all"
+                x-text="minted?.join_token"></code>
+          <button @click="copy(minted?.join_token)"
+                  class="text-xs border border-gray-300 hover:bg-gray-50 px-2 py-1 rounded shrink-0">
+            Copy
+          </button>
+        </div>
+        <p class="text-xs text-gray-500 ml-[8.5rem]">
+          One use, fifteen minutes, for the SPIRE agent on the worker's host. Mint the cell
+          again if it lapses.
+        </p>
+        <div class="flex items-start gap-2">
+          <span class="text-xs text-gray-500 w-32 shrink-0 pt-1">Trust bundle</span>
+          <pre class="flex-1 text-[10px] bg-gray-50 border border-gray-200 rounded px-2 py-1 overflow-x-auto max-h-28"
+               x-text="minted?.bootstrap_pem"></pre>
+          <button @click="copy(minted?.bootstrap_pem)"
+                  class="text-xs border border-gray-300 hover:bg-gray-50 px-2 py-1 rounded shrink-0">
+            Copy
+          </button>
+        </div>
+        <p class="text-xs text-gray-500 ml-[8.5rem]">Save it as <code>bootstrap.crt</code> where you run the playbook.</p>
+      </div>
+
       <ul x-show="minted?.notes?.length" x-cloak
           class="mt-4 text-xs text-gray-600 list-disc list-inside space-y-1">
         <template x-for="n in (minted?.notes || [])" :key="n"><li x-text="n"></li></template>
@@ -579,7 +624,16 @@
       </p>
 
       <div class="space-y-3 text-sm">
-        <div>
+        <div x-show="installRow?.trust_source === 'dashboard'" x-cloak>
+          <p class="text-xs text-gray-500 mb-1">1 &mdash; a SPIRE agent on the worker's host</p>
+          <p class="text-xs text-gray-500 mb-1">
+            The dashboard already created the registration entry. This attests the host with
+            the join token from the mint, and proves a JWT-SVID can be fetched as the worker.
+          </p>
+          <pre class="text-xs bg-gray-50 border border-gray-200 rounded p-2 overflow-x-auto"
+               x-text="spireAgentCommand()"></pre>
+        </div>
+        <div x-show="installRow?.trust_source !== 'dashboard'">
           <p class="text-xs text-gray-500 mb-1">1 &mdash; the registration entry (on the SPIRE server)</p>
           <p class="text-xs text-amber-700 mb-1" x-show="installRow && !installRow.agent_node_id" x-cloak>
             The worker's host must run a SPIRE agent. In this lab the host that does is the
@@ -902,7 +956,8 @@ function workloadAgentTab() {
     },
 
     canMint() {
-      return !this.readOnly && this.options.labs.length > 0
+      return !this.readOnly
+             && (this.options.labs.length > 0 || !!this.options.dashboard_spire)
              && this.options.users.length > 0;
     },
     mintReady() {
@@ -919,6 +974,7 @@ function workloadAgentTab() {
     // almost every time -- and a host in a different cloud from the lab is the mistake
     // this prefill exists to avoid.
     labChanged() {
+      if (this.form.spire_lab_id === '__dashboard__') return;
       const lab = this.selectedLab();
       if (!lab) return;
       if (lab.cloud) this.form.cloud = lab.cloud;
@@ -1111,6 +1167,20 @@ function workloadAgentTab() {
                pat_hours: this.options.pat_hours.default, workgroup: '' };
     },
 
+    // The form's select holds "__dashboard__" for the dashboard's own SPIRE server; the
+    // API takes that as trust_source with no lab id.
+    mintBody(form) {
+      const body = Object.assign({}, form);
+      if (!body.workgroup) body.workgroup = null;
+      if (body.spire_lab_id === '__dashboard__') {
+        body.trust_source = 'dashboard';
+        body.spire_lab_id = '';
+      } else {
+        body.trust_source = 'lab';
+      }
+      return body;
+    },
+
     openMint() {
       this.form = this.blankForm();
       this.mintOpen = true;
@@ -1119,8 +1189,7 @@ function workloadAgentTab() {
     async submitMint() {
       this.busy = true;
       try {
-        const body = Object.assign({}, this.form);
-        if (!body.workgroup) body.workgroup = null;
+        const body = this.mintBody(this.form);
         const out = await API.post('/api/agentcell/agent', body);
         this.mintOpen = false;
         this.minted = out;
@@ -1134,7 +1203,11 @@ function workloadAgentTab() {
                             host_name: body.host_ref, pat_name: out.pat_name,
                             client_id: out.client_id || '',
                             token_mode: out.token ? (out.client_id ? 'oauth' : 'pat')
-                                                  : (out.client_id ? 'spiffe' : 'pat') };
+                                                  : (out.client_id ? 'spiffe' : 'pat'),
+                            trust_source: body.trust_source,
+                            trust_domain: (out.spiffe_id || '').split('/')[2] || '',
+                            spire_server_address: out.spire_server_address || '',
+                            spire_server_port: out.spire_server_port || 0 };
         await this.load();
         const row = this.agents.find(a => a.id === out.id);
         // The listed row is authoritative about the host: `host_ref` was a proposal and
@@ -1170,6 +1243,20 @@ function workloadAgentTab() {
               + '  -e agent_node_id=' + (r.agent_node_id || ('spiffe://' + td + '/node/<the worker\'s node>'));
       if (r.spire_cli_prefix) cmd += ' \\\n  -e "spire_cli_prefix=' + r.spire_cli_prefix + '"';
       return cmd;
+    },
+    // The dashboard trust source: no entry playbook, because the dashboard made the entry.
+    // The join token was shown once at mint and is not on the row, so it stays a
+    // placeholder here; the bundle is read from the file the mint modal says to save.
+    spireAgentCommand() {
+      const r = this.installRow || {};
+      return 'ansible-playbook -i ' + (r.host_name || '<host>') + ', spire-agent-install.yml \\\n'
+           + '  -e trust_domain=' + (r.trust_domain || '<trust domain>') + ' \\\n'
+           + '  -e spire_server_address=' + (r.spire_server_address || '<dashboard host>') + ' \\\n'
+           + '  -e spire_server_port=' + (r.spire_server_port || 8081) + ' \\\n'
+           + '  -e join_token=<the join token, shown once at mint> \\\n'
+           + '  -e "trust_bundle_pem=\'$(cat bootstrap.crt)\'" \\\n'
+           + '  -e workload_user=root -e workload_uid=0 \\\n'
+           + '  -e verify_audience=' + window.location.origin + '/api/oauth/token';
     },
     installCommand() {
       const r = this.installRow || {};
@@ -1266,6 +1353,20 @@ function workloadAgentTab() {
         await this.load();
       } catch (e) {
         this.notify('Could not close the request: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+
+    async removeIdentity(row) {
+      if (!confirm('Delete ' + (row.spiffe_id || 'this cell\'s SPIFFE ID') + ' on the '
+                   + 'dashboard\'s SPIRE server and evict its node? The worker cannot fetch '
+                   + 'a new SVID afterwards.')) return;
+      this.busy = true;
+      try {
+        const out = await API.del('/api/agentcell/agent/' + row.id + '/spire-identity');
+        this.notify(out.message + ((out.problems || []).length ? ' ' + out.problems.join('; ') : ''),
+                    out.removed ? 'info' : 'error');
+      } catch (e) {
+        this.notify('Refused: ' + (e.message || e), 'error');
       } finally { this.busy = false; }
     },
 

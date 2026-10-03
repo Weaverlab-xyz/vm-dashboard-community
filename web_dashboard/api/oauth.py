@@ -236,6 +236,9 @@ def _td_item(row) -> dict:
         "bundle_captured_at": row.bundle_captured_at.isoformat() if row.bundle_captured_at else None,
         "stale": spiffe_assertion.is_stale(row),
         "spire_lab_id": row.spire_lab_id or "",
+        # The dashboard's OWN SPIRE server registered this one (services/dashboard_spire):
+        # service-account workloads can be given an entry on it from the Users page.
+        "dashboard_owned": row.created_by == "dashboard-spire",
     }
 
 

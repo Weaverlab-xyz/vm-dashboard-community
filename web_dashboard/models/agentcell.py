@@ -4,7 +4,7 @@ Cloud-agnostic, unlike the network cell: the worker attaches to a Linux VM over 
 the only thing that differs between clouds is how that VM was created — which is
 somebody else's job by the time this runs.
 """
-from typing import List, Optional
+from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
 from ..services.agentcell_service import DEFAULT_PAT_HOURS, MAX_PAT_HOURS
@@ -22,9 +22,16 @@ class AgentCellCreateRequest(BaseModel):
     # spire_lab_service.resolve_host. The caller supplies a proposal, not an address.
     host_ref: str = Field(min_length=1)
     cloud: str = "gcp"
-    # The SPIRE lab whose trust domain attests the worker. Its trust domain becomes the
-    # worker's SPIFFE ID; without one the worker would log `unattested`.
-    spire_lab_id: str = Field(min_length=1)
+    # Which SPIRE server attests the worker. "lab" is a Workload Lab SPIRE row
+    # (spire_lab_id), whose Kubernetes-linked k3s node runs the one agent the lab has.
+    # "dashboard" is this dashboard's own server (docker-compose.spire.yml): the cell gets
+    # an entry and a one-use join token there, and the worker's host runs its own agent —
+    # one VM, no lab (docs/design/dashboard-workload-identity.md, L1).
+    trust_source: Literal["lab", "dashboard"] = "lab"
+    spire_lab_id: str = ""
+    # The uid the worker runs as, and so the entry's `unix:uid:` selector. The install
+    # play runs the worker as root, which is the default; named so it can change.
+    worker_uid: int = Field(default=0, ge=0, le=2**31 - 1)
     # The user the agent's token is minted against. This is the agent's blast radius:
     # every MCP tool applies this user's RBAC, so the cell refuses an administrator.
     pat_user_id: str = Field(min_length=1)
@@ -47,6 +54,12 @@ class AgentCellCreateResponse(BaseModel):
     # Set when the token user is a service account: the OAuth client's PUBLIC id. The
     # secret travels in `token` above, as the `client_id:secret` pair the worker reads.
     client_id: str = ""
+    # Dashboard trust source only. The join token is one-use, expires in fifteen minutes
+    # and is shown ONCE, like `token`; the rest is public and repeated by the list.
+    join_token: str = ""
+    bootstrap_pem: str = ""
+    spire_server_address: str = ""
+    spire_server_port: int = 0
     message: str = ""
     notes: List[str] = []
 
@@ -177,6 +190,12 @@ class AgentCellInfo(BaseModel):
     agent_node_host: str = ""
     # The worker's host IS that node. Anywhere else there is no SPIRE agent to attest to.
     worker_on_node: bool = False
+    # "lab" or "dashboard": which SPIRE server attests the worker. For "dashboard" the
+    # worker's own host runs the agent (spire-agent-install.yml), so the two fields below
+    # replace spire_host/spire_cli_prefix and there is no entry playbook to run.
+    trust_source: str = "lab"
+    spire_server_address: str = ""
+    spire_server_port: int = 0
 
 
 class AgentCellListResponse(BaseModel):

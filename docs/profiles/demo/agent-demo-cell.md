@@ -65,8 +65,9 @@ What the authorization is depends on **who you mint the agent against**:
 | a **service account**, trust domain not registered | an **OAuth client** (`client_id:secret`) | a 0600 file holding the pair | an access token that lives minutes |
 | a **service account**, trust domain registered | an OAuth client **bound to the agent's SPIFFE ID** | **nothing** | an access token the **SVID itself** minted |
 
-A SPIRE lab built by the Workload Lab **registers its trust domain with the dashboard
-automatically** (by JWKS URL, kept current by the lab's scheduled **Refresh keys**), so a
+The dashboard's own SPIRE server registers its trust domain when a cell is minted against
+it, and keeps the keys current. A SPIRE lab built by the Workload Lab **registers its trust
+domain with the dashboard automatically** too (by JWKS URL, kept current by the lab's scheduled **Refresh keys**), so a
 service account against a lab-built trust domain lands in the last row. The mint response
 then shows *Token: None — this agent holds no secret* and the client id.
 
@@ -494,11 +495,19 @@ The tab's own *Not ready yet* panel checks most of this at load and names the re
 open **Workload Lab → Agent** first and read it before working down the list.
 
 - [ ] The **Agent Demo Cell preview** on, and **MCP Server** on.
-- [ ] A **SPIRE lab** (any deployment mode — VM, Docker or Kubernetes) **linked to a k3s
-      node** with its **Kubernetes** action. The worker's host must run a SPIRE agent, and
-      in this lab the host that does is that k3s node — mint the agent **on that node**.
-      The SPIRE lab's own VM runs the *server*, not an agent, and a worker there logs
-      `unattested`. The Install dialog warns when the host is not the node.
+- [ ] A SPIRE server to attest the worker, one of two:
+  - **This dashboard's own** (`docker-compose.spire.yml`) — **one VM, no lab.** Pick it on
+    the mint form. The dashboard creates the entry and shows a one-use join token; the
+    Install dialog's first step puts a SPIRE agent on the worker's own host with
+    `spire-agent-install.yml`. The host must reach the dashboard on `tcp/8081`, as remote
+    agents do. Revoking the cell keeps its identity (that is the demo); **Remove SPIRE
+    identity** on the revoked row deletes it.
+  - A **SPIRE lab** (any deployment mode — VM, Docker or Kubernetes) **linked to a k3s
+    node** with its **Kubernetes** action. The worker's host must run a SPIRE agent, and
+    in a lab the host that does is that k3s node — mint the agent **on that node**.
+    The SPIRE lab's own VM runs the *server*, not an agent, and a worker there logs
+    `unattested`. The Install dialog warns when the host is not the node. Choose this
+    when the demo also shows the Password Safe SPIFFE plugin governing the lab.
 - [ ] A **service account** to mint the agent against (recommended — see above), or at
       least a narrow user. Not an administrator; the cell refuses that.
 - [ ] The Ansible runner able to reach both the SPIRE server and the node, and the

@@ -5,8 +5,8 @@ All routes require the authenticated user to have is_admin=True.
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..database import User, Fido2Credential, PersonalAccessToken, get_db, get_password_hash
@@ -739,14 +739,104 @@ def revoke_oauth_client(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    """Revoke a client. Every access token it issued stops working on its next use."""
-    from ..services import job_service
+    """Revoke a client. Every access token it issued stops working on its next use.
+
+    A client whose SPIFFE ID lives in the dashboard's own trust domain also loses its
+    SPIRE entry and its node — the identity was minted for this client and nothing else.
+    Best-effort: the revoke stands even when the SPIRE server cannot be reached, and the
+    response says what was left behind."""
+    from ..services import dashboard_spire, job_service
     client = _client_or_404(db, user_id, client_row_id)
     client.is_active = False
     db.commit()
     job_service.log_audit(db, admin.username, "service_account.client_revoke",
                           details={"user_id": user_id, "client_id": client.client_id})
-    return {"detail": "OAuth client revoked"}
+    left = []
+    own = dashboard_spire.registered(db)
+    if (client.spiffe_id and own
+            and dashboard_spire.path_of(client.spiffe_id, own.trust_domain)
+            .startswith(dashboard_spire.WORKLOAD_PREFIX)):
+        left = dashboard_spire.remove_workload(client.spiffe_id,
+                                               _workload_node(own.trust_domain, client.id))
+    return {"detail": "OAuth client revoked", "spire_left_behind": left}
+
+
+class SpireEntryRequest(BaseModel):
+    # The uid the workload runs as on its host: the entry's `unix:uid:` selector.
+    uid: int = Field(ge=0, le=2**31 - 1)
+
+
+def _workload_node(td: str, client_row_id: str) -> str:
+    return f"spiffe://{td}/node/workload-{client_row_id}"
+
+
+@router.post("/{user_id}/oauth-clients/{client_row_id}/spire-entry")
+def create_spire_entry(
+    user_id: str,
+    client_row_id: str,
+    body: SpireEntryRequest,
+    request: Request,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Register this client's workload on the dashboard's own SPIRE server.
+
+    docs/design/dashboard-workload-identity.md, L2. The entry selects ``unix:uid:<uid>``
+    under a node of its own, and a one-use join token attests that node; the workload then
+    fetches JWT-SVIDs from its host's SPIRE agent and holds nothing. Only for an SVID
+    client whose ID is under ``spiffe://<the dashboard's trust domain>/workload/``: the
+    rest of that trust domain belongs to remote agents and the dashboard, and a lab's
+    trust domain has its own server. The join token is returned once and never logged.
+    """
+    from ..services import dashboard_spire, job_service, public_url
+    user = _service_account_or_404(db, user_id)
+    client = _client_or_404(db, user_id, client_row_id)
+    if not client.is_active:
+        raise HTTPException(status_code=409, detail="This OAuth client has been revoked.")
+    if not client.spiffe_id:
+        raise HTTPException(status_code=409, detail=(
+            "This client authenticates with a secret. Create a client bound to a SPIFFE ID "
+            "under the dashboard's trust domain instead."))
+    try:
+        td = dashboard_spire.trust_domain()
+    except dashboard_spire.DashboardSpireError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    if not dashboard_spire.path_of(client.spiffe_id, td).startswith(dashboard_spire.WORKLOAD_PREFIX):
+        raise HTTPException(status_code=409, detail=(
+            f"{client.spiffe_id} is not under spiffe://{td}{dashboard_spire.WORKLOAD_PREFIX}. "
+            f"The dashboard's SPIRE server registers service-account workloads only there; "
+            f"an ID in a lab's trust domain is that lab's server's to register."))
+    node = _workload_node(td, client.id)
+    try:
+        join_token = dashboard_spire.register_workload(node, client.spiffe_id, body.uid)
+        dashboard_spire.sync_trust_domain(db, td)
+        facts = dashboard_spire.install_facts(td)
+    except dashboard_spire.DashboardSpireError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    job_service.log_audit(db, admin.username, "service_account.spire_entry",
+                          details={"service_account": user.username,
+                                   "client_id": client.client_id,
+                                   "spiffe_id": client.spiffe_id, "node": node,
+                                   "uid": body.uid})
+    token_endpoint = public_url.resolve(request).rstrip("/") + "/api/oauth/token"
+    workload_user = "root" if body.uid == 0 else "<the account that runs the workload>"
+    command = (
+        "ansible-playbook -i <workload host>, spire-agent-install.yml \\\n"
+        f"  -e trust_domain={td} \\\n"
+        f"  -e spire_server_address={facts['server_address'] or '<dashboard host>'} \\\n"
+        f"  -e spire_server_port={facts['server_port']} \\\n"
+        "  -e join_token=<the join token above> \\\n"
+        "  -e \"trust_bundle_pem='$(cat bootstrap.crt)'\" \\\n"
+        f"  -e workload_user={workload_user} -e workload_uid={body.uid} \\\n"
+        f"  -e verify_audience={token_endpoint}")
+    return {"spiffe_id": client.spiffe_id, "node_spiffe_id": node,
+            "join_token": join_token,
+            "join_token_ttl_s": dashboard_spire.JOIN_TOKEN_TTL_S,
+            "bootstrap_pem": facts["bootstrap_pem"],
+            "spire_server_address": facts["server_address"],
+            "spire_server_port": facts["server_port"],
+            "token_endpoint": token_endpoint,
+            "command": command}
 
 
 # ── External IdP identities mapped to a service account ───────────────────────

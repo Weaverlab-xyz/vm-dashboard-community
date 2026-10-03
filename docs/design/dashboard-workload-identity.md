@@ -2,7 +2,7 @@
 
 > **Audience:** contributor · **Profile:** `both` · **Read this when:** you are about to give the dashboard an identity of its own, retire one of its stored cloud keys, move a Workload Lab demo off the lab's SPIRE server, or decide whether something else in the codebase should use a SPIFFE token.
 
-**Slice 1 is built; nothing else here is.** This is an audit, made after the dashboard got
+**Slice 1, L1 and L2 are built; nothing else here is.** This is an audit, made after the dashboard got
 its own SPIRE server (#996–#998), of where that server should be used next. Each section says what it
 removes, what it costs, and what is still unknown. Where SPIFFE adds little, the note says so.
 
@@ -120,6 +120,17 @@ whether or not any remote agent attests. Gate it on the server being configured 
 
 ### L1. The agent demo cell can attest to the dashboard's trust domain
 
+**Built.** Choose *This dashboard's own SPIRE server* on the Agent tab's mint form
+(`trust_source="dashboard"`). The cell's ID is `spiffe://<td>/demo/agent-cell/<cell id>`
+and its node `spiffe://<td>/node/agent-cell-<cell id>`, both per cell, made by
+`dashboard_spire.register_workload` (extracted from `migrate_agent`). The mint response
+carries the one-use join token and the bundle; the Install dialog's first step becomes
+`spire-agent-install.yml` on the worker's host, which now never touches uid 0's account.
+**One deviation from the sketch below:** revoking a cell keeps its SPIRE identity, because
+the demo is watching authorization end while identity stays. A separate **Remove SPIRE
+identity** action, offered only on a revoked dashboard-attested cell, deletes the entry and
+evicts the node.
+
 Today `agentcell_service.trust_domain_problem` refuses a cell with no SPIRE lab, and in
 practice the cell needs the lab's **k3s link** as well, because the linked k3s node is the
 only lab host that runs a SPIRE agent. That is two VMs and a lab build before the demo's
@@ -137,6 +148,13 @@ first step.
 - Keep the lab-backed option for the demo that shows the plugin and the worker together.
 
 ### L2. Service accounts on the dashboard's trust domain, with one click
+
+**Built.** `POST /api/users/{id}/oauth-clients/{client}/spire-entry` (admin) for an SVID
+client under `spiffe://<td>/workload/`; Users → OAuth clients prefills that path and shows
+**Create SPIRE entry** on such clients. Revoking the client deletes the entry and evicts its
+node. `service_accounts.create_client` refuses `/dashboard` and `/agent/…` in the
+dashboard's own trust domain (`dashboard_spire.RESERVED_PREFIXES`). The trust bundle stays
+current once registered, whichever switches are on (`sync_if_due`).
 
 Service accounts can already authenticate at the token endpoint with a JWT-SVID
 (`service_accounts.py`, `spiffe_assertion.authenticate`), but only from a registered trust
@@ -278,8 +296,8 @@ SPIRE-attested agents** setting, completes
 
 1. ~~**Slice 1:** `jwt_issuer`, minted token files with one writer, in-app discovery, and
    the sync decoupled from agent attestation.~~ Built.
-2. **L1 and L2:** the agent cell and service accounts on the dashboard's trust domain.
-   They remove the lab VM from those demos and need nothing from Slice 3.
+2. ~~**L1 and L2:** the agent cell and service accounts on the dashboard's trust domain.~~
+   Built.
 3. **Slice 3:** AWS and GCP (configuration and docs, plus the `packer_service` fix), then
    Azure (the `ClientAssertionCredential` branch).
 4. **Slice 4:** on-prem k3s through the dashboard's SVID.

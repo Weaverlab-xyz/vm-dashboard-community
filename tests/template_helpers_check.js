@@ -1593,6 +1593,45 @@ async function portainerFirewallChecks() {
   delete global.toast;
 }
 
+// ── Workload identities on the dashboard's own trust domain (L1, L2) ──────────
+// The agent cell's select carries "__dashboard__" for the dashboard's SPIRE server; the
+// API takes trust_source and no lab. And the Users page prefills service-account SVID
+// IDs under /workload/ and offers "Create SPIRE entry" only there.
+{
+  const AGT = 'workload_lab/_agent.html';
+  const a = build(AGT, 'mintBody', {});
+  const dash = a.mintBody({spire_lab_id: '__dashboard__', workgroup: '', name: 'x'});
+  ok(AGT + ' the dashboard choice posts trust_source=dashboard and no lab id',
+     dash.trust_source === 'dashboard' && dash.spire_lab_id === '' && dash.workgroup === null);
+  const lab = a.mintBody({spire_lab_id: 'lab-1', workgroup: 'blue'});
+  ok(AGT + ' a lab choice posts trust_source=lab and keeps the lab id',
+     lab.trust_source === 'lab' && lab.spire_lab_id === 'lab-1' && lab.workgroup === 'blue');
+  const form = {spire_lab_id: '__dashboard__'};
+  a.mintBody(form);
+  ok(AGT + ' building the body does not rewrite the form the select is bound to',
+     form.spire_lab_id === '__dashboard__');
+
+  const USR = 'rbac/_users.html';
+  const u = Object.assign(build(USR, 'dashboardTrustDomain', {}),
+                          build(USR, 'workloadSpiffeId', {}),
+                          build(USR, 'onDashboardWorkloadPath', {}));
+  u.trustDomains = [{trust_domain: 'lab.example', dashboard_owned: false},
+                    {trust_domain: 'dash.example', dashboard_owned: true}];
+  ok(USR + ' the dashboard trust domain is the one it registered, not the first listed',
+     u.dashboardTrustDomain() === 'dash.example');
+  ok(USR + ' the prefill puts the service account under /workload/, sanitised',
+     u.workloadSpiffeId('dash.example', 'CI Pipeline/1') === 'spiffe://dash.example/workload/ci-pipeline-1');
+  ok(USR + ' Create SPIRE entry is offered under /workload/ only',
+     u.onDashboardWorkloadPath('spiffe://dash.example/workload/ci')
+       && !u.onDashboardWorkloadPath('spiffe://dash.example/agent/x')
+       && !u.onDashboardWorkloadPath('spiffe://lab.example/workload/ci')
+       && !u.onDashboardWorkloadPath(null));
+  u.trustDomains = [];
+  ok(USR + ' with no dashboard trust domain there is no prefill and no action',
+     u.dashboardTrustDomain() === '' && u.workloadSpiffeId('', 'x') === ''
+       && !u.onDashboardWorkloadPath('spiffe://dash.example/workload/ci'));
+}
+
 Promise.all([ociPlacementChecks(), portainerFirewallChecks(), bulkPowerClickChecks()])
   .then(() => process.exit(fail ? 1 : 0),
         (e) => { console.log('FAIL a deferred check threw: ' + e);

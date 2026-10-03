@@ -157,6 +157,16 @@ def create_client(db: Session, user, *, name: str, secret_days: Optional[int] = 
     if spiffe_id:
         if not spiffe_assertion.valid_spiffe_id(spiffe_id):
             raise ServiceAccountError(f"{spiffe_id!r} is not a SPIFFE ID (spiffe://<trust-domain>/<path>).")
+        # In the dashboard's OWN trust domain, remote agents' IDs and the dashboard's own are
+        # reserved: the dashboard mints those, and a client bound to one would let it sign
+        # in as a service account. A lab's trust domain has no such rule.
+        from . import dashboard_spire
+        own = dashboard_spire.registered(db)
+        if own and dashboard_spire.reserved_path(spiffe_id, own.trust_domain):
+            raise ServiceAccountError(
+                f"{spiffe_id} is reserved in the dashboard's own trust domain (remote agents "
+                f"and the dashboard itself). Use a path under "
+                f"spiffe://{own.trust_domain}{dashboard_spire.WORKLOAD_PREFIX}.")
         if (db.query(OAuthClient)
                 .filter(OAuthClient.spiffe_id == spiffe_id, OAuthClient.is_active == True)  # noqa: E712
                 .first()):

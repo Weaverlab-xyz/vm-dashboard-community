@@ -50,6 +50,16 @@ JWT_SVID_TTL_S = 300
 SYNC_EVERY = timedelta(hours=24)
 MIN_AGENT_VERSION = "2.6.0"          # first agent with AGENT_SPIFFE_JWT_FILE
 DASHBOARD_PATH = "/dashboard"        # the dashboard's own SPIFFE ID under its trust domain
+SERVER_PORT = 8081                   # docker-compose.spire.yml publishes this by default
+
+# Who may hold which path in the dashboard's OWN trust domain. Remote agents and the
+# dashboard itself are reserved: a service-account client bound to one of those IDs would
+# let whatever can mint them sign in as something else. The other two are where the
+# Workload Lab's demos and service-account workloads live (docs/design/
+# dashboard-workload-identity.md, L1 and L2).
+RESERVED_PREFIXES = ("/agent/", DASHBOARD_PATH)
+CELL_PREFIX = "/demo/agent-cell/"
+WORKLOAD_PREFIX = "/workload/"
 
 
 class DashboardSpireError(Exception):
@@ -88,8 +98,8 @@ def _cli(*args: str, timeout: int = 30) -> str:
     return proc.stdout
 
 
-def _json(*args: str) -> dict:
-    out = _cli(*args, "-output", "json")
+def _json(*args: str, timeout: int = 30) -> dict:
+    out = _cli(*args, "-output", "json", timeout=timeout)
     try:
         data = json.loads(out)
     except ValueError as exc:
@@ -102,8 +112,8 @@ def _json(*args: str) -> dict:
 
 # ── the trust domain ──────────────────────────────────────────────────────────
 
-def trust_domain() -> str:
-    td = str(_json("bundle", "show").get("trust_domain") or "").strip().lower()
+def trust_domain(timeout: int = 30) -> str:
+    td = str(_json("bundle", "show", timeout=timeout).get("trust_domain") or "").strip().lower()
     if not td:
         raise DashboardSpireError("the SPIRE server reported no trust domain")
     return td
@@ -161,17 +171,24 @@ def server_in_use() -> bool:
             or config_service.get_bool("dashboard_spiffe_identity_enabled"))
 
 
-def sync_if_due(db: Session, now: Optional[datetime] = None) -> bool:
-    """Re-sync the stored bundle once a day while the server is in use. Never raises: this
-    runs from the background refresh loop, and a SPIRE server that is down today must not
-    take the loop with it."""
+def registered(db: Session):
+    """The SpiffeTrustDomain row this module owns, or None."""
     from ..database import SpiffeTrustDomain
-    if not server_in_use():
-        return False
+    return (db.query(SpiffeTrustDomain)
+            .filter(SpiffeTrustDomain.created_by == OWNER).first())
+
+
+def sync_if_due(db: Session, now: Optional[datetime] = None) -> bool:
+    """Re-sync the stored bundle once a day while the server is in use — or once anything
+    has registered its trust domain, because agent cells and service-account clients bound
+    to it verify against those keys whichever switches are on. Never raises: this runs from
+    the background refresh loop, and a SPIRE server that is down today must not take the
+    loop with it."""
     now = now or datetime.utcnow()
     try:
-        rec = (db.query(SpiffeTrustDomain)
-               .filter(SpiffeTrustDomain.created_by == OWNER).first())
+        rec = registered(db)
+        if rec is None and not server_in_use():
+            return False
         if rec and rec.bundle_captured_at and now - rec.bundle_captured_at < SYNC_EVERY:
             return False
         sync_trust_domain(db, rec.trust_domain if rec else None)
@@ -192,6 +209,82 @@ def _entry_exists(spiffe_id: str) -> bool:
     return bool(_json("entry", "show", "-spiffeID", spiffe_id).get("entries"))
 
 
+def register_workload(node: str, spiffe_id: str, uid: int,
+                      jwt_ttl_s: int = JWT_SVID_TTL_S) -> str:
+    """A one-use join token for ``node``, and the workload entry ``spiffe_id`` selecting
+    ``unix:uid:<uid>`` under it — created only if absent, so a second call just mints a new
+    token. Returns the token; the caller shows it once and never stores it."""
+    token = str(_json("token", "generate", "-spiffeID", node,
+                      "-ttl", str(JOIN_TOKEN_TTL_S)).get("value") or "")
+    if not token:
+        raise DashboardSpireError("the SPIRE server minted no join token")
+
+    if not _entry_exists(spiffe_id):
+        res = _json("entry", "create", "-parentID", node, "-spiffeID", spiffe_id,
+                    "-selector", f"unix:uid:{int(uid)}",
+                    "-jwtSVIDTTL", str(jwt_ttl_s))
+        results = res.get("results") or []
+        status = (results[0].get("status") or {}) if results else {}
+        if not results or int(status.get("code") or 0) != 0:
+            raise DashboardSpireError(
+                f"the SPIRE server refused the workload entry: "
+                f"{status.get('message') or 'no result returned'}")
+    return token
+
+
+def remove_workload(spiffe_id: str, node: str) -> list:
+    """Delete the workload's entries and evict its node. Best-effort: returns what could
+    not be done rather than raising, so revoking a credential never fails because the SPIRE
+    server is down — the credential is the thing that must stop, and it already has."""
+    problems = []
+    try:
+        for entry in _json("entry", "show", "-spiffeID", spiffe_id).get("entries") or []:
+            res = _json("entry", "delete", "-entryID", str(entry.get("id") or ""))
+            results = res.get("results") or []
+            status = (results[0].get("status") or {}) if results else {}
+            if results and int(status.get("code") or 0) != 0:
+                problems.append(f"entry {entry.get('id')}: {status.get('message')}")
+    except DashboardSpireError as exc:
+        problems.append(f"entries for {spiffe_id}: {exc}")
+    try:
+        _cli("agent", "evict", "-spiffeID", node)
+    except DashboardSpireError as exc:
+        # A node whose agent never attested has nothing to evict; that is not a problem.
+        if "not found" not in str(exc).lower():
+            problems.append(f"node {node}: {exc}")
+    return problems
+
+
+def server_address() -> str:
+    """Where an agent host reaches this SPIRE server: the pinned agent audience's host,
+    because that is the name the install already publishes for agents."""
+    from urllib.parse import urlparse
+    from . import agent_service
+    return urlparse(config_service.get(agent_service.AUDIENCE_CONFIG) or "").hostname or ""
+
+
+def install_facts(td: str) -> dict:
+    """What spire-agent-install.yml needs besides the join token. None of it is secret."""
+    return {"trust_domain": td, "server_address": server_address(),
+            "server_port": SERVER_PORT, "bootstrap_pem": bootstrap_bundle_pem()}
+
+
+def in_trust_domain(spiffe_id: str, td: str) -> bool:
+    return (spiffe_id or "").startswith(f"spiffe://{td}/")
+
+
+def path_of(spiffe_id: str, td: str) -> str:
+    return spiffe_id[len(f"spiffe://{td}"):] if in_trust_domain(spiffe_id, td) else ""
+
+
+def reserved_path(spiffe_id: str, td: str) -> bool:
+    """Whether ``spiffe_id`` is one only the dashboard itself may hold in its own trust
+    domain — a remote agent's or the dashboard's."""
+    path = path_of(spiffe_id, td)
+    return any(path == base or path.startswith(base + "/")
+               for base in (p.rstrip("/") for p in RESERVED_PREFIXES))
+
+
 def migrate_agent(db: Session, agent) -> dict:
     """Everything an agent needs to attest through the dashboard's SPIRE server.
 
@@ -202,23 +295,7 @@ def migrate_agent(db: Session, agent) -> dict:
     from . import agent_service
     td = trust_domain()
     sid, node = ids_for(td, agent.id)
-
-    token = str(_json("token", "generate", "-spiffeID", node,
-                      "-ttl", str(JOIN_TOKEN_TTL_S)).get("value") or "")
-    if not token:
-        raise DashboardSpireError("the SPIRE server minted no join token")
-
-    if not _entry_exists(sid):
-        res = _json("entry", "create", "-parentID", node, "-spiffeID", sid,
-                    "-selector", f"unix:uid:{AGENT_UID}",
-                    "-jwtSVIDTTL", str(JWT_SVID_TTL_S))
-        results = res.get("results") or []
-        status = (results[0].get("status") or {}) if results else {}
-        if not results or int(status.get("code") or 0) != 0:
-            raise DashboardSpireError(
-                f"the SPIRE server refused the workload entry: "
-                f"{status.get('message') or 'no result returned'}")
-
+    token = register_workload(node, sid, AGENT_UID)
     sync_trust_domain(db, td)
     agent_service.bind_spiffe_id(db, agent, sid)
     return {"trust_domain": td, "spiffe_id": sid, "node_spiffe_id": node,
