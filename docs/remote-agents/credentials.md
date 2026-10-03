@@ -4,6 +4,83 @@
 
 Part of [Remote Agents](../remote-agents.md). What the dashboard holds, what the host seals, and where a credential comes from at run time.
 
+### Central storage with SPIRE: the recommended model
+
+Keep each credential in the dashboard, attest the agent through SPIRE, and let the agent
+fetch the credential per job. In practice:
+
+1. **Migrate the agent to SPIRE.** Use **Migrate to SPIRE** on the Agents page and the
+   [`docker-compose.spire.yml`](../../examples/remote-agent/docker-compose.spire.yml) overlay.
+   After that the agent's signing key lives only in memory, and every restart attests again.
+2. **Set `dashboard_secret: true`** on the connection in `connections.yaml`, and delete
+   the local `password`, `password_file` or `password_sealed`.
+3. **Set the credential on the Connections tab.** A Password Safe managed account
+   (`ps_account://`) is best, so that the dashboard keeps no standing password either.
+4. **Tick "Release dashboard-held credentials only to SPIRE-attested agents"** under
+   Settings → Remote agents (`dashboard_secrets_require_spire`). Once every agent that
+   needs a credential has migrated, this stops an Ed25519 key from receiving credentials,
+   including one copied off a host.
+
+Earlier versions of these docs treated a host-side credential as the default and central
+storage as a trade. That advice was right for an agent whose identity is a file.
+
+With an Ed25519 agent, `identity.json` sits unencrypted in the state volume, and that key
+is what asks for a `dashboard_secret` credential. Moving the credential to the dashboard
+therefore replaced a password in one file with the ability to request that password,
+stored in another file. That was a real improvement (narrow, audited, revocable), but
+anyone who could read the host's disk still left with something that worked.
+
+SPIRE removes that file:
+
+* **Nothing at rest asks for a credential.** An attested agent makes its key in memory and
+  binds it with a single-use JWT-SVID that expires within minutes. A backup, a snapshot or
+  a copied volume holds no agent key at all.
+  - With cloud node attestation (`aws_iid`, `azure_imds`, `gcp_iit`), the host stores no
+    key at all.
+  - On a bare Docker host using a join token, only the SPIRE agent's own key is on disk.
+    A copy of that key can stand in for the node only until SPIRE rotates it (hourly by
+    default). You can also evict the node from the dashboard's SPIRE server at once.
+* **One place to rotate.** A changed password is changed once, on the Connections tab, or
+  not at all with a Password Safe account that rotates on every release. There is no
+  per-host re-seal, no per-host file to update, and no copy left in a backup of
+  `connections.yaml`.
+* **Every release is an event.** Each fetch writes one `agent.connection_secret` audit row
+  that names the job, the connection and the source. A file read on the agent host writes
+  nothing.
+* **Revocation is central.** Revoking the agent, or unbinding its SPIFFE ID, cuts off its
+  key at the next request. You do not need to reach the host.
+* **It works through a TLS-inspecting proxy.** The credential is sealed to a key that
+  exists for one fetch, so the proxy sees only ciphertext. (The SPIRE agent's own mTLS
+  connection to its server does need a proxy bypass; see the overlay's header.)
+
+Two limits remain.
+
+**Root on a running agent host.** Someone with root on the host while the agent runs can
+read its memory, including the in-memory key and any credential a running job holds. No
+storage choice prevents that. Central storage bounds it: the attacker gets the credentials
+of jobs that run while they are present, each one audited, and nothing durable once they
+are evicted and the agent restarts.
+
+**A compromised dashboard.** It holds a credential that is stored on the Connections tab.
+It does not hold one that is a `ps_account://` reference: the dashboard checks the account
+out per job, and the account's Password Safe policy, approval workflow and rotation still
+apply. This is why step 3 recommends a reference. Either way the dashboard still cannot aim
+a credential: `host` and `username` stay in your `connections.yaml`, gated by your
+`policy.yaml`. See [Philosophy](../remote-agents.md#philosophy).
+
+**Host-side storage stays supported.** `password_sealed`, `password_file` and
+`ps_managed_account` keep working, and an Ed25519 agent keeps receiving `dashboard_secret`
+credentials unless you tick the setting in step 4. Use host-side storage when a site will
+not let a credential leave it, or when an agent behind an inspecting proxy cannot reach a
+SPIRE server. In the second case `dashboard_secret` with an Ed25519 agent is still better
+than a password in a file.
+
+With the setting ticked, an Ed25519 agent asking for a dashboard-held credential gets
+`403 … releases the credentials it holds only to agents attested through SPIRE`. That
+covers hypervisor credentials, Gateway deploy keys and Config-Management bundles alike.
+The check runs after job ownership, so an agent asking about a job that isn't its own
+still gets the same answer as for a job that doesn't exist.
+
 ### The credential the dashboard holds
 
 Set `dashboard_secret: true` on a connection in your `connections.yaml` and the agent stops
@@ -45,7 +122,9 @@ not needed.
 ### Sealing a credential this host keeps
 
 Some sites will not move a credential to the dashboard — that being the point of an on-prem
-agent for them — but do not want it sitting in a YAML file as text. `password_sealed:` in
+agent for them — but do not want it sitting in a YAML file as text. If yours can, prefer
+[central storage with SPIRE](#central-storage-with-spire-the-recommended-model): sealing
+is the better *local* option, not the better option. `password_sealed:` in
 `connections.yaml`, and `client_secret_sealed:` in `passwordsafe.yaml`, hold a value
 encrypted against a key in the agent's state volume.
 
@@ -146,6 +225,8 @@ Password Safe OAuth client whose single power is to ask for one. Each job checks
 credential out and checks it back in, so every use lands in Password Safe's audit trail
 and is subject to its policy and approval workflow. That gets the agent close to the end
 state this design was heading for: no standing *hypervisor* credential on the host.
+[Central storage with SPIRE](#central-storage-with-spire-the-recommended-model) is that end
+state.
 
 It does not get all the way there, and the remaining gap is worth naming: the Password Safe
 OAuth client is itself a credential on this host, and its entitlements are usually broader

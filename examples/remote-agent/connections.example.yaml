@@ -36,12 +36,17 @@
 #                               encrypted to a key that exists only for that fetch.
 #                               Nothing sensitive is stored on this host at all.
 #
-# The trade in that last one is real and worth stating: the dashboard, rather than this
-# host, becomes the thing holding the credential. Point it at a Password Safe managed
-# account on the Connections page and neither holds a standing password — the dashboard
-# checks one out per job, checks it back in and rotates it. Which of the three applies
-# is decided HERE, in your file; a credential set on the dashboard does nothing until an
-# entry below says `dashboard_secret: true`.
+# RECOMMENDED: that last one, with this agent attested through SPIRE
+# (docker-compose.spire.yml, "Migrate to SPIRE" on the Agents page). The agent's key then
+# lives only in memory, so nothing on this host — not even a key file — can ask for a
+# credential later. Point the connection at a Password Safe managed account on the
+# Connections page and the dashboard holds no standing password either: it checks one out
+# per job, checks it back in and rotates it. See docs/remote-agents/credentials.md,
+# "Central storage with SPIRE".
+#
+# The other sources stay supported for sites that will not let a credential leave them.
+# Which one applies is decided HERE, in your file; a credential set on the dashboard does
+# nothing until an entry below says `dashboard_secret: true`.
 #
 # Mount it read-only, with the SELinux relabel:
 #   -v "$PWD/connections.yaml:/etc/dashboard-agent/connections.yaml:ro,Z"      # bash
@@ -144,8 +149,9 @@ connections:
   #   verify_ssl: true
 
   # ── Password Safe, instead of a stored credential ──────────────────────────
-  # The end state: this agent holds NO hypervisor credential at all, only a Password
-  # Safe OAuth client whose single power is to ask. Each job checks a credential out
+  # This agent holds NO hypervisor credential at all, only a Password Safe OAuth client
+  # whose single power is to ask. (`dashboard_secret: true` below removes that client
+  # from this host too.) Each job checks a credential out
   # and checks it back in, so every use is subject to Password Safe's own policy,
   # approval workflow and session recording.
   #
@@ -171,7 +177,12 @@ connections:
   #   ps_duration_minutes: 30
   #   verify_ssl: true
 
-  # ── Credential held by the dashboard, fetched per job ──────────────────────
+  # ── Credential held by the dashboard, fetched per job (RECOMMENDED) ────────
+  #
+  # Pair it with SPIRE attestation (docker-compose.spire.yml): an Ed25519 agent fetches
+  # with a key kept in its state volume, an attested one with a key that exists only in
+  # memory. The dashboard can be set to release credentials to attested agents only
+  # (Settings → Remote agents).
   #
   # This host then stores NOTHING sensitive for this connection — no password, no
   # password file, and no Password Safe client either. The credential is fetched when a

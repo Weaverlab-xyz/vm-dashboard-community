@@ -29,6 +29,15 @@ makes that insufficient to execute anything meaningful on the LAN.
 `policy.yaml` is mounted read-only into the agent and no dashboard API can read, write
 or override it. It names what may be touched. It fails closed.
 
+**Holding a credential is not aiming it.** Principle 1 is about *execution*: a
+compromised dashboard must not be able to run anything meaningful on your LAN. Holding a
+credential for an agent to fetch does not break that. `host`, `username` and the verbs
+allowed stay in your `connections.yaml` and `policy.yaml`, so the dashboard cannot point a
+credential anywhere you did not. It is also why the recommended model keeps credentials on
+the dashboard, ideally as Password Safe references, and releases them per job to agents
+attested through SPIRE. See
+[Central storage with SPIRE](remote-agents/credentials.md#central-storage-with-spire-the-recommended-model).
+
 **3. Nothing reusable crosses the wire.**
 The agent authenticates with an Ed25519 signature over one method, one path, one body,
 valid for sixty seconds — not a bearer token. This is what makes it safe through a
@@ -228,6 +237,7 @@ what an unauthenticated internet-facing endpoint actually needs.
 | A Password Safe checkout fails `4031 … 403` | The OAuth client's user needs the **Requestor** role plus a View access policy on a Smart Rule containing that managed account. Membership is recomputed on a schedule, so a new account is not requestable immediately. |
 | A Password Safe checkout fails `4034 … 403` | The request is awaiting human approval. An unattended agent does not wait — the job fails rather than hanging. Use an auto-approve access policy for accounts an agent needs. The request it opened is checked straight back in, so it does not hold the account's concurrent-request slot while you fix the policy. |
 | `the dashboard refused to release the credential for 'x' (409)` | Read the rest of that line: it carries the dashboard's own reason, and it says explicitly that this is **not** a policy.yaml or connections.yaml problem. Usually the connection has `dashboard_secret: true` here but no credential set on the Connections tab. |
+| `the dashboard refused to release the credential for 'x' (403)` … *only to agents attested through SPIRE* | Settings → Remote agents has **Release dashboard-held credentials only to SPIRE-attested agents** ticked, and this agent still uses an Ed25519 key. Click **Migrate to SPIRE** on its row, or untick the setting until every agent has migrated. The same refusal applies to Gateway deploy keys and Config-Management bundles. |
 | `did not authenticate — sealed to a different key, or for a different agent, job or connection` | The seal was built for something other than what this agent asked for. Almost always a dashboard and agent mid-upgrade against a changed audience; check `AGENT_BASE_URL`/the pinned audience matches on both sides. |
 | The dashboard refuses to queue: *"needs at least 2.1"* | This connection takes its credential from the dashboard and the agent image predates that. Pull `chrweav/dashboard-agent:latest` and restart the container; the agent keeps its identity, so no re-enrolment. |
 | A connection shows `takes its credential from Password Safe, but this dashboard has no Password Safe API client configured` | Set the BeyondTrust API URL, client id and client secret under Settings. Refused at enqueue rather than as a failed job, because a checkout that cannot authenticate is a configuration state, not a run failure. |
@@ -312,6 +322,13 @@ Hypervisor brokering followed it and is described above. Next:
   through the dashboard's own SPIRE server) with a banner recommending it. Agent host side:
   `examples/remote-agent/docker-compose.spire.yml`. Design, including
   what `join_token` hosts still keep on disk: [agent-and-human-identity.md](design/agent-and-human-identity.md).
+- **Credentials held centrally, released to attested agents.** With an agent key that no
+  longer sits on disk, keeping credentials on the dashboard (`dashboard_secret`, ideally a
+  `ps_account://` reference) is the recommended model rather than a trade, and
+  host-side storage becomes the fallback. **Built:** the opt-in setting **Release
+  dashboard-held credentials only to SPIRE-attested agents** (`dashboard_secrets_require_spire`),
+  enforced on all three release routes. See
+  [Central storage with SPIRE](remote-agents/credentials.md#central-storage-with-spire-the-recommended-model).
 - **Retiring `POWERSHELL_EXECUTION_MODE=ssh`,** now that a co-located agent does the
   same job by polling outward instead of the dashboard holding an inbound SSH key to a
   Windows desktop.

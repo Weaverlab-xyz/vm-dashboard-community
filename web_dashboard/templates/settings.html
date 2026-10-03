@@ -5243,6 +5243,22 @@
             </p>
           </div>
 
+          <label class="flex items-start gap-2 pt-1">
+            <input type="checkbox" x-model="panelCfg.dashboard_secrets_require_spire"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-gray-700">
+              Release dashboard-held credentials only to SPIRE-attested agents
+              <span class="block text-[11px] text-gray-500">
+                Hypervisor credentials (<code class="font-mono">dashboard_secret: true</code>),
+                Gateway deploy keys and Config-Management bundles are handed only to agents
+                whose key came from a SPIRE attestation. That key lives only in the agent's
+                memory and is replaced at every restart, so nothing on the host's disk can be
+                copied off to pull credentials later. Ed25519 agents keep running jobs whose
+                credentials are stored on their own host. Off by default.
+              </span>
+            </span>
+          </label>
+
           <!-- ── Signing audience (read-only) ──────────────────────────────────
                A separate box from the field above, because they are separate values and
                conflating them is the bug: Public base URL is what you *state*, the audience

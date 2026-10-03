@@ -914,6 +914,9 @@ class RemoteAgentsFeatureConfig(BaseModel):
     # The dashboard's own SPIRE server container (docker-compose.spire.yml), driven with
     # `docker exec` by "Migrate to SPIRE" and the daily trust-bundle re-sync.
     spire_server_container: str = "vmdash-spire-server"
+    # Opt-in: credentials the dashboard holds are released only to agents that attested
+    # through SPIRE (auth_mode "spiffe"). Off, Ed25519 agents receive them as before.
+    dashboard_secrets_require_spire: bool = False
 
 class PasswordSafeFeatureConfig(BaseModel):
     """Password Safe / Secrets Safe — secret and managed-account checkout, plus

@@ -54,6 +54,16 @@ untrusted input, which is the other reason nothing is auto-registered; and, for
 `dashboard_secret` connections, credential requests that show up in the audit log and stop
 the moment the key is revoked.
 
+**An agent attested through SPIRE has no `identity.json` to steal.** It makes its key in
+memory at every start and binds it with a single-use JWT-SVID. In the table above,
+what remains is root (or the Docker socket) on the host while the agent is running, which
+can read process memory. A disk copy, a
+backup or a stopped container's volume holds no agent key. That is what makes it safe to
+keep every credential on the dashboard and let the agent fetch it per job. See
+[Central storage with SPIRE](credentials.md#central-storage-with-spire-the-recommended-model).
+Settings → Remote agents can then refuse dashboard-held credentials to any agent that still
+authenticates with a key file.
+
 Revocation does not depend on reaching the container. **Revoke** clears the stored public
 key, so the next poll fails verification whatever that container is still doing, and any
 job it held is failed immediately rather than at the next reconcile.
