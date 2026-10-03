@@ -259,19 +259,36 @@ def test_the_dropin_directory_exists_before_the_dropin_is_written():
         f"{names[write]!r} writes the drop-in before {names[mkdir]!r} creates its directory")
 
 
+def _auth_doc(play):
+    """The AuthenticationConfiguration document the play writes, as data.
+
+    The file is shared with k3s-dex-auth.yml, so the play no longer writes it as text: it
+    builds `_auth_doc` (apiVersion, kind, and the merged `jwt` list) and dumps it. These
+    tests read that structure rather than the dump template, which is the one line
+    `{{ _auth_doc | to_nice_yaml }}` and would make every assertion below vacuous.
+    """
+    task = _copy_task(play, "spiffe-auth-config.yaml")
+    assert "_auth_doc" in task["ansible.builtin.copy"]["content"], (
+        "the AuthenticationConfiguration is not written from _auth_doc")
+    return task["vars"]["_auth_doc"]
+
+
+def _own_jwt(play):
+    """This play's own JWT authenticator, as the set_fact describes it."""
+    task = next(t for t in _tasks(play) if "_own_jwt" in (t.get("ansible.builtin.set_fact") or {}))
+    return task["ansible.builtin.set_fact"]["_own_jwt"]
+
+
 def test_the_authentication_config_is_the_ga_api_version():
     """Structured authentication is GA in 1.34 as apiserver.config.k8s.io/v1. A v1 document
     on an older API server is rejected and the API server does not start."""
     play = _spiffe_play()
-    content = _copy_task(play, "spiffe-auth-config.yaml")["ansible.builtin.copy"]["content"]
-    # Matched as a whole LINE, not a substring: "…k8s.io/v1" is a substring of
-    # "…k8s.io/v1beta1", so `in content` would happily accept the beta version this test
-    # exists to reject. Caught by mutation-testing the assertion itself.
-    lines = [ln.strip() for ln in content.splitlines()]
-    assert "apiVersion: apiserver.config.k8s.io/v1" in lines, (
-        "the AuthenticationConfiguration is not at the GA apiVersion; found "
-        + repr(next((ln for ln in lines if ln.startswith("apiVersion:")), None)))
-    assert "kind: AuthenticationConfiguration" in lines
+    doc = _auth_doc(play)
+    # Compared as a whole value, not a substring: "…k8s.io/v1" is a substring of
+    # "…k8s.io/v1beta1", which is the version this test exists to reject.
+    assert doc["apiVersion"] == "apiserver.config.k8s.io/v1", (
+        f"the AuthenticationConfiguration is not at the GA apiVersion; found {doc['apiVersion']!r}")
+    assert doc["kind"] == "AuthenticationConfiguration"
     guard = yaml.safe_dump([t for t in _tasks(play) if "assert" in yaml.safe_dump(t)])
     assert "34" in guard, (
         "nothing refuses an older Kubernetes. Writing a v1 config to a pre-1.34 API server "
@@ -282,9 +299,9 @@ def test_the_username_claim_carries_the_mandatory_prefix():
     """Kubernetes requires a prefix on any username claim that is not `email`, and whatever
     is chosen becomes part of every RBAC subject naming this identity."""
     play = _spiffe_play()
-    content = _copy_task(play, "spiffe-auth-config.yaml")["ansible.builtin.copy"]["content"]
-    assert "claim: sub" in content, "the username must map from sub, which holds the SPIFFE ID"
-    assert "prefix:" in content, "a username claim other than email needs a prefix"
+    username = _own_jwt(play)["claimMappings"]["username"]
+    assert username["claim"] == "sub", "the username must map from sub, which holds the SPIFFE ID"
+    assert username.get("prefix"), "a username claim other than email needs a prefix"
     assert play["vars"]["username_prefix"], "username_prefix defaults to empty"
     rbac = _copy_task(play, "spiffe-rbac.yaml")["ansible.builtin.copy"]["content"]
     assert "_rbac_user" in rbac, (
@@ -295,10 +312,90 @@ def test_the_username_claim_carries_the_mandatory_prefix():
 def test_the_audience_is_checked_and_not_merely_declared():
     """The audience is the only thing stopping a JWT-SVID minted for another relying party
     being replayed at this API server."""
-    play = _spiffe_play()
-    content = _copy_task(play, "spiffe-auth-config.yaml")["ansible.builtin.copy"]["content"]
-    assert "audiences:" in content, "the issuer declares no audience"
-    assert "claim: aud" in content, "no claimValidationRule pins the audience"
+    own = _own_jwt(_spiffe_play())
+    assert own["issuer"].get("audiences"), "the issuer declares no audience"
+    assert any(r.get("claim") == "aud" for r in own.get("claimValidationRules") or []), (
+        "no claimValidationRule pins the audience")
+
+
+# ── one AuthenticationConfiguration, two plays ──────────────────────────────
+# k3s takes one --authentication-config, and k3s-dex-auth.yml keeps its authenticator in
+# the same file. Reasoning: docs/design/agent-and-human-identity.md. The merge itself was
+# exercised under ansible-core 2.19 and the merged file booted on k3s v1.34.12; these pin
+# the parts of it a later edit could quietly break.
+
+def _dex_play():
+    path = os.path.join(_K3S_DIR, "k3s-dex-auth.yml")
+    assert os.path.exists(path), "k3s-dex-auth.yml is missing"
+    return yaml.safe_load(open(path, encoding="utf-8").read())[0]
+
+
+def _unlink_play():
+    return yaml.safe_load(open(os.path.join(_K3S_DIR, "k3s-spiffe-unlink.yml"),
+                               encoding="utf-8").read())[0]
+
+
+def test_both_auth_plays_share_one_file_and_one_identical_dropin():
+    """Two files would mean two --authentication-config flags; two different drop-in bodies
+    would make each play rewrite the other's and restart k3s on every run."""
+    spiffe, dex = _spiffe_play(), _dex_play()
+    for key in ("auth_config", "dropin"):
+        assert spiffe["vars"][key] == dex["vars"][key], (
+            f"{key} differs between the plays: {spiffe['vars'][key]!r} vs {dex['vars'][key]!r}")
+    body = lambda p: _copy_task(p, "config.yaml.d")["ansible.builtin.copy"]["content"]  # noqa: E731
+    assert body(spiffe) == body(dex), "the two plays write different drop-ins to the same path"
+
+
+def test_each_play_replaces_only_its_own_entry_in_place():
+    """Ownership is the username prefix. Removing and appending (rather than replacing in
+    place) reorders the file whenever the plays alternate, and every reorder restarts k3s."""
+    for play, prefix_var in ((_spiffe_play(), "username_prefix"), (_dex_play(), "dex_username_prefix")):
+        merge = next(t for t in _tasks(play) if "_new_jwt" in (t.get("ansible.builtin.set_fact") or {}))
+        src = yaml.safe_dump(merge)
+        assert "claimMappings.username.prefix" in src, "ownership is not keyed on the username prefix"
+        assert prefix_var in src, f"the merge does not use {prefix_var}"
+        assert "_existing_jwt[:(_at | int)]" in src, "the play's entry is not put back where it was"
+        assert _copy_task(play, "spiffe-auth-config.yaml")["vars"]["_auth_doc"]["jwt"] == "{{ _new_jwt }}"
+
+
+def test_the_dex_prefix_can_never_be_the_spiffe_prefix():
+    """A shared prefix would let either play delete the other's authenticator."""
+    spiffe, dex = _spiffe_play(), _dex_play()
+    assert dex["vars"]["dex_username_prefix"] != spiffe["vars"]["username_prefix"]
+    assert dex["vars"]["spiffe_username_prefix"] == spiffe["vars"]["username_prefix"], (
+        "k3s-dex-auth.yml guards against the wrong SPIFFE prefix")
+    guard = yaml.safe_dump(next(t for t in _tasks(dex) if "ansible.builtin.assert" in t))
+    assert "dex_username_prefix != spiffe_username_prefix" in guard
+
+
+def test_the_dex_authenticator_prefixes_groups_too():
+    """Without a groups prefix an upstream group named system:masters would be cluster-admin."""
+    # The Dex entry is one Jinja expression (it adds certificateAuthority only when a CA
+    # is given), so this matches the mapping in its source rather than a parsed dict.
+    src = _own_jwt(_dex_play())
+    assert "'groups': {'claim': 'groups', 'prefix': dex_groups_prefix}" in src, (
+        "the groups claim is not mapped with dex_groups_prefix")
+    assert _dex_play()["vars"]["dex_groups_prefix"], "dex_groups_prefix defaults to empty"
+
+
+def test_the_unlink_removes_what_the_link_actually_wrote():
+    """It used to name 90-spiffe-auth.yaml and /etc/rancher/k3s/spiffe-auth.yaml, which the
+    link never wrote — so unlinking left the API server's flag exactly where it was."""
+    link, unlink = _spiffe_play(), _unlink_play()
+    for key in ("auth_config", "dropin"):
+        assert unlink["vars"][key] == link["vars"][key], (
+            f"the unlink's {key} is {unlink['vars'][key]!r}; the link writes {link['vars'][key]!r}")
+    assert unlink["vars"]["rbac_manifest"] == _resolved(link, "{{ k3s_server_dir }}/spiffe-rbac.yaml")
+
+
+def test_the_unlink_keeps_other_authenticators_and_their_dropin():
+    """A node that also trusts Dex must keep trusting Dex after the SPIFFE half goes."""
+    tasks = _tasks(_unlink_play())
+    dropin = next(t for t in tasks if "drop-in" in (t.get("name") or ""))
+    assert "_other_jwt | length == 0" in str(dropin.get("when")), (
+        "the drop-in is removed even when another play's authenticator still needs it")
+    rewrite = next(t for t in tasks if (t.get("ansible.builtin.copy") or {}).get("dest") == "{{ auth_config }}")
+    assert rewrite["vars"]["_auth_doc"]["jwt"] == "{{ _other_jwt }}"
 
 
 def test_the_workloads_kubeconfig_holds_no_credential():

@@ -160,6 +160,12 @@ a file read.
 | `k3s-status.yml` | Read-only — service state, version, and on a server the nodes/pods |
 | `k3s-uninstall.yml` | Run k3s's uninstall script (guarded; `confirm: true` required) |
 | `k3s-spiffe-auth.yml` | Make the API server accept SPIFFE JWT-SVIDs as bearer tokens (needs 1.34+; **never live-validated**) |
+| `k3s-spiffe-unlink.yml` | Undo `k3s-spiffe-auth.yml`, keeping any other authenticator (Dex) the API server trusts |
+| `k3s-dex-auth.yml` | Make the API server accept Dex ID tokens for **people** — usernames and groups `dex:`-prefixed. **Required** after `k3s-server-init.yml`: Dex is the only way people reach an on-prem cluster (needs 1.34+; see [`dex/`](dex/README.md)) |
+
+`k3s-spiffe-auth.yml` and `k3s-dex-auth.yml` share one `AuthenticationConfiguration` (k3s
+takes a single `--authentication-config`). Each replaces only its own entry, keyed by its
+username prefix, so either can be run, re-run or undone without touching the other's.
 
 ### Building a cluster
 
@@ -170,7 +176,10 @@ Same node-by-node shape as `swarm/`, since a run targets one host:
 3. `k3s-join.yml` on each remaining node (`node_role: server` for extra control-plane
    nodes — the first server must have been started with `cluster_init: true`).
 4. `k3s-status.yml` on a server to confirm everyone registered.
-5. `k3s-kubeconfig.yml` on a server to collect the kubeconfig for registration.
+5. `k3s-kubeconfig.yml` on a server to collect the kubeconfig for registration. This is the
+   dashboard's own (admin) credential and break-glass, not something to hand to people.
+6. `k3s-dex-auth.yml` on each server, against a Dex from [`dex/`](dex/README.md). People
+   reach on-prem clusters only through Dex.
 
 **Use the local runner**, and note the install fetches `get.k3s.io` over HTTPS, so the
 nodes need egress. Air-gapped installs are out of scope.
@@ -181,7 +190,9 @@ nodes need egress. Air-gapped installs are out of scope.
 and `spire/`, and the dashboard drives the whole chain from a button on a SPIRE lab's row: a SPIRE-attested workload fetches a JWT-SVID over the Workload API and `kubectl`
 sends it as the bearer token, so nothing is stored on disk or in a vault. It exists because
 `--authentication-config` is a kube-apiserver flag and **EKS, AKS and GKE do not expose it**
-— a self-managed cluster is the only place the pattern works at all.
+— a self-managed cluster is the only place the pattern works at all. (For *people* the
+managed clouds each accept one public OIDC issuer, which is enough for Dex — see
+[`dex/`](dex/README.md).)
 
 Run order, alternating hosts:
 
@@ -364,6 +375,23 @@ with a filter bug that silently narrowed the inventory while still reporting suc
 admin credential moves one way only — into Password Safe under `no_log`, never back
 through the job log. See [`spire/README.md`](spire/README.md) for the order to run them
 in and what each one proves.
+
+## Dex — one issuer for people (`dex/`)
+
+Dex federates your existing IdP into one OIDC issuer that the dashboard's SSO and every
+cluster's API server can trust, so a person and their groups mean the same thing everywhere.
+**Required for on-prem clusters** (it is the only way people reach a k3s cluster);
+**optional and not the default** for managed clusters and for dashboard sign-in.
+
+| File | Purpose |
+|---|---|
+| `dex-helm.yml` | Dex 2.45.1 on k3s (chart and image pinned), HTTPS-only on the node address, lab CA or your certificate, `kubernetes` + `dashboard` clients; checks the advertised issuer |
+| `dex-remove.yml` | Remove Dex and its authenticator, keeping SPIFFE's if present |
+
+Then `k3s/k3s-dex-auth.yml` on each k3s server that should trust it. See
+[`dex/README.md`](dex/README.md) for the order and what has been verified, and
+[docs/design/agent-and-human-identity.md](../../docs/design/agent-and-human-identity.md) for
+why Dex is for people and SPIRE for workloads.
 
 ## The agent cell (`agent/`)
 
