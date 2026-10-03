@@ -419,8 +419,11 @@ async def _spire_refresh_loop() -> None:
     lab across both app workers. A no-op when there are no labs.
     """
     def work(db):
-        from .services import spire_lab_service
+        from .services import dashboard_spire, spire_lab_service
         spire_lab_service.enqueue_refresh_if_due(db)
+        # The dashboard's own SPIRE trust domain (agent attestation). A no-op unless
+        # spire_attest_enabled, at most once a day, and never raises.
+        dashboard_spire.sync_if_due(db)
 
     def interval():
         from .services import spire_lab_service

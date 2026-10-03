@@ -95,6 +95,32 @@
       </div>
     </div>
 
+    <!-- SPIRE recommendation. Only when the dashboard accepts attestation, only for
+         active agents still on an Ed25519 key, and dismissible per agent: "not now" is a
+         legitimate answer for a site behind a TLS-inspecting proxy, which cannot reach a
+         SPIRE server at all. docs/design/agent-and-human-identity.md, "The banner". -->
+    <div x-show="spireEnabled && spireCandidates().length > 0" x-cloak
+         class="mb-4 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3">
+      <p class="text-sm text-indigo-900 font-medium"
+         x-text="spireCandidates().length + (spireCandidates().length === 1 ? ' agent still keeps' : ' agents still keep') + ' a long-lived signing key on disk.'"></p>
+      <p class="text-xs text-indigo-800 mt-0.5">
+        Migrating to SPIRE moves the key into memory: on a cloud VM nothing is stored at all,
+        and on a bare Docker host only SPIRE's own hourly-rotated key remains.
+      </p>
+      <ul class="mt-2 space-y-1">
+        <template x-for="a in spireCandidates()" :key="a.id">
+          <li class="flex flex-wrap items-center gap-2 text-xs text-indigo-900">
+            <span class="font-medium" x-text="a.name"></span>
+            <span x-show="!versionAtLeast(a.agent_version, spireMinVersion)" class="text-amber-700"
+                  x-text="'update the agent image to ' + spireMinVersion + '+ first (it reports ' + (a.agent_version || 'no version') + ')'"></span>
+            <button x-show="versionAtLeast(a.agent_version, spireMinVersion)" @click="migrateSpire(a)"
+                    class="text-indigo-700 hover:text-indigo-900 font-medium underline">Migrate to SPIRE</button>
+            <button @click="dismissSpire(a.id)" class="text-indigo-400 hover:text-indigo-700">Not now</button>
+          </li>
+        </template>
+      </ul>
+    </div>
+
     <div x-show="loading" class="py-6 text-center text-gray-400 text-sm">Loading…</div>
 
     <div x-show="!loading && agents.length === 0" class="py-8 text-center text-gray-400 text-sm">
@@ -170,6 +196,12 @@
                           class="text-xs font-medium transition mr-2">
                     Discover
                   </button>
+                  <button x-show="spireEnabled && a.status !== 'revoked' && a.auth_mode === 'ed25519'"
+                          @click="migrateSpire(a)"
+                          title="Move this agent to SPIRE attestation: its signing key will live only in memory"
+                          class="text-xs font-medium transition mr-2 text-indigo-600 hover:text-indigo-800">
+                    Migrate to SPIRE
+                  </button>
                   <button @click="reissue(a)"
                           :disabled="a.status === 'revoked'"
                           :class="a.status === 'revoked' ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:text-gray-800'"
@@ -213,6 +245,12 @@
                       <dt class="text-gray-400 uppercase tracking-wide">Policy hash</dt>
                       <dd class="font-mono text-gray-700" :title="a.policy_hash || ''"
                           x-text="a.policy_hash ? a.policy_hash.slice(0, 12) + '…' : '—'"></dd>
+                    </div>
+                    <div>
+                      <dt class="text-gray-400 uppercase tracking-wide">Identity</dt>
+                      <dd class="text-gray-700"
+                          x-text="a.auth_mode === 'spiffe' ? 'SPIRE (key in memory)' : 'Ed25519 (key on disk)'"></dd>
+                      <dd x-show="a.spiffe_id" class="font-mono text-gray-500 break-all" x-text="a.spiffe_id"></dd>
                     </div>
                     <div x-show="a.status === 'enrolling'" class="col-span-2">
                       <dt class="text-gray-400 uppercase tracking-wide">Enrolment code expires</dt>
@@ -374,6 +412,64 @@
     </div>
   </div>
 
+  <!-- Migrate to SPIRE — the join token is shown ONCE -->
+  <div x-show="migrate.open" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-semibold text-gray-800 mb-1">Migrate <span x-text="migrate.name"></span> to SPIRE</h3>
+      <p class="text-sm text-gray-600 mb-1">
+        The SPIRE entries exist and the agent is bound to
+        <code class="font-mono text-xs break-all" x-text="migrate.spiffe_id"></code>.
+        Its current key keeps working until it first attests, so nothing breaks in between.
+      </p>
+      <p class="text-sm text-red-600 mb-4">
+        The join token below is shown once, works once, and expires in
+        <span x-text="Math.round((migrate.join_token_ttl_s || 900) / 60)"></span> minutes.
+      </p>
+      <ol class="list-decimal ml-5 space-y-4 text-sm text-gray-700">
+        <li>
+          On the agent host, beside its <code class="font-mono">docker-compose.yml</code>, save the trust bundle as
+          <code class="font-mono">spire/bootstrap.crt</code>:
+          <div class="flex gap-2 mt-1">
+            <textarea readonly rows="4" :value="migrate.bootstrap_pem"
+                      class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono bg-gray-50"></textarea>
+            <button @click="copy(migrate.bootstrap_pem)"
+                    class="self-start text-sm px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 transition">Copy</button>
+          </div>
+        </li>
+        <li>
+          Add these to the agent's <code class="font-mono">.env</code>:
+          <div class="flex gap-2 mt-1">
+            <textarea readonly rows="3" :value="migrate.env"
+                      class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono bg-gray-50"></textarea>
+            <button @click="copy(migrate.env)"
+                    class="self-start text-sm px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 transition">Copy</button>
+          </div>
+        </li>
+        <li>
+          Restart it with the SPIRE overlay:
+          <div class="flex gap-2 mt-1">
+            <input type="text" readonly :value="migrate.run"
+                   class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono bg-gray-50"/>
+            <button @click="copy(migrate.run)"
+                    class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 transition">Copy</button>
+          </div>
+        </li>
+      </ol>
+      <p class="text-xs text-gray-500 mt-4">
+        Needs agent image 2.6.0 or newer, and outbound access to the SPIRE server's port (8081) —
+        a TLS-inspecting proxy needs a bypass for it. To go back, use <strong>Re-enrol</strong>:
+        it clears the SPIRE binding and issues a fresh code.
+      </p>
+      <div class="flex justify-end mt-6">
+        <button @click="migrate.open = false"
+                class="text-sm bg-blue-700 hover:bg-blue-800 text-white px-3 py-1.5 rounded-lg font-medium transition">
+          Done
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Discover modal -->
   <div x-show="discoverOpen" x-cloak
        class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
@@ -464,6 +560,11 @@ function agentsPage() {
     enrolOpen: false,
     discoverOpen: false,
     audienceBlock: '',   // the 409 explaining why a mint was refused; sticky until dismissed
+    spireEnabled: false,       // from GET /api/agents: the dashboard accepts SPIRE attestation
+    spireMinVersion: '2.6.0',  // the first agent image that can attest
+    spireDismissed: {},        // per-agent "Not now" on the SPIRE banner (localStorage)
+    migrate: {open: false, name: '', spiffe_id: '', join_token_ttl_s: 900,
+              bootstrap_pem: '', env: '', run: ''},
     form: {name: '', site: '', description: ''},
     enrol: {name: '', code: '', docker_run: '', docker_run_code_file: '',
             docker_run_powershell: '', docker_run_code_file_powershell: '', warnings: []},
@@ -517,6 +618,7 @@ function agentsPage() {
 
     async init() {
       requireAuth();
+      this.spireDismissed = this.loadSpireDismissed();
       await this.load();
       // Status is derived from last_seen_at, so it only changes as the agent polls.
       this._timer = setInterval(() => this.load(true), 15000);
@@ -527,6 +629,8 @@ function agentsPage() {
       try {
         const r = await API.get('/api/agents');
         this.agents = r.agents || [];
+        this.spireEnabled = !!r.spire_attest_enabled;
+        this.spireMinVersion = r.spire_min_agent_version || '2.6.0';
         this.notEnabled = false;
         this.noAccess = '';
       } catch (e) {
@@ -546,6 +650,57 @@ function agentsPage() {
         }
       } finally {
         this.loading = false;
+      }
+    },
+
+    // ── SPIRE migration ──
+    // Methods, not getters, so tests/template_helpers_check.js can reach them.
+
+    // Numeric, part by part: as strings '2.10.0' < '2.6.0', which would tell an operator
+    // on a NEWER image to update it.
+    versionAtLeast(version, min) {
+      const parts = v => String(v || '').replace(/^v/, '').split(/[.+-]/).slice(0, 3)
+        .map(n => parseInt(n, 10) || 0);
+      const a = parts(version), b = parts(min);
+      if (!version) return false;
+      for (let i = 0; i < 3; i++) {
+        if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0);
+      }
+      return true;
+    },
+
+    spireCandidates() {
+      return this.agents.filter(a => a.status !== 'revoked' && a.auth_mode === 'ed25519'
+                                     && !this.spireDismissed[a.id]);
+    },
+
+    // Every storage access wrapped: a private window, blocked site data or a preview can
+    // throw on the accessor itself, and the page must still render.
+    loadSpireDismissed() {
+      try {
+        return JSON.parse(window.localStorage.getItem('agents.spire.dismissed') || '{}') || {};
+      } catch (e) {
+        return {};
+      }
+    },
+
+    dismissSpire(id) {
+      this.spireDismissed = {...this.spireDismissed, [id]: true};
+      try {
+        window.localStorage.setItem('agents.spire.dismissed', JSON.stringify(this.spireDismissed));
+      } catch (e) { /* not remembered across reloads; fine */ }
+    },
+
+    async migrateSpire(a) {
+      if (!confirm(`Migrate "${a.name}" to SPIRE? The dashboard creates its SPIRE entries and a one-time join token. The agent keeps its current key until it first attests.`)) return;
+      try {
+        const r = await API.post(`/api/agents/${encodeURIComponent(a.id)}/migrate-spire`, {});
+        this.migrate = {open: true, name: a.name, spiffe_id: r.spiffe_id,
+                        join_token_ttl_s: r.join_token_ttl_s, bootstrap_pem: r.bootstrap_pem,
+                        env: r.env, run: r.run};
+        await this.load(true);
+      } catch (e) {
+        this.flash('Migrate to SPIRE failed: ' + (e.message || e), 'error');
       }
     },
 

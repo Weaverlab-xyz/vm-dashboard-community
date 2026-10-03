@@ -18,20 +18,13 @@
 #
 # Before the first `up`:
 #   1. Dashboard: Settings → Remote agents → tick "Let agents attest through SPIRE".
-#   2. Dashboard: register the dashboard's own trust domain under SPIFFE trust domains,
-#      with the bundle from its SPIRE server
-#        docker compose -f docker-compose.yml -f docker-compose.spire.yml \
-#          exec spire-server /opt/spire/bin/spire-server bundle show -format spiffe
-#   3. Dashboard: on this agent's row, bind its SPIFFE ID
-#        POST /api/agents/<id>/spiffe-id {"spiffe_id": "spiffe://<td>/agent/<agent-id>"}
-#   4. SPIRE server: create the node entry (or a join token) and the workload entry
-#        spire-server token generate -spiffeID spiffe://<td>/node/<host>
-#        spire-server entry create -parentID spiffe://<td>/node/<host> \
-#          -spiffeID spiffe://<td>/agent/<agent-id> -selector unix:uid:10001
-#      (the Agents page will do 3 and 4 in one click in a later release).
-#   5. Here: copy the trust bundle to spire/bootstrap.crt
-#        (spire-server bundle show, on the dashboard), and set SPIRE_SERVER_ADDRESS,
-#        SPIRE_TRUST_DOMAIN and, for join-token attestation, SPIRE_JOIN_TOKEN.
+#   2. Dashboard: Agents → this agent → "Migrate to SPIRE". That creates the SPIRE entries
+#      and a one-use join token, registers the dashboard's trust domain and binds the
+#      agent, and shows what to paste here:
+#   3. Here: the trust bundle it shows → spire/bootstrap.crt, and its SPIRE_SERVER_ADDRESS,
+#      SPIRE_TRUST_DOMAIN and SPIRE_JOIN_TOKEN lines → .env. Then `up -d` as above.
+#   Cloud VMs using agent-cloud.conf (no key at rest) need their node entry made by hand:
+#   the node's SPIFFE ID comes from the instance and is not known until it attests.
 #
 # BEHIND A TLS-INSPECTING PROXY: spire-agent → server is mTLS gRPC and an inspecting proxy
 # breaks it. Ask for a bypass for SPIRE_SERVER_ADDRESS:SPIRE_SERVER_PORT, or stay on

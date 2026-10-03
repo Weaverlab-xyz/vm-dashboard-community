@@ -265,9 +265,15 @@ k3s takes one `--authentication-config` file. That file holds a list of JWT auth
 - `RemoteAgent.spiffe_id` / `auth_mode`, bound with `POST /api/agents/{id}/spiffe-id` (`agents:write`; `""` unbinds and cuts off an attested key). Re-issuing an enrolment code clears both: that is the rollback.
 - The agent's `AGENT_SPIFFE_JWT_FILE` mode (agent 2.6.0) and the spiffe-helper layout in `examples/remote-agent/docker-compose.spire.yml`.
 
+**Also built:** the one-click **Migrate to SPIRE** action and the banner (`services/dashboard_spire.py`, `POST /api/agents/{id}/migrate-spire`).
+- It drives the dashboard's SPIRE server with `docker exec <spire_server_container> spire-server … -output json`, the way the SPIRE lab drives its Docker-mode server. The Docker socket and CLI were already in the app image, so there is no gRPC dependency, and the compose overlay's admin-socket mount is not needed for it.
+- One click: a one-use join token for `spiffe://<td>/node/<agent-id>`, the workload entry `spiffe://<td>/agent/<agent-id>` selecting `unix:uid:10001` under it (reused if it exists), the trust domain registered from `bundle show -format spiffe`, and the binding. The modal shows the token once, the `.env` lines and the trust bundle for `spire/bootstrap.crt`.
+- The trust domain row is owned (`created_by="dashboard-spire"`) and re-synced daily by the existing SPIRE refresh loop, because SPIRE rotates JWT keys within `ca_ttl`. A row a SPIRE lab or an admin registered under the same name is never overwritten.
+- The banner lists active Ed25519 agents when attestation is on, says "update the image first" below agent 2.6.0, and is dismissible per agent.
+- Not automated: cloud node attestation (`aws_iid`, `azure_imds`, `gcp_iit`), whose node SPIFFE ID is derived from the instance and is unknown until it attests. Those entries are still created by hand.
+
 Still to build:
 
-- The **Migrate to SPIRE** action (bind + SPIRE node/workload entries through the dashboard's admin socket in one click), auto-registering the dashboard's own trust domain, and the banner.
 - Settings: SSO provider `direct | dex`, `k8s_human_auth_mode` (managed clusters only, default `native`) with a per-cluster override.
 - `dex_issuer_url` wiring in the four managed-cluster Terraform modules, empty by default.
 - A Dex compose overlay for the dashboard host, for sites that want Dex beside the dashboard rather than on a cluster.

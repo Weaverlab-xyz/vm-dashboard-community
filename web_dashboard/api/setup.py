@@ -911,6 +911,9 @@ class RemoteAgentsFeatureConfig(BaseModel):
     # Opt-in: agents may attest through SPIRE (POST /api/agent/attest) instead of an
     # enrolment code. Off, the route 404s. Ed25519 enrolment works either way.
     spire_attest_enabled: bool = False
+    # The dashboard's own SPIRE server container (docker-compose.spire.yml), driven with
+    # `docker exec` by "Migrate to SPIRE" and the daily trust-bundle re-sync.
+    spire_server_container: str = "vmdash-spire-server"
 
 class PasswordSafeFeatureConfig(BaseModel):
     """Password Safe / Secrets Safe — secret and managed-account checkout, plus

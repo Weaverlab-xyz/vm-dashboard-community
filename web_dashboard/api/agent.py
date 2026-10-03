@@ -57,6 +57,7 @@ import json
 import logging
 import re
 from typing import NamedTuple, Optional
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -73,6 +74,7 @@ from ..services import (agent_ansible_bundle, agent_ansible_meta, agent_gateway_
 from ..services.hypervisor_connection_service import HypervisorConnectionError
 from ..services.agent_guard import AgentThrottled
 from ..services.agent_service import AgentError
+from ..services import dashboard_spire
 from .auth import require_explicit_permission
 
 logger = logging.getLogger(__name__)
@@ -1195,7 +1197,11 @@ def list_agents(current_user: User = Depends(require_explicit_permission("agents
     for agent_id, in db.query(Job.agent_id).filter(
             Job.agent_id.isnot(None), Job.status == "running").all():
         counts[agent_id] = counts.get(agent_id, 0) + 1
-    return {"agents": [_agent_row(a, counts.get(a.id, 0)) for a in agents]}
+    return {"agents": [_agent_row(a, counts.get(a.id, 0)) for a in agents],
+            # For the "move to SPIRE" banner: shown only when attestation is on, and
+            # "update the image first" for agents older than the first that can attest.
+            "spire_attest_enabled": config_service.get_bool("spire_attest_enabled"),
+            "spire_min_agent_version": dashboard_spire.MIN_AGENT_VERSION}
 
 
 # ── The signing audience ──────────────────────────────────────────────────────
@@ -1346,6 +1352,43 @@ def bind_spiffe_id(agent_id: str, body: SpiffeBindRequest, request: Request,
                           details={"agent": agent.name, "spiffe_id": agent.spiffe_id or "",
                                    "audience": audience["effective"]})
     return {**_agent_row(agent), "attest_audience": (_pinned_audience() + ATTEST_PATH)}
+
+
+@admin_router.post("/{agent_id}/migrate-spire")
+def migrate_to_spire(agent_id: str, request: Request,
+                     current_user: User = Depends(require_explicit_permission("agents", "write")),
+                     db: Session = Depends(get_db)):
+    """One click: a join token, the SPIRE entries, the trust domain, and the binding.
+
+    Drives the dashboard's own SPIRE server (docker-compose.spire.yml) through
+    services/dashboard_spire. Returns the join token ONCE, with what the agent host
+    pastes: the env block for examples/remote-agent/docker-compose.spire.yml and the
+    trust bundle for spire/bootstrap.crt. The agent's current key keeps working until it
+    first attests; Re-enrol is the rollback.
+    """
+    if not config_service.get_bool("spire_attest_enabled"):
+        raise HTTPException(status_code=409, detail=(
+            "SPIRE attestation is off. Turn on Settings → Remote agents → 'Let agents "
+            "attest through SPIRE' first."))
+    agent = _load(db, agent_id)
+    if not agent.is_active:
+        raise HTTPException(status_code=409, detail="This agent has been revoked.")
+    try:
+        out = dashboard_spire.migrate_agent(db, agent)
+    except dashboard_spire.DashboardSpireError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except AgentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    job_service.log_audit(db, current_user.username, "agent.migrate_spire",
+                          ip_address=_client_ip(request),
+                          details={"agent": agent.name, "spiffe_id": out["spiffe_id"],
+                                   "trust_domain": out["trust_domain"]})
+    host = urlparse(_pinned_audience() or "").hostname or "<dashboard host>"
+    env = (f"SPIRE_SERVER_ADDRESS={host}\n"
+           f"SPIRE_TRUST_DOMAIN={out['trust_domain']}\n"
+           f"SPIRE_JOIN_TOKEN={out['join_token']}\n")
+    return {**_agent_row(agent), **out, "env": env,
+            "run": "docker compose -f docker-compose.yml -f docker-compose.spire.yml up -d"}
 
 
 class DiscoverRequest(BaseModel):
