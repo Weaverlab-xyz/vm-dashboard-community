@@ -384,6 +384,15 @@ class Settings(BaseSettings):
     # Release dashboard-held credentials (/jobs/{id}/secret, /gateway-key, /ansible-bundle)
     # only to agents that attested through SPIRE. Off by default: Ed25519 agents keep them.
     dashboard_secrets_require_spire: bool = False
+    # The dashboard's own SPIFFE identity (docs/design/dashboard-workload-identity.md):
+    # JWT-SVID files for spiffe://<td>/dashboard, one per audience, for federated cloud
+    # access. Off by default; a stored cloud key still wins over a token file.
+    dashboard_spiffe_identity_enabled: bool = False
+    dashboard_spiffe_issuer: str = ""     # blank = <agent audience>/spiffe; must equal SPIRE_JWT_ISSUER
+    dashboard_spiffe_aud_aws: bool = False
+    dashboard_spiffe_aud_azure: bool = False
+    dashboard_spiffe_aud_gcp: str = ""    # the workload identity provider's full resource name
+    dashboard_spiffe_aud_wlc: bool = False
 
     # Which peers may set X-Forwarded-For / X-Forwarded-Proto.
     #

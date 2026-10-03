@@ -147,8 +147,33 @@ def test_the_dashboard_overlay_only_adds_mounts_to_existing_services():
         assert name in base
         assert set(services[name]) == {"volumes"}, (
             f"the overlay changes {sorted(set(services[name]) - {'volumes'})} on {name}")
-        assert all(str(v).endswith(":ro") for v in services[name]["volumes"]), (
+        admin = [str(v) for v in services[name]["volumes"] if str(v).startswith("spire_admin:")]
+        assert admin and all(v.endswith(":ro") for v in admin), (
             f"{name} gets the SPIRE admin socket writable")
+        others = [str(v) for v in services[name]["volumes"]
+                  if not str(v).startswith(("spire_admin:", "spiffe_tokens:"))]
+        assert not others, f"the overlay mounts {others} into {name}"
+
+
+def test_only_the_app_writes_the_dashboards_token_files():
+    """One writer (services/dashboard_identity.refresh, run by the app's token loop),
+    readers elsewhere; and the files live in memory, never on the host disk."""
+    overlay = _yaml(*_DASH_OVERLAY)
+    services = overlay["services"]
+    mounts = {name: [str(v) for v in services[name]["volumes"]
+                     if str(v).startswith("spiffe_tokens:")] for name in ("app", "worker")}
+    assert mounts["app"] == ["spiffe_tokens:/run/spiffe-tokens"]
+    assert mounts["worker"] == ["spiffe_tokens:/run/spiffe-tokens:ro"]
+    opts = overlay["volumes"]["spiffe_tokens"]["driver_opts"]
+    assert opts["type"] == "tmpfs" and "mode=0700" in opts["o"]
+
+
+def test_the_issuer_is_optional_and_comes_from_the_environment():
+    conf = _text(*_SERVER_CONF)
+    assert 'jwt_issuer = "${SPIRE_JWT_ISSUER}"' in conf
+    env = _yaml(*_DASH_OVERLAY)["services"]["spire-server"]["environment"]
+    assert env["SPIRE_JWT_ISSUER"] == "${SPIRE_JWT_ISSUER:-}", (
+        "an agent-only install must not have to set an issuer")
 
 
 def test_the_agent_overlay_only_adds_to_the_agent():

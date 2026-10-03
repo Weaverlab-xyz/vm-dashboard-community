@@ -116,6 +116,7 @@ operator-supplied code. The runner stays one-shot; only the thing that launches 
 | [Credentials an agent uses](remote-agents/credentials.md) | What the dashboard holds, what the host seals, and where a credential comes from at run time. |
 | [Agent-executed Config Management](remote-agents/config-runs.md) | What the dashboard sends, the grants it needs, and what a run looks like. |
 | [Agent-brokered file shares](remote-agents/file-shares.md) | A name rather than a path, the grants, and why it needs no Docker socket. |
+| [The dashboard's own SPIFFE identity](remote-agents/dashboard-identity.md) | The same SPIRE server gives the dashboard short-lived tokens a cloud can trust instead of a stored key. Preview. |
 
 The first two split by **who is reading**: the operator enrols and manages agents from
 the dashboard, and the host owner runs the container and writes its policy. They are

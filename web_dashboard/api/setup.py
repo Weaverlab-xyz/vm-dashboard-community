@@ -917,6 +917,14 @@ class RemoteAgentsFeatureConfig(BaseModel):
     # Opt-in: credentials the dashboard holds are released only to agents that attested
     # through SPIRE (auth_mode "spiffe"). Off, Ed25519 agents receive them as before.
     dashboard_secrets_require_spire: bool = False
+    # The dashboard's own SPIFFE identity: token files for federated cloud access.
+    # Strings and bools only — see the class docstring on unset ints.
+    dashboard_spiffe_identity_enabled: bool = False
+    dashboard_spiffe_issuer: str = ""
+    dashboard_spiffe_aud_aws: bool = False
+    dashboard_spiffe_aud_azure: bool = False
+    dashboard_spiffe_aud_gcp: str = ""
+    dashboard_spiffe_aud_wlc: bool = False
 
 class PasswordSafeFeatureConfig(BaseModel):
     """Password Safe / Secrets Safe — secret and managed-account checkout, plus

@@ -137,6 +137,9 @@ async def lifespan(app: FastAPI):
     warmers.append(
         asyncio.create_task(_spire_refresh_loop(), name="spire_refresh_loop")
     )
+    warmers.append(
+        asyncio.create_task(_spiffe_token_loop(), name="spiffe_token_loop")
+    )
     # Cost-summary warmer — always launched; no-ops (no billable calls) while the
     # cost feature is off, so flipping the flag in Settings warms the next pass.
     warmers.append(
@@ -421,8 +424,8 @@ async def _spire_refresh_loop() -> None:
     def work(db):
         from .services import dashboard_spire, spire_lab_service
         spire_lab_service.enqueue_refresh_if_due(db)
-        # The dashboard's own SPIRE trust domain (agent attestation). A no-op unless
-        # spire_attest_enabled, at most once a day, and never raises.
+        # The dashboard's own SPIRE trust domain (agent attestation, the dashboard's own
+        # identity). A no-op unless one of them is on, at most once a day, never raises.
         dashboard_spire.sync_if_due(db)
 
     def interval():
@@ -430,6 +433,22 @@ async def _spire_refresh_loop() -> None:
         return spire_lab_service.REFRESH_LOOP_INTERVAL
 
     await _sweeper_loop("spire lab key refresh", work, interval, fallback=60 * 60)
+
+
+async def _spiffe_token_loop() -> None:
+    """Keep the dashboard's own JWT-SVID files fresh (``dashboard_identity.refresh``).
+
+    Its own loop rather than a step in ``_spire_refresh_loop``, because the cadence is
+    different by two orders of magnitude: tokens live fifteen minutes and are re-minted at
+    half that, while lab keys are checked hourly. A no-op unless
+    ``dashboard_spiffe_identity_enabled``; an flock inside keeps the two app workers from
+    minting twice; never raises. docs/design/dashboard-workload-identity.md.
+    """
+    def work(db):
+        from .services import dashboard_identity
+        dashboard_identity.refresh()
+
+    await _sweeper_loop("dashboard SPIFFE tokens", work, lambda: 60, fallback=60)
 
 
 # ── POV reconcile loop ───────────────────────────────────────────────────────
@@ -831,7 +850,9 @@ _SETUP_503_PREFIXES = ("/api/agent", "/api/entitle/rest",
                        "/api/pov/accessor/rest",
                        # The OAuth token endpoint and its metadata: every caller is a
                        # workload, and an OAuth client library reads a 302 as a hard error.
-                       "/api/oauth", "/.well-known/oauth-authorization-server")
+                       "/api/oauth", "/.well-known/oauth-authorization-server",
+                       # A cloud's STS fetching this dashboard's SPIFFE discovery document.
+                       "/spiffe/")
 
 @app.middleware("http")
 async def setup_guard(request: Request, call_next):
@@ -1003,6 +1024,7 @@ from .api import auth, jobs, websocket, aws, azure, gcp, oci, packer, mfa, token
 from .api import cloud_databases  # noqa: E402
 from .api import cert_lab as cert_lab_api  # noqa: E402
 from .api import spire_lab as spire_lab_api  # noqa: E402
+from .api import spiffe_oidc as spiffe_oidc_api  # noqa: E402
 from .api import workload_k8s as workload_k8s_api  # noqa: E402
 from .api import workload_cloud as workload_cloud_api  # noqa: E402
 from .api import cloud_functions as cloud_functions_api  # noqa: E402
@@ -1111,6 +1133,10 @@ app.include_router(tokens.router)
 # way a workload gets a short-lived token instead of a PAT.
 app.include_router(oauth.router)
 app.include_router(oauth.wellknown_router)
+# The dashboard's own SPIFFE issuer: public discovery + keys, 404 unless switched on.
+# docs/design/dashboard-workload-identity.md.
+app.include_router(spiffe_oidc_api.router)
+app.include_router(spiffe_oidc_api.admin_router)
 app.include_router(users.router)
 app.include_router(groups.router)
 # Access roles. No _feature_gate: identity administration exists on every install, and

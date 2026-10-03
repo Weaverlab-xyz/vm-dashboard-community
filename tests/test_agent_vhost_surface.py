@@ -140,7 +140,7 @@ def test_the_caddyfile_still_proxies_something():
     do."""
     matchers = _proxied_matchers()
     assert matchers, f"no proxied `handle` matcher found in {_CADDYFILE}"
-    assert matchers == ["/api/agent/*"], (
+    assert matchers == ["/api/agent/*", "/spiffe/*"], (
         f"the agent vhost proxies {matchers}. If that is deliberate, the comments in "
         f"the Caddyfile and docker-compose.agent.yml describe the old set and need "
         f"updating too — they are the reason this test exists.")
@@ -193,8 +193,19 @@ def test_only_the_agent_protocol_router_is_published():
     every route on it, because prefix matching does not care about word boundaries.
     """
     routes, matchers = _proxied_routes()
-    strays = sorted({r.path for r in routes if not r.path.startswith("/api/agent/")})
+    strays = sorted({r.path for r in routes
+                     if not r.path.startswith(("/api/agent/", "/spiffe/"))})
     assert not strays, f"{matchers} also publishes {strays}"
+
+
+def test_the_spiffe_issuer_publishes_discovery_and_keys_and_nothing_else():
+    """/spiffe/* is on the vhost for one reason: a cloud's STS fetching the dashboard's
+    own issuer documents. Exactly those two, both GET, neither behind a session."""
+    routes, _ = _proxied_routes()
+    spiffe = {(r.path, tuple(sorted(r.methods))) for r in routes
+              if r.path.startswith("/spiffe/")}
+    assert spiffe == {("/spiffe/.well-known/openid-configuration", ("GET",)),
+                      ("/spiffe/keys", ("GET",))}, spiffe
 
 
 def test_the_operator_half_is_off_the_vhost_and_still_gated():

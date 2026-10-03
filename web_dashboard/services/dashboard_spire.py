@@ -20,6 +20,12 @@ Three jobs:
 
 Cloud node attestation (aws_iid / azure_imds / gcp_iit) is not automated: the node's
 SPIFFE ID is derived from the instance and is not known until it attests.
+
+And one for the dashboard itself (``mint_jwt``, ``live_bundle``): JWT-SVIDs for
+``spiffe://<td>/dashboard``, minted through the admin API rather than attested through a
+SPIRE agent. Attestation proves a workload to a server that does not already trust it, and
+the app already administers this one. See services/dashboard_identity.py and
+docs/design/dashboard-workload-identity.md.
 """
 from __future__ import annotations
 
@@ -43,6 +49,7 @@ JOIN_TOKEN_TTL_S = 900
 JWT_SVID_TTL_S = 300
 SYNC_EVERY = timedelta(hours=24)
 MIN_AGENT_VERSION = "2.6.0"          # first agent with AGENT_SPIFFE_JWT_FILE
+DASHBOARD_PATH = "/dashboard"        # the dashboard's own SPIFFE ID under its trust domain
 
 
 class DashboardSpireError(Exception):
@@ -146,12 +153,20 @@ def sync_trust_domain(db: Session, td: Optional[str] = None) -> dict:
     return {"trust_domain": td, "captured_at": now}
 
 
+def server_in_use() -> bool:
+    """Whether anything on this install relies on the dashboard's SPIRE server: agent
+    attestation, or the dashboard's own workload identity. Either needs the trust domain
+    registered and current, independently of the other."""
+    return (config_service.get_bool("spire_attest_enabled")
+            or config_service.get_bool("dashboard_spiffe_identity_enabled"))
+
+
 def sync_if_due(db: Session, now: Optional[datetime] = None) -> bool:
-    """Re-sync the stored bundle once a day while attestation is on. Never raises: this
+    """Re-sync the stored bundle once a day while the server is in use. Never raises: this
     runs from the background refresh loop, and a SPIRE server that is down today must not
     take the loop with it."""
     from ..database import SpiffeTrustDomain
-    if not config_service.get_bool("spire_attest_enabled"):
+    if not server_in_use():
         return False
     now = now or datetime.utcnow()
     try:
@@ -209,3 +224,42 @@ def migrate_agent(db: Session, agent) -> dict:
     return {"trust_domain": td, "spiffe_id": sid, "node_spiffe_id": node,
             "join_token": token, "join_token_ttl_s": JOIN_TOKEN_TTL_S,
             "bootstrap_pem": bootstrap_bundle_pem()}
+
+
+# ── the dashboard's own identity ──────────────────────────────────────────────
+
+def dashboard_id(td: str) -> str:
+    """The dashboard's SPIFFE ID. One for app and worker alike: they run the same code with
+    the same configuration, and a cloud trust policy that must name two subjects for one
+    service is a policy somebody gets half right."""
+    return f"spiffe://{td}{DASHBOARD_PATH}"
+
+
+def mint_jwt(audience: str, ttl_s: int, td: Optional[str] = None) -> str:
+    """A JWT-SVID for the dashboard, for one audience, from the server's admin API.
+
+    ``jwt mint -output json`` prints the MintJWTSVIDResponse (``{"svid": {"token": …}}``);
+    ``-ttl`` is a Go duration. The caller checks the claims — this only refuses output that
+    is not a JWT at all. The token is never put into an error message.
+    """
+    td = td or trust_domain()
+    data = _json("jwt", "mint", "-spiffeID", dashboard_id(td), "-audience", audience,
+                 "-ttl", f"{int(ttl_s)}s")
+    token = str((data.get("svid") or {}).get("token") or "")
+    if token.count(".") != 2:
+        raise DashboardSpireError("the SPIRE server minted no JWT-SVID")
+    return token
+
+
+def live_bundle() -> dict:
+    """The SPIFFE bundle as the server holds it right now, including a JWT key it has
+    prepared but not yet signed with — which is why discovery reads this rather than the
+    daily copy in SpiffeTrustDomain."""
+    raw = _cli("bundle", "show", "-format", "spiffe")
+    try:
+        bundle = json.loads(raw)
+    except ValueError as exc:
+        raise DashboardSpireError("the SPIRE server's SPIFFE bundle is not JSON") from exc
+    if not isinstance(bundle, dict):
+        raise DashboardSpireError("the SPIRE server's SPIFFE bundle has an unexpected shape")
+    return bundle

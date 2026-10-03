@@ -2,8 +2,8 @@
 
 > **Audience:** contributor · **Profile:** `both` · **Read this when:** you are about to give the dashboard an identity of its own, retire one of its stored cloud keys, move a Workload Lab demo off the lab's SPIRE server, or decide whether something else in the codebase should use a SPIFFE token.
 
-**Nothing here is built.** This is an audit, made after the dashboard got its own SPIRE
-server (#996–#998), of where that server should be used next. Each section says what it
+**Slice 1 is built; nothing else here is.** This is an audit, made after the dashboard got
+its own SPIRE server (#996–#998), of where that server should be used next. Each section says what it
 removes, what it costs, and what is still unknown. Where SPIFFE adds little, the note says so.
 
 ## Why now
@@ -40,6 +40,20 @@ Nothing below removes a working path:
 ## Slice 1: the dashboard gets an identity of its own
 
 Everything else depends on this slice.
+
+**Built.** `dashboard_spire.mint_jwt` and `live_bundle`; `services/dashboard_identity.py`
+(token files under an `flock`, status, issuer, public JWKS); `api/spiffe_oidc.py`
+(`/spiffe/.well-known/openid-configuration`, `/spiffe/keys`, `/api/spiffe-identity`); the
+`_spiffe_token_loop` in `main.py`; `jwt_issuer` and the `spiffe_tokens` volume in the
+overlay; `/spiffe/*` on the agent gateway. Settings → Remote Agents. Operator guide:
+[The dashboard's own SPIFFE identity](../remote-agents/dashboard-identity.md). Two
+differences from the sketch below, both deliberate:
+
+- **Its own loop, every minute,** not a step in the hourly SPIRE refresh loop. Fifteen-minute
+  tokens re-minted at half their life cannot wait an hour.
+- **The default issuer is the pinned agent audience plus `/spiffe`,** not the public base
+  URL. The agent gateway is the part of an install built to be reachable from outside, so
+  its Caddyfile publishes `/spiffe/*` and the default works without new ingress.
 
 ### One SPIFFE ID, minted through the admin API the app already drives
 
@@ -262,8 +276,8 @@ SPIRE-attested agents** setting, completes
 
 ## Order
 
-1. **Slice 1:** `jwt_issuer`, minted token files with one writer, in-app discovery, and
-   the sync decoupled from agent attestation. Everything else depends on it.
+1. ~~**Slice 1:** `jwt_issuer`, minted token files with one writer, in-app discovery, and
+   the sync decoupled from agent attestation.~~ Built.
 2. **L1 and L2:** the agent cell and service accounts on the dashboard's trust domain.
    They remove the lab VM from those demos and need nothing from Slice 3.
 3. **Slice 3:** AWS and GCP (configuration and docs, plus the `packer_service` fix), then
@@ -276,7 +290,8 @@ SPIRE-attested agents** setting, completes
 
 - No cloud has yet accepted a SPIRE-minted JWT-SVID from this dashboard. The table's
   trust conditions follow each cloud's federation documentation, not a run.
-- `jwt mint` output shape: SPIRE 1.15's CLI prints the token. Pin it in a test fixture the
-  way `tests/test_dashboard_spire_migrate.py` pins the other CLI shapes.
+- `jwt mint` output shape: read from the 1.15.3 source (`-output json` prints the
+  `MintJWTSVIDResponse`, token at `svid.token`; `-ttl` is a Go duration) and pinned in
+  `tests/test_dashboard_spiffe_identity.py`'s fake, but not run against a real server.
 - Whether SPIRE logs a `jwt mint` with enough detail to serve as the audit trail the
   threat model leans on. If not, the dashboard should write its own audit row per mint.
