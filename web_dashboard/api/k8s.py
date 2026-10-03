@@ -41,7 +41,7 @@ from ..models.k8s import (
 from ..services import (k8s_service, job_service, cache_service, pra_api_service,
                         inventory_service, workgroup_service)
 from ..services.aws_service import AWSError
-from ..services.k8s_service import K8sError
+from ..services.k8s_service import K8sCredentialRefused, K8sError
 from .auth import require_admin, require_permission
 
 logger = logging.getLogger(__name__)
@@ -451,6 +451,10 @@ def api_tunnel_kubeconfig(
     info = _visible_or_404(db, cluster_id, current_user)
     try:
         content = k8s_service.build_api_tunnel_kubeconfig(db, cluster_id)
+    except K8sCredentialRefused as e:
+        # The cluster exists and the caller may see it; the stored kubeconfig is just not
+        # something to hand a person. 409, with the remedy, not a misleading 404.
+        raise HTTPException(status_code=409, detail=str(e))
     except K8sError as e:
         raise HTTPException(status_code=404, detail=str(e))
     filename = f"{info.get('name') or cluster_id}-api-tunnel.kubeconfig"

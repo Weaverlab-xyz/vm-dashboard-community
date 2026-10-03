@@ -61,6 +61,10 @@ class K8sError(Exception):
     pass
 
 
+class K8sCredentialRefused(K8sError):
+    """A kubeconfig would have been handed to a person with a credential inside it."""
+
+
 async def _to_thread(fn, /, *args, **kwargs):
     """Run a blocking kubernetes call on k8s's OWN bounded thread pool.
 
@@ -3338,11 +3342,62 @@ def _repoint_kubeconfig_to_tunnel(kubeconfig: str, local_port: int) -> str:
     return yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False)
 
 
+# Keys under a kubeconfig `users[].user` that ARE a credential, or point at one on disk.
+# An `exec` block is not among them: it names a command that authenticates the person
+# running kubectl, which is the whole point of the tunnel download.
+_EMBEDDED_CREDENTIAL_KEYS = ("token", "tokenFile", "client-certificate-data", "client-key-data",
+                             "client-certificate", "client-key", "password", "username",
+                             "auth-provider")
+
+
+def _embedded_credential_keys(kubeconfig: str) -> list:
+    """The credential-bearing keys present in ``kubeconfig``'s users, by NAME only.
+
+    Pure, and never returns a value: the result goes into an error a person reads, and
+    the values are exactly what must not leave the server."""
+    try:
+        cfg = yaml.safe_load(kubeconfig) or {}
+    except yaml.YAMLError:
+        return ["(unparseable kubeconfig)"]
+    found = []
+    for entry in (cfg.get("users") or []) if isinstance(cfg, dict) else []:
+        user = (entry or {}).get("user") or {}
+        if not isinstance(user, dict):
+            continue
+        for key in _EMBEDDED_CREDENTIAL_KEYS:
+            if user.get(key) and key not in found:
+                found.append(key)
+    return found
+
+
 def build_api_tunnel_kubeconfig(db: Session, cluster_id: str) -> str:
     """Return a kubeconfig for the cluster's API TCP tunnel: the STORED kubeconfig
     repointed at the local tunnel port (see ``_repoint_kubeconfig_to_tunnel``).
-    Token-free — reuses the cluster's own cloud-native exec-plugin auth."""
+
+    Token-free — reuses the cluster's own cloud-native exec-plugin auth, and REFUSES
+    (``K8sCredentialRefused``) when the stored kubeconfig carries a credential instead.
+    That is not hypothetical: an on-prem k3s cluster is registered with the admin
+    kubeconfig from k3s-kubeconfig.yml (client certificate and key inline), and an
+    imported cluster can carry a static token. Returning either would hand a shared,
+    unrevocable admin credential to anyone with k8s:read. The stored file keeps doing
+    the dashboard's own work; it is just never a person's download."""
     kubeconfig = resolve_kubeconfig(db, cluster_id)
+    embedded = _embedded_credential_keys(kubeconfig)
+    if embedded:
+        row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+        keys = ", ".join(embedded)
+        if row is not None and row.cloud == "local":
+            raise K8sCredentialRefused(
+                f"This on-prem cluster's stored kubeconfig authenticates with an embedded "
+                f"credential ({keys}) — the cluster's admin identity, which is not handed "
+                f"to people. People reach on-prem clusters through Dex: run "
+                f"examples/playbooks/k3s/k3s-dex-auth.yml on the cluster; a Dex kubeconfig "
+                f"download replaces this one (docs/design/agent-and-human-identity.md).")
+        raise K8sCredentialRefused(
+            f"This cluster's stored kubeconfig embeds a static credential ({keys}), so a "
+            f"download would hand that credential to whoever asks. Re-register the cluster "
+            f"with a kubeconfig that authenticates through the cloud's exec plugin "
+            f"(aws eks get-token, kubelogin, gke-gcloud-auth-plugin).")
     return _repoint_kubeconfig_to_tunnel(kubeconfig, int(_cfg("k8s_api_tunnel_local_port", "6443")))
 
 
