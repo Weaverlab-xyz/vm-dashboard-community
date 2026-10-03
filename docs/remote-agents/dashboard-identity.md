@@ -142,6 +142,18 @@ through `GOOGLE_APPLICATION_CREDENTIALS`.
 
 **OCI** has no federated path here; it keeps its signing key.
 
+### On-prem k3s
+
+Here the identity replaces the admin client certificate the dashboard uses on a `cloud=local`
+cluster. Nothing needs to be ticked under the audiences: the token is minted on demand, per
+cluster, for the audience `<issuer>/k8s/<cluster id>`, lives thirty minutes, and goes only
+into the kubeconfig of the call that needs it — never into a file. Run
+`examples/playbooks/k3s/k3s-dashboard-auth.yml` on the server node, then tick **Trusts
+dashboard identity?** on the cluster's row; the button shows the command with the values
+filled in. The API server must be able to fetch `<issuer>/.well-known/openid-configuration`
+and `<issuer>/keys`; for an issuer with a private CA, pass it as `dashboard_issuer_ca_pem`.
+Details and the break-glass are in [Kubernetes](../kubernetes.md#access--identity).
+
 ## Pin the subject, never the trust domain
 
 Remote agents and service-account workloads share the dashboard's trust domain. A trust
@@ -183,4 +195,5 @@ presence, instead of one that works offline for ever. It is not "the app holds n
 | A cloud says *not federated: …* in the panel | The reason is the one thing left to do — a role ARN, the Azure tenant id, `gcp_project_id`, or a stored key that still wins. |
 | *AWS refused the dashboard's SPIFFE identity … InvalidIdentityToken* | AWS could not verify the token: the issuer is not reachable over HTTPS with a publicly trusted certificate, or the IAM OIDC provider's URL differs from the issuer. |
 | *AWS refused … AccessDenied* | The role's trust policy does not match: check the `:sub` and `:aud` conditions against the issuer's host and path. |
+| *marked as trusting the dashboard's identity, but …* on a k8s operation | The cluster's flag is on but no token could be minted. Fix the cause it names, or untick **Trusts dashboard identity?** to fall back to the admin kubeconfig. |
 | `/spiffe/keys` answers 503 | Neither the live server nor a stored bundle has a JWT key yet. Start the SPIRE server; the stored copy is written on the first sync. |

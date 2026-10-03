@@ -129,6 +129,11 @@
                       class="text-xs px-2 py-1 rounded font-medium"
                       :class="c.dex_trusted ? 'bg-indigo-600 hover:bg-indigo-700 text-white' : 'bg-white border border-indigo-300 text-indigo-700 hover:bg-indigo-50'"
                       x-text="c.dex_trusted ? 'Trusts Dex ✓' : 'Trusts Dex?'"></button>
+              <button x-show="c.cloud === 'local' && (c.status === 'registered' || c.status === 'managed')" @click="toggleSpiffeTrust(c)"
+                      :title="c.spiffe_trusted ? 'The dashboard reaches this cluster with its own short-lived token. Click to fall back to the stored admin kubeconfig (break-glass).' : 'Turn on once k3s-dashboard-auth.yml has run on this cluster: the dashboard then stops using the stored admin kubeconfig for routine work.'"
+                      class="text-xs px-2 py-1 rounded font-medium"
+                      :class="c.spiffe_trusted ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'bg-white border border-emerald-300 text-emerald-700 hover:bg-emerald-50'"
+                      x-text="c.spiffe_trusted ? 'Trusts dashboard identity ✓' : 'Trusts dashboard identity?'"></button>
               <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openApiTunnel(c)"
                       title="Direct kubectl-to-API TCP tunnel + downloadable cloud-login (token-free) kubeconfig; supports kubectl --as impersonation for Entitle grants"
                       class="text-xs px-2 py-1 bg-cyan-600 hover:bg-cyan-700 text-white rounded font-medium"
@@ -1131,6 +1136,33 @@ function k8sPage() {
       this.openRegister();
       this.form.name = q.get('name') || '';
       this.discoveredApiServer = q.get('api_server') || '';
+    },
+
+    // The k3s-dashboard-auth.yml command for this cluster, with its own audience. Shown in
+    // the confirm, because the play has to have run BEFORE the flag is turned on — the
+    // dashboard stops presenting the admin certificate the moment it is.
+    dashboardAuthCommand(c) {
+      const aud = c.dashboard_audience || '<turn on the dashboard identity first>';
+      const issuer = aud.replace(/\/k8s\/[^/]+$/, '');
+      return 'ansible-playbook -i <k3s server>, k3s-dashboard-auth.yml \\\n'
+           + '  -e dashboard_issuer_url=' + issuer + ' \\\n'
+           + '  -e dashboard_spiffe_id=spiffe://<trust domain>/dashboard \\\n'
+           + '  -e cluster_audience=' + aud;
+    },
+
+    async toggleSpiffeTrust(c) {
+      const next = !c.spiffe_trusted;
+      if (next && !confirm(`Mark "${c.name}" as trusting the dashboard's identity?\n\n`
+          + `Only once this has run on its API server:\n\n${this.dashboardAuthCommand(c)}\n\n`
+          + `The dashboard then stops using the stored admin kubeconfig for routine work.`)) return;
+      try {
+        await API.post(`/api/k8s/clusters/${c.id}/spiffe-trust`, { trusted: next });
+        await this.refresh();
+        this.flash(next ? 'The dashboard now reaches this cluster with its own short-lived token.'
+                        : 'Back on the stored admin kubeconfig (break-glass).');
+      } catch (e) {
+        this.flash(e.message || 'Could not update the dashboard identity trust.', 'error');
+      }
     },
 
     async toggleDexTrust(c) {

@@ -19,6 +19,8 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import uuid
 from urllib.parse import urlparse
 
@@ -157,6 +159,11 @@ def _serialize(r: K8sCluster) -> dict:
         # (k3s-dex-auth.yml has run). Gates the person-facing Dex kubeconfig.
         "dex_trusted":           r.cloud == "local"
                                  and config_service.get(f"k8s_dex_trusted_{r.id}") in ("1", "true", "yes"),
+        # On-prem only: the API server trusts the DASHBOARD's own SPIFFE identity
+        # (k3s-dashboard-auth.yml has run), so routine operations present a short-lived
+        # JWT-SVID instead of the admin kubeconfig. The audience is this cluster's alone.
+        "spiffe_trusted":        _spiffe_trusted(r),
+        "dashboard_audience":    dashboard_audience(r.id) if r.cloud == "local" else "",
         # AKS is natively Entra-integrated (always federated); EKS/GKE are federated
         # once the "Entra federation" action runs (tracked in config).
         "entra_federation_enabled": (r.cloud == "azure")
@@ -194,9 +201,32 @@ def get_cluster(db: Session, cluster_id: str) -> dict:
 
 
 def resolve_kubeconfig(db: Session, cluster_id: str) -> str:
-    """The cluster's kubeconfig, resolved from its reference. For Phase 2+
-    (apply a management plane); kept out of the row + list/get responses."""
+    """The kubeconfig the dashboard's own routine operations use for this cluster.
+
+    The stored one — except for an on-prem cluster marked "Trusts dashboard identity",
+    which gets the stored cluster entry (server and CA) with a short-lived JWT-SVID for
+    the dashboard as its only credential (docs/design/dashboard-workload-identity.md,
+    Slice 4). Every routine caller comes through here, so the admin client certificate
+    stops being what they present.
+
+    **No silent fallback.** A cluster marked trusted whose token cannot be minted is an
+    error naming the break-glass, never a quiet return to the admin certificate.
+    """
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        raise K8sError(f"cluster {cluster_id} not found")
+    stored = stored_kubeconfig(db, cluster_id, row=row)
+    if not _spiffe_trusted(row):
+        return stored
+    return _spiffe_kubeconfig(row, stored)
+
+
+def stored_kubeconfig(db: Session, cluster_id: str, row=None) -> str:
+    """The kubeconfig as registered, untouched. For the few callers that need the file
+    itself rather than a credential to act with (the API-tunnel download for people,
+    which strips the user anyway)."""
+    if row is None:
+        row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     if row is None:
         raise K8sError(f"cluster {cluster_id} not found")
     if not row.kubeconfig_ref:
@@ -3385,7 +3415,7 @@ def build_api_tunnel_kubeconfig(db: Session, cluster_id: str) -> str:
     imported cluster can carry a static token. Returning either would hand a shared,
     unrevocable admin credential to anyone with k8s:read. The stored file keeps doing
     the dashboard's own work; it is just never a person's download."""
-    kubeconfig = resolve_kubeconfig(db, cluster_id)
+    kubeconfig = stored_kubeconfig(db, cluster_id)
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     if row is not None and row.cloud == "local":
         # On-prem: Dex is the ONLY way people get in, whatever the stored file holds.
@@ -3483,6 +3513,116 @@ def _onprem_dex_tunnel_kubeconfig(cluster_id: str, stored: str) -> str:
     if leaked:  # cannot happen with users replaced wholesale; refuse rather than leak if it ever does
         raise K8sCredentialRefused(f"refusing: the Dex kubeconfig still carries {', '.join(leaked)}")
     return out
+
+
+# ── The dashboard's own identity on on-prem clusters (Slice 4) ───────────────
+# k3s-dashboard-auth.yml makes the API server trust the dashboard's SPIFFE issuer for one
+# audience per cluster; this side mints a JWT-SVID for that audience and puts it in the
+# kubeconfig every routine operation uses. Thirty minutes, so a long `helm --wait` does not
+# outlive its token; re-minted once ten remain. In memory only, like the EKS/AKS/GKE
+# tokens _runner_kubeconfig mints — never in a file.
+
+SPIFFE_K8S_TTL_S = 1800
+_SPIFFE_K8S_REMINT_S = 600
+_SPIFFE_K8S_USER = "vm-dashboard-spiffe"
+_svid_cache: dict = {}
+_svid_lock = threading.Lock()
+
+
+def spiffe_trust_key(cluster_id: str) -> str:
+    return f"k8s_spiffe_trusted_{cluster_id}"
+
+
+def dashboard_audience(cluster_id: str) -> str:
+    """This cluster's audience for the dashboard's JWT-SVID: ``<issuer>/k8s/<cluster id>``.
+    Per cluster, so a token one API server sees cannot be replayed at another. The play
+    is given exactly this string (the Kubernetes page shows it)."""
+    from . import dashboard_identity
+    issuer = dashboard_identity.issuer()
+    return f"{issuer}/k8s/{cluster_id}" if issuer else ""
+
+
+def _spiffe_trusted(row) -> bool:
+    from . import config_service
+    return (row.cloud == "local"
+            and config_service.get(spiffe_trust_key(row.id)) in ("1", "true", "yes"))
+
+
+def _dashboard_svid(cluster_id: str, now: Optional[float] = None) -> str:
+    """A JWT-SVID for the dashboard, for this cluster's audience, cached per process."""
+    from . import dashboard_identity, dashboard_spire
+    now = time.time() if now is None else now
+    with _svid_lock:
+        hit = _svid_cache.get(cluster_id)
+        if hit and hit[1] - now > _SPIFFE_K8S_REMINT_S:
+            return hit[0]
+    breakglass = ("Untick 'Trusts dashboard identity' on the Kubernetes page to fall back "
+                  "to the stored admin kubeconfig (break-glass).")
+    if not dashboard_identity.enabled():
+        raise K8sError("This cluster is marked as trusting the dashboard's identity, but "
+                       "the dashboard's SPIFFE identity is off (Settings → Remote Agents). "
+                       + breakglass)
+    audience = dashboard_audience(cluster_id)
+    try:
+        td = dashboard_spire.trust_domain()
+        token = dashboard_spire.mint_jwt(audience, SPIFFE_K8S_TTL_S, td)
+        dashboard_identity._check_minted(token, audience, dashboard_spire.dashboard_id(td),
+                                         dashboard_identity.issuer())
+    except (dashboard_spire.DashboardSpireError, dashboard_identity.IdentityError) as exc:
+        raise K8sError(f"Could not mint the dashboard's token for this cluster: {exc} "
+                       + breakglass) from exc
+    exp = float(dashboard_identity.claims(token).get("exp") or now + SPIFFE_K8S_TTL_S)
+    with _svid_lock:
+        _svid_cache[cluster_id] = (token, exp)
+    return token
+
+
+def _spiffe_kubeconfig(row, stored: str) -> str:
+    """The stored kubeconfig's cluster (server and CA kept) with the dashboard's JWT-SVID
+    as its only user. The client certificate and key are not carried over."""
+    cfg = yaml.safe_load(stored) or {}
+    contexts = cfg.get("contexts") or []
+    current = cfg.get("current-context")
+    ctx = next((c for c in contexts if c.get("name") == current), None) or (
+        contexts[0] if contexts else {})
+    cluster_name = (ctx.get("context") or {}).get("cluster")
+    clusters = cfg.get("clusters") or []
+    cluster = next((c for c in clusters if c.get("name") == cluster_name), None) or (
+        clusters[0] if clusters else None)
+    if not cluster:
+        raise K8sError(f"cluster {row.id}'s stored kubeconfig names no cluster to reach")
+    token = _dashboard_svid(row.id)
+    context = {"cluster": cluster["name"], "user": _SPIFFE_K8S_USER}
+    namespace = (ctx.get("context") or {}).get("namespace")
+    if namespace:
+        context["namespace"] = namespace
+    return yaml.safe_dump({
+        "apiVersion": "v1", "kind": "Config",
+        "clusters": [cluster],
+        "users": [{"name": _SPIFFE_K8S_USER, "user": {"token": token}}],
+        "contexts": [{"name": _SPIFFE_K8S_USER, "context": context}],
+        "current-context": _SPIFFE_K8S_USER,
+    }, sort_keys=False)
+
+
+def set_spiffe_trust(db: Session, cluster_id: str, trusted: bool) -> dict:
+    """Record (or clear) that an on-prem cluster's API server trusts the dashboard's own
+    SPIFFE identity — the operator's statement that k3s-dashboard-auth.yml has run."""
+    from . import config_service, dashboard_identity
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        raise K8sError(f"cluster {cluster_id} not found")
+    if row.cloud != "local":
+        raise K8sError("'Trusts dashboard identity' applies to on-prem clusters; managed "
+                       "clusters already get short-lived tokens from their cloud")
+    if trusted and not dashboard_identity.enabled():
+        raise K8sError("Turn on the dashboard's SPIFFE identity (Settings → Remote Agents) "
+                       "first: the cluster would trust a token nothing mints.")
+    config_service.set(spiffe_trust_key(cluster_id), "1" if trusted else "")
+    with _svid_lock:
+        _svid_cache.pop(cluster_id, None)
+    return {"cluster_id": cluster_id, "spiffe_trusted": bool(trusted),
+            "dashboard_audience": dashboard_audience(cluster_id)}
 
 
 def set_dex_trust(db: Session, cluster_id: str, trusted: bool) -> dict:

@@ -137,13 +137,13 @@ class _DB:
 
 
 def _build(stored: str, cloud: str) -> str:
-    real_resolve, real_cfg = k8s_service.resolve_kubeconfig, k8s_service._cfg
-    k8s_service.resolve_kubeconfig = lambda db, cid: stored
+    real_resolve, real_cfg = k8s_service.stored_kubeconfig, k8s_service._cfg
+    k8s_service.stored_kubeconfig = lambda db, cid: stored
     k8s_service._cfg = lambda key, default="": default
     try:
         return k8s_service.build_api_tunnel_kubeconfig(_DB(cloud), "c1")
     finally:
-        k8s_service.resolve_kubeconfig, k8s_service._cfg = real_resolve, real_cfg
+        k8s_service.stored_kubeconfig, k8s_service._cfg = real_resolve, real_cfg
 
 
 def _refusal(stored: str, cloud: str) -> str:

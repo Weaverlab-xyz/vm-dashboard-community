@@ -309,6 +309,27 @@ secrets)**, and **Entitle + Entra federation (Layer 3 — time-boxed access)**.
   The user needs the [kubelogin](https://github.com/int128/kubelogin) plugin
   (`kubectl oidc-login`); the first `kubectl` opens a browser to Dex. Usernames arrive as
   `dex:<email>`, groups as `dex:<group>` — bind RBAC to those.
+- **On-prem clusters: the dashboard's own access, without the admin certificate (preview).**
+  The dashboard itself still operates a `cloud=local` cluster (manifests, Helm, RBAC,
+  ServiceAccount tokens, Ansible k8s targets) with the admin kubeconfig from
+  `k3s-kubeconfig.yml` — a `system:masters` client certificate that never expires. With
+  the [dashboard's own SPIFFE identity](remote-agents/dashboard-identity.md#on-prem-k3s)
+  turned on, it can use a short-lived token instead:
+  1. Run `k3s/k3s-dashboard-auth.yml` on the server node. **Trusts dashboard identity?** on
+     the cluster's row shows the exact command, with this cluster's audience
+     (`<issuer>/k8s/<cluster id>`) filled in. It adds one JWT authenticator to the same
+     `AuthenticationConfiguration` the Dex and lab plays share (prefix `dashboard:`), and
+     binds `dashboard:spiffe://<trust domain>/dashboard` to `cluster-admin` — the power the
+     admin certificate already has.
+  2. Turn the flag on (`POST /clusters/{id}/spiffe-trust`, `k8s:write`, audited).
+
+  From then on every routine call gets a kubeconfig whose only user is a thirty-minute
+  JWT-SVID minted for that cluster's audience; the server and CA are kept, the client
+  certificate is dropped. A token minted for one cluster is refused by every other.
+  **There is no silent fallback:** if the token cannot be minted (SPIRE down, identity
+  switched off) the operation fails and names the cause. **Break-glass** is unticking the
+  flag, which puts the stored admin kubeconfig back in use at once; it is never deleted.
+  The people-facing API-tunnel download is unaffected — it still builds the Dex kubeconfig.
 - **Entra → k8s RBAC federation** — bind **one Entra security group** to cluster RBAC
   (`POST /clusters/{id}/entra-group`, default role `entra_rbac_group_role=cluster-admin`);
   members sign in **as themselves** (group Object ID is the RBAC subject), and Entitle's
