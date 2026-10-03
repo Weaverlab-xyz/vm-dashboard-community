@@ -485,8 +485,7 @@ def set_dex_trust(
         result = k8s_service.set_dex_trust(db, cluster_id, req.trusted)
     except K8sError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    logger.info("k8s cluster %s dex_trusted=%s by %s", cluster_id, req.trusted,
-                current_user.username)
+    logger.info("k8s cluster %s dex_trusted=%s", cluster_id, bool(req.trusted))
     return result
 
 
