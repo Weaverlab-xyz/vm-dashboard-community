@@ -5296,10 +5296,20 @@
                 <input type="checkbox" x-model="panelCfg.dashboard_spiffe_aud_aws" class="rounded border-gray-300 text-blue-600">
                 AWS <span class="text-[11px] text-gray-500 font-mono">sts.amazonaws.com → aws.jwt</span>
               </label>
+              <div x-show="panelCfg.dashboard_spiffe_aud_aws" class="pl-6">
+                <input type="text" x-model="panelCfg.aws_federation_role_arn"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="arn:aws:iam::123456789012:role/vm-dashboard">
+                <p class="text-[11px] text-gray-400 mt-1">The role the dashboard assumes with AssumeRoleWithWebIdentity.</p>
+              </div>
               <label class="flex items-center gap-2 text-sm text-gray-700">
                 <input type="checkbox" x-model="panelCfg.dashboard_spiffe_aud_azure" class="rounded border-gray-300 text-blue-600">
                 Azure <span class="text-[11px] text-gray-500 font-mono">api://AzureADTokenExchange → azure.jwt</span>
               </label>
+              <p x-show="panelCfg.dashboard_spiffe_aud_azure" class="pl-6 text-[11px] text-gray-400">
+                Uses the Azure setup's client id and tenant id, as a federated credential on
+                that app registration. Clear its client secret to switch.
+              </p>
               <label class="flex items-center gap-2 text-sm text-gray-700">
                 <input type="checkbox" x-model="panelCfg.dashboard_spiffe_aud_wlc" class="rounded border-gray-300 text-blue-600">
                 Workload Credentials <span class="text-[11px] text-gray-500">its identity audience → <span class="font-mono">wlc.jwt</span></span>
@@ -5309,6 +5319,9 @@
                 <input type="text" x-model="panelCfg.dashboard_spiffe_aud_gcp"
                        class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                        placeholder="//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/x">
+                <input type="text" x-model="panelCfg.gcp_federation_service_account"
+                       class="mt-1 w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="service account to impersonate (optional) — vm-dashboard@project.iam.gserviceaccount.com">
               </div>
               <div class="rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-900">
                 In every cloud trust policy, pin the subject to this dashboard's exact SPIFFE ID,
@@ -5317,6 +5330,14 @@
               <template x-if="spiffeIdentity && spiffeIdentity.enabled">
                 <div class="text-[11px] space-y-1">
                   <p x-show="spiffeIdentity.error" class="text-red-700" x-text="spiffeIdentity.error"></p>
+                  <template x-for="entry in Object.entries(spiffeIdentity.sources || {})" :key="'src-' + entry[0]">
+                    <div>
+                      <span class="font-medium text-gray-700" x-text="entry[0].toUpperCase()"></span>
+                      <span class="text-gray-500">uses</span>
+                      <span :class="entry[1] === 'SPIFFE federation' ? 'text-green-700' : 'text-gray-700'"
+                            x-text="entry[1]"></span>
+                    </div>
+                  </template>
                   <template x-for="entry in Object.entries(spiffeIdentity.tokens || {})" :key="entry[0]">
                     <div>
                       <span class="font-mono text-gray-800" x-text="entry[1].path"></span>

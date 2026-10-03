@@ -1026,18 +1026,16 @@ async def archive_to_azure_blob(
     credentials: dict,
 ) -> str:
     """Upload the Packer template to Azure Blob Storage. Returns the blob URL."""
-    from azure.identity import ClientSecretCredential
     from azure.storage.blob import BlobServiceClient
+    from . import cloud_federation
 
     blob_name = f"{job_id}/{image_name}.pkr.hcl"
     account_url = f"https://{storage_account}.blob.core.windows.net"
 
     def _upload():
-        cred = ClientSecretCredential(
-            tenant_id=credentials["azure_tenant_id"],
-            client_id=credentials["azure_client_id"],
-            client_secret=credentials["azure_client_secret"],
-        )
+        cred = cloud_federation.azure_credential(
+            credentials["azure_tenant_id"], credentials["azure_client_id"],
+            credentials.get("azure_client_secret") or "")
         svc = BlobServiceClient(account_url=account_url, credential=cred)
         container_client = svc.get_container_client(container)
         try:
@@ -1066,12 +1064,24 @@ async def archive_to_gcs(
     object_name = f"packer-templates/{job_id}/{image_name}.pkr.hcl"
 
     def _upload():
-        sa_info = _json.loads(credentials["gcp_service_account_json"])
-        creds = service_account.Credentials.from_service_account_info(
-            sa_info,
-            scopes=["https://www.googleapis.com/auth/cloud-platform"],
-        )
-        client = storage.Client(credentials=creds, project=sa_info.get("project_id"))
+        from . import cloud_federation
+        sa_raw = credentials.get("gcp_service_account_json") or ""
+        if sa_raw:
+            sa_info = _json.loads(sa_raw)
+            creds = service_account.Credentials.from_service_account_info(
+                sa_info,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+            project = sa_info.get("project_id")
+        else:
+            # The dashboard's own SPIFFE identity. Its credential carries no project,
+            # which is why federation requires gcp_project_id.
+            creds = cloud_federation.gcp_credentials()
+            if creds is None:
+                raise PackerError("No GCP service-account key, and SPIFFE federation is "
+                                  f"not usable: {cloud_federation.reason('gcp')}")
+            project = credentials.get("gcp_project_id") or cloud_federation._cfg("gcp_project_id")
+        client = storage.Client(credentials=creds, project=project)
         gcs_bucket = client.bucket(bucket)
         blob = gcs_bucket.blob(object_name)
         blob.upload_from_string(template_path.read_bytes(), content_type="text/plain")

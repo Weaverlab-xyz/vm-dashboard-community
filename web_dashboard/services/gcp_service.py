@@ -84,7 +84,8 @@ def _gcp_region() -> str:
 
 
 def _gcp_creds():
-    """Return google.oauth2 credentials or None for ADC."""
+    """Return google-auth credentials, or None for ADC: the stored service-account key,
+    else the dashboard's own SPIFFE identity (``cloud_federation``), else ADC."""
     try:
         from google.oauth2 import service_account as _sa
     except ImportError:
@@ -92,7 +93,8 @@ def _gcp_creds():
 
     raw = _cfg("gcp_service_account_json")
     if not raw:
-        return None  # ADC fallback
+        from . import cloud_federation
+        return cloud_federation.gcp_credentials()  # None → ADC fallback
     try:
         info = json.loads(raw)
     except json.JSONDecodeError as exc:

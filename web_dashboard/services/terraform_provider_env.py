@@ -32,7 +32,8 @@ def aws_env() -> Optional[dict]:
     secret = _cfg("aws_secret_access_key")
     if key_id and secret:
         return {"AWS_ACCESS_KEY_ID": key_id, "AWS_SECRET_ACCESS_KEY": secret}
-    return None
+    from . import cloud_federation
+    return cloud_federation.aws_subprocess_env()
 
 
 def gcp_env() -> Optional[dict]:
@@ -43,6 +44,11 @@ def gcp_env() -> Optional[dict]:
     env: dict = {}
     if creds:
         env["GOOGLE_CREDENTIALS"] = creds
+    else:
+        # The dashboard's own SPIFFE identity: an external_account config file the
+        # google provider reads through GOOGLE_APPLICATION_CREDENTIALS.
+        from . import cloud_federation
+        env.update(cloud_federation.gcp_subprocess_env() or {})
     if project:
         env["GOOGLE_PROJECT"] = project
     return env or None
@@ -55,6 +61,10 @@ def azure_env() -> Optional[dict]:
     dynamic = leases.azure_subprocess_env()
     if dynamic:
         return dynamic
+    from . import cloud_federation
+    federated = cloud_federation.azure_subprocess_env()
+    if federated:
+        return federated
     env: dict = {}
     for cfg_key, arm_key in (
         ("azure_client_id", "ARM_CLIENT_ID"),

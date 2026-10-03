@@ -89,6 +89,9 @@ def _backend_settings(deploy_dir: str):
             ak, sk = _cfg("aws_access_key_id"), _cfg("aws_secret_access_key")
             if ak and sk:
                 env = {"AWS_ACCESS_KEY_ID": ak, "AWS_SECRET_ACCESS_KEY": sk}
+            else:
+                from . import cloud_federation
+                env = cloud_federation.aws_subprocess_env() or {}
         return ("s3", cfg, env)
 
     if backend == "azure_blob":
@@ -105,6 +108,9 @@ def _backend_settings(deploy_dir: str):
         from . import workload_credential_lease as _leases
         env = _leases.azure_subprocess_env() or {}
         if not env:
+            from . import cloud_federation
+            env = cloud_federation.azure_subprocess_env() or {}
+        if not env:
             for ck, ak in (("azure_client_id", "ARM_CLIENT_ID"),
                            ("azure_client_secret", "ARM_CLIENT_SECRET"),
                            ("azure_tenant_id", "ARM_TENANT_ID"),
@@ -120,6 +126,9 @@ def _backend_settings(deploy_dir: str):
         creds = _cfg("gcp_service_account_json") or _cfg("gcp_credentials_json")
         if creds:
             env["GOOGLE_CREDENTIALS"] = creds
+        else:
+            from . import cloud_federation
+            env.update(cloud_federation.gcp_subprocess_env() or {})
         return ("gcs", cfg, env)
 
     return ("local", {}, {})

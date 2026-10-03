@@ -202,9 +202,17 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
         _dynamic = _wlc_aws_env()
         if _dynamic:
             env.update(_dynamic)
-        else:
+        elif _cfg("aws_access_key_id") and _cfg("aws_secret_access_key"):
             env["AWS_ACCESS_KEY_ID"] = _cfg("aws_access_key_id")
             env["AWS_SECRET_ACCESS_KEY"] = _cfg("aws_secret_access_key")
+        else:
+            # The dashboard's own SPIFFE identity, assumed into a role (the session
+            # token is what makes the triple work).
+            from . import cloud_federation
+            try:
+                env.update(cloud_federation.aws_subprocess_env() or {})
+            except cloud_federation.FederationError as exc:
+                raise PackerError(str(exc)) from exc
         env["AWS_DEFAULT_REGION"] = region
         env["PKR_VAR_region"] = region
 
@@ -322,7 +330,9 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
                 "Azure service-principal credentials not found in the config store or .env "
                 "(azure_client_id / azure_client_secret / azure_tenant_id / azure_subscription_id). "
                 "Packer needs them explicitly. (Creds sourced only from BeyondTrust Password Safe "
-                "are not yet wired into the Packer build path.)"
+                "are not yet wired into the Packer build path, and neither is the dashboard's "
+                "SPIFFE federation: the azure-arm builder takes its credential through the "
+                "template, and that path has not been verified.)"
             )
 
         env = _base_env()
@@ -509,6 +519,12 @@ async def _run_gcp_build(job_id: str, req: GCPPackerBuildRequest, created_by: st
             creds_file = build_dir / "credentials.json"
             creds_file.write_text(sa_json)
             env["GOOGLE_APPLICATION_CREDENTIALS"] = str(creds_file)
+        else:
+            # The dashboard's own SPIFFE identity: the external_account config beside
+            # its token, which googlecompute reads like any ADC file.
+            from . import cloud_federation
+            env.update({k: v for k, v in (cloud_federation.gcp_subprocess_env() or {}).items()
+                        if k == "GOOGLE_APPLICATION_CREDENTIALS"})
 
         # Name the source in the job log. A provisioner that refuses the image it
         # was given (the network cell's vyatta check) otherwise fails against a

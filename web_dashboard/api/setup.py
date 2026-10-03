@@ -925,6 +925,10 @@ class RemoteAgentsFeatureConfig(BaseModel):
     dashboard_spiffe_aud_azure: bool = False
     dashboard_spiffe_aud_gcp: str = ""
     dashboard_spiffe_aud_wlc: bool = False
+    # Where those tokens are federated to (services/cloud_federation). Azure reuses its
+    # own client and tenant id, with the client secret cleared.
+    aws_federation_role_arn: str = ""
+    gcp_federation_service_account: str = ""
 
 class PasswordSafeFeatureConfig(BaseModel):
     """Password Safe / Secrets Safe — secret and managed-account checkout, plus

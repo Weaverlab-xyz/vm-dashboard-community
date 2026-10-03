@@ -238,14 +238,11 @@ def _azure_blob_client():
         from azure.storage.blob import BlobServiceClient  # noqa: F401
     except ImportError:
         raise StorageError("azure-storage-blob or azure-identity is not installed")
-    from azure.identity import ClientSecretCredential
     from azure.storage.blob import BlobServiceClient
+    from . import cloud_federation
     account = _cfg("storage_azure_account")
-    cred = ClientSecretCredential(
-        tenant_id=_cfg("azure_tenant_id"),
-        client_id=_cfg("azure_client_id"),
-        client_secret=_cfg("azure_client_secret"),
-    )
+    cred = cloud_federation.azure_credential(
+        _cfg("azure_tenant_id"), _cfg("azure_client_id"), _cfg("azure_client_secret"))
     return BlobServiceClient(account_url=f"https://{account}.blob.core.windows.net", credential=cred)
 
 
