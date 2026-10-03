@@ -32,7 +32,10 @@ session at an endpoint of its choosing and harvest the credential on first use; 
 could set `username` could spray a known password across accounts. So those stay yours, in
 your file, gated by your `policy.yaml`, which no dashboard API can reach.
 
-The credential is the part that can move, and there is no single right answer:
+The credential is the part that can move. The recommended place for it is the dashboard,
+fetched per job by an agent attested through SPIRE. That is the last row below, and
+[Central storage with SPIRE](credentials.md#central-storage-with-spire-the-recommended-model)
+explains why. The other rows stay supported:
 
 | Where the credential lives | An attacker who reads files on the agent host gets | An attacker who compromises the dashboard gets |
 |---|---|---|
@@ -41,9 +44,16 @@ The credential is the part that can move, and there is no single right answer:
 | `ps_managed_account` | a Password Safe OAuth client — usually entitled to more than the one account | a verb and a name |
 | `dashboard_secret` + a stored password | the agent's identity key: the ability to *request* a credential while a job runs, audited and revocable | the password |
 | `dashboard_secret` + `ps_account://` | the same narrow request ability | a Password Safe account id, subject to its policy, approval workflow and rotation |
+| `dashboard_secret` + `ps_account://`, agent attested through SPIRE, release limited to SPIRE-attested agents | **no agent key**: it is only in memory and is replaced on every restart. On a cloud VM, nothing at all. On a join-token host, the SPIRE agent's own key, which works only until SPIRE rotates it | a Password Safe account id, subject to its policy, approval workflow and rotation |
 
-The default is unchanged and stays available. The last row is the only configuration in which
-**neither** side holds a standing hypervisor credential.
+The last two rows are the only configurations in which **neither** side holds a standing
+hypervisor credential. The last row is the only one in which a copy of the agent host's
+disk yields nothing durable either. It is the recommended configuration.
+
+A host-side credential (`password`, `password_file`, `password_sealed`) is no longer the
+recommendation, but it stays available. Nothing is migrated for you: a connection takes its
+credential from the dashboard only once its entry in your `connections.yaml` says
+`dashboard_secret: true`.
 
 The cost is two files joined by a string, and a typo in either yields
 `unknown connection 'dc1-vcenter'`. The connection form mitigates that by offering an

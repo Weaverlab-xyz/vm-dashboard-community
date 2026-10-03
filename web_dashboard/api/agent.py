@@ -625,6 +625,30 @@ async def complete(job_id: str, body: CompleteRequest, request: Request,
     return {"job_id": job.id, "status": applied}
 
 
+# Operator policy (Settings → Remote agents): credentials the DASHBOARD holds go only to
+# agents whose signing key came from a SPIRE attestation. Such a key lives in the agent's
+# memory and is replaced on every restart, so a copy of the host's disk — the realistic
+# theft — yields nothing that can ask for a credential. An Ed25519 identity.json can be
+# copied and replayed until someone revokes it, which is why this exists at all.
+REQUIRE_SPIRE_FOR_SECRETS = "dashboard_secrets_require_spire"
+
+
+def _require_attested_for_release(agent: RemoteAgent) -> None:
+    """Refuse a dashboard-held credential to an agent not attested through SPIRE, when the
+    operator has asked for that. Called AFTER ``_owned``, so a job that is not this agent's
+    still answers exactly as a missing one does — this refusal is no oracle."""
+    if not config_service.get_bool(REQUIRE_SPIRE_FOR_SECRETS):
+        return
+    if (agent.auth_mode or "ed25519") == "spiffe":
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=("This dashboard releases the credentials it holds only to agents attested "
+                "through SPIRE, and this agent authenticates with an Ed25519 key. Migrate "
+                "it to SPIRE on the Agents page. A hypervisor credential can instead stay "
+                "on the agent host (password_sealed or password_file in connections.yaml)."))
+
+
 class SecretRequest(BaseModel):
     """What the agent must say to be handed a credential.
 
@@ -661,6 +685,7 @@ async def job_secret(job_id: str, body: SecretRequest, request: Request,
       feature exists for, and it reads response bodies.
     """
     job = _owned(db, agent, job_id, statuses=("running",))
+    _require_attested_for_release(agent)
     if job.job_type != "agent_hypervisor":
         # Equality against the one type that has a connection, not a truthy test. A
         # discovery job has none, and by design carries no credential anywhere.
@@ -760,6 +785,7 @@ def job_gateway_key(job_id: str, body: GatewayKeyRequest, request: Request,
     has no business being handed a fresh credential.
     """
     job = _owned(db, agent, job_id, statuses=("running",))
+    _require_attested_for_release(agent)
     if job.job_type != "agent_gateway":
         # Equality against the one type that has a deploy key, not a truthy test — the
         # same rule job_secret follows.
@@ -851,6 +877,7 @@ async def job_ansible_bundle(job_id: str, body: BundleRequest, request: Request,
     no business being handed fresh credentials.
     """
     job = _owned(db, agent, job_id, statuses=("running",))
+    _require_attested_for_release(agent)
     if job.job_type != "agent_ansible":
         # Equality against the one type that has a run bundle, not a truthy test.
         raise HTTPException(
@@ -1201,6 +1228,8 @@ def list_agents(current_user: User = Depends(require_explicit_permission("agents
             # For the "move to SPIRE" banner: shown only when attestation is on, and
             # "update the image first" for agents older than the first that can attest.
             "spire_attest_enabled": config_service.get_bool("spire_attest_enabled"),
+            "dashboard_secrets_require_spire": config_service.get_bool(
+                REQUIRE_SPIRE_FOR_SECRETS),
             "spire_min_agent_version": dashboard_spire.MIN_AGENT_VERSION}
 
 

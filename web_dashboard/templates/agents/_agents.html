@@ -105,7 +105,13 @@
          x-text="spireCandidates().length + (spireCandidates().length === 1 ? ' agent still keeps' : ' agents still keep') + ' a long-lived signing key on disk.'"></p>
       <p class="text-xs text-indigo-800 mt-0.5">
         Migrating to SPIRE moves the key into memory: on a cloud VM nothing is stored at all,
-        and on a bare Docker host only SPIRE's own hourly-rotated key remains.
+        and on a bare Docker host only SPIRE's own hourly-rotated key remains. A migrated
+        agent can then fetch its hypervisor credentials from the dashboard per job
+        (<code class="font-mono">dashboard_secret: true</code>), so none are stored on its host.
+      </p>
+      <p x-show="secretsRequireSpire" class="text-xs text-amber-800 mt-1">
+        This dashboard releases the credentials it holds only to SPIRE-attested agents, so
+        jobs on these agents that need one are refused until they migrate.
       </p>
       <ul class="mt-2 space-y-1">
         <template x-for="a in spireCandidates()" :key="a.id">
@@ -563,6 +569,7 @@ function agentsPage() {
     spireEnabled: false,       // from GET /api/agents: the dashboard accepts SPIRE attestation
     spireMinVersion: '2.6.0',  // the first agent image that can attest
     spireDismissed: {},        // per-agent "Not now" on the SPIRE banner (localStorage)
+    secretsRequireSpire: false, // dashboard-held credentials go only to SPIRE-attested agents
     migrate: {open: false, name: '', spiffe_id: '', join_token_ttl_s: 900,
               bootstrap_pem: '', env: '', run: ''},
     form: {name: '', site: '', description: ''},
@@ -631,6 +638,7 @@ function agentsPage() {
         this.agents = r.agents || [];
         this.spireEnabled = !!r.spire_attest_enabled;
         this.spireMinVersion = r.spire_min_agent_version || '2.6.0';
+        this.secretsRequireSpire = !!r.dashboard_secrets_require_spire;
         this.notEnabled = false;
         this.noAccess = '';
       } catch (e) {

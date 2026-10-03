@@ -138,6 +138,12 @@ services:
     # agent_state is deliberately still mounted: it holds sealing.key, the host-local key
     # for sealed credentials. That is not an authentication key and SPIRE does not replace
     # it — and identity.json, if one exists from an Ed25519 life, stays as the rollback.
+    #
+    # Once this agent attests, prefer `dashboard_secret: true` in connections.yaml over a
+    # sealed or plain password: the credential then stays on the dashboard and is fetched
+    # per job by a key that exists only in memory. See docs/remote-agents/credentials.md,
+    # "Central storage with SPIRE". (An identity.json left from the Ed25519 life is no
+    # threat: attesting replaced its public key on the dashboard, so it no longer signs in.)
 
 volumes:
   spire_agent_data:

@@ -381,6 +381,9 @@ class Settings(BaseSettings):
     # docs/design/agent-and-human-identity.md). Ed25519 enrolment is unaffected.
     spire_attest_enabled: bool = False
     spire_server_container: str = "vmdash-spire-server"   # see services/dashboard_spire.py
+    # Release dashboard-held credentials (/jobs/{id}/secret, /gateway-key, /ansible-bundle)
+    # only to agents that attested through SPIRE. Off by default: Ed25519 agents keep them.
+    dashboard_secrets_require_spire: bool = False
 
     # Which peers may set X-Forwarded-For / X-Forwarded-Proto.
     #

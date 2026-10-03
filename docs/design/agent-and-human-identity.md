@@ -272,6 +272,10 @@ k3s takes one `--authentication-config` file. That file holds a list of JWT auth
 - The banner lists active Ed25519 agents when attestation is on, says "update the image first" below agent 2.6.0, and is dismissible per agent.
 - Not automated: cloud node attestation (`aws_iid`, `azure_imds`, `gcp_iit`), whose node SPIFFE ID is derived from the instance and is unknown until it attests. Those entries are still created by hand.
 
+**Also built:** central credential storage as the recommended model for attested agents.
+- The existing per-job release routes (`/api/agent/jobs/{id}/secret`, `/gateway-key`, `/ansible-bundle`) were already scoped to the job, sealed per fetch and audited. What held the docs back from recommending them was that an Ed25519 agent's request ability is a file on the host. Attestation removes that file, so the docs now recommend `dashboard_secret` (ideally a `ps_account://` reference) for attested agents and treat host-side storage as the fallback.
+- **Settings → Remote agents → Release dashboard-held credentials only to SPIRE-attested agents** (`dashboard_secrets_require_spire`, off by default). When it is on, all three routes refuse an agent whose `auth_mode` is not `spiffe` with 403 and a remedy. The check runs after job ownership, so it adds no oracle. The banner says when it applies.
+
 Still to build:
 
 - Settings: SSO provider `direct | dex`, `k8s_human_auth_mode` (managed clusters only, default `native`) with a per-cluster override.
