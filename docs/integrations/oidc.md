@@ -165,9 +165,10 @@ admin-granted ones, see the [Entitle user-JIT design doc](../design/entitle-user
 
 [Dex](https://dexidp.io) can sit between the dashboard and your IdP. It is **optional**:
 pointing the dashboard straight at your IdP, as above, is the default and stays fully
-supported. Dex earns its place when you also want **clusters** — k3s, EKS, GKE, OKE, and AKS
-in preview — to trust the same issuer, so a person and their groups mean the same thing in
-the dashboard and in `kubectl`.
+supported. Dex earns its place when you also want **clusters** to trust the same issuer, so
+a person and their groups mean the same thing in the dashboard and in `kubectl`. On-prem
+(k3s) clusters require it for people; managed clusters (EKS, GKE, OKE, and AKS in preview)
+can opt in per cluster and stay on their native authentication by default.
 
 Nothing in the dashboard changes to use it — Dex is just another issuer:
 

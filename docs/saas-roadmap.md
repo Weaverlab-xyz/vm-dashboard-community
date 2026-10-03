@@ -231,8 +231,9 @@ the next things queued for QA.
   people their own way.
 - **What is being added (additively):** an opt-in SPIRE server beside the dashboard and a
   SPIRE sidecar beside the agent, so an agent on a cloud VM holds no key at rest; and Dex as
-  an optional single OIDC issuer for people across the dashboard, k3s and the managed
-  clusters. The Ed25519 path and direct OIDC remain the defaults.
+  the single OIDC issuer for people: the only way people reach on-prem (k3s) clusters, and
+  an opt-in per managed cluster, which stay on native authentication by default. The
+  Ed25519 path and direct OIDC remain the defaults.
 - **Status:** In design; compose overlays and k3s/Dex lab plays built. See
   [design/agent-and-human-identity.md](design/agent-and-human-identity.md).
 - **Dev-testable?** Partial. The shared k3s authentication config has been booted on k3s

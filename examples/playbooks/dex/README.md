@@ -4,11 +4,10 @@ Dex is the **optional** single OIDC issuer for *people*. It federates the IdP yo
 run (Entra, Okta, Keycloak, Google) so that the dashboard's SSO and every cluster's API
 server trust one issuer and see the same user and groups.
 
-Nothing here is required:
-- The dashboard's direct OIDC sign-in ([docs/integrations/oidc.md](../../../docs/integrations/oidc.md)) keeps working, pointed straight at your IdP.
-- Clusters keep their native authentication.
-
-Dex is something you opt in to, cluster by cluster.
+Where it is required and where it is optional:
+- **On-prem clusters (k3s): required.** Dex is the only way people reach an on-prem cluster. The admin kubeconfig stays as the dashboard's own credential and break-glass, and is never handed to people. Run `k3s/k3s-dex-auth.yml` on every k3s server you build.
+- **Managed clusters (EKS, GKE, OKE, AKS): optional, and not the default.** They keep their native authentication unless an administrator switches a cluster to Dex.
+- **Dashboard sign-in: optional.** Direct OIDC ([docs/integrations/oidc.md](../../../docs/integrations/oidc.md)) keeps working, pointed straight at your IdP.
 
 Why Dex for people and SPIRE for workloads, and how the two share a k3s API server:
 [docs/design/agent-and-human-identity.md](../../../docs/design/agent-and-human-identity.md).
@@ -41,7 +40,7 @@ Why Dex for people and SPIRE for workloads, and how the two share a k3s API serv
 
 ## Managed clusters
 
-EKS, GKE, OKE and AKS (in preview) can all trust Dex too: see the matrix in the design note. They fetch Dex's discovery document and JWKS from the internet, so for them Dex needs:
+EKS, GKE, OKE and AKS (AKS's side is in preview) can all trust Dex too, **as an opt-in per cluster**; they stay on their native authentication by default. See the matrix in the design note. They fetch Dex's discovery document and JWKS from the internet, so for them Dex needs:
 - a **public** DNS name,
 - a **public-CA** certificate (`dex_tls_cert_pem` / `dex_tls_key_pem`).
 

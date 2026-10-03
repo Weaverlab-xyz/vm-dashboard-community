@@ -161,7 +161,7 @@ a file read.
 | `k3s-uninstall.yml` | Run k3s's uninstall script (guarded; `confirm: true` required) |
 | `k3s-spiffe-auth.yml` | Make the API server accept SPIFFE JWT-SVIDs as bearer tokens (needs 1.34+; **never live-validated**) |
 | `k3s-spiffe-unlink.yml` | Undo `k3s-spiffe-auth.yml`, keeping any other authenticator (Dex) the API server trusts |
-| `k3s-dex-auth.yml` | Make the API server accept Dex ID tokens for **people** — usernames and groups `dex:`-prefixed (needs 1.34+; see [`dex/`](dex/README.md)) |
+| `k3s-dex-auth.yml` | Make the API server accept Dex ID tokens for **people** — usernames and groups `dex:`-prefixed. **Required** after `k3s-server-init.yml`: Dex is the only way people reach an on-prem cluster (needs 1.34+; see [`dex/`](dex/README.md)) |
 
 `k3s-spiffe-auth.yml` and `k3s-dex-auth.yml` share one `AuthenticationConfiguration` (k3s
 takes a single `--authentication-config`). Each replaces only its own entry, keyed by its
@@ -176,7 +176,10 @@ Same node-by-node shape as `swarm/`, since a run targets one host:
 3. `k3s-join.yml` on each remaining node (`node_role: server` for extra control-plane
    nodes — the first server must have been started with `cluster_init: true`).
 4. `k3s-status.yml` on a server to confirm everyone registered.
-5. `k3s-kubeconfig.yml` on a server to collect the kubeconfig for registration.
+5. `k3s-kubeconfig.yml` on a server to collect the kubeconfig for registration. This is the
+   dashboard's own (admin) credential and break-glass, not something to hand to people.
+6. `k3s-dex-auth.yml` on each server, against a Dex from [`dex/`](dex/README.md). People
+   reach on-prem clusters only through Dex.
 
 **Use the local runner**, and note the install fetches `get.k3s.io` over HTTPS, so the
 nodes need egress. Air-gapped installs are out of scope.
@@ -375,9 +378,10 @@ in and what each one proves.
 
 ## Dex — one issuer for people (`dex/`)
 
-**Optional.** Dex federates your existing IdP into one OIDC issuer that the dashboard's SSO
-and every cluster's API server can trust, so a person and their groups mean the same thing
-everywhere. Direct OIDC sign-in and each cluster's native authentication stay the defaults.
+Dex federates your existing IdP into one OIDC issuer that the dashboard's SSO and every
+cluster's API server can trust, so a person and their groups mean the same thing everywhere.
+**Required for on-prem clusters** (it is the only way people reach a k3s cluster);
+**optional and not the default** for managed clusters and for dashboard sign-in.
 
 | File | Purpose |
 |---|---|

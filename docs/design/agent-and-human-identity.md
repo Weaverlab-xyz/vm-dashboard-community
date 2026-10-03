@@ -30,13 +30,14 @@ Dex was looked at for the agent first and rejected for it. See [Rejected](#rejec
 
 ## The rule: additive
 
-Nothing here removes or changes a path that works today.
+Nothing here removes or changes a path that works today, with **one deliberate exception**: how people get a kubeconfig for an on-prem cluster (see [On-prem: the one path that changes](#on-prem-the-one-path-that-changes)).
 
 | Today | Stays | New, opt-in |
 |---|---|---|
 | Agent enrols with `agte_…` and keeps Ed25519 in `identity.json` | **Yes, permanently**, and still the default | Agent attests through a SPIRE sidecar |
 | SSO points straight at an IdP (`oidc_*` settings) | **Yes**, and still the default | SSO points at Dex, which points at the IdP |
-| Cluster access per cloud (EKS/GKE/OKE exec plugins, AKS with Entra) | **Yes**, and still the default | Cluster API servers trust Dex |
+| Cluster access per cloud (EKS/GKE/OKE exec plugins, AKS with Entra) | **Yes**, and still the default | A managed cluster's API server also trusts Dex, per cluster, opt-in |
+| On-prem clusters (k3s, `cloud="local"`): no standard way for people, only the admin kubeconfig | **The admin kubeconfig stays**, as the dashboard's own credential and break-glass; it is never handed to people | Dex, as **the only** way people reach an on-prem cluster |
 
 Three reasons the legacy agent path is permanent rather than deprecated:
 - **The proxy constraint below.** Some sites can never reach a SPIRE server.
@@ -174,16 +175,36 @@ node attestation ──── mTLS gRPC :8081 ───────────�
   - `direct` (default) is today's behavior.
   - `dex` fills `oidc_issuer` / `oidc_client_id` / `oidc_client_secret` from the Dex settings. The **same** `oidc_service` code path runs either way.
   - Dex is a different issuer URL, not a different integration.
-- **Clusters: Settings → Kubernetes → Human authentication** (`k8s_human_auth_mode`)
-  - `native` (default) is today's per-cloud behavior, including AKS with Entra.
-  - `dex`: kubeconfigs generated *for people* use an `oidc-login` exec plugin against Dex.
-  - Set globally, overridable per cluster. Flip a cluster to `dex` only once its API server trusts Dex.
+- **Clusters: how people authenticate depends on where the cluster runs.**
+
+  | Cluster | Human authentication | Default | Can it be changed? |
+  |---|---|---|---|
+  | EKS, GKE, OKE, AKS (managed) | `native` (the cloud's own: EKS/GKE/OKE exec plugins, AKS with Entra) or `dex` | **`native`** | Yes, per cluster, opt-in: **Settings → Kubernetes → Human authentication** (`k8s_human_auth_mode`), overridable on the cluster |
+  | k3s / on-prem (`cloud="local"`) | `dex` | **`dex`** | No. There is no native option to fall back to |
+
+  - **Managed: Dex is optional, never the default, on every cloud.** Not only on AKS, where the cluster side is still preview. One default for all four is easier to reason about than a per-cloud exception that changes when a preview ends. Flip a cluster to `dex` only once its API server trusts Dex (the Terraform wiring below).
+  - **On-prem: Dex is the only way.** A self-built cluster has no cloud identity to be "native" to; the alternative is handing people copies of the admin client certificate, which cannot be revoked per person and leaves no per-person audit trail. So kubeconfigs the dashboard generates for people on a `cloud="local"` cluster always use the `oidc-login` exec plugin against Dex, and the setting is not shown for those clusters.
+  - **The on-prem admin kubeconfig is not removed.** It is how the dashboard registers and operates the cluster, and it is the break-glass path if Dex is down. It stays where it is stored today (the encrypted config store or an external vault) and is never offered to a person.
+  - **Consequence for building an on-prem cluster:** `k3s-dex-auth.yml` becomes a required step after `k3s-server-init.yml`, not an extra. Until a cluster's API server trusts Dex, the dashboard has no way to give people access to it, and says so on the cluster's row rather than falling back to the admin kubeconfig.
+  - `dex` generates kubeconfigs that use an `oidc-login` exec plugin against Dex; `native` is unchanged from today.
+
+### On-prem: the one path that changes
+
+Today a registered `cloud="local"` cluster shows the **API tunnel** button, and its download (`GET /api/k8s/clusters/{id}/api-tunnel-kubeconfig` → `k8s_service.build_api_tunnel_kubeconfig`) returns the **stored** kubeconfig, repointed at the tunnel.
+- For EKS, GKE and AKS that file is token-free: its `users` entry is the cloud's exec plugin, so each person authenticates as themselves.
+- For k3s the stored kubeconfig is the **admin** one from `k3s-kubeconfig.yml`, with the client certificate and key inline. So the same download hands cluster-admin credentials to anyone with `k8s:read`. That credential cannot be revoked per person, and the audit trail cannot tell people apart.
+
+"Dex is the only way on-prem" closes that. In Phase 2, for `cloud="local"`:
+- the route returns a kubeconfig whose `users` entry is the Dex `oidc-login` exec block (cluster CA kept, no client certificate, no key);
+- if the cluster's API server does not trust Dex yet, the route refuses with a message naming `k3s-dex-auth.yml`. It never falls back to the stored file.
+
+The stored admin kubeconfig keeps doing what it does for the dashboard itself (registration, the transient runners, break-glass). It just stops being downloadable by people. This is the only behavior in this note that is removed rather than added, and it is removed because it hands out a shared admin credential.
 - **Not affected:** the transient-runner kubeconfig (`k8s_service._runner_kubeconfig`). It swaps in a server-minted token for the dashboard's own runs and has nothing to do with people.
 - **Groups:** Dex passes the upstream IdP's groups through in the `groups` claim. The cluster maps them to RBAC with a prefix (`dex:` in the lab play), so a Dex group can never collide with a built-in `system:` group.
 
 ### Every cluster type can trust Dex
 
-This is what makes standardizing on Dex hold for managed clusters as well as on-prem ones:
+Standardizing on Dex is therefore always *possible*: mandatory on-prem, available on every managed cloud for an administrator who wants one identity everywhere.
 
 | Cluster | Mechanism | Where it gets wired | Caveat |
 |---|---|---|---|
@@ -191,7 +212,9 @@ This is what makes standardizing on Dex hold for managed clusters as well as on-
 | EKS | OIDC identity provider config | `aws_eks_identity_provider_config` in `terraform/k8s_cluster/aws_eks` | one external OIDC provider per cluster |
 | GKE | Identity Service for GKE | `identity_service_config` and its `ClientConfig` in `terraform/k8s_cluster/gcp_gke` | Identity Service must be enabled on the cluster |
 | OKE | Cluster OIDC token authentication | `open_id_connect_token_authentication_config` in `terraform/k8s_cluster/oci_oke` | check the pinned OCI provider supports it |
-| AKS | Structured authentication, **preview** | an `azapi` resource in `terraform/k8s_cluster/azure_aks` (azurerm likely lacks it) | preview, Kubernetes ≥ 1.30; leave AKS on Entra (`native`) by default until GA |
+| AKS | Structured authentication, **preview** | an `azapi` resource in `terraform/k8s_cluster/azure_aks` (azurerm likely lacks it) | preview, Kubernetes ≥ 1.30 |
+
+On every managed row this is **opt-in**: the cluster stays on `native` unless an administrator switches it. On the k3s row it is required (see above).
 
 - Each Terraform change takes a `dex_issuer_url` variable. **Empty means no change**, so every existing cluster plans with an empty diff.
 - **This corrects an earlier claim.** The header of `k3s-spiffe-auth.yml` said managed clusters cannot be pointed at an external issuer. That is true for that play's *workload* case: arbitrary `--authentication-config`, an issuer on a private address, a SPIFFE CA. It is not true for a public OIDC issuer used by people.
@@ -237,7 +260,7 @@ k3s takes one `--authentication-config` file. That file holds a list of JWT auth
 - In `runners/agent/agent.py`: socket detection, the Workload API fetch (via the `spiffe` Python package or the gRPC stubs), and the in-memory key.
 - Alembic migration: `RemoteAgent.auth_mode`, `RemoteAgent.spiffe_id`.
 - The **Migrate to SPIRE** action, entry creation through the admin socket, the re-issue changes, and the banner.
-- Settings: `spire_server_enabled`, SSO provider `direct | dex`, `k8s_human_auth_mode` with a per-cluster override.
-- Dex kubeconfig generation in `k8s_service` (the `oidc-login` exec block).
+- Settings: `spire_server_enabled`, SSO provider `direct | dex`, `k8s_human_auth_mode` (managed clusters only, default `native`) with a per-cluster override.
+- Dex kubeconfig generation in `k8s_service` (the `oidc-login` exec block), always used for people on `cloud="local"` clusters, including the API-tunnel download, which stops returning the stored admin kubeconfig for those clusters; a "trusts Dex" flag on those cluster rows, and the "no access for people yet" state when it is unset.
 - `dex_issuer_url` wiring in the four managed-cluster Terraform modules, empty by default.
 - A Dex compose overlay for the dashboard host, for sites that want Dex beside the dashboard rather than on a cluster.
