@@ -1,0 +1,243 @@
+# Make the k3s API server accept the DASHBOARD's own JWT-SVID — the dashboard operates
+# this cluster with a token that expires instead of the admin client certificate
+# Target: the k3s SERVER node. Idempotent — restarts k3s only if something changed.
+#
+# docs/design/dashboard-workload-identity.md, Slice 4. Today every routine operation the
+# dashboard runs against an on-prem cluster (manifests, helm, RBAC, ServiceAccount tokens,
+# Ansible k8s targets) uses the admin kubeconfig from k3s-kubeconfig.yml: a client
+# certificate in system:masters that cannot be revoked and never expires. After this play,
+# and once the cluster is marked "Trusts dashboard identity" on the Kubernetes page, those
+# operations present a JWT-SVID for spiffe://<trust domain>/dashboard instead, minted for
+# THIS cluster's audience and living thirty minutes. The admin kubeconfig is not removed:
+# it stays as break-glass (untick the flag to use it again).
+#
+# OPT-IN AND ADDITIVE, exactly like k3s-dex-auth.yml: whatever already authenticates to
+# this cluster keeps working, including the admin kubeconfig, Dex and the lab's SPIFFE
+# authenticator.
+#
+# SHARED FILE, OWNED ENTRY. k3s takes ONE --authentication-config, shared with
+# k3s-spiffe-auth.yml and k3s-dex-auth.yml. This play replaces, in place, only the entry
+# whose username prefix is its own (dashboard_username_prefix) and never touches theirs.
+# The middle of this play is copied verbatim from k3s-dex-auth.yml, and
+# tests/test_playbook_k3s.py holds the three plays' shared parts equal.
+#
+# THE AUDIENCE IS PER CLUSTER. The Kubernetes page shows it (<issuer>/k8s/<cluster id>).
+# A token the dashboard minted for another cluster is refused here, so a cluster that sees
+# the dashboard's token cannot replay it at its neighbour.
+#
+# THE BINDING IS cluster-admin, and that is not a widening: it is the power the admin
+# certificate this replaces already has (system:masters). The subject is
+# "<prefix><spiffe id>" — by default "dashboard:spiffe://<td>/dashboard".
+#
+# NEVER LIVE-VALIDATED. This edits the API server's authentication configuration, and a bad
+# file stops the API server. Read "If k3s will not come back" at the end BEFORE the first
+# run.
+#
+# extra_vars:
+#   dashboard_issuer_url: https://agents.example.com/spiffe   # REQUIRED — Settings shows it
+#   dashboard_spiffe_id: spiffe://dashboard.example.com/dashboard   # REQUIRED
+#   cluster_audience: https://agents.example.com/spiffe/k8s/<cluster id>   # REQUIRED
+#   dashboard_issuer_ca_pem: ""        # the issuer's TLS CA; blank = a public CA
+#   dashboard_username_prefix: "dashboard:"
+- name: Accept the dashboard's JWT-SVID at the k3s API server
+  hosts: all
+  become: true
+  vars:
+    dashboard_issuer_url: ""
+    dashboard_spiffe_id: ""
+    cluster_audience: ""
+    dashboard_issuer_ca_pem: ""
+    dashboard_username_prefix: "dashboard:"
+    # The other two plays' prefixes — refused here so no two plays claim one entry.
+    spiffe_username_prefix: "spiffe:"
+    dex_username_prefix: "dex:"
+    k3s_server_dir: /var/lib/rancher/k3s/server
+    # SHARED with k3s-spiffe-auth.yml and k3s-dex-auth.yml. Same file, same drop-in.
+    auth_config: /var/lib/rancher/k3s/server/spiffe-auth-config.yaml
+    dropin: /etc/rancher/k3s/config.yaml.d/10-spiffe-auth.yaml
+  tasks:
+    - name: Require the issuer, the identity, the audience, and a prefix of our own
+      ansible.builtin.assert:
+        that:
+          - dashboard_issuer_url is match('^https://')
+          - dashboard_issuer_url is not match('^https://[0-9.]+(:[0-9]+)?(/.*)?$')
+          - dashboard_spiffe_id is match('^spiffe://')
+          - cluster_audience | length > 0
+          - dashboard_username_prefix | length > 0
+          - dashboard_username_prefix not in [spiffe_username_prefix, dex_username_prefix]
+          - dashboard_issuer_ca_pem | length == 0 or 'BEGIN CERTIFICATE' in dashboard_issuer_ca_pem
+        fail_msg: >-
+          dashboard_issuer_url must be https on a hostname, spelled EXACTLY as the
+          dashboard's discovery document advertises it (Settings → Remote Agents shows it).
+          dashboard_spiffe_id and cluster_audience come from the Kubernetes page.
+          dashboard_username_prefix must not be '{{ spiffe_username_prefix }}' or
+          '{{ dex_username_prefix }}' — that is how the three plays tell their entries
+          apart. dashboard_issuer_ca_pem, if given, is the PEM itself.
+
+    - name: Confirm k3s is running here
+      ansible.builtin.command: systemctl is-active k3s
+      register: k3s_state
+      changed_when: false
+      failed_when: false
+
+    - name: Fail when this is not a k3s server
+      ansible.builtin.fail:
+        msg: >-
+          k3s is not active on this host (systemctl is-active k3s said
+          '{{ k3s_state.stdout | default("nothing") }}'). Run k3s-server-init.yml first.
+      when: k3s_state.stdout != "active"
+
+    - name: Read the k3s version
+      ansible.builtin.command: k3s --version
+      register: k3s_version_out
+      changed_when: false
+
+    - name: Require Kubernetes 1.34 or newer
+      ansible.builtin.assert:
+        that:
+          - _k8s_minor | int >= 34
+        fail_msg: >-
+          This host runs Kubernetes 1.{{ _k8s_minor }}. AuthenticationConfiguration v1 is
+          GA in 1.34, and a config the API server rejects stops it — on a single-node
+          cluster, with no API left to fix it through.
+      vars:
+        _k8s_minor: >-
+          {{ (k3s_version_out.stdout | regex_search('v1\.(\d+)\.', '\\1') | first) | default(0, true) }}
+
+    # The API server fetches the dashboard's discovery document and keys over TLS. A
+    # publicly trusted issuer needs nothing here; a private one (Caddy's internal CA) is
+    # given to the API server for THIS issuer only, not added to the host's trust store.
+    #
+    # The username is the token's `sub` — the dashboard's SPIFFE ID — behind the prefix.
+    # The audience is this cluster's alone.
+    - name: Describe this play's JWT authenticator
+      ansible.builtin.set_fact:
+        _own_jwt: >-
+          {{ {'issuer': {'url': dashboard_issuer_url, 'audiences': [cluster_audience]}
+                        | combine({'certificateAuthority': dashboard_issuer_ca_pem}
+                                  if dashboard_issuer_ca_pem | length > 0 else {}),
+              'claimMappings': {
+                'username': {'claim': 'sub', 'prefix': dashboard_username_prefix}}} }}
+
+    - name: Read the current AuthenticationConfiguration, if there is one
+      ansible.builtin.slurp:
+        src: "{{ auth_config }}"
+      register: _auth_existing
+      failed_when: false
+
+    # In PLACE, not removed-and-appended: if each play moved its entry to the end, running
+    # them alternately would reorder the file every time and restart k3s for nothing.
+    - name: Put this play's authenticator where its old one was
+      ansible.builtin.set_fact:
+        _other_jwt: >-
+          {{ _existing_jwt | zip(_prefixes) | rejectattr('1', 'equalto', dashboard_username_prefix)
+             | map('first') | list }}
+        _new_jwt: >-
+          {{ _existing_jwt[:(_at | int)]
+             + [_own_jwt]
+             + (_existing_jwt[(_at | int) + 1:] | zip(_prefixes[(_at | int) + 1:])
+                | rejectattr('1', 'equalto', dashboard_username_prefix) | map('first') | list) }}
+      vars:
+        _existing_jwt: >-
+          {{ (((_auth_existing.content | b64decode | from_yaml) or {}).get('jwt') or [])
+             if _auth_existing.content is defined else [] }}
+        _prefixes: >-
+          {{ _existing_jwt | map(attribute='claimMappings.username.prefix', default='') | list }}
+        _at: >-
+          {{ _prefixes.index(dashboard_username_prefix) if dashboard_username_prefix in _prefixes else _existing_jwt | length }}
+
+    # Kubernetes refuses two authenticators with one issuer URL. Only possible here if
+    # another play already trusts this issuer under a different prefix — refuse, and say so,
+    # rather than write a file that stops the API server.
+    - name: Refuse a second authenticator for the same issuer
+      ansible.builtin.assert:
+        that:
+          - dashboard_issuer_url not in (_other_jwt | map(attribute='issuer.url') | list)
+        fail_msg: >-
+          {{ auth_config }} already has an authenticator for {{ dashboard_issuer_url }} under a
+          different username prefix. Kubernetes rejects duplicate issuers and the API
+          server would not start. Remove that entry first.
+
+    - name: Write the AuthenticationConfiguration
+      ansible.builtin.copy:
+        dest: "{{ auth_config }}"
+        mode: "0600"
+        content: "{{ _auth_doc | to_nice_yaml(indent=2) }}"
+      vars:
+        _auth_doc:
+          apiVersion: apiserver.config.k8s.io/v1
+          kind: AuthenticationConfiguration
+          jwt: "{{ _new_jwt }}"
+      notify: Restart k3s
+
+    - name: Create the drop-in directory
+      ansible.builtin.file:
+        path: /etc/rancher/k3s/config.yaml.d
+        state: directory
+        mode: "0755"
+
+    # Byte-for-byte what k3s-spiffe-auth.yml writes, so running both never flaps the file
+    # (and never restarts k3s for nothing).
+    - name: Point the API server at it
+      ansible.builtin.copy:
+        dest: "{{ dropin }}"
+        mode: "0600"
+        content: |
+          # Managed by k3s-spiffe-auth.yml and k3s-dex-auth.yml, which share the file it
+          # names. A drop-in rather than config.yaml, so flags set elsewhere survive.
+          kube-apiserver-arg:
+            - "authentication-config={{ auth_config }}"
+      notify: Restart k3s
+
+    - name: Apply the restart before touching the API
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for the API to serve again
+      ansible.builtin.command: k3s kubectl get --raw /readyz
+      register: readyz
+      changed_when: false
+      retries: 36
+      delay: 5
+      until: readyz.rc == 0
+
+    - name: Write the RBAC binding for the dashboard
+      ansible.builtin.copy:
+        dest: "{{ k3s_server_dir }}/dashboard-spiffe-rbac.yaml"
+        mode: "0600"
+        content: |
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: vm-dashboard-spiffe
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: cluster-admin
+          subjects:
+          - apiGroup: rbac.authorization.k8s.io
+            kind: User
+            name: "{{ dashboard_username_prefix }}{{ dashboard_spiffe_id }}"
+
+    - name: Bind the dashboard
+      ansible.builtin.command: >-
+        k3s kubectl apply -f {{ k3s_server_dir }}/dashboard-spiffe-rbac.yaml
+      register: rbac_apply
+      changed_when: "'unchanged' not in rbac_apply.stdout"
+
+    - name: What was built
+      ansible.builtin.debug:
+        msg:
+          - "The k3s API server now accepts JWT-SVIDs from {{ dashboard_issuer_url }} for audience {{ cluster_audience }}."
+          - "The dashboard arrives as '{{ dashboard_username_prefix }}{{ dashboard_spiffe_id }}', bound to cluster-admin."
+          - "Other authenticators in {{ auth_config }} were kept: {{ _other_jwt | length }}."
+          - "Next: on the Kubernetes page, mark this cluster 'Trusts dashboard identity'."
+          - "IF K3S WILL NOT COME BACK: delete {{ dropin }} and run"
+          - "  systemctl restart k3s"
+          - "That removes the flag (for Dex and SPIFFE too, if this node uses them) and leaves"
+          - "the cluster as it was before; the admin kubeconfig still works throughout."
+  handlers:
+    - name: Restart k3s
+      ansible.builtin.systemd:
+        name: k3s
+        state: restarted
+        daemon_reload: true

@@ -244,6 +244,17 @@ For `cloud="local"` clusters the dashboard keeps the admin kubeconfig from
 `k3s-kubeconfig.yml`, a client certificate and key. #995 stopped handing it to *people*
 (they go through Dex). The dashboard itself still uses it.
 
+**Built**, with three changes from the sketch below. A play of its own,
+`k3s-dashboard-auth.yml` (prefix `dashboard:`, binding `dashboard:<spiffe id>` →
+`cluster-admin`), instead of reusing the lab's `spiffe:` entry, so the lab's authenticator
+and the dashboard's never share one. The audience is per cluster, `<issuer>/k8s/<cluster id>`
+(`k8s_service.dashboard_audience`), so one cluster cannot replay the dashboard's token at
+another. And the switch is `k8s_service.resolve_kubeconfig`, the one function every routine
+caller already goes through: for a local cluster marked `k8s_spiffe_trusted_<cid>` it keeps
+the stored cluster and replaces the user with a thirty-minute SVID, cached until ten minutes
+remain. A mint that fails is a `K8sError` naming the break-glass (untick the flag), never the
+admin certificate. `stored_kubeconfig` keeps the raw file for the API-tunnel download.
+
 - `examples/playbooks/k3s/k3s-spiffe-auth.yml` already maintains a shared
   `AuthenticationConfiguration` with one JWT authenticator per issuer, each replaced in
   place by its username prefix. Point one at the dashboard's issuer, and bind RBAC to
@@ -311,7 +322,7 @@ SPIRE-attested agents** setting, completes
    Built.
 3. ~~**Slice 3:** AWS and GCP (configuration and docs, plus the `packer_service` fix), then
    Azure (the `ClientAssertionCredential` branch).~~ Built.
-4. **Slice 4:** on-prem k3s through the dashboard's SVID.
+4. ~~**Slice 4:** on-prem k3s through the dashboard's SVID.~~ Built.
 5. **L3, L4 and L5:** after the lab answers the Password Safe attribute question.
 6. **Slice 5.**
 
@@ -322,5 +333,7 @@ SPIRE-attested agents** setting, completes
 - `jwt mint` output shape: read from the 1.15.3 source (`-output json` prints the
   `MintJWTSVIDResponse`, token at `svid.token`; `-ttl` is a Go duration) and pinned in
   `tests/test_dashboard_spiffe_identity.py`'s fake, but not run against a real server.
+- No k3s API server has yet accepted a dashboard SVID: `k3s-dashboard-auth.yml` shares its
+  tested structure with `k3s-dex-auth.yml`, but has not been run.
 - Whether SPIRE logs a `jwt mint` with enough detail to serve as the audit trail the
   threat model leans on. If not, the dashboard should write its own audit row per mint.

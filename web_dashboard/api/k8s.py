@@ -489,6 +489,30 @@ def set_dex_trust(
     return result
 
 
+@router.post("/clusters/{cluster_id}/spiffe-trust")
+def set_spiffe_trust(
+    cluster_id: str,
+    req: _DexTrustRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("k8s", "write")),
+):
+    """Mark (or unmark) an on-prem cluster as trusting the dashboard's own SPIFFE
+    identity — the operator's statement that k3s-dashboard-auth.yml has run on it. The
+    dashboard's routine operations then present a short-lived JWT-SVID instead of the
+    stored admin kubeconfig; unmarking is the break-glass back to it. Managed clusters are
+    refused (docs/design/dashboard-workload-identity.md, Slice 4)."""
+    from ..services import job_service
+    _visible_or_404(db, cluster_id, current_user)
+    try:
+        result = k8s_service.set_spiffe_trust(db, cluster_id, req.trusted)
+    except K8sError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    job_service.log_audit(db, current_user.username, "k8s.spiffe_trust",
+                          details={"cluster_id": cluster_id, "trusted": bool(req.trusted)})
+    logger.info("k8s cluster %s spiffe_trusted=%s", cluster_id, bool(req.trusted))
+    return result
+
+
 @router.post("/clusters/{cluster_id}/entra-group", status_code=202)
 def bind_entra_group(
     cluster_id: str,

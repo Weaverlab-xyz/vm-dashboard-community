@@ -378,6 +378,67 @@ def test_the_dex_authenticator_prefixes_groups_too():
     assert _dex_play()["vars"]["dex_groups_prefix"], "dex_groups_prefix defaults to empty"
 
 
+def _dashboard_play():
+    path = os.path.join(_K3S_DIR, "k3s-dashboard-auth.yml")
+    assert os.path.exists(path), "k3s-dashboard-auth.yml is missing"
+    return yaml.safe_load(open(path, encoding="utf-8").read())[0]
+
+
+def test_all_three_auth_plays_share_the_file_the_dropin_and_its_bytes():
+    """docs/design/dashboard-workload-identity.md, Slice 4. A third play in the same file:
+    any difference in the drop-in body restarts k3s every time the plays alternate."""
+    spiffe, dash = _spiffe_play(), _dashboard_play()
+    for key in ("auth_config", "dropin"):
+        assert dash["vars"][key] == spiffe["vars"][key], key
+    body = lambda p: _copy_task(p, "config.yaml.d")["ansible.builtin.copy"]["content"]  # noqa: E731
+    assert body(dash) == body(spiffe) == body(_dex_play())
+
+
+def test_the_dashboard_play_replaces_only_its_own_entry_in_place():
+    play = _dashboard_play()
+    merge = next(t for t in _tasks(play) if "_new_jwt" in (t.get("ansible.builtin.set_fact") or {}))
+    src = yaml.safe_dump(merge)
+    assert "claimMappings.username.prefix" in src and "dashboard_username_prefix" in src
+    assert "_existing_jwt[:(_at | int)]" in src, "the entry is not put back where it was"
+    assert _copy_task(play, "spiffe-auth-config.yaml")["vars"]["_auth_doc"]["jwt"] == "{{ _new_jwt }}"
+    assert any("not in (_other_jwt | map(attribute='issuer.url')" in yaml.safe_dump(t)
+               for t in _tasks(play)), "a duplicate issuer is not refused"
+
+
+def test_the_dashboard_prefix_can_never_be_another_plays():
+    dash = _dashboard_play()
+    assert dash["vars"]["dashboard_username_prefix"] not in (
+        _spiffe_play()["vars"]["username_prefix"], _dex_play()["vars"]["dex_username_prefix"])
+    assert dash["vars"]["spiffe_username_prefix"] == _spiffe_play()["vars"]["username_prefix"]
+    assert dash["vars"]["dex_username_prefix"] == _dex_play()["vars"]["dex_username_prefix"]
+    guard = yaml.safe_dump(next(t for t in _tasks(dash) if "ansible.builtin.assert" in t))
+    assert "dashboard_username_prefix not in [spiffe_username_prefix, dex_username_prefix]" in guard
+
+
+def test_the_dashboard_authenticator_is_per_cluster_and_maps_sub():
+    """The audience is this cluster's alone, so a token one cluster sees cannot be replayed
+    at another; the username is the dashboard's SPIFFE ID behind the prefix."""
+    src = _own_jwt(_dashboard_play())
+    assert "'audiences': [cluster_audience]" in src
+    assert "'username': {'claim': 'sub', 'prefix': dashboard_username_prefix}" in src
+    guard = yaml.safe_dump(next(t for t in _tasks(_dashboard_play()) if "ansible.builtin.assert" in t))
+    assert "cluster_audience | length > 0" in guard and "^spiffe://" in guard
+
+
+def test_the_dashboard_binding_names_the_prefixed_spiffe_id():
+    rbac = _copy_task(_dashboard_play(), "dashboard-spiffe-rbac.yaml")["ansible.builtin.copy"]["content"]
+    doc = yaml.safe_load(rbac.replace("{{ dashboard_username_prefix }}{{ dashboard_spiffe_id }}",
+                                      "SUBJECT"))
+    assert doc["kind"] == "ClusterRoleBinding" and doc["roleRef"]["name"] == "cluster-admin"
+    assert doc["subjects"] == [{"apiGroup": "rbac.authorization.k8s.io", "kind": "User",
+                                "name": "SUBJECT"}]
+
+
+def test_the_dashboard_play_documents_its_recovery():
+    src = open(os.path.join(_K3S_DIR, "k3s-dashboard-auth.yml"), encoding="utf-8").read()
+    assert "config.yaml.d" in src and "systemctl restart k3s" in src
+
+
 def test_the_unlink_removes_what_the_link_actually_wrote():
     """It used to name 90-spiffe-auth.yaml and /etc/rancher/k3s/spiffe-auth.yaml, which the
     link never wrote — so unlinking left the API server's flag exactly where it was."""
