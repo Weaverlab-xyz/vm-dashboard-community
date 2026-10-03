@@ -47,8 +47,10 @@ def _require_boto3():
 def _aws_kwargs(region: str) -> dict:
     """Build boto3 client kwargs, preferring config_service (DB) over env vars.
 
-    Explicit credential kwargs are passed so boto3 doesn't fall back to the
-    environment or instance metadata — the wizard is the authoritative source.
+    The order: a Workload Credentials lease, then the stored key (which still wins),
+    then the dashboard's own SPIFFE identity (``cloud_federation``). With none of those,
+    no credential kwargs are passed and boto3 falls back to its default chain
+    (environment, instance metadata) — it does NOT refuse.
     """
     import os
     try:
@@ -86,6 +88,20 @@ def _aws_kwargs(region: str) -> dict:
     if key_id and secret:
         kwargs["aws_access_key_id"]     = key_id
         kwargs["aws_secret_access_key"] = secret
+        return kwargs
+
+    # The dashboard's own SPIFFE identity, assumed into a role. Raises when it is
+    # configured but refused: a deployment that retired its key must not fall through
+    # to whatever is left in the environment.
+    from . import cloud_federation
+    try:
+        federated = cloud_federation.aws_credentials()
+    except cloud_federation.FederationError as exc:
+        raise AWSError(str(exc)) from exc
+    if federated:
+        kwargs["aws_access_key_id"]     = federated["access_key_id"]
+        kwargs["aws_secret_access_key"] = federated["secret_access_key"]
+        kwargs["aws_session_token"]     = federated["session_token"]
     return kwargs
 
 

@@ -393,6 +393,10 @@ class Settings(BaseSettings):
     dashboard_spiffe_aud_azure: bool = False
     dashboard_spiffe_aud_gcp: str = ""    # the workload identity provider's full resource name
     dashboard_spiffe_aud_wlc: bool = False
+    # Federation targets for those tokens (services/cloud_federation). Azure reuses
+    # azure_client_id / azure_tenant_id with the client secret cleared.
+    aws_federation_role_arn: str = ""          # the role the dashboard's identity assumes
+    gcp_federation_service_account: str = ""   # optional: impersonate this SA after STS
 
     # Which peers may set X-Forwarded-For / X-Forwarded-Proto.
     #

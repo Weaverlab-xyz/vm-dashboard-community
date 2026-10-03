@@ -4,11 +4,11 @@
 
 Part of [Remote Agents](../remote-agents.md). The same SPIRE server that attests agents can give the dashboard an identity of its own, which a cloud can trust instead of a stored key.
 
-**Preview, and only the first half.** This page covers what is built: the dashboard keeps a
-short-lived JWT-SVID per audience in a file, and publishes the discovery document and keys
-a cloud fetches to verify it. Pointing each cloud's SDK at those files, and the Azure code
-path that reads one, are the next slice. Until then a file is used only by something you
-point at it yourself. The design, including what is not built, is
+**Preview.** The dashboard keeps a short-lived JWT-SVID per audience in a file, publishes
+the discovery document and keys a cloud fetches to verify it, and — once you retire a
+stored key — uses those tokens for its own AWS, Azure and GCP calls, including Terraform and
+Packer. No cloud has yet accepted one of these tokens from a live install; the first one
+you set up is the test. The design, including what is not built, is
 [The dashboard as a SPIFFE workload](../design/dashboard-workload-identity.md).
 
 ## What it does
@@ -28,8 +28,11 @@ re-minted at half that. The files sit on a memory-only volume: written by the ap
 by the worker, never on the host disk. Unticking an audience deletes its file at once, so
 anything still pointed at it fails now rather than when it expires.
 
-**Nothing changes which credential a cloud call uses.** A stored key still wins, exactly as
-before. Clear one only after its cloud has accepted the token.
+**A stored key still wins.** For each cloud the order is: a Workload Credentials lease, then
+the stored key, then this identity, then whatever the SDK finds on its own. So ticking
+the box changes nothing until you clear that cloud's stored key — do that only after the
+cloud trusts the issuer (below). The panel shows which one each cloud is using, and when it
+is not this identity, why not.
 
 ## Setting it up
 
@@ -56,6 +59,88 @@ before. Clear one only after its cloud has accepted the token.
    missing.
 4. **Register the issuer with the cloud.** Use the issuer URL, and pin the subject to
    `spiffe://<trust domain>/dashboard` exactly.
+
+## Making each cloud trust it
+
+Replace `agents.example.com/spiffe` with your issuer and `dashboard.example.com` with your
+trust domain. In every case the condition is on the **exact subject**
+`spiffe://<trust domain>/dashboard` — see the next section for why.
+
+### AWS
+
+```bash
+aws iam create-open-id-connect-provider \
+  --url https://agents.example.com/spiffe --client-id-list sts.amazonaws.com
+
+cat > trust.json <<'JSON'
+{"Version": "2012-10-17", "Statement": [{
+  "Effect": "Allow",
+  "Principal": {"Federated": "arn:aws:iam::123456789012:oidc-provider/agents.example.com/spiffe"},
+  "Action": "sts:AssumeRoleWithWebIdentity",
+  "Condition": {"StringEquals": {
+    "agents.example.com/spiffe:sub": "spiffe://dashboard.example.com/dashboard",
+    "agents.example.com/spiffe:aud": "sts.amazonaws.com"}}}]}
+JSON
+aws iam create-role --role-name vm-dashboard --assume-role-policy-document file://trust.json
+```
+
+Attach the policies the dashboard needs to that role, then tick **AWS**, paste the role
+ARN, and clear the stored access key. Terraform's provider and S3 state backend and Packer
+get the assumed role's session credentials.
+
+### Azure
+
+On the app registration the dashboard already uses (its client id and tenant id stay
+under the Azure setup):
+
+```bash
+az ad app federated-credential create --id <application client id> --parameters \
+  '{"name": "vm-dashboard-spiffe",
+    "issuer": "https://agents.example.com/spiffe",
+    "subject": "spiffe://dashboard.example.com/dashboard",
+    "audiences": ["api://AzureADTokenExchange"]}'
+```
+
+```powershell
+@{ name = 'vm-dashboard-spiffe'; issuer = 'https://agents.example.com/spiffe'
+   subject = 'spiffe://dashboard.example.com/dashboard'
+   audiences = @('api://AzureADTokenExchange') } | ConvertTo-Json | Set-Content fic.json
+az ad app federated-credential create --id <application client id> --parameters '@fic.json'
+```
+
+Then tick **Azure** and clear the Azure client secret. Every Azure call, Key Vault, Blob
+storage and Terraform (`ARM_USE_OIDC`) then use the identity. **The Packer azure-arm build
+does not yet**: it still needs the secret.
+
+### GCP
+
+```bash
+gcloud iam workload-identity-pools create vm-dashboard --location=global
+gcloud iam workload-identity-pools providers create-oidc dashboard \
+  --location=global --workload-identity-pool=vm-dashboard \
+  --issuer-uri=https://agents.example.com/spiffe \
+  --attribute-mapping="google.subject=assertion.sub" \
+  --attribute-condition="assertion.sub == 'spiffe://dashboard.example.com/dashboard'"
+```
+
+Paste the provider's full name —
+`//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/vm-dashboard/providers/dashboard`
+— as the GCP audience, and set `gcp_project_id` (a federated credential carries no
+project). Then either grant roles to the principal
+`principal://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/vm-dashboard/subject/spiffe://dashboard.example.com/dashboard`
+directly, or let it impersonate a service account:
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding vm-dashboard@<project>.iam.gserviceaccount.com \
+  --role=roles/iam.workloadIdentityUser \
+  --member="principal://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/vm-dashboard/subject/spiffe://dashboard.example.com/dashboard"
+```
+
+and enter that service account in the panel. Clear the stored service-account key. The app
+writes `gcp-external-account.json` beside the token, and Terraform and Packer read it
+through `GOOGLE_APPLICATION_CREDENTIALS`.
+
+**OCI** has no federated path here; it keeps its signing key.
 
 ## Pin the subject, never the trust domain
 
@@ -95,4 +180,7 @@ presence, instead of one that works offline for ever. It is not "the app holds n
 | *is not https* | The issuer resolved to `http://`. Set the issuer explicitly, or fix the pinned agent audience. |
 | *container 'vmdash-spire-server' is not running* | The SPIRE overlay is not up, or its container name differs from **SPIRE server container**. The previous token file is kept until it expires. |
 | *Workload Credentials is ticked but its identity audience is blank* | Set the audience under Settings → Workload Credentials first. |
+| A cloud says *not federated: …* in the panel | The reason is the one thing left to do — a role ARN, the Azure tenant id, `gcp_project_id`, or a stored key that still wins. |
+| *AWS refused the dashboard's SPIFFE identity … InvalidIdentityToken* | AWS could not verify the token: the issuer is not reachable over HTTPS with a publicly trusted certificate, or the IAM OIDC provider's URL differs from the issuer. |
+| *AWS refused … AccessDenied* | The role's trust policy does not match: check the `:sub` and `:aud` conditions against the issuer's host and path. |
 | `/spiffe/keys` answers 503 | Neither the live server nor a stored bundle has a JWT key yet. Start the SPIRE server; the stored copy is written on the first sync. |

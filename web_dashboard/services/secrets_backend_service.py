@@ -353,16 +353,12 @@ def list_aws_sm_ephemeral() -> list:
 # ── Azure Key Vault ───────────────────────────────────────────────────────────
 
 def _azure_kv_client():
-    from azure.identity import ClientSecretCredential
     from azure.keyvault.secrets import SecretClient
+    from . import cloud_federation
     url, tenant, client_id, client_secret = _azure_kv_cfg()
     if not url:
         raise ValueError("Azure Key Vault URL is not configured. Set it in Secrets → Azure Key Vault.")
-    cred = ClientSecretCredential(
-        tenant_id=tenant,
-        client_id=client_id,
-        client_secret=client_secret,
-    )
+    cred = cloud_federation.azure_credential(tenant, client_id, client_secret)
     return SecretClient(vault_url=url, credential=cred), url
 
 
@@ -431,7 +427,6 @@ def _azure_kv_client_for(vault_id: str):
     missing — same path the resolver takes when the vault registry is
     empty. Keeps the multi-vault scheme additive rather than breaking.
     """
-    from azure.identity import ClientSecretCredential
     from azure.keyvault.secrets import SecretClient
     from ..database import SessionLocal, SecretVault
     db = SessionLocal()
@@ -448,12 +443,9 @@ def _azure_kv_client_for(vault_id: str):
     # credentials_ref support is deferred to Phase 5.5; for now the dashboard's
     # primary Azure SP credentials are used for every vault. Document so the
     # operator knows.
+    from . import cloud_federation
     _, tenant, client_id, client_secret = _azure_kv_cfg()
-    cred = ClientSecretCredential(
-        tenant_id=tenant,
-        client_id=client_id,
-        client_secret=client_secret,
-    )
+    cred = cloud_federation.azure_credential(tenant, client_id, client_secret)
     return SecretClient(vault_url=url, credential=cred), url
 
 
@@ -476,6 +468,10 @@ def _gcp_client():
         info = json.loads(sa_json)
         creds = service_account.Credentials.from_service_account_info(info)
         return secretmanager.SecretManagerServiceClient(credentials=creds)
+    from . import cloud_federation
+    federated = cloud_federation.gcp_credentials()
+    if federated is not None:
+        return secretmanager.SecretManagerServiceClient(credentials=federated)
     return secretmanager.SecretManagerServiceClient()
 
 

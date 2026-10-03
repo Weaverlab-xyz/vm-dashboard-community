@@ -332,13 +332,17 @@ def _azure_creds_configured() -> dict:
 
 def _gcp_creds_configured() -> dict:
     from . import config_service
-    have = bool(config_service.get("gcp_project_id")) and bool(config_service.get("gcp_service_account_json"))
+    from . import cloud_federation
+    have = bool(config_service.get("gcp_project_id")) and (
+        bool(config_service.get("gcp_service_account_json")) or cloud_federation.active("gcp"))
     return {
         "name":   "Target credentials configured",
         "status": "pass" if have else "fail",
         "detail": (
-            "GCP project + service-account JSON present." if have
-            else "gcp_project_id / gcp_service_account_json not set. Configure in the setup wizard."
+            "GCP project + a credential (service-account JSON or SPIFFE federation) present."
+            if have
+            else "gcp_project_id / gcp_service_account_json not set, and SPIFFE federation is "
+                 "not in use. Configure in the setup wizard."
         ),
     }
 

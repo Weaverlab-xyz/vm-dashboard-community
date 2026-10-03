@@ -198,6 +198,13 @@ def refresh(now: Optional[float] = None) -> dict:
             logger.exception("dashboard identity: refresh failed")
             status = {"enabled": True, "checked_at": now,
                       "error": f"refresh failed: {type(exc).__name__}"}
+        # GCP's external_account config beside its token, for Terraform and Packer
+        # (services/cloud_federation). Not a secret; written by the same one writer.
+        try:
+            from . import cloud_federation
+            cloud_federation.write_gcp_config()
+        except OSError as exc:
+            logger.warning("dashboard identity: could not write the GCP config: %s", exc)
         try:
             _write_atomic(directory, STATUS_FILE, json.dumps(status), 0o600)
         except OSError as exc:
@@ -279,7 +286,11 @@ def _read_status(directory: str) -> dict:
 def status() -> dict:
     """What Settings shows: the recorded status, plus what is actually in each file now
     (the file is the truth — the status is only as fresh as the last pass)."""
-    out = {"enabled": enabled(), "issuer": issuer(), "token_dir": token_dir()}
+    from . import cloud_federation
+    out = {"enabled": enabled(), "issuer": issuer(), "token_dir": token_dir(),
+           # Which rung each cloud's calls use right now — so an operator who clears a
+           # stored key sees federation take over rather than inferring it.
+           "sources": cloud_federation.sources()}
     if not out["enabled"]:
         return out
     directory = token_dir()

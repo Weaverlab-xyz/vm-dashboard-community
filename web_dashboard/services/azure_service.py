@@ -163,8 +163,13 @@ async def _ensure_creds() -> tuple:
         tenant_id     = config_service.get("azure_tenant_id")     or settings.azure_tenant_id
         sub_id        = config_service.get("azure_subscription_id") or settings.azure_subscription_id
 
+        from . import cloud_federation
         if client_id and client_secret and tenant_id and sub_id:
             source = "config store / env vars"
+        elif client_id and tenant_id and sub_id and cloud_federation.active("azure"):
+            # No secret: the dashboard's own SPIFFE identity, presented as a client
+            # assertion against the app registration's federated credential.
+            source = cloud_federation.SOURCE
         elif settings.password_safe_enabled:
             from . import btapi_service
             try:
@@ -188,11 +193,12 @@ async def _ensure_creds() -> tuple:
 
     key = (client_id, client_secret, tenant_id, sub_id)
     if _cred_cache is None or _cred_key != key:
-        _cred_cache = ClientSecretCredential(
-            tenant_id=tenant_id,
-            client_id=client_id,
-            client_secret=client_secret,
-        )
+        from . import cloud_federation
+        try:
+            _cred_cache = cloud_federation.azure_credential(tenant_id, client_id,
+                                                            client_secret)
+        except cloud_federation.FederationError as exc:
+            raise AzureError(str(exc)) from exc
         _sub_id_cache = sub_id
         _cred_key = key
         logger.info("Azure credentials loaded from %s.", source)
@@ -244,9 +250,9 @@ def aks_get_token(server_id: str = AKS_AAD_SERVER_APP_ID) -> str:
         client_id     = config_service.get("azure_client_id")     or settings.azure_client_id
         client_secret = config_service.get("azure_client_secret") or settings.azure_client_secret
         tenant_id     = config_service.get("azure_tenant_id")     or settings.azure_tenant_id
-    if client_id and client_secret and tenant_id:
-        cred = ClientSecretCredential(
-            tenant_id=tenant_id, client_id=client_id, client_secret=client_secret)
+    from . import cloud_federation
+    if client_id and tenant_id and (client_secret or cloud_federation.active("azure")):
+        cred = cloud_federation.azure_credential(tenant_id, client_id, client_secret)
     elif _cred_cache is not None:
         cred = _cred_cache
     else:

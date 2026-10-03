@@ -2,7 +2,7 @@
 
 > **Audience:** contributor · **Profile:** `both` · **Read this when:** you are about to give the dashboard an identity of its own, retire one of its stored cloud keys, move a Workload Lab demo off the lab's SPIRE server, or decide whether something else in the codebase should use a SPIFFE token.
 
-**Slice 1, L1 and L2 are built; nothing else here is.** This is an audit, made after the dashboard got
+**Slices 1 and 3, L1 and L2 are built; the rest is not.** This is an audit, made after the dashboard got
 its own SPIRE server (#996–#998), of where that server should be used next. Each section says what it
 removes, what it costs, and what is still unknown. Where SPIFFE adds little, the note says so.
 
@@ -201,6 +201,17 @@ it is the honest demonstration for customers who run more than one trust domain.
 
 ## Slice 3: the dashboard's cloud credentials, federated
 
+**Built** (`services/cloud_federation.py`). The order is Workload Credentials lease →
+stored key → this identity → ambient, so a stored key still wins; `cloud_federation.reason`
+names what is missing and Settings shows each cloud's live source. AWS assumes a role with
+`AssumeRoleWithWebIdentity` (unsigned, cached to five minutes before expiry); Azure has one
+constructor, `azure_credential`, whose assertion re-reads the token file per request, and
+Terraform gets `ARM_USE_OIDC`; GCP gets an `external_account` config, written beside the
+token for subprocesses. **A correction to the table below:** Terraform and Packer run as
+local subprocesses of the app and worker, not as sibling containers, so nothing has to be
+passed into another container — they read the files directly. **Not covered:** the Packer
+azure-arm build (credential through the template, unverified) and OCI.
+
 The largest credential this removes. On PaaS hosting, Workload Credentials and the
 platform's managed identity already avoid stored keys. A self-hosted Docker install has no
 platform identity, so today it stores a key per cloud. With Slice 1 it has an identity
@@ -298,8 +309,8 @@ SPIRE-attested agents** setting, completes
    the sync decoupled from agent attestation.~~ Built.
 2. ~~**L1 and L2:** the agent cell and service accounts on the dashboard's trust domain.~~
    Built.
-3. **Slice 3:** AWS and GCP (configuration and docs, plus the `packer_service` fix), then
-   Azure (the `ClientAssertionCredential` branch).
+3. ~~**Slice 3:** AWS and GCP (configuration and docs, plus the `packer_service` fix), then
+   Azure (the `ClientAssertionCredential` branch).~~ Built.
 4. **Slice 4:** on-prem k3s through the dashboard's SVID.
 5. **L3, L4 and L5:** after the lab answers the Password Safe attribute question.
 6. **Slice 5.**
