@@ -1,0 +1,170 @@
+# Undo dex-helm.yml and k3s-dex-auth.yml on a k3s node
+# Target: the k3s server node. Idempotent, and safe on a node that never had Dex.
+#
+# THE ORDER IS THE REVERSE OF THE BUILD, for the reason k3s-spiffe-unlink.yml gives: the
+# API server's trust goes FIRST, because an issuer the API server is configured for but
+# can no longer reach slows every k3s restart until it is removed. Then Dex itself.
+#
+# AND IT REMOVES ONLY WHAT IS DEX'S. The AuthenticationConfiguration is shared with
+# k3s-spiffe-auth.yml: this drops the entries whose username prefix is dex_username_prefix
+# and keeps every other one. The drop-in and the file go only if that leaves nothing —
+# a node that also trusts SPIFFE keeps trusting SPIFFE.
+#
+# NEVER FAILS ON SOMETHING ALREADY GONE: every step is `state: absent`, guarded, or
+# --ignore-not-found, because a teardown runs on half-built hosts by definition.
+#
+# extra_vars:
+#   dex_username_prefix: "dex:"        # must match k3s-dex-auth.yml
+#   admin_group: ""                    # the group k3s-dex-auth.yml bound, if any
+#   remove_lab_ca: false               # also delete the lab CA (clusters still trusting
+#                                      #   it then need a new dex_ca_pem on rebuild)
+- name: Remove Dex from this k3s node
+  hosts: all
+  become: true
+  vars:
+    dex_username_prefix: "dex:"
+    dex_namespace: dex
+    admin_group: ""
+    remove_lab_ca: false
+    dex_root: /opt/dex
+    k3s_server_dir: /var/lib/rancher/k3s/server
+    auth_config: /var/lib/rancher/k3s/server/spiffe-auth-config.yaml
+    dropin: /etc/rancher/k3s/config.yaml.d/10-spiffe-auth.yaml
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  tasks:
+    # 1. THE API SERVER'S TRUST.
+    - name: Read the AuthenticationConfiguration, if there is one
+      ansible.builtin.slurp:
+        src: "{{ auth_config }}"
+      register: _auth_existing
+      failed_when: false
+
+    - name: Work out which authenticators survive
+      ansible.builtin.set_fact:
+        _other_jwt: >-
+          {{ _existing_jwt
+             | zip(_existing_jwt | map(attribute='claimMappings.username.prefix', default=''))
+             | rejectattr('1', 'equalto', dex_username_prefix)
+             | map('first') | list }}
+      vars:
+        _existing_jwt: >-
+          {{ (((_auth_existing.content | b64decode | from_yaml) or {}).get('jwt') or [])
+             if _auth_existing.content is defined else [] }}
+
+    - name: Remove the authentication-config drop-in when nothing else uses it
+      ansible.builtin.file:
+        path: "{{ dropin }}"
+        state: absent
+      register: dropin_gone
+      when: _other_jwt | length == 0
+
+    - name: Remove the AuthenticationConfiguration when nothing else uses it
+      ansible.builtin.file:
+        path: "{{ auth_config }}"
+        state: absent
+      when: _other_jwt | length == 0
+
+    - name: Rewrite the AuthenticationConfiguration without Dex
+      ansible.builtin.copy:
+        dest: "{{ auth_config }}"
+        mode: "0600"
+        content: "{{ _auth_doc | to_nice_yaml(indent=2) }}"
+      vars:
+        _auth_doc:
+          apiVersion: apiserver.config.k8s.io/v1
+          kind: AuthenticationConfiguration
+          jwt: "{{ _other_jwt }}"
+      register: auth_rewritten
+      when: _other_jwt | length > 0
+
+    - name: Restart k3s so the API server drops the issuer
+      ansible.builtin.systemd:
+        name: k3s
+        state: restarted
+        daemon_reload: true
+      when: (dropin_gone is changed) or (auth_rewritten is changed)
+
+    - name: Wait for the API server to come back
+      ansible.builtin.command: k3s kubectl get --raw /readyz
+      register: readyz
+      changed_when: false
+      retries: 36
+      delay: 5
+      until: readyz.rc == 0
+
+    # 2. THE BINDING.
+    - name: Remove the admin group's binding
+      ansible.builtin.command: >-
+        k3s kubectl delete clusterrolebinding
+        dex-{{ admin_group | regex_replace('[^a-z0-9-]', '-') }} --ignore-not-found
+      register: rbac_removed
+      changed_when: "'deleted' in rbac_removed.stdout"
+      when: admin_group | length > 0
+
+    - name: Remove the binding's manifest
+      ansible.builtin.file:
+        path: "{{ k3s_server_dir }}/dex-rbac.yaml"
+        state: absent
+
+    # 3. DEX.
+    - name: Detect helm
+      ansible.builtin.command: helm version --short
+      register: helm_present
+      changed_when: false
+      failed_when: false
+
+    - name: Uninstall the Dex release
+      ansible.builtin.command: helm uninstall dex --namespace {{ dex_namespace }}
+      register: helm_rm
+      changed_when: helm_rm.rc == 0
+      failed_when:
+        - helm_rm.rc != 0
+        - "'not found' not in (helm_rm.stderr | lower)"
+      when: helm_present.rc == 0
+
+    # The namespace takes dex-public, the TLS secret and Dex's CRD-stored state with it.
+    - name: Delete the namespace
+      ansible.builtin.command: >-
+        k3s kubectl delete namespace {{ dex_namespace }} --ignore-not-found --wait=true
+      register: ns_removed
+      changed_when: "'deleted' in ns_removed.stdout"
+
+    # Dex's storage CRDs are cluster-scoped and outlive the namespace. Selected by the API
+    # group Dex registers them under, so nothing else's CRDs can match.
+    - name: Delete Dex's storage CRDs
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        k3s kubectl get crd -o name | grep '\.dex\.coreos\.com$'
+        | xargs -r k3s kubectl delete --ignore-not-found
+      args:
+        executable: /bin/bash
+      register: crds_removed
+      changed_when: "'deleted' in crds_removed.stdout"
+      failed_when: false
+
+    - name: Remove the values, the service manifest and the client secret
+      ansible.builtin.file:
+        path: "{{ dex_root }}/{{ item }}"
+        state: absent
+      loop:
+        - values.yaml
+        - values.extra.yaml
+        - service.yaml
+        - dashboard-client-secret
+
+    - name: Remove the lab CA and serving certificate
+      ansible.builtin.file:
+        path: "{{ dex_root }}"
+        state: absent
+      when: remove_lab_ca | bool
+
+    - name: What was undone
+      ansible.builtin.debug:
+        msg:
+          - "{{ ('Drop-in removed: ' ~ dropin) if dropin_gone is changed else ('Dex removed from ' ~ auth_config ~ '; ' ~ (_other_jwt | length) ~ ' other authenticator(s) kept') if auth_rewritten is changed else 'The API server did not trust Dex (nothing to remove).' }}"
+          - "Dex release, namespace and storage CRDs removed."
+          - "{{ 'Lab CA removed.' if remove_lab_ca | bool else 'Lab CA kept in ' ~ dex_root ~ ' — a rebuild reuses it, so clusters already given dex_ca_pem keep working.' }}"
+          - "NOT touched: the dashboard. If its SSO issuer points at this Dex, set it back"
+          - "  under Settings → Integrations → Single sign-on, or sign-in will fail."

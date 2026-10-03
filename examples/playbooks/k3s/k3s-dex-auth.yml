@@ -1,0 +1,255 @@
+# Make the k3s API server accept Dex ID tokens — people reach the cluster with the same
+# identity they use for the dashboard
+# Target: the k3s SERVER node, after dex-helm.yml (Dex can run on this cluster or anywhere
+# the API server can reach). Idempotent — restarts k3s only if something changed.
+#
+# OPT-IN AND ADDITIVE. Whatever already authenticates to this cluster keeps working: the
+# k3s admin kubeconfig, ServiceAccount tokens, and the SPIFFE authenticator if
+# k3s-spiffe-auth.yml linked this node. Dex becomes one more JWT authenticator beside them.
+#
+# SHARED FILE, OWNED ENTRY. k3s takes ONE --authentication-config, and k3s-spiffe-auth.yml
+# keeps its authenticator in the same file behind the same drop-in. So this play reads the
+# file and replaces, in place, only the entry whose username prefix is its own
+# (dex_username_prefix), appending it the first time. Re-running either play never removes
+# or reorders the other's. The path keeps its
+# historical spiffe- name for that reason — renaming it would leave a linked node with two
+# authentication-config flags. Reasoning: docs/design/agent-and-human-identity.md.
+#
+# NEVER LIVE-VALIDATED. Like the SPIFFE play, this edits the API server's authentication
+# configuration, and a bad file stops the API server. Read "If k3s will not come back" at
+# the end BEFORE the first run.
+#
+# STRUCTURED AUTHENTICATION IS GA IN KUBERNETES 1.34 (apiserver.config.k8s.io/v1); older
+# servers are refused, exactly as k3s-spiffe-auth.yml refuses them.
+#
+# THE PREFIXES ARE NOT COSMETIC. Usernames become "<prefix><email>" and groups
+# "<prefix><group>", so an upstream group called "system:masters" arrives as
+# "dex:system:masters" and grants nothing. The prefix must also differ from the SPIFFE
+# play's ("spiffe:"), because it is how each play recognises its own entry.
+#
+# extra_vars:
+#   dex_issuer_url: https://dex.lab.test:5554   # REQUIRED — exactly as Dex advertises it
+#   dex_ca_pem: ""                     # the lab CA from dex-helm.yml; blank = public CA
+#   dex_client_id: kubernetes          # the audience; matches dex-helm.yml's public client
+#   dex_username_prefix: "dex:"
+#   dex_groups_prefix: "dex:"
+#   dex_host_ip: ""                    # /etc/hosts entry for the issuer name (lab only)
+#   admin_group: ""                    # an upstream group to bind, e.g. k8s-admins
+#   admin_group_role: view             # the ClusterRole it gets
+- name: Accept Dex ID tokens at the k3s API server
+  hosts: all
+  become: true
+  vars:
+    dex_issuer_url: ""
+    dex_ca_pem: ""
+    dex_client_id: "kubernetes"
+    dex_username_prefix: "dex:"
+    dex_groups_prefix: "dex:"
+    dex_host_ip: ""
+    admin_group: ""
+    admin_group_role: "view"
+    # The SPIFFE play's prefix — refused here so the two can never claim one entry.
+    spiffe_username_prefix: "spiffe:"
+    k3s_server_dir: /var/lib/rancher/k3s/server
+    # SHARED with k3s-spiffe-auth.yml. Same file, same drop-in, same drop-in content.
+    auth_config: /var/lib/rancher/k3s/server/spiffe-auth-config.yaml
+    dropin: /etc/rancher/k3s/config.yaml.d/10-spiffe-auth.yaml
+  tasks:
+    - name: Require the issuer, and prefixes that cannot collide
+      ansible.builtin.assert:
+        that:
+          - dex_issuer_url is match('^https://')
+          - dex_issuer_url is not match('^https://[0-9.]+(:[0-9]+)?(/.*)?$')
+          - dex_client_id | length > 0
+          - dex_username_prefix | length > 0
+          - dex_username_prefix != spiffe_username_prefix
+          - dex_ca_pem | length == 0 or 'BEGIN CERTIFICATE' in dex_ca_pem
+        fail_msg: >-
+          dex_issuer_url must be https on a hostname, spelled EXACTLY as Dex's discovery
+          document advertises it (a trailing slash or a different port rejects every token
+          with no useful message). dex_username_prefix is required and must not be
+          '{{ spiffe_username_prefix }}' — that is how this play and k3s-spiffe-auth.yml
+          tell their entries apart. dex_ca_pem, if given, is the PEM itself.
+
+    - name: Confirm k3s is running here
+      ansible.builtin.command: systemctl is-active k3s
+      register: k3s_state
+      changed_when: false
+      failed_when: false
+
+    - name: Fail when this is not a k3s server
+      ansible.builtin.fail:
+        msg: >-
+          k3s is not active on this host (systemctl is-active k3s said
+          '{{ k3s_state.stdout | default("nothing") }}'). Run k3s-server-init.yml first.
+      when: k3s_state.stdout != "active"
+
+    - name: Read the k3s version
+      ansible.builtin.command: k3s --version
+      register: k3s_version_out
+      changed_when: false
+
+    - name: Require Kubernetes 1.34 or newer
+      ansible.builtin.assert:
+        that:
+          - _k8s_minor | int >= 34
+        fail_msg: >-
+          This host runs Kubernetes 1.{{ _k8s_minor }}. AuthenticationConfiguration v1 is
+          GA in 1.34, and a config the API server rejects stops it — on a single-node
+          cluster, with no API left to fix it through.
+      vars:
+        _k8s_minor: >-
+          {{ (k3s_version_out.stdout | regex_search('v1\.(\d+)\.', '\\1') | first) | default(0, true) }}
+
+    - name: Resolve the issuer hostname (lab only)
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\s{{ _issuer_host | regex_escape }}(\s|$)'
+        line: "{{ dex_host_ip }} {{ _issuer_host }}"
+        state: present
+      when: dex_host_ip | length > 0
+      vars:
+        _issuer_host: "{{ dex_issuer_url | regex_replace('^https://([^:/]+).*$', '\\1') }}"
+
+    # The API server fetches discovery and JWKS over TLS. A public-CA Dex needs nothing
+    # here; the lab's own CA is given to the API server for THIS issuer only, not added to
+    # the host's trust store.
+    #
+    # No claimValidationRule for email_verified: with `email` as the username claim the
+    # API server already requires email_verified to be true whenever the token carries it.
+    - name: Describe this play's JWT authenticator
+      ansible.builtin.set_fact:
+        _own_jwt: >-
+          {{ {'issuer': {'url': dex_issuer_url, 'audiences': [dex_client_id]}
+                        | combine({'certificateAuthority': dex_ca_pem} if dex_ca_pem | length > 0 else {}),
+              'claimMappings': {
+                'username': {'claim': 'email', 'prefix': dex_username_prefix},
+                'groups': {'claim': 'groups', 'prefix': dex_groups_prefix}}} }}
+
+    - name: Read the current AuthenticationConfiguration, if there is one
+      ansible.builtin.slurp:
+        src: "{{ auth_config }}"
+      register: _auth_existing
+      failed_when: false
+
+    # In PLACE, not removed-and-appended: if each play moved its entry to the end, running
+    # them alternately would reorder the file every time and restart k3s for nothing.
+    - name: Put this play's authenticator where its old one was
+      ansible.builtin.set_fact:
+        _other_jwt: >-
+          {{ _existing_jwt | zip(_prefixes) | rejectattr('1', 'equalto', dex_username_prefix)
+             | map('first') | list }}
+        _new_jwt: >-
+          {{ _existing_jwt[:(_at | int)]
+             + [_own_jwt]
+             + (_existing_jwt[(_at | int) + 1:] | zip(_prefixes[(_at | int) + 1:])
+                | rejectattr('1', 'equalto', dex_username_prefix) | map('first') | list) }}
+      vars:
+        _existing_jwt: >-
+          {{ (((_auth_existing.content | b64decode | from_yaml) or {}).get('jwt') or [])
+             if _auth_existing.content is defined else [] }}
+        _prefixes: >-
+          {{ _existing_jwt | map(attribute='claimMappings.username.prefix', default='') | list }}
+        _at: >-
+          {{ _prefixes.index(dex_username_prefix) if dex_username_prefix in _prefixes else _existing_jwt | length }}
+
+    # Kubernetes refuses two authenticators with one issuer URL. Only possible here if
+    # someone pointed another play at Dex under a different prefix — refuse, and say so,
+    # rather than write a file that stops the API server.
+    - name: Refuse a second authenticator for the same issuer
+      ansible.builtin.assert:
+        that:
+          - dex_issuer_url not in (_other_jwt | map(attribute='issuer.url') | list)
+        fail_msg: >-
+          {{ auth_config }} already has an authenticator for {{ dex_issuer_url }} under a
+          different username prefix. Kubernetes rejects duplicate issuers and the API
+          server would not start. Remove that entry first.
+
+    - name: Write the AuthenticationConfiguration
+      ansible.builtin.copy:
+        dest: "{{ auth_config }}"
+        mode: "0600"
+        content: "{{ _auth_doc | to_nice_yaml(indent=2) }}"
+      vars:
+        _auth_doc:
+          apiVersion: apiserver.config.k8s.io/v1
+          kind: AuthenticationConfiguration
+          jwt: "{{ _new_jwt }}"
+      notify: Restart k3s
+
+    - name: Create the drop-in directory
+      ansible.builtin.file:
+        path: /etc/rancher/k3s/config.yaml.d
+        state: directory
+        mode: "0755"
+
+    # Byte-for-byte what k3s-spiffe-auth.yml writes, so running both never flaps the file
+    # (and never restarts k3s for nothing).
+    - name: Point the API server at it
+      ansible.builtin.copy:
+        dest: "{{ dropin }}"
+        mode: "0600"
+        content: |
+          # Managed by k3s-spiffe-auth.yml and k3s-dex-auth.yml, which share the file it
+          # names. A drop-in rather than config.yaml, so flags set elsewhere survive.
+          kube-apiserver-arg:
+            - "authentication-config={{ auth_config }}"
+      notify: Restart k3s
+
+    - name: Apply the restart before touching the API
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for the API to serve again
+      ansible.builtin.command: k3s kubectl get --raw /readyz
+      register: readyz
+      changed_when: false
+      retries: 36
+      delay: 5
+      until: readyz.rc == 0
+
+    - name: Write the RBAC binding for the admin group
+      ansible.builtin.copy:
+        dest: "{{ k3s_server_dir }}/dex-rbac.yaml"
+        mode: "0600"
+        content: |
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: dex-{{ admin_group | regex_replace('[^a-z0-9-]', '-') }}
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: {{ admin_group_role }}
+          subjects:
+          - apiGroup: rbac.authorization.k8s.io
+            kind: Group
+            name: "{{ dex_groups_prefix }}{{ admin_group }}"
+      when: admin_group | length > 0
+
+    - name: Bind the group
+      ansible.builtin.command: >-
+        k3s kubectl apply -f {{ k3s_server_dir }}/dex-rbac.yaml
+      register: rbac_apply
+      changed_when: "'unchanged' not in rbac_apply.stdout"
+      when: admin_group | length > 0
+
+    - name: What was built
+      ansible.builtin.debug:
+        msg:
+          - "The k3s API server now accepts Dex ID tokens from {{ dex_issuer_url }} (audience {{ dex_client_id }})."
+          - "Users arrive as '{{ dex_username_prefix }}<email>', groups as '{{ dex_groups_prefix }}<group>'."
+          - "{{ ('Bound: Group ' ~ dex_groups_prefix ~ admin_group ~ ' -> ClusterRole/' ~ admin_group_role) if admin_group | length > 0 else 'No binding made (admin_group unset) — a Dex user authenticates and is then denied everything.' }}"
+          - "Other authenticators in {{ auth_config }} were kept: {{ _other_jwt | length }}."
+          - "A person's kubeconfig names a command, not a credential (kubelogin):"
+          - "  kubectl oidc-login setup --oidc-issuer-url={{ dex_issuer_url }} --oidc-client-id={{ dex_client_id }}"
+          - "Prove it: kubectl auth whoami  — the username must carry the {{ dex_username_prefix }} prefix."
+          - "IF K3S WILL NOT COME BACK: delete {{ dropin }} and run"
+          - "  systemctl restart k3s"
+          - "That removes the flag (for SPIFFE too, if this node was linked) and leaves the"
+          - "cluster as it was before either play; re-run the plays once the cause is fixed."
+  handlers:
+    - name: Restart k3s
+      ansible.builtin.systemd:
+        name: k3s
+        state: restarted
+        daemon_reload: true

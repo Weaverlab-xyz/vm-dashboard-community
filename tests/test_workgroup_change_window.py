@@ -54,6 +54,11 @@ from web_dashboard.services import admission_service, change_window  # noqa: E40
 
 ACTION = "aws:ec2:deploy"
 
+# A Wednesday noon: outside the default Saturday 02:00–06:00 window, and inside the
+# all-day one. The refusal tests used the wall clock and failed whenever CI ran during
+# a Saturday 02:00–06:00 UTC slot (PR #993's run, 04:37 UTC).
+_NOW = datetime(2026, 9, 30, 12, 0)
+
 
 def _session():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
@@ -83,8 +88,9 @@ def _wg(db, *, window=None, required=False, name="prod"):
 
 
 def _window(db, *, days="0000010", start="02:00", minutes=240, name="Prod Weekend"):
-    """Saturday 02:00–06:00 UTC by default — closed on most days, which is what makes
-    the refusal tests deterministic without freezing a clock."""
+    """Saturday 02:00–06:00 UTC by default. The clock is pinned to `_NOW`, a Wednesday,
+    so the window is reliably closed for the refusal tests — "closed on most days" was
+    not enough, and the suite failed every Saturday morning UTC."""
     w = ChangeWindow(name=name, start_at_local=start, duration_minutes=minutes,
                      timezone="UTC", schedule_days=days, enabled=True,
                      created_by="admin")
@@ -93,7 +99,7 @@ def _window(db, *, days="0000010", start="02:00", minutes=240, name="Prod Weeken
     return w
 
 
-def _enforce(db, *, workgroup="prod", scheduled=None, now=None):
+def _enforce(db, *, workgroup="prod", scheduled=None, now=_NOW):
     admission_service.enforce(ACTION, request={"workgroup": workgroup},
                               actor=None, db=db, now=now, scheduled=scheduled)
 
@@ -140,7 +146,7 @@ def test_a_time_inside_the_window_is_admitted_without_naming_it():
     db = _session()
     w = _window(db)
     _wg(db, window=w, required=True)
-    start, _end = change_window.next_occurrence(w, datetime.utcnow())
+    start, _end = change_window.next_occurrence(w, _NOW)
     _enforce(db, scheduled={"scheduled_for": start + timedelta(minutes=30)})
 
 
@@ -149,7 +155,7 @@ def test_a_time_outside_the_window_is_still_refused():
     db = _session()
     w = _window(db)
     _wg(db, window=w, required=True)
-    start, _end = change_window.next_occurrence(w, datetime.utcnow())
+    start, _end = change_window.next_occurrence(w, _NOW)
     _refuses(db, scheduled={"scheduled_for": start + timedelta(days=1)})
 
 

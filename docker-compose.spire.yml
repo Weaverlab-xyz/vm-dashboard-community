@@ -1,0 +1,93 @@
+# SPIRE server for the dashboard's own trust domain — OPT-IN.
+#
+# Remote agents can attest through a SPIRE sidecar instead of keeping an Ed25519 key in
+# their state volume. This overlay is the server half; the agent half is
+# examples/remote-agent/docker-compose.spire.yml. Neither changes anything for an agent
+# that does not use it: Ed25519 enrolment stays the default, and stays supported.
+#
+# Usage:
+#   SPIRE_TRUST_DOMAIN=dashboard.example.com \
+#   docker compose -f docker-compose.yml -f docker-compose.spire.yml up -d
+#
+# What to open, and what NOT to put in front of it:
+#
+#   * Publish tcp/8081 to wherever the agents are. It is NOT routed through Caddy
+#     (docker-compose.agent.yml): agent-to-server is mTLS gRPC and has to reach the
+#     server untouched, which Caddy cannot do without a layer-4 build.
+#   * An agent behind a TLS-INSPECTING proxy needs a bypass rule for this host:port.
+#     Without one it cannot attest — and stays on Ed25519, which is why that path is
+#     permanent rather than deprecated.
+#   * The admin API is a unix socket on the `spire_admin` volume, mounted only into the
+#     dashboard's own containers. Nothing administrative listens on the network.
+#
+# Images are pinned by digest, from the same table as the SPIRE lab
+# (examples/playbooks/spire/spire-docker-server.yml); tests/test_spire_overlay.py keeps
+# the two in step. Design: docs/design/agent-and-human-identity.md
+
+services:
+  # Named volumes are created root-owned, and the server runs as 1000:1000 with a
+  # read-only root filesystem — so without this it cannot write its datastore or create
+  # its socket, and exits on first start with a permission error. Runs once, as root,
+  # with nothing but CHOWN, and exits. (The lab play does the same job with host
+  # directories it owns by hand.)
+  spire-volumes-init:
+    image: busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: none
+    command: ["sh", "-c", "chown 1000:1000 /data /admin && chmod 0700 /data && chmod 0750 /admin"]
+    volumes:
+      - spire_data:/data
+      - spire_admin:/admin
+    restart: "no"
+
+  spire-server:
+    image: ghcr.io/spiffe/spire-server:1.15.3@sha256:4082f30d3e0ddc4000a171392c4ea174345ee44d161ee917c70b97b2ecfba141
+    container_name: vmdash-spire-server
+    restart: unless-stopped
+    # The image's own non-root user, as in the lab.
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    command: ["-config", "/opt/spire/conf/server.conf", "-expandEnv"]
+    environment:
+      SPIRE_TRUST_DOMAIN: ${SPIRE_TRUST_DOMAIN:?set SPIRE_TRUST_DOMAIN, e.g. dashboard.example.com}
+    ports:
+      - "${SPIRE_BIND_PORT:-8081}:8081"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    volumes:
+      - ./examples/spire-server/server.conf:/opt/spire/conf/server.conf:ro
+      - spire_data:/opt/spire/data
+      - spire_admin:/tmp/spire-server/private
+    depends_on:
+      spire-volumes-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/opt/spire/bin/spire-server", "healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  # The dashboard creates agent entries and join tokens through the admin socket. These
+  # two mounts are the only change to the base services, and both are additive.
+  app:
+    volumes:
+      - spire_admin:/run/spire-server:ro
+  worker:
+    volumes:
+      - spire_admin:/run/spire-server:ro
+
+volumes:
+  # Datastore and CA keys. Persist it: losing it re-keys the trust domain and every
+  # attested agent has to attest again from scratch.
+  spire_data:
+  spire_admin:

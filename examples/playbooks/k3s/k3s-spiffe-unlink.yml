@@ -36,33 +36,75 @@
     workload_spiffe_id: ""
     remove_workload_user: false
     spire_root: /opt/spire
-    dropin: /etc/rancher/k3s/config.yaml.d/90-spiffe-auth.yaml
-    auth_config: /etc/rancher/k3s/spiffe-auth.yaml
-    rbac_manifest: /etc/rancher/k3s/spiffe-rbac.yaml
+    # The paths k3s-spiffe-auth.yml actually writes. These used to name files the link
+    # never created (90-spiffe-auth.yaml, /etc/rancher/k3s/spiffe-auth.yaml), so the
+    # unlink "succeeded" and left the API server's flag exactly where it was.
+    dropin: /etc/rancher/k3s/config.yaml.d/10-spiffe-auth.yaml
+    auth_config: /var/lib/rancher/k3s/server/spiffe-auth-config.yaml
+    rbac_manifest: /var/lib/rancher/k3s/server/spiffe-rbac.yaml
   tasks:
     # 1. THE FLAG. Deleting this one file is the whole recovery path, and it is why the
     #    link put the flag in a drop-in rather than in config.yaml: config.yaml carries
     #    whatever k3s-server-init.yml or an operator put there, and clobbering it would
     #    make this teardown destructive.
-    - name: Remove the authentication-config drop-in
+    #
+    #    BUT ONLY WHEN NOTHING ELSE USES IT. k3s-dex-auth.yml keeps its own authenticator
+    #    in the same AuthenticationConfiguration, behind the same drop-in. So this removes
+    #    the entries it owns (by username_prefix, exactly as the link wrote them) and takes
+    #    the drop-in and the file away only if that leaves the list empty. A node that
+    #    also trusts Dex keeps trusting Dex.
+    - name: Read the AuthenticationConfiguration, if there is one
+      ansible.builtin.slurp:
+        src: "{{ auth_config }}"
+      register: _auth_existing
+      failed_when: false
+
+    - name: Work out which authenticators survive this unlink
+      ansible.builtin.set_fact:
+        _other_jwt: >-
+          {{ _existing_jwt
+             | zip(_existing_jwt | map(attribute='claimMappings.username.prefix', default=''))
+             | rejectattr('1', 'equalto', username_prefix)
+             | map('first') | list }}
+      vars:
+        _existing_jwt: >-
+          {{ (((_auth_existing.content | b64decode | from_yaml) or {}).get('jwt') or [])
+             if _auth_existing.content is defined else [] }}
+
+    - name: Remove the authentication-config drop-in when nothing else uses it
       ansible.builtin.file:
         path: "{{ dropin }}"
         state: absent
       register: dropin_gone
+      when: _other_jwt | length == 0
 
-    - name: Remove the AuthenticationConfiguration itself
+    - name: Remove the AuthenticationConfiguration when nothing else uses it
       ansible.builtin.file:
         path: "{{ auth_config }}"
         state: absent
+      when: _other_jwt | length == 0
 
-    # Only when the flag actually changed. Restarting k3s is disruptive to everything on
-    # the node, so a teardown re-run on an already-unlinked host must not do it again.
+    - name: Rewrite the AuthenticationConfiguration without this play's entry
+      ansible.builtin.copy:
+        dest: "{{ auth_config }}"
+        mode: "0600"
+        content: "{{ _auth_doc | to_nice_yaml(indent=2) }}"
+      vars:
+        _auth_doc:
+          apiVersion: apiserver.config.k8s.io/v1
+          kind: AuthenticationConfiguration
+          jwt: "{{ _other_jwt }}"
+      register: auth_rewritten
+      when: _other_jwt | length > 0
+
+    # Only when the API server's view actually changed. Restarting k3s is disruptive to
+    # everything on the node, so a teardown re-run on an already-unlinked host must not.
     - name: Restart k3s so the API server drops the issuer
       ansible.builtin.systemd:
         name: k3s
         state: restarted
         daemon_reload: true
-      when: dropin_gone.changed
+      when: (dropin_gone is changed) or (auth_rewritten is changed)
 
     - name: Wait for the API server to come back
       ansible.builtin.command: k3s kubectl get --raw /readyz
@@ -71,7 +113,7 @@
       retries: 12
       delay: 5
       until: readyz.rc == 0
-      when: dropin_gone.changed
+      when: (dropin_gone is changed) or (auth_rewritten is changed)
 
     # 2. THE BINDING. Removed through the manifest the link wrote where it still exists,
     #    which is exact; otherwise by name, which is best-effort. `--ignore-not-found` so a
@@ -156,7 +198,7 @@
       ansible.builtin.debug:
         msg:
           - "The API server no longer trusts the trust domain's issuer."
-          - "Drop-in removed: {{ dropin }}{{ ' (k3s restarted)' if dropin_gone.changed else ' (was already gone)' }}"
+          - "{{ ('Drop-in removed: ' ~ dropin) if dropin_gone is changed else ('Other authenticators kept, this one removed from ' ~ auth_config) if auth_rewritten is changed else 'Nothing to remove from the API server (already unlinked).' }}"
           - "SPIRE agent stopped and its data removed, so a re-link attests cleanly."
           - "RBAC binding and the workload's kubeconfig removed."
           - "LEFT ALONE: k3s itself, the cluster's own data, and the {{ workload_user }}"

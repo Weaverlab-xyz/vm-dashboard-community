@@ -12,10 +12,17 @@
 # it edits the API server's authentication configuration: get it wrong and the API server
 # can fail to start. Read "If k3s will not come back" at the end BEFORE the first run.
 #
-# WHY k3s AND NOT A MANAGED CLUSTER. --authentication-config is a kube-apiserver flag.
-# EKS, AKS and GKE do not expose it, so none of the clusters on the dashboard's Kubernetes
-# page can do this at all. k3s takes arbitrary API server flags, which is the whole reason
-# the lab is built on it. That is a real limit on the pattern's reach, not a lab shortcut.
+# WHY k3s AND NOT A MANAGED CLUSTER. --authentication-config is a kube-apiserver flag, and
+# this pattern needs all of it: an issuer on a private address, trusted through the SPIFFE
+# bundle rather than a public CA. EKS, GKE and OKE each accept ONE public OIDC issuer for
+# people (and AKS does in preview) — enough for Dex, see
+# docs/design/agent-and-human-identity.md — but not this. k3s takes arbitrary API server
+# flags, which is the whole reason the lab is built on it. That is a real limit on the
+# pattern's reach, not a lab shortcut.
+#
+# SHARED WITH k3s-dex-auth.yml. Both plays keep their JWT authenticator in the one
+# AuthenticationConfiguration and each replaces only its own entry (by username_prefix),
+# so running either one never removes the other's.
 #
 # STRUCTURED AUTHENTICATION IS GA IN KUBERNETES 1.34 (apiserver.config.k8s.io/v1). On an
 # older k3s the apiVersion has to be v1beta1 and the feature gate turned on; this play
@@ -162,29 +169,70 @@
     #
     # claimMappings.username.prefix is REQUIRED by Kubernetes for any claim other than
     # email. The resulting username is what every binding below has to name.
+    - name: Describe this play's JWT authenticator
+      ansible.builtin.set_fact:
+        _own_jwt:
+          issuer:
+            url: "{{ oidc_issuer_url }}"
+            audiences: ["{{ audience }}"]
+            certificateAuthority: "{{ trust_bundle_pem }}"
+          claimMappings:
+            username:
+              claim: sub
+              prefix: "{{ username_prefix }}"
+          claimValidationRules:
+            # Belt and braces with `audiences` above: the audience is the only thing
+            # stopping a token minted for another relying party being replayed here.
+            - claim: aud
+              requiredValue: "{{ audience }}"
+
+    # ── ONE FILE, MORE THAN ONE AUTHENTICATOR ────────────────────────────────
+    # k3s takes a single --authentication-config, and k3s-dex-auth.yml puts its own JWT
+    # authenticator in the same file. So this play no longer writes the file whole: it
+    # reads what is there and replaces only the entry it OWNS (appending it the first
+    # time), leaving every other authenticator exactly where it was. Ownership
+    # is the username prefix — Kubernetes rejects unknown fields in this file, so there is
+    # nowhere to put a marker, and keying by prefix (not issuer) means a re-run with a new
+    # issuer REPLACES its old entry instead of leaving a stale second one beside it.
+    # The file keeps its historical spiffe- name so a node linked before this change is
+    # updated in place and never ends up with two authentication-config flags.
+    - name: Read the current AuthenticationConfiguration, if there is one
+      ansible.builtin.slurp:
+        src: "{{ auth_config }}"
+      register: _auth_existing
+      failed_when: false
+
+    # In PLACE, not removed-and-appended: if each play moved its entry to the end, running
+    # them alternately would reorder the file every time and restart k3s for nothing.
+    - name: Put this play's authenticator where its old one was
+      ansible.builtin.set_fact:
+        _other_jwt: >-
+          {{ _existing_jwt | zip(_prefixes) | rejectattr('1', 'equalto', username_prefix)
+             | map('first') | list }}
+        _new_jwt: >-
+          {{ _existing_jwt[:(_at | int)]
+             + [_own_jwt]
+             + (_existing_jwt[(_at | int) + 1:] | zip(_prefixes[(_at | int) + 1:])
+                | rejectattr('1', 'equalto', username_prefix) | map('first') | list) }}
+      vars:
+        _existing_jwt: >-
+          {{ (((_auth_existing.content | b64decode | from_yaml) or {}).get('jwt') or [])
+             if _auth_existing.content is defined else [] }}
+        _prefixes: >-
+          {{ _existing_jwt | map(attribute='claimMappings.username.prefix', default='') | list }}
+        _at: >-
+          {{ _prefixes.index(username_prefix) if username_prefix in _prefixes else _existing_jwt | length }}
+
     - name: Write the AuthenticationConfiguration
       ansible.builtin.copy:
         dest: "{{ auth_config }}"
         mode: "0600"
-        content: |
+        content: "{{ _auth_doc | to_nice_yaml(indent=2) }}"
+      vars:
+        _auth_doc:
           apiVersion: apiserver.config.k8s.io/v1
           kind: AuthenticationConfiguration
-          jwt:
-          - issuer:
-              url: {{ oidc_issuer_url }}
-              audiences:
-              - {{ audience }}
-              certificateAuthority: |
-          {{ trust_bundle_pem | indent(10, true) }}
-            claimMappings:
-              username:
-                claim: sub
-                prefix: "{{ username_prefix }}"
-            claimValidationRules:
-            # Belt and braces with `audiences` above: the audience is the only thing
-            # stopping a token minted for another relying party being replayed here.
-            - claim: aud
-              requiredValue: {{ audience }}
+          jwt: "{{ _new_jwt }}"
       notify: Restart k3s
 
     - name: Create the drop-in directory
@@ -198,8 +246,8 @@
         dest: "{{ dropin }}"
         mode: "0600"
         content: |
-          # Managed by k3s-spiffe-auth.yml. A drop-in rather than config.yaml, so flags
-          # set elsewhere survive.
+          # Managed by k3s-spiffe-auth.yml and k3s-dex-auth.yml, which share the file it
+          # names. A drop-in rather than config.yaml, so flags set elsewhere survive.
           kube-apiserver-arg:
             - "authentication-config={{ auth_config }}"
       notify: Restart k3s

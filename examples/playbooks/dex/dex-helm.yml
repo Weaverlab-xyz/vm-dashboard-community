@@ -1,0 +1,368 @@
+# Install Dex on k3s — one OIDC issuer for PEOPLE, in front of whatever IdP you already run
+# Target: a k3s server node (k3s-server-init.yml first). Idempotent (helm upgrade --install).
+#
+# Why Dex, and why only for people: docs/design/agent-and-human-identity.md. In short,
+# Dex federates an upstream IdP (Entra, Okta, Keycloak, Google…) into one issuer that the
+# dashboard's SSO and every cluster's API server can trust. Workloads and the remote agent
+# get SPIFFE identities from SPIRE instead; Dex has no way to attest a machine.
+#
+# ADDITIVE. Nothing in the dashboard or any cluster changes until someone points it here:
+# the dashboard's SSO stays on whatever issuer it already has until its oidc_issuer is
+# set to this one, and a cluster trusts Dex only after k3s-dex-auth.yml (or its managed
+# cloud's OIDC setting) is applied.
+#
+# NEVER LIVE-VALIDATED. The chart value keys are written from chart 0.25.2's values.yaml,
+# not from a run. So the play does not trust them — it fetches the discovery document
+# through the published port at the end and fails, with the reason, if the issuer it
+# advertises is not the one this play configured.
+#
+# THE ISSUER IS A HOSTNAME, AND FOR MANAGED CLUSTERS IT MUST BE PUBLIC. Kubernetes
+# compares the issuer STRING; an IP issuer also fails TLS name checks. A lab can use a
+# private name plus the CA this play generates (handed to k3s-dex-auth.yml as dex_ca_pem).
+# EKS, GKE, OKE and AKS fetch discovery and JWKS from the internet: they need a public
+# DNS name and a public-CA certificate (pass dex_tls_cert_pem / dex_tls_key_pem).
+#
+# extra_vars:
+#   dex_hostname: dex.lab.test             # REQUIRED — the issuer's DNS name
+#   dex_port: 5554                         # published by k3s ServiceLB on the node address
+#   dex_tls_cert_pem / dex_tls_key_pem: "" # blank = a lab CA and cert generated here
+#   upstream_issuer: ""                    # the IdP Dex federates (an `oidc` connector)
+#   upstream_client_id / upstream_client_secret: ""
+#   upstream_name: "Corporate SSO"
+#   lab_user_email: ""                     # NO upstream: one static user, lab only
+#   lab_user_bcrypt: ""                    #   with this bcrypt hash (htpasswd -nbBC 10 "" pw)
+#   dashboard_redirect_uri: ""             # https://<dashboard>/api/auth/oauth/oidc/callback
+#   dex_chart_version: 0.25.2              # pinned: ships Dex 2.45.1
+#   dex_image_digest: sha256:…             # the v2.45.1 multi-arch index
+#   dex_allow_unpinned: false
+#   helm_values_extra: ""                  # YAML merged over the values below
+- name: Install Dex on k3s
+  hosts: all
+  become: true
+  vars:
+    dex_hostname: ""
+    dex_port: 5554
+    dex_namespace: dex
+    dex_tls_cert_pem: ""
+    dex_tls_key_pem: ""
+    upstream_issuer: ""
+    upstream_client_id: ""
+    upstream_client_secret: ""
+    upstream_name: "Corporate SSO"
+    lab_user_email: ""
+    lab_user_bcrypt: ""
+    dashboard_redirect_uri: ""
+    dex_chart_repo: https://charts.dexidp.io
+    dex_chart_version: "0.25.2"
+    dex_image_tag: "v2.45.1"
+    # The multi-arch image index for dex_image_tag, read from ghcr.io. Moves with the
+    # chart version; a tag can be re-pointed, a digest cannot.
+    dex_image_digest: "sha256:8499afd690c437f52301efd2b05b2455da5bd2dfc20332cd697dc9937f808462"
+    dex_allow_unpinned: false
+    helm_values_extra: ""
+    dex_root: /opt/dex
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  tasks:
+    - name: Require a hostname, and a way for people to sign in
+      ansible.builtin.assert:
+        that:
+          - dex_hostname | length > 0
+          - dex_hostname is not match('^[0-9.]+$')
+          - (upstream_issuer | length > 0 and upstream_client_id | length > 0)
+            or (lab_user_email | length > 0 and lab_user_bcrypt is match('^\$2[aby]\$'))
+        fail_msg: >-
+          dex_hostname is required and must be a DNS name, not an IP (Kubernetes compares
+          the issuer string, and Go verifies an IP SAN for an IP URL). Then EITHER an
+          upstream IdP (upstream_issuer + upstream_client_id, the normal case) OR, for a
+          lab with no IdP, lab_user_email + lab_user_bcrypt (a bcrypt hash, never a
+          password: `htpasswd -nbBC 10 "" '<password>' | tr -d ':\n'`).
+
+    - name: Refuse an image that is not pinned by digest
+      ansible.builtin.assert:
+        that:
+          - dex_image_digest is match('^sha256:[0-9a-f]{64}$') or dex_allow_unpinned | bool
+          - dex_chart_version | length > 0 or dex_allow_unpinned | bool
+        fail_msg: >-
+          Pin dex_chart_version and dex_image_digest (the ghcr.io/dexidp/dex index digest for
+          {{ dex_image_tag }}), or set dex_allow_unpinned for a throwaway lab.
+
+    - name: Confirm k3s is serving
+      ansible.builtin.command: k3s kubectl get nodes -o name
+      register: k3s_nodes
+      changed_when: false
+
+    - name: Confirm helm is installed
+      ansible.builtin.command: helm version --short
+      register: helm_present
+      changed_when: false
+      failed_when: helm_present.rc != 0
+      # spire/spire-helm.yml installs a checksummed helm; this play does not repeat it.
+
+    - name: Resolve the issuer
+      ansible.builtin.set_fact:
+        _issuer: "https://{{ dex_hostname }}:{{ dex_port }}"
+
+    - name: Create the working directory
+      ansible.builtin.file:
+        path: "{{ dex_root }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    # ── TLS ──────────────────────────────────────────────────────────────────
+    # A lab CA and a serving certificate for dex_hostname, generated once with openssl
+    # (no collection needed) and reused on every re-run, so the CA a cluster was told to
+    # trust does not change underneath it.
+    - name: Generate a lab CA
+      ansible.builtin.command: >-
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 825
+        -subj "/CN=Dex lab CA" -keyout {{ dex_root }}/ca.key -out {{ dex_root }}/ca.crt
+      args:
+        creates: "{{ dex_root }}/ca.crt"
+      when: dex_tls_cert_pem | length == 0
+
+    - name: Generate the serving certificate for the issuer's name
+      ansible.builtin.shell: >-
+        set -euo pipefail;
+        openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes
+        -subj "/CN={{ dex_hostname }}" -keyout {{ dex_root }}/tls.key -out {{ dex_root }}/tls.csr;
+        printf 'subjectAltName=DNS:%s\nextendedKeyUsage=serverAuth\n' '{{ dex_hostname }}' > {{ dex_root }}/tls.ext;
+        openssl x509 -req -in {{ dex_root }}/tls.csr -CA {{ dex_root }}/ca.crt -CAkey {{ dex_root }}/ca.key
+        -CAcreateserial -days 397 -extfile {{ dex_root }}/tls.ext -out {{ dex_root }}/tls.crt
+      args:
+        executable: /bin/bash
+        creates: "{{ dex_root }}/tls.crt"
+      when: dex_tls_cert_pem | length == 0
+
+    - name: Write a supplied certificate and key
+      ansible.builtin.copy:
+        dest: "{{ dex_root }}/{{ item.name }}"
+        content: "{{ item.pem }}"
+        mode: "0600"
+      loop:
+        - {name: tls.crt, pem: "{{ dex_tls_cert_pem }}"}
+        - {name: tls.key, pem: "{{ dex_tls_key_pem }}"}
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: true
+      when: dex_tls_cert_pem | length > 0
+
+    - name: Create the namespace
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        k3s kubectl create namespace {{ dex_namespace }} --dry-run=client -o yaml
+        | k3s kubectl apply -f -
+      args:
+        executable: /bin/bash
+      register: ns_apply
+      changed_when: "'unchanged' not in ns_apply.stdout"
+
+    - name: Store the serving certificate as a TLS secret
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        k3s kubectl -n {{ dex_namespace }} create secret tls dex-tls
+        --cert={{ dex_root }}/tls.crt --key={{ dex_root }}/tls.key --dry-run=client -o yaml
+        | k3s kubectl apply -f -
+      args:
+        executable: /bin/bash
+      register: tls_apply
+      changed_when: "'unchanged' not in tls_apply.stdout"
+
+    # The dashboard is a confidential client. Its secret is generated once on this host
+    # and never printed — read it from the file when you fill in the dashboard's SSO panel.
+    - name: Generate the dashboard client's secret
+      ansible.builtin.shell: >-
+        umask 077 && openssl rand -hex 32 > {{ dex_root }}/dashboard-client-secret
+      args:
+        creates: "{{ dex_root }}/dashboard-client-secret"
+      when: dashboard_redirect_uri | length > 0
+
+    - name: Read the dashboard client's secret
+      ansible.builtin.slurp:
+        src: "{{ dex_root }}/dashboard-client-secret"
+      register: _dash_secret
+      no_log: true
+      when: dashboard_redirect_uri | length > 0
+
+    # ── values ───────────────────────────────────────────────────────────────
+    # Written as YAML text with the computed lists dropped in as JSON (which is YAML),
+    # rather than a dict through to_nice_yaml: older ansible-core renders a templated
+    # number as a STRING, and a Service whose port is "5554" is rejected by the API.
+    - name: Write the chart values
+      ansible.builtin.copy:
+        dest: "{{ dex_root }}/values.yaml"
+        mode: "0600"
+        content: |
+          image:
+            tag: "{{ dex_image_tag }}"
+            digest: "{{ dex_image_digest }}"
+          https:
+            enabled: true
+          # Locked down the way the SPIRE chart's `recommendations` are: non-root,
+          # read-only root, no capabilities, RuntimeDefault seccomp.
+          podSecurityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          # The chart's own Service stays ClusterIP: as LoadBalancer it would publish
+          # http and TELEMETRY on the node's address too. The published one is
+          # dex-public below — HTTPS only.
+          service:
+            type: ClusterIP
+          volumes:
+            - name: tls
+              secret:
+                secretName: dex-tls
+          volumeMounts:
+            # NOT under /etc/dex: the chart mounts its config secret there, secret volumes
+            # are read-only, and a mount point nested inside one can fail to be created.
+            - name: tls
+              mountPath: /etc/dex-tls
+              readOnly: true
+          config:
+            issuer: "{{ _issuer }}"
+            # Dex's own state (auth requests, refresh tokens, signing keys) as CRDs in
+            # this cluster — no database to run. Signing keys rotate on Dex's schedule
+            # and every relying party here re-fetches JWKS on an unknown kid.
+            storage:
+              type: kubernetes
+              config:
+                inCluster: true
+            web:
+              https: 0.0.0.0:5554
+              tlsCert: /etc/dex-tls/tls.crt
+              tlsKey: /etc/dex-tls/tls.key
+            oauth2:
+              skipApprovalScreen: true
+            connectors: {{ _connectors | to_json }}
+            enablePasswordDB: {{ (upstream_issuer | length == 0) | lower }}
+            staticPasswords: {{ _static_passwords | to_json }}
+            staticClients: {{ _static_clients | to_json }}
+      no_log: true
+      vars:
+        _connectors: >-
+          {{ [{'type': 'oidc', 'id': 'upstream', 'name': upstream_name,
+               'config': {'issuer': upstream_issuer, 'clientID': upstream_client_id,
+                          'clientSecret': upstream_client_secret,
+                          'redirectURI': _issuer ~ '/callback',
+                          'scopes': ['openid', 'profile', 'email', 'groups'],
+                          'insecureEnableGroups': true,
+                          'getUserInfo': true}}]
+             if upstream_issuer | length > 0 else [] }}
+        _static_passwords: >-
+          {{ [{'email': lab_user_email, 'hash': lab_user_bcrypt,
+               'username': lab_user_email.split('@')[0],
+               'userID': lab_user_email | to_uuid}]
+             if upstream_issuer | length == 0 else [] }}
+        _static_clients: >-
+          {{ [{'id': 'kubernetes', 'name': 'Kubernetes', 'public': true,
+               'redirectURIs': ['http://localhost:8000', 'http://localhost:18000']}]
+             + ([{'id': 'dashboard', 'name': 'Dashboard',
+                  'secret': (_dash_secret.content | b64decode | trim),
+                  'redirectURIs': [dashboard_redirect_uri]}]
+                if dashboard_redirect_uri | length > 0 else []) }}
+
+    - name: Write the extra values
+      ansible.builtin.copy:
+        dest: "{{ dex_root }}/values.extra.yaml"
+        mode: "0600"
+        content: "{{ helm_values_extra if helm_values_extra | length > 0 else '{}' }}\n"
+
+    - name: Install the Dex chart
+      ansible.builtin.command: >-
+        helm upgrade --install dex dex
+        --repo {{ dex_chart_repo }}
+        {{ ('--version ' ~ dex_chart_version) if dex_chart_version | length > 0 else '' }}
+        --namespace {{ dex_namespace }}
+        -f {{ dex_root }}/values.yaml -f {{ dex_root }}/values.extra.yaml
+        --wait --timeout 5m
+      register: helm_dex
+      changed_when: helm_dex.rc == 0
+
+    # Selector read from the chart's own Deployment, not guessed, so a chart that renames
+    # its labels breaks loudly here instead of publishing a Service that selects nothing.
+    - name: Read the Dex pods' selector
+      ansible.builtin.command: >-
+        k3s kubectl -n {{ dex_namespace }} get deployment dex
+        -o jsonpath={.spec.selector.matchLabels}
+      register: dex_selector
+      changed_when: false
+
+    - name: Write the published Service (HTTPS only)
+      ansible.builtin.copy:
+        dest: "{{ dex_root }}/service.yaml"
+        mode: "0600"
+        content: |
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: dex-public
+            namespace: {{ dex_namespace }}
+          spec:
+            type: LoadBalancer
+            selector: {{ dex_selector.stdout | from_json | to_json }}
+            ports:
+              - name: https
+                port: {{ dex_port | int }}
+                targetPort: https
+                protocol: TCP
+
+    - name: Publish Dex on the node address
+      ansible.builtin.command: >-
+        k3s kubectl apply -f {{ dex_root }}/service.yaml
+      register: svc_apply
+      changed_when: "'unchanged' not in svc_apply.stdout"
+
+    # ── verify what the values were supposed to do ───────────────────────────
+    # Through the PUBLISHED port, by NAME, against the CA a cluster will be given — the
+    # exact path an API server takes. --resolve pins the name to this node so the check
+    # does not depend on DNS being set up yet.
+    - name: Fetch the discovery document as a relying party would
+      ansible.builtin.command: >-
+        curl -sS --fail --noproxy '*'
+        --resolve {{ dex_hostname }}:{{ dex_port }}:{{ ansible_facts['default_ipv4']['address'] }}
+        --cacert {{ dex_root ~ '/ca.crt' if dex_tls_cert_pem | length == 0 else '/etc/ssl/certs/ca-certificates.crt' }}
+        {{ _issuer }}/.well-known/openid-configuration
+      register: discovery
+      changed_when: false
+      retries: 12
+      delay: 5
+      until: discovery.rc == 0
+
+    - name: Refuse an issuer that does not match
+      ansible.builtin.assert:
+        that:
+          - (discovery.stdout | from_json).issuer == _issuer
+        fail_msg: >-
+          Dex advertises issuer {{ (discovery.stdout | from_json).issuer }} but this play
+          configured {{ _issuer }}. Every relying party compares that string exactly, so
+          nothing would accept its tokens. A chart value key has probably moved — check
+          `config.issuer` in chart {{ dex_chart_version }}'s values and pass the fix in
+          helm_values_extra.
+
+    - name: Read the lab CA for the clusters that will trust it
+      ansible.builtin.slurp:
+        src: "{{ dex_root }}/ca.crt"
+      register: _ca
+      when: dex_tls_cert_pem | length == 0
+
+    - name: What was built
+      ansible.builtin.debug:
+        msg:
+          - "Dex {{ dex_image_tag }} is serving issuer {{ _issuer }}"
+          - "Sign-in: {{ ('upstream ' ~ upstream_name ~ ' (' ~ upstream_issuer ~ ')') if upstream_issuer | length > 0 else ('LAB static user ' ~ lab_user_email ~ ' — not for anything real') }}"
+          - "Clients: kubernetes (public, for kubectl oidc-login){{ ', dashboard (secret in ' ~ dex_root ~ '/dashboard-client-secret)' if dashboard_redirect_uri | length > 0 else '' }}"
+          - "Next, for this cluster: k3s-dex-auth.yml with dex_issuer_url={{ _issuer }}{{ ' and dex_ca_pem = the CA below' if dex_tls_cert_pem | length == 0 else '' }}"
+          - "Dashboard SSO (optional): Settings → Integrations → Single sign-on — issuer {{ _issuer }}, client dashboard."
+          - "Lab CA (give it to k3s-dex-auth.yml as dex_ca_pem):"
+          - "{{ (_ca.content | b64decode) if dex_tls_cert_pem | length == 0 else '(public certificate supplied — no CA to hand out)' }}"
