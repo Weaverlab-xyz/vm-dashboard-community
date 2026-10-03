@@ -224,6 +224,20 @@ the next things queued for QA.
   dispatch leg needs a real enrolled worker registered against the dev
   tenant.
 
+### Agent identity without a key at rest (SPIRE), and one issuer for people (Dex)
+
+- **What community does:** remote agents enrol with a one-time code and keep a
+  self-generated Ed25519 key in their state volume; SSO and each cluster type authenticate
+  people their own way.
+- **What is being added (additively):** an opt-in SPIRE server beside the dashboard and a
+  SPIRE sidecar beside the agent, so an agent on a cloud VM holds no key at rest; and Dex as
+  an optional single OIDC issuer for people across the dashboard, k3s and the managed
+  clusters. The Ed25519 path and direct OIDC remain the defaults.
+- **Status:** In design; compose overlays and k3s/Dex lab plays built. See
+  [design/agent-and-human-identity.md](design/agent-and-human-identity.md).
+- **Dev-testable?** Partial. The shared k3s authentication config has been booted on k3s
+  1.34; the agent's attest route is not built.
+
 ### Containerised remote worker for zero-touch SaaS spokes
 
 - **What community does:** community already dispatches **ephemeral

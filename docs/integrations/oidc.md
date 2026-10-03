@@ -161,6 +161,34 @@ admin-granted ones, see the [Entitle user-JIT design doc](../design/entitle-user
 
 ---
 
+## Dex (optional)
+
+[Dex](https://dexidp.io) can sit between the dashboard and your IdP. It is **optional**:
+pointing the dashboard straight at your IdP, as above, is the default and stays fully
+supported. Dex earns its place when you also want **clusters** — k3s, EKS, GKE, OKE, and AKS
+in preview — to trust the same issuer, so a person and their groups mean the same thing in
+the dashboard and in `kubectl`.
+
+Nothing in the dashboard changes to use it — Dex is just another issuer:
+
+| Field | Value |
+|---|---|
+| Issuer URL | Dex's issuer, e.g. `https://dex.example.com:5554` |
+| Client ID | `dashboard` |
+| Client secret | the `dashboard` client's secret (the lab play leaves it in `/opt/dex/dashboard-client-secret`) |
+| Groups claim | `groups` — Dex passes the upstream IdP's groups through |
+
+Register the dashboard's callback, `https://<dashboard>/api/auth/oauth/oidc/callback`, as the
+`dashboard` client's redirect URI in Dex, and Dex's own callback
+(`https://<dex>/callback`) at the upstream IdP. To go back, put the upstream IdP's issuer
+and client back in these fields.
+
+A lab Dex on k3s, and the play that makes the k3s API server trust it:
+[`examples/playbooks/dex/`](../../examples/playbooks/dex/README.md). Why Dex for people and
+SPIRE for workloads: [design/agent-and-human-identity.md](../design/agent-and-human-identity.md).
+
+---
+
 ## Provider quick reference
 
 Issuer URL format per provider (paste the **base** into the Issuer URL field):

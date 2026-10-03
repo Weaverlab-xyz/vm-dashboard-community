@@ -125,7 +125,9 @@ It is also a **kube-apiserver flag**, which is the constraint that decides every
 - **EKS, AKS and GKE do not expose it.** The `docs/kubernetes.md` clusters are therefore all
   ineligible. EKS has its own OIDC identity-provider association and AKS has a preview of
   structured auth, but neither is this file, and building against either would be a different
-  feature.
+  feature. That different feature exists for *people*: each managed cloud can trust one
+  public OIDC issuer, which is how Dex standardises human access across all of them — see
+  [agent-and-human-identity.md](agent-and-human-identity.md#every-cluster-type-can-trust-dex).
 - **k3s takes arbitrary API server flags** through `kube-apiserver-arg` in
   `/etc/rancher/k3s/config.yaml`, and [`examples/playbooks/k3s/`](../../examples/playbooks/k3s/)
   already stands a server up (`k3s-server-init.yml`), opens its ports

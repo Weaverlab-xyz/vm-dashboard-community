@@ -303,6 +303,12 @@ Hypervisor brokering followed it and is described above. Next:
 - **On-premises Kubernetes clusters as agent targets.** `cloud="local"` clusters have the
   identical problem an on-prem database had, and the fix is the same shape — an `agent_id` on
   the cluster row and the existing `run_kind` enum grown a third member.
+- **An agent identity with no key at rest.** An opt-in SPIRE sidecar that attests the agent
+  and lets it hold its signing key only in memory, beside — never instead of — today's
+  Ed25519 enrolment, which stays the default and stays supported (sites behind a
+  TLS-inspecting proxy cannot reach a SPIRE server). The compose overlays are in the repo;
+  the agent and dashboard code is next. Design, including what `join_token` hosts still keep
+  on disk: [agent-and-human-identity.md](design/agent-and-human-identity.md).
 - **Retiring `POWERSHELL_EXECUTION_MODE=ssh`,** now that a co-located agent does the
   same job by polling outward instead of the dashboard holding an inbound SSH key to a
   Windows desktop.
