@@ -256,11 +256,14 @@ k3s takes one `--authentication-config` file. That file holds a list of JWT auth
 
 ## Phase 2: what is specified here and not built
 
+**Built since:** the on-prem Dex kubeconfig. For `cloud="local"` clusters the API-tunnel download is a `kubectl oidc-login` kubeconfig against Dex (`k8s_service._onprem_dex_tunnel_kubeconfig`), gated on the Dex settings (`dex_issuer_url`, `dex_k8s_client_id`, `dex_ca_pem`) and the per-cluster **Trusts Dex** flag (`POST /api/k8s/clusters/{id}/dex-trust`). Without either it refuses with the missing step. The stored admin kubeconfig is never returned. See `docs/kubernetes.md`.
+
+Still to build:
+
 - `POST /api/agent/attest`, reusing `services/spiffe_assertion.py` for verification and `agent_service` for binding.
 - In `runners/agent/agent.py`: socket detection, the Workload API fetch (via the `spiffe` Python package or the gRPC stubs), and the in-memory key.
 - Alembic migration: `RemoteAgent.auth_mode`, `RemoteAgent.spiffe_id`.
 - The **Migrate to SPIRE** action, entry creation through the admin socket, the re-issue changes, and the banner.
 - Settings: `spire_server_enabled`, SSO provider `direct | dex`, `k8s_human_auth_mode` (managed clusters only, default `native`) with a per-cluster override.
-- Dex kubeconfig generation in `k8s_service` (the `oidc-login` exec block), always used for people on `cloud="local"` clusters, including the API-tunnel download, which stops returning the stored admin kubeconfig for those clusters; a "trusts Dex" flag on those cluster rows, and the "no access for people yet" state when it is unset.
 - `dex_issuer_url` wiring in the four managed-cluster Terraform modules, empty by default.
 - A Dex compose overlay for the dashboard host, for sites that want Dex beside the dashboard rather than on a cluster.

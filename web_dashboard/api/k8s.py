@@ -465,6 +465,31 @@ def api_tunnel_kubeconfig(
     )
 
 
+class _DexTrustRequest(BaseModel):
+    trusted: bool = True
+
+
+@router.post("/clusters/{cluster_id}/dex-trust")
+def set_dex_trust(
+    cluster_id: str,
+    req: _DexTrustRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("k8s", "write")),
+):
+    """Mark (or unmark) an on-prem cluster as trusting Dex — the operator's statement
+    that k3s-dex-auth.yml has run on it. Turns on the Dex kubeconfig download for
+    people; nothing about the cluster itself changes. Managed clusters are refused:
+    they keep their native authentication."""
+    _visible_or_404(db, cluster_id, current_user)
+    try:
+        result = k8s_service.set_dex_trust(db, cluster_id, req.trusted)
+    except K8sError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    logger.info("k8s cluster %s dex_trusted=%s by %s", cluster_id, req.trusted,
+                current_user.username)
+    return result
+
+
 @router.post("/clusters/{cluster_id}/entra-group", status_code=202)
 def bind_entra_group(
     cluster_id: str,

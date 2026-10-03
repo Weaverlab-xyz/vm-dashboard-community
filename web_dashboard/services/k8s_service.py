@@ -153,6 +153,10 @@ def _serialize(r: K8sCluster) -> dict:
         "api_tunnel_jump":       bool(config_service.get(f"k8s_api_tunnel_jump_{r.id}")),
         "entra_group_bound":     bool(config_service.get(f"k8s_entra_group_{r.id}")),
         "impersonator_bound":    bool(config_service.get(f"k8s_impersonator_{r.id}")),
+        # On-prem only: an operator's assertion that the API server trusts Dex
+        # (k3s-dex-auth.yml has run). Gates the person-facing Dex kubeconfig.
+        "dex_trusted":           r.cloud == "local"
+                                 and config_service.get(f"k8s_dex_trusted_{r.id}") in ("1", "true", "yes"),
         # AKS is natively Entra-integrated (always federated); EKS/GKE are federated
         # once the "Entra federation" action runs (tracked in config).
         "entra_federation_enabled": (r.cloud == "azure")
@@ -3382,23 +3386,116 @@ def build_api_tunnel_kubeconfig(db: Session, cluster_id: str) -> str:
     unrevocable admin credential to anyone with k8s:read. The stored file keeps doing
     the dashboard's own work; it is just never a person's download."""
     kubeconfig = resolve_kubeconfig(db, cluster_id)
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is not None and row.cloud == "local":
+        # On-prem: Dex is the ONLY way people get in, whatever the stored file holds.
+        return _onprem_dex_tunnel_kubeconfig(cluster_id, kubeconfig)
     embedded = _embedded_credential_keys(kubeconfig)
     if embedded:
-        row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
         keys = ", ".join(embedded)
-        if row is not None and row.cloud == "local":
-            raise K8sCredentialRefused(
-                f"This on-prem cluster's stored kubeconfig authenticates with an embedded "
-                f"credential ({keys}) — the cluster's admin identity, which is not handed "
-                f"to people. People reach on-prem clusters through Dex: run "
-                f"examples/playbooks/k3s/k3s-dex-auth.yml on the cluster; a Dex kubeconfig "
-                f"download replaces this one (docs/design/agent-and-human-identity.md).")
         raise K8sCredentialRefused(
             f"This cluster's stored kubeconfig embeds a static credential ({keys}), so a "
             f"download would hand that credential to whoever asks. Re-register the cluster "
             f"with a kubeconfig that authenticates through the cloud's exec plugin "
             f"(aws eks get-token, kubelogin, gke-gcloud-auth-plugin).")
     return _repoint_kubeconfig_to_tunnel(kubeconfig, int(_cfg("k8s_api_tunnel_local_port", "6443")))
+
+
+# ── On-prem: people reach the cluster through Dex ──────────────────────────────
+# docs/design/agent-and-human-identity.md, "On-prem: the one path that changes". An
+# on-prem cluster has no cloud identity to be "native" to, and its stored kubeconfig is
+# the admin one — so the download for a person is a Dex `oidc-login` kubeconfig, and
+# nothing else. Whether the cluster's API server trusts Dex is an operator's assertion
+# (`k8s_dex_trusted_<cid>`, set once k3s-dex-auth.yml has run): it cannot be probed
+# without a person's token, and a kubeconfig for an issuer the API server ignores would
+# fail at the first kubectl with an unhelpful 401.
+
+def dex_trust_key(cluster_id: str) -> str:
+    return f"k8s_dex_trusted_{cluster_id}"
+
+
+def _dex_settings() -> dict:
+    """The Dex issuer people sign in through (Settings → Kubernetes → Dex). Issuer
+    blank → {} (not configured)."""
+    issuer = _cfg("dex_issuer_url").strip().rstrip("/")
+    if not issuer:
+        return {}
+    return {
+        "issuer": issuer,
+        "client_id": (_cfg("dex_k8s_client_id", "kubernetes") or "kubernetes").strip(),
+        "ca_pem": _cfg("dex_ca_pem").strip(),
+    }
+
+
+def _dex_oidc_login_kubeconfig(kubeconfig: str, dex: dict) -> str:
+    """Pure transform: replace EVERY user with int128 ``kubectl oidc-login`` against
+    Dex. Users are replaced wholesale, not edited, so a client certificate, key or token
+    in the stored file cannot survive into the result. Cluster CA and server are kept
+    (the repoint to the tunnel happens before this).
+
+    The default authorization-code grant, not device-code: dex-helm.yml registers the
+    `kubernetes` client as public with kubelogin's localhost redirect URIs, which is
+    exactly what that flow uses. A lab Dex with its own CA gets it inline, so the file
+    works on a machine that has never seen that CA."""
+    import base64 as _b64
+    cfg = yaml.safe_load(kubeconfig) or {}
+    args = [
+        "oidc-login", "get-token",
+        f"--oidc-issuer-url={dex['issuer']}",
+        f"--oidc-client-id={dex['client_id']}",
+        "--oidc-extra-scope=email", "--oidc-extra-scope=profile", "--oidc-extra-scope=groups",
+    ]
+    if dex.get("ca_pem"):
+        args.append("--certificate-authority-data="
+                    + _b64.b64encode(dex["ca_pem"].encode()).decode())
+    exec_user = {"exec": {
+        "apiVersion": "client.authentication.k8s.io/v1beta1",
+        "command": "kubectl",
+        "args": args,
+        "interactiveMode": "IfAvailable",
+    }}
+    users = cfg.get("users") or [{"name": "dex"}]
+    cfg["users"] = [{"name": (u or {}).get("name") or "dex", "user": dict(exec_user)}
+                    for u in users]
+    return yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False)
+
+
+def _onprem_dex_tunnel_kubeconfig(cluster_id: str, stored: str) -> str:
+    """The tunnel kubeconfig a PERSON gets for an on-prem cluster — through Dex, or a
+    refusal that names the missing step. Never the stored (admin) kubeconfig."""
+    dex = _dex_settings()
+    if not dex:
+        raise K8sCredentialRefused(
+            "People reach on-prem clusters through Dex, and no Dex issuer is configured. "
+            "Stand Dex up (examples/playbooks/dex/dex-helm.yml), make this cluster's API "
+            "server trust it (examples/playbooks/k3s/k3s-dex-auth.yml), then set the issuer "
+            "under Settings → Kubernetes → Dex. The cluster's stored kubeconfig is its admin "
+            "identity and is never handed to people.")
+    if _cfg(dex_trust_key(cluster_id)) not in ("1", "true", "yes"):
+        raise K8sCredentialRefused(
+            f"This on-prem cluster is not marked as trusting Dex ({dex['issuer']}). Run "
+            f"examples/playbooks/k3s/k3s-dex-auth.yml on its servers, then turn on "
+            f"'Trusts Dex' on the cluster's row. Until then there is no way for people "
+            f"to reach it: the stored kubeconfig is its admin identity and is never handed out.")
+    out = _dex_oidc_login_kubeconfig(
+        _repoint_kubeconfig_to_tunnel(stored, int(_cfg("k8s_api_tunnel_local_port", "6443"))), dex)
+    leaked = _embedded_credential_keys(out)
+    if leaked:  # cannot happen with users replaced wholesale; refuse rather than leak if it ever does
+        raise K8sCredentialRefused(f"refusing: the Dex kubeconfig still carries {', '.join(leaked)}")
+    return out
+
+
+def set_dex_trust(db: Session, cluster_id: str, trusted: bool) -> dict:
+    """Record (or clear) that an on-prem cluster's API server trusts Dex."""
+    from . import config_service
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        raise K8sError(f"cluster {cluster_id} not found")
+    if row.cloud != "local":
+        raise K8sError("'Trusts Dex' applies to on-prem clusters; managed clusters keep "
+                       "their native authentication")
+    config_service.set(dex_trust_key(cluster_id), "1" if trusted else "")
+    return {"cluster_id": cluster_id, "dex_trusted": bool(trusted)}
 
 
 async def run_api_tunnel(db: Session, *, cluster_id: str, job_id: str, action: str = "register",

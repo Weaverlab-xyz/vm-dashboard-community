@@ -124,6 +124,11 @@
                       title="Provision/remove this cluster's PRA tunnel_type=k8s jump — raw kubectl to the API server via the BeyondTrust representative console (no public ingress)"
                       class="text-xs px-2 py-1 bg-teal-600 hover:bg-teal-700 text-white rounded font-medium"
                       x-text="c.pra_jump_id ? 'PRA tunnel ✓' : 'PRA tunnel'"></button>
+              <button x-show="c.cloud === 'local' && (c.status === 'registered' || c.status === 'managed')" @click="toggleDexTrust(c)"
+                      :title="c.dex_trusted ? 'People get a Dex kubeconfig for this cluster. Click to stop (e.g. after removing Dex from its API server).' : 'Turn on once k3s-dex-auth.yml has run on this cluster: people then get a Dex kubeconfig from the API tunnel. Dex is the only way people reach on-prem clusters.'"
+                      class="text-xs px-2 py-1 rounded font-medium"
+                      :class="c.dex_trusted ? 'bg-indigo-600 hover:bg-indigo-700 text-white' : 'bg-white border border-indigo-300 text-indigo-700 hover:bg-indigo-50'"
+                      x-text="c.dex_trusted ? 'Trusts Dex ✓' : 'Trusts Dex?'"></button>
               <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openApiTunnel(c)"
                       title="Direct kubectl-to-API TCP tunnel + downloadable cloud-login (token-free) kubeconfig; supports kubectl --as impersonation for Entitle grants"
                       class="text-xs px-2 py-1 bg-cyan-600 hover:bg-cyan-700 text-white rounded font-medium"
@@ -1126,6 +1131,18 @@ function k8sPage() {
       this.openRegister();
       this.form.name = q.get('name') || '';
       this.discoveredApiServer = q.get('api_server') || '';
+    },
+
+    async toggleDexTrust(c) {
+      const next = !c.dex_trusted;
+      if (next && !confirm(`Mark "${c.name}" as trusting Dex? Only do this once k3s-dex-auth.yml has run on its API server — people will then download a Dex kubeconfig for it.`)) return;
+      try {
+        await API.post(`/api/k8s/clusters/${c.id}/dex-trust`, { trusted: next });
+        await this.refresh();
+        this.flash(next ? 'Cluster marked as trusting Dex.' : 'Dex trust removed — people can no longer download a kubeconfig for it.');
+      } catch (e) {
+        this.flash(e.message || 'Could not update Dex trust.', 'error');
+      }
     },
 
     async refresh() {

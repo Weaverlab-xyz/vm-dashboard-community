@@ -2048,6 +2048,13 @@ class Settings(BaseSettings):
     entra_oidc_issuer_url: str = ""                  # blank → https://login.microsoftonline.com/<azure_tenant_id>/v2.0
     entra_oidc_username_claim: str = "oid"           # OIDC username claim (portable Entra user Object ID)
     entra_oidc_groups_claim: str = "groups"          # OIDC groups claim (Entra emits group Object IDs)
+    # Dex — how PEOPLE reach on-prem (cloud=local) clusters, and the only way they do
+    # (docs/design/agent-and-human-identity.md). The issuer exactly as Dex advertises
+    # it; the client is dex-helm.yml's public `kubernetes` client; the CA only for a lab
+    # Dex whose certificate is not from a public CA.
+    dex_issuer_url: str = ""
+    dex_k8s_client_id: str = "kubernetes"
+    dex_ca_pem: str = ""
     # GKE Workforce Identity Federation (the "Entra federation" action's GCP leg):
     # GKE can't use an OIDC IdP (GKE Identity Service is off for new orgs), so a
     # user reaches the cluster through Connect Gateway as a workforce identity. The

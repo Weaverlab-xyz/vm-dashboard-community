@@ -33,7 +33,8 @@ Why Dex for people and SPIRE for workloads, and how the two share a k3s API serv
    -e dex_issuer_url=https://dex.lab.test:5554 -e dex_ca_pem="$(cat ca.crt)" -e admin_group=k8s-admins
    ```
    Use the CA that `dex-helm.yml` printed, or leave `dex_ca_pem` blank for a public certificate.
-4. **Optional:** point the dashboard's SSO at Dex. In **Settings → Integrations → Single sign-on**:
+4. In the dashboard, **Settings → Kubernetes → Dex**: the issuer (`https://dex.lab.test:5554`), client `kubernetes`, and the lab CA from step 2. Then turn on **Trusts Dex** on the cluster's row. People now get a Dex kubeconfig from the cluster's **API tunnel** download, and only that.
+5. **Optional:** point the dashboard's SSO at Dex. In **Settings → Integrations → Single sign-on**:
    - **Issuer:** `https://dex.lab.test:5554`
    - **Client ID:** `dashboard`
    - **Client secret:** the value in `/opt/dex/dashboard-client-secret` on the node.

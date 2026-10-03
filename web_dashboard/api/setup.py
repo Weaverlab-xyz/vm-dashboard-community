@@ -1659,6 +1659,10 @@ class K8sManagementFeatureConfig(BaseModel):
     entra_oidc_issuer_url: str = ""           # blank → https://login.microsoftonline.com/<azure_tenant_id>/v2.0
     entra_oidc_username_claim: str = "oid"    # OIDC username claim (portable Entra user Object ID)
     entra_oidc_groups_claim: str = "groups"   # OIDC groups claim (Entra emits group Object IDs)
+    # Dex — how people reach on-prem clusters (the only way). See config.py.
+    dex_issuer_url: str = ""
+    dex_k8s_client_id: str = "kubernetes"
+    dex_ca_pem: str = ""
     # GKE Workforce Identity Federation (the "Entra federation" action's GCP leg):
     # users reach GKE via Connect Gateway as workforce identities; RBAC subject is
     # principalSet://…/workforcePools/<pool>/group/<entra-oid>. Pool + provider are

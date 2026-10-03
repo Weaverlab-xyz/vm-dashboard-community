@@ -292,11 +292,23 @@ secrets)**, and **Entitle + Entra federation (Layer 3 — time-boxed access)**.
   served **only when that kubeconfig authenticates through an exec plugin** (each person as
   themselves). One that embeds a credential — `token`, a client certificate or key, a
   password — is refused with 409 and the reason, because handing it out would give every
-  `k8s:read` user the same unrevocable identity. That is always the case for an on-prem
-  (`cloud=local`) k3s cluster, which is registered with its admin kubeconfig: people reach
-  those through Dex (`docs/design/agent-and-human-identity.md`, `k3s/k3s-dex-auth.yml`).
-  An imported managed cluster with a static token is refused the same way; re-register it
-  with exec-plugin auth.
+  `k8s:read` user the same unrevocable identity. An imported managed cluster with a static
+  token is refused; re-register it with exec-plugin auth.
+- **On-prem clusters: people get a Dex kubeconfig, and nothing else.** For a `cloud=local`
+  cluster the same download is a `kubectl oidc-login` kubeconfig against Dex — the stored
+  admin kubeconfig is never handed out ([design](design/agent-and-human-identity.md#on-prem-the-one-path-that-changes)).
+  It needs two things, and the download says which is missing:
+  1. **Settings → Kubernetes → Dex**: the issuer URL (exactly as Dex advertises it), the
+     client ID (`kubernetes`, dex-helm.yml's public client) and, for a lab Dex with its own
+     CA, that CA (embedded in the kubeconfig).
+  2. **Trusts Dex** on the cluster's row (`POST /clusters/{id}/dex-trust`, `k8s:write`) —
+     turn it on once `k3s/k3s-dex-auth.yml` has run on the cluster. It is the operator's
+     statement that the API server trusts Dex; the dashboard cannot probe it without a
+     person's token.
+
+  The user needs the [kubelogin](https://github.com/int128/kubelogin) plugin
+  (`kubectl oidc-login`); the first `kubectl` opens a browser to Dex. Usernames arrive as
+  `dex:<email>`, groups as `dex:<group>` — bind RBAC to those.
 - **Entra → k8s RBAC federation** — bind **one Entra security group** to cluster RBAC
   (`POST /clusters/{id}/entra-group`, default role `entra_rbac_group_role=cluster-admin`);
   members sign in **as themselves** (group Object ID is the RBAC subject), and Entitle's
