@@ -1482,7 +1482,13 @@ function k8sPage() {
         const resp = await fetch(`/api/k8s/clusters/${c.id}/api-tunnel-kubeconfig`, {
           headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
         });
-        if (!resp.ok) { this.flash(`kubeconfig download failed (HTTP ${resp.status}).`, 'error'); return; }
+        if (!resp.ok) {
+          // A 409 carries the reason and the remedy (an embedded credential is refused).
+          let detail = '';
+          try { detail = (await resp.json()).detail || ''; } catch (_) {}
+          this.flash(detail || `kubeconfig download failed (HTTP ${resp.status}).`, 'error');
+          return;
+        }
         const text = await resp.text();
         const url = URL.createObjectURL(new Blob([text], { type: 'application/yaml' }));
         const a = document.createElement('a');

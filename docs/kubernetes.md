@@ -288,6 +288,15 @@ secrets)**, and **Entitle + Entra federation (Layer 3 — time-boxed access)**.
   straight to the API server on a pinned local port (`k8s_api_tunnel_local_port`, `6443`).
   Raw TCP, so kubectl authenticates end-to-end with the downloadable kubeconfig
   (`GET …/api-tunnel-kubeconfig`) and **can `--as` impersonate** Entitle grants.
+  The download is the cluster's stored kubeconfig with only the server repointed, so it is
+  served **only when that kubeconfig authenticates through an exec plugin** (each person as
+  themselves). One that embeds a credential — `token`, a client certificate or key, a
+  password — is refused with 409 and the reason, because handing it out would give every
+  `k8s:read` user the same unrevocable identity. That is always the case for an on-prem
+  (`cloud=local`) k3s cluster, which is registered with its admin kubeconfig: people reach
+  those through Dex (`docs/design/agent-and-human-identity.md`, `k3s/k3s-dex-auth.yml`).
+  An imported managed cluster with a static token is refused the same way; re-register it
+  with exec-plugin auth.
 - **Entra → k8s RBAC federation** — bind **one Entra security group** to cluster RBAC
   (`POST /clusters/{id}/entra-group`, default role `entra_rbac_group_role=cluster-admin`);
   members sign in **as themselves** (group Object ID is the RBAC subject), and Entitle's
