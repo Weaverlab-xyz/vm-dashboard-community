@@ -254,7 +254,7 @@ def test_off_means_no_calls_and_no_files():
 
 def test_audiences_that_cannot_be_resolved_say_which_setting_to_fix():
     _fresh(dashboard_spiffe_identity_enabled=True, dashboard_spiffe_aud_gcp="projects/1/x")
-    assert "//iam.googleapis.com/" in dashboard_identity.refresh()["error"]
+    assert "full resource name" in dashboard_identity.refresh()["error"]
     _fresh(dashboard_spiffe_identity_enabled=True, dashboard_spiffe_aud_wlc=True)
     assert "Workload Credentials" in dashboard_identity.refresh()["error"]
     d = _fresh(dashboard_spiffe_identity_enabled=True, dashboard_spiffe_aud_wlc=True,
