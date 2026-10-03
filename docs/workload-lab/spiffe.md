@@ -50,6 +50,12 @@ the Managed Account credential.
 
 Deploy the governance half first. It stands on its own.
 
+**The dashboard now runs a SPIRE server of its own** (for remote agents). This lab keeps
+its own server on purpose: its seeded weak entries must never go into a real trust domain.
+Which lab demos could move to the dashboard's trust domain instead, and what else that
+server should be used for, is in
+[The dashboard as a SPIFFE workload](../design/dashboard-workload-identity.md).
+
 ## Minting is a deliberate downgrade, and the honest version matters
 
 Minting **bypasses SPIRE node attestation and workload attestation**. That is SPIFFE's
