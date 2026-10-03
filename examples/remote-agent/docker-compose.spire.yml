@@ -1,38 +1,50 @@
-# SPIRE sidecar for the remote agent — OPT-IN, and layered over docker-compose.yml.
+# SPIRE attestation for the remote agent — OPT-IN, and layered over docker-compose.yml.
 #
 #   docker compose -f docker-compose.yml -f docker-compose.spire.yml up -d
 #
-# Instead of keeping its Ed25519 key in the state volume, an agent next to this sidecar
-# gets a short-lived SPIFFE identity from the dashboard's SPIRE server
-# (docker-compose.spire.yml at the repo root) and holds its signing key only in memory.
-# Without this overlay nothing changes: the agent enrols and authenticates exactly as it
-# always has, and that path stays supported.
+# Instead of keeping an Ed25519 key in its state volume, the agent proves who it is with
+# a short-lived JWT-SVID from the dashboard's SPIRE server (docker-compose.spire.yml at
+# the repo root) and holds its signing key only in memory; every restart attests again.
+# Without this overlay nothing changes: the agent enrols with a code and authenticates
+# exactly as it always has, and that path stays supported.
 #
-# STATUS: the sidecar half. The agent image that USES the socket is Phase 2 in
-# docs/design/agent-and-human-identity.md — until it ships, the agent ignores
-# SPIFFE_ENDPOINT_SOCKET and keeps authenticating with Ed25519. You can still prove the
-# identity is there (see "Check it" below).
+# THREE CONTAINERS BESIDE THE AGENT, and why:
+#   spire-agent    attests this host to the SPIRE server and serves the Workload API.
+#   spiffe-helper  runs as the agent's uid (10001), so the Workload API's unix attestor
+#                  identifies it by that uid, and keeps a JWT-SVID for
+#                  <DASHBOARD_URL>/api/agent/attest in a memory-only volume.
+#   the agent      reads that file (AGENT_SPIFFE_JWT_FILE). It needs no gRPC library, no
+#                  socket and no shared PID namespace — its image stays as small as it is.
 #
 # Before the first `up`:
-#   1. On the dashboard, migrate the agent to SPIRE (or create its entries by hand) and
-#      copy the join token it gives you. Cloud VMs skip this — see SPIRE_AGENT_CONF.
-#   2. Copy the dashboard's SPIRE trust bundle here as spire/bootstrap.crt:
+#   1. Dashboard: Settings → Remote agents → tick "Let agents attest through SPIRE".
+#   2. Dashboard: register the dashboard's own trust domain under SPIFFE trust domains,
+#      with the bundle from its SPIRE server
 #        docker compose -f docker-compose.yml -f docker-compose.spire.yml \
-#          exec spire-server /opt/spire/bin/spire-server bundle show   # on the dashboard
-#   3. Set SPIRE_SERVER_ADDRESS, SPIRE_TRUST_DOMAIN and (join token only) SPIRE_JOIN_TOKEN.
+#          exec spire-server /opt/spire/bin/spire-server bundle show -format spiffe
+#   3. Dashboard: on this agent's row, bind its SPIFFE ID
+#        POST /api/agents/<id>/spiffe-id {"spiffe_id": "spiffe://<td>/agent/<agent-id>"}
+#   4. SPIRE server: create the node entry (or a join token) and the workload entry
+#        spire-server token generate -spiffeID spiffe://<td>/node/<host>
+#        spire-server entry create -parentID spiffe://<td>/node/<host> \
+#          -spiffeID spiffe://<td>/agent/<agent-id> -selector unix:uid:10001
+#      (the Agents page will do 3 and 4 in one click in a later release).
+#   5. Here: copy the trust bundle to spire/bootstrap.crt
+#        (spire-server bundle show, on the dashboard), and set SPIRE_SERVER_ADDRESS,
+#        SPIRE_TRUST_DOMAIN and, for join-token attestation, SPIRE_JOIN_TOKEN.
 #
-# BEHIND A TLS-INSPECTING PROXY: agent-to-server is mTLS gRPC and an inspecting proxy
+# BEHIND A TLS-INSPECTING PROXY: spire-agent → server is mTLS gRPC and an inspecting proxy
 # breaks it. Ask for a bypass for SPIRE_SERVER_ADDRESS:SPIRE_SERVER_PORT, or stay on
-# Ed25519 — it is not going away.
+# Ed25519 — it is not going away. The agent → dashboard traffic is unchanged: one
+# single-use, audience-bound token per start, then ordinary signed requests.
 #
-# Check it — fetch a JWT-SVID as the agent's uid, the only uid the entry matches:
-#   docker compose -f docker-compose.yml -f docker-compose.spire.yml exec --user 10001 \
-#     spire-agent /opt/spire/bin/spire-agent api fetch jwt -audience check \
-#     -socketPath /run/spire/sockets/agent.sock
+# Rollback: drop this overlay and re-issue an enrolment code for the agent (that also
+# clears its SPIFFE binding).
 
 services:
-  # Named volumes are created root-owned and the sidecar runs as 1000 with a read-only
-  # root — same fix, same pinned image, as the dashboard-side overlay.
+  # Named volumes are created root-owned and the sidecars run unprivileged with a
+  # read-only root, so this fixes ownership — and renders spiffe-helper's config, which
+  # cannot read environment variables itself, with this dashboard's URL as the audience.
   spire-volumes-init:
     image: busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
     user: "0:0"
@@ -40,10 +52,30 @@ services:
     cap_add: [CHOWN, FOWNER]
     security_opt: ["no-new-privileges:true"]
     network_mode: none
-    command: ["sh", "-c", "chown 1000:1000 /data /sock && chmod 0700 /data && chmod 0755 /sock"]
+    environment:
+      DASHBOARD_URL: ${DASHBOARD_URL:?set DASHBOARD_URL, e.g. https://agents.example.com}
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        chown 1000:1000 /data /sock && chmod 0700 /data && chmod 0755 /sock
+        # Root here holds only CHOWN/FOWNER, not DAC_OVERRIDE, so it cannot write into a
+        # directory it has already handed to 10001: take it back, write, hand it over.
+        chown 0:0 /helper && chmod 0755 /helper && rm -f /helper/helper.conf
+        printf '%s\n' \
+          'agent_address = "/run/spire/sockets/agent.sock"' \
+          'cert_dir = "/run/spiffe/jwt"' \
+          'daemon_mode = true' \
+          "jwt_svids = [{jwt_audience=\"$${DASHBOARD_URL%/}/api/agent/attest\", jwt_svid_file_name=\"attest.jwt\"}]" \
+          'jwt_svid_file_mode = 0400' \
+          > /helper/helper.conf
+        chown 10001:10001 /helper /helper/helper.conf
+        chmod 0400 /helper/helper.conf && chmod 0700 /helper
     volumes:
       - spire_agent_data:/data
       - spire_agent_socket:/sock
+      - spiffe_helper_conf:/helper
     restart: "no"
 
   spire-agent:
@@ -77,20 +109,50 @@ services:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
 
-  agent:
-    # Share the sidecar's PID namespace so the unix workload attestor can see this
-    # process and read its uid (10001). The alternative, the docker attestor, needs the
-    # Docker socket — root on the host — and nothing on this host gets that.
+  spiffe-helper:
+    image: ghcr.io/spiffe/spiffe-helper:0.12.1@sha256:49a7b1aca5b497bb4c1ca1ed1f15397bdf9c9cafb8036df4b963b566bd234f7f
+    container_name: dashboard-agent-spiffe-helper
+    restart: unless-stopped
+    # The agent's uid: the workload entry's selector is unix:uid:10001, and THIS is the
+    # process the Workload API sees ask for the token.
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    # Shares spire-agent's PID namespace so the unix workload attestor can see this
+    # process and read its uid. The alternative, the docker attestor, needs the Docker
+    # socket — root on the host — and nothing on this host gets that.
     pid: "service:spire-agent"
+    command: ["-config", "/etc/spiffe-helper/helper.conf"]
+    volumes:
+      - spiffe_helper_conf:/etc/spiffe-helper:ro
+      - spire_agent_socket:/run/spire/sockets:ro
+      - spiffe_jwt:/run/spiffe/jwt
     depends_on:
       - spire-agent
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  agent:
+    depends_on:
+      - spiffe-helper
     environment:
-      SPIFFE_ENDPOINT_SOCKET: unix:///run/spire/sockets/agent.sock
+      AGENT_SPIFFE_JWT_FILE: /run/spiffe/jwt/attest.jwt
     volumes:
-      - spire_agent_socket:/run/spire/sockets:ro
+      - spiffe_jwt:/run/spiffe/jwt:ro
     # agent_state is deliberately still mounted: it holds sealing.key, the host-local key
-    # for sealed credentials. That is not an authentication key and SPIRE does not replace it.
+    # for sealed credentials. That is not an authentication key and SPIRE does not replace
+    # it — and identity.json, if one exists from an Ed25519 life, stays as the rollback.
 
 volumes:
   spire_agent_data:
   spire_agent_socket:
+  spiffe_helper_conf:
+  # The JWT-SVID lives in memory only: a tmpfs-backed volume, owned by the agent's uid.
+  spiffe_jwt:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,uid=10001,gid=10001,mode=0700"

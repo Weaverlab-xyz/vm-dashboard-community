@@ -48,6 +48,7 @@ reads like credential spraying in a customer's SIEM.
 |---|---|---|
 | `DASHBOARD_URL` | — | Required. Must be `https://` unless `AGENT_INSECURE_TLS=1`. |
 | `AGENT_ENROLLMENT_CODE` | — | Required on first start only; the identity persists. Stays readable via `docker inspect` for the container's life — prefer the file below. |
+| `AGENT_SPIFFE_JWT_FILE` | — | **SPIRE mode (opt-in, 2.6.0+).** Path to a JWT-SVID file kept fresh by a SPIRE sidecar, audience `<DASHBOARD_URL>/api/agent/attest`. Set, the agent attests at every start with a key held only in memory and never reads or writes `identity.json`; the enrolment code is not used. Needs the dashboard's **Let agents attest through SPIRE** setting and a SPIFFE ID bound to the agent. Layout: `examples/remote-agent/docker-compose.spire.yml`. |
 | `AGENT_ENROLLMENT_CODE_FILE` | — | Path to a mounted file holding the code. Wins over the variable above. Must be readable by uid 10001, and mounted `:ro,Z`. Read as text, so it must be ASCII or UTF-8 with no BOM — see [Running on a Windows host](#running-on-a-windows-host). |
 | `AGENT_STATE_DIR` | `/var/lib/dashboard-agent` | Holds the 0600 private key, and `sealing.key` if you use [`seal`](#sealing-a-credential-kept-on-this-host). Mount a volume. |
 | `AGENT_POLICY_FILE` | `/etc/dashboard-agent/policy.yaml` | Mount read-only, as `:ro,Z`. |

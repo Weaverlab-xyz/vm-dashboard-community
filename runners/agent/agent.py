@@ -109,7 +109,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 # broker running the earlier one failed identically while reporting the same string as the
 # build that fixed it. A behaviour change the fleet cannot see is a behaviour change nobody
 # can confirm arrived, so bump this whenever the agent's behaviour moves.
-AGENT_VERSION = "2.5.2"
+AGENT_VERSION = "2.6.0"
 
 log = logging.getLogger("agent")
 
@@ -122,6 +122,12 @@ ENROLLMENT_CODE = os.environ.get("AGENT_ENROLLMENT_CODE", "").strip()
 # has been spent; a mounted file leaves nothing durable in Docker's metadata and can be
 # deleted the moment enrolment succeeds.
 ENROLLMENT_CODE_FILE = os.environ.get("AGENT_ENROLLMENT_CODE_FILE", "").strip()
+# SPIRE attestation (opt-in). A file holding a JWT-SVID whose audience is
+# <dashboard>/api/agent/attest, kept fresh by a SPIRE sidecar (spiffe-helper in
+# examples/remote-agent/docker-compose.spire.yml). Set, the agent attests at every start
+# with a key that lives only in this process's memory, and never reads or writes
+# identity.json. Unset, nothing changes: enrolment code and identity.json, as always.
+SPIFFE_JWT_FILE = os.environ.get("AGENT_SPIFFE_JWT_FILE", "").strip()
 STATE_DIR = os.environ.get("AGENT_STATE_DIR", "/var/lib/dashboard-agent")
 POLICY_FILE = os.environ.get("AGENT_POLICY_FILE", "/etc/dashboard-agent/policy.yaml")
 CA_BUNDLE = os.environ.get("AGENT_CA_BUNDLE", "").strip()
@@ -1465,6 +1471,73 @@ class Identity:
             return None
 
 
+# ── Keys and SPIRE attestation ────────────────────────────────────────────────
+
+# Must match agent_service.ATTEST_PROOF_CONTEXT on the dashboard: the attesting key signs
+# this prefix + the SVID, which proves the presenter of the SVID holds the key it binds.
+ATTEST_PROOF_CONTEXT = b"vm-dashboard/agent-attest/v1\n"
+# How long one start keeps trying to attest (covering one or two sidecar rotations)
+# before giving up and letting the container's restart policy take over.
+_ATTEST_PATIENCE_S = 360
+
+
+def _new_keypair() -> tuple:
+    """(private_b64, public_b64) for a fresh Ed25519 key."""
+    private = Ed25519PrivateKey.generate()
+    private_b64 = base64.b64encode(private.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption())).decode("ascii")
+    public_b64 = base64.b64encode(private.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw)).decode("ascii")
+    return private_b64, public_b64
+
+
+def _parse_jwt_file(raw: str) -> str:
+    """The compact JWT in a token file, or "". Accepts the token itself, or the token
+    base64-encoded (spiffe-helper's docs describe its file as a base64 string)."""
+    text = (raw or "").strip()
+    if text.count(".") == 2 and " " not in text:
+        return text
+    try:
+        decoded = base64.b64decode(text + "=" * (-len(text) % 4), validate=False).decode("ascii").strip()
+    except Exception:  # noqa: BLE001 — not base64 either: not a token
+        return ""
+    return decoded if decoded.count(".") == 2 and " " not in decoded else ""
+
+
+def read_jwt_svid(path: str, *, wait_s: float = 60.0) -> str:
+    """The JWT-SVID in ``path``, waiting up to ``wait_s`` for the sidecar to write it —
+    on a cold start the agent can come up before SPIRE has issued anything."""
+    deadline = time.time() + wait_s
+    while True:
+        try:
+            with open(path, encoding="ascii", errors="replace") as fh:
+                token = _parse_jwt_file(fh.read())
+            if token:
+                return token
+        except OSError:
+            pass
+        if time.time() >= deadline:
+            raise AgentFatal(
+                f"no JWT-SVID in {path} after {wait_s:.0f}s. Is the SPIRE sidecar running, "
+                f"and does this agent's registration entry exist?")
+        time.sleep(2)
+
+
+def _wait_for_new_token(path: str, used: str, deadline: float) -> None:
+    """Sleep until ``path`` holds a token other than ``used``, or the deadline."""
+    while time.time() < deadline:
+        time.sleep(5)
+        try:
+            with open(path, encoding="ascii", errors="replace") as fh:
+                if _parse_jwt_file(fh.read()) not in ("", used):
+                    return
+        except OSError:
+            pass
+
+
 # ── Dashboard client ──────────────────────────────────────────────────────────
 
 class Dashboard:
@@ -1563,14 +1636,7 @@ class Dashboard:
     # ── protocol ──
 
     def enroll(self, code: str) -> Identity:
-        private = Ed25519PrivateKey.generate()
-        private_b64 = base64.b64encode(private.private_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PrivateFormat.Raw,
-            encryption_algorithm=serialization.NoEncryption())).decode("ascii")
-        public_b64 = base64.b64encode(private.public_key().public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw)).decode("ascii")
+        private_b64, public_b64 = _new_keypair()
 
         resp = self._request("POST", "/api/agent/enroll", {
             "enrollment_code": code,
@@ -1593,6 +1659,53 @@ class Dashboard:
         log.info("enrolled as %s (%s)", data.get("name"), data["agent_id"])
         return identity
 
+    def attest(self, jwt_file: str) -> Identity:
+        """Prove this agent's identity with a JWT-SVID and bind a key held ONLY in memory.
+
+        The SVID is single-use at the dashboard, so if the file still holds the token a
+        previous start already presented (a quick restart), wait for the sidecar to
+        rotate it rather than fail. spiffe-helper rewrites the file at half the token's
+        lifetime — about every two and a half minutes for SPIRE's default five.
+        """
+        private_b64, public_b64 = _new_keypair()
+        deadline = time.time() + _ATTEST_PATIENCE_S
+        last_error = ""
+        while True:
+            svid = read_jwt_svid(jwt_file, wait_s=max(1.0, deadline - time.time()))
+            proof = Identity("", private_b64, "", "").sign(ATTEST_PROOF_CONTEXT + svid.encode())
+            resp = self._request("POST", "/api/agent/attest", {
+                "svid": svid, "public_key": public_b64, "proof": proof,
+                "agent_version": AGENT_VERSION, "policy_hash": POLICY.digest,
+            }, signed=False)
+            if resp.status_code == 200:
+                data = resp.json()
+                log.info("attested through SPIRE as %s (%s); signing key held in memory only",
+                         data.get("name"), data["agent_id"])
+                # Deliberately NOT saved: a restart attests again. That is the point.
+                return Identity(data["agent_id"], private_b64,
+                                data["dashboard_public_key"], data["audience"])
+            if resp.status_code == 404:
+                raise AgentFatal(
+                    "the dashboard does not accept SPIRE attestation (Settings → Remote "
+                    "agents → 'Let agents attest through SPIRE' is off). Turn it on, or "
+                    "unset AGENT_SPIFFE_JWT_FILE to enrol with a code instead.")
+            if resp.status_code == 409:
+                raise AgentFatal(f"attestation refused: {resp.text[:300]}")
+            if resp.status_code == 429:
+                wait = _retry_after_seconds(resp, 30)
+                raise AgentFatal(
+                    f"the dashboard is throttling attestation and asked for a retry in "
+                    f"{wait:.0f}s — exiting so the container's restart policy retries.")
+            last_error = f"{resp.status_code}: {resp.text[:200]}"
+            if time.time() >= deadline:
+                raise AgentFatal(
+                    f"attestation refused ({last_error}). Check that this agent's row is "
+                    f"bound to the SPIFFE ID the sidecar fetches, that the dashboard has "
+                    f"the trust domain registered, and that the token's audience is "
+                    f"{self.base}/api/agent/attest.")
+            log.warning("attestation refused (%s); waiting for a fresh SVID", last_error)
+            _wait_for_new_token(jwt_file, svid, deadline)
+
     def lease(self) -> Optional[dict]:
         # The lease body carries what this agent CURRENTLY is, not what it was when it
         # enrolled. agent_version was written once at enrolment, so an operator who
@@ -1611,7 +1724,9 @@ class Dashboard:
         if resp.status_code == 401:
             raise AgentFatal(
                 "the dashboard rejected this agent's signature — it was probably "
-                "revoked. Re-enrol with a fresh code.")
+                "revoked or unbound. " + (
+                    "Restart the container to attest again." if SPIFFE_JWT_FILE
+                    else "Re-enrol with a fresh code."))
         if resp.status_code == 429:
             # Never conflated with the 401 above: one means stop for good, the other
             # means come back later, and treating a load spike as a revocation would
@@ -5217,7 +5332,17 @@ def main() -> int:
              len(POLICY.allow), sorted(POLICY.job_types))
 
     dashboard = Dashboard(DASHBOARD_URL)
-    dashboard.identity = Identity.load()
+    if SPIFFE_JWT_FILE:
+        # SPIRE mode: identity.json is neither read nor written. If one exists from an
+        # earlier Ed25519 life it is left alone — it is the rollback, and the dashboard
+        # replaced that key the moment this agent first attested.
+        try:
+            dashboard.identity = dashboard.attest(SPIFFE_JWT_FILE)
+        except AgentFatal as exc:
+            log.error("%s", exc)
+            return 2
+    else:
+        dashboard.identity = Identity.load()
     if dashboard.identity is None:
         try:
             code = enrollment_code()

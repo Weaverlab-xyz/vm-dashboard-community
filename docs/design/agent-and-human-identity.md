@@ -116,15 +116,17 @@ node attestation ──── mTLS gRPC :8081 ───────────�
 ### How each side picks a mode
 
 **Agent side**
-- `SPIFFE_ENDPOINT_SOCKET` set and the socket present → attest through SPIRE.
+- `AGENT_SPIFFE_JWT_FILE` set → attest through SPIRE at every start, key in memory, `identity.json` neither read nor written.
 - Otherwise → today's behavior exactly: use `identity.json` if present, else redeem `AGENT_ENROLLMENT_CODE`.
 - A new agent image without the sidecar is indistinguishable from the old one.
+
+**Where the token comes from (as built).** Not the Workload API directly: that is gRPC, and the agent image deliberately carries four Python packages. A `spiffe-helper` sidecar runs as the agent's uid (10001), so the `unix:uid:10001` entry matches *it*, and keeps a JWT-SVID for `<DASHBOARD_URL>/api/agent/attest` in a memory-only (tmpfs) volume that only uid 10001 can read. The agent reads that file. It needs no socket and no shared PID namespace; the helper has both. A token that a previous start already presented is refused as a replay, so the agent waits for the helper's next rotation (half the token's lifetime) instead of failing.
 
 **Server side**
 - `RemoteAgent` gets two new columns:
   - `auth_mode` (`ed25519` | `spiffe`, default `ed25519`),
   - nullable `spiffe_id` (unique).
-- The Alembic migration needs no backfill: every existing row is `ed25519` by default, which is what it already is.
+- The migration (the additive `ALTER TABLE` list in `database.py`) needs no backfill: every existing row is `ed25519` by default, which is what it already is.
 - `/api/agent/attest` accepts only rows whose `spiffe_id` matches the SVID's `sub`. An `ed25519` row cannot be taken over by someone who happens to hold an SVID.
 
 ### Migrating one agent
@@ -258,12 +260,14 @@ k3s takes one `--authentication-config` file. That file holds a list of JWT auth
 
 **Built since:** the on-prem Dex kubeconfig. For `cloud="local"` clusters the API-tunnel download is a `kubectl oidc-login` kubeconfig against Dex (`k8s_service._onprem_dex_tunnel_kubeconfig`), gated on the Dex settings (`dex_issuer_url`, `dex_k8s_client_id`, `dex_ca_pem`) and the per-cluster **Trusts Dex** flag (`POST /api/k8s/clusters/{id}/dex-trust`). Without either it refuses with the missing step. The stored admin kubeconfig is never returned. See `docs/kubernetes.md`.
 
+**Also built:** SPIRE attestation for agents.
+- `POST /api/agent/attest` (`agent_service.attest`, verification by `spiffe_assertion.verify` + `consume`), off unless **Settings → Remote agents → Let agents attest through SPIRE** (`spire_attest_enabled`) is on, and checking the SVID audience against the **pinned** audience only.
+- `RemoteAgent.spiffe_id` / `auth_mode`, bound with `POST /api/agents/{id}/spiffe-id` (`agents:write`; `""` unbinds and cuts off an attested key). Re-issuing an enrolment code clears both: that is the rollback.
+- The agent's `AGENT_SPIFFE_JWT_FILE` mode (agent 2.6.0) and the spiffe-helper layout in `examples/remote-agent/docker-compose.spire.yml`.
+
 Still to build:
 
-- `POST /api/agent/attest`, reusing `services/spiffe_assertion.py` for verification and `agent_service` for binding.
-- In `runners/agent/agent.py`: socket detection, the Workload API fetch (via the `spiffe` Python package or the gRPC stubs), and the in-memory key.
-- Alembic migration: `RemoteAgent.auth_mode`, `RemoteAgent.spiffe_id`.
-- The **Migrate to SPIRE** action, entry creation through the admin socket, the re-issue changes, and the banner.
-- Settings: `spire_server_enabled`, SSO provider `direct | dex`, `k8s_human_auth_mode` (managed clusters only, default `native`) with a per-cluster override.
+- The **Migrate to SPIRE** action (bind + SPIRE node/workload entries through the dashboard's admin socket in one click), auto-registering the dashboard's own trust domain, and the banner.
+- Settings: SSO provider `direct | dex`, `k8s_human_auth_mode` (managed clusters only, default `native`) with a per-cluster override.
 - `dex_issuer_url` wiring in the four managed-cluster Terraform modules, empty by default.
 - A Dex compose overlay for the dashboard host, for sites that want Dex beside the dashboard rather than on a cluster.

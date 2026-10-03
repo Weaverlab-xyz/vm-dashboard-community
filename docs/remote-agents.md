@@ -306,9 +306,11 @@ Hypervisor brokering followed it and is described above. Next:
 - **An agent identity with no key at rest.** An opt-in SPIRE sidecar that attests the agent
   and lets it hold its signing key only in memory, beside — never instead of — today's
   Ed25519 enrolment, which stays the default and stays supported (sites behind a
-  TLS-inspecting proxy cannot reach a SPIRE server). The compose overlays are in the repo;
-  the agent and dashboard code is next. Design, including what `join_token` hosts still keep
-  on disk: [agent-and-human-identity.md](design/agent-and-human-identity.md).
+  TLS-inspecting proxy cannot reach a SPIRE server). **Built:** `POST /api/agent/attest`,
+  the per-agent SPIFFE binding and agent 2.6.0's `AGENT_SPIFFE_JWT_FILE` mode, set up by
+  hand with `examples/remote-agent/docker-compose.spire.yml`. **Next:** a one-click
+  "Migrate to SPIRE" on the Agents page and the recommendation banner. Design, including
+  what `join_token` hosts still keep on disk: [agent-and-human-identity.md](design/agent-and-human-identity.md).
 - **Retiring `POWERSHELL_EXECUTION_MODE=ssh`,** now that a co-located agent does the
   same job by polling outward instead of the dashboard holding an inbound SSH key to a
   Windows desktop.
