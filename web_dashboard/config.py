@@ -377,6 +377,9 @@ class Settings(BaseSettings):
     # that isn't in trusted_proxy_hosts below would silently produce http:// callbacks
     # that the identity provider rejects. See services/public_url.py.
     public_base_url: str = ""
+    # Remote agents may attest through SPIRE instead of an enrolment code (opt-in;
+    # docs/design/agent-and-human-identity.md). Ed25519 enrolment is unaffected.
+    spire_attest_enabled: bool = False
 
     # Which peers may set X-Forwarded-For / X-Forwarded-Proto.
     #

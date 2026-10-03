@@ -165,14 +165,129 @@ def reissue_enroll_code(db: Session, agent: RemoteAgent) -> str:
 
     Clears the public key too: the agent is being replaced, and leaving the old key
     valid would mean the retired container could still lease work.
+
+    Also the ROLLBACK from SPIRE: the SPIFFE binding is cleared with the key, so the row
+    is back to plain Ed25519 enrolment and an SVID for the old identity attests nothing.
     """
     code = new_enroll_code()
     agent.enroll_code_hash = hash_code(code)
     agent.enroll_expires_at = datetime.utcnow() + timedelta(minutes=ENROLL_TTL_MINUTES)
     agent.public_key = None
     agent.enrolled_at = None
+    agent.spiffe_id = None
+    agent.auth_mode = None
     db.commit()
     return code
+
+
+# ── SPIRE attestation ─────────────────────────────────────────────────────────
+# docs/design/agent-and-human-identity.md, "Agent → dashboard". The agent presents a
+# JWT-SVID (audience-bound to this dashboard's attest route) plus a public key it just
+# generated IN MEMORY, and a signature by that key over the SVID. The SVID says who;
+# the signature proves the presenter holds the key being bound; spiffe_assertion makes
+# the SVID single-use, so a copy lifted from a TLS-inspecting proxy's log after the
+# agent used it binds nothing. Every request after this is the ordinary signed path.
+
+ATTEST_PROOF_CONTEXT = b"vm-dashboard/agent-attest/v1\n"
+
+
+def attest_proof_message(svid: str) -> bytes:
+    """What the attesting agent signs with its new key."""
+    return ATTEST_PROOF_CONTEXT + (svid or "").encode()
+
+
+def bind_spiffe_id(db: Session, agent: RemoteAgent, spiffe_id: str) -> RemoteAgent:
+    """Bind (or, with "", unbind) the SPIFFE ID this agent will attest as.
+
+    Binding does not touch the current key: an Ed25519 agent keeps working until it
+    first attests, and only then is its old key replaced. Unbinding an agent that is
+    running on an attested key cuts that key off too — otherwise an identity nobody
+    vouches for any more would keep leasing work until the container restarted.
+    """
+    from . import spiffe_assertion
+    spiffe_id = (spiffe_id or "").strip()
+    if not spiffe_id:
+        if agent.auth_mode == "spiffe":
+            agent.public_key = None
+            agent.auth_mode = None
+        agent.spiffe_id = None
+        db.commit()
+        return agent
+    if not spiffe_assertion.valid_spiffe_id(spiffe_id):
+        raise AgentError("Not a SPIFFE ID — expected spiffe://<trust-domain>/<path>.")
+    other = (db.query(RemoteAgent)
+             .filter(RemoteAgent.spiffe_id == spiffe_id, RemoteAgent.id != agent.id).first())
+    if other:
+        raise AgentError(f"{spiffe_id} is already bound to agent {other.name!r}.")
+    agent.spiffe_id = spiffe_id
+    db.commit()
+    return agent
+
+
+def attest(db: Session, *, svid: str, public_key: str, proof: str, audiences,
+           agent_version: str = "", policy_hash: str = "", ip: str = "") -> RemoteAgent:
+    """Bind an in-memory key to the agent a valid, unused JWT-SVID identifies.
+
+    Throttled and failure-recorded exactly like enrolment, which is the other route
+    that authenticates with something other than a signature. Every refusal is one
+    message to the caller; the reason goes to the log.
+    """
+    agent_guard.check_enroll(db, ip=ip)
+    try:
+        return _attest(db, svid=svid, public_key=public_key, proof=proof,
+                       audiences=audiences, agent_version=agent_version,
+                       policy_hash=policy_hash, ip=ip)
+    except AgentError:
+        agent_guard.record_enroll_failure(db, ip=ip)
+        raise
+
+
+def _attest(db: Session, *, svid: str, public_key: str, proof: str, audiences,
+            agent_version: str, policy_hash: str, ip: str) -> RemoteAgent:
+    from . import spiffe_assertion
+    refused = AgentError("Attestation refused.")
+    try:
+        claims = spiffe_assertion.verify(db, svid or "", audiences)
+    except spiffe_assertion.AssertionError_ as exc:
+        logger.warning("agent attest refused: %s", exc)
+        raise refused
+    sub = str(claims["sub"])
+    agent = db.query(RemoteAgent).filter(RemoteAgent.spiffe_id == sub).first()
+    if agent is None:
+        logger.warning("agent attest refused: no agent is bound to %s", sub)
+        raise refused
+    if not agent.is_active:
+        logger.warning("agent attest refused: agent %s (%s) is revoked", agent.name, sub)
+        raise refused
+    try:
+        agent_signing.load_public_key(public_key)
+    except agent_signing.SignatureError as exc:
+        raise AgentError(f"Invalid public key: {exc}")
+    if not agent_signing.verify_bytes(public_key, proof or "", attest_proof_message(svid)):
+        logger.warning("agent attest refused: proof of possession failed for %s", sub)
+        raise refused
+    # Last, so a refused attempt never burns the SVID for a retry that would succeed.
+    try:
+        spiffe_assertion.consume(db, svid, claims["exp"])
+    except spiffe_assertion.AssertionError_ as exc:
+        logger.warning("agent attest refused for %s: %s", sub, exc)
+        raise refused
+
+    now = datetime.utcnow()
+    agent.public_key = public_key          # replaces any Ed25519 key: one key per agent
+    agent.auth_mode = "spiffe"
+    agent.agent_version = (agent_version or "")[:32]
+    agent.policy_hash = (policy_hash or "")[:64]
+    agent.enrolled_at = agent.enrolled_at or now
+    agent.last_seen_at = now
+    agent.last_seen_ip = (ip or "")[:45]
+    # An outstanding enrolment code would be a second way in for an identity that is
+    # now vouched for by SPIRE. Burn it.
+    agent.enroll_code_hash = None
+    agent.enroll_expires_at = None
+    db.commit()
+    db.refresh(agent)
+    return agent
 
 
 def revoke_agent(db: Session, agent: RemoteAgent) -> int:

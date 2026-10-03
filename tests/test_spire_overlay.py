@@ -110,6 +110,7 @@ def _locked(name, svc):
 def test_the_spire_containers_run_unprivileged_and_locked_down():
     _locked("spire-server", _yaml(*_DASH_OVERLAY)["services"]["spire-server"])
     _locked("spire-agent", _yaml(*_AGENT_OVERLAY)["services"]["spire-agent"])
+    _locked("spiffe-helper", _yaml(*_AGENT_OVERLAY)["services"]["spiffe-helper"])
 
 
 def test_the_volume_init_containers_can_only_chown():
@@ -155,9 +156,13 @@ def test_the_agent_overlay_only_adds_to_the_agent():
     agent = services["agent"]
     assert set(agent) <= _ADDITIVE_KEYS, (
         f"the overlay changes {sorted(set(agent) - _ADDITIVE_KEYS)} on the agent")
-    assert set(agent["environment"]) == {"SPIFFE_ENDPOINT_SOCKET"}
+    assert set(agent["environment"]) == {"AGENT_SPIFFE_JWT_FILE"}
+    assert "pid" not in agent, (
+        "the agent itself no longer needs SPIRE's PID namespace — the helper is the workload")
+    assert all(str(v).endswith(":ro") for v in agent["volumes"]), (
+        "the agent only reads the token; it must not be able to write it")
     base = _yaml("examples", "remote-agent", "docker-compose.yml")["services"]["agent"]
-    assert "SPIFFE_ENDPOINT_SOCKET" not in (base.get("environment") or {}), (
+    assert "AGENT_SPIFFE_JWT_FILE" not in (base.get("environment") or {}), (
         "the BASE agent compose must not opt in to SPIRE — only the overlay does")
     assert any("agent_state" in str(v) for v in base["volumes"]), (
         "agent_state must stay: it holds sealing.key, which SPIRE does not replace")
@@ -171,8 +176,12 @@ def test_the_workload_is_identified_by_the_agent_images_uid():
     dockerfile = _text("runners", "agent", "Dockerfile")
     assert re.search(r"^USER 10001:10001$", dockerfile, re.M), "the agent image's uid moved"
     overlay = _yaml(*_AGENT_OVERLAY)["services"]
-    assert overlay["agent"]["pid"] == "service:spire-agent", (
-        "without a shared PID namespace the unix attestor cannot see the agent's process")
+    helper = overlay["spiffe-helper"]
+    assert helper["user"] == "10001:10001", (
+        "spiffe-helper is the process the Workload API sees; it must run as the uid the "
+        "entry selects")
+    assert helper["pid"] == "service:spire-agent", (
+        "without a shared PID namespace the unix attestor cannot see the helper's process")
     design = _text("docs", "design", "agent-and-human-identity.md")
     assert "uid:10001" in design
 
@@ -193,8 +202,26 @@ def test_each_agent_config_matches_what_it_promises_about_keys_at_rest():
         assert "insecure_bootstrap" not in active, (
             f"{name}: insecure_bootstrap trusts whoever answers the first connection")
         assert _hcl_value(conf, "socket_path") == "/run/spire/sockets/agent.sock"
-    sock = _yaml(*_AGENT_OVERLAY)["services"]["agent"]["environment"]["SPIFFE_ENDPOINT_SOCKET"]
-    assert sock == "unix:///run/spire/sockets/agent.sock"
+    init = " ".join(_yaml(*_AGENT_OVERLAY)["services"]["spire-volumes-init"]["command"])
+    assert 'agent_address = "/run/spire/sockets/agent.sock"' in init, (
+        "the helper is pointed at a socket the spire-agent config does not serve")
+
+
+def test_the_helper_writes_the_token_the_agent_reads_for_the_route_the_server_checks():
+    """Three spellings of one contract — the helper's cert_dir + file name, the agent's
+    AGENT_SPIFFE_JWT_FILE, and the audience path the dashboard verifies. Any drift and
+    the agent waits for a token that never appears, or presents one the server refuses."""
+    services = _yaml(*_AGENT_OVERLAY)["services"]
+    init = " ".join(services["spire-volumes-init"]["command"])
+    cert_dir = re.search(r'cert_dir = "([^"]+)"', init).group(1)
+    name = re.search(r'jwt_svid_file_name=\\?"([^"\\]+)', init).group(1)
+    assert services["agent"]["environment"]["AGENT_SPIFFE_JWT_FILE"] == f"{cert_dir}/{name}"
+    api = _text("web_dashboard", "api", "agent.py")
+    route = re.search(r'^ATTEST_PATH = "([^"]+)"', api, re.M).group(1)
+    assert f"/api/agent/attest" == route and route in init, (
+        "the helper's audience does not end in the route the dashboard checks")
+    mounts = [str(v) for v in services["spiffe-helper"]["volumes"]]
+    assert any(m.endswith(f":{cert_dir}") for m in mounts), "the helper cannot write cert_dir"
 
 
 def test_the_server_enables_every_attestor_an_agent_config_can_use():

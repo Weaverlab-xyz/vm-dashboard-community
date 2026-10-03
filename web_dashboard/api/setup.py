@@ -908,6 +908,9 @@ class RemoteAgentsFeatureConfig(BaseModel):
     """
     enabled: bool = False
     public_base_url: str = ""
+    # Opt-in: agents may attest through SPIRE (POST /api/agent/attest) instead of an
+    # enrolment code. Off, the route 404s. Ed25519 enrolment works either way.
+    spire_attest_enabled: bool = False
 
 class PasswordSafeFeatureConfig(BaseModel):
     """Password Safe / Secrets Safe — secret and managed-account checkout, plus

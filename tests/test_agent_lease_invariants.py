@@ -224,8 +224,11 @@ def test_the_operator_half_is_admin_only():
     # deploy key and no playbook. What is genuinely different is the secret's lifetime — a
     # PRA deploy key is neither single-use nor short-lived — which is an argument for the
     # sealed channel it uses, not against this route.
-    agent_half = {"enroll_agent", "lease_job", "heartbeat", "push_logs", "complete",
-                  "job_secret", "job_ansible_bundle", "job_gateway_key"}
+    # attest_agent is enroll_agent's SPIRE twin: unsigned (there is no key on file yet),
+    # authenticated by a single-use JWT-SVID instead of a single-use code, and off unless
+    # spire_attest_enabled is set.
+    agent_half = {"enroll_agent", "attest_agent", "lease_job", "heartbeat", "push_logs",
+                  "complete", "job_secret", "job_ansible_bundle", "job_gateway_key"}
 
     # The list above and the router each function is decorated with are two spellings of
     # the same membership, and the second one is the one that decides what the agent
@@ -288,9 +291,10 @@ def test_the_protocol_router_carries_no_operator_shaped_route():
     """
     protocol = _routes("router")
     assert protocol, "no agent-protocol routes found — did they get renamed?"
-    assert all(p in ("/enroll", "/lease") or p.startswith("/jobs/") for p in protocol), (
+    top = ("/enroll", "/attest", "/lease")
+    assert all(p in top or p.startswith("/jobs/") for p in protocol), (
         f"the agent-protocol router declares a route that is not part of the protocol: "
-        f"{[p for p in protocol if not (p in ('/enroll', '/lease') or p.startswith('/jobs/'))]}")
+        f"{[p for p in protocol if not (p in top or p.startswith('/jobs/'))]}")
     assert not any("{agent_id}" in p for p in protocol), (
         "a /{agent_id} route is on the protocol router — it would be published on the "
         "agent vhost, and it would bind agent_id='lease'")

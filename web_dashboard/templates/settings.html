@@ -5214,6 +5214,22 @@
             </p>
           </div>
 
+          <label class="flex items-start gap-2 pt-1">
+            <input type="checkbox" x-model="panelCfg.spire_attest_enabled"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-gray-700">
+              Let agents attest through SPIRE
+              <span class="block text-[11px] text-gray-500">
+                An agent bound to a SPIFFE ID (Agents page) can then prove itself with a
+                short-lived JWT-SVID from a SPIRE sidecar and keep its signing key only in
+                memory — no key at rest on a cloud VM. Ed25519 enrolment codes keep working
+                either way and stay the default; sites behind a TLS-inspecting proxy usually
+                cannot reach a SPIRE server. See
+                <code class="font-mono">examples/remote-agent/docker-compose.spire.yml</code>.
+              </span>
+            </span>
+          </label>
+
           <!-- ── Signing audience (read-only) ──────────────────────────────────
                A separate box from the field above, because they are separate values and
                conflating them is the bug: Public base URL is what you *state*, the audience

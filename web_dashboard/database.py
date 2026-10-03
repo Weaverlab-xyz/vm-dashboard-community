@@ -723,6 +723,15 @@ class RemoteAgent(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     created_by = Column(String(100))
 
+    # SPIRE attestation (docs/design/agent-and-human-identity.md). `spiffe_id` is the
+    # identity an operator bound to this row; an agent presenting a JWT-SVID for it at
+    # /api/agent/attest binds a key that lives only in its memory. `auth_mode` records
+    # which path set the CURRENT key: NULL/"ed25519" = enrolment code + identity.json
+    # (the default, and permanent), "spiffe" = attested. No backfill: every existing
+    # row is NULL, which is what it already is.
+    spiffe_id = Column(String(255), nullable=True, unique=True, index=True)
+    auth_mode = Column(String(16), nullable=True)
+
     # No `status` column on purpose. Status is derived from is_active / public_key /
     # last_seen_at freshness, because a stored status is how you end up with a row
     # that still reads "online" three weeks after the container died.
@@ -4594,6 +4603,13 @@ def init_db():
             # read NULL until their agent next polls, which is the correct answer — the
             # dashboard genuinely does not know yet.
             "ALTER TABLE remote_agents ADD COLUMN reported_job_types TEXT",
+            # SPIRE attestation. Both NULL on every existing row, which reads as "Ed25519,
+            # not bound to SPIRE" -- exactly what those agents are. Not idempotent, like
+            # the bare CREATE INDEX statements above: it fails harmlessly on an install
+            # where create_all already built the index from the model.
+            "ALTER TABLE remote_agents ADD COLUMN spiffe_id VARCHAR(255)",
+            "ALTER TABLE remote_agents ADD COLUMN auth_mode VARCHAR(16)",
+            "CREATE UNIQUE INDEX ix_remote_agents_spiffe_id ON remote_agents(spiffe_id)",
             # `hypervisor_connections` needs no entry: create_all makes new tables.
             # Nor does `ephemeral_state` (FIDO2 challenges + OAuth/OIDC CSRF state),
             # for the same reason. Nothing backfills that one either — every row it

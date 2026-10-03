@@ -316,6 +316,63 @@ def enroll_agent(body: EnrollRequest, request: Request,
     }
 
 
+ATTEST_PATH = "/api/agent/attest"
+
+
+class AttestRequest(BaseModel):
+    svid: str
+    public_key: str
+    proof: str
+    agent_version: str = ""
+    policy_hash: str = ""
+
+
+@router.post("/attest")
+def attest_agent(body: AttestRequest, request: Request, db: Session = Depends(get_db)):
+    """Bind an in-memory key by SPIRE attestation instead of an enrolment code.
+
+    Opt-in (``spire_attest_enabled`` on the Remote agents panel); off, the route does not
+    exist. The JWT-SVID's audience must be ``<pinned audience>/api/agent/attest`` — the
+    PINNED audience only, never one derived from this request's Host header, which
+    whoever sends the request controls. An install with nothing pinned yet refuses;
+    registering the agent (an authenticated admin mint) pins it.
+
+    Answers like enrolment: the dashboard's envelope key and the audience, so the agent
+    can verify job envelopes and sign every later request on the ordinary path.
+    """
+    if not config_service.get_bool("spire_attest_enabled"):
+        raise HTTPException(status_code=404, detail="Not Found")
+    pinned = _pinned_audience()
+    if not pinned:
+        raise HTTPException(status_code=409, detail=(
+            "This dashboard has no pinned agent audience yet. Registering the agent on the "
+            "Agents page pins it; do that before binding its SPIFFE ID."))
+    try:
+        agent = agent_service.attest(
+            db, svid=body.svid, public_key=body.public_key, proof=body.proof,
+            audiences=[pinned + ATTEST_PATH], agent_version=body.agent_version,
+            policy_hash=body.policy_hash, ip=_client_ip(request))
+    except AgentThrottled as exc:
+        raise _throttled(exc)
+    except AgentError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+
+    agent_service.audit(db, agent, "agent.attest", ip=_client_ip(request),
+                        details={"spiffe_id": agent.spiffe_id,
+                                 "agent_version": agent.agent_version,
+                                 "policy_hash": agent.policy_hash})
+    return {
+        "agent_id": agent.id,
+        "name": agent.name,
+        "site": agent.site or "",
+        "audience": pinned,
+        "dashboard_public_key": agent_service.envelope_public_key(),
+        "poll_interval_s": agent_service.DEFAULT_POLL_INTERVAL_S,
+        "heartbeat_interval_s": agent_service.DEFAULT_HEARTBEAT_INTERVAL_S,
+        "max_log_lines_per_request": agent_service.MAX_LOG_LINES_PER_REQUEST,
+    }
+
+
 async def signed_agent(request: Request, db: Session = Depends(get_db)) -> RemoteAgent:
     """Dependency: authenticate a signed agent request.
 
@@ -947,6 +1004,10 @@ def _agent_row(agent: RemoteAgent, running: int = 0) -> dict:
         "job_types": list(agent_service.AGENT_JOB_TYPES),
         "allowed_job_types": list(agent_service.allowed_job_types(agent)),
         "reported_job_types": agent.reported_job_types_list,
+        # "ed25519" (enrolment code, key in identity.json) or "spiffe" (attested, key
+        # in memory). spiffe_id is what the agent is bound to attest as, if anything.
+        "auth_mode": agent.auth_mode or "ed25519",
+        "spiffe_id": agent.spiffe_id or "",
     }
 
 
@@ -1251,6 +1312,40 @@ def reissue_code(agent_id: str, request: Request,
                                    "audience_mismatch_acknowledged": bool(audience["conflict"])})
     return {**_agent_row(agent), "enrollment_code": code,
             "install": _install_hint(request, code, audience)}
+
+
+class SpiffeBindRequest(BaseModel):
+    spiffe_id: str = ""
+
+
+@admin_router.post("/{agent_id}/spiffe-id")
+def bind_spiffe_id(agent_id: str, body: SpiffeBindRequest, request: Request,
+                   acknowledge_audience: bool = False,
+                   current_user: User = Depends(require_explicit_permission("agents", "write")),
+                   db: Session = Depends(get_db)):
+    """Bind the SPIFFE ID this agent will attest as ("" unbinds).
+
+    The agent keeps its current key until it first attests; unbinding an attested agent
+    cuts its key off. Does NOT pin the signing audience: only the admin mint and a
+    redeemed code may (tests/test_agent_lease_invariants.py), and this row's creation
+    already minted a code and pinned it. Attestation refuses while nothing is pinned.
+
+    The matching SPIRE registration entry is created in SPIRE itself for now
+    (docs/design/agent-and-human-identity.md).
+    """
+    agent = _load(db, agent_id)
+    if not agent.is_active:
+        raise HTTPException(status_code=409, detail="This agent has been revoked.")
+    audience = _audience_guard(request, acknowledged=acknowledge_audience)
+    try:
+        agent_service.bind_spiffe_id(db, agent, body.spiffe_id)
+    except AgentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    job_service.log_audit(db, current_user.username, "agent.bind_spiffe_id",
+                          ip_address=_client_ip(request),
+                          details={"agent": agent.name, "spiffe_id": agent.spiffe_id or "",
+                                   "audience": audience["effective"]})
+    return {**_agent_row(agent), "attest_audience": (_pinned_audience() + ATTEST_PATH)}
 
 
 class DiscoverRequest(BaseModel):
