@@ -2,7 +2,7 @@
 
 > **Audience:** contributor · **Profile:** `both` · **Read this when:** you are about to give the dashboard an identity of its own, retire one of its stored cloud keys, move a Workload Lab demo off the lab's SPIRE server, or decide whether something else in the codebase should use a SPIFFE token.
 
-**Slices 1 and 3, L1 and L2 are built; the rest is not.** This is an audit, made after the dashboard got
+**Built except L3**, which waits on the lab's attribute probe being run against a live tenant ([L3](#l3-govern-the-dashboards-own-trust-domain)). None of it has run against a live cloud yet ([Not verified](#not-verified)). This is an audit, made after the dashboard got
 its own SPIRE server (#996–#998), of where that server should be used next. Each section says what it
 removes, what it costs, and what is still unknown. Where SPIFFE adds little, the note says so.
 

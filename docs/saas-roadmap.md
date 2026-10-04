@@ -231,13 +231,23 @@ the next things queued for QA.
   people their own way.
 - **What is being added (additively):** an opt-in SPIRE server beside the dashboard and a
   SPIRE sidecar beside the agent, so an agent on a cloud VM holds no key at rest; and Dex as
-  the single OIDC issuer for people: the only way people reach on-prem (k3s) clusters, and
-  an opt-in per managed cluster, which stay on native authentication by default. The
-  Ed25519 path and direct OIDC remain the defaults.
-- **Status:** In design; compose overlays and k3s/Dex lab plays built. See
-  [design/agent-and-human-identity.md](design/agent-and-human-identity.md).
+  the single OIDC issuer for people: the only way people reach on-prem (k3s) clusters. Dex
+  for managed clusters is paused. The Ed25519 path and direct OIDC remain the defaults.
+- **Status:** In progress. Built, but not yet run against a live host:
+  - agent attestation (`/api/agent/attest`), **Migrate to SPIRE** and central credential
+    storage for attested agents;
+  - the on-prem Dex kubeconfig;
+  - the dashboard's own SPIFFE identity, which builds on the same SPIRE server: cloud
+    federation for AWS, Azure and GCP, k3s, agent file-share credentials, the ECS and
+    Cloud Run runners collecting credentials from the dashboard, and federation with
+    Workload Lab trust domains.
+
+  Still to build: Dex as the dashboard's SSO provider, and a Dex overlay for the dashboard
+  host. See [design/agent-and-human-identity.md](design/agent-and-human-identity.md) and
+  [design/dashboard-workload-identity.md](design/dashboard-workload-identity.md).
 - **Dev-testable?** Partial. The shared k3s authentication config has been booted on k3s
-  1.34; the agent's attest route is not built.
+  1.34. Attestation and the dashboard's identity need the SPIRE overlay
+  (`docker-compose.spire.yml`) and a reachable agent or cloud account.
 
 ### Containerised remote worker for zero-touch SaaS spokes
 

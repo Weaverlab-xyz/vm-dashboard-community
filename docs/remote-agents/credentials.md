@@ -10,7 +10,8 @@ Keep each credential in the dashboard, attest the agent through SPIRE, and let t
 fetch the credential per job. In practice:
 
 1. **Migrate the agent to SPIRE.** Use **Migrate to SPIRE** on the Agents page and the
-   [`docker-compose.spire.yml`](../../examples/remote-agent/docker-compose.spire.yml) overlay.
+   [`docker-compose.spire.yml`](../../examples/remote-agent/docker-compose.spire.yml) overlay;
+   [Attesting an agent through SPIRE](spire-attestation.md) walks through it.
    After that the agent's signing key lives only in memory, and every restart attests again.
 2. **Set `dashboard_secret: true`** on the connection in `connections.yaml`, and delete
    the local `password`, `password_file` or `password_sealed`.

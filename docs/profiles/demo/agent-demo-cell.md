@@ -101,8 +101,10 @@ error from the MCP client is scrubbed of anything token-shaped on its way to one
 > the host. See [Service accounts → SPIFFE workloads](../../service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing).
 >
 > What stays unbuilt is the *other* bridge — the SVID minting a credential **inside
-> Password Safe** via the SPIFFE SVID plugin, whose configuration question
-> `spire_lab_service` records as unresolved. And the SVID **does not authenticate to `/mcp`
+> Password Safe** via the SPIFFE SVID plugin. Whether that plugin can be configured the
+> way it was designed is still unresolved; the SPIRE lab's
+> [attribute probe](../../runbooks/spire-lab-standup.md#5-onboard-and-read-the-one-line-that-matters)
+> is how it gets answered. And the SVID **does not authenticate to `/mcp`
 > directly** — `/mcp` has no mTLS path; the SVID is exchanged at the token endpoint for a
 > bearer token, and that token is what `/mcp` sees.
 >

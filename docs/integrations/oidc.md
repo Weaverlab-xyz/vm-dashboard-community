@@ -167,8 +167,9 @@ admin-granted ones, see the [Entitle user-JIT design doc](../design/entitle-user
 pointing the dashboard straight at your IdP, as above, is the default and stays fully
 supported. Dex earns its place when you also want **clusters** to trust the same issuer, so
 a person and their groups mean the same thing in the dashboard and in `kubectl`. On-prem
-(k3s) clusters require it for people; managed clusters (EKS, GKE, OKE, and AKS in preview)
-can opt in per cluster and stay on their native authentication by default.
+(k3s) clusters require it for people. Managed clusters (EKS, GKE, OKE, AKS) stay on their
+native authentication: Dex for them is
+[paused](../design/agent-and-human-identity.md#managed-clusters-paused).
 
 Nothing in the dashboard changes to use it — Dex is just another issuer:
 
@@ -183,6 +184,13 @@ Register the dashboard's callback, `https://<dashboard>/api/auth/oauth/oidc/call
 `dashboard` client's redirect URI in Dex, and Dex's own callback
 (`https://<dex>/callback`) at the upstream IdP. To go back, put the upstream IdP's issuer
 and client back in these fields.
+
+**For on-prem clusters** the dashboard needs Dex's issuer separately from SSO, because
+the kubeconfig it hands people logs in to Dex with its own public client: **Settings →
+Kubernetes → Dex** (`dex_issuer_url`, `dex_k8s_client_id`, and `dex_ca_pem` for a lab Dex
+with its own CA), then **Trusts Dex** on the cluster's row. See
+[Kubernetes](../kubernetes.md), where the API-tunnel download for a `cloud=local` cluster
+is described.
 
 A lab Dex on k3s, and the play that makes the k3s API server trust it:
 [`examples/playbooks/dex/`](../../examples/playbooks/dex/README.md). Why Dex for people and
@@ -241,6 +249,14 @@ Re-enable it in user management.
 
 ## Not to be confused with
 
-`docs/integrations/entra-k8s-federation.md` covers a different feature — federating
-**Kubernetes cluster RBAC** to Entra via OIDC. This page is about **dashboard login
-SSO**.
+This page is about **dashboard login SSO**. Several other features also speak OIDC and
+are configured elsewhere:
+
+| Feature | What it is | Where |
+|---|---|---|
+| Entra for cluster RBAC | federating **Kubernetes cluster RBAC** to Entra via OIDC | [entra-k8s-federation.md](entra-k8s-federation.md) |
+| Workload tokens | a CI job or service calls the dashboard's API with an access token its own IdP issued; no SSO client needed | [Service accounts → Tokens from your own IdP](../service-accounts.md#tokens-from-your-own-idp-no-dashboard-secret) |
+| SPIFFE workloads | a workload presents a JWT-SVID at `/api/oauth/token` | [Service accounts → SPIFFE workloads](../service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing) |
+| The dashboard as an issuer | the dashboard publishes `<issuer>/.well-known/openid-configuration` so AWS, Azure, GCP and k3s can trust its own SPIFFE identity | [The dashboard's own SPIFFE identity](../remote-agents/dashboard-identity.md) |
+| A Workload Lab trust domain as an issuer | a SPIRE lab's OIDC Discovery Provider, which the dashboard and a k3s API server verify JWT-SVIDs against | [SPIFFE and SPIRE](../workload-lab/spiffe.md) |
+| Dex for on-prem `kubectl` | the kubeconfig people download for a `cloud=local` cluster | [Dex](#dex-optional) above, and [Kubernetes](../kubernetes.md) |
