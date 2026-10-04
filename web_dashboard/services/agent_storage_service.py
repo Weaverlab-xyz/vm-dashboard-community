@@ -46,6 +46,11 @@ _POLL_INTERVAL_S = 1.0
 
 _TERMINAL = ("completed", "failed", "cancelled")
 
+# The SMB password the dashboard holds for the configured share. Released only through
+# POST /api/agent/jobs/{id}/secret (api/agent.job_secret), sealed to the job, and only for a
+# share entry that declares `dashboard_secret: true` — the agent never asks otherwise.
+SHARE_PASSWORD = "storage_agent_password"
+
 
 class AgentStorageError(Exception):
     """A storage operation could not be carried out through the agent.
@@ -102,6 +107,9 @@ def _preflight(db, meta: dict) -> RemoteAgent:
             f"the Agents page.")
     if not agent_service.supports_storage(agent):
         raise AgentStorageError(agent_service.storage_upgrade_hint(agent))
+    if (config_service.get(SHARE_PASSWORD) or "") and \
+            not agent_service.supports_share_secret(agent):
+        raise AgentStorageError(agent_service.share_secret_upgrade_hint(agent, share))
     return agent
 
 

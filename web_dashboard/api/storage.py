@@ -57,8 +57,15 @@ _BACKEND_KEYS = {
     "oci_object_storage": ["storage_oci_bucket", "storage_oci_namespace", "storage_oci_prefix"],
     "local":      ["storage_local_path",      "storage_local_username",  "storage_local_password",
                    "storage_local_domain"],
-    "agent_local": ["storage_agent_id",       "storage_agent_share",     "storage_agent_subpath"],
+    "agent_local": ["storage_agent_id",       "storage_agent_share",     "storage_agent_subpath",
+                    "storage_agent_password"],
 }
+
+# The SMB password the dashboard holds for the agent-brokered share
+# (docs/design/dashboard-workload-identity.md, Slice 5). Masked on GET; the mask on PATCH
+# means "keep", and an empty string clears it.
+_AGENT_PASSWORD = "storage_agent_password"
+_MASK = "••••••••"
 
 # Backends that only make sense for the local Ansible runner (no cloud
 # runner has a network path back to a corporate file server).
@@ -170,6 +177,11 @@ async def get_config(current_user: User = Depends(require_admin)):
     for keys in _BACKEND_KEYS.values():
         for k in keys:
             out[k] = _cfg_get(k)
+    # Never sent back: a credential the dashboard releases only sealed to an attested agent
+    # should not be readable in the clear by the page that set it. The mask round-trips —
+    # PATCH treats it as "keep".
+    if out.get(_AGENT_PASSWORD):
+        out[_AGENT_PASSWORD] = _MASK
     # Promote-runner config — kept on /storage because it shares the hub
     # backend's lifecycle (runner reads hub via presigned URL).
     for k in (
@@ -238,6 +250,7 @@ class StorageConfigPatch(BaseModel):
     storage_agent_id:       str | None = None
     storage_agent_share:    str | None = None
     storage_agent_subpath:  str | None = None
+    storage_agent_password: str | None = None
     # Control flag (NOT persisted): when switching storage_active_backend while
     # live Terraform state exists in the current backend, set this true to copy
     # the state to the new backend first instead of being blocked.
@@ -294,6 +307,8 @@ async def patch_config(
     """Partial update — only fields explicitly supplied (non-None) are written.
     Validates that the active backend (if changed) is configured before flipping."""
     raw = payload.model_dump(exclude_unset=True, exclude_none=True)
+    if raw.get(_AGENT_PASSWORD) == _MASK:
+        raw.pop(_AGENT_PASSWORD)
     # migrate_terraform_state is a control flag, never a stored config key.
     do_migrate_state = bool(raw.pop("migrate_terraform_state", False))
     if "storage_active_backend" in raw:

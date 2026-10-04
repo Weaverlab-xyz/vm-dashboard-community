@@ -686,6 +686,8 @@ async def job_secret(job_id: str, body: SecretRequest, request: Request,
     """
     job = _owned(db, agent, job_id, statuses=("running",))
     _require_attested_for_release(agent)
+    if job.job_type == "agent_storage":
+        return _share_secret(db, agent, job, body, request)
     if job.job_type != "agent_hypervisor":
         # Equality against the one type that has a connection, not a truthy test. A
         # discovery job has none, and by design carries no credential anywhere.
@@ -747,6 +749,64 @@ async def job_secret(job_id: str, body: SecretRequest, request: Request,
                                  "connection_ref": ref, "source": source})
     # Explicit, because nothing else in this app sets it. `no-store` and not `no-cache`:
     # the latter permits a proxy to store the body so long as it revalidates.
+    return JSONResponse(
+        content={"sealed": envelope},
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+
+
+def _share_secret(db: Session, agent: RemoteAgent, job: Job, body: SecretRequest,
+                  request: Request) -> JSONResponse:
+    """The SMB password the dashboard holds for the agent-brokered share, sealed to this
+    job — for a shares.yaml entry declaring `dashboard_secret: true`
+    (docs/design/dashboard-workload-identity.md, Slice 5).
+
+    The same scoping as the hypervisor path, applied to a share. The share is **derived
+    from the job row** and must be THE share the storage backend is configured with, on
+    THE agent it is configured with: there is one dashboard-held share credential, and a
+    job for any other share or agent gets nothing — not even confirmation one exists.
+    """
+    from ..services import agent_storage_service
+    meta = job.metadata_dict or {}
+    share = str(meta.get("share") or "")
+    agent_id, configured_share, _subpath = agent_storage_service.configured()
+    if not share or share != configured_share or agent.id != agent_id:
+        raise HTTPException(
+            status_code=409,
+            detail=("The dashboard holds no credential for this share on this agent. Its "
+                    "SMB password is held only for the share and agent configured on "
+                    "/storage."))
+    if (body.connection_ref or "") != share:
+        raise HTTPException(
+            status_code=409,
+            detail="That share is not the one this job was queued for.")
+    # Before the password is read, matching the hypervisor path.
+    try:
+        agent_sealing.check_reply_key(body.reply_key)
+    except agent_sealing.SealError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The reply key could not be used to seal a response: {exc}")
+    secret = config_service.get(agent_storage_service.SHARE_PASSWORD) or ""
+    if not secret:
+        # A hard error, never an empty password: the file server reads that as a wrong
+        # one, and the storage backend retries on every page that lists the share.
+        raise HTTPException(
+            status_code=409,
+            detail=(f"share {share!r} declares 'dashboard_secret: true' in this agent's "
+                    f"shares.yaml, but the dashboard holds no SMB password for it. Set "
+                    f"one on /storage, or remove 'dashboard_secret' from shares.yaml and "
+                    f"restore the local credential. Nothing was attempted against the "
+                    f"file server."))
+    try:
+        envelope = agent_sealing.seal(
+            body.reply_key, secret, agent_id=agent.id,
+            audience=_resolve_audience(request), job_id=job.id, ref=share)
+    except agent_sealing.SealError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The reply key could not be used to seal a response: {exc}")
+    agent_service.audit(db, agent, "agent.share_secret", ip=_client_ip(request),
+                        details={"job_id": job.id, "share": share, "source": "config"})
     return JSONResponse(
         content={"sealed": envelope},
         headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
