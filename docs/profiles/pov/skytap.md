@@ -51,12 +51,12 @@ error message says so rather than reporting a generic failure.
 
 **Settings → Integrations → Skytap.**
 
-| Field | Notes |
-|---|---|
-| API URL | `https://cloud.skytap.com` unless your account is on another region's endpoint |
-| Username | The account's login, usually an email address |
-| API security token | From the account page. Stored encrypted; the panel shows "stored — leave blank to keep" once set |
-| Project ID | Optional. Templates and environments are **listed from** this project, and new environments are **created inside** it. Blank lists everything the token can see |
+| Field | Key | Notes |
+|---|---|---|
+| API URL | `skytap_base_url` | `https://cloud.skytap.com` unless your account is on another region's endpoint |
+| Username | `skytap_username` | The account's login, usually an email address |
+| API security token | `skytap_api_token` | From the account page. Stored encrypted; the panel shows "stored — leave blank to keep" once set |
+| Project ID | `skytap_project_id` | Optional. Templates and environments are **listed from** this project, and new environments are **created inside** it. Blank lists everything the token can see |
 
 The token is encrypted at rest with the same Fernet key as every other secret, and — like
 any secret in this dashboard — it can instead be a reference into an external vault.

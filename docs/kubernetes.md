@@ -446,7 +446,7 @@ secrets)**, and **Entitle + Entra federation (Layer 3 — time-boxed access)**.
     `Impersonate-User` (confirmed live 2026-07-30: the denial above is a GKE authorizer
     decision about the impersonation attempt, so the header reached the API server).
 
-Config: `entra_rbac_group_id` / `_name` / `_role` (`cluster-admin`), `pra_k8s_namespace`
+Config: `entra_rbac_group_id`, `entra_rbac_group_name` (display only) and `entra_rbac_group_role` (`cluster-admin`), `pra_k8s_namespace`
 (`pra-access`), `pra_k8s_sa_name` (`pra-access`), `k8s_api_tunnel_local_port` (`6443`),
 `bt_vault_account_group_id`.
 

@@ -310,7 +310,7 @@ cloud via the `*_registration_method` key (set to `ssh`).
 |---|---|---|
 | `passwordsafe_registration_enabled` | `false` | Global capability flag (also per-deploy opt-in) |
 | `passwordsafe_workgroup` | — | Workgroup name or id the managed system lands in |
-| `passwordsafe_vm_functional_account_aws` / `_azure` / `_gcp` | — | Functional account per cloud (for AWS+SSM, the custom-plugin account) |
+| `passwordsafe_vm_functional_account_aws` / `passwordsafe_vm_functional_account_azure` / `passwordsafe_vm_functional_account_gcp` / `passwordsafe_vm_functional_account_oci` | — | Functional account per cloud (for AWS+SSM, the custom-plugin account) |
 | `passwordsafe_managed_account_name` | `adminuser` | The onboarded account (the `{name}` part for SSM) |
 | `passwordsafe_aws_registration_method` | `ssm` | AWS method: `ssm` (AWS Systems Manager plugin) or `ssh` |
 | `passwordsafe_ssm_account_suffix` | `local` | SSM account-name suffix; an AssumeRole ARN for EC2 cross-account mode |
@@ -679,7 +679,7 @@ credential and the token is what the subscriber receives.
 | `k8s_ps_token_rotation_enabled` | `false` | Master gate (row action, provision checkbox) |
 | `k8s_ps_token_platform` | `Kubernetes Service Account Token` | Plugin platform (name or id) |
 | `k8s_ps_pravault_token_platform` | `PRA Vault Token` | Subscriber plugin platform |
-| `k8s_ps_functional_account_aws` / `_azure` / `_gcp` / `_local` | — | Per cloud; `_local` also covers OKE and on-prem |
+| `k8s_ps_functional_account_aws` / `k8s_ps_functional_account_azure` / `k8s_ps_functional_account_gcp` / `k8s_ps_functional_account_local` | — | Per cloud; `_local` also covers OKE and on-prem |
 | `k8s_ps_pravault_functional_account` | — | PRA Config-API OAuth client for the PRA Vault account |
 | `k8s_ps_workgroup` | — | Blank → `passwordsafe_workgroup` |
 | `k8s_ps_token_mode` | `longlived` | `longlived` (revokes) or `bound` (TTL expiry, no revoke) |

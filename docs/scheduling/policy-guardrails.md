@@ -85,14 +85,14 @@ is computed by the dashboard so policies stay free of timezone math.
 
 ## Enabling it
 
-**Settings → Integrations → Action Guardrails**, then set:
+**Settings → Integrations → Action Guardrails** (`admission_control_enabled`), then set:
 
-- **Gated actions** — which actions to enforce, e.g. `aws:ec2:deploy, clouddb:provision`.
+- **Gated actions** (`admission_gated_actions`) — which actions to enforce, e.g. `aws:ec2:deploy, clouddb:provision`.
   Only listed actions are gated; everything else is untouched. Blank ⇒ inert even
   when enabled.
-- **Allowed regions** — allow-list; blank ⇒ no region restriction.
-- **Blocked instance types** — block-list of sizes/classes.
-- **Change-freeze days** — weekdays (UTC) on which deploys are frozen, e.g. `sat,sun`.
+- **Allowed regions** (`admission_allowed_regions`) — allow-list; blank ⇒ no region restriction.
+- **Blocked instance types** (`admission_denied_instance_types`) — block-list of sizes/classes.
+- **Change-freeze days** (`admission_prod_window`) — weekdays (UTC) on which deploys are frozen, e.g. `sat,sun`.
 
 All list fields accept a comma-separated string or a JSON array. Changes take effect
 immediately (no restart) — they're read live from config on each deploy.
@@ -138,7 +138,7 @@ using it as a soft signal today. Switching it on under you would turn actions th
 run now into 403s with the policy unchanged.
 
 Turn it on with **Settings → Action Guardrails → Act on a policy's `needs_approval`
-verdict**. With it on:
+verdict** (`admission_enforce_needs_approval`, off by default). With it on:
 
 - On a surface that can create an approval-gated job (the cloud deploy forms), the job
   is created **awaiting approval**: it is not claimed by the worker until somebody

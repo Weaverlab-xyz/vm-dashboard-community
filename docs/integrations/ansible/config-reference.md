@@ -105,5 +105,6 @@ the image-promote runner (see [Shared cloud infrastructure](shared-cloud.md#shar
 |---|---|---|---|---|
 | Kubernetes runner | `k8s_runner` | `K8S_RUNNER` | `local` | `local` (in-process) \| `ecs` \| `aci` \| `gcp`. See [Kubernetes runner](#kubernetes-runner). |
 | Kubernetes runner image | `k8s_runner_image` | `K8S_RUNNER_IMAGE` | `dtzar/helm-kubectl:latest` | Stock kubectl+helm image the cloud task runs. No custom image is needed. |
+| Kubernetes runner image, per cluster cloud | `k8s_runner_image_aws` / `k8s_runner_image_azure` / `k8s_runner_image_gcp` | `K8S_RUNNER_IMAGE_AWS` / `_AZURE` / `_GCP` | blank: `k8s_runner_image` | Override for one cloud's clusters, such as an ACR mirror for Azure. An AWS or GCP runner cannot authenticate to an Azure ACR, which is why this is per cloud. |
 
 ---

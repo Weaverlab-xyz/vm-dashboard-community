@@ -965,6 +965,7 @@ apply immediately.
 | `rancher_api_token` | (runtime) | Minted at bootstrap (secret) |
 | `rancher_ui_web_jump_enabled` | `false` | Opt-in PRA Web Jump broker for the UI |
 | `rancher_ui_verify_certificate` | `false` | Web Jump cert verification |
+| `rancher_ui_jump_group` / `rancher_ui_jumpoint_name` | `""` (= `bt_jump_group_name` / `bt_jumpoint_name`) | The default Jump Group and Gateway for the Web Jump. The Containers page can pick both per deploy; these are what it starts from |
 | `rancher_ui_jumpoint_cloud` | `gcp` | Which dashboard-managed Gateway host brokers the UI (`gcp`\|`aws`\|`azure`); its egress IP is auto-whitelisted |
 | `rancher_ui_jumpoint_egress_ip` | (runtime) | Captured egress IP of the SHARED Web-Jump Gateway (auto-added to the firewall). Gateways you deploy yourself come from the gateway registry, so every cluster node is allowed |
 | `rancher_ui_vault_account_group_id` | `""` | PRA Vault account group (numeric id) the admin credential is vaulted into for Web-Jump injection; usually chosen per-deploy |

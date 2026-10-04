@@ -159,18 +159,19 @@ reference; it is resolved at send time.
 
 ### Settings
 
-| Setting | Default | |
-|---|---|---|
-| Dry run | on | Record, don't send. |
-| Dashboard URL | *blank* | **Set this.** The worker has no request context, so blank means every message ships with no link — which looks like a bug and is this setting. |
-| Events to send | all six | CSV. An endpoint can narrow this, never widen it. |
-| Minimum severity | `warning` | |
-| Send every | 30s | Drain cadence. |
-| Condition scan every | 3600s | Budget / secret / drift. Reads the **cached** cost summary and skips when cold — those API calls are billable. |
-| Attempts | 4 | Then terminal. Backoff 30s → 2m → 10m → 30m, honouring `Retry-After` on a 429. Retry state is a column, so it survives a worker restart. |
-| Max per pass | 50 | |
-| Queue ceiling | 500 | Past this, new messages are recorded `suppressed` rather than queued, with one audit entry per pass. This is the brake that keeps a first enable against a large estate from becoming an incident. |
-| Keep delivery history | 30 days | 0 = forever. Failed rows are never pruned — they're the evidence. |
+| Setting | Key | Default | Meaning |
+|---|---|---|---|
+| Dry run | `notify_dry_run` | on | Record, don't send. |
+| Dashboard URL | `notify_base_url` | *blank* | **Set this.** The worker has no request context, so blank means every message ships with no link — which looks like a bug and is this setting. |
+| Events to send | `notify_event_types` | all six | CSV. An endpoint can narrow this, never widen it. |
+| Minimum severity | `notify_min_severity` | `warning` | |
+| Send every | `notify_flush_interval_s` | 30s | Drain cadence. |
+| Condition scan every | `notify_scan_interval_s` | 3600s | Budget / secret / drift. Reads the **cached** cost summary and skips when cold — those API calls are billable. |
+| Attempts | `notify_max_attempts` | 4 | Then terminal. Backoff 30s → 2m → 10m → 30m, honouring `Retry-After` on a 429. Retry state is a column, so it survives a worker restart. |
+| Timeout | `notify_http_timeout_s` | 10s | Per delivery attempt. |
+| Max per pass | `notify_max_per_flush` | 50 | |
+| Queue ceiling | `notify_max_queue` | 500 | Past this, new messages are recorded `suppressed` rather than queued, with one audit entry per pass. This is the brake that keeps a first enable against a large estate from becoming an incident. |
+| Keep delivery history | `notify_retention_days` | 30 days | 0 = forever. Failed rows are never pruned — they're the evidence. |
 
 ---
 

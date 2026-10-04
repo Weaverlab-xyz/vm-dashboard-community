@@ -83,21 +83,32 @@ group on each host.
 Turning it on sets the `hyperv_enabled` feature flag, and the **Hyper-V** page appears in
 the navigation at `/hyperv`.
 
-**Option A — Settings → Integrations → Microsoft Hyper-V**
+**Turn it on** in **Settings → Integrations → Microsoft Hyper-V**.
 
-Toggle **Microsoft Hyper-V** on. Fill in the connection fields:
+**Then add the connection on the Connections tab** of the Remote Agents page
+(`/connections`) → **Add connection**, kind **Hyper-V**. That is where connection details
+have lived since a dashboard could hold more than one of each kind; see
+[Multiple connections](#multiple-connections).
 
 | Field | Description |
 |---|---|
-| Hyper-V Host | Hostname or IP of the Windows host |
+| Name | Your name for it, such as `dc1` |
+| Host | Hostname or IP of the Windows host |
 | Port | `5985` for HTTP (default), `5986` for HTTPS |
 | Username | Windows account — `DOMAIN\user`, `user@domain`, or `.\localuser` |
-| Password | Account password |
-| Auth Transport | `NTLM` (works for domain and local accounts without extra setup) |
-| Use HTTPS | Enable to use WinRM over HTTPS (requires a certificate on the host) |
-| Verify SSL | Disable for self-signed certificates |
+| WinRM transport | `NTLM` (works for domain and local accounts without extra setup), `Basic` or `Kerberos` |
+| Use HTTPS (5986) | WinRM over HTTPS (needs a certificate on the host) |
+| Password | The account password. Prefer a **Password Safe managed account** or a **secret reference** (`bt_safe://`, `aws_sm://`, `azure_kv://`, `gcp_sm://`): a password stored here is the weakest of the three |
+| Verify the TLS certificate | Untick for self-signed certificates (common in home labs) |
+| Site | Optional label |
+| Make this the default | The connection every page and API call uses unless told otherwise. The first one of a kind becomes the default |
 
-Click **Save**. No container restart is required.
+Click **Save**. No container restart is required. For a Hyper-V the dashboard cannot reach,
+tick **Reached through a remote agent** instead; see [Over a remote agent](#over-a-remote-agent).
+
+The old **Settings → Integrations → Microsoft Hyper-V** fields (`hyperv_host`, `hyperv_port`, `hyperv_username`, `hyperv_password`, `hyperv_transport`, `hyperv_use_ssl`, `hyperv_verify_ssl`) are read only as a fallback
+while no Hyper-V connection exists, and were copied into the first connection on upgrade.
+Editing them after that changes nothing.
 
 ### Step 4 — Verify
 
@@ -222,7 +233,8 @@ In the dashboard: set **Port** to `5986`, enable **Use HTTPS**, and disable
 **Hyper-V tab is missing** — verify `HYPERV_ENABLED=true` and that the stack
 restarted after the change (or that you saved via Settings → Integrations).
 
-**"HYPERV_HOST is not configured"** — set the host field in **Settings → Integrations → Hyper-V**.
+**"no hyperv connection is configured — add one on the Connections page"** — add a
+Hyper-V connection on the **Connections** tab of the Remote Agents page (`/connections`).
 
 **"pywinrm is not installed"** — run `pip install pywinrm` inside the container
 or rebuild the image: `docker compose build app`.

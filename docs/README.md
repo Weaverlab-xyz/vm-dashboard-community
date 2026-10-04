@@ -36,6 +36,7 @@ demoing, running a lab, or running production.
 | [Onboarding Guide](ONBOARDING.md) | you are setting the dashboard up for the first time and want the shortest path to a running instance. |
 | [Cloud Sandbox Guide](CLOUD_SANDBOX.md) | you want an isolated cloud account for the dashboard's labs, bootstrapped rather than hand-built. |
 | [Cloud VMs](cloud-vms.md) | you are deploying cloud VMs, or want the dashboard to see and power ones it did not deploy. |
+| [Cloud Costs](costs.md) | you want month-to-date cloud spend on the dashboard, a budget alert, or a budget in the cloud that alerts while the dashboard is down. |
 | [Databases](databases.md) | you are standing up a managed database, or want to manage one you already run. |
 | [Kubernetes](kubernetes.md) | you are managing Kubernetes clusters and the privileged access into them. |
 | [KubeSolo](kubesolo.md) | you need the Entitle agent on an edge or plant-floor host that will not carry a real cluster — or you want to see the single-node cluster the OT demo cell runs on. |

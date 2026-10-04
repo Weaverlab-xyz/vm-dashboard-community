@@ -361,6 +361,60 @@ Being straight about the boundary is more persuasive than eliding it.
 
 ---
 
+## Settings
+
+**Settings → Preview features → Certificate Lab → Configure**. The row's toggle is
+`cert_lab_enabled`. Nothing here is a secret except the two keys marked as one.
+
+**Platforms and functional accounts**
+
+| Key | Default | What it is |
+|---|---|---|
+| `cert_ps_platform` | `Certificate` | The leaf package's platform, by name or id, resolved live |
+| `cert_ps_subca_platform` | `Subordinate CA` | The subordinate-CA package's platform |
+| `cert_ps_workgroup` | blank: `passwordsafe_workgroup` | Where managed systems are created |
+| `cert_ps_functional_account_mode` | `create` | `create` mints one functional account per CA from the build's outputs; `reference` uses an account you maintain (the only option for ADCS and other bring-your-own CAs) |
+| `cert_ps_functional_account` | blank | `reference` mode: the leaf platform's account |
+| `cert_ps_subca_functional_account` | blank: `cert_ps_functional_account` | `reference` mode: the subordinate platform's account. A functional account is platform-bound, so running both platforms needs both |
+
+**How a created account reaches BeyondInsight** (`create` mode)
+
+| Key | Default | What it is |
+|---|---|---|
+| `cert_ps_bi_auth` | `auto` | `auto`, `oauth` or `apikey`. `auto` prefers a dedicated client id, then an API key you set, then the dashboard's own `pscli_*` pair |
+| `cert_ps_bi_client_id` / `cert_ps_bi_client_secret` | blank: `pscli_client_id` | A BeyondInsight OAuth registration for the plugin. Both or neither; the secret is a secret |
+| `cert_ps_bi_api_key` | blank | The packed fallback, where the console offers no OAuth credential type on a plugin platform. A secret |
+| `cert_ps_bi_run_as_user` | blank: `pscli_api_account_name` | The run-as user for the API key |
+
+**Where the plugin writes the bundle**
+
+| Key | Default | What it is |
+|---|---|---|
+| `cert_ps_biurl` | blank: `pscli_api_url`'s origin | The BeyondInsight base URL the plugin calls. On a Cloud tenant this is the only place it can come from |
+| `cert_ps_folder` | `Certificates` | The Secrets Safe folder. It must exist; the plugin creates nothing |
+| `cert_ps_owner_group_id` | blank | The `OwnerGroupId` for created secrets. Secrets Safe requires an owner. Not the same as `secrets_bt_owner`, which is a user id |
+| `cert_ps_secret_template` | blank: `cert/{system}/{account}` | The secret's path |
+
+**Certificate profile defaults.** Applied to a new managed system unless the form overrides
+them. A blank one is left out of the address entirely, which matters with
+[255 characters](#the-255-character-budget-is-real) to spend.
+
+| Key | Default | What it is |
+|---|---|---|
+| `cert_default_lifetime` | `24h` | `90m`, `12h`, `30d`, `2w`, `1y`; a bare number means days. ADCS ignores it |
+| `cert_default_key` | `ecdsa-p256` | `rsa2048`, `rsa3072`, `rsa4096`, `ecdsa-p256`, `ecdsa-p384` or `ecdsa-p521` |
+| `cert_default_eku` | `ClientAuth` | Named explicitly: under `eku=Auto` a DNS SAN brings in serverAuth |
+| `cert_default_warn` | blank: the plugin's 25 | Renewal threshold, as a percentage of the certificate's own lifetime |
+| `cert_default_subject` | blank: `CN={AccountName}` | The subject |
+| `cert_subca_default_lifetime` | blank: the plugin's default | A subordinate CA's lifetime. Rotation does not revoke, so this is the exposure window if its key leaks: issue it just longer than the rotation interval. The plugin cautions above 45 days |
+
+**GCP CAS lab**
+
+| Key | Default | What it is |
+|---|---|---|
+| `cert_gcp_cas_location` | `us-central1` | CAS is regional: the pool, its CAs and any template share it |
+| `cert_gcp_cas_tier` | `DEVOPS` | `DEVOPS` (about $20 a month per pool, keeps no certificate records) or `ENTERPRISE` |
+
 ## Where things live
 
 | | |
