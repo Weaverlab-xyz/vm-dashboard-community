@@ -3739,6 +3739,7 @@ def _run_cloud_run_ansible_sync(
     secret_entries: list | None = None, manifest_b64: str = "",
     service_account: str = "",
     ps_env: dict | None = None,
+    runner_fetch: dict | None = None,
 ) -> tuple:
     """
     Create a Cloud Run Job that runs a single Ansible playbook, wait for it to
@@ -3765,8 +3766,9 @@ def _run_cloud_run_ansible_sync(
     job_resource_name = f"{parent}/jobs/{job_name}"
 
     from . import cloud_ansible_secrets as _cas
-    _secret_prefix = _cas.command_prefix() if manifest_b64 else ""
-    _secret_ev = _cas.extra_vars_arg() if manifest_b64 else ""
+    _secret_prefix = (_cas.command_prefix() if manifest_b64 else "") + (
+        _cas.fetch_prefix() if runner_fetch else "")
+    _secret_ev = _cas.extra_vars_arg() if (manifest_b64 or runner_fetch) else ""
     cmd = (
         "set -e && "
         "echo \"$PLAYBOOK_B64\" | base64 -d > /tmp/playbook.yml && "
@@ -3805,7 +3807,13 @@ def _run_cloud_run_ansible_sync(
                 ] + _secret_env
                 # PASSWORD_SAFE_* for an in-playbook beyondtrust.secrets_safe lookup —
                 # plain env, same channel as SSH_KEY_B64 (no Secret Manager needed).
-                + [run_v2.EnvVar(name=k, value=v) for k, v in (ps_env or {}).items()],
+                + [run_v2.EnvVar(name=k, value=v) for k, v in (ps_env or {}).items()]
+                # Collect-from-dashboard: the fetch script and where/as whom to collect.
+                # The job is deleted after the run; the token is single-use regardless.
+                + ([run_v2.EnvVar(name=_cas.FETCH_ENV, value=runner_fetch["script_b64"])]
+                   if runner_fetch else [])
+                + [run_v2.EnvVar(name=k, value=v)
+                   for k, v in ((runner_fetch or {}).get("env") or {}).items()],
                 resources=run_v2.ResourceRequirements(
                     limits={"cpu": "1000m", "memory": "512Mi"},
                 ),
@@ -3890,6 +3898,7 @@ async def run_cloud_run_ansible_task(
     service_account: str = "",
     secret_entries: list | None = None, manifest_b64: str = "",
     ps_env: dict | None = None,
+    runner_fetch: dict | None = None,
 ) -> tuple:
     """
     Run an Ansible playbook via a GCP Cloud Run Job.
@@ -3907,6 +3916,7 @@ async def run_cloud_run_ansible_task(
             secret_entries, manifest_b64,
             service_account,
             ps_env,
+            runner_fetch,
         )
     except GCPError:
         raise

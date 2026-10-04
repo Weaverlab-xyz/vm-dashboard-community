@@ -105,9 +105,12 @@ def check_runner_capability(*, needs_ephemeral_store: bool = False,
             return Refusal(
                 400,
                 ("Managed-account checkout on the ECS / Cloud Run runners requires "
-                 "'Ephemeral cloud secrets' to be enabled in Settings (it briefly copies "
-                 "the credential into the cloud store, RBAC-locked). Otherwise use the "
-                 "local or Azure (ACI) runner."))
+                 "either 'Collect credentials from the dashboard' (the runner task proves "
+                 "its cloud identity and collects the credential sealed — needs the agent "
+                 "URL and the runner's task role / service account) or 'Ephemeral cloud "
+                 "secrets' (it briefly copies the credential into the cloud store, "
+                 "RBAC-locked) in Settings. Otherwise use the local or Azure (ACI) "
+                 "runner."))
         if runner == "gcp" and not gcp_runner_service_account:
             return Refusal(
                 400,

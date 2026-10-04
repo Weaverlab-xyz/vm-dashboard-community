@@ -573,6 +573,30 @@ class ExternalWorkloadIdentity(Base):
     is_active = Column(Boolean, default=True)
 
 
+class RunnerCredentialGrant(Base):
+    """One run's managed-account credential, waiting for its ECS / Cloud Run task to
+    collect it (services/runner_credential; docs/design/dashboard-workload-identity.md,
+    Slice 5).
+
+    The alternative this replaces copies the credential into AWS or GCP Secrets Manager
+    for the task to read at launch. Here it stays in the dashboard, encrypted with the
+    dashboard's own key, for at most ``expires_at`` — ten minutes — and leaves only
+    SEALED to a key the task generated, after the task proves with its own cloud identity
+    that it is the configured runner. A row is single-use (``redeemed_at``) and deleted
+    when the run ends, redeemed or not. Only the token's SHA-256 is stored.
+    """
+    __tablename__ = "runner_credential_grants"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    job_id = Column(String(36), nullable=False, index=True)
+    runner = Column(String(16), nullable=False)          # ecs | gcp
+    values_enc = Column(Text, nullable=False)            # config_service._encrypt(JSON)
+    expires_at = Column(DateTime, nullable=False)
+    redeemed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class SpiffeTrustDomain(Base):
     """Where the dashboard gets a SPIFFE trust domain's JWT-SVID signing keys.
 

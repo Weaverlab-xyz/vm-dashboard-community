@@ -126,7 +126,8 @@ async def lookup_host(host: str, name: str = "", *, estate=None, batch=None) -> 
 
     # ephemeral_enabled tells the UI that managed accounts can run on ECS/GCP (via the
     # ephemeral store copy) and to nudge on change-after-release for those.
-    ephemeral_enabled = cs.get_bool("ansible_cloud_ephemeral_secrets_enabled")
+    from . import runner_credential
+    ephemeral_enabled = runner_credential.cloud_delivery_available()
     base = {"enabled": True, "ephemeral_enabled": ephemeral_enabled, "systems": []}
     if not cs.get_bool("password_safe_enabled"):
         return {**base, "enabled": False}
@@ -164,7 +165,8 @@ async def lookup_targets(targets: list, *, default_account_name: str = "",
     """
     from . import config_service as cs, btapi_service, managed_accounts as ma
 
-    ephemeral_enabled = cs.get_bool("ansible_cloud_ephemeral_secrets_enabled")
+    from . import runner_credential
+    ephemeral_enabled = runner_credential.cloud_delivery_available()
     if not cs.get_bool("password_safe_enabled"):
         return {"enabled": False, "ephemeral_enabled": ephemeral_enabled,
                 "truncated": False, "targets": []}

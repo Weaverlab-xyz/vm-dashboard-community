@@ -227,8 +227,19 @@ def test_the_operator_half_is_admin_only():
     # attest_agent is enroll_agent's SPIRE twin: unsigned (there is no key on file yet),
     # authenticated by a single-use JWT-SVID instead of a single-use code, and off unless
     # spire_attest_enabled is set.
+    #
+    # runner_credential is the fourth credential-out route, and it is here because the
+    # caller is not an enrolled agent at all but a one-shot ECS / Cloud Run Ansible task,
+    # and the agent vhost is the one the dashboard publishes for exactly that kind of
+    # caller. It clears the bar differently and no lower: a single-use, ten-minute token
+    # burnt before anything else (only its hash stored), a reply key checked before the
+    # credential is decrypted, and the caller's OWN cloud identity proven and bound to the
+    # token — a presigned STS GetCallerIdentity sent only to a regional STS host, or a
+    # Google-signed ID token — matched against the configured runner. Nothing in the body
+    # selects the credential; the grant does. See services/runner_credential.
     agent_half = {"enroll_agent", "attest_agent", "lease_job", "heartbeat", "push_logs",
-                  "complete", "job_secret", "job_ansible_bundle", "job_gateway_key"}
+                  "complete", "job_secret", "job_ansible_bundle", "job_gateway_key",
+                  "runner_credential"}
 
     # The list above and the router each function is decorated with are two spellings of
     # the same membership, and the second one is the one that decides what the agent
@@ -291,7 +302,9 @@ def test_the_protocol_router_carries_no_operator_shaped_route():
     """
     protocol = _routes("router")
     assert protocol, "no agent-protocol routes found — did they get renamed?"
-    top = ("/enroll", "/attest", "/lease")
+    # /runner-credential: a cloud Ansible runner task's one-shot collect — see the list in
+    # test_the_operator_half_is_admin_only for why it belongs on the published router.
+    top = ("/enroll", "/attest", "/lease", "/runner-credential")
     assert all(p in top or p.startswith("/jobs/") for p in protocol), (
         f"the agent-protocol router declares a route that is not part of the protocol: "
         f"{[p for p in protocol if not (p in top or p.startswith('/jobs/'))]}")

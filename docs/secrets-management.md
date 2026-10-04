@@ -465,6 +465,44 @@ store copy) — the default.
 Full operator detail:
 [docs/integrations/ansible.md → Managed-account checkout](integrations/ansible\secrets.md#managed-account-checkout-beyondtrust-password-safe).
 
+### Collect from the dashboard (no store copy)
+
+The alternative to the copy above, and the one to prefer when the runner can reach the
+dashboard. With **Collect credentials from the dashboard** on (Settings → Ansible,
+**off by default**), the credential never goes into a cloud store. Instead:
+
+1. The dashboard checks it out and parks it under a **single-use, ten-minute token**. Only
+   the token's SHA-256 is stored, and the credential is encrypted with the dashboard's own
+   key.
+2. The task gets the token in its per-run environment: the RunTask override on ECS, never
+   the task definition. It also gets a small fetch script.
+3. The task **proves its own cloud identity, bound to that token**:
+   - **ECS:** a presigned `sts:GetCallerIdentity`, signed with the **task role**. The
+     token's hash is in a signed header.
+   - **Cloud Run:** a Google-signed ID token for the runner **service account**. The
+     token's hash is in its audience.
+4. The task calls `POST <agent URL>/api/agent/runner-credential`. The dashboard burns the
+   token first, then sends the presigned request to STS (only ever a regional STS host) or
+   verifies the Google token. It checks that the identity is the configured runner and
+   answers with the credential **sealed** to a key the task generated (the
+   [remote agents'](remote-agents/credentials.md#central-storage-with-spire-the-recommended-model)
+   format).
+5. The task merges it into the run's `0600` vars file. The grant is deleted when the run
+   ends, whether redeemed or not.
+
+| Needs | Why |
+|---|---|
+| The agent URL pinned (Settings → Remote Agents) and reachable from the runner | The task calls `/api/agent/runner-credential` there. That vhost publishes only `/api/agent/*`. |
+| ECS: `ansible_ecs_task_role_arn` | The identity the task proves. It needs no permissions; it only has to be *who* the task runs as. |
+| Cloud Run: `gcp_ansible_runner_service_account` | The same, for Cloud Run. |
+
+A copied token is worth nothing without the runner's own cloud identity, and a proof made
+for one token is refused with another. Every collection and refusal is audited
+(`agent.runner_credential` / `agent.runner_credential_refused`). Rotate-on-check-in still
+applies. When both settings are on, collect-from-dashboard wins wherever it is fully
+configured. It is **not SPIFFE**: a Fargate or Cloud Run task cannot run a SPIRE agent, so
+the platform's own attestation is the stronger statement.
+
 ---
 
 ## Secret staleness — age alerting

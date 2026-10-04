@@ -301,6 +301,16 @@ warns about. It still beats copying the real credential, but the win comes from
 seal-and-exchange, not from SPIFFE. It also needs the runner to reach the dashboard, which
 the current design does not assume.
 
+**Built**, opt-in (`ansible_runner_credential_callback`), and stronger than the token
+sketched above. The token is single-use and bound to the run, but it is not the
+authenticator. The task also proves its **platform identity**, bound to the token's hash:
+ECS through a presigned `sts:GetCallerIdentity` signed with its task role, Cloud Run
+through a Google-signed ID token for its service account. The answer is sealed in
+`agent_sealing`'s format to a key the task made (`services/runner_credential`,
+`services/runner_fetch`). The grant waits in the database rather than in memory, because
+the worker issues it and the app redeems it. It is encrypted and lives at most ten
+minutes. The Secrets Manager copy stays as the fallback setting.
+
 **Agent file-share credentials.** `shares.yaml` SMB passwords stay on the agent host and
 have no `dashboard_secret` option, unlike `connections.yaml`. For a SPIRE-attested agent
 the same per-job sealed fetch, under the same **Release dashboard-held credentials only to
@@ -352,7 +362,7 @@ held. Username, domain and path stay in `shares.yaml`.
    Azure (the `ClientAssertionCredential` branch).~~ Built.
 4. ~~**Slice 4:** on-prem k3s through the dashboard's SVID.~~ Built.
 5. **L3:** after the lab answers the Password Safe attribute question. ~~L4 and L5~~ built.
-6. **Slice 5:** ~~agent file-share credentials~~ built; the ECS and Cloud Run runners remain.
+6. ~~**Slice 5:** agent file-share credentials, then the ECS and Cloud Run runners.~~ Built.
 
 ## Not verified
 

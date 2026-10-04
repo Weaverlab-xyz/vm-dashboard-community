@@ -96,10 +96,15 @@ works on either out of the box.
 
 **ECS and Cloud Run** *reference* a store secret (the task identity fetches it at
 launch), which a checked-out (ephemeral) credential has none of — so they're
-**rejected unless "Ephemeral cloud secrets" is enabled** (Settings → Ansible). When
-on, the credential is written to that cloud's store as a short-lived, RBAC-locked
-secret, injected via the provider's channel, then force-deleted after the run — see
-[Ephemeral cloud secrets](../../secrets-management.md#ephemeral-cloud-secrets).
+**rejected unless one of two settings is on** (Settings → Ansible):
+
+- **Collect credentials from the dashboard** (preferred). The task proves its own cloud
+  identity and collects the credential sealed, with no copy in any store. See
+  [Collect from the dashboard](../../secrets-management.md#collect-from-the-dashboard-no-store-copy).
+- **Ephemeral cloud secrets.** The credential is written to that cloud's store as a
+  short-lived, RBAC-locked secret, injected via the provider's channel, then force-deleted
+  after the run. See
+  [Ephemeral cloud secrets](../../secrets-management.md#ephemeral-cloud-secrets).
 
 SSH-password targets require `sshpass` in the runner image (already true for the
 built-in on-prem SSH path). The lookup and checkout go through `ps-cli`,

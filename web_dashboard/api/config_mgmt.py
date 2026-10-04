@@ -1085,6 +1085,7 @@ async def run_playbook(
     # lab's build form: two pages telling one operator two different things about one
     # Settings checkbox is the failure that sharing them prevents.
     from ..services import ansible_run_gate as _gate, config_service as cs
+    from ..services import runner_credential
     has_managed = bool(payload.managed_account or payload.managed_become)
     wants_secret = bool(payload.secret_vars or payload.secret_become_source
                         or payload.secret_ssh_key_source or has_managed)
@@ -1154,7 +1155,7 @@ async def run_playbook(
         # Both read only when the predicate says they matter, as before — the common
         # run is not a managed-account run on a store-referencing runner.
         ephemeral_enabled=(_needs_ephemeral
-                           and cs.get_bool("ansible_cloud_ephemeral_secrets_enabled")),
+                           and runner_credential.cloud_delivery_available(eff_runner)),
         runner=eff_runner,
         gcp_runner_service_account=(
             _cfg("gcp_ansible_runner_service_account") if _needs_ephemeral else ""))

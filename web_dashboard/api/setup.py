@@ -1324,6 +1324,9 @@ class AnsibleFeatureConfig(BaseModel):
     ansible_cloud_ephemeral_secrets_enabled: bool = False
     ansible_ephemeral_secret_ttl_min: int = 30     # GC safety-net age
     ansible_ephemeral_kms_key_id: str = ""         # AWS CMK for the ephemeral secret (true read-restriction)
+    # Collect-from-dashboard instead of the store copy (services/runner_credential).
+    ansible_runner_credential_callback: bool = False
+    ansible_ecs_task_role_arn: str = ""            # the ECS task's own identity, proven via STS
     ansible_managed_request_duration_min: int = 60  # PS request duration (must outlast the run)
     # Kubernetes (kubectl/helm) runner — reuses the ECS/ACI/Cloud Run network
     # settings above. "local" runs in-process; cloud modes run cluster-API ops

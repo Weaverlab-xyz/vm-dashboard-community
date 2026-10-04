@@ -4179,6 +4179,30 @@
                 </div>
               </div>
 
+              <!-- Collect from the dashboard (managed-account checkout on ECS / Cloud Run,
+                   without a copy in the cloud store) -->
+              <div class="rounded-lg border border-emerald-200 bg-emerald-50 p-3 space-y-3"
+                   x-show="panelCfg.ansible_runner_aws==='ecs' || panelCfg.ansible_runner_gcp==='gcp'" x-cloak>
+                <label class="flex items-start gap-2">
+                  <input type="checkbox" x-model="panelCfg.ansible_runner_credential_callback" class="mt-1">
+                  <span>
+                    <span class="text-sm font-semibold text-gray-700">Collect credentials from the dashboard</span>
+                    <span class="block text-xs text-gray-600">Instead of copying a checked-out managed-account credential
+                    into the cloud store, the runner task proves its own cloud identity (ECS: its task role, via STS;
+                    Cloud Run: its service account, via a Google-signed ID token) and collects the credential from the
+                    dashboard, sealed to a key it made. Single-use, bound to the run. Needs the agent URL pinned
+                    (Remote Agents) — the task calls it — and the runner identity below. Takes precedence over
+                    Ephemeral cloud secrets when both are on and it is fully configured.</span>
+                  </span>
+                </label>
+                <div x-show="panelCfg.ansible_runner_credential_callback" x-cloak>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">ECS task role ARN <span class="text-gray-400 font-normal">(the task's own identity; it needs no permissions. Cloud Run uses the runner service account above)</span></label>
+                  <input type="text" x-model="panelCfg.ansible_ecs_task_role_arn"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="arn:aws:iam::123456789012:role/vm-dashboard-ansible-runner">
+                </div>
+              </div>
+
               <!-- Ephemeral cloud secrets (managed-account checkout on ECS / Cloud Run) -->
               <div class="rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-3"
                    x-show="panelCfg.ansible_runner_aws==='ecs' || panelCfg.ansible_runner_gcp==='gcp'" x-cloak>
