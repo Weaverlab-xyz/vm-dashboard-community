@@ -73,20 +73,31 @@ Assign via **Datacenter → Permissions → Add → API Token Permission**:
 Turning it on sets the `proxmox_enabled` feature flag, and the **Proxmox** page appears in
 the navigation at `/proxmox`.
 
-**Option A — Settings → Integrations → Proxmox VE**
+**Turn it on** in **Settings → Integrations → Proxmox VE**.
 
-Toggle **Proxmox VE** on. Fill in the connection fields:
+**Then add the connection on the Connections tab** of the Remote Agents page
+(`/connections`) → **Add connection**, kind **Proxmox VE**. That is where connection details
+have lived since a dashboard could hold more than one of each kind; see
+[Multiple connections](#multiple-connections).
 
 | Field | Description |
 |---|---|
-| Proxmox Host | Hostname or IP of a Proxmox node (or the cluster VIP) |
+| Name | Your name for it, such as `dc1` |
+| Host | Hostname or IP of a Proxmox node (or the cluster VIP) |
 | Port | Default `8006` |
 | Username | e.g. `root@pam` |
-| Token ID | The token name (e.g. `dashboard`) |
-| Token Secret | The UUID token value |
-| Verify SSL | Disable for self-signed certificates (common in home labs) |
+| API token id | The full token id, e.g. `root@pam!dashboard`. Blank means password authentication |
+| Password | The token secret (the UUID), or the account password for password auth. Prefer a **Password Safe managed account** or a **secret reference** (`bt_safe://`, `aws_sm://`, `azure_kv://`, `gcp_sm://`): a password stored here is the weakest of the three |
+| Verify the TLS certificate | Untick for self-signed certificates (common in home labs) |
+| Site | Optional label |
+| Make this the default | The connection every page and API call uses unless told otherwise. The first one of a kind becomes the default |
 
-Click **Save**. No container restart is required.
+Click **Save**. No container restart is required. For a Proxmox VE the dashboard cannot reach,
+tick **Reached through a remote agent** instead; see [Over a remote agent](#over-a-remote-agent).
+
+The old **Settings → Integrations → Proxmox VE** fields (`proxmox_host`, `proxmox_port`, `proxmox_user`, `proxmox_token_id`, `proxmox_token_secret`, `proxmox_verify_ssl`) are read only as a fallback
+while no Proxmox VE connection exists, and were copied into the first connection on upgrade.
+Editing them after that changes nothing.
 
 ### Step 4 — Verify
 
@@ -174,8 +185,8 @@ Then enable it in Proxmox: **VM → Options → QEMU Guest Agent → Enabled**.
 **Proxmox tab is missing** — verify `PROXMOX_ENABLED=true` and that the stack
 restarted after the change (or that you saved via Settings → Integrations).
 
-**"PROXMOX_HOST is not configured"** — the host field is required. Set it in
-**Settings → Integrations → Proxmox VE**.
+**"no proxmox connection is configured — add one on the Connections page"** — add a
+Proxmox connection on the **Connections** tab of the Remote Agents page (`/connections`).
 
 **"Connection refused" or timeout** — confirm port 8006 is reachable from
 inside the container:
@@ -191,8 +202,8 @@ has been deleted. Regenerate the token in Proxmox → Datacenter → API Tokens.
 **"403 Forbidden" on power operations** — the API token lacks `VM.PowerMgmt`.
 Reassign the token to a role that includes that privilege (e.g. `PVEVMAdmin`).
 
-**SSL certificate errors** — for self-signed certificates, set
-`PROXMOX_VERIFY_SSL=false`. For production with a valid cert, set it to `true`.
+**SSL certificate errors** — for self-signed certificates, untick **Verify the TLS
+certificate** on the connection. For production with a valid cert, leave it on.
 
 **IP addresses not showing** — install and enable the QEMU Guest Agent inside
 the VM and ensure **QEMU Guest Agent** is checked under VM → Options in the

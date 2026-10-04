@@ -135,7 +135,7 @@ under a read-only and a privileged service account.
 * Job-backed operations (deploys, power verbs) record the connection at **enqueue**, so
   changing the default while one is queued cannot redirect it.
 
-Your existing Settings values were copied into the first connection on upgrade. The old
+Your existing Settings values (`nutanix_host`, `nutanix_port`, `nutanix_username`, `nutanix_password`, `nutanix_verify_ssl`) were copied into the first connection on upgrade, and are still read as a fallback while no connection of this kind exists. The old
 panel is still there, read-only, with a banner pointing here — editing it no longer
 changes what the dashboard connects to. It is kept so that rolling back to a previous
 image still works.

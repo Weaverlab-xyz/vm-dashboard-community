@@ -10,7 +10,7 @@ Skytap is not the only place a POV can run. A POV instance may also select **one
 cloud, and build POVs on it through the same pages, the same blueprints, the same wire-up
 and the same auto-delete timer. Today that cloud is AWS, Azure, GCP or OCI.
 
-Turn it on in **Settings → Integrations → POV cloud provider**: pick the provider, paste
+Turn it on in **Settings → Integrations → POV cloud provider** (`pov_cloud_platform`: blank, `aws`, `azure`, `gcp` or `oci`): pick the provider, paste
 its credentials, save, then **Test connection**. The POV page's platform selector gains it
 alongside Skytap.
 

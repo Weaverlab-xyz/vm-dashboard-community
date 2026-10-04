@@ -77,7 +77,7 @@ https://app.beyondtrust.io/api/platform/currentSite
 
 **Settings → Integrations → EPM for Linux**
 
-Paste the **Site ID** and the **Personal Access Token** and save. The PAT is
+Paste the **Site ID** (`epml_site_id`) and the **Personal Access Token** (`epml_pat`) and save. The PAT is
 encrypted with AES-256 and stored in the database — it never touches disk in
 plaintext.
 

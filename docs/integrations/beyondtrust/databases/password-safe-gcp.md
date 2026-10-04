@@ -117,12 +117,13 @@ validator refuses the global form at the click rather than letting a rotation di
 > a deployed service in the database's region nor that override, SQL Server onboarding
 > stays off, because there would be no address to build.
 >
-> **The v1 request contract is not implemented yet.** The service deploys, authenticates,
-> reaches the VPC and answers a health probe, but `/v1/credential-op` returns **501** with
-> the versions it can serve, and logs the request it was sent. That is deliberate: the
-> shape is defined by the plugin and is not in this repository, and a plausible guess would
-> produce a service that deploys cleanly and fails every rotation. Point one managed system
-> at it and click *Verify Managed Account* — the real request lands in Cloud Logging.
+> **The v1 request contract is implemented, from the plugin's own specification, and has
+> never run against the real plugin.** `/v1/credential-op` serves contract version 1 and
+> answers **501**, naming the versions it serves, for any other. Two details the
+> specification does not spell out are inferred: which credential `change-self`
+> authenticates as, and the `statementKind` values beyond the one example. To settle them,
+> set `FN_DBOPS_CAPTURE=1` to log the redacted request, point one managed system at the
+> service and click *Verify Managed Account*: one real request in Cloud Logging answers both.
 > See [docs/design/ps-dbops-cloud-run.md](../../../design/ps-dbops-cloud-run.md).
 
 The DB is registered on the **`GCP Cloud SQL {engine}`** platform with the five-field

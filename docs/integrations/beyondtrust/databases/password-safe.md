@@ -92,6 +92,25 @@ Plugins**; plugin internals are documented in the Beekeeper articles. Set the pl
 config keys to match what you uploaded.
 
 
+**Every platform, functional-account and mode key**, so the patterns above can be searched by
+name. Platform keys must match the platform names of the plugins you uploaded;
+functional-account keys are read only in `reference` mode.
+
+| | PostgreSQL | MySQL | SQL Server |
+|---|---|---|---|
+| **AWS platform** | `clouddb_ps_platform_postgres` (`psql SSM Custom Plugin`) | `clouddb_ps_platform_mysql` (`mysql SSM Custom Plugin`) | `clouddb_ps_platform_sqlserver` (`mssql SSM Custom Plugin`) |
+| **AWS functional account** | `clouddb_ps_functional_account_postgres` | `clouddb_ps_functional_account_mysql` | `clouddb_ps_functional_account_sqlserver` |
+| **Azure platform** | `clouddb_ps_platform_azure_postgres` (`PostgreSQL Azure Run Command Plugin`) | `clouddb_ps_platform_azure_mysql` (`MySQL Azure Run Command Plugin`) | `clouddb_ps_platform_azure_sqlserver` (`MSSQL Azure Run Command Plugin`) |
+| **Azure functional account** | `clouddb_ps_functional_account_azure_postgres` | `clouddb_ps_functional_account_azure_mysql` | `clouddb_ps_functional_account_azure_sqlserver` |
+| **GCP platform** | `clouddb_ps_platform_gcp_postgres` (`GCP Cloud SQL PostgreSQL`) | `clouddb_ps_platform_gcp_mysql` (`GCP Cloud SQL MySQL`) | `clouddb_ps_platform_gcp_sqlserver` (`GCP Cloud SQL SQL Server`) |
+| **GCP functional account** | `clouddb_ps_functional_account_gcp_postgres` | `clouddb_ps_functional_account_gcp_mysql` | `clouddb_ps_functional_account_gcp_sqlserver` |
+| **Mode, per engine** | `clouddb_ps_functional_account_mode_postgres` | `clouddb_ps_functional_account_mode_mysql` | `clouddb_ps_functional_account_mode_sqlserver` |
+
+The mode's other rungs are `clouddb_ps_functional_account_mode_aws`,
+`clouddb_ps_functional_account_mode_azure` and `clouddb_ps_functional_account_mode_gcp` (per cloud), `clouddb_ps_functional_account_mode_gcp_sqlserver` (the one cloud+engine
+cell), and `clouddb_ps_functional_account_mode` (global, default `create`). Every rung but
+the global one is blank by default, which means "fall through".
+
 ### AWS — `dbssm` (AWS Systems Manager)
 
 The dashboard creates the managed user by running the DB client on the shared **ECS
@@ -224,5 +243,5 @@ AWS keys above):
 | `clouddb_ps_azure_auth_mode` | `SP` | `create` mode only: `SP` (service principal) or `MSI` — functional-account username prefix |
 | `clouddb_ps_azure_cert_path` | `C:\BeyondTrust\certs\public_cert.cer` | Public-cert path on the Resource Broker (address field 7) |
 | `clouddb_ps_azure_ssl` | `true` | `sslTRUE` / `sslFALSE` (address field 8) |
-| `clouddb_ps_azure_sp_client_id` / `_client_secret` | — | `create` mode only: Azure SP for the functional account; blank → reuse `azure_client_id` / `_secret` |
+| `clouddb_ps_azure_sp_client_id` / `clouddb_ps_azure_sp_client_secret` | — | `create` mode only: Azure SP for the functional account; blank → reuse `azure_client_id` / `_secret` |
 | `clouddb_ps_azure_plugin_private_key` / `_passphrase` | — | Plugin RSA key material dropped on the jump VM (encrypted at rest) |

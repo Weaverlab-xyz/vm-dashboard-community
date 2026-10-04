@@ -453,7 +453,9 @@ rotated, dead credential.
 
 **Garbage collection.** Each run reaps its own ephemerals; a sweeper (on startup and
 before each run) force-deletes any tagged ephemeral older than the TTL, covering a
-crash between create and cleanup.
+crash between create and cleanup. The TTL is **GC TTL** on the same panel
+(`ansible_ephemeral_secret_ttl_min`, default 30 minutes), and must be at least the longest
+run, or a sweep deletes a secret a task is still reading.
 
 **The trade-off.** This briefly writes a PAM-vaulted credential into the cloud store
 (a second trust domain) for the task's lifetime. Mitigations shrink but don't erase

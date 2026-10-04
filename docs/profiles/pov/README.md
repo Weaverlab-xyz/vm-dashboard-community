@@ -25,6 +25,10 @@ prerequisites, the API token it needs, and the
 [template contract](skytap.md#the-template-contract) its broker VM has to
 satisfy.
 
+**Who sees which POV.** A **POV Presenter** sees only the POVs they own: the ones they
+created, plus any added to their POV access picker. A **POV Manager** sees and manages every
+POV. See [Permissions → Roles](../../permissions.md#roles) and [who a presenter sees](../../permissions.md#a-named-person-who-should-also-be-a-real-user).
+
 And it needs somewhere to put the many tenants the first paragraph of this page is about.
 That is [the tenant registry](standing-one-up.md#the-tenant-registry). The platform registry lives in
 `services/lab_platforms.py`, and `GET /api/pov/platforms` reports what each one can do so

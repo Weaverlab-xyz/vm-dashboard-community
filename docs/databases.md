@@ -188,6 +188,13 @@ the exact host it will record.
 | `clouddb_ps_import_max_systems` | `500` | Cap on candidates. The dialog says so when it truncates — narrow with a workgroup rather than raising this. |
 | `clouddb_ps_import_platform_map` | *(blank)* | JSON platform→engine overrides, e.g. `{"Percona Server": "mysql"}`. Invalid JSON is ignored. |
 
+Two more settings that affect how the dashboard reaches a database:
+
+| Key | Default | |
+|---|---|---|
+| `clouddb_ansible_use_ps_account` | off | Config Management runs against a **provisioned** database connect as its Password Safe managed user instead of the admin credential. That user is created with no grants, so a playbook that needs more fails on permissions until you grant it out of band. Registered databases already connect as their own managed account. |
+| `clouddb_db_client_image_postgres` / `clouddb_db_client_image_mysql` / `clouddb_db_client_image_sqlserver` | `postgres:16` / `mysql:8.4` / blank | The DB-client container images run on the jump host; override for a mirrored registry. SQL Server is blank on purpose: no `sqlcmd` image exists, so the jump host's own `/opt/mssql-tools18/bin/sqlcmd` is used. Setting it forces the container path, and the image must carry `sqlcmd` 18 at that path. |
+
 The candidate list is cached for 5 minutes per workgroup; "already imported" is computed
 fresh on every request, so an import is reflected immediately.
 

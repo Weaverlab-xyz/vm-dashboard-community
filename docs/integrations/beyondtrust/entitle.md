@@ -168,6 +168,7 @@ opt in. Clusters differ: they are registered on demand after the fact
 |---|---|
 | API URL / API Token | Shared Entitle tenant credentials (also used by the other two tracks). The **API URL** is **regional** — `https://api.us.entitle.io/v1` (the shipped default), `https://api.entitle.io/v1` and `https://api.ca.entitle.io/v1` are separate deployments, not aliases — and drives both machine-identity JIT and, normalized to scheme+host, the Terraform provider endpoint. Set the region your tenant is in. Every region answers an unauthenticated request, so a wrong one is not rejected here: it surfaces later as a tenant that appears to hold none of your resources. |
 | Terraform Provider API Key | `entitleio/entitle` provider key (`ENTITLE_API_KEY`); falls back to the API Token. |
+| Provider endpoint (`entitle_endpoint`) | **Optional.** The Terraform provider's API base. Blank derives it from the regional API URL above, which is almost always right; set it only to point the provider somewhere else. Blank does *not* mean the provider's own default, which is the unprefixed `https://api.entitle.io`. |
 | Registration enabled | Master capability switch for this track. |
 | `entitle_owner_id` / `entitle_workflow_id` | **Required** — Entitle user UUID that owns created integrations + the default approval workflow UUID. |
 | `entitle_agent_token_name` | **Auto-minted** — installing the Entitle agent mints a token via the provider, stashes its value in the secrets backend, and records this name (used to attach **private**/PRA-only targets during registration). Shown read-only in the panel; you don't set it by hand. See [the design doc](../../design/entitle-resource-registration.md#agent-token--server-side-secret--helm-reuses-the-runner-primitives). |
@@ -301,7 +302,9 @@ login or token refresh (via Entra group membership).
 | `entitle_user_jit_enabled` | Settings → Integrations → Entitle → User JIT | Master toggle. Off by default. |
 | Entra tenant ID + admin SP | Same panel | Used by the bootstrap script for one-shot group provisioning. |
 | OAuth group mapping | Same panel + `/api/admin/oauth-group-mappings` | Maps `dashboard-aws-write` → scope `aws:write`. |
-| Resource ID map | Same panel (JSON) | Maps each scope to the Entitle resource ID for the 403-page request-access deep link. |
+| Request portal URL (`entitle_request_portal_url`) | Same panel | Where the **Request access** nav link and the 403-page deep links point. |
+| Resource ID map (`entitle_resource_ids_json`) | Same panel (JSON) | Maps each scope (`aws:write`) to the Entitle resource ID for the 403-page request-access deep link. Paste the `resource_ids` output of `terraform/entitle_user_jit/`. |
+| Session length (`access_token_expire_minutes`) | Environment only: `ACCESS_TOKEN_EXPIRE_MINUTES` | The dashboard's own session token lifetime, default 480 (8 hours). Not a Settings field, and an import does not change it. A revoked Entitle grant takes effect at the user's next token, so keep it short (the design recommends 30 minutes or less) for high-sensitivity tenants. |
 
 The Terraform module under [`terraform/entitle_user_jit/`](../../../terraform/entitle_user_jit)
 covers the Entitle side (one application + workflows + resources + policies). The Entra

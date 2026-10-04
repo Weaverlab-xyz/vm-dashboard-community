@@ -68,20 +68,31 @@ For a standalone ESXi host:
 Turning it on sets the `vsphere_enabled` feature flag, and the **vSphere** page appears in
 the navigation at `/vsphere`.
 
-**Option A — Settings → Integrations → VMware vSphere / ESXi**
+**Turn it on** in **Settings → Integrations → VMware vSphere / ESXi**.
 
-Toggle **VMware vSphere / ESXi** on. Fill in the connection fields:
+**Then add the connection on the Connections tab** of the Remote Agents page
+(`/connections`) → **Add connection**, kind **vSphere**. That is where connection details
+have lived since a dashboard could hold more than one of each kind; see
+[Multiple connections](#multiple-connections).
 
 | Field | Description |
 |---|---|
-| vCenter / ESXi Host | Hostname or IP of the vCenter Server or ESXi host |
+| Name | Your name for it, such as `dc1` |
+| Host | Hostname or IP of the vCenter Server or ESXi host |
 | Port | Default `443` |
 | Username | e.g. `administrator@vsphere.local` or `root` |
-| Password | The account password |
-| Default Datacenter | Optional — leave blank to show all VMs; set to filter |
-| Verify SSL | Disable for self-signed certificates (common in home labs) |
+| Datacenter | Optional — leave blank to show all VMs; set to filter |
+| Password | The account password. Prefer a **Password Safe managed account** or a **secret reference** (`bt_safe://`, `aws_sm://`, `azure_kv://`, `gcp_sm://`): a password stored here is the weakest of the three |
+| Verify the TLS certificate | Untick for self-signed certificates (common in home labs) |
+| Site | Optional label |
+| Make this the default | The connection every page and API call uses unless told otherwise. The first one of a kind becomes the default |
 
-Click **Save**. No container restart is required.
+Click **Save**. No container restart is required. For a vSphere the dashboard cannot reach,
+tick **Reached through a remote agent** instead; see [Over a remote agent](#over-a-remote-agent).
+
+The old **Settings → Integrations → VMware vSphere / ESXi** fields (`vsphere_host`, `vsphere_port`, `vsphere_user`, `vsphere_password`, `vsphere_datacenter`, `vsphere_verify_ssl`) are read only as a fallback
+while no vSphere connection exists, and were copied into the first connection on upgrade.
+Editing them after that changes nothing.
 
 ### Step 3 — Verify
 
@@ -177,15 +188,14 @@ configuration applies — the API is identical for ESXi and vCenter.
 **vSphere tab is missing** — verify `VSPHERE_ENABLED=true` and that the stack
 restarted after the change (or that you saved via Settings → Integrations).
 
-**"VSPHERE_HOST is not configured"** — the host field is required. Set it in
-**Settings → Integrations → VMware vSphere / ESXi**.
+**"no vsphere connection is configured — add one on the Connections page"** — add a
+vSphere connection on the **Connections** tab of the Remote Agents page (`/connections`).
 
 **"pyVmomi is not installed"** — run `pip install pyVmomi` inside the container,
 or rebuild the image: `docker compose build app`.
 
-**SSL certificate errors** — for self-signed certificates, set
-`VSPHERE_VERIFY_SSL=false`. For production with a valid CA-signed cert, set it
-to `true`.
+**SSL certificate errors** — for self-signed certificates, untick **Verify the TLS
+certificate** on the connection. For production with a valid CA-signed cert, leave it on.
 
 **"Permission to perform this operation was denied"** — the account lacks the
 required privileges. Check the role assignment in vCenter → Administration →
