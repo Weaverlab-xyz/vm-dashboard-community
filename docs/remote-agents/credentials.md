@@ -21,6 +21,11 @@ fetch the credential per job. In practice:
    needs a credential has migrated, this stops an Ed25519 key from receiving credentials,
    including one copied off a host.
 
+File shares work the same way: put `dashboard_secret: true` on the share's entry in
+`shares.yaml` and set the SMB password on `/storage`
+([Storage Management](../storage-management.md#the-smb-password-can-live-in-the-dashboard)).
+Its releases are audited as `agent.share_secret`.
+
 Earlier versions of these docs treated a host-side credential as the default and central
 storage as a trade. That advice was right for an agent whose identity is a file.
 
@@ -77,7 +82,8 @@ than a password in a file.
 
 With the setting ticked, an Ed25519 agent asking for a dashboard-held credential gets
 `403 … releases the credentials it holds only to agents attested through SPIRE`. That
-covers hypervisor credentials, Gateway deploy keys and Config-Management bundles alike.
+covers hypervisor credentials, file-share passwords, Gateway deploy keys and
+Config-Management bundles alike.
 The check runs after job ownership, so an agent asking about a job that isn't its own
 still gets the same answer as for a job that doesn't exist.
 

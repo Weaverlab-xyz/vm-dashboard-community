@@ -36,10 +36,27 @@ shares:
 ```
 
 The same split as `connections.yaml`, and the same reason. The dashboard stores an agent
-and a share **name**; the path and the credential never leave this host. There is no path
+and a share **name**; the path never leaves this host, and neither does the credential
+unless you move it to the dashboard (below). There is no path
 field anywhere in the job protocol, so a UNC path to some other server is not refused —
 it is unsayable. A job names a share you already wrote down plus a bare filename, and
 both ends independently refuse a name containing a separator or a leading dot.
+
+### Or keep the SMB password in the dashboard (agent 2.7.0+)
+
+Replace `password:` with `dashboard_secret: true` and set the password on `/storage`. The
+agent fetches it sealed, once per job, exactly as a connection's
+[`dashboard_secret`](credentials.md#central-storage-with-spire-the-recommended-model) does,
+and a `password:` left in the file is ignored with a warning. The username and domain stay
+here. A local path or an entry with no `username:` refuses the key rather than guessing.
+
+```yaml
+  - name: corp-automation
+    path: \\fs01.corp.example.com\automation\playbooks
+    username: svc-dashboard
+    domain: CORP
+    dashboard_secret: true
+```
 
 ### Four grants, all required
 

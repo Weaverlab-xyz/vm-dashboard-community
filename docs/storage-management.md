@@ -289,12 +289,13 @@ runner is fine**. There is no `ansible_runner=local` requirement.
 | **Agent** | Required. Any enrolled agent, granted the `agent_storage` job type on the Agents page, running **2.5.0 or later**. |
 | **Share name** | Required. Must match a `name:` in that agent's `shares.yaml` **and** a `name:` under `storage.shares:` in its `policy.yaml`. |
 | **Subpath** | Optional relative directory inside the share. Relative only — an absolute path is refused, not quietly made relative. |
+| **SMB password** | Optional, and only for a UNC share whose `shares.yaml` entry says `dashboard_secret: true`. The dashboard holds it encrypted and hands it to the agent sealed, once per job; the agent needs **2.7.0 or later**. Never shown again once saved. See [below](#the-smb-password-can-live-in-the-dashboard). |
 
 #### What the dashboard does not hold
 
-**No path, no username, no password.** All three live in the agent's own
-`shares.yaml`, next to its `connections.yaml`, and the dashboard has no API
-that can read or write that file. What it stores is one half of a join — the
+**No path and no username,** and by default **no password.** They live in the
+agent's own `shares.yaml`, next to its `connections.yaml`, and the dashboard has
+no API that can read or write that file. What it stores is one half of a join — the
 same arrangement hypervisor connections already use, where the dashboard
 holds a connection *name* and the credential never leaves the customer's
 host.
@@ -304,6 +305,26 @@ There is no path field anywhere in the job protocol, so `\\some-other-server\c$`
 is not refused, it is unsayable. A job names a share the operator already
 wrote down, plus a bare filename; both the dashboard and the agent
 independently refuse anything containing a separator or a leading dot.
+
+#### The SMB password can live in the dashboard
+
+The one exception, and the one this doc recommends for an agent attested
+through SPIRE: set **SMB password** above, put `dashboard_secret: true` on the
+share's entry in `shares.yaml`, and delete its `password:`. The agent then
+fetches the password for each job through the same sealed per-job fetch a
+[hypervisor connection](remote-agents/credentials.md#central-storage-with-spire-the-recommended-model)
+uses, and nothing durable sits on the host.
+
+- **Only for the configured share and agent.** A storage job for any other share
+  or any other agent gets nothing.
+- **Under the same gate.** With **Release dashboard-held credentials only to
+  SPIRE-attested agents** ticked, an Ed25519 agent is refused.
+- **Every release is audited** as `agent.share_secret`, naming the job and the share.
+- **The username, domain and path stay in `shares.yaml`.** The dashboard can hand
+  over a password, but it cannot aim it at another server.
+- **An agent older than 2.7.0** would ignore the key and send whatever password is
+  left in `shares.yaml`, so while a password is set the dashboard refuses to queue
+  for one. Clear the field to go back to the host-side password.
 
 #### Three grants, all required
 

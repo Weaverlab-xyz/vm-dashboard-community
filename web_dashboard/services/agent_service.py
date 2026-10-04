@@ -579,6 +579,11 @@ MIN_GATEWAY_VERSION = (2, 4)
 # HANDLERS at all, so the agent refuses it by name.
 MIN_STORAGE_VERSION = (2, 5)
 
+# The agent build that first understood `dashboard_secret: true` on a shares.yaml entry.
+# Below this the key is ignored, and the agent offers whatever password is left in
+# shares.yaml — or none — to the file server.
+MIN_SHARE_SECRET_VERSION = (2, 7)
+
 
 def _version_at_least(agent: RemoteAgent, minimum: tuple) -> bool:
     """Whether this agent's self-reported version is at least ``minimum``.
@@ -683,6 +688,26 @@ def storage_upgrade_hint(agent: RemoteAgent) -> str:
             f"chrweav/dashboard-agent onto that host, then add `agent_storage` to "
             f"`job_types:` in its policy.yaml and a `storage:` block granting the share by "
             f"name, and restart it. Nothing was queued.")
+
+
+def supports_share_secret(agent: RemoteAgent) -> bool:
+    """Whether this agent can fetch the SMB password the dashboard holds for its share.
+
+    Read at ENQUEUE time, and only when the dashboard actually holds one, for the reason
+    ``supports_dashboard_secret`` gives: an older agent does not fail on the key, it sends
+    the leftover or empty shares.yaml password, which the file server reads as a wrong one —
+    and repeated, that locks the service account out.
+    """
+    return _version_at_least(agent, MIN_SHARE_SECRET_VERSION)
+
+
+def share_secret_upgrade_hint(agent: RemoteAgent, share: str) -> str:
+    return (f"The dashboard holds the SMB password for share '{share}', but agent "
+            f"'{agent.name}' reports version {agent.agent_version or 'unknown'} and needs at "
+            f"least {'.'.join(str(p) for p in MIN_SHARE_SECRET_VERSION)} to fetch it. Pull "
+            f"chrweav/dashboard-agent:latest on that host and restart the container, or clear "
+            f"the password on /storage to keep using the one in shares.yaml. Nothing was "
+            f"queued.")
 
 
 def supports_dashboard_secret(agent: RemoteAgent) -> bool:

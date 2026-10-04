@@ -7,10 +7,11 @@
 # cannot reach a file server at all. The agent already can.
 #
 # The split is the same one connections.yaml makes, for the same reason. The dashboard
-# stores an agent and a SHARE NAME. The path behind that name, and any credential it
-# needs, are here and are never sent anywhere. A job can ask for a granted operation on a
-# name you already wrote down, and nothing else — there is no path field anywhere in the
-# protocol, so a UNC path to some other server is not refused, it is unsayable.
+# stores an agent and a SHARE NAME. The path behind that name is here and is never sent
+# anywhere, and so is the credential — unless you choose `dashboard_secret: true` below.
+# A job can ask for a granted operation on a name you already wrote down, and nothing
+# else — there is no path field anywhere in the protocol, so a UNC path to some other
+# server is not refused, it is unsayable.
 #
 # Mount it read-only, next to policy.yaml:
 #   -v "$PWD/shares.yaml:/etc/dashboard-agent/shares.yaml:ro,Z"        # bash
@@ -52,12 +53,20 @@ shares:
   #   username: svc-dashboard
   #   password: ...
   #   domain: CORP
+  #
+  #   # Or keep NO password on this host: the dashboard holds it (the SMB password field on
+  #   # /storage) and hands it to this agent sealed, once per job, exactly as
+  #   # `dashboard_secret: true` does in connections.yaml. Agent 2.7+. The username stays
+  #   # here; a `password:` left beside it is ignored, with a warning. Pair it with the
+  #   # dashboard's "release dashboard-held credentials only to SPIRE-attested agents"
+  #   # setting so only an attested agent can ask.
+  #   dashboard_secret: true
 
 # ── What travels, and what does not ───────────────────────────────────────────
-# The password above stays on this host. It is not sealed and sent, it is not reported at
-# enrolment, and there is no dashboard API that reads it — the agent opens the file itself
-# when a granted job arrives. The dashboard learns only what a listing returns: file
-# names, sizes and types.
+# A password written here stays on this host. It is not sealed and sent, it is not
+# reported at enrolment, and there is no dashboard API that reads it — the agent opens
+# the file itself when a granted job arrives. The dashboard learns only what a listing
+# returns: file names, sizes and types.
 #
 # ── The size ceiling ──────────────────────────────────────────────────────────
 # Files move inside the signed job envelope, which is capped at 256 KB — about 190 KB of

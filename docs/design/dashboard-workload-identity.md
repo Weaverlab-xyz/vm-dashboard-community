@@ -287,6 +287,14 @@ the same per-job sealed fetch, under the same **Release dashboard-held credentia
 SPIRE-attested agents** setting, completes
 [central storage with SPIRE](../remote-agents/credentials.md#central-storage-with-spire-the-recommended-model).
 
+**Built** (agent 2.7.0). `dashboard_secret: true` on a `shares.yaml` entry, and one
+dashboard-held password, `storage_agent_password`, for the one share the storage backend is
+configured with. The existing `POST /api/agent/jobs/{id}/secret` serves `agent_storage`
+jobs too: the share is derived from the job row and must be the configured share on the
+configured agent, the SPIRE-only setting applies, and each release is audited as
+`agent.share_secret`. The storage preflight refuses an older agent while a password is
+held. Username, domain and path stay in `shares.yaml`.
+
 ## Considered and left alone
 
 | What | Why not |
@@ -324,7 +332,7 @@ SPIRE-attested agents** setting, completes
    Azure (the `ClientAssertionCredential` branch).~~ Built.
 4. ~~**Slice 4:** on-prem k3s through the dashboard's SVID.~~ Built.
 5. **L3, L4 and L5:** after the lab answers the Password Safe attribute question.
-6. **Slice 5.**
+6. **Slice 5:** ~~agent file-share credentials~~ built; the ECS and Cloud Run runners remain.
 
 ## Not verified
 

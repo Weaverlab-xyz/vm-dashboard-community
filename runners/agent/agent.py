@@ -102,6 +102,11 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 #     any `ansible_*` extra var. A dashboard-supplied inventory could set
 #     `ansible_connection: local`, which would run the operator's playbook inside the runner
 #     container on this network instead of against the target it names.
+# 2.7 added `dashboard_secret: true` on a shares.yaml entry: the SMB password is fetched
+# per job from the dashboard, sealed, exactly as a connection's is. Gated from the dashboard
+# (agent_service.supports_share_secret) whenever it holds that password, because an older
+# agent ignores the key and offers the file server whatever password is left in
+# shares.yaml — or none.
 # The PATCH digit exists so a host can be told apart from itself. Every gate here and in
 # agent_service compares (major, minor) only, so bumping it changes no behaviour anywhere —
 # what it changes is that the Agents page can answer "did this host actually pick up the
@@ -109,7 +114,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 # broker running the earlier one failed identically while reporting the same string as the
 # build that fixed it. A behaviour change the fleet cannot see is a behaviour change nobody
 # can confirm arrived, so bump this whenever the agent's behaviour moves.
-AGENT_VERSION = "2.6.0"
+AGENT_VERSION = "2.7.0"
 
 log = logging.getLogger("agent")
 
@@ -2336,6 +2341,13 @@ class FileShares:
                     raise AgentFatal(
                         f"shares.yaml: share {entry['name']!r} has no `path:`. A share "
                         f"with no path is one every job against it fails on.")
+                if not isinstance(entry.get("dashboard_secret", False), bool):
+                    # A quoted "false" is truthy; guessing which was meant would decide
+                    # where a credential comes from.
+                    raise AgentFatal(
+                        f"shares.yaml: share {entry['name']!r} has `dashboard_secret: "
+                        f"{entry['dashboard_secret']!r}` — it must be true or false, "
+                        f"unquoted.")
                 by_name[str(entry["name"])] = entry
         return cls(by_name)
 
@@ -4883,6 +4895,35 @@ def _share_root(share: dict) -> str:
     return str(share.get("path") or "").rstrip("/\\")
 
 
+def _share_credential(share: dict, secrets: "JobSecrets") -> dict:
+    """The share entry with its SMB password resolved for this job.
+
+    Unchanged unless the entry declares `dashboard_secret: true`. Then the password is the
+    one the dashboard holds, fetched sealed for THIS job (``JobSecrets.dashboard_secret``,
+    the same fetch a connection uses), and a password left in shares.yaml is ignored —
+    never a fallback, because an operator who moved the credential to the dashboard must
+    not be quietly authenticating with a stale copy. Called once per job, before any SMB
+    operation, so one job is one fetch.
+    """
+    if not share.get("dashboard_secret"):
+        return share
+    name = share.get("name")
+    if not _share_is_unc(_share_root(share)):
+        raise PolicyRefusal(
+            f"share {name!r} declares 'dashboard_secret: true', but its path is local, so "
+            f"no credential is used for it. Remove the key from shares.yaml.")
+    if not share.get("username"):
+        raise PolicyRefusal(
+            f"share {name!r} declares 'dashboard_secret: true' but has no `username:` in "
+            f"shares.yaml. The dashboard holds only the password; the username stays here.")
+    if share.get("password"):
+        log.warning(
+            "share %r takes its SMB password from the dashboard; the 'password' left in "
+            "shares.yaml is IGNORED and should be deleted", name)
+    password = _held(secrets, secrets.dashboard_secret(share))
+    return dict(share, password=password)
+
+
 def _share_smb_session(share: dict) -> None:
     """Register SMB credentials for this share's server. Idempotent.
 
@@ -5019,7 +5060,8 @@ def run_storage(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
     # The grant is checked before the share is even looked up, so an ungranted name is
     # refused without confirming whether it exists on this host.
     policy.check_share(share_name, write=op in ("upload", "delete"))
-    share = FileShares.load().get(share_name)
+    share = _share_credential(FileShares.load().get(share_name),
+                              JobSecrets(job_id=job_id, dashboard=dashboard, ref=share_name))
 
     where = share_name + (f"/{subpath}" if subpath else "")
     if op == "list":
