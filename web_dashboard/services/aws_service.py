@@ -3126,6 +3126,8 @@ def _run_ecs_ansible_sync(
     secret_entries: list | None = None,
     manifest_b64: str = "",
     ps_env: dict | None = None,
+    task_role_arn: str = "",
+    runner_fetch: dict | None = None,
 ) -> tuple:
     """Create an ECS Fargate task that runs one Ansible playbook, wait for it to
     finish, retrieve CloudWatch logs, and return (exit_code, output)."""
@@ -3142,8 +3144,9 @@ def _run_ecs_ansible_sync(
             raise
 
     from . import cloud_ansible_secrets as _cas
-    _secret_prefix = _cas.command_prefix() if manifest_b64 else ""
-    _secret_ev = _cas.extra_vars_arg() if manifest_b64 else ""
+    _secret_prefix = (_cas.command_prefix() if manifest_b64 else "") + (
+        _cas.fetch_prefix() if runner_fetch else "")
+    _secret_ev = _cas.extra_vars_arg() if (manifest_b64 or runner_fetch) else ""
     cmd = (
         "set -e && "
         'echo "$PLAYBOOK_B64" | base64 -d > /tmp/playbook.yml && '
@@ -3182,7 +3185,11 @@ def _run_ecs_ansible_sync(
             # stays an ephemeral RunTask override so it isn't retained in task-def
             # revision history.
             "environment": [{"name": "PLAYBOOK_B64", "value": playbook_b64}]
-                + ([{"name": _cas.MANIFEST_ENV, "value": manifest_b64}] if manifest_b64 else []),
+                + ([{"name": _cas.MANIFEST_ENV, "value": manifest_b64}] if manifest_b64 else [])
+                # Collect-from-dashboard: the fetch SCRIPT is code, not a credential, so
+                # it rides the task definition (it would not fit the 8192-byte override).
+                + ([{"name": _cas.FETCH_ENV, "value": runner_fetch["script_b64"]}]
+                   if runner_fetch else []),
             **({"secrets": _secrets_def} if _secrets_def else {}),
             "logConfiguration": {
                 "logDriver": "awslogs",
@@ -3196,6 +3203,10 @@ def _run_ecs_ansible_sync(
     )
     if execution_role_arn:
         td_kwargs["executionRoleArn"] = execution_role_arn
+    # The task's own identity — what collect-from-dashboard proves (a presigned
+    # sts:GetCallerIdentity). It needs no permissions; it only has to be WHO the task is.
+    if task_role_arn:
+        td_kwargs["taskRoleArn"] = task_role_arn
 
     td_resp = ecs.register_task_definition(**td_kwargs)
     task_def_arn = td_resp["taskDefinition"]["taskDefinitionArn"]
@@ -3220,6 +3231,10 @@ def _run_ecs_ansible_sync(
             "environment": (
                 [{"name": "SSH_KEY_B64", "value": ssh_key_b64}]
                 + [{"name": k, "value": v} for k, v in (ps_env or {}).items()]
+                # The run's single-use collect token and where to use it: per-run
+                # override only, never the task definition's revision history.
+                + [{"name": k, "value": v}
+                   for k, v in ((runner_fetch or {}).get("env") or {}).items()]
             ),
         }]},
         count=1,
@@ -3280,6 +3295,8 @@ async def run_ecs_ansible_task(
     secret_entries: list | None = None,
     manifest_b64: str = "",
     ps_env: dict | None = None,
+    task_role_arn: str = "",
+    runner_fetch: dict | None = None,
 ) -> tuple:
     """Run an Ansible playbook via ECS Fargate. Returns (exit_code, output)."""
     try:
@@ -3288,7 +3305,7 @@ async def run_ecs_ansible_task(
             region, cluster, task_family, image, cpu, memory,
             subnet_id, security_group_ids, execution_role_arn,
             target_ip, ansible_user, playbook_b64, ssh_key_b64, job_id,
-            secret_entries, manifest_b64, ps_env,
+            secret_entries, manifest_b64, ps_env, task_role_arn, runner_fetch,
         )
     except AWSError:
         raise

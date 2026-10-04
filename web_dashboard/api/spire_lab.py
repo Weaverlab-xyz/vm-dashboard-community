@@ -434,7 +434,7 @@ def build_lab(req: BuildRequest, db: Session = Depends(get_db),
     # credential inline, while an AWS or GCP lab dispatches to ECS / Cloud Run, where a
     # just-in-time credential needs the ephemeral-store opt-in.
     from ..services import (ansible_local_service, ansible_run_gate,
-                            managed_accounts as _ma)
+                            managed_accounts as _ma, runner_credential)
     from ..services import config_service as cs
 
     cloud = (req.cloud or "azure").lower()
@@ -463,7 +463,7 @@ def build_lab(req: BuildRequest, db: Session = Depends(get_db),
     refusal = ansible_run_gate.check_runner_capability(
         needs_ephemeral_store=needs_ephemeral,
         ephemeral_enabled=(needs_ephemeral
-                           and cs.get_bool("ansible_cloud_ephemeral_secrets_enabled")),
+                           and runner_credential.cloud_delivery_available(eff_runner)),
         runner=eff_runner,
         gcp_runner_service_account=(
             ansible_local_service._cfg("gcp_ansible_runner_service_account")

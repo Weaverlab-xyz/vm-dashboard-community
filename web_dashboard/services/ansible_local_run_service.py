@@ -195,6 +195,27 @@ def _add_ephemeral_managed_entries(runner: str, entries: list, manifest_b64: str
     return entries, manifest_b64, cleanup
 
 
+def _runner_fetch(db, runner: str, job_id: str, managed_cred_vars: dict) -> dict:
+    """Collect-from-dashboard (services/runner_credential): park the run's managed-account
+    vars in a single-use grant and return what the task needs to collect them — a fetch
+    script (code, not a secret: it rides the task DEFINITION) and the env telling it where
+    and as whom (the token rides only the per-run override / execution env)."""
+    import base64 as _b64, inspect
+    from ..services import cloud_ansible_secrets as _cas, runner_credential as _rc
+    from ..services import runner_fetch as _rf
+    token = _rc.issue(db, job_id=job_id, runner=runner, values=managed_cred_vars)
+    env = {"RUNNER_CREDENTIAL_URL": _rc.callback_url(),
+           "RUNNER_CREDENTIAL_TOKEN": token,
+           "RUNNER_CREDENTIAL_PLATFORM": runner,
+           "RUNNER_CREDENTIAL_JOB": job_id,
+           "RUNNER_CREDENTIAL_AUDIENCE": _rc.audience(),
+           "RUNNER_CREDENTIAL_VARS_FILE": _cas.VARS_FILE}
+    if runner == "ecs":
+        env["RUNNER_CREDENTIAL_STS_REGION"] = _cfg("aws_region") or "us-east-1"
+    return {"script_b64": _b64.b64encode(inspect.getsource(_rf).encode()).decode(),
+            "env": env, "token": token}
+
+
 def _delete_ephemeral(cleanup: list) -> None:
     """Best-effort force-delete of the ephemeral store secrets created for a run.
     A failure here is non-fatal — the GC sweeper reaps anything left behind."""
@@ -449,6 +470,7 @@ async def _run_job(
             # the `if managed_cred_vars:` branch below is what handles the opted-in case.
             from ..services import cloud_ansible_secrets as _cas
             ephemeral_cleanup: list = []
+            runner_fetch: dict = {}
             if runner == "aci":
                 cloud_secret_entries, cloud_manifest_b64 = _cas.inline_entries(secret_extra_vars)
             else:
@@ -461,7 +483,13 @@ async def _run_job(
                 # ECS/GCP secret channel references a store secret; a JIT credential
                 # has none, so we mint one per run and reap it). Sweep leaked ones
                 # first (belt-and-braces with the startup GC).
-                if managed_cred_vars:
+                from ..services import runner_credential as _rc
+                if managed_cred_vars and _rc.use_for(runner):
+                    # Collect-from-dashboard: no store copy. The task proves its cloud
+                    # identity and collects the vars sealed (services/runner_credential).
+                    runner_fetch = _runner_fetch(db, runner, job_id, managed_cred_vars)
+                    secret_values.append(runner_fetch["token"])
+                elif managed_cred_vars:
                     try:
                         from ..services import ephemeral_gc
                         ephemeral_gc.sweep()
@@ -471,6 +499,7 @@ async def _run_job(
                         _add_ephemeral_managed_entries(
                             runner, cloud_secret_entries, cloud_manifest_b64,
                             managed_cred_vars, job_id))
+                if managed_cred_vars:
                     # Best-effort: flag the PS requests to rotate on check-in, so the
                     # copied-to-store credential is rotated (dead) once we check in
                     # below — even if the store cleanup is missed. Not enforceable
@@ -491,13 +520,19 @@ async def _run_job(
                     secret_entries=cloud_secret_entries,
                     manifest_b64=cloud_manifest_b64,
                     ps_env=ps_env,
+                    runner_fetch=runner_fetch or None,
                 )
             finally:
                 # Value already fetched by the task identity at launch — safe to reap
                 # the store copy and check the PS requests in (rotates on release when
                 # flagged above). Both best-effort; the GC sweeper backstops leaks.
                 _delete_ephemeral(ephemeral_cleanup)
-                if ephemeral_cleanup and managed_request_ids:
+                if runner_fetch:
+                    # Redeemed or not, the grant goes: a token the task never used must
+                    # not outlive the run that issued it.
+                    from ..services import runner_credential as _rc
+                    _rc.revoke_for_job(db, job_id)
+                if (ephemeral_cleanup or runner_fetch) and managed_request_ids:
                     from ..services import btapi_service as _bt
                     for _rid in managed_request_ids:
                         await _bt.checkin_ps_request(_rid)
@@ -575,6 +610,7 @@ async def _dispatch_cloud_runner(
     secret_entries: list | None = None,
     manifest_b64: str = "",
     ps_env: dict | None = None,
+    runner_fetch: dict | None = None,
 ) -> tuple:
     """Route to the configured cloud Ansible runner. Returns (exit_code, output).
 
@@ -601,6 +637,8 @@ async def _dispatch_cloud_runner(
             subnet_id=_cfg("ansible_ecs_subnet_id") or "",
             security_group_ids=sg_ids,
             execution_role_arn=_cfg("ansible_ecs_execution_role_arn") or "",
+            task_role_arn=_cfg("ansible_ecs_task_role_arn") or "",
+            runner_fetch=runner_fetch,
             target_ip=target_ip,
             ansible_user=ansible_user,
             playbook_b64=playbook_b64,
@@ -662,6 +700,7 @@ async def _dispatch_cloud_runner(
             secret_entries=secret_entries,
             manifest_b64=manifest_b64,
             ps_env=ps_env,
+            runner_fetch=runner_fetch,
         )
 
     raise ValueError(f"Unknown ansible_runner: {runner!r}")

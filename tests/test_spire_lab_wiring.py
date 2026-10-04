@@ -574,7 +574,7 @@ def test_the_gate_owns_the_refusal_wording_and_the_api_layers_only_raise_it():
         # avoid the one above, which the count below would otherwise catch as a copy.
         "required to bind an EPM for Linux",
         "Managed-account checkout requires BeyondTrust Password Safe",
-        "'Ephemeral cloud secrets' to be enabled in Settings",
+        "either 'Collect credentials from the dashboard'",
         "GCP ephemeral secrets require 'gcp_ansible_runner_service_account'",
     )
     for s in sentences:

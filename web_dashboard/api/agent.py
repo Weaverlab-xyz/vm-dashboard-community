@@ -812,6 +812,44 @@ def _share_secret(db: Session, agent: RemoteAgent, job: Job, body: SecretRequest
         headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 
 
+class RunnerCredentialRequest(BaseModel):
+    """What an ECS / Cloud Run Ansible runner task sends to collect its run's credential
+    (services/runner_credential): the run's one-use token, a proof of the task's own cloud
+    identity bound to that token, and the X25519 key to seal the answer to."""
+    token: str = ""
+    proof: dict = {}
+    reply_key: str = ""
+
+
+@router.post("/runner-credential")
+def runner_credential(body: RunnerCredentialRequest, request: Request,
+                      db: Session = Depends(get_db)):
+    """Hand a cloud Ansible runner task its run's managed-account credential, sealed.
+
+    Unsigned — the caller is not an enrolled agent — and that is fine, because nothing
+    here is bearer: the token is single-use and burnt before anything else happens, the
+    task must prove with its OWN cloud identity that it is the configured runner (STS for
+    ECS, a Google-signed ID token for Cloud Run), and that proof carries the token's hash.
+    An unknown token is refused on one indexed lookup, before any call to STS or Google,
+    so this route cannot be used to make the dashboard send requests at will.
+    """
+    from ..services import runner_credential as rc
+    try:
+        envelope, meta = rc.redeem(db, token=body.token, proof=body.proof,
+                                   reply_key=body.reply_key)
+    except rc.RunnerCredentialError as exc:
+        # The reason only: it names the check that failed and never the token or a value.
+        job_service.log_audit(db, "runner", "agent.runner_credential_refused",
+                              details={"reason": str(exc)}, ip_address=_client_ip(request))
+        raise HTTPException(status_code=403, detail=str(exc))
+    job_service.log_audit(db, f"runner:{meta['runner']}", "agent.runner_credential",
+                          details={"job_id": meta["job_id"], "runner": meta["runner"],
+                                   "identity": meta["identity"]},
+                          ip_address=_client_ip(request))
+    return JSONResponse(content={"sealed": envelope},
+                        headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+
+
 class GatewayKeyRequest(BaseModel):
     """What the agent must say to be handed a Gateway deploy key.
 

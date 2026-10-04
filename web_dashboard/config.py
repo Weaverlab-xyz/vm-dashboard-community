@@ -1680,6 +1680,12 @@ class Settings(BaseSettings):
     # missed cleanup leaves only a rotated, dead credential. See docs/secrets-management.md.
     ansible_cloud_ephemeral_secrets_enabled: bool = False
     ansible_ephemeral_secret_ttl_min: int = 30       # GC safety-net age (>= max task runtime)
+    # The alternative to the store copy above (services/runner_credential): the ECS /
+    # Cloud Run task proves its own cloud identity and COLLECTS the run's credential from
+    # the dashboard, sealed to a key it made. OFF by default; needs the agent URL pinned
+    # (the task calls /api/agent/runner-credential) and the runner's identity below.
+    ansible_runner_credential_callback: bool = False
+    ansible_ecs_task_role_arn: str = ""              # the ECS task's own identity (no permissions needed)
     # Password Safe request duration for a managed-account checkout. Must outlast the
     # whole run so the request is still open for us to flag rotate-on-check-in and
     # then check it in afterwards (best-effort — rotation isn't enforceable, it

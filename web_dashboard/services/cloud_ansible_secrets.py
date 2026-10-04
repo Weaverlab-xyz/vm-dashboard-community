@@ -60,6 +60,20 @@ def command_prefix() -> str:
     return _BUILD_VARS + " && "
 
 
+# Collect-from-dashboard (services/runner_credential): the fetch script rides the task
+# definition base64 in this env var and runs AFTER the manifest step, merging the run's
+# managed-account vars into the same 0600 vars file. `set -e` upstream makes a refused
+# collection fail the run before ansible-playbook starts.
+FETCH_ENV = "RUNNER_FETCH_PY_B64"
+
+
+def fetch_prefix() -> str:
+    """Shell snippet (trailing ``&& ``) that runs the collect-from-dashboard script."""
+    return ("python3 -c \"import base64,os;"
+            "exec(compile(base64.b64decode(os.environ['" + FETCH_ENV + "']),"
+            "'runner_fetch','exec'),{'__name__':'__main__'})\" && ")
+
+
 def extra_vars_arg() -> str:
     """The ``ansible-playbook`` flag to consume the built vars file."""
     return f"-e @{VARS_FILE} "
