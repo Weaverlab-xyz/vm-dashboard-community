@@ -925,6 +925,44 @@ def test_the_upgrade_job_is_wired_into_the_worker_the_api_and_the_page():
                 encoding="utf-8").read()
     assert "'/upgrade'" in page and "lab.spire_version !== lab.target_release" in page
 
+
+# ── every mode signs with the issuer the provider publishes (L5) ─────────────
+
+def _oidc_play_issuer(row) -> str:
+    """The issuer spire-oidc-provider.yml publishes for this lab, rendered from the play's
+    own set_fact with the vars the lab service gives it."""
+    import jinja2
+    task = next(t for t in _play("spire-oidc-provider.yml")["tasks"]
+                if t.get("name") == "Resolve the provider identity and issuer URL")
+    return jinja2.Template(task["ansible.builtin.set_fact"]["_issuer"]).render(
+        **svc._oidc_vars(row))
+
+
+def test_every_mode_signs_with_the_issuer_the_provider_publishes():
+    """Kubernetes matches a token's `iss` against its issuer.url exactly, so a lab whose
+    server signs with no issuer — or a different spelling — has a k3s link that accepts
+    nothing. All three modes must agree with the provider, character for character."""
+    row = _row()
+    want = svc.issuer_url_for(row)
+    assert want == _oidc_play_issuer(row) == "https://oidc.modes.test:8443"
+    assert svc._install_vars(row)["jwt_issuer"] == want
+    assert svc._docker_server_vars(_row(deployment_mode="docker"))["jwt_issuer"] == want
+    helm = yaml.safe_load(_rendered(
+        "spire-helm.yml", "Write the chart values", trust_domain=row.trust_domain,
+        oidc_domain=svc.oidc_domain_for(row), _issuer=want,
+        _admin_id="spiffe://modes.test/password-safe/admin"))
+    assert helm["global"]["spire"]["jwtIssuer"] == want
+
+
+def test_both_server_plays_write_the_issuer_they_are_given():
+    for play in ("spire-server-install.yml", "spire-docker-server.yml"):
+        conf = _rendered(play, "Write the server configuration", trust_domain="modes.test",
+                         jwt_issuer="https://oidc.modes.test:8443",
+                         _admin_id="spiffe://modes.test/password-safe/admin")
+        assert 'jwt_issuer = "https://oidc.modes.test:8443"' in conf, play
+        assert _play(play)["vars"]["jwt_issuer"] == "", (
+            f"{play}: blank by default, so a hand run without the lab keeps no `iss`")
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

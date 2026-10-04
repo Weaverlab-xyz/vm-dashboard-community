@@ -477,6 +477,15 @@ A 401 on the *first* attempt is almost always the issuer string or clock skew, n
 journalctl -u k3s | grep -i 'authentication\|oidc\|jwt'
 ```
 
+**Labs built before the server set an issuer.** The API server matches a token's `iss`
+against the issuer it was given, exactly. Every mode's server now signs with the OIDC
+provider's URL (`jwt_issuer` in vm and docker mode, `jwtIssuer` in the Helm values). A vm
+or docker lab built earlier signs with no `iss`, and its k3s link refuses every token. It
+picks the setting up the next time its install stage runs: **Upgrade** does that when the
+SPIRE version changes. Otherwise, re-run the mode's install play by hand with
+`-e jwt_issuer=https://oidc.<trust domain>:8443`. Seeded entries, the admin credential
+and the CA are kept.
+
 The full argument, including the four traps the playbooks encode, is in
 [the design note](../design/workload-k8s-short-lived-token.md).
 

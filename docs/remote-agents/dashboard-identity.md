@@ -183,6 +183,34 @@ for the dashboard's identity, and use them while they are present. A stored key,
 contrast, can be copied and kept. That is the improvement: a credential that needs continued
 presence, instead of one that works offline for ever. It is not "the app holds nothing".
 
+## Protect the SPIRE server's CA key
+
+The SPIRE server keeps its CA and JWT signing keys in `keys.json` on its data volume
+(`KeyManager "disk"`). Once this identity is on, that key signs every token a cloud accepts
+in place of the stored key you retired, as well as agent attestation and service-account
+SVIDs. Whoever copies `keys.json` can mint all of them until the key rotates.
+
+On a host with a cloud identity of its own, keep the key in that cloud's KMS instead.
+`examples/spire-server/server.conf` carries a commented block for each:
+
+| Host | KeyManager | The SPIRE container needs |
+|---|---|---|
+| AWS | `aws_kms` | an instance role allowed to create and use KMS keys |
+| Azure | `azure_key_vault` | a managed identity with key permissions on the vault |
+| GCP | `gcp_kms` | a service account with KMS rights on the key ring |
+
+Comment out the `disk` line, uncomment one block, fill it in, and restart the
+`spire-server` container. Check the field names against SPIRE 1.15's
+`server_keymanager_*` plugin docs first: the examples are starting points.
+
+**Switching creates a new CA.** The old keys stay in `keys.json`, and the server will not
+read them through a KMS plugin. Every agent attested to the old CA has to attest again, and
+the published JWT keys change. Each cloud re-fetches `/spiffe/keys` on its own schedule, so
+expect federated calls to fail for a while after the switch.
+Switch before you migrate agents to SPIRE, or plan the re-attestation. A self-hosted Docker
+host with no cloud identity has nothing to authenticate to a KMS with, so it stays on `disk`.
+Protect that volume as you would the key itself.
+
 ## Troubleshooting
 
 | Symptom | Cause |
