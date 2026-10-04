@@ -918,7 +918,7 @@ All four were guesses before, and two of them were wrong:
 | `GET Attributes` | **404** | No flat attribute collection either. |
 | `GET Assets/{id}/Attributes` | 200 | Per object, which is why the read is capped and only matched objects are fetched. |
 | `GET ManagedSystems/{id}/Attributes` | 200 | Exists, and is commonly empty. |
-| `POST`/`DELETE ManagedSystems/{id}/Attributes/{attributeID}` | **unverified** | Documented by BeyondTrust; not yet exercised against a tenant from here. See the write note below for what the dashboard does about that. |
+| `POST`/`DELETE ManagedSystems/{id}/Attributes/{attributeID}` | **unverified** | Documented by BeyondTrust; not yet exercised against a tenant from here. See the write note below for what the dashboard does about that. The SPIRE lab's **Prepare probe** is the first caller that will. It also calls `POST AttributeTypes` and `POST AttributeTypes/{id}/Attributes` when the tenant lacks `SpiffeTrustDomain`, and its job log records every call's status, so its first live run settles all three rows. |
 
 **An attribute's shape is easy to read backwards**, and doing so produces chips that look
 broken. A row is:

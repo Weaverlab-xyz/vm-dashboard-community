@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import User, get_db
-from ..services import config_service, spire_lab_service
+from ..services import config_service, job_service, spire_lab_service
 from ..services.spire_lab_service import SpireLabError
 from .auth import require_permission
 # ONE definition of the managed-account ref, imported rather than re-declared: its
@@ -179,6 +179,9 @@ def _shape(row) -> dict:
         # accounts), so the page must not read its absence as an incomplete onboard.
         "ps_system_id": row.ps_system_id or "",
         "ps_governed": bool(row.ps_system_id),
+        # The attribute probe (unblocks L3): what Prepare did, and the recorded answer
+        # with its runbook row. Statuses and attribute names only — nothing secret.
+        "attr_probe": spire_lab_service.attr_probe_view(row),
         "ps_platform": spire_lab_service.ps_platform(),
         "k8s_workload_user": spire_lab_service.K8S_WORKLOAD_USER,
         "k8s_jwt_svid_ttl": spire_lab_service.K8S_JWT_SVID_TTL,
@@ -242,6 +245,17 @@ def list_labs(db: Session = Depends(get_db),
     _require_enabled()
     rows = spire_lab_service.list_labs(db)
     return [_shape(r) for r in rows if r.status != "deleted" and _visible(r, user)]
+
+
+@router.get("/attr-probe")
+def latest_attr_probe(db: Session = Depends(get_db),
+                      user: User = Depends(require_permission("cloud_function", "read"))):
+    """The most recent recorded attribute-probe answer on a lab this user can see, with
+    the runbook's meaning and next step — what L3 cites. ``{"answer": null}`` when no
+    lab has recorded one. Declared before ``/{lab_id}`` so the path is not read as an id."""
+    _require_enabled()
+    return {"answer": spire_lab_service.latest_attr_probe(
+        db, visible=lambda r: r.status != "deleted" and _visible(r, user))}
 
 
 @router.get("/options")
@@ -529,10 +543,10 @@ def ps_register(lab_id: str, db: Session = Depends(get_db),
 
     **Creates no managed account**, deliberately — the plugin discovers its accounts as
     SPIRE registration entries, and one made here would move the eleven-in-eight-out count
-    the lab asserts on. Two steps still need a human and the response names both: the
-    functional account (whose DSS-key field holds the administrative PKCS#12, which this
-    dashboard never reads) and the ``SpiffeTrustDomain`` attribute (for which no attribute
-    API exists here, and whose behaviour is the open question the lab was built to answer).
+    the lab asserts on. The functional account still needs a human (its DSS-key field holds
+    the administrative PKCS#12, which this dashboard never reads); the ``SpiffeTrustDomain``
+    attribute is Prepare probe's (``/{lab_id}/attr-probe``), the setup of the open question
+    the lab was built to answer.
     """
     _require_enabled()
     _visible_or_404(db, lab_id, user)
@@ -601,6 +615,51 @@ def upgrade_lab(lab_id: str, db: Session = Depends(get_db),
         return spire_lab_service.start_upgrade(db, lab_id=lab_id, created_by=user.username)
     except SpireLabError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/{lab_id}/attr-probe")
+def prepare_attr_probe(lab_id: str, db: Session = Depends(get_db),
+                       user: User = Depends(require_permission("cloud_function", "write"))):
+    """Prepare the attribute probe: ``SpiffeTrustDomain = <trust domain>`` on the lab's
+    managed system — the type and value created if the tenant has neither — assigned and
+    read back. The request carries nothing; every value comes from the lab row."""
+    _require_enabled()
+    _visible_or_404(db, lab_id, user)
+    try:
+        return spire_lab_service.start_attr_probe(db, lab_id=lab_id,
+                                                  created_by=user.username)
+    except SpireLabError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class AttrProbeAnswer(BaseModel):
+    outcome: str
+    line: str = ""
+    tilde_in_account_name: str = "not_tried"
+    at_in_audience_label: str = "not_tried"
+    pem_fits: str = "not_tried"
+
+
+@router.post("/{lab_id}/attr-probe/answer")
+def record_attr_probe_answer(lab_id: str, req: AttrProbeAnswer,
+                             db: Session = Depends(get_db),
+                             user: User = Depends(require_permission("cloud_function",
+                                                                     "write"))):
+    """Record what Verify Functional Account's "Attributes received:" line said — one of
+    the runbook's three rows — plus §5's two side observations. Audited."""
+    _require_enabled()
+    _visible_or_404(db, lab_id, user)
+    side = {k: getattr(req, k) for k in spire_lab_service.ATTR_PROBE_SIDE}
+    try:
+        out = spire_lab_service.record_attr_probe_answer(
+            db, lab_id=lab_id, outcome=req.outcome, line=req.line, side=side,
+            answered_by=user.username)
+    except SpireLabError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    job_service.log_audit(db, user.username, "spire_lab.attr_probe_answer",
+                          target_vm=f"spire_lab:{lab_id}",
+                          details={"outcome": req.outcome, **side})
+    return out
 
 
 @router.delete("/{lab_id}/ps-register")

@@ -159,7 +159,8 @@ deterministic are named rather than guessed at:
 |---|---|---|
 | Asset + **Managed System** on `SPIFFE SVID` at port 8081 | **Govern** | deterministic: the address, the port and the platform are all known |
 | **Functional Account** whose *name is a SPIFFE ID* (`spiffe://<trust-domain>/password-safe/admin`), PKCS#12 as its DSS key | you | its DSS-key field holds the administrative credential, and creating it here would mean the dashboard reading that credential out of Secrets Safe to push it back in. `spire-admin-identity.yml` writes it there under `no_log`; nothing in the app ever reads it |
-| **`SpiffeTrustDomain`** attribute on the managed system | you | the plugin takes its whole configuration from BeyondInsight *attributes*, there is no attribute API in this codebase, and whether the gateway populates them for a plugin action **has never been observed** — which is the question this lab exists to answer. A writer built now would be betting on it |
+| **`SpiffeTrustDomain`** attribute on the managed system | **Prepare probe** | the plugin takes its whole configuration from BeyondInsight *attributes*, and whether the gateway populates them for a plugin action **has never been observed**, which is the question this lab exists to answer. Setting the attribute is the probe's setup, not a bet on the answer. It is created if the tenant lacks it, assigned, and read back |
+| **The answer**: Verify Functional Account's `Attributes received:` line | you | there is no API for running Verify Functional Account or reading its activity record. Record what the line said on the probe panel; the panel shows that answer's next step |
 
 **No managed account is created, deliberately.** The plugin's accounts are SPIRE
 registration entries and they arrive by *discovery*; one created here would sit beside
@@ -169,7 +170,8 @@ caught a real plugin bug.
 The **Onboarding** panel still resolves every value, and after Govern it shows what ran
 and what is left. `SpiffeTrustBundlePem` comes from the **Bundle** button.
 
-Then run *Verify Functional Account* and read the `Attributes received:` line.
+Then press **Prepare probe**, run *Verify Functional Account*, read the
+`Attributes received:` line, and record it on the same panel.
 [The standup runbook](../runbooks/spire-lab-standup.md) §5 is that procedure and what each
 answer means.
 

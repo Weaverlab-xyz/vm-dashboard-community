@@ -71,6 +71,7 @@ HANDLED_TYPES = (
     "certca_provision", "certca_decommission", "cert_ps_register",
     "spirelab_provision", "spirelab_decommission", "spirelab_k8s_link",
     "spirelab_ps_register", "spirelab_jwt_bundle", "spirelab_upgrade", "spirelab_federate",
+    "spirelab_attr_probe",
     "workload_k8s_token", "workload_cloud_credential",
     "ansible_cloud_run", "ansible_local", "epml_sync",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
@@ -244,6 +245,9 @@ LIGHT_TYPES = (
     # Re-applies the install, ports and federation stages as awaited `ansible_local`
     # children, then a `docker exec`. LIGHT for the same deadlock reason.
     "spirelab_federate",
+    # A handful of Password Safe REST calls (find or create one attribute, assign it, read
+    # it back) and a row update. No local process, no terraform, no children.
+    "spirelab_attr_probe",
     # One or two HTTPS calls to Workload Credentials and a row update. No local process, no
     # terraform, no children. The one tier note here that is about COST rather than
     # concurrency: `generate` is BILLED PER ISSUANCE, so this job must never be retried
@@ -622,6 +626,13 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             await spire_lab_service.run_federation(
                 db, lab_id=meta["lab_id"], job_id=job_id,
                 action=meta.get("action", "federate"))
+        elif job_type == "spirelab_attr_probe":
+            # The attribute probe's setup: SpiffeTrustDomain on the lab's managed system,
+            # created if the tenant lacks it, assigned and read back. Verify Functional
+            # Account, which reads the answer, has no API and stays with the operator.
+            from .services import spire_lab_service
+            await spire_lab_service.run_attr_probe(
+                db, lab_id=meta["lab_id"], job_id=job_id)
         elif job_type == "workload_cloud_credential":
             # Mints, revokes or retires a dynamic AWS/Azure credential. `issue` is the
             # metered call; `revoke` is refused up front on AWS, where STS will not withdraw

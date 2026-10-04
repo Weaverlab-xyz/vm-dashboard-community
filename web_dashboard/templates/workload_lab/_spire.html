@@ -698,15 +698,69 @@
             </div>
           </template>
 
-          <div class="border border-blue-200 bg-blue-50 rounded-lg px-3 py-2 text-xs text-blue-800">
-            <p class="font-medium mb-1">Then run Verify Functional Account and read one line</p>
-            <p class="font-mono mb-1">Attributes received: system=[...] account=[...]</p>
-            <p>
-              <code>system=[SpiffeTrustDomain]</code> means the configuration model works
-              as designed. <code>system=[]</code> means it does not, and the whole
-              configuration surface has to move onto the managed system address like the
-              Certificate and Kubernetes plugins &mdash; a plugin change, not a dashboard
-              one. Either way, record it.
+          <!-- THE ATTRIBUTE PROBE (unblocks L3, docs/runbooks/spire-lab-standup.md §5).
+               Prepare is the setup: SpiffeTrustDomain on the managed system, created if the
+               tenant lacks it, assigned, read back. The ANSWER is read by a person, because
+               Verify Functional Account has no API, and recorded here. -->
+          <div class="border border-blue-200 bg-blue-50 rounded-lg px-3 py-2 text-xs text-blue-800"
+               x-data="{ ans: { outcome: '', line: '', tilde_in_account_name: 'not_tried',
+                                at_in_audience_label: 'not_tried', pem_fits: 'not_tried' } }">
+            <p class="font-medium mb-1">The attribute probe &mdash; does the gateway hand attributes to a plugin action?</p>
+            <template x-if="onboardLab?.ps_governed">
+              <div class="space-y-2">
+                <div class="flex items-center gap-2">
+                  <button @click="prepareProbe(onboardLab)" :disabled="busy"
+                          class="px-2 py-1 rounded bg-blue-600 text-white disabled:opacity-50">
+                    <span x-text="probe()?.setup?.read_back ? 'Prepare again' : 'Prepare probe'"></span></button>
+                  <span x-show="probe()?.setup?.read_back" x-cloak>
+                    <code x-text="'SpiffeTrustDomain = ' + onboardLab.trust_domain"></code> is on the
+                    managed system (read back<span x-show="probe()?.setup?.created_type || probe()?.setup?.created_value"
+                    x-text="'; created ' + [probe()?.setup?.created_type ? 'the type' : '', probe()?.setup?.created_value ? 'the value' : ''].filter(Boolean).join(' and ')"></span>).</span>
+                  <span x-show="probe()?.setup?.error" x-cloak class="text-red-700"
+                        x-text="'Last prepare failed: ' + (probe()?.setup?.error || '')"></span>
+                </div>
+                <p>Then run <strong>Verify Functional Account</strong> on the managed system and read one line in its activity record:</p>
+                <p class="font-mono">Attributes received: system=[...] account=[...]</p>
+
+                <template x-if="probe()?.answer">
+                  <div class="border border-blue-300 bg-white rounded px-2 py-1.5 text-gray-700">
+                    <p><strong>Recorded:</strong> <code x-text="probe().outcomes[probe().answer.outcome]"></code>
+                       by <span x-text="probe().answer.answered_by"></span>,
+                       <span x-text="(probe().answer.answered_at || '').slice(0, 16).replace('T', ' ')"></span> UTC</p>
+                    <p class="mt-0.5" x-text="probe().meaning?.means"></p>
+                    <p class="mt-0.5"><strong>Next:</strong> <span x-text="probe().meaning?.next"></span></p>
+                  </div>
+                </template>
+
+                <div class="space-y-1">
+                  <p class="font-medium" x-text="probe()?.answer ? 'Record again' : 'Record what it said'"></p>
+                  <template x-for="(label, key) in (probe()?.outcomes || {})" :key="key">
+                    <label class="flex items-center gap-1.5">
+                      <input type="radio" name="attr-outcome" :value="key" x-model="ans.outcome">
+                      <code x-text="label"></code></label>
+                  </template>
+                  <input type="text" maxlength="500" x-model="ans.line"
+                         placeholder="Paste the Attributes received: line (optional)"
+                         class="w-full border border-gray-300 rounded px-2 py-1 font-mono">
+                  <div class="grid grid-cols-3 gap-2">
+                    <template x-for="obs in [['tilde_in_account_name', '~ in an account name accepted'],
+                                             ['at_in_audience_label', '@ in an audience label accepted'],
+                                             ['pem_fits', 'SpiffeTrustBundlePem holds the full PEM']]" :key="obs[0]">
+                      <label class="block"><span x-text="obs[1]"></span>
+                        <select x-model="ans[obs[0]]" class="w-full border border-gray-300 rounded px-1 py-0.5">
+                          <option value="not_tried">not tried</option>
+                          <option value="yes">yes</option>
+                          <option value="no">no</option>
+                        </select></label>
+                    </template>
+                  </div>
+                  <button @click="recordProbe(onboardLab, ans)" :disabled="busy || !ans.outcome"
+                          class="px-2 py-1 rounded bg-blue-600 text-white disabled:opacity-50">Record answer</button>
+                </div>
+              </div>
+            </template>
+            <p x-show="!onboardLab?.ps_governed" x-cloak>
+              Press <strong>Govern</strong> first: the attribute goes on the managed system.
             </p>
             <p class="mt-1">
               After that run <strong>Discovery Accounts</strong> and check the
@@ -806,6 +860,7 @@ function spireLabPage() {
 
     onboardOpen: false,
     onboard: null,
+    onboardLab: null,
 
     bundleOpen: false,
     bundlePem: '',
@@ -1161,8 +1216,41 @@ function spireLabPage() {
     async showOnboarding(lab) {
       try {
         this.onboard = await API.get('/api/spire-lab/' + lab.id + '/onboarding');
+        this.onboardLab = lab;
         this.onboardOpen = true;
       } catch (e) { this.notify(e.message, 'error'); }
+    },
+
+    probe() {
+      return this.onboardLab ? this.onboardLab.attr_probe : null;
+    },
+
+    async _refreshOnboardLab() {
+      await this.load();
+      const id = this.onboardLab && this.onboardLab.id;
+      this.onboardLab = (this.labs || []).find(l => l.id === id) || this.onboardLab;
+      if (id) this.onboard = await API.get('/api/spire-lab/' + id + '/onboarding');
+    },
+
+    async prepareProbe(lab) {
+      this.busy = true;
+      try {
+        await API.post('/api/spire-lab/' + lab.id + '/attr-probe', {});
+        this.notify('Preparing the probe — follow it in Jobs, then reopen this panel.');
+      } catch (e) {
+        this.notify('Could not prepare the probe: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+
+    async recordProbe(lab, ans) {
+      this.busy = true;
+      try {
+        await API.post('/api/spire-lab/' + lab.id + '/attr-probe/answer', ans);
+        this.notify('Answer recorded.');
+        await this._refreshOnboardLab();
+      } catch (e) {
+        this.notify('Could not record the answer: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
     },
 
     onboardFields() {
@@ -1180,7 +1268,7 @@ function spireLabPage() {
           hint: 'Its passphrase, generated on the VM so it never passed through this dashboard.' },
         { label: 'Managed system attribute', value: o.attribute
           ? (o.attribute.name + ' = ' + o.attribute.value) : '',
-          hint: 'Define the attribute type first, then set it on the managed system.' },
+          hint: 'Prepare probe (below) sets this on the managed system, creating the type and value if this tenant has neither.' },
         { label: 'Administrative SVID expires', value: o.admin_svid_expires_at || 'unknown',
           hint: 'What SPIRE actually granted, which is shorter than what was asked for — ca_ttl caps the mint. Past it, everything fails PERMISSION_DENIED.' },
       ];
