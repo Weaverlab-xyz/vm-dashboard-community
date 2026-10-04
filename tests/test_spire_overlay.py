@@ -257,6 +257,30 @@ def test_the_server_enables_every_attestor_an_agent_config_can_use():
     assert join <= server, f"the server does not enable {join - server}"
 
 
+# ── L5: the two servers' settings in line ────────────────────────────────────
+
+def test_the_lab_server_sets_an_issuer_too():
+    """The dashboard's server signs with ${SPIRE_JWT_ISSUER}; the lab's with its OIDC
+    provider's URL. Neither may lose the line."""
+    lab = _lab()
+    conf = next(t["ansible.builtin.copy"]["content"] for t in lab["tasks"]
+                if str((t.get("ansible.builtin.copy") or {}).get("dest", "")).endswith(
+                    "server.conf"))
+    assert 'jwt_issuer = "{{ jwt_issuer }}"' in conf
+    assert _hcl_value(_text(*_SERVER_CONF), "jwt_issuer") == "${SPIRE_JWT_ISSUER}"
+
+
+def test_disk_stays_the_key_manager_and_each_kms_is_one_uncomment_away():
+    conf = _text(*_SERVER_CONF)
+    keymanagers = {name for kind, name in _active_plugins(conf) if kind == "KeyManager"}
+    assert keymanagers == {"disk"}, "exactly one KeyManager may be active"
+    commented = "\n".join(ln.lstrip()[1:] for ln in conf.splitlines()
+                          if ln.lstrip().startswith("#"))
+    for kms in ("aws_kms", "azure_key_vault", "gcp_kms"):
+        assert f'KeyManager "{kms}"' in commented, kms
+    assert "Protect the SPIRE server's CA key" in conf, "the comment must point at the doc"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0

@@ -138,7 +138,11 @@ def _install_vars(row: SpireLab) -> dict:
            # ca_ttl CAPS every SVID the server issues, including the admin credential:
            # `-ttl 720h` against the 168h default yields ~7 days and SPIRE says so
            # rather than failing. Raising it here is how a lab outlives a week.
-           "ca_ttl": _cfg("spire_lab_ca_ttl", "168h")}
+           "ca_ttl": _cfg("spire_lab_ca_ttl", "168h"),
+           # The `iss` every JWT-SVID carries: the OIDC provider's own URL, as the Helm
+           # mode's jwtIssuer already is. k3s matches it exactly against the issuer it
+           # was given; a token without it is refused.
+           "jwt_issuer": issuer_url_for(row)}
     if row.admin_spiffe_id:
         out["admin_spiffe_id"] = row.admin_spiffe_id
     return out
@@ -2064,7 +2068,8 @@ def _docker_server_vars(row: SpireLab) -> dict:
            "oidc_port": OIDC_PORT,
            "spire_version": _cfg("spire_lab_version", "1.15.3"),
            **_pin_vars(),
-           "ca_ttl": _cfg("spire_lab_ca_ttl", "168h")}
+           "ca_ttl": _cfg("spire_lab_ca_ttl", "168h"),
+           "jwt_issuer": issuer_url_for(row)}
     if row.admin_spiffe_id:
         out["admin_spiffe_id"] = row.admin_spiffe_id
     return out

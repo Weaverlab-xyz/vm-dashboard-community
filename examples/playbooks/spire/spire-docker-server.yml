@@ -44,6 +44,7 @@
 #   bind_port: 8081
 #   oidc_port: 8443
 #   ca_ttl: 168h
+#   jwt_issuer: ""                        # the OIDC provider's issuer URL; blank = no `iss`
 #   spire_version: 1.15.3                 # the image tag, for both containers
 #   spire_server_image / spire_oidc_image # full image refs; override the digest table
 #   spire_allow_unpinned: false           # true = take a tag-only image
@@ -60,6 +61,7 @@
     ca_ttl: "168h"
     default_x509_svid_ttl: "1h"
     default_jwt_svid_ttl: "5m"
+    jwt_issuer: ""
     spire_version: "1.15.3"
     spire_root: /opt/spire
     spire_data: /opt/spire/data
@@ -177,6 +179,11 @@
               ca_ttl       = "{{ ca_ttl }}"
               default_x509_svid_ttl = "{{ default_x509_svid_ttl }}"
               default_jwt_svid_ttl  = "{{ default_jwt_svid_ttl }}"
+              # The `iss` claim on every JWT-SVID. Blank leaves it unset. The lab sets it
+              # to its OIDC Discovery Provider's URL, character for character: a
+              # Kubernetes JWT authenticator refuses a token whose `iss` is not its
+              # issuer.url, so without it k3s-spiffe-auth.yml accepts nothing.
+              jwt_issuer = "{{ jwt_issuer }}"
 
               # An entry-level admin=true does NOT apply to an SVID produced by
               # "spire-server x509 mint". Only admin_ids grants administrative rights
