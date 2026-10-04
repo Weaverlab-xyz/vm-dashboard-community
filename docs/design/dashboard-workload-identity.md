@@ -200,6 +200,15 @@ labs come after that.
 
 ### L5. Bring the two servers' settings in line
 
+**Built.** The vm and docker plays write `jwt_issuer` from a new var, and the lab service
+passes `issuer_url_for(row)`, the URL the OIDC provider publishes and the Helm mode already
+used. Without it, those two modes signed tokens with no `iss`, which a Kubernetes JWT
+authenticator refuses, so their k3s link most likely accepted nothing. That reading comes
+from the Kubernetes spec, not a live lab. `server.conf` carries commented `aws_kms`,
+`azure_key_vault` and `gcp_kms` blocks, and
+[the identity doc](../remote-agents/dashboard-identity.md#protect-the-spire-servers-ca-key)
+says when and how to switch.
+
 - **`jwt_issuer`**: set on the dashboard's server (Slice 1). The lab's server should set
   it too, so the lab's tokens look like what a customer's federated trust domain issues.
   `tests/test_spire_overlay.py` already holds the two configs in step and should hold this.
@@ -340,7 +349,7 @@ held. Username, domain and path stay in `shares.yaml`.
 3. ~~**Slice 3:** AWS and GCP (configuration and docs, plus the `packer_service` fix), then
    Azure (the `ClientAssertionCredential` branch).~~ Built.
 4. ~~**Slice 4:** on-prem k3s through the dashboard's SVID.~~ Built.
-5. **L3, L4 and L5:** after the lab answers the Password Safe attribute question.
+5. **L3 and L4:** after the lab answers the Password Safe attribute question. ~~L5~~ built.
 6. **Slice 5:** ~~agent file-share credentials~~ built; the ECS and Cloud Run runners remain.
 
 ## Not verified

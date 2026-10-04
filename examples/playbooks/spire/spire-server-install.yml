@@ -38,6 +38,7 @@
 #   federation_port: 8082                 # the bundle endpoint, for SPIFFE federation
 #   ca_ttl: 168h
 #   admin_spiffe_id: ""                 # default spiffe://<trust_domain>/password-safe/admin
+#   jwt_issuer: ""                      # the OIDC provider's issuer URL; blank = no `iss`
 - name: Install a SPIRE Server
   hosts: all
   become: true
@@ -59,6 +60,7 @@
     ca_ttl: "168h"
     default_x509_svid_ttl: "1h"
     default_jwt_svid_ttl: "5m"
+    jwt_issuer: ""
     admin_spiffe_id: ""
     spire_root: /opt/spire
     spire_data: /opt/spire/data
@@ -233,6 +235,11 @@
               ca_ttl       = "{{ ca_ttl }}"
               default_x509_svid_ttl = "{{ default_x509_svid_ttl }}"
               default_jwt_svid_ttl  = "{{ default_jwt_svid_ttl }}"
+              # The `iss` claim on every JWT-SVID. Blank leaves it unset. The lab sets it
+              # to its OIDC Discovery Provider's URL, character for character: a
+              # Kubernetes JWT authenticator refuses a token whose `iss` is not its
+              # issuer.url, so without it k3s-spiffe-auth.yml accepts nothing.
+              jwt_issuer = "{{ jwt_issuer }}"
 
               # An entry-level admin=true does NOT apply to an SVID produced by
               # "spire-server x509 mint". Only admin_ids grants administrative rights
