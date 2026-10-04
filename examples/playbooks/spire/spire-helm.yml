@@ -18,11 +18,14 @@
 # published port with the expected Host, failing with the fix if either is wrong. Extra
 # or corrected values go in `helm_values_extra` without editing this file.
 #
-# EXPOSURE. Two LoadBalancer Services of this play's own, on k3s's built-in ServiceLB,
+# EXPOSURE. Three LoadBalancer Services of this play's own, on k3s's built-in ServiceLB,
 # which binds the NODE's address: tcp/8081 → the server (Password Safe, and agents on
-# other hosts such as the k3s-link node, dial it exactly as in `vm` mode) and tcp/8443 →
-# the OIDC provider (the dashboard fetches JWKS from it). Their selectors and target
-# ports are read from the chart's own workloads rather than guessed.
+# other hosts such as the k3s-link node, dial it exactly as in `vm` mode), tcp/8443 →
+# the OIDC provider (the dashboard fetches JWKS from it), and tcp/8082 → the server's
+# federation bundle endpoint (https_spiffe, TLS with the server's own SVID, so nothing
+# may terminate it in between; the dashboard's SPIRE server fetches the lab's bundle
+# from it once the lab is federated). Their selectors and target ports are read from the
+# chart's own workloads rather than guessed.
 #
 # extra_vars:
 #   trust_domain: weaverlab.test          # REQUIRED
@@ -32,6 +35,7 @@
 #   ca_ttl: 168h
 #   bind_port: 8081
 #   oidc_port: 8443
+#   federation_port: 8082                 # the bundle endpoint, as in the vm and docker modes
 #   helm_version: 3.16.2
 #   helm_sha256: ""                       # the tarball's SHA-256 from get.helm.sh (*.sha256sum)
 #   spire_chart_version: 0.30.2           # pinned: ships SPIRE 1.15.3, as the other modes do
@@ -52,6 +56,7 @@
     default_jwt_svid_ttl: "5m"
     bind_port: 8081
     oidc_port: 8443
+    federation_port: 8082
     helm_version: "3.16.2"
     # Not pinned by default: Helm publishes its checksums only on get.helm.sh, and no
     # value is shipped here that was not checked against that file. Set it to verify.
@@ -183,6 +188,13 @@
             defaultJwtSvidTTL: "{{ default_jwt_svid_ttl }}"
             adminIDs:
               - "{{ _admin_id }}"
+            # The bundle endpoint, always on as in the vm and docker modes: public keys
+            # only. federation.tls.spire (the chart's default) makes it https_spiffe.
+            federation:
+              enabled: true
+              bundleEndpoint:
+                address: "0.0.0.0"
+                port: {{ federation_port }}
             controllerManager:
               enabled: true
               # The provider's serving certificate is an SVID from this ClusterSPIFFEID.
@@ -249,6 +261,16 @@
           take `spire-server.adminIDs` on this version. The administrative credential would
           mint but be refused. Set the correct key through helm_values_extra and re-run.
 
+    - name: Confirm the bundle endpoint reached the server configuration
+      ansible.builtin.assert:
+        that:
+          - "'bundle_endpoint' in server_cm.stdout"
+          - "'https_spiffe' in server_cm.stdout"
+        fail_msg: >-
+          The rendered spire-server config has no https_spiffe bundle_endpoint, so the
+          chart did not take `spire-server.federation` on this version and the lab cannot
+          be federated. Set the correct keys through helm_values_extra and re-run.
+
     - name: Read the server workload's selector and API port
       ansible.builtin.command: >-
         k3s kubectl -n spire-server get statefulset spire-server -o json
@@ -269,6 +291,11 @@
               | selectattr('name', 'equalto', 'spire-server') | first).ports
              | selectattr('containerPort', 'equalto', 8081) | map(attribute='containerPort')
              | first | default(8081) }}
+        _federation_target: >-
+          {{ ((server_sts.stdout | from_json).spec.template.spec.containers
+              | selectattr('name', 'equalto', 'spire-server') | first).ports
+             | selectattr('name', 'equalto', 'federation') | map(attribute='containerPort')
+             | first | default(federation_port) }}
         _oidc_sel: "{{ ((oidc_deploy.stdout | from_json)['items'] | first).spec.selector.matchLabels }}"
         _oidc_port: >-
           {{ (((oidc_deploy.stdout | from_json)['items'] | first).spec.template.spec.containers
@@ -296,17 +323,26 @@
             type: LoadBalancer
             selector: {{ _oidc_sel | to_json }}
             ports: [{name: https, port: {{ oidc_port }}, targetPort: {{ _oidc_port | int }}}]
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: {name: spire-federation-lab, namespace: spire-server}
+          spec:
+            type: LoadBalancer
+            selector: {{ _server_sel | to_json }}
+            ports: [{name: federation, port: {{ federation_port }}, targetPort: {{ _federation_target | int }}}]
 
     - name: Apply the lab Services
       ansible.builtin.command: k3s kubectl apply -f /opt/spire/lab-services.yaml
       register: svc_apply
       changed_when: "'configured' in svc_apply.stdout or 'created' in svc_apply.stdout"
 
-    - name: Wait for the API port on the node
+    - name: Wait for the API and bundle endpoint ports on the node
       ansible.builtin.wait_for:
-        port: "{{ bind_port }}"
+        port: "{{ item }}"
         host: 127.0.0.1
         timeout: 180
+      loop: ["{{ bind_port }}", "{{ federation_port }}"]
 
     - name: Health check through the CLI prefix the shared plays use
       ansible.builtin.command: >-
@@ -350,5 +386,6 @@
           - "SPIRE on k3s for trust domain '{{ trust_domain }}' (release spire in spire-mgmt)."
           - "Server API:      tcp/{{ bind_port }} on this node (Service spire-server-lab)."
           - "OIDC provider:   {{ _issuer }} → tcp/{{ oidc_port }} (Service spire-oidc-lab)."
+          - "Bundle endpoint: https_spiffe on tcp/{{ federation_port }} (Service spire-federation-lab)."
           - "CLI: k3s kubectl exec -n spire-server spire-server-0 -c spire-server -- /opt/spire/bin/spire-server <command>"
           - "In-cluster workloads get SVIDs through the CSI driver; register them with ClusterSPIFFEID."

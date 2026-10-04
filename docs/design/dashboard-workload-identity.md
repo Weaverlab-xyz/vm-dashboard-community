@@ -189,7 +189,7 @@ a bundle endpoint on both servers) would let a lab workload be authorized by the
 dashboard and the reverse. That is a core SPIFFE capability the lab cannot show today, and
 it is the honest demonstration for customers who run more than one trust domain.
 
-**Built** (vm and docker modes). The servers federate: both serve a bundle endpoint on tcp/8082
+**Built** (every lab mode). The servers federate: both serve a bundle endpoint on tcp/8082
 (`https_spiffe`). **Federate** on a vm or docker lab re-applies the lab's install, opens
 8082 on its ACL and host firewall, and creates the lab's relationship
 (`spire-federation.yml`), then the dashboard's (`dashboard_spire.federate`). Each is seeded
@@ -197,8 +197,12 @@ with the other's current bundle and refreshed once to prove the fetch. Decommiss
 unfederates. The workloads federate too: the lab's k8s workload gets the dashboard in its
 `federatesWith`, and agent cells on the dashboard's trust domain get the lab, at mint or
 when the lab federates. `spire-federation-proof.yml` proves it on the linked k3s node, as
-the workload. **Not built:** Helm-mode labs, and a dashboard-run proof on a cell host,
-since the dashboard runs no playbooks there and the operator runs it by hand.
+the workload. A Helm-mode lab serves the
+endpoint from the chart (`spire-server.federation`) through a node Service, and declares
+its relationship as a `ClusterFederatedTrustDomain`: the chart's controller manager deletes
+any relationship no resource names, so the CLI path would be undone. **Not built:** a
+dashboard-run proof on a cell host, since the dashboard runs no playbooks there and the
+operator runs it by hand.
 
 ### L5. Bring the two servers' settings in line
 

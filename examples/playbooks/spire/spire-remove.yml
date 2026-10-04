@@ -11,7 +11,8 @@
 #   vm      stops and disables spire-server and spire-oidc-provider, removes their units,
 #           the socket directory and the `spire` / `spire-oidc` users and groups
 #   docker  `docker compose down -v` — containers, and the socket volume
-#   k8s     `helm uninstall` of spire and spire-crds, and this lab's two Services
+#   k8s     `helm uninstall` of spire and spire-crds, this lab's three Services and its
+#           ClusterFederatedTrustDomains
 # and in every mode deletes /opt/spire — INCLUDING THE CA KEY AND THE DATASTORE. That is
 # the point: a retired trust domain whose signing key survives on disk can be revived.
 #
@@ -89,10 +90,20 @@
         - compose_stat.stat.exists
 
     # ── k8s ─────────────────────────────────────────────────────────────────
+    # Cluster-scoped and not Helm's (spire-federation.yml applies them), so the chart
+    # uninstall would leave them for the CRDs chart to take; withdraw them first.
+    - name: Remove the lab's federation declarations
+      ansible.builtin.command: >-
+        k3s kubectl delete clusterfederatedtrustdomains --all --ignore-not-found
+      register: cftd_delete
+      changed_when: "'deleted' in cftd_delete.stdout"
+      failed_when: false
+      when: deployment_mode == 'k8s'
+
     - name: Remove this lab's Services
       ansible.builtin.command: >-
         k3s kubectl delete -n spire-server service spire-server-lab spire-oidc-lab
-        --ignore-not-found
+        spire-federation-lab --ignore-not-found
       register: svc_delete
       changed_when: "'deleted' in svc_delete.stdout"
       when: deployment_mode == 'k8s'
