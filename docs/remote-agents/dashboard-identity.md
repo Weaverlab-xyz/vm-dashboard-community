@@ -176,6 +176,13 @@ every key rotation (weekly by default).
 These documents carry public keys and nothing else. Do not put them behind SSO: every cloud
 that trusts the issuer would stop accepting the dashboard's tokens at once.
 
+The SPIRE server also serves its trust bundle on **tcp/8082**, a SPIFFE bundle endpoint.
+That is a different thing from the issuer: another SPIRE server fetches it once a
+[Workload Lab is federated](../workload-lab/spiffe.md#federating-with-the-dashboard) with
+this one. `docker-compose.spire.yml` publishes it directly, not through Caddy, because it is
+TLS with the server's own SVID. Firewall it to the lab hosts, or leave it closed if you
+federate nothing.
+
 ## What it does not protect against
 
 The app administers the SPIRE server, so anyone who compromises the app can mint tokens

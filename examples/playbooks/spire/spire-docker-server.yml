@@ -42,6 +42,7 @@
 #   trust_domain: weaverlab.test          # REQUIRED
 #   admin_spiffe_id: ""                   # default spiffe://<td>/password-safe/admin
 #   bind_port: 8081
+#   federation_port: 8082                 # the bundle endpoint, for SPIFFE federation
 #   oidc_port: 8443
 #   ca_ttl: 168h
 #   spire_version: 1.15.3                 # the image tag, for both containers
@@ -56,6 +57,7 @@
     trust_domain: ""
     admin_spiffe_id: ""
     bind_port: 8081
+    federation_port: 8082
     oidc_port: 8443
     ca_ttl: "168h"
     default_x509_svid_ttl: "1h"
@@ -182,6 +184,16 @@
               # "spire-server x509 mint". Only admin_ids grants administrative rights
               # to a minted SVID, which is what the plugin authenticates with.
               admin_ids = ["{{ _admin_id }}"]
+
+              # SPIFFE federation: this server's trust bundle, served over https_spiffe
+              # (TLS with the server's own SVID) to the dashboard's SPIRE server once the
+              # lab is federated with it. Public keys only.
+              federation {
+                  bundle_endpoint {
+                      address = "0.0.0.0"
+                      port    = {{ federation_port }}
+                  }
+              }
           }
 
           plugins {
@@ -226,6 +238,7 @@
               command: ["-config", "{{ spire_root }}/conf/server.conf"]
               ports:
                 - "{{ bind_port }}:{{ bind_port }}"
+                - "{{ federation_port }}:{{ federation_port }}"
               tmpfs:
                 - /tmp:rw,noexec,nosuid,nodev,size=64m
               volumes:

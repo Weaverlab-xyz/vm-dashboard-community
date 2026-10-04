@@ -480,6 +480,44 @@ journalctl -u k3s | grep -i 'authentication\|oidc\|jwt'
 The full argument, including the four traps the playbooks encode, is in
 [the design note](../design/workload-k8s-short-lived-token.md).
 
+## Federating with the dashboard
+
+**Preview, vm and docker modes.** A lab's trust domain can be federated with the
+dashboard's own SPIRE server ([the dashboard's SPIFFE identity](../remote-agents/dashboard-identity.md)),
+two trust domains that each trust the other. That is the setup customers who run more than
+one trust domain ask about. Press **Federate** on an available lab's row.
+
+Each SPIRE server serves its trust bundle on **tcp/8082** from a SPIFFE bundle endpoint
+(`https_spiffe`, which is TLS with the server's own SVID). Each holds a federation
+relationship naming the other's endpoint, so each fetches the other's bundle and keeps it
+current through key rotation on its own. The job runs in this order:
+
+1. **The lab's half.** It re-applies the lab's install playbook, which adds the bundle
+   endpoint to a lab built before this feature and restarts its server. It opens tcp/8082
+   on the lab's ACL and host firewall to the lab's existing sources, then runs
+   `spire-federation.yml`. That playbook creates the relationship, seeded with the
+   dashboard's current bundle, and refreshes it once to prove the lab can fetch.
+2. **The dashboard's half.** It creates the mirror relationship on the dashboard's SPIRE
+   server, seeded with the bundle **Refresh keys** captured, and refreshes it once.
+
+It needs both directions open:
+
+| From | To | Port | Opened by |
+|---|---|---|---|
+| the lab host | the dashboard's SPIRE host | tcp/8082 | you: `docker-compose.spire.yml` publishes it (`SPIRE_FEDERATION_PORT`); firewall it to the lab hosts |
+| the dashboard host | the lab host | tcp/8082 | the lab's ACL, to its existing sources, which must include the dashboard's egress, as they already do for 8443 |
+
+A failed refresh names the direction that is closed. **Unfederate** (the **Federated ✓**
+button) removes both relationships and both federated bundles. Decommissioning a lab
+removes the dashboard's relationship with it.
+
+The playbook is `spire-federation.yml`. Upload it with the rest of the `spire-*.yml` set on
+the Storage page. Bundles are public keys, so nothing secret moves in either direction.
+
+Not yet: Helm-mode labs, where the bundle endpoint runs inside k3s and nothing exposes it,
+and workloads that use the federation (`-federatesWith`) along with the step that proves
+them. Both are next. Neither SPIRE server has fetched the other's bundle in a live run yet.
+
 ## Boundaries
 
 - **No revocation.** Deleting a registration entry stops renewal; an SVID already in a

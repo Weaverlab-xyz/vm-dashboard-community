@@ -66,6 +66,10 @@ services:
       SPIRE_JWT_ISSUER: ${SPIRE_JWT_ISSUER:-}
     ports:
       - "${SPIRE_BIND_PORT:-8081}:8081"
+      # The federation bundle endpoint (server.conf). Direct, like 8081: it is TLS with
+      # the server's own SVID, which Caddy would terminate. Only a federated Workload Lab
+      # needs to reach it; firewall it to the lab hosts.
+      - "${SPIRE_FEDERATION_PORT:-8082}:8082"
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
     volumes:
