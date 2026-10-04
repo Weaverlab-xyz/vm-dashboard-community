@@ -8,7 +8,7 @@ set, an optional access role and an optional persona.
 contract, so it stays -- but the app has a fully generic OIDC login path beside the Entra
 one (`api/auth.oauth_oidc_callback`), and the value is simply whatever group identifier the
 provider's groups claim emits: an Entra group Object ID, an Okta group id, a Keycloak group
-name. User-facing prose says "identity provider", matching docs/integrations/oidc.md; only
+name. User-facing prose says "identity provider", matching docs/oidc.md; only
 identifiers carry the older name. Same split as Gateway/Jumpoint -- see
 tests/test_gateway_terminology.py.
 """

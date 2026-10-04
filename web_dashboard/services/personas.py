@@ -825,7 +825,7 @@ _SRE = Persona(
                     "afterwards — no permanent cluster-admin group.",
             target="/k8s",
             minutes=12,
-            docs="integrations/entra-k8s-federation",
+            docs="oidc/entra-k8s-federation",
             requires_flags=("k8s_management_enabled", "entitle_enabled"),
         ),
         UseCase(
@@ -856,7 +856,7 @@ _SRE = Persona(
                     "instead of per-cluster identity nobody deprovisions.",
             target="/k8s",
             minutes=12,
-            docs="integrations/entra-k8s-federation",
+            docs="oidc/entra-k8s-federation",
             requires_flags=("k8s_management_enabled",),
         ),
         UseCase(

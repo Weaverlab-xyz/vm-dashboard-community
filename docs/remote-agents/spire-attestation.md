@@ -111,7 +111,7 @@ All on **Settings → Integrations → Remote Agents**.
 | Let agents attest through SPIRE | `spire_attest_enabled` | off | Turns on `POST /api/agent/attest`, the **Migrate to SPIRE** button and the banner |
 | SPIRE server container | `spire_server_container` | `vmdash-spire-server` | The container the dashboard drives with `docker exec` for entries, join tokens and the daily trust-bundle re-read |
 | Release dashboard-held credentials only to SPIRE-attested agents | `dashboard_secrets_require_spire` | off | Hypervisor credentials, Gateway deploy keys, Config-Management bundles and file-share passwords go only to agents whose key came from a SPIRE attestation |
-| Give the dashboard its own SPIFFE identity | `dashboard_spiffe_identity_enabled` | off | Not needed for attestation; see [The dashboard's own SPIFFE identity](dashboard-identity.md) |
+| Give the dashboard its own SPIFFE identity | `dashboard_spiffe_identity_enabled` | off | Not needed for attestation; see [The dashboard's own SPIFFE identity](../oidc/dashboard-identity.md) |
 
 The overlay's environment variables: `SPIRE_TRUST_DOMAIN` (required), `SPIRE_BIND_PORT`
 (8081), `SPIRE_FEDERATION_PORT` (8082) and `SPIRE_JWT_ISSUER` (only for the dashboard's own

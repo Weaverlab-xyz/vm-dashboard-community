@@ -5,7 +5,7 @@
    fully generic OIDC login path beside the Entra one (api/auth.oauth_oidc_callback) and the
    field takes whatever identifier the provider's groups claim emits -- an Entra group Object
    ID, an Okta group id, a Keycloak group name. Same identifier-vs-prose split as
-   Gateway/Jumpoint; the vocabulary matches docs/integrations/oidc.md.
+   Gateway/Jumpoint; the vocabulary matches docs/oidc.md.
 
    Macro imported here, not inherited -- see the note in _users.html. #}
 {% from "partials/permission_matrix.html" import permission_matrix %}
@@ -16,7 +16,7 @@
     Map groups from your identity provider onto dashboard workgroups, a permission set and
     an access role. Members of a mapped group are provisioned automatically on first login
     &mdash; no manual user creation needed.
-    <a href="/docs/integrations/oidc" target="_blank" class="text-blue-600 hover:underline">Set up single sign-on</a>.
+    <a href="/docs/oidc" target="_blank" class="text-blue-600 hover:underline">Set up single sign-on</a>.
   </p>
 
   <!-- Toast -->

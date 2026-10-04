@@ -494,7 +494,7 @@ The full argument, including the four traps the playbooks encode, is in
 ## Federating with the dashboard
 
 **Preview, every deployment mode.** A lab's trust domain can be federated with the
-dashboard's own SPIRE server ([the dashboard's SPIFFE identity](../remote-agents/dashboard-identity.md)),
+dashboard's own SPIRE server ([the dashboard's SPIFFE identity](../oidc/dashboard-identity.md)),
 two trust domains that each trust the other. That is the setup customers who run more than
 one trust domain ask about. Press **Federate** on an available lab's row.
 

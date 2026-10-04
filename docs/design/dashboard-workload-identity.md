@@ -46,7 +46,7 @@ Everything else depends on this slice.
 (`/spiffe/.well-known/openid-configuration`, `/spiffe/keys`, `/api/spiffe-identity`); the
 `_spiffe_token_loop` in `main.py`; `jwt_issuer` and the `spiffe_tokens` volume in the
 overlay; `/spiffe/*` on the agent gateway. Settings → Remote Agents. Operator guide:
-[The dashboard's own SPIFFE identity](../remote-agents/dashboard-identity.md). Two
+[The dashboard's own SPIFFE identity](../oidc/dashboard-identity.md). Two
 differences from the sketch below, both deliberate:
 
 - **Its own loop, every minute,** not a step in the hourly SPIRE refresh loop. Fifteen-minute
@@ -222,7 +222,7 @@ used. Without it, those two modes signed tokens with no `iss`, which a Kubernete
 authenticator refuses, so their k3s link most likely accepted nothing. That reading comes
 from the Kubernetes spec, not a live lab. `server.conf` carries commented `aws_kms`,
 `azure_key_vault` and `gcp_kms` blocks, and
-[the identity doc](../remote-agents/dashboard-identity.md#protect-the-spire-servers-ca-key)
+[the identity doc](../oidc/dashboard-identity.md#protect-the-spire-servers-ca-key)
 says when and how to switch.
 
 - **`jwt_issuer`**: set on the dashboard's server (Slice 1). The lab's server should set
