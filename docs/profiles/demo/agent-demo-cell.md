@@ -102,7 +102,7 @@ error from the MCP client is scrubbed of anything token-shaped on its way to one
 >
 > What stays unbuilt is the *other* bridge — the SVID minting a credential **inside
 > Password Safe** via the SPIFFE SVID plugin. Whether that plugin can be configured the
-> way it was designed is still open; the SPIRE lab's
+> way it was designed is still unresolved; the SPIRE lab's
 > [attribute probe](../../runbooks/spire-lab-standup.md#5-onboard-and-read-the-one-line-that-matters)
 > is how it gets answered. And the SVID **does not authenticate to `/mcp`
 > directly** — `/mcp` has no mTLS path; the SVID is exchanged at the token endpoint for a
