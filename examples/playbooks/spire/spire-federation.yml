@@ -31,6 +31,8 @@
 #   dashboard_bundle_endpoint_url: https://dashboard.example.com:8082   # REQUIRED
 #   dashboard_bundle_json: '{"keys": [...]}'      # REQUIRED when state=present (the seed)
 #   state: present                               # absent = remove the relationship + bundle
+#   workload_spiffe_id: ""                       # the linked k3s workload; its entry gains
+#                                                #   (or loses) the dashboard in federatesWith
 #   spire_cli_prefix: ""                         # set by the lab for the docker mode
 - name: Federate the lab's SPIRE server with the dashboard's
   hosts: all
@@ -41,6 +43,7 @@
     dashboard_bundle_endpoint_url: ""
     dashboard_bundle_json: ""
     state: present
+    workload_spiffe_id: ""
     spire_root: /opt/spire
     spire_cli_prefix: ""
     # The seed goes in on stdin, so a container needs `docker exec -i`. A VM runs the binary
@@ -125,3 +128,35 @@
               - "Federated with {{ dashboard_trust_domain }} via {{ dashboard_bundle_endpoint_url }}"
               - "Endpoint SPIFFE ID: {{ _endpoint_id }}"
               - "Keys held for it: {{ federated.stdout | regex_findall('\"use\"') | length }}"
+
+    # THE WORKLOAD. A relationship lets the SERVER hold the dashboard's bundle; an entry's
+    # federatesWith is what hands it to a workload in its SVID response. `entry update`
+    # REPLACES the entry, so every field is written back from what the server reports and
+    # only federatesWith changes. Skipped when there is no linked workload, or when the
+    # entry is already in the wanted state.
+    - name: Read the workload's entry
+      when: workload_spiffe_id | length > 0
+      ansible.builtin.command: "{{ _cli }} entry show -spiffeID {{ workload_spiffe_id }} -output json"
+      register: workload_entry
+      changed_when: false
+
+    - name: Set the workload's federatesWith
+      when:
+        - workload_spiffe_id | length > 0
+        - (workload_entry.stdout | from_json).entries | default([]) | length > 0
+        - (_have | sort) != (_want | sort)
+      vars:
+        _entry: "{{ (workload_entry.stdout | from_json).entries | first }}"
+        _have: "{{ _entry.federates_with | default([], true) | map('regex_replace', '^spiffe://', '') | list }}"
+        _want: >-
+          {{ (_have + [dashboard_trust_domain]) | unique | list if state == 'present'
+             else _have | reject('equalto', dashboard_trust_domain) | list }}
+      ansible.builtin.command:
+        cmd: >-
+          {{ _cli }} entry update -entryID {{ _entry.id }}
+          -parentID spiffe://{{ _entry.parent_id.trust_domain }}{{ _entry.parent_id.path }}
+          -spiffeID spiffe://{{ _entry.spiffe_id.trust_domain }}{{ _entry.spiffe_id.path }}
+          {% for sel in _entry.selectors %}-selector {{ sel.type }}:{{ sel.value }} {% endfor %}
+          {% if _entry.x509_svid_ttl | default(0) %}-x509SVIDTTL {{ _entry.x509_svid_ttl }} {% endif %}
+          {% if _entry.jwt_svid_ttl | default(0) %}-jwtSVIDTTL {{ _entry.jwt_svid_ttl }} {% endif %}
+          {% for td in _want %}-federatesWith spiffe://{{ td }} {% endfor %}

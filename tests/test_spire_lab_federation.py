@@ -292,7 +292,8 @@ def test_the_labs_half_runs_first_and_the_acl_keeps_every_port_and_source():
         job = svc.start_federation(db, lab_id=row.id, created_by="tester")
         calls = _run(db, row, job["job_id"])
         order = [c[1] if c[0] == "stage" else c[0] for c in calls]
-        assert order == ["acl", "install", "ports", "federation", "dashboard"], order
+        assert order == ["acl", "install", "ports", "federation", "dashboard",
+                         "federation_proof"], order
         acl = calls[0]
         assert acl[1] == (8081, 8443, 8082)
         assert acl[2] == ("198.51.100.7/32", "10.0.0.9/32"), (

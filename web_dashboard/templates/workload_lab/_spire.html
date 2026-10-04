@@ -170,7 +170,9 @@
               <button @click="unfederate(lab)" x-show="lab.federation_status === 'federated'" x-cloak
                       :disabled="busy"
                       class="text-green-700 hover:underline text-xs mr-2 disabled:opacity-50"
-                      :title="'Federated with this dashboard since ' + (lab.federated_at || '') + '. Click to remove both halves.'">
+                      :title="'Federated with this dashboard since ' + (lab.federated_at || '') + '.'
+                              + (lab.federation_proof ? '\nProof: ' + lab.federation_proof : '\nNo proof run: link Kubernetes for a workload to prove it with.')
+                              + '\n\nClick to remove both halves.'">
                 Federated ✓</button>
               <button @click="govern(lab)" x-show="lab.status === 'available' && !lab.ps_governed"
                       x-cloak :disabled="busy"

@@ -214,7 +214,7 @@ def _entry_exists(spiffe_id: str) -> bool:
 
 
 def register_workload(node: str, spiffe_id: str, uid: int,
-                      jwt_ttl_s: int = JWT_SVID_TTL_S) -> str:
+                      jwt_ttl_s: int = JWT_SVID_TTL_S, federates_with=()) -> str:
     """A one-use join token for ``node``, and the workload entry ``spiffe_id`` selecting
     ``unix:uid:<uid>`` under it — created only if absent, so a second call just mints a new
     token. Returns the token; the caller shows it once and never stores it."""
@@ -224,9 +224,10 @@ def register_workload(node: str, spiffe_id: str, uid: int,
         raise DashboardSpireError("the SPIRE server minted no join token")
 
     if not _entry_exists(spiffe_id):
+        fed = [arg for td in federates_with for arg in ("-federatesWith", f"spiffe://{td}")]
         res = _json("entry", "create", "-parentID", node, "-spiffeID", spiffe_id,
                     "-selector", f"unix:uid:{int(uid)}",
-                    "-jwtSVIDTTL", str(jwt_ttl_s))
+                    "-jwtSVIDTTL", str(jwt_ttl_s), *fed)
         results = res.get("results") or []
         status = (results[0].get("status") or {}) if results else {}
         if not results or int(status.get("code") or 0) != 0:
@@ -431,3 +432,61 @@ def unfederate(td: str) -> list:
                 raise
             logger.info("dashboard-spire: no %s to remove for %s (%s)", what, td, exc)
     return removed
+
+
+def _id_str(sid) -> str:
+    """``{"trust_domain": "td", "path": "/p"}`` (entry JSON) or a string -> spiffe://td/p."""
+    if isinstance(sid, dict):
+        return f"spiffe://{sid.get('trust_domain', '')}{sid.get('path', '')}"
+    return str(sid or "")
+
+
+def _bare_td(td: str) -> str:
+    return str(td or "").strip().lower().removeprefix("spiffe://").rstrip("/")
+
+
+def set_federates_with(spiffe_id: str, td: str, present: bool = True) -> int:
+    """Add (or remove) ``td`` in the ``federatesWith`` of every entry for ``spiffe_id``,
+    so the workload's SVID response carries — or stops carrying — that trust domain's
+    bundle. Returns how many entries changed.
+
+    ``entry update`` REPLACES the entry, so every field the entry has is written back
+    from what the server just reported; only federatesWith differs. An entry already in
+    the wanted state is left alone.
+    """
+    td = _bare_td(td)
+    entries = _json("entry", "show", "-spiffeID", spiffe_id).get("entries") or []
+    changed = 0
+    for e in entries:
+        have = [_bare_td(x) for x in (e.get("federates_with") or [])]
+        want = sorted(set(have) | {td}) if present else [x for x in have if x != td]
+        if sorted(have) == sorted(want):
+            continue
+        args = ["entry", "update", "-entryID", str(e["id"]),
+                "-parentID", _id_str(e.get("parent_id")),
+                "-spiffeID", _id_str(e.get("spiffe_id"))]
+        for sel in e.get("selectors") or []:
+            args += ["-selector", f"{sel['type']}:{sel['value']}"]
+        if e.get("x509_svid_ttl"):
+            args += ["-x509SVIDTTL", str(int(e["x509_svid_ttl"]))]
+        if e.get("jwt_svid_ttl"):
+            args += ["-jwtSVIDTTL", str(int(e["jwt_svid_ttl"]))]
+        for dns in e.get("dns_names") or []:
+            args += ["-dns", dns]
+        if e.get("admin"):
+            args.append("-admin")
+        if e.get("downstream"):
+            args.append("-downstream")
+        if e.get("hint"):
+            args += ["-hint", str(e["hint"])]
+        for other in want:
+            args += ["-federatesWith", f"spiffe://{other}"]
+        res = _json(*args)
+        results = res.get("results") or []
+        status = (results[0].get("status") or {}) if results else {}
+        if not results or int(status.get("code") or 0) != 0:
+            raise DashboardSpireError(
+                f"the SPIRE server refused to update the entry for {spiffe_id}: "
+                f"{status.get('message') or 'no result returned'}")
+        changed += 1
+    return changed

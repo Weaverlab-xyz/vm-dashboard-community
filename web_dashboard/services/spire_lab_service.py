@@ -1274,7 +1274,24 @@ def _k8s_entry_vars(row: SpireLab) -> dict:
             # job's output IS a captured log — anyone who can read it can attest a host
             # into this trust domain until the token is spent.
             "node_token_secret": f"{(row.admin_secret_folder or '').strip('/')}/{JOIN_TOKEN_TITLE}",
-            "token_safe": row.ps_safe or ""}
+            "token_safe": row.ps_safe or "",
+            # A lab federated with the dashboard gives its workload the dashboard's bundle
+            # too, so a link made AFTER federating is federated from the start.
+            "federates_with": _federated_tds(row)}
+
+
+def _federated_tds(row: SpireLab) -> list:
+    """The trust domains this lab's workload entries federate with: the dashboard's,
+    while the lab is federated with it. Read live; a dashboard server that is down leaves
+    the entry unfederated rather than failing the link."""
+    if row.federation_status != "federated":
+        return []
+    try:
+        from . import dashboard_spire
+        return [dashboard_spire.trust_domain()]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("spire-lab: no dashboard trust domain for %s's entry: %s", row.id, exc)
+        return []
 
 
 def _agent_vars(row: SpireLab) -> dict:
@@ -2353,7 +2370,11 @@ def _dashboard_side() -> dict:
 def _federation_vars(row: SpireLab, state: str = "present") -> dict:
     dash = _dashboard_side()
     out = {"trust_domain": row.trust_domain, **cli_vars(row), "state": state,
-           "dashboard_trust_domain": dash["trust_domain"]}
+           "dashboard_trust_domain": dash["trust_domain"],
+           # The linked k3s workload's entry gains (or loses) the dashboard in its
+           # federatesWith, so its SVID response carries the dashboard's bundle.
+           "workload_spiffe_id": (row.k8s_workload_spiffe_id or "")
+           if row.k8s_status == "linked" else ""}
     if state == "present":
         out.update(dashboard_bundle_endpoint_url=dash["url"],
                    dashboard_bundle_json=dash["bundle_json"])
@@ -2369,6 +2390,50 @@ UNFEDERATION_STAGE = {
     "vars_for": lambda row: _federation_vars(row, "absent"),
     "pct": 50, "label": "Removing the lab's federation with the dashboard…",
 }
+
+
+def _proof_vars(row: SpireLab) -> dict:
+    return {"federated_trust_domain": _dashboard_side()["trust_domain"],
+            "workload_user": K8S_WORKLOAD_USER}
+
+
+# Runs on the linked k3s NODE, as the workload: the proof is the workload's own SVID
+# response carrying the dashboard's bundle, not a server saying it should.
+FEDERATION_PROOF_STAGE = {
+    "key": "federation_proof", "asset": "spire-federation-proof.yml",
+    "vars_for": _proof_vars, "host": "k8s", "pct": 92,
+    "label": "Proving the lab's workload holds the dashboard's bundle…",
+}
+
+
+def _dashboard_cells(db: Session, dash_td: str) -> list:
+    """Agent cells attested by the dashboard's own SPIRE server (no lab), still live."""
+    from ..database import AgentCell
+    return [c for c in db.query(AgentCell).filter(AgentCell.spire_lab_id.is_(None)).all()
+            if (c.trust_domain or "").lower() == dash_td and c.spiffe_id
+            and c.status != "revoked"]
+
+
+def federated_lab_tds(db: Session) -> list:
+    """Every lab trust domain the dashboard's server federates with now — what a cell
+    minted on the dashboard's trust domain federates with from the start."""
+    return sorted({(r.trust_domain or "").lower() for r in db.query(SpireLab).filter(
+        SpireLab.federation_status == "federated").all() if r.trust_domain})
+
+
+def _federate_cells(db: Session, dash_td: str, lab_td: str, present: bool) -> list:
+    """Add (or remove) the lab in each dashboard-attested cell's federatesWith. Per cell
+    and non-fatal: one entry the server refuses must not undo the federation."""
+    from . import dashboard_spire
+    done = []
+    for cell in _dashboard_cells(db, dash_td):
+        try:
+            if dashboard_spire.set_federates_with(cell.spiffe_id, lab_td, present):
+                done.append(cell.spiffe_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("spire-lab: cell %s federatesWith %s not updated: %s",
+                           cell.id, lab_td, exc)
+    return done
 
 
 def lab_federation_url(row: SpireLab) -> str:
@@ -2472,6 +2537,8 @@ async def run_federation(db: Session, *, lab_id: str, job_id: str,
     try:
         if action == "unfederate":
             await broadcast_progress(job_id, 20, "Removing the dashboard's relationship…")
+            cells = _federate_cells(db, dashboard_spire.trust_domain(),
+                                    (row.trust_domain or "").lower(), False)
             removed = dashboard_spire.unfederate(row.trust_domain)
             try:
                 await _stage(UNFEDERATION_STAGE)
@@ -2482,9 +2549,11 @@ async def run_federation(db: Session, *, lab_id: str, job_id: str,
             row.federation_status = None
             row.federation_error = None
             row.federated_at = None
+            row.federation_proof = None
             db.commit()
             job_service.set_completed(db, job_id, result={"lab_id": row.id,
-                                                          "removed": removed})
+                                                          "removed": removed,
+                                                          "cells_unfederated": cells})
             return
 
         dash_td = dashboard_spire.trust_domain()
@@ -2528,8 +2597,29 @@ async def run_federation(db: Session, *, lab_id: str, job_id: str,
         row.federation_error = None
         row.federated_at = datetime.utcnow()
         db.commit()
+
+        # The workloads. Cells on the dashboard's trust domain gain the lab in their
+        # federatesWith here; the lab's k8s workload already did, in the play above.
+        cells = _federate_cells(db, dash_td, (row.trust_domain or "").lower(), True)
+
+        # The proof, where the dashboard can run one: the linked k3s node, as the
+        # workload. Recorded, not fatal — the servers ARE federated either way, and the
+        # proof's failure names what the workload is missing.
+        proof = ""
+        if row.k8s_status == "linked":
+            await broadcast_progress(job_id, 92, FEDERATION_PROOF_STAGE["label"])
+            status = await _run_stage(db, row=row, stage=FEDERATION_PROOF_STAGE,
+                                      actor=actor, asset_backend=asset_backend,
+                                      parent_job_id=job_id)
+            proof = (f"{row.k8s_workload_spiffe_id or 'the lab workload'} holds the bundle "
+                     f"of spiffe://{dash_td}" if status == "completed" else
+                     f"the lab workload's SVID response does not carry spiffe://{dash_td} "
+                     f"yet — see job {stage_jobs(row).get('federation_proof', '')}")
+        row.federation_proof = proof or None
+        db.commit()
         job_service.set_completed(db, job_id, result={
-            "lab_id": row.id, "dashboard_trust_domain": dash_td, **result})
+            "lab_id": row.id, "dashboard_trust_domain": dash_td, **result,
+            "cells_federated": cells, "proof": proof})
         logger.info("spire-lab: %r federated with %s", row.name, dash_td)
     except Exception as exc:  # noqa: BLE001
         logger.error("spire-lab: federation %s failed for %s: %s", action, lab_id, exc)
