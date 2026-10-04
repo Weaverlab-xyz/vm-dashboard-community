@@ -1368,6 +1368,9 @@ class Settings(BaseSettings):
     storage_agent_id: str = ""                 # RemoteAgent.id that brokers the share
     storage_agent_share: str = ""              # `name:` of an entry in its shares.yaml
     storage_agent_subpath: str = ""            # optional subdirectory within the share
+    storage_agent_password: str = ""           # SMB password the dashboard holds for that share; sent
+                                               # sealed, per job, only to a shares.yaml entry with
+                                               # `dashboard_secret: true` (agent 2.7+)
 
     # ── Promote runner ───────────────────────────────────────────────────────
     # Transient container launched in the target cloud to convert + upload a

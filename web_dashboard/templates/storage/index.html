@@ -244,8 +244,9 @@
         <code class="bg-white px-1 rounded">ansible_runner=local</code> constraint.
         <span class="font-semibold">The path is not configured here.</span> It lives in
         that agent's own <code class="bg-white px-1 rounded">shares.yaml</code> alongside
-        any SMB credential, and its <code class="bg-white px-1 rounded">policy.yaml</code>
-        grants the share by name — the dashboard never holds either. Files move inside a
+        its <code class="bg-white px-1 rounded">policy.yaml</code> grants the share by
+        name, and the dashboard never holds either. The SMB password can stay there too, or
+        the dashboard can hold it (below) and hand it to the agent sealed, per job. Files move inside a
         signed job envelope, so playbooks and scripts work and packages
         (<code class="bg-white px-1 rounded">.rpm</code>,
         <code class="bg-white px-1 rounded">.deb</code>,
@@ -275,6 +276,18 @@
                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                placeholder="windows/prod">
         <p class="text-xs text-gray-500 mt-1">A directory inside the share. Relative only — leave blank for its root.</p>
+      </div>
+      <div class="col-span-2">
+        <label class="block text-sm font-medium text-gray-700 mb-1">SMB password <span class="text-gray-400 font-normal">(optional — held by the dashboard, encrypted)</span></label>
+        <input type="password" x-model="cfg.storage_agent_password" autocomplete="new-password"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+               placeholder="leave blank to keep it in shares.yaml">
+        <p class="text-xs text-gray-500 mt-1">
+          Used only when the share's entry in <code class="bg-white px-1 rounded">shares.yaml</code>
+          says <code class="bg-white px-1 rounded">dashboard_secret: true</code> (agent 2.7+); the
+          username stays there. Delivered sealed to each job, and only to SPIRE-attested agents
+          when Remote Agents requires that.
+        </p>
       </div>
       <div class="col-span-2">
         <button @click="testBackend('agent_local')"
@@ -707,6 +720,7 @@ function storagePage() {
       storage_local_path: '', storage_local_username: '',
       storage_local_password: '', storage_local_domain: '',
       storage_agent_id: '', storage_agent_share: '', storage_agent_subpath: '',
+      storage_agent_password: '',
     },
     ansibleRunner: 'local',
     agents: [],
