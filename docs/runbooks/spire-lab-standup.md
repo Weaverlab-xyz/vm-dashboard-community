@@ -197,13 +197,18 @@ In BeyondInsight:
    It creates **no managed account**, deliberately. The plugin's accounts are registration
    entries and they arrive by discovery — one created here would sit beside them,
    indistinguishable, and move the number section 6 measures.
-4. Define an attribute type and set **`SpiffeTrustDomain` = `weaverlab.test`** on the
-   managed system. *Still yours*, and this is the interesting one: the plugin takes its
-   whole configuration from attributes, there is no attribute API in the dashboard, and
-   **whether the gateway populates attributes for a plugin action is exactly the question
-   this runbook exists to answer**. Writing it from the dashboard before that is known
-   would be betting on the answer.
-5. Run **Verify Functional Account** and open the activity record.
+4. **`SpiffeTrustDomain` = `weaverlab.test`** on the managed system. **← Prepare probe
+   does this**, on the lab's onboarding panel (behind **Governed ✓**). The plugin takes its
+   whole configuration from attributes, and **whether the gateway populates them for a
+   plugin action is exactly the question this runbook exists to answer**. Setting the
+   attribute is the probe's setup and assumes nothing about that answer. Prepare finds the
+   type and value, or creates them if this tenant has neither (`POST AttributeTypes`, then
+   its `Attributes`), assigns the value, and reads it back. Each call's status goes into
+   the job log, because three of those calls had never run against a tenant from here. If
+   one is refused, create the type and value under *Configuration → Attributes* by hand and
+   press Prepare again: it finds what exists and only assigns.
+5. Run **Verify Functional Account** and open the activity record. There is no API for
+   this step, so it stays yours.
 
 **The line to read:**
 
@@ -217,7 +222,13 @@ Attributes received: system=[...] account=[...]
 | `system=[SpiffeTrustDomain]` but the value is truncated | Short attributes work; a 1.8 KB PEM will not fit one. | The trust bundle needs another home — see below. |
 | `system=[]` | The gateway does not populate attributes at all. | The whole configuration surface moves onto the managed system address, like the Certificate and k8s plugins. That is a plugin change. |
 
-**Also record, while you are here:**
+**Record the answer on the probe panel.** Pick the row below that matches, paste the line if
+you like, and press **Record answer**. The panel then shows that row's meaning and next step.
+`GET /api/spire-lab/attr-probe` returns the latest recorded answer, which is what L3
+([the design note](../design/dashboard-workload-identity.md#l3-govern-the-dashboards-own-trust-domain))
+follows.
+
+**Also record, while you are here** (the panel has a field for each):
 
 - Did BeyondInsight accept **`~`** in a managed account name (`vaulted~partner~acme-etl`)
   and **`@`** in an audience label? `!` is no longer in question — SPIRE's own path

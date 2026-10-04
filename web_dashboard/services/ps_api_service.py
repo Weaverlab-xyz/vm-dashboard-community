@@ -657,6 +657,128 @@ async def set_managed_system_attribute(system_id, attribute_id, *, assign: bool,
                                 assign=assign, tenant=tenant)
 
 
+
+class AttributeProbeError(PSApiError):
+    """A step of :func:`ensure_managed_system_attribute` was refused. ``calls`` carries
+    every call made up to and including the refusal, so the record of what this
+    appliance answered survives the failure."""
+
+    def __init__(self, message: str, calls: list):
+        super().__init__(message)
+        self.calls = calls
+
+
+def _id_of(body, *keys):
+    if isinstance(body, dict):
+        for key in keys:
+            if body.get(key) not in (None, ""):
+                return body[key]
+    return None
+
+
+def _same(a, b) -> bool:
+    return str(a or "").strip().lower() == str(b or "").strip().lower()
+
+
+async def ensure_managed_system_attribute(system_id, type_name: str, value: str, *,
+                                          tenant=None) -> dict:
+    """Make ``type_name = value`` an attribute OF ONE MANAGED SYSTEM, creating the type
+    and the value when the tenant has neither, and prove it by reading it back.
+
+    Built for the SPIRE lab's attribute probe (``spire_lab_service.run_attr_probe``): the
+    SPIFFE plugin takes its configuration from attributes, and whether the gateway hands
+    them to a plugin action is the open question the probe exists to answer. Assigning one
+    is the probe's SETUP, not a bet on the answer.
+
+    Four of these calls have never been exercised against a tenant from here
+    (``POST AttributeTypes``, ``POST AttributeTypes/{id}/Attributes``, and ``POST`` on
+    ``ManagedSystems/{id}/Attributes/{id}``; see docs/integrations/beyondtrust/
+    password-safe.md). So every call's method, path and status is returned in ``calls`` —
+    and carried on :class:`AttributeProbeError` when one is refused — which is what turns
+    the first live run into the evidence that settles them. A POST answering 200 is not
+    taken as done: the read-back must show the attribute on the managed system.
+
+    Returns ``{"type_id", "attribute_id", "created_type", "created_value", "assigned",
+    "read_back", "calls"}``. Response bodies are never carried outward (they can quote
+    tenant data); a refusal names the call and its status only.
+    """
+    try:
+        sid = int(system_id)
+    except (TypeError, ValueError):
+        raise PSApiError("a managed system id is a number") from None
+    type_name, value = (type_name or "").strip(), (value or "").strip()
+    if not type_name or not value:
+        raise PSApiError("an attribute type name and a value are both required")
+
+    calls = []
+    out = {"type_id": None, "attribute_id": None, "created_type": False,
+           "created_value": False, "assigned": False, "read_back": False, "calls": calls}
+
+    async def call(method: str, path: str, ok=(200, 201, 204), **kw):
+        resp = await getattr(client, method.lower())(path, **kw)
+        calls.append({"method": method, "path": path, "status": resp.status_code})
+        if resp.status_code not in ok:
+            raise AttributeProbeError(
+                f"Password Safe answered {method} {path} with {resp.status_code}", calls)
+        if method == "GET":
+            return _page_items(resp)
+        try:
+            return resp.json() if resp.content else None
+        except ValueError:
+            return None
+
+    async with _client(tenant) as client:
+        await _sign_in(client, tenant)
+        try:
+            types = await call("GET", "AttributeTypes", ok=(200,)) or []
+            found = next((t for t in types if isinstance(t, dict)
+                          and _same(t.get("Name"), type_name)), None)
+            if found and found.get("IsReadOnly"):
+                raise AttributeProbeError(
+                    f"the attribute type {type_name!r} is read-only in this tenant", calls)
+            if found:
+                type_id = _id_of(found, "AttributeTypeID", "ID")
+            else:
+                body = await call("POST", "AttributeTypes", json={"Name": type_name})
+                type_id = _id_of(body, "AttributeTypeID", "ID")
+                out["created_type"] = True
+            if type_id in (None, ""):
+                raise AttributeProbeError(
+                    f"Password Safe returned no id for the attribute type {type_name!r}",
+                    calls)
+            out["type_id"] = int(type_id)
+
+            values = await call("GET", f"AttributeTypes/{int(type_id)}/Attributes",
+                                ok=(200,)) or []
+            have = next((v for v in values if isinstance(v, dict)
+                         and (_same(v.get("ShortName"), value)
+                              or _same(v.get("LongName"), value))), None)
+            if have:
+                attribute_id = _id_of(have, "AttributeID", "ID")
+            else:
+                body = await call("POST", f"AttributeTypes/{int(type_id)}/Attributes",
+                                  json={"ShortName": value, "LongName": value})
+                attribute_id = _id_of(body, "AttributeID", "ID")
+                out["created_value"] = True
+            if attribute_id in (None, ""):
+                raise AttributeProbeError(
+                    f"Password Safe returned no id for the value {value!r}", calls)
+            out["attribute_id"] = int(attribute_id)
+
+            await call("POST", f"ManagedSystems/{sid}/Attributes/{int(attribute_id)}")
+            out["assigned"] = True
+            current = await call("GET", f"ManagedSystems/{sid}/Attributes", ok=(200,)) or []
+            out["read_back"] = any(
+                isinstance(a, dict) and str(_id_of(a, "AttributeID", "ID")) == str(attribute_id)
+                for a in current)
+            if not out["read_back"]:
+                raise AttributeProbeError(
+                    f"the assignment answered success, but managed system {sid} does not "
+                    f"list {type_name} = {value} when read back", calls)
+            return out
+        finally:
+            await _sign_out(client)
+
 async def process_smart_rule(rule_id, tenant=None, *, queue: bool = True) -> dict:
     """``POST SmartRules/{id}/Process`` — the one runbook action the API does expose.
 

@@ -277,9 +277,9 @@ def test_the_spire_tab_reports_what_it_cannot_do():
     green tick that overstates what happened is worse than no tick.
 
     The attribute is the one that matters most: the plugin takes its whole configuration
-    from BeyondInsight attributes, no attribute API exists in this codebase, and whether
-    the gateway populates them for a plugin action has never been observed. Writing a
-    writer on that would be betting on the answer the lab was built to find.
+    from BeyondInsight attributes, and whether the gateway populates them for a plugin
+    action has never been observed. Prepare probe sets it (the probe's setup, not a bet on
+    the answer); until it has been set and read back, the gap stays named.
     """
     from web_dashboard.services import spire_lab_service as svc
 

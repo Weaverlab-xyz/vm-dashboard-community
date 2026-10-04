@@ -22,12 +22,12 @@ stage at run time — so a host whose deploy record carries no usable key is no 
 host no run can log in to. Choosing nothing keeps the auto-derivation, which now fails
 with a named reason rather than by shipping an empty key file to the runner.
 
-**It does not write the Password Safe managed system or functional account, deliberately
-and for now.** The plugin takes its whole configuration from BeyondInsight *attributes*,
-and whether the gateway populates those for a plugin action is unresolved — see
-``docs/runbooks/spire-lab-standup.md`` §5. Writing an attribute writer before that
-question is answered would be betting on the answer. So this feature gets an operator to
-the point where §5 takes two minutes, and stops.
+**It never writes the functional account**, whose DSS key is the administrative
+credential. **Govern** writes the managed system, and **Prepare probe** sets the
+``SpiffeTrustDomain`` attribute on it: the setup of the open question in
+``docs/runbooks/spire-lab-standup.md`` §5 (does the gateway populate attributes for a
+plugin action?), which an operator then answers by reading Verify Functional Account and
+recording the line. Setting the attribute assumes nothing about that answer.
 
 **Why a row and a timer.** Not cost — the VM's own timer covers that. A forgotten trust
 domain keeps minting: 8081 is an API that issues identities, so a lab nobody remembers is
@@ -927,9 +927,10 @@ async def run_provision(db: Session, *, lab_id: str, job_id: str) -> None:
             "entries_seeded": row.entries_seeded,
             "discovery_expected": row.discovery_expected,
             "secrets": secret_refs(row),
-            "next": "docs/runbooks/spire-lab-standup.md §5 — onboard the "
-                    "functional account and managed system by hand, then read the "
-                    "'Attributes received:' line on Verify Functional Account."})
+            "next": "docs/runbooks/spire-lab-standup.md §5 — create the functional "
+                    "account, press Govern and Prepare probe, then read the "
+                    "'Attributes received:' line on Verify Functional Account and "
+                    "record it on the probe panel."})
     except Exception as exc:
         row.status = "failed"
         row.error_message = str(exc)[:2000]
@@ -1623,13 +1624,11 @@ async def _run_k8s_stage(db: Session, *, row: SpireLab, stage: dict, actor: str,
 #     to push it back in. Every other plugin in this codebase looks a functional account up
 #     BY NAME for exactly that reason, and `spire-admin-identity.yml` already writes the
 #     PKCS#12 into Secrets Safe under `no_log` without it ever passing through here.
-#   * THE `SpiffeTrustDomain` ATTRIBUTE. The plugin takes its whole configuration from
-#     BeyondInsight attributes; there is no attribute API in this codebase, and whether the
-#     gateway populates attributes for a plugin ACTION has never been observed. That is the
-#     open question this lab was built to answer, so writing an attribute writer now would
-#     be betting on the answer. `onboarding_gaps` names it, the result reports it, and the
-#     page shows it — which is what makes the first live run answer the question instead of
-#     hiding it.
+#   * THE `SpiffeTrustDomain` ATTRIBUTE is not Govern's either: it is the setup of the open
+#     question (does the gateway populate attributes for a plugin ACTION?), so it belongs to
+#     the attribute probe below, whose Prepare step assigns it and whose answer form
+#     records what Verify Functional Account showed. `onboarding_gaps` names both steps
+#     until they are done.
 
 PS_REGISTER_JOB_TYPE = "spirelab_ps_register"
 
@@ -1658,13 +1657,25 @@ def onboarding_gaps(row: SpireLab) -> list:
          "remedy": (f"create a functional account named {row.admin_spiffe_id or '<the admin SPIFFE ID>'} "
                     f"on the {ps_platform()!r} platform and upload the PKCS#12 from "
                     f"{(secret_refs(row) or {}).get('pfx') or 'the lab folder'} as its DSS key")},
-        {"what": "the SpiffeTrustDomain attribute",
-         "why": ("the plugin reads its configuration from BeyondInsight attributes, and "
-                 "whether the gateway populates them for a plugin action is the open "
-                 "question this lab exists to answer — so nothing here guesses at it"),
-         "remedy": (f"add attribute SpiffeTrustDomain = {row.trust_domain} to the managed "
-                    f"system, then run Test Functional Account")},
     ]
+    probe = attr_probe(row)
+    if not (probe.get("setup") or {}).get("read_back"):
+        gaps.append(
+            {"what": f"the {ATTR_PROBE_TYPE} attribute",
+             "why": ("the plugin reads its configuration from BeyondInsight attributes; "
+                     "setting one is the probe's setup, and whether the gateway hands it to "
+                     "a plugin action is what the probe then reads"),
+             "remedy": (f"press Prepare probe: it assigns {ATTR_PROBE_TYPE} = "
+                        f"{row.trust_domain} to the managed system, creating the type and "
+                        f"the value if this tenant has neither, and reads it back")})
+    if not probe.get("answer"):
+        gaps.append(
+            {"what": "the probe's answer",
+             "why": ("Verify Functional Account has no API, so the line that answers the "
+                     "question is read by a person"),
+             "remedy": ("run Verify Functional Account on the managed system, read the "
+                        "'Attributes received:' line in its activity record, and record "
+                        "what it says on the lab's probe panel")})
     return gaps
 
 
@@ -1787,8 +1798,8 @@ async def run_ps_register(db: Session, *, lab_id: str, job_id: str,
                 db, job_id, f"still needs a human: {gap['what']} — {gap['remedy']}")
         await broadcast_progress(
             job_id, 95,
-            "Managed system created. Two steps still need a human — see the job log and "
-            "the lab's onboarding panel.")
+            "Managed system created. What still needs a human is in the job log and the "
+            "lab's onboarding panel.")
         job_service.set_completed(db, job_id, result={
             "lab_id": row.id, "managed_system_id": row.ps_system_id,
             "platform": ps_platform(), "trust_domain": row.trust_domain,
@@ -1804,6 +1815,208 @@ async def run_ps_register(db: Session, *, lab_id: str, job_id: str,
         logger.error("spire-lab: Password Safe %s failed for %s: %s", action, lab_id, exc)
         job_service.set_failed(db, job_id, str(exc))
 
+
+
+# ── The attribute probe (unblocks L3) ─────────────────────────────────────────
+# docs/runbooks/spire-lab-standup.md §5; docs/design/dashboard-workload-identity.md, L3.
+# The plugin takes its configuration from BeyondInsight attributes, and whether the
+# gateway populates attributes for a plugin ACTION has never been observed. Governing the
+# dashboard's own trust domain (L3) is built one way or another depending on the answer.
+#
+# Two halves:
+#   * PREPARE (a job): SpiffeTrustDomain = <trust domain> on the lab's managed system,
+#     the type and value created when the tenant has neither, assigned, read back. That is
+#     the probe's SETUP — it assumes nothing about the answer. Every Password Safe call's
+#     status is kept, because three of them have never run against a tenant from here.
+#   * THE ANSWER (a form): Verify Functional Account has no API, so an operator runs it,
+#     reads the "Attributes received:" line, and records which of the runbook's three rows
+#     it was. Recorded on the row, so the next step is on the page, not in someone's notes.
+
+ATTR_PROBE_JOB_TYPE = "spirelab_attr_probe"
+ATTR_PROBE_TYPE = "SpiffeTrustDomain"
+ATTR_PROBE_LINE_MAX = 500
+
+# The runbook's table, verbatim in substance: what the line said, what it means, and what
+# L3 does next. The keys are the only outcomes a record accepts.
+ATTR_PROBE_OUTCOMES = {
+    "populated": {
+        "label": "system=[SpiffeTrustDomain]",
+        "means": "The gateway populates attributes. The configuration model works as designed.",
+        "next": "Build the attribute writer in ps_api_service (L3 proceeds on attributes)."},
+    "truncated": {
+        "label": "system=[SpiffeTrustDomain], value truncated",
+        "means": "Short attributes work; a 1.8 KB PEM will not fit one.",
+        "next": ("The trust bundle needs another home: the PKCS#12 already embeds it "
+                 "(spire-admin-identity.yml, -certfile), so the plugin can read it there.")},
+    "empty": {
+        "label": "system=[]",
+        "means": "The gateway does not populate attributes at all.",
+        "next": ("The configuration surface moves onto the managed system address, like the "
+                 "Certificate and k8s plugins. That is a plugin change, before L3.")},
+}
+# The two side observations §5 asks for while the console is open.
+ATTR_PROBE_SIDE = ("tilde_in_account_name", "at_in_audience_label", "pem_fits")
+ATTR_PROBE_SIDE_VALUES = ("yes", "no", "not_tried")
+
+
+def attr_probe(row) -> dict:
+    """The row's probe record, ``{}`` when there is none or it does not parse."""
+    try:
+        data = json.loads(getattr(row, "attr_probe", None) or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_attr_probe(db: Session, row: SpireLab, data: dict) -> None:
+    row.attr_probe = json.dumps(data, sort_keys=True)
+    row.updated_at = datetime.utcnow()
+    db.commit()
+
+
+def attr_probe_view(row) -> dict:
+    """What the page shows: the record, plus the outcome's runbook row when answered."""
+    data = attr_probe(row)
+    answer = data.get("answer") or {}
+    out = {"setup": data.get("setup"), "prepared_at": data.get("prepared_at"),
+           "prepared_by": data.get("prepared_by"), "answer": answer or None,
+           "outcomes": {k: v["label"] for k, v in ATTR_PROBE_OUTCOMES.items()}}
+    if answer.get("outcome") in ATTR_PROBE_OUTCOMES:
+        out["meaning"] = ATTR_PROBE_OUTCOMES[answer["outcome"]]
+    return out
+
+
+def start_attr_probe(db: Session, *, lab_id: str, created_by: str) -> dict:
+    """Enqueue Prepare probe. Refused before the job exists when there is nothing to
+    assign the attribute to, or a probe is already running."""
+    row = get_lab(db, lab_id)
+    if not row:
+        raise SpireLabError(f"SPIRE lab {lab_id} not found")
+    if row.status != "available":
+        raise SpireLabError(f"{row.name} is {row.status}, not available — the probe reads "
+                            f"a plugin action against a running server")
+    if not row.ps_system_id:
+        raise SpireLabError(f"{row.name} is not governed yet — press Govern first: the "
+                            f"attribute goes on its Password Safe managed system")
+    if _active_lab_jobs(db, row.id, (ATTR_PROBE_JOB_TYPE,)):
+        raise SpireLabError(f"{row.name} already has a probe being prepared")
+    job = job_service.create_job(
+        db, ATTR_PROBE_JOB_TYPE, created_by, workgroup=row.workgroup,
+        metadata={"lab_id": row.id, "trust_domain": row.trust_domain,
+                  "managed_system_id": row.ps_system_id})
+    db.commit()
+    logger.info("spire-lab: queued the attribute probe for %r as job %s", row.name, job.id)
+    return {"lab_id": row.id, "job_id": job.id}
+
+
+async def run_attr_probe(db: Session, *, lab_id: str, job_id: str) -> None:
+    """Worker entry point for ``spirelab_attr_probe``."""
+    from ..api.websocket import broadcast_progress
+    from . import ps_api_service
+
+    row = get_lab(db, lab_id)
+    if not row:
+        logger.warning("spire-lab: row %s vanished before the attribute probe", lab_id)
+        return
+    job_service.set_running(db, job_id)
+    job = db.query(Job).filter(Job.id == job_id).first()
+    data = attr_probe(row)
+    data.update(prepared_at=datetime.utcnow().isoformat(),
+                prepared_by=(job.created_by if job else None) or "system")
+    try:
+        if not ps_api_service.configured():
+            raise SpireLabError(
+                "Password Safe is not configured — set pscli_api_url, pscli_client_id, "
+                "pscli_client_secret and pscli_api_account_name")
+        await broadcast_progress(job_id, 30, f"Assigning {ATTR_PROBE_TYPE} = "
+                                             f"{row.trust_domain} to the managed system…")
+        try:
+            result = await ps_api_service.ensure_managed_system_attribute(
+                row.ps_system_id, ATTR_PROBE_TYPE, row.trust_domain)
+        except ps_api_service.AttributeProbeError as exc:
+            for c in exc.calls:
+                job_service.append_job_log(db, job_id,
+                                           f"{c['method']} {c['path']} → {c['status']}")
+            data["setup"] = {"calls": exc.calls, "read_back": False, "error": str(exc)}
+            _save_attr_probe(db, row, data)
+            raise SpireLabError(
+                f"{exc}. Create the attribute type {ATTR_PROBE_TYPE} with a value "
+                f"{row.trust_domain} in BeyondInsight (Configuration → Attributes), assign "
+                f"it to the managed system, then press Prepare probe again — it finds "
+                f"what exists and only assigns") from None
+        for c in result["calls"]:
+            job_service.append_job_log(db, job_id, f"{c['method']} {c['path']} → {c['status']}")
+        data["setup"] = result
+        _save_attr_probe(db, row, data)
+        # A write into the customer's PAM tenant, so it is audited like the inventory
+        # page's attribute writes — after the read-back, never before.
+        job_service.log_audit(
+            db, data["prepared_by"], "spire_lab.attr_probe_prepare",
+            target_vm=f"ManagedSystem:{row.ps_system_id}",
+            details={"lab_id": row.id, "type": ATTR_PROBE_TYPE, "value": row.trust_domain,
+                     "attribute_id": result["attribute_id"],
+                     "created_type": result["created_type"],
+                     "created_value": result["created_value"]})
+        job_service.set_completed(db, job_id, result={
+            "lab_id": row.id, "managed_system_id": row.ps_system_id,
+            "attribute": f"{ATTR_PROBE_TYPE} = {row.trust_domain}",
+            "created_type": result["created_type"],
+            "created_value": result["created_value"], "read_back": result["read_back"],
+            "next": ("run Verify Functional Account on the managed system and record the "
+                     "'Attributes received:' line on the lab's probe panel")})
+    except Exception as exc:  # noqa: BLE001
+        # The message only: it reaches a browser through the job (py/stack-trace-exposure).
+        logger.error("spire-lab: attribute probe failed for %s: %s", lab_id, exc)
+        job_service.set_failed(db, job_id, str(exc))
+
+
+def record_attr_probe_answer(db: Session, *, lab_id: str, outcome: str, line: str = "",
+                             side: Optional[dict] = None, answered_by: str) -> dict:
+    """Record what Verify Functional Account's "Attributes received:" line said."""
+    row = get_lab(db, lab_id)
+    if not row:
+        raise SpireLabError(f"SPIRE lab {lab_id} not found")
+    if not row.ps_system_id:
+        raise SpireLabError(f"{row.name} is not governed — the answer comes from Verify "
+                            f"Functional Account on its managed system")
+    if outcome not in ATTR_PROBE_OUTCOMES:
+        raise SpireLabError(f"outcome must be one of {', '.join(ATTR_PROBE_OUTCOMES)}")
+    side = side or {}
+    unknown = set(side) - set(ATTR_PROBE_SIDE)
+    if unknown:
+        raise SpireLabError(f"unknown observation {sorted(unknown)[0]!r}")
+    for key, value in side.items():
+        if value not in ATTR_PROBE_SIDE_VALUES:
+            raise SpireLabError(f"{key} must be one of {', '.join(ATTR_PROBE_SIDE_VALUES)}")
+    line = (line or "").strip()
+    if len(line) > ATTR_PROBE_LINE_MAX:
+        raise SpireLabError(f"the pasted line is longer than {ATTR_PROBE_LINE_MAX} "
+                            f"characters — paste only the 'Attributes received:' line")
+    data = attr_probe(row)
+    data["answer"] = {"outcome": outcome, "line": line,
+                      **{k: side.get(k, "not_tried") for k in ATTR_PROBE_SIDE},
+                      "answered_by": answered_by,
+                      "answered_at": datetime.utcnow().isoformat()}
+    _save_attr_probe(db, row, data)
+    logger.info("spire-lab: attribute probe answer for %r recorded: %s", row.name, outcome)
+    return {"lab_id": row.id, **attr_probe_view(row)}
+
+
+def latest_attr_probe(db: Session, visible=None) -> Optional[dict]:
+    """The most recent recorded answer across the labs ``visible`` admits (all by
+    default) — what L3 cites — or None."""
+    best = None
+    for row in db.query(SpireLab).filter(SpireLab.attr_probe.isnot(None)).all():
+        if visible is not None and not visible(row):
+            continue
+        answer = attr_probe(row).get("answer") or {}
+        if answer.get("outcome") not in ATTR_PROBE_OUTCOMES:
+            continue
+        if best is None or answer.get("answered_at", "") > best["answered_at"]:
+            best = {"lab_id": row.id, "lab_name": row.name,
+                    "trust_domain": row.trust_domain, **answer,
+                    **ATTR_PROBE_OUTCOMES[answer["outcome"]]}
+    return best
 
 # ── JWT-SVID bundle capture (for the dashboard's own token endpoint) ──────────
 # The dashboard accepts a JWT-SVID as an OAuth client assertion (services/

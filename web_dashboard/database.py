@@ -2569,6 +2569,10 @@ class SpireLab(Base):
     # What the proof showed: the linked k3s workload's own SVID response carrying the
     # dashboard's bundle (spire-federation-proof.yml), or why not. NULL = no proof run.
     federation_proof = Column(Text, nullable=True)
+    # The attribute probe (docs/runbooks/spire-lab-standup.md §5): JSON holding what
+    # "Prepare probe" did against Password Safe (each call's status included) and, once an
+    # operator has read Verify Functional Account, the answer they recorded. L3 waits on it.
+    attr_probe = Column(Text, nullable=True)
 
     # WHO the runner logs in as ON THE K3S NODE. A SEPARATE SET from the four
     # `ansible_*` / `login_user` fields above, which belong to the SPIRE host, because the
@@ -4773,6 +4777,7 @@ def init_db():
             "ALTER TABLE spire_labs ADD COLUMN federation_error TEXT",
             "ALTER TABLE spire_labs ADD COLUMN federated_at TIMESTAMP",
             "ALTER TABLE spire_labs ADD COLUMN federation_proof TEXT",
+            "ALTER TABLE spire_labs ADD COLUMN attr_probe TEXT",
             # The k3s node's OWN connection identity. The two VMs do not share an SSH
             # key. NULL backfills to "auto-derive from this host's deploy job", which is
             # both the pre-existing behaviour and the correct one — see the model. Bare

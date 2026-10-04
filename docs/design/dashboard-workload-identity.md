@@ -180,6 +180,16 @@ the lab rehearses.
 - **Blocked on the lab's open question:** whether the gateway populates managed system
   attributes for a plugin action at all ([SPIFFE and SPIRE](../workload-lab/spiffe.md)).
   Answer it in the lab first; this follows from the answer.
+- **How it gets answered.** On a governed lab, **Prepare probe** sets `SpiffeTrustDomain`
+  on the managed system: it creates the type and value if the tenant lacks them, assigns
+  the value, and reads it back. An operator runs *Verify Functional Account*, which has no
+  API, and records the `Attributes received:` line on the probe panel
+  ([runbook §5](../runbooks/spire-lab-standup.md)). `GET /api/spire-lab/attr-probe`
+  returns the latest answer. Each answer sets L3's path:
+  - **populated:** an attribute writer for the dashboard's own managed system;
+  - **truncated:** the bundle comes from the PKCS#12 instead;
+  - **empty:** a plugin change first.
+  Not answered from a live tenant yet.
 
 ### L4. Federation between the lab and the dashboard
 
