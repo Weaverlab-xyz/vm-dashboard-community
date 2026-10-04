@@ -189,6 +189,15 @@ a bundle endpoint on both servers) would let a lab workload be authorized by the
 dashboard and the reverse. That is a core SPIFFE capability the lab cannot show today, and
 it is the honest demonstration for customers who run more than one trust domain.
 
+**In progress.** The servers federate: both serve a bundle endpoint on tcp/8082
+(`https_spiffe`). **Federate** on a vm or docker lab re-applies the lab's install, opens
+8082 on its ACL and host firewall, and creates the lab's relationship
+(`spire-federation.yml`), then the dashboard's (`dashboard_spire.federate`). Each is seeded
+with the other's current bundle and refreshed once to prove the fetch. Decommissioning
+unfederates. **Still to come:** workloads with `-federatesWith` (the agent cell and the
+lab's k8s workload) and a step that proves each sees the other's trust domain. Helm-mode
+labs come after that.
+
 ### L5. Bring the two servers' settings in line
 
 **Built.** The vm and docker plays write `jwt_issuer` from a new var, and the lab service

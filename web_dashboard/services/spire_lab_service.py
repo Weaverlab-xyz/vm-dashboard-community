@@ -72,6 +72,19 @@ BIND_PORT = 8081
 # ingress on a VM that is also a Rancher or Portainer node.
 RULE_NAME = "allow-spire-api"
 
+# The SPIRE server's federation bundle endpoint (server.conf `federation.bundle_endpoint`),
+# which the dashboard's own SPIRE server fetches this trust domain's bundle from once the
+# lab is federated with it (docs/workload-lab/spiffe.md). Public keys only, served over
+# https_spiffe — TLS with the server's own SVID — so nothing may terminate TLS in front of
+# it either. The dashboard's SPIRE server serves its bundle on the same port number.
+FEDERATION_PORT = 8082
+
+
+def _acl_ports(row) -> list:
+    """Every port the lab's ONE ingress rule carries. One list for every caller, because
+    the rule is CONVERGED — a call naming fewer ports closes the others."""
+    return [row.bind_port or BIND_PORT, OIDC_PORT, FEDERATION_PORT]
+
 # What the seed puts in, and what discovery should return. **The count is the assertion,
 # not "discovery succeeded".** The plugin shipped with discovery defaulting its path
 # filter to the MINTABLE prefix, so configuring minting silently narrowed the inventory
@@ -139,6 +152,7 @@ def _install_vars(row: SpireLab) -> dict:
            # `-ttl 720h` against the 168h default yields ~7 days and SPIRE says so
            # rather than failing. Raising it here is how a lab outlives a week.
            "ca_ttl": _cfg("spire_lab_ca_ttl", "168h"),
+           "federation_port": FEDERATION_PORT,
            # The `iss` every JWT-SVID carries: the OIDC provider's own URL, as the Helm
            # mode's jwtIssuer already is. k3s matches it exactly against the issuer it
            # was given; a token without it is refused.
@@ -155,7 +169,7 @@ def _ports_vars(row: SpireLab) -> dict:
     # 8443 to the same sources: every lab publishes its OIDC Discovery Provider so the
     # dashboard can fetch the trust domain's JWKS (register_trust_domain).
     return {"bind_port": row.bind_port or BIND_PORT,
-            "extra_ports": [OIDC_PORT],
+            "extra_ports": [OIDC_PORT, FEDERATION_PORT],
             "spire_source_cidrs": _row_cidrs(row)}
 
 
@@ -855,7 +869,7 @@ async def run_provision(db: Session, *, lab_id: str, job_id: str) -> None:
         if cidrs:
             # 8443 beside 8081, to the same sources: the OIDC Discovery Provider is how
             # the dashboard fetches this trust domain's JWT keys (register_trust_domain).
-            res = await backend.apply_ingress(placement, [row.bind_port, OIDC_PORT], cidrs)
+            res = await backend.apply_ingress(placement, _acl_ports(row), cidrs)
             if not res.get("opened"):
                 raise SpireLabError(
                     f"the {backend.acl_label} was not opened, so nothing can reach "
@@ -1071,7 +1085,7 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str,
         # An empty source set is the fail-closed contract on all three clouds: the rule
         # is removed (or every permission revoked), and `opened` comes back False. Both
         # ports, because every build now opens both.
-        res = await backend.apply_ingress(placement, [row.bind_port, OIDC_PORT], [])
+        res = await backend.apply_ingress(placement, _acl_ports(row), [])
         if res.get("opened"):
             raise SpireLabError(
                 f"the {backend.acl_label} still allows tcp/{row.bind_port}")
@@ -1081,6 +1095,23 @@ async def run_decommission(db: Session, *, lab_id: str, job_id: str,
         if unregister_trust_domain(db, row):
             job_service.append_job_log(
                 db, job_id, f"removed the dashboard's trust in {row.trust_domain}")
+        # And the dashboard's SPIRE server stops federating with it: a relationship to a
+        # deleted lab would keep a stale bundle for a trust domain nobody controls. Non-fatal
+        # for the same reason as the unlink: the ACL is closed.
+        if row.federation_status:
+            try:
+                from . import dashboard_spire
+                removed = dashboard_spire.unfederate(row.trust_domain)
+                job_service.append_job_log(
+                    db, job_id, f"the dashboard's SPIRE server no longer federates with "
+                                f"{row.trust_domain} ({', '.join(removed) or 'nothing held'})")
+            except Exception as exc:  # noqa: BLE001
+                job_service.append_job_log(
+                    db, job_id, f"could not remove the dashboard's federation with "
+                                f"{row.trust_domain} ({exc}) — run `spire-server federation "
+                                f"delete -id {row.trust_domain}` in vmdash-spire-server")
+            row.federation_status = None
+            row.federated_at = None
 
         # Optional, and NON-FATAL like the unlink above: the ACL is already closed, which
         # is the part that matters.
@@ -1466,8 +1497,7 @@ async def run_k8s_link(db: Session, *, lab_id: str, job_id: str) -> None:
         await broadcast_progress(
             job_id, 6, f"Opening tcp/{row.bind_port} and tcp/{OIDC_PORT} on the "
                        f"{backend.acl_label} to {node_cidr}…")
-        res = await backend.apply_ingress(
-            placement, [row.bind_port or BIND_PORT, OIDC_PORT], [node_cidr])
+        res = await backend.apply_ingress(placement, _acl_ports(row), [node_cidr])
         if not res.get("opened"):
             raise SpireLabError(
                 f"the {backend.acl_label} was not opened to {node_cidr}, so the agent "
@@ -2069,6 +2099,7 @@ def _docker_server_vars(row: SpireLab) -> dict:
            "spire_version": _cfg("spire_lab_version", "1.15.3"),
            **_pin_vars(),
            "ca_ttl": _cfg("spire_lab_ca_ttl", "168h"),
+           "federation_port": FEDERATION_PORT,
            "jwt_issuer": issuer_url_for(row)}
     if row.admin_spiffe_id:
         out["admin_spiffe_id"] = row.admin_spiffe_id
@@ -2178,7 +2209,7 @@ STAGE_ASSETS = MODE_ASSETS["vm"]
 # handling already keeps honest; refresh and teardown both check it.
 
 UPGRADE_JOB_TYPE = "spirelab_upgrade"
-_LAB_JOB_TYPES = (UPGRADE_JOB_TYPE, JWT_BUNDLE_JOB_TYPE, "spirelab_k8s_link",
+_LAB_JOB_TYPES = (UPGRADE_JOB_TYPE, JWT_BUNDLE_JOB_TYPE, "spirelab_k8s_link", "spirelab_federate",
                   "spirelab_provision", "spirelab_decommission")
 
 
@@ -2289,4 +2320,220 @@ async def run_upgrade(db: Session, *, lab_id: str, job_id: str) -> None:
         row.updated_at = datetime.utcnow()
         db.commit()
         logger.error("spire-lab: upgrade failed for %s: %s", lab_id, exc)
+        job_service.set_failed(db, job_id, str(exc))
+
+
+# ── SPIFFE federation with the dashboard's own SPIRE server ───────────────────
+# docs/design/dashboard-workload-identity.md, L4; docs/workload-lab/spiffe.md, "Federating
+# with the dashboard". Each SPIRE server serves its trust bundle on tcp/8082 (https_spiffe)
+# and holds a federation relationship naming the other's, so each FETCHES the other's
+# bundle and keeps it current through rotation on its own. Nothing here is secret.
+#
+# The lab's half runs as a playbook stage (spire-federation.yml); the dashboard's half is
+# `docker exec` (dashboard_spire.federate). The lab goes FIRST: re-applying its install
+# stage is what puts the bundle endpoint on a lab built before this feature, and the
+# dashboard's first fetch needs that endpoint up.
+#
+# vm and docker modes only. The chart can serve a bundle endpoint too, but getting it out
+# of k3s needs a NodePort and chart values nothing else here uses yet.
+
+FEDERATION_JOB_TYPE = "spirelab_federate"
+
+
+def _dashboard_side() -> dict:
+    """The dashboard SPIRE server's trust domain, bundle and endpoint URL — read live, at
+    run time, so a re-run always seeds the lab with the current keys."""
+    from . import dashboard_spire
+    td = dashboard_spire.trust_domain()
+    return {"trust_domain": td,
+            "url": dashboard_spire.federation_url(dashboard_spire.server_address()),
+            "bundle_json": json.dumps(dashboard_spire.live_bundle())}
+
+
+def _federation_vars(row: SpireLab, state: str = "present") -> dict:
+    dash = _dashboard_side()
+    out = {"trust_domain": row.trust_domain, **cli_vars(row), "state": state,
+           "dashboard_trust_domain": dash["trust_domain"]}
+    if state == "present":
+        out.update(dashboard_bundle_endpoint_url=dash["url"],
+                   dashboard_bundle_json=dash["bundle_json"])
+    return out
+
+
+FEDERATION_STAGE = {
+    "key": "federation", "asset": "spire-federation.yml", "vars_for": _federation_vars,
+    "pct": 70, "label": "Federating the lab's SPIRE server with the dashboard's…",
+}
+UNFEDERATION_STAGE = {
+    "key": "unfederation", "asset": "spire-federation.yml",
+    "vars_for": lambda row: _federation_vars(row, "absent"),
+    "pct": 50, "label": "Removing the lab's federation with the dashboard…",
+}
+
+
+def lab_federation_url(row: SpireLab) -> str:
+    """Where the dashboard's SPIRE server fetches this lab's bundle: the same address the
+    dashboard already reaches the lab's OIDC provider at (jwks_url_for)."""
+    from . import dashboard_spire
+    host = row.public_ip or row.private_ip or ""
+    return dashboard_spire.federation_url(host) if host else ""
+
+
+def _captured_bundle(db: Session, row: SpireLab) -> str:
+    from ..database import SpiffeTrustDomain
+    rec = db.query(SpiffeTrustDomain).filter(
+        SpiffeTrustDomain.trust_domain == (row.trust_domain or "").lower(),
+        SpiffeTrustDomain.spire_lab_id == row.id).first()
+    return (rec.bundle_json or "").strip() if rec else ""
+
+
+def federation_problem(db: Session, row: SpireLab) -> str:
+    """Why this lab cannot be federated right now, or "" — each with its remedy."""
+    from . import dashboard_spire
+    if row.status != "available":
+        return f"{row.name} is {row.status}, not available — only a running lab federates"
+    if deployment_mode(row) == "k8s":
+        return ("federation is built for the vm and docker modes. A k8s lab's bundle "
+                "endpoint runs inside k3s, and nothing exposes it outside the cluster yet")
+    if not (row.public_ip or row.private_ip):
+        return f"{row.name} reports no address for the dashboard to fetch its bundle from"
+    if not _captured_bundle(db, row):
+        return (f"the dashboard holds no bundle for {row.trust_domain} to seed the "
+                f"relationship with. Press Refresh keys on the lab first")
+    if not dashboard_spire.server_in_use():
+        return ("the dashboard's own SPIRE server is not in use. Turn on agent attestation "
+                "or the dashboard's SPIFFE identity under Settings → Remote Agents first")
+    if not dashboard_spire.server_address():
+        return ("the dashboard has no address the lab can reach its SPIRE server at — pin "
+                "the agent audience under Settings → Remote Agents")
+    busy = _active_lab_jobs(db, row.id, _LAB_JOB_TYPES)
+    if busy:
+        return (f"{row.name} already has a {busy[0].job_type} job running "
+                f"({busy[0].id[:8]}) — federate once it finishes")
+    return ""
+
+
+def start_federation(db: Session, *, lab_id: str, created_by: str,
+                     enable: bool = True) -> dict:
+    row = get_lab(db, lab_id)
+    if not row:
+        raise SpireLabError(f"SPIRE lab {lab_id} not found")
+    if enable:
+        problem = federation_problem(db, row)
+        if problem:
+            raise SpireLabError(problem)
+    elif not row.federation_status:
+        raise SpireLabError(f"{row.name} is not federated")
+    job = job_service.create_job(
+        db, FEDERATION_JOB_TYPE, created_by, workgroup=row.workgroup,
+        metadata={"lab_id": row.id, "trust_domain": row.trust_domain,
+                  "action": "federate" if enable else "unfederate"})
+    row.federation_status = "federating" if enable else row.federation_status
+    db.commit()
+    logger.info("spire-lab: queued %s of %r as job %s",
+                "federation" if enable else "unfederation", row.name, job.id)
+    return {"lab_id": row.id, "job_id": job.id}
+
+
+def _federation_sources(row: SpireLab) -> list:
+    """The lab ACL's source set while it carries 8082. The operator's sources (the
+    dashboard's egress among them — it already fetches the lab's JWKS from there) plus a
+    linked k3s node, so re-applying the converged rule never drops either."""
+    cidrs = list(_row_cidrs(row))
+    if row.k8s_status == "linked" and row.k8s_private_ip:
+        node = f"{row.k8s_private_ip}/32"
+        if node not in cidrs:
+            cidrs.append(node)
+    return cidrs
+
+
+async def run_federation(db: Session, *, lab_id: str, job_id: str,
+                         action: str = "federate") -> None:
+    """Worker entry point for ``spirelab_federate``."""
+    from ..api.websocket import broadcast_progress
+    from . import dashboard_spire, storage_service
+
+    row = get_lab(db, lab_id)
+    if not row:
+        logger.warning("spire-lab: row %s vanished before federation", lab_id)
+        return
+    job_service.set_running(db, job_id)
+    asset_backend = _cfg("spire_lab_asset_backend") or storage_service.active_backend()
+    actor = row.created_by or "system"
+
+    async def _stage(stage: dict) -> None:
+        status = await _run_stage(db, row=row, stage=stage, actor=actor,
+                                  asset_backend=asset_backend, parent_job_id=job_id)
+        if status != "completed":
+            raise SpireLabError(
+                f"{stage['asset']} {status} — see job {stage_jobs(row).get(stage['key'], '')} "
+                f"for the Ansible output")
+
+    try:
+        if action == "unfederate":
+            await broadcast_progress(job_id, 20, "Removing the dashboard's relationship…")
+            removed = dashboard_spire.unfederate(row.trust_domain)
+            try:
+                await _stage(UNFEDERATION_STAGE)
+            except Exception as exc:  # noqa: BLE001 — the dashboard side is what matters
+                job_service.append_job_log(
+                    db, job_id, f"the lab's half was not removed ({exc}) — run "
+                                f"spire-federation.yml with state=absent by hand")
+            row.federation_status = None
+            row.federation_error = None
+            row.federated_at = None
+            db.commit()
+            job_service.set_completed(db, job_id, result={"lab_id": row.id,
+                                                          "removed": removed})
+            return
+
+        dash_td = dashboard_spire.trust_domain()
+        if dash_td == (row.trust_domain or "").lower():
+            raise SpireLabError(
+                f"the lab and the dashboard both use the trust domain {dash_td}; "
+                f"federation is between two different trust domains")
+
+        # The lab's half: its install stage (re-applied, so a lab built before this
+        # feature gets its bundle endpoint), its ACL and host firewall (8082 among them),
+        # then the relationship naming the dashboard.
+        backend = require_backend(row.cloud)
+        cidrs = _federation_sources(row)
+        if cidrs:
+            await broadcast_progress(
+                job_id, 10, f"Opening tcp/{FEDERATION_PORT} on the {backend.acl_label}…")
+            res = await backend.apply_ingress(json.loads(row.vm_resource_id or "{}"),
+                                              _acl_ports(row), cidrs)
+            if not res.get("opened"):
+                raise SpireLabError(
+                    f"the {backend.acl_label} was not opened, so the dashboard cannot "
+                    f"reach tcp/{FEDERATION_PORT}")
+        else:
+            job_service.append_job_log(
+                db, job_id, "this lab opened no ACL (no source set); the dashboard reaches "
+                            f"tcp/{FEDERATION_PORT} only from inside the lab's network")
+        install = next(s for s in stages_for(row) if s["key"] == "install")
+        await broadcast_progress(job_id, 25, "Re-applying the server configuration…")
+        await _stage(install)
+        await _stage(_PORTS)
+        await broadcast_progress(job_id, 60, FEDERATION_STAGE["label"])
+        await _stage(FEDERATION_STAGE)
+
+        # The dashboard's half.
+        await broadcast_progress(job_id, 85, "Federating the dashboard's SPIRE server…")
+        result = dashboard_spire.federate(
+            row.trust_domain, lab_federation_url(row),
+            dashboard_spire.server_id((row.trust_domain or "").lower()),
+            _captured_bundle(db, row))
+        row.federation_status = "federated"
+        row.federation_error = None
+        row.federated_at = datetime.utcnow()
+        db.commit()
+        job_service.set_completed(db, job_id, result={
+            "lab_id": row.id, "dashboard_trust_domain": dash_td, **result})
+        logger.info("spire-lab: %r federated with %s", row.name, dash_td)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("spire-lab: federation %s failed for %s: %s", action, lab_id, exc)
+        row.federation_status = "failed"
+        row.federation_error = str(exc)
+        db.commit()
         job_service.set_failed(db, job_id, str(exc))

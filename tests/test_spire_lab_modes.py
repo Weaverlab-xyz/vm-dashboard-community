@@ -270,8 +270,8 @@ def test_both_mint_plays_carry_the_same_split():
 
 # ── the host firewall and teardown ───────────────────────────────────────────
 
-def test_the_host_firewall_stage_opens_8443_too():
-    assert svc._ports_vars(_row())["extra_ports"] == [svc.OIDC_PORT]
+def test_the_host_firewall_stage_opens_8443_and_the_bundle_endpoint_too():
+    assert svc._ports_vars(_row())["extra_ports"] == [svc.OIDC_PORT, svc.FEDERATION_PORT]
     assert "product(_ports)" in _src("spire-open-ports.yml")
 
 

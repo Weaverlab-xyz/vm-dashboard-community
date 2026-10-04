@@ -35,6 +35,7 @@
 #   spire_version: 1.15.3
 #   spire_sha256: ""                # overrides the pinned checksum table
 #   bind_port: 8081
+#   federation_port: 8082                 # the bundle endpoint, for SPIFFE federation
 #   ca_ttl: 168h
 #   admin_spiffe_id: ""                 # default spiffe://<trust_domain>/password-safe/admin
 #   jwt_issuer: ""                      # the OIDC provider's issuer URL; blank = no `iss`
@@ -55,6 +56,7 @@
         arm64: a9982b3ca7de489def22265fd4586d8e13091ecb6fddf6adcea9291313b18886
     spire_allow_unpinned: false
     bind_port: 8081
+    federation_port: 8082
     ca_ttl: "168h"
     default_x509_svid_ttl: "1h"
     default_jwt_svid_ttl: "5m"
@@ -243,6 +245,16 @@
               # "spire-server x509 mint". Only admin_ids grants administrative rights
               # to a minted SVID, which is what the plugin authenticates with.
               admin_ids = ["{{ _admin_id }}"]
+
+              # SPIFFE federation: this server's trust bundle, served over https_spiffe
+              # (TLS with the server's own SVID) to the dashboard's SPIRE server once the
+              # lab is federated with it. Public keys only.
+              federation {
+                  bundle_endpoint {
+                      address = "0.0.0.0"
+                      port    = {{ federation_port }}
+                  }
+              }
           }
 
           plugins {

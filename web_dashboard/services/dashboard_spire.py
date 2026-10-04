@@ -71,16 +71,20 @@ def container() -> str:
     return (config_service.get("spire_server_container") or "").strip() or DEFAULT_CONTAINER
 
 
-def _run(argv: list, timeout: int) -> subprocess.CompletedProcess:
+def _run(argv: list, timeout: int, input: Optional[str] = None) -> subprocess.CompletedProcess:
     """Indirection so tests can stub the subprocess without touching the parsing."""
-    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                          check=False, input=input)
 
 
-def _cli(*args: str, timeout: int = 30) -> str:
+def _cli(*args: str, timeout: int = 30, input: Optional[str] = None) -> str:
     name = container()
-    argv = ["docker", "exec", name, SPIRE_BIN, *args]
+    # `-i` only when there is something to send: a federation's seed bundle goes in on
+    # stdin (`-trustDomainBundlePath /dev/stdin`) because the container's filesystem is
+    # read-only and nothing the app writes is mounted into it.
+    argv = ["docker", "exec", *(["-i"] if input is not None else []), name, SPIRE_BIN, *args]
     try:
-        proc = _run(argv, timeout)
+        proc = _run(argv, timeout) if input is None else _run(argv, timeout, input=input)
     except FileNotFoundError as exc:
         raise DashboardSpireError("the docker CLI is not available to the dashboard") from exc
     except subprocess.TimeoutExpired as exc:
@@ -98,8 +102,8 @@ def _cli(*args: str, timeout: int = 30) -> str:
     return proc.stdout
 
 
-def _json(*args: str, timeout: int = 30) -> dict:
-    out = _cli(*args, "-output", "json", timeout=timeout)
+def _json(*args: str, timeout: int = 30, input: Optional[str] = None) -> dict:
+    out = _cli(*args, "-output", "json", timeout=timeout, input=input)
     try:
         data = json.loads(out)
     except ValueError as exc:
@@ -340,3 +344,90 @@ def live_bundle() -> dict:
     if not isinstance(bundle, dict):
         raise DashboardSpireError("the SPIRE server's SPIFFE bundle has an unexpected shape")
     return bundle
+
+
+# ── SPIFFE federation with a Workload Lab ─────────────────────────────────────
+# docs/design/dashboard-workload-identity.md, L4. This server FETCHES a federated trust
+# domain's bundle from that domain's bundle endpoint (https_spiffe: TLS authenticated by
+# the endpoint server's own SVID), and keeps it current through rotation by itself. The
+# relationship needs a SEED bundle to authenticate that first fetch; the caller passes the
+# bundle the dashboard already captured from the lab. Everything here is public keys.
+
+FEDERATION_PORT = 8082               # server.conf federation.bundle_endpoint.port
+SERVER_PATH = "/spire/server"        # the SPIFFE ID a SPIRE server's bundle endpoint presents
+
+
+def federation_url(host: str) -> str:
+    return f"https://{host}:{FEDERATION_PORT}"
+
+
+def server_id(td: str) -> str:
+    return f"spiffe://{td}{SERVER_PATH}"
+
+
+def _federation_exists(td: str) -> bool:
+    try:
+        _json("federation", "show", "-trustDomain", td)
+        return True
+    except DashboardSpireError as exc:
+        if "is not running" in str(exc):
+            raise
+        return False
+
+
+def federate(td: str, url: str, endpoint_id: str, bundle_json: str) -> dict:
+    """Create (or update) this server's federation relationship with ``td`` and refresh it
+    once, so a relationship that cannot fetch is an error now, not a silent stale bundle.
+
+    The caller derives every argument from the lab row and the captured bundle; nothing
+    here comes from a request.
+    """
+    td = (td or "").strip().lower()
+    if not td or "/" in td or ":" in td:
+        raise DashboardSpireError(f"{td!r} is not a bare trust domain name")
+    if not url.startswith("https://"):
+        raise DashboardSpireError("a bundle endpoint URL must be https")
+    if endpoint_id != server_id(td):
+        raise DashboardSpireError(
+            f"the endpoint's SPIFFE ID must be {server_id(td)} — a SPIRE server's bundle "
+            f"endpoint presents its own SVID")
+    if '"keys"' not in (bundle_json or ""):
+        raise DashboardSpireError(
+            f"there is no captured bundle for {td} to seed the relationship with. Press "
+            f"Refresh keys on the lab first")
+    verb = "update" if _federation_exists(td) else "create"
+    res = _json("federation", verb, "-trustDomain", td, "-bundleEndpointURL", url,
+                "-bundleEndpointProfile", "https_spiffe", "-endpointSpiffeID", endpoint_id,
+                "-trustDomainBundleFormat", "spiffe", "-trustDomainBundlePath", "/dev/stdin",
+                input=bundle_json)
+    results = res.get("results") or []
+    status = (results[0].get("status") or {}) if results else {}
+    if not results or int(status.get("code") or 0) != 0:
+        raise DashboardSpireError(
+            f"the SPIRE server refused the federation relationship with {td}: "
+            f"{status.get('message') or 'no result returned'}")
+    try:
+        _cli("federation", "refresh", "-id", td, timeout=60)
+    except DashboardSpireError as exc:
+        raise DashboardSpireError(
+            f"the relationship with {td} is set, but this server could not fetch its "
+            f"bundle from {url}: {exc}. Check that tcp/{FEDERATION_PORT} on the lab host is "
+            f"reachable from the dashboard host") from exc
+    return {"trust_domain": td, "bundle_endpoint_url": url, "action": verb}
+
+
+def unfederate(td: str) -> list:
+    """Remove the relationship and the federated bundle. Each step is attempted on its own
+    so a half-removed federation still finishes; returns what was removed."""
+    td = (td or "").strip().lower()
+    removed = []
+    for what, args in (("relationship", ("federation", "delete", "-id", td)),
+                       ("bundle", ("bundle", "delete", "-id", f"spiffe://{td}"))):
+        try:
+            _cli(*args)
+            removed.append(what)
+        except DashboardSpireError as exc:
+            if "is not running" in str(exc):
+                raise
+            logger.info("dashboard-spire: no %s to remove for %s (%s)", what, td, exc)
+    return removed

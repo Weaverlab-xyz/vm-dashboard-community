@@ -2535,6 +2535,14 @@ class SpireLab(Base):
     # diagnostic — which is why it is recorded rather than rebuilt from parts each time.
     k8s_issuer_url = Column(String(255), nullable=True)
 
+    # SPIFFE federation with the dashboard's own SPIRE server (docs/workload-lab/spiffe.md,
+    # "Federating with the dashboard"): federating | federated | failed, or NULL for never.
+    # Separate from `status` for the reason k8s_status is: a failed federation must not
+    # make a working trust domain read as broken.
+    federation_status = Column(String(32), nullable=True)
+    federation_error = Column(Text, nullable=True)
+    federated_at = Column(DateTime, nullable=True)
+
     # WHO the runner logs in as ON THE K3S NODE. A SEPARATE SET from the four
     # `ansible_*` / `login_user` fields above, which belong to the SPIRE host, because the
     # two VMs are deployed independently and **do not share an SSH key**.
@@ -4732,6 +4740,11 @@ def init_db():
             "ALTER TABLE spire_labs ADD COLUMN k8s_workload_uid INTEGER",
             "ALTER TABLE spire_labs ADD COLUMN k8s_workload_role VARCHAR(120)",
             "ALTER TABLE spire_labs ADD COLUMN k8s_issuer_url VARCHAR(255)",
+            # SPIFFE federation with the dashboard's SPIRE server. NULL backfills to "never
+            # federated", which every lab built before the button is.
+            "ALTER TABLE spire_labs ADD COLUMN federation_status VARCHAR(32)",
+            "ALTER TABLE spire_labs ADD COLUMN federation_error TEXT",
+            "ALTER TABLE spire_labs ADD COLUMN federated_at TIMESTAMP",
             # The k3s node's OWN connection identity. The two VMs do not share an SSH
             # key. NULL backfills to "auto-derive from this host's deploy job", which is
             # both the pre-existing behaviour and the correct one — see the model. Bare
