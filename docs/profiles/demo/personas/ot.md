@@ -59,7 +59,7 @@ a Rockwell shop" into the same demo rather than two.
 
 ### kubectl into the plant, through PRA
 
-The cell's simulators are workloads of [KubeSolo](../../../kubesolo.md), the single-node
+The cell's simulators are workloads of [KubeSolo](../../../kubernetes/kubesolo.md), the single-node
 Kubernetes small enough for plant hardware — so the answer to "we cannot run a cluster on
 the plant floor" is a running cell rather than a slide. Its API gets a tunnel of its own,
 which is what makes "this vendor may read the PLC but not the cluster" a policy decision
@@ -69,7 +69,7 @@ The agent half of that story runs next door, on the cell's DMZ broker — same K
 same chart, inside the plant. See
 [Who brokers identity in the plant](../ot-demo-cell.md#who-brokers-identity-in-the-plant).
 
-**Guide:** [KubeSolo](../../../kubesolo.md) · [OT Demo Cell](../ot-demo-cell.md)
+**Guide:** [KubeSolo](../../../kubernetes/kubesolo.md) · [OT Demo Cell](../ot-demo-cell.md)
 
 ### Time-bound vendor access to one cell
 

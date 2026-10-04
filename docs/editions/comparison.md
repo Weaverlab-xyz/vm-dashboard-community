@@ -2,6 +2,8 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you are choosing between running this yourself and a managed edition.
 
+Part of [Editions](../editions.md).
+
 The dashboard codebase has two shipping deployment topologies:
 
 - **Community (self-hosted)** — runs on a host you control, secrets in an
@@ -17,7 +19,7 @@ This doc covers the one structural difference that changes the security
 posture: the **root-key bootstrap**. For the broader feature roadmap
 (durable cross-cloud workflows, drift detection, compliance-as-code, etc.)
 and which items are built, planned, or researching, see
-[saas-roadmap.md](saas-roadmap.md).
+[the SaaS roadmap](roadmap.md).
 
 ---
 
@@ -31,7 +33,7 @@ encrypted store**, because the dashboard would need a credential to fetch
 it — and that credential would live in the same encrypted database the
 root key unlocks.
 
-See [secrets-management.md → Why the JWT root key cannot be migrated](secrets-management.md#why-the-jwt-root-key-cannot-be-migrated)
+See [secrets-management.md → Why the JWT root key cannot be migrated](../access/secrets-management.md#why-the-jwt-root-key-cannot-be-migrated)
 for the loop in detail.
 
 ## How the hosted topology breaks the cycle (shipping today)
@@ -69,7 +71,7 @@ still fetched from a **single shared secret store under one platform
 identity**, common to the deployment rather than scoped per tenant. Giving
 each tenant its own store, reached via a **federated (per-tenant) workload
 identity**, is the remaining enhancement on this axis — see
-[saas-roadmap.md](saas-roadmap.md).
+[the SaaS roadmap](roadmap.md).
 
 ## Side-by-side
 

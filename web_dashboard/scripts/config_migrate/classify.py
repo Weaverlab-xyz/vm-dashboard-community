@@ -258,7 +258,7 @@ _ON_PREM_PREFIXES = (
 # ── Secrets ──────────────────────────────────────────────────────────────────
 #
 # The codebase carries four non-identical secret-key lists (see
-# docs/config-migration.md). Only config_service._SECRET_KEYS — the four below —
+# docs/operations/config-migration.md). Only config_service._SECRET_KEYS — the four below —
 # drives masking in GET /api/setup/config, which is why an HTTP export cannot
 # recover them and export-local exists.
 

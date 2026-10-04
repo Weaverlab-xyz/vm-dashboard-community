@@ -130,7 +130,7 @@ list, select-all and bulk power with it. The same tags appear on
 dialled connection is written immediately. An agent-bound one is queued as a job for the
 agent. Proxmox tags are bare labels with no values. Chip colours, the refused
 dashboard-owned keys, and the audit entry are all in
-[Cloud VMs — Editing tags](../cloud-vms.md#editing-tags). The agent path is described in
+[Cloud VMs — Editing tags](../cloud/vms.md#editing-tags). The agent path is described in
 [Agent-brokered hypervisors](../remote-agents/hypervisors.md#the-verbs).
 
 **Scheduling power.** On a connection bound to a

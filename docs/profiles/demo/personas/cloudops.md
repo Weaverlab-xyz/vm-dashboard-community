@@ -34,7 +34,7 @@ Deploy a cloud VM and watch Shell Jump, Password Safe onboarding and an Entitle 
 themselves in a single job. The machine is under management before anyone could have logged
 into it.
 
-**Guide:** [Cloud VMs](../../../cloud-vms.md)
+**Guide:** [Cloud VMs](../../../cloud/vms.md)
 
 ### Onboard a cloud VM with nothing installed on it
 
@@ -57,7 +57,7 @@ standing administrators in the cloud IAM.
 Build a hardened image with Packer in one cloud and promote it to the others, so every VM in
 every region starts from the same audited baseline.
 
-**Guide:** [Image Management](../../../image-management.md)
+**Guide:** [Image Management](../../../cloud/image-management.md)
 
 ### Guardrails: refuse the deploy, then reap it
 
@@ -65,7 +65,7 @@ Admission policy turns down a non-compliant request up front; the auto-delete ti
 what did get built. The two halves of not accumulating privileged infrastructure by accident.
 
 **Guide:** [Policy Guardrails](../../../scheduling/policy-guardrails.md) ·
-[Auto-delete Timer](../../../auto-delete-timer.md)
+[Auto-delete Timer](../../../operations/auto-delete-timer.md)
 
 ## What to enable
 

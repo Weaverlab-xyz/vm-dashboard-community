@@ -193,7 +193,7 @@ access* — but a `security` card pointing at the same listing would not be wron
 **Role:** `itops` already exists. This is a cell for an existing persona.
 
 The gap is sharper than "no cloud VDI" — cloud VDI is built and reasonably mature
-([Virtual Desktops](../virtual-desktops.md), preview). The gap is that
+([Virtual Desktops](../cloud/virtual-desktops.md), preview). The gap is that
 **"remove local admin from a Windows endpoint and elevate per-application" — among the
 most recognisable demos BeyondTrust has — has no home in this dashboard**, because
 `epml_enabled` is the only EPM flag in the registry and
@@ -399,7 +399,7 @@ one §5b used.
 
 §5b argued from capability — *OIDC federation for non-human identities is available in all
 three clouds*, which is true and is not quite a reason to build anything. The reason is in
-`docs/cloud-hosting.md`, which has said all along that this dashboard runs as a managed
+`docs/operations/cloud-hosting.md`, which has said all along that this dashboard runs as a managed
 container on **Azure Container Apps, GCP Cloud Run or AWS ECS**. Wiring only Azure left two
 of the three *documented hosting options* unable to use the mode that stores nothing —
 not because the mechanism belonged to Azure, but because nothing here asked the other

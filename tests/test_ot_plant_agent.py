@@ -116,7 +116,7 @@ def test_the_brokers_ways_out_are_the_entitle_channel_and_its_own_cell():
     src = _fn_src(_OT, "_wire_dmz_firewall")
     assert ot.ENTITLE_AGENT_PORTS == ("443", "8080"), (
         "8080 is not telemetry and not optional — it carries the agent's primary "
-        "channel (docs/kubesolo.md)")
+        "channel (docs/kubernetes/kubesolo.md)")
     allows = re.findall(r'direction="EGRESS", action="allow"[^)]*?destination_ranges=(\w+|\[[^\]]*\])',
                         src, re.S)
     assert allows, "the DMZ zone opens nothing"

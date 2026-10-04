@@ -2,6 +2,8 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you are deciding where to store cloud credentials, and how to evolve that over time.
 
+Part of [Identity and access](../access.md).
+
 This document explains how the dashboard stores and protects credentials,
 the security philosophy behind the design, and how to migrate secrets to
 an external vault once you are ready.
@@ -153,7 +155,7 @@ sources only, in order:
 > The hosted SaaS edition removes this limitation by fetching the root key
 > from Azure Key Vault using a workload-managed identity and OIDC federation
 > — no static credential is required to bootstrap. See
-> [SaaS comparison](saas-comparison.md) for details.
+> [SaaS comparison](../editions/comparison.md) for details.
 
 To rotate the JWT root key in the community edition: stop the application,
 write a new key to the file/secret, restart. **All existing sessions are
@@ -265,7 +267,7 @@ decodes its response to text, so a PEM bundle, a config file or JSON round-trips
 PKCS#12 or DER payload does not. A payload showing decode damage is **refused rather
 than returned**, since a corrupt bundle that looks like a value fails much later and
 somewhere unrelated. See
-[Password Safe → Troubleshooting](integrations/beyondtrust/password-safe.md#troubleshooting).
+[Password Safe → Troubleshooting](../integrations/beyondtrust/password-safe.md#troubleshooting).
 
 **Writing one goes through a file, because ps-cli has no inline route.** The type is
 inferred from the argument: `--text` makes a text secret, `-fp <path>` makes a file
@@ -314,7 +316,7 @@ HashiCorp Vault Enterprise, AWS Audit Manager + CloudTrail, etc.):
   operate a multi-cloud workstation lab, not to replace their
   procurement decision for a PAM/secret-vault platform.
 - **No plans on the SaaS roadmap either.** The hosted SaaS edition's
-  differentiation (see [SaaS comparison](saas-comparison.md)) is
+  differentiation (see [SaaS comparison](../editions/comparison.md)) is
   managed hosting and operator UX — not vault feature parity.
   Customers who need an enterprise vault should keep using one and
   point the dashboard at it via the existing migration / reference
@@ -331,7 +333,7 @@ file against the dashboard.
 
 With the BeyondTrust integration enabled, the dashboard can retrieve AWS, Azure,
 and SSH credentials directly from Password Safe at runtime rather than from the
-application database. See [docs/integrations/beyondtrust/password-safe.md](integrations/beyondtrust/password-safe.md)
+application database. See [docs/integrations/beyondtrust/password-safe.md](../integrations/beyondtrust/password-safe.md)
 for setup instructions.
 
 **How it differs from Tier 2:**
@@ -368,7 +370,7 @@ the container mints a short-lived Entra token from its own managed identity, and
 with references only. The migration refuses to move the PAT on the token mode,
 and reports it as a skipped bootstrap credential.
 
-See [workload-lab/workload-credentials.md](workload-lab/workload-credentials.md).
+See [workload-lab/workload-credentials.md](../workload-lab/workload-credentials.md).
 
 ### Hypervisor credentials for a remote agent
 
@@ -387,7 +389,7 @@ Unlike the four backend prefixes, `ps_account://` is deliberately **not** resolv
 `config_service.get()`. The others are stateless reads; this one opens a request that
 something has to close, so it is handled only on the agent-credential path where the release
 lifecycle exists. See
-[docs/remote-agents.md](remote-agents/credentials.md#the-credential-the-dashboard-holds).
+[docs/remote-agents.md](../remote-agents/credentials.md#the-credential-the-dashboard-holds).
 
 ---
 
@@ -421,7 +423,7 @@ Managed-account checkout works on the **local and Azure (ACI) runners** (both
 inject inline); on **ECS / Cloud Run** it requires the opt-in below.
 
 Full operator detail lives in
-[docs/integrations/ansible.md → Using a Secrets-Management secret in a run](integrations/ansible\secrets.md#using-a-secrets-management-secret-in-a-run).
+[docs/integrations/ansible.md → Using a Secrets-Management secret in a run](../integrations/ansible\secrets.md#using-a-secrets-management-secret-in-a-run).
 
 ### Ephemeral cloud secrets
 
@@ -465,7 +467,7 @@ use. If that trade-off isn't acceptable, use the local or ACI runner (inline, no
 store copy) — the default.
 
 Full operator detail:
-[docs/integrations/ansible.md → Managed-account checkout](integrations/ansible\secrets.md#managed-account-checkout-beyondtrust-password-safe).
+[docs/integrations/ansible.md → Managed-account checkout](../integrations/ansible\secrets.md#managed-account-checkout-beyondtrust-password-safe).
 
 ### Collect from the dashboard (no store copy)
 
@@ -487,7 +489,7 @@ dashboard. With **Collect credentials from the dashboard** on (Settings → Ansi
    token first, then sends the presigned request to STS (only ever a regional STS host) or
    verifies the Google token. It checks that the identity is the configured runner and
    answers with the credential **sealed** to a key the task generated (the
-   [remote agents'](remote-agents/credentials.md#central-storage-with-spire-the-recommended-model)
+   [remote agents'](../remote-agents/credentials.md#central-storage-with-spire-the-recommended-model)
    format).
 5. The task merges it into the run's `0600` vars file. The grant is deleted when the run
    ends, whether redeemed or not.

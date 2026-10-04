@@ -130,7 +130,7 @@ replace the manual setup in Parts A/B/C below.
 - ❌ Production or shared dashboards with existing cloud infra — the
   scripts create new VPCs/VNets and assume they own them.
 
-**See [docs/CLOUD_SANDBOX.md](CLOUD_SANDBOX.md)** for the full walkthrough:
+**See [docs/cloud/sandbox.md](cloud/sandbox.md)** for the full walkthrough:
 topology diagrams per cloud, cost estimates, verification, customisation
 hooks, and troubleshooting. The [`scripts/sandbox/README.md`](../scripts/sandbox/README.md)
 also has a one-line summary per file if you want a quick orientation

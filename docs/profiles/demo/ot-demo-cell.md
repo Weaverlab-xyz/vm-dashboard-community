@@ -6,7 +6,7 @@ The dashboard can stand up a simulated **OT/ICS plant cell** — Modbus, Siemens
 S7comm, Rockwell EtherNet/IP and OPC UA PLC simulators plus the FUXA web SCADA/HMI —
 inside a cloud sandbox's **private,
 egress-less subnet**, then layer the BeyondTrust PAM stack on top. Same
-**provisioning + three layers** model as [Cloud VMs](../../cloud-vms.md); the OT twist is
+**provisioning + three layers** model as [Cloud VMs](../../cloud/vms.md); the OT twist is
 that the air-gapped subnet *is* the plant network, and every path in is PRA-brokered:
 
 - **Provisioning** *(stand it up)* — deploy a VM from the Packer-baked **`ot-sim`**
@@ -14,7 +14,7 @@ that the air-gapped subnet *is* the plant network, and every path in is PRA-brok
   running cell needs **zero outbound internet**: a PLC simulator whose holding registers
   tick every second (:502), the same four process values over **Siemens S7comm** (:102),
   **Rockwell EtherNet/IP** (:44818) and **OPC UA** (:4840), and FUXA (:1881) with its PLC
-  connection pre-seeded. They run as workloads of **[KubeSolo](../../kubesolo.md)** —
+  connection pre-seeded. They run as workloads of **[KubeSolo](../../kubernetes/kubesolo.md)** —
   the single-node Kubernetes this repo puts on plant hosts — so the cell is a plant IPC
   running a real cluster, and its Kubernetes API (:6443) is one more thing PRA can
   broker. A systemd unit applies the workloads at boot.
@@ -66,14 +66,14 @@ S7comm, Rockwell EtherNet/IP and OPC UA**, so the story holds whichever protocol
 customer's plant speaks. Ticking several protocols on one cell is what turns "we are a
 Siemens shop" and "we are a Rockwell shop" into the same demo.
 
-The cell also **is** a [KubeSolo](../../kubesolo.md) host — the simulators are its
+The cell also **is** a [KubeSolo](../../kubernetes/kubesolo.md) host — the simulators are its
 workloads — so the other half of the OT conversation, "we cannot carry Kubernetes on
 plant hardware", has a running answer instead of a slide. See
 [The cell runs on KubeSolo](#the-cell-runs-on-kubesolo).
 
 ## The cell runs on KubeSolo
 
-The baked image installs **[KubeSolo](../../kubesolo.md)** — single-node, etcd-free
+The baked image installs **[KubeSolo](../../kubernetes/kubesolo.md)** — single-node, etcd-free
 Kubernetes, a control plane of about 200 MB — and runs the four simulators and FUXA on
 it as Deployments in the `ot-sim` namespace. Nothing the customer sees changes: same
 images, same ports, same Web Jump, same protocol tunnels. Every workload runs with
@@ -653,7 +653,7 @@ Notes that save demo time:
   destroy runner only ever collects for a deploy that *completed*.
 - **Expiry**: the child is a normal deploy row for its cloud, so the cell participates
   in the auto-delete timer with no extra configuration (see
-  [auto-delete-timer](../../auto-delete-timer.md)). A cell with a broker gives the
+  [auto-delete-timer](../../operations/auto-delete-timer.md)). A cell with a broker gives the
   broker **its own expiry**, not the policy default: on separate clocks the two diverge
   the moment anyone extends one, and whichever reaped first would leave the other
   useless — an agent brokering access to a plant that is gone, or a cell whose Entitle

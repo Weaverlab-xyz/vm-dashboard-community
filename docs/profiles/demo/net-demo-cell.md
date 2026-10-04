@@ -12,7 +12,7 @@
 The dashboard can stand up a **VyOS router/firewall** — a real network OS, with a real
 `configure` mode — in a cloud sandbox's private subnet, with **no external IP and no
 inbound rule**, and layer the BeyondTrust stack on top. Same **provisioning + three
-layers** model as [Cloud VMs](../../cloud-vms.md); the network twist is that the device
+layers** model as [Cloud VMs](../../cloud/vms.md); the network twist is that the device
 being demoed *is* a firewall, so "who may reconfigure it" and "what it permits" are
 visibly different questions:
 

@@ -2,6 +2,8 @@
 
 > **Audience:** operator · **Profile:** `demo` · **Read this when:** you want a containerised app on a cloud runtime without standing up Portainer.
 
+Part of [Cloud](../cloud.md).
+
 The **Containers → Cloud** tab deploys a Docker Compose file to a managed cloud container
 runtime — without going through Portainer — and monitors the container workloads the
 dashboard runs across AWS, Azure, and GCP.
@@ -19,20 +21,20 @@ and they all run on **AWS, Azure or GCP**, chosen per deploy:
 
 | Node | Doc | What it hosts |
 |---|---|---|
-| **Gateway** | [Gateway hosts](integrations/beyondtrust/gateways.md) | the PRA broker every tunnel and jump goes through |
-| **Portainer server** | [Portainer](integrations/portainer.md) | Portainer CE, managing remote Docker hosts via Edge agents |
-| **Rancher node** | [Rancher](integrations/rancher.md) | the Kubernetes management plane every cluster is imported into |
+| **Gateway** | [Gateway hosts](../integrations/beyondtrust/gateways.md) | the PRA broker every tunnel and jump goes through |
+| **Portainer server** | [Portainer](../integrations/portainer.md) | Portainer CE, managing remote Docker hosts via Edge agents |
+| **Rancher node** | [Rancher](../integrations/rancher.md) | the Kubernetes management plane every cluster is imported into |
 
-> **The PAM layer stack does not apply here.** Unlike [Cloud VMs](cloud-vms.md),
-> [Databases](databases.md), and [Kubernetes](kubernetes.md), a compose
+> **The PAM layer stack does not apply here.** Unlike [Cloud VMs](vms.md),
+> [Databases](../databases.md), and [Kubernetes](../kubernetes.md), a compose
 > deployment is an **ephemeral workload**, not a persistent access target — there is no PRA
 > tunnel, Password Safe onboarding, or Entitle registration for it. This doc is about
 > *provisioning* container workloads and *monitoring* the dashboard's container fleet.
 
 Related surfaces on the same page live in their own docs: the **Portainer** tab
-→ [Portainer integration](integrations/portainer.md); the **Kubernetes
-(Rancher)** tab → [Kubernetes](kubernetes.md) and [Rancher integration](integrations/rancher.md);
-the **Gateways** tab → [Gateway hosts](integrations/beyondtrust/gateways.md).
+→ [Portainer integration](../integrations/portainer.md); the **Kubernetes
+(Rancher)** tab → [Kubernetes](../kubernetes.md) and [Rancher integration](../integrations/rancher.md);
+the **Gateways** tab → [Gateway hosts](../integrations/beyondtrust/gateways.md).
 Note the **"Containers" nav link is gated on `portainer_enabled`** (default on) even though
 the Cloud tab works regardless — a cloud-only operator who disables Portainer reaches it via
 the direct `/containers` URL.
@@ -42,7 +44,7 @@ the direct `/containers` URL.
 ## Deploy Compose
 
 The compose file is **referenced from the storage backend** (the same store used for
-playbooks and Packer scripts) — upload it once on the [Storage](storage-management.md) page
+playbooks and Packer scripts) — upload it once on the [Storage](../storage-management.md) page
 and pick it from a dropdown at deploy time. Deploys run as background jobs; watch progress on
 the Jobs page. The deploy endpoint requires the `containers:write` permission (deleting a GCE
 compose instance requires `containers:delete`).
@@ -51,10 +53,10 @@ compose instance requires `containers:delete`).
 > edition — the community edition ships the generic "bring your own compose file" capability.
 
 **Sample compose files.** Ready-to-adapt starters for common apps live in
-[`examples/compose/`](../examples/compose/) — Apache Guacamole, Kasm, Trivy, Syft, Grype,
+[`examples/compose/`](../../examples/compose/) — Apache Guacamole, Kasm, Trivy, Syft, Grype,
 Cosign, OPA, Conftest, Checkov, Terraform/driftctl, and a Temporal worker. Upload one, edit
 the placeholders, and deploy; each conforms to the supported subset below. See
-[`examples/compose/README.md`](../examples/compose/README.md) for the per-file guide.
+[`examples/compose/README.md`](../../examples/compose/README.md) for the per-file guide.
 
 ### Supported compose subset
 
@@ -124,7 +126,7 @@ The tab is gated on `pra_enabled`, and the **Gateways** tile in the dashboard's
 Containers section deep-links straight to it (`/containers#gateways`). For the full story —
 why the managed gateway can't be deleted, why the region picker offers only configured
 regions, and the naming rules that keep the two kinds of host apart in the cloud — see
-**[Gateway hosts](integrations/beyondtrust/gateways.md)**.
+**[Gateway hosts](../integrations/beyondtrust/gateways.md)**.
 
 
 ### Reaping stranded runner jobs
@@ -170,4 +172,4 @@ sweep explicitly and reports what it deleted.
   informational there — reachability is governed by the instance's firewall tags/rules.
 
 For the per-cloud network topology (gateway subnets, ECS cluster, ACI/COS placement) see
-[Cloud Sandbox](CLOUD_SANDBOX.md).
+[Cloud Sandbox](sandbox.md).

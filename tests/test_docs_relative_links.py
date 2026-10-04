@@ -4,8 +4,8 @@ on GitHub.
 ``docs/`` is authored and reviewed on GitHub, so a cross-reference is written the way
 GitHub resolves it -- ``[Cloud VMs](cloud-vms.md)``, or ``../../cloud-vms.md`` from a
 nested page. Nothing rewrote those and ``_SHELL`` has no ``<base>``, so the browser
-resolved them against the current route: ``/docs/cloud-vms.md``, which makes ``doc_page``
-append its own suffix, look for ``docs/cloud-vms.md.md``, and 404. Every relative link in
+resolved them against the current route: ``/docs/cloud/vms.md``, which makes ``doc_page``
+append its own suffix, look for ``docs/cloud/vms.md.md``, and 404. Every relative link in
 the tree -- 500-odd of them -- was dead in this viewer while working perfectly on GitHub.
 
 That is the same split ``tests/test_app_docs_links.py`` was written about, one layer down,

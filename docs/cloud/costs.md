@@ -2,6 +2,8 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you want month-to-date cloud spend on the dashboard, an alert when it runs over budget, or a budget in the cloud itself that keeps alerting when the dashboard is down.
 
+Part of [Cloud](../cloud.md).
+
 **Costs** (`/costs`, admins only) shows month-to-date spend for every configured cloud, and
 the dashboard home page shows the same total as a tile. It is off until you turn on
 `cost_explorer_enabled` under **Settings → Cloud Costs**.
@@ -45,7 +47,7 @@ only ever read the cache:
   blanking.
 
 The reasoning, with the numbers, is in
-[cloud cost guardrails](notes/cloud-cost-guardrails.md).
+[cloud cost guardrails](../notes/cloud-cost-guardrails.md).
 
 ## Budgets
 
@@ -55,7 +57,7 @@ The reasoning, with the numbers, is in
 | Per-cloud budgets | `cost_budget_aws`, `cost_budget_azure`, `cost_budget_gcp`, `cost_budget_oci` | `0` (off) | Each cloud's spend against its own limit, as well as the overall one |
 
 These are checked by the dashboard, against figures it fetched, so **nothing watches the
-spend while the dashboard is down**. [Notifications](notifications.md) can send the budget
+spend while the dashboard is down**. [Notifications](../operations/notifications.md) can send the budget
 alert; the condition scan reads the cached figures.
 
 ### A budget in the cloud itself
@@ -110,7 +112,7 @@ throttle-safety knobs, not features:
 
 ## Related
 
-- [Cloud VMs → Spend caps](cloud-vms.md#spend-caps), which stop a VM rather than report it.
-- [Tags and labels](cloud-vms.md#tags-and-labels): `managed-by` is how spend is attributed,
+- [Cloud VMs → Spend caps](vms.md#spend-caps), which stop a VM rather than report it.
+- [Tags and labels](vms.md#tags-and-labels): `managed-by` is how spend is attributed,
   which is why it cannot be edited.
-- [Notifications](notifications.md), for budget alerts.
+- [Notifications](../operations/notifications.md), for budget alerts.

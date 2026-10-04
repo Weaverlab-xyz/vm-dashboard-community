@@ -198,7 +198,7 @@ catalog entry now shows the new resources.
 > non-admin with an explicit map could already reach: the full level set
 > for a previously ungated route, and *nothing* for one that required the
 > Admin flag. See
-> [Permissions → Adding a scope](../permissions.md#adding-a-scope-for-contributors).
+> [Permissions → Adding a scope](../access/permissions.md#adding-a-scope-for-contributors).
 
 ## Step 9 — Where this fits
 

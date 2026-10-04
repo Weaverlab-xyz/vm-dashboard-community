@@ -17,7 +17,7 @@ have once sessions start queueing behind a single host.
 
 **Containers → Gateways** answers it. The tab is one inventory of every gateway host the
 dashboard put in a cloud, plus a form to add more. It appears when **BeyondTrust** is
-enabled (`pra_enabled`), alongside the [Cloud](../../cloud-containers.md),
+enabled (`pra_enabled`), alongside the [Cloud](../../cloud/containers.md),
 [Portainer](../portainer.md) and [Kubernetes (Rancher)](../rancher.md) tabs.
 
 The **Gateways** tile in the dashboard's *Containers* section links straight there
@@ -177,7 +177,7 @@ The shape is per-cloud, and the same for both kinds:
 | **Azure** | a **VM** running the gateway container | `clouddb-jumpoint` |
 
 On GCP the tab's hosts also appear in the **GCE Container Instances** table on the Cloud
-tab, badged `Gateway` — see [Cloud Containers](../../cloud-containers.md#monitoring-the-container-fleet).
+tab, badged `Gateway` — see [Cloud Containers](../../cloud/containers.md#monitoring-the-container-fleet).
 
 ---
 

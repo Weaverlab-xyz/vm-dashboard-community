@@ -12,7 +12,7 @@ cloud VM appears because a deploy job created it; a hypervisor VM appears becaus
 connection was synced. That is what keeps the page fast, and it is also why it can briefly
 lag the provider (see [Tags](#tags) below). Rows are filtered by **workgroup**: you see
 what your workgroups own, and an admin sees everything. Reading it needs the
-`inventory:read` permission — see [Permissions](permissions.md).
+`inventory:read` permission — see [Permissions](access/permissions.md).
 
 ---
 
@@ -57,7 +57,7 @@ their tags from the per-cloud caches those pages already fill, so for about a mi
 a restart they can show none. Hypervisor rows carry their tags natively.
 
 Tags are **edited** on the cloud and Proxmox pages, not here. Which platforms report tags,
-and how editing works, is in [Cloud VMs — Tags and labels](cloud-vms.md#tags-and-labels).
+and how editing works, is in [Cloud VMs — Tags and labels](cloud/vms.md#tags-and-labels).
 
 ---
 
@@ -104,7 +104,7 @@ writable Password Safe record, so it never promises more than it can do.
 * Each target succeeds or fails on its own, and failures are listed by name. Removing an
   attribute the record no longer carries counts as success, so retrying a partly failed
   apply is safe.
-* Every change is written to the [audit log](audit-log.md) as `attributes.assign` or
+* Every change is written to the [audit log](access/audit-log.md) as `attributes.assign` or
   `attributes.remove`, one entry per record.
 
 ### Re-running a Smart Rule
@@ -131,7 +131,7 @@ while it is active. With a selection you can:
 
 ## Expiry and auto-delete
 
-When the [auto-delete timer](auto-delete-timer.md) feature is on, a banner at the top says
+When the [auto-delete timer](operations/auto-delete-timer.md) feature is on, a banner at the top says
 whether anything is actually being deleted. The **Expires** column shows each resource's
 expiry, and you can change a resource's timer from its row. Read the auto-delete page
 before enabling it: it destroys infrastructure.
@@ -140,8 +140,8 @@ before enabling it: it destroys infrastructure.
 
 ## See also
 
-* [Cloud VMs](cloud-vms.md) — tags, power and deploys per cloud.
+* [Cloud VMs](cloud/vms.md) — tags, power and deploys per cloud.
 * [Password Safe](integrations/beyondtrust/password-safe.md) — setup, and the API behaviour behind the
   attributes column.
 * [Scheduling](scheduling.md) — running a change later or on a window.
-* [Permissions](permissions.md) — workgroups, and who sees which rows.
+* [Permissions](access/permissions.md) — workgroups, and who sees which rows.

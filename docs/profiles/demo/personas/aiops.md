@@ -76,7 +76,7 @@ Three records that agree: the token's own `last_used_at`, the job trail, and the
 log naming the identity behind each call. For a principal most estates are not watching at
 all, that is the difference between an incident and an investigation.
 
-**Guide:** [Audit log](../../../audit-log.md)
+**Guide:** [Audit log](../../../access/audit-log.md)
 
 ### A credential that was never a secret to begin with
 

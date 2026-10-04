@@ -144,7 +144,7 @@ _NAV_EXEMPT = {
     # grantable when they must never be.
     #
     # The prose twin of this entry is the "Scopes that are deliberately not grantable"
-    # section of docs/permissions.md; the two must keep saying the same thing.
+    # section of docs/access/permissions.md; the two must keep saying the same thing.
     "rbac": "identity administration (require_admin); its Workgroups tab has the "
             "`workgroups` scope",
     # Reads the POV API, so `pov:read` already governs what it can show.

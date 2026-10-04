@@ -202,7 +202,7 @@ def test_slack_escapes_the_characters_it_treats_as_markup():
 
 def test_the_custom_envelope_keys_are_stable():
     """Receivers parse this. Renaming a key silently breaks integrations we can't
-    see, so the shape is pinned here and versioned in docs/notifications.md."""
+    see, so the shape is pinned here and versioned in docs/operations/notifications.md."""
     _with_base_url()
     p = nt.build_custom(_ev(fields={"Expires": "2026-07-30"}), "subj", "body")
     assert set(p) == {"version", "event", "severity", "subject", "body",

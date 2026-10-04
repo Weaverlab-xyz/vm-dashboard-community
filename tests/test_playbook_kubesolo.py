@@ -26,7 +26,7 @@ verified against chart 2.11.0 by rendering it. The chart defaults to THREE repli
 no anti-affinity (so all three land on the one node and reserve 3 CPU / 3Gi of requests),
 and `datadog.enabled: false` is already the chart default yet still injects a Datadog
 sidecar into every pod — `datadog.sidecarLogs: false` is the actual switch. If someone
-edits these values, the numbers in docs/kubesolo.md have to move with them.
+edits these values, the numbers in docs/kubernetes/kubesolo.md have to move with them.
 
 Run: python tests/test_playbook_kubesolo.py   (or under pytest)
 """

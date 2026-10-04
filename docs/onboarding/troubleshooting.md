@@ -168,7 +168,7 @@ secret (AWS keys, Azure SP credentials, etc.) in the database.
 key that decrypts everything (including any vault credentials), so it must be
 present at startup from the host. See [Protect and back up the JWT
 key](after-first-run.md#protect-and-back-up-the-jwt-key) above and
-[why](../secrets-management.md#why-the-jwt-root-key-cannot-be-migrated). (Removing the
+[why](../access/secrets-management.md#why-the-jwt-root-key-cannot-be-migrated). (Removing the
 on-disk key via cloud workload identity is a SaaS-edition feature.)
 
 **Protect it:** back it up somewhere safe (password manager, encrypted drive), and

@@ -167,7 +167,7 @@ admin-granted ones, see the [Entitle user-JIT design doc](design/entitle-user-ji
 | **Auto-provisioning** | Users in a mapped group are created automatically on first login. |
 | **Group-driven access** | Workgroups and permissions are derived from IdP group membership and re-synced on every login. |
 | **Permission enforcement** | Derived permissions feed the dashboard's scope/level checks (`vms`, `aws`, `k8s`, `cloud_database`, …). |
-| **Workload tokens** | Optional, separate from sign-in: the same (or another) IdP's *access tokens* for workloads, mapped to [service accounts](service-accounts.md#tokens-from-your-own-idp-no-dashboard-secret). Configured under **Workload tokens** in this panel; needs an audience, not a client id. |
+| **Workload tokens** | Optional, separate from sign-in: the same (or another) IdP's *access tokens* for workloads, mapped to [service accounts](access/service-accounts.md#tokens-from-your-own-idp-no-dashboard-secret). Configured under **Workload tokens** in this panel; needs an audience, not a client id. |
 
 ---
 
@@ -234,8 +234,8 @@ are configured elsewhere:
 | Feature | What it is | Where |
 |---|---|---|
 | Entra for cluster RBAC | federating **Kubernetes cluster RBAC** to Entra via OIDC | [Entra → Kubernetes federation](oidc/entra-k8s-federation.md) |
-| Workload tokens | a CI job or service calls the dashboard's API with an access token its own IdP issued; no SSO client needed | [Service accounts → Tokens from your own IdP](service-accounts.md#tokens-from-your-own-idp-no-dashboard-secret) |
-| SPIFFE workloads | a workload presents a JWT-SVID at `/api/oauth/token` | [Service accounts → SPIFFE workloads](service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing) |
+| Workload tokens | a CI job or service calls the dashboard's API with an access token its own IdP issued; no SSO client needed | [Service accounts → Tokens from your own IdP](access/service-accounts.md#tokens-from-your-own-idp-no-dashboard-secret) |
+| SPIFFE workloads | a workload presents a JWT-SVID at `/api/oauth/token` | [Service accounts → SPIFFE workloads](access/service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing) |
 | The dashboard as an issuer | the dashboard publishes `<issuer>/.well-known/openid-configuration` so AWS, Azure, GCP and k3s can trust its own SPIFFE identity | [The dashboard's own identity](oidc/dashboard-identity.md) |
 | A Workload Lab trust domain as an issuer | a SPIRE lab's OIDC Discovery Provider, which the dashboard and a k3s API server verify JWT-SVIDs against | [SPIFFE and SPIRE](workload-lab/spiffe.md) |
 | Dex for on-prem `kubectl` | the kubeconfig people download for a `cloud=local` cluster | [Dex](oidc/dex.md), and [Kubernetes](kubernetes.md) |

@@ -10,7 +10,7 @@ import API.
 
 For the operator-facing flow (when this fires, where the artefact lives,
 how to read promotion status), see
-[`docs/image-management.md`](../../docs/image-management.md) — the
+[`docs/cloud/image-management.md`](../../docs/cloud/image-management.md) — the
 architecture diagram there is the canonical picture. This README is the
 runner internals + per-cloud prerequisites + config-key reference.
 

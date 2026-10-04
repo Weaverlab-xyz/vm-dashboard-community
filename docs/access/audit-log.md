@@ -2,6 +2,8 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you need to show who did what, or to satisfy yourself that the record has not been edited.
 
+Part of [Identity and access](../access.md).
+
 The dashboard records security-relevant actions — agent enrolment and revocation,
 hypervisor connection changes, image deletions, cloud destroys, policy denials — to an
 append-only, hash-chained table. This page is what you can do with it.
@@ -98,7 +100,7 @@ to ask, which makes a tamper-evident log evidence nobody ever checks. The period
 condition scan (`notify_scanner`, hourly by default) now runs the same verification and
 raises **`audit.chain_broken`** — severity `critical` — when it fails.
 
-Enable [notifications](notifications.md) to receive it. It is in the default event set.
+Enable [notifications](../operations/notifications.md) to receive it. It is in the default event set.
 
 Like the other scanned conditions it dedupes per day, so a standing break re-notifies
 once a day rather than once ever. Unlike them it also buckets on the offending `seq`, so
@@ -111,7 +113,7 @@ old one.
   did what is a different feature with a different blast radius, so this ships admin-only.
 - **Not an external archive.** The chain is verifiable locally. Continuous export to a
   WORM bucket or a SIEM — so the trail is durable evidence off this box — is on the
-  [SaaS roadmap](saas-roadmap.md), and the export endpoint here is the manual half of it.
+  [SaaS roadmap](../editions/roadmap.md), and the export endpoint here is the manual half of it.
 - **Not the aggregated pane.** The roadmap's centralised audit pane pulls together
   Password Safe checkouts, signed build manifests and workflow history. Those feeds
   mostly do not exist yet. This is the one feed that does, made legible.

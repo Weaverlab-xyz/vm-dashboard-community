@@ -105,7 +105,7 @@ follow. (Streamable HTTP is not served yet — the MCP SDK version the dashboard
 FastAPI pin allows predates it.)
 
 A workload can use an OAuth access token instead of a PAT: create a
-[service account](../service-accounts.md), exchange its client credentials at
+[service account](../access/service-accounts.md), exchange its client credentials at
 `/api/oauth/token`, and send `Authorization: Bearer <access_token>`.
 
 If the dashboard is running on a remote machine (not `localhost`), replace

@@ -16,7 +16,7 @@ had before this one.
 
 Same contract as the database and cluster paths: every provision records the Terraform
 state, and every destroy is fed by that recorded state rather than by hand-typed ids, so
-the lifecycle is closed. See docs/infrastructure-as-code.md.
+the lifecycle is closed. See docs/cloud/infrastructure-as-code.md.
 """
 
 import logging

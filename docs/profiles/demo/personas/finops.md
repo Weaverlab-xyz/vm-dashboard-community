@@ -51,7 +51,7 @@ that exist without anyone here having decided they should.
 Note what the discovered listing will *not* do: **Destroy is refused on those rows, always.**
 The dashboard did not build them and does not know what depends on them.
 
-**Guide:** [Cloud VMs](../../../cloud-vms.md)
+**Guide:** [Cloud VMs](../../../cloud/vms.md)
 
 ### A cap in dollars, not a reminder to check
 
@@ -59,7 +59,7 @@ Put a ceiling in dollars on one VM and watch it accrue against it. The total is 
 elapsed on every sweep rather than a figure read off a bill — a bill lags a day on all
 four clouds, which is long enough to *report* a runaway instead of *stopping* one.
 
-**Guide:** [Cloud VMs](../../../cloud-vms.md)
+**Guide:** [Cloud VMs](../../../cloud/vms.md)
 
 ### Nobody is a standing admin of the thing that spends the money
 
@@ -79,7 +79,7 @@ Spend by workgroup and by resource, from the dashboard's own record of what it b
 "whose lab was that?" has an answer that does not begin with exporting a billing CSV and
 joining it to a tag convention nobody followed.
 
-**Guide:** [Cloud hosting](../../../cloud-hosting.md)
+**Guide:** [Cloud hosting](../../../operations/cloud-hosting.md)
 
 ### Business hours for a lab that is not in one
 
@@ -88,7 +88,7 @@ Suspend at seven, resume at seven, weekdays only, set per VM. The rule is whethe
 what stops a VM somebody deliberately woke at 21:00 from being put straight back to sleep
 on the next sweep.
 
-**Guide:** [Cloud VMs](../../../cloud-vms.md)
+**Guide:** [Cloud VMs](../../../cloud/vms.md)
 
 ## What to enable
 

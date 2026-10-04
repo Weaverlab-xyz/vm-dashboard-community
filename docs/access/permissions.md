@@ -2,6 +2,8 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you are deciding what a user may see or do — and especially before you tick "Full access (unrestricted)" or hand a POV to a customer stakeholder.
 
+Part of [Identity and access](../access.md).
+
 Two independent questions, and keeping them apart is the whole model:
 
 | Question | Answered by | Where |
@@ -117,12 +119,12 @@ scopes offer it:
   create, destroy, share, power or add logins to it. Powering an environment, waking a
   suspended one included, is `pov:write`: the route takes an arbitrary runstate, so it
   stops and suspends as readily as it starts. A *POV accessor* has a separate start-only
-  wake of its own — see [Customer access to a POV](profiles/pov/customer-access.md) — and
+  wake of its own — see [Customer access to a POV](../profiles/pov/customer-access.md) — and
   a stakeholder who must be able to wake their own POV needs `write` or an accessor
   alongside.
 - **`change_windows:use`** — approve a change booked into a change window. Deliberately a
   different authority from `change_windows:write`, which maintains the calendar. See
-  [Change Windows](scheduling/change-windows.md).
+  [Change Windows](../scheduling/change-windows.md).
 
 **Every scope offers exactly the levels something enforces**, so every checkbox on the grid
 does something. vSphere has nothing to delete, so it shows no Delete checkbox. If you send a
@@ -222,7 +224,7 @@ checklist nobody can tick is a screenshot. With `write` they could provision and
 
 ### An anonymous prospect who should not have a dashboard login at all
 
-Use a **POV accessor** instead — see [Customer access to a POV](profiles/pov/customer-access.md).
+Use a **POV accessor** instead — see [Customer access to a POV](../profiles/pov/customer-access.md).
 An accessor is an ephemeral credential bound to one environment, able to reach five
 endpoints and nothing else in the product, and deleted when the POV is reaped. It is not a
 restricted user; it is a different kind of principal.
@@ -330,7 +332,7 @@ Two more have no scope for narrower reasons:
   administrator may bring a deletion forward: an earlier date, a timer on a resource that
   had none, or an extend the lifetime ceiling would clamp below the current expiry.
   Clearing a timer outright needs an administrator **and** the
-  `resource_expiry_allow_never` setting. See [Auto-delete Timer](auto-delete-timer.md).
+  `resource_expiry_allow_never` setting. See [Auto-delete Timer](../operations/auto-delete-timer.md).
 - **The Dashboard home page**, which is an aggregate of things you already have access to.
 
 ## Objects, not just areas
@@ -350,8 +352,8 @@ A scope says *what*, not *which*. Two mechanisms narrow the *which*:
 "Untagged resources are visible to whoever deployed them" is the whole rule, and it is
 worth reading twice: a workgroup is a property of the **row**, not of the page. A cloud
 database or Kubernetes cluster carries one only once somebody assigns it — at creation, or
-later with the admin-only **Workgroup** button on [Databases](databases.md) /
-[Kubernetes](kubernetes.md). Until then the row is creator-scoped, which is why adding the
+later with the admin-only **Workgroup** button on [Databases](../databases.md) /
+[Kubernetes](../kubernetes.md). Until then the row is creator-scoped, which is why adding the
 field granted and revoked nothing on upgrade.
 
 Tagging a row widens what its workgroup can **do** to it, not only what they can see: the

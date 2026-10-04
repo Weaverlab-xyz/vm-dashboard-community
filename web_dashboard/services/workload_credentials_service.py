@@ -24,7 +24,7 @@ own cloud identity, trusted by a **Workload Identity** registered in
 Pathfinder). The second removes the last standing credential this feature
 needed, and it is **not Azure-only** — ``wlc_identity_platform`` selects which
 of Azure, GCP or AWS vouches for the container, because
-``docs/cloud-hosting.md`` documents the dashboard running on all three. See the
+``docs/operations/cloud-hosting.md`` documents the dashboard running on all three. See the
 Auth section below.
 
 **The API version is a header, not a path.** ``bt-secrets-api-version`` is
@@ -215,7 +215,7 @@ def missing_settings() -> list:
 # module wired only the Azure one, on the reasoning that "the thing being
 # authenticated is an Azure-hosted container".
 #
-# **That reasoning was too narrow, and `docs/cloud-hosting.md` is the refutation:**
+# **That reasoning was too narrow, and `docs/operations/cloud-hosting.md` is the refutation:**
 # this dashboard is documented to run as a managed container on Azure Container
 # Apps, GCP Cloud Run **or** AWS ECS. Wiring only Azure left two of the three
 # documented hosting options unable to use the mode that stores nothing — not

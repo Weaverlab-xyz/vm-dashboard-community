@@ -215,7 +215,7 @@ Reports in these categories are wanted **even though they require a compromised 
 malicious dashboard**, which is exactly the exemption that does not apply here.
 
 For background on how the dashboard handles credentials and secrets, see
-[docs/secrets-management.md](docs/secrets-management.md).
+[docs/access/secrets-management.md](docs/access/secrets-management.md).
 
 ## Safe harbor
 

@@ -155,7 +155,7 @@ node attestation ──── mTLS gRPC :8081 ───────────�
 ### The dashboard-hosted SPIRE server
 
 - **Packaged as an opt-in compose overlay**, [`docker-compose.spire.yml`](../../docker-compose.spire.yml). It reuses the lab's hardening and image-digest pins from `examples/playbooks/spire/spire-docker-server.yml`, and `tests/test_spire_overlay.py` keeps the two from drifting.
-  - It stays on docker-compose, as the roadmap requires (`docs/saas-roadmap.md`, "Feasibility flag").
+  - It stays on docker-compose, as the roadmap requires (`docs/editions/roadmap.md`, "Feasibility flag").
 - **Port 8081 is published directly, not through Caddy.**
   - Caddy terminates TLS, and SPIRE's agent-to-server channel is mTLS that has to reach the server untouched.
   - Passing it through would need Caddy's layer-4 plugin, a custom build for one port.

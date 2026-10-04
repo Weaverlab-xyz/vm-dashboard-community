@@ -6,7 +6,7 @@ This document explains how the dashboard stores playbooks, scripts, and
 other large assets that don't fit in the encrypted credentials database
 — and how to choose, configure, and migrate between cloud object stores.
 
-The companion to [Secrets Management](secrets-management.md): secrets are
+The companion to [Secrets Management](access/secrets-management.md): secrets are
 small, sensitive, and live in a per-key encrypted store. Storage holds
 bigger, mostly-non-sensitive payloads (playbooks, shell scripts, package
 files, image artefacts) that need to be readable by Ansible runners
@@ -14,9 +14,9 @@ across hosts and by cloud VM-import APIs. For the philosophy and
 best-practice side of running playbooks against your fleet, see
 [Config Management](config-management.md). For the IaC layer that
 stood the targets up in the first place, see
-[Infrastructure as Code](infrastructure-as-code.md). For the image
+[Infrastructure as Code](cloud/infrastructure-as-code.md). For the image
 build → promote lifecycle that produces the binaries the IaC layer
-deploys, see [Image Management](image-management.md).
+deploys, see [Image Management](cloud/image-management.md).
 
 ---
 
@@ -99,7 +99,7 @@ can share a bucket if the prefix differs.
 > here is load-bearing for infrastructure teardown, not just playbooks. The
 > BeyondTrust PRA tunnel state is the one exception — it's scrubbed of
 > credentials and kept in the database instead. See
-> [Infrastructure as Code → State](infrastructure-as-code.md#state-the-thing-that-makes-iac-work).
+> [Infrastructure as Code → State](cloud/infrastructure-as-code.md#state-the-thing-that-makes-iac-work).
 
 ## Uploading
 
@@ -385,7 +385,7 @@ The hub backend is the single storage backend that holds the canonical
 VHD/raw artefact for every registered image, regardless of which cloud
 built it. It's the source the cross-cloud promote flow reads from when
 it kicks off a per-target runner — see
-[Image Management](image-management.md) for the full lifecycle and
+[Image Management](cloud/image-management.md) for the full lifecycle and
 [`runners/promote/README.md`](../runners/promote/README.md) for the
 runner internals.
 
@@ -427,7 +427,7 @@ The same export-and-land-on-hub path runs when an operator clicks
 (AWS Private AMIs / Azure Managed Images / GCP Custom Images). This
 is the recovery path for builds whose auto-export was skipped (e.g.
 the storage prerequisite was missing at build time). See
-[Image Management → Manual export](image-management.md#manual-export-recovery-path).
+[Image Management → Manual export](cloud/image-management.md#manual-export-recovery-path).
 
 **What it doesn't do.** The hub is not where the promote runner
 *uploads* to. Each target cloud has its own staging container the
@@ -477,7 +477,7 @@ backend. Operating principles:
   the active backend. So the safe cutover is: migrate assets → switch the
   active backend and confirm the state migration → verify → delete from the
   old backend by hand. Losing that state orphans the resources it tracks
-  (see [Infrastructure as Code → State](infrastructure-as-code.md#state-the-thing-that-makes-iac-work)).
+  (see [Infrastructure as Code → State](cloud/infrastructure-as-code.md#state-the-thing-that-makes-iac-work)).
 - **Neither filesystem backend holds Terraform state at all.** Terraform ships
   no state backend for a filesystem, so with `local` *or* `agent_local` active,
   state stays in the container's deploy directory — which on Azure Container

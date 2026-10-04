@@ -26,7 +26,7 @@ means UNRESTRICTED. This module is the workload-shaped alternative:
 What this deliberately does NOT do yet: accept access tokens from an external IdP, or a
 SPIFFE JWT-SVID as the client assertion in place of a secret. Both slot in at
 ``api/auth.resolve_bearer`` and the token endpoint without changing the principal, and
-docs/service-accounts.md records them as the next phases.
+docs/access/service-accounts.md records them as the next phases.
 """
 import hashlib
 import hmac

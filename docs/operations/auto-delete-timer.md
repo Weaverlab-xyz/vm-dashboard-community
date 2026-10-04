@@ -2,6 +2,8 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you want lab resources to clean themselves up -- read it before enabling it, because it deletes infrastructure.
 
+Part of [Operations](../operations.md).
+
 **This feature deletes infrastructure.** A timer that runs out ends in the same teardown the
 Destroy button runs — terminated instances, deleted databases, destroyed clusters, none of it
 recoverable. Everything below is arranged around making that safe to switch on.
@@ -301,7 +303,7 @@ by hand.
 row is actually *tagged*. A cloud database or Kubernetes cluster carries a workgroup only
 once someone assigns one — every row created before the field existed is untagged, and an
 untagged row matches no exemption. Assign it with the **Workgroup** button on
-[Databases](databases.md) or [Kubernetes](kubernetes.md), or pin that one row instead.
+[Databases](../databases.md) or [Kubernetes](../kubernetes.md), or pin that one row instead.
 
 Note the asymmetry that remains: assigning an exempt workgroup stops a *new* resource being
 stamped at all, but it does **not** clear a timer already on an existing row. The sweeper

@@ -2,6 +2,8 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you are about to deploy your first cloud resource and want to know what is actually running underneath.
 
+Part of [Cloud](../cloud.md).
+
 This document explains how the dashboard does infrastructure as code —
 the philosophy that drives the design, the best practices the codebase
 encodes, and how each cloud's deployment path fits the same model.
@@ -12,13 +14,13 @@ The companion docs:
   Terraform deploys consume are built, hubbed in a single storage
   backend, and one-click promoted to AWS / Azure / GCP via the
   per-target promote runners
-- [Config Management](config-management.md) — what to install on the
+- [Config Management](../config-management.md) — what to install on the
   infra you've stood up
-- [Storage Management](storage-management.md) — where your IaC-side
+- [Storage Management](../storage-management.md) — where your IaC-side
   artefacts (playbooks, Packer manifests) live
-- [Secrets Management](secrets-management.md) — credentials feeding
+- [Secrets Management](../access/secrets-management.md) — credentials feeding
   the IaC layer
-- [Policy Guardrails](scheduling/policy-guardrails.md) — optional pre-action OPA
+- [Policy Guardrails](../scheduling/policy-guardrails.md) — optional pre-action OPA
   checks that can block a deploy before it starts (allowed regions,
   instance-size caps, change-freeze windows)
 
@@ -39,7 +41,7 @@ second run, leaks tags between runs, and offers no rollback.
 
 **2. Version-controlled definitions.** Templates are code: in git,
 reviewed, rolled back when wrong. The dashboard ships HCL templates in
-[`terraform/`](../terraform/) under source control; runtime values
+[`terraform/`](../../terraform/) under source control; runtime values
 (AMI ID, region, subnet) come from the deploy form, not from inline
 edits to the HCL.
 
@@ -61,7 +63,7 @@ state. No "ssh into the cloud console and click delete" lifecycle.
 
 | Principle | Where it shows up |
 |---|---|
-| Declarative | Cloud databases and Kubernetes clusters each use a Terraform module with a fixed resource shape ([`terraform/db_*/`](../terraform/), [`terraform/k8s_cluster/*/`](../terraform/k8s_cluster/)). The provision form supplies variable values; the module is unchanged across deploys. |
+| Declarative | Cloud databases and Kubernetes clusters each use a Terraform module with a fixed resource shape ([`terraform/db_*/`](../../terraform/), [`terraform/k8s_cluster/*/`](../../terraform/k8s_cluster/)). The provision form supplies variable values; the module is unchanged across deploys. |
 | Version-controlled | All HCL is in the repo. Runtime variables flow through `services/terraform.py`'s `apply()` as `-var key=value`, never spliced into the template. Compromise an HCL template via PR review, not by hand-edit. |
 | Plan-then-record | Deploys run as background jobs (`/jobs`) with progress and final state saved to `Job.extra_data`. Failed apply leaves the deploy job marked `failed` with the Terraform stderr captured for forensics. |
 | Idempotent destroy | Each deploy's state is keyed per job (`terraform-state/{job_id}/`) in your active storage backend; destroy replays that exact state through `terraform destroy -auto-approve`. Purely state-driven — no "re-derive the resource ID from live cloud state" step. Because the state is remote, destroy still works after the container is recreated. |
@@ -76,13 +78,13 @@ overlap in concept but each has its own state model and lifecycle.
 ### Cloud databases and Kubernetes clusters (Terraform per-job)
 
 The main Terraform surface. The provision forms feed a per-engine / per-cloud module,
-invoked through [`services/terraform.py`](../web_dashboard/services/terraform.py) by
+invoked through [`services/terraform.py`](../../web_dashboard/services/terraform.py) by
 `cloud_database_service` and `k8s_service`:
 
 | Surface | Modules | Resources they create |
 |---|---|---|
-| Cloud databases | [`terraform/db_postgres/`](../terraform/db_postgres/), `db_mysql`, `db_sqlserver`, `db_azure_*`, `db_gcp_*`, `db_oci_autonomous` | The DB instance/server + database + (Azure SQL only) a private endpoint. **No networking** — the delegated subnet, DB subnet group, parameter groups and private DNS zone come in as variables from the sandbox. |
-| Kubernetes clusters | [`terraform/k8s_cluster/aws_eks/`](../terraform/k8s_cluster/aws_eks/), `azure_aks`, `gcp_gke`, `oci_oke` | Self-contained: each builds its **own** VPC/VNet + subnets + egress and peers back to the sandbox network, then the cluster + node pool. |
+| Cloud databases | [`terraform/db_postgres/`](../../terraform/db_postgres/), `db_mysql`, `db_sqlserver`, `db_azure_*`, `db_gcp_*`, `db_oci_autonomous` | The DB instance/server + database + (Azure SQL only) a private endpoint. **No networking** — the delegated subnet, DB subnet group, parameter groups and private DNS zone come in as variables from the sandbox. |
+| Kubernetes clusters | [`terraform/k8s_cluster/aws_eks/`](../../terraform/k8s_cluster/aws_eks/), `azure_aks`, `gcp_gke`, `oci_oke` | Self-contained: each builds its **own** VPC/VNet + subnets + egress and peers back to the sandbox network, then the cluster + node pool. |
 
 > **Cloud VM deploys are *not* Terraform.** They go through the cloud SDKs directly
 > (`aws_service.launch_instance`, `azure_vm_service`, `gcp_vm_service`, `oci_vm_service`)
@@ -108,7 +110,7 @@ through 60-second applies.
 ### BeyondTrust Shell Jump (Terraform `sra` provider)
 
 Implemented in
-[`services/terraform_pra_service.py`](../web_dashboard/services/terraform_pra_service.py).
+[`services/terraform_pra_service.py`](../../web_dashboard/services/terraform_pra_service.py).
 Each VM deploy automatically provisions a BT PRA Shell Jump with
 matching name + jump-group; the destroy path tears it down. Same
 pattern as cloud VMs — Terraform module + per-deploy state — just
@@ -117,7 +119,7 @@ applied to a different cloud-of-clouds (BeyondTrust's PRA platform).
 ### Image building (Packer)
 
 For the "build me a custom image" path, the dashboard wraps Packer:
-[`services/packer_service.py`](../web_dashboard/services/packer_service.py).
+[`services/packer_service.py`](../../web_dashboard/services/packer_service.py).
 Four builders are supported (`amazon-ebs`, `azure-arm`,
 `googlecompute`, `oracle-oci`); per-build templates are generated in-process from
 form input rather than pre-staged in repo, because image-build inputs
@@ -130,12 +132,12 @@ git tag: build once, deploy from it many times.
 
 ### Sandbox bootstrappers (bash / PowerShell)
 
-The [`scripts/sandbox/`](../scripts/sandbox/) bootstrappers stand up
+The [`scripts/sandbox/`](../../scripts/sandbox/) bootstrappers stand up
 fully-isolated lab VPCs / VNets / VPCs across AWS / Azure / GCP. They
 intentionally use cloud-CLI calls rather than Terraform — for
 laboratory, throw-away infrastructure, the bash + tags-driven cleanup
 model is cheaper and has fewer moving parts than maintaining a
-parallel Terraform tree. See [docs/CLOUD_SANDBOX.md](CLOUD_SANDBOX.md)
+parallel Terraform tree. See [docs/cloud/sandbox.md](sandbox.md)
 for the topology and tear-down semantics.
 
 The two patterns coexist deliberately: bootstrappers create the
@@ -150,9 +152,9 @@ Terraform state is the canonical record of what a deploy created — lose
 it and the destroy path can no longer target those resources. The
 dashboard keeps state in **two places, by design**.
 
-**Most state lives in your active storage backend.** [Cloud VM](cloud-vms.md),
-[cloud-database](databases.md), and [Kubernetes-cluster](kubernetes.md) deploys write their state to the
-same backend the [/storage](storage-management.md) system uses (AWS S3 /
+**Most state lives in your active storage backend.** [Cloud VM](vms.md),
+[cloud-database](../databases.md), and [Kubernetes-cluster](../kubernetes.md) deploys write their state to the
+same backend the [/storage](../storage-management.md) system uses (AWS S3 /
 Azure Blob / GCS), keyed per job at
 `terraform-state/{job_id}/terraform.tfstate`, authenticated with the same
 credentials. It's remote and **locked**: S3 uses native state locking
@@ -160,7 +162,7 @@ credentials. It's remote and **locked**: S3 uses native state locking
 needed), Azure Blob uses a blob lease, GCS is natively consistent. Two
 operators pressing Deploy on the same target serialise safely instead of
 corrupting state. Wiring lives in
-[`services/terraform.py`](../web_dashboard/services/terraform.py)
+[`services/terraform.py`](../../web_dashboard/services/terraform.py)
 (`_backend_settings`). If no storage backend is configured, state falls
 back to the local deploy directory.
 
@@ -175,7 +177,7 @@ configure a storage backend for durability.)
 
 **Some state lives in the dashboard database — deliberately.** The
 BeyondTrust PRA tunnel state (the Terraform `sra` provider, via
-[`services/terraform_pra_service.py`](../web_dashboard/services/terraform_pra_service.py))
+[`services/terraform_pra_service.py`](../../web_dashboard/services/terraform_pra_service.py))
 is a security carve-out: raw `sra` state contains **live PRA /
 vault-account credentials**, so the dashboard **scrubs those secrets and
 stores the scrubbed state on the job/resource row in the database**, never
@@ -201,7 +203,7 @@ Two operating rules follow:
   tracker, which reads outcomes from `Job.extra_data`, not by re-running
   `terraform refresh`.
 
-Note the deliberate asymmetry with [config-management.md](config-management.md):
+Note the deliberate asymmetry with [config-management.md](../config-management.md):
 **Ansible runs are ephemeral by design; Terraform state is persistent
 by necessity.** The runner that *does* the apply is short-lived (one
 Terraform process, exits when done); the *state* that apply produces
@@ -275,7 +277,7 @@ PowerShell variant), get repeatable scaffolding in 90 seconds, tear
 down with `rollback.sh --cloud all` when you're done.
 
 **Keep templates minimal.** The Terraform modules in
-[`terraform/`](../terraform/) intentionally do one thing each — `aws_instance`,
+[`terraform/`](../../terraform/) intentionally do one thing each — `aws_instance`,
 nothing more. Anything else (VPCs, IAM, security groups) is the
 operator's problem before they hit deploy. Resist the temptation to
 let the dashboard own the entire stack; it makes destroy paths
@@ -300,9 +302,9 @@ build/deploy split natively but doesn't enforce naming hygiene.
 
 Remote state with locking already ships in community (see
 [State](#state-the-thing-that-makes-iac-work) above), as do pre-action
-policy guardrails ([Policy Guardrails](scheduling/policy-guardrails.md)). A few
+policy guardrails ([Policy Guardrails](../scheduling/policy-guardrails.md)). A few
 things the community edition still leaves to the hosted edition — see
-[docs/saas-comparison.md](saas-comparison.md) for the philosophy.
+[docs/editions/comparison.md](../editions/comparison.md) for the philosophy.
 
 - **Continuous drift detection.** Community's view of a deployed VM
   is whatever was true at apply time; if someone resizes the instance
@@ -317,7 +319,7 @@ things the community edition still leaves to the hosted edition — see
   offer for config management.
 - **Post-apply compliance-as-code.** Community enforces policy
   *pre-action* — the OPA guardrails block a disallowed deploy before it
-  starts ([Policy Guardrails](scheduling/policy-guardrails.md)). SaaS adds the
+  starts ([Policy Guardrails](../scheduling/policy-guardrails.md)). SaaS adds the
   *post-apply* half: continuously evaluating already-deployed
   infrastructure against policy and flagging resources that have drifted
   out of compliance. Pre-action gate + post-apply scan = one policy
@@ -335,7 +337,7 @@ matter more than self-hosting flexibility.
 The AMI you picked isn't accessible from your account in the chosen
 region. Use the per-cloud page's AMI search or paste an AMI ID you
 know your account can reach (the
-"[Deploy from AMI ID](../web_dashboard/templates/aws/index.html#L15)"
+"[Deploy from AMI ID](../../web_dashboard/templates/aws/index.html#L15)"
 button supports arbitrary IDs).
 
 **Destroy fails with "Failed to load state file."**

@@ -2,6 +2,8 @@
 
 > **Audience:** operator · **Profile:** `demo` · **Read this when:** you are about to build a custom image and need to know how it will reach the other clouds.
 
+Part of [Cloud](../cloud.md).
+
 This document explains how the dashboard treats VM images — the
 philosophy that drives the design, the lifecycle the codebase encodes,
 and how a single source image becomes an AMI, an Azure Managed Image,
@@ -11,11 +13,11 @@ The companion docs:
 
 - [Infrastructure as Code](infrastructure-as-code.md) — what consumes
   images (Terraform deploys, Packer build orchestration)
-- [Storage Management](storage-management.md) — where image artefacts
+- [Storage Management](../storage-management.md) — where image artefacts
   live between build and promotion
-- [Config Management](config-management.md) — what runs *on* the
+- [Config Management](../config-management.md) — what runs *on* the
   resulting VMs after deployment
-- [Secrets Management](secrets-management.md) — credentials feeding
+- [Secrets Management](../access/secrets-management.md) — credentials feeding
   the build/promote process
 
 ---
@@ -36,7 +38,7 @@ upstream release timing. Build the artefact once; promote that exact
 artefact everywhere.
 
 **2. Storage-backed portability.** The image artefact lives in your
-[storage backend](storage-management.md) of record (S3 / Azure Blob /
+[storage backend](../storage-management.md) of record (S3 / Azure Blob /
 GCS / OCI Object Storage / Local-or-UNC). It's a versioned, named, source-controlled
 binary blob. The cloud-specific images (AMI / Managed Image / Custom
 Image) are *consumers* of that artefact, not the source of truth. If
@@ -62,7 +64,7 @@ artefact gone everywhere.
 
 | Principle | Where it shows up |
 |---|---|
-| Build once, deploy many | The Packer integration ([`services/packer_service.py`](../web_dashboard/services/packer_service.py)) supports four builders today. The roadmap is to standardise on one source builder + post-build conversion to the other clouds' formats, so a single Packer run produces four deploys. |
+| Build once, deploy many | The Packer integration ([`services/packer_service.py`](../../web_dashboard/services/packer_service.py)) supports four builders today. The roadmap is to standardise on one source builder + post-build conversion to the other clouds' formats, so a single Packer run produces four deploys. |
 | Storage-backed portability | `archive_to_s3()`, `archive_to_azure_blob()`, `archive_to_gcs()`, `archive_to_oci()` already export build outputs to the active storage backend. The artefact lands at `images/<name>-<version>/` keyed by the build job ID. |
 | Same source, multiple targets | Each cloud's API (`api/aws.py`, `api/azure.py`, `api/gcp.py`, `api/oci.py`) has create-image-from-source endpoints that accept a storage URL. The promote flow calls them in turn. |
 | Lifecycle hygiene | Build jobs land in the standard job tracker (`/jobs`) with the Packer template, provisioner stdout/stderr, and resulting image IDs in `extra_data`. Deleting a build job deletes the artefact from storage and (with confirmation) the derived images. |
@@ -182,7 +184,7 @@ placement before Packer starts
 (`oci_service.check_launch_placement`) — so cases 1 and 2 now fail
 with a message naming the shape and listing what would work. The two
 OCI *deploy* endpoints run the same check for the same reason — see the
-`shape_not_launchable` entry in [cloud-vms.md](cloud-vms.md).
+`shape_not_launchable` entry in [cloud-vms.md](vms.md).
 
 That precheck **fails open when a lookup is silent** — it can't reach
 OCI, or one of the two lists (`ListShapes`, or the image's compatibility
@@ -220,7 +222,7 @@ dropdown next to the Provisioner Script field. It lists every
 different backends are unambiguous.
 
 Selecting an entry fetches the script via
-[`GET /api/storage/fetch/{backend}/{name}`](../web_dashboard/api/storage.py)
+[`GET /api/storage/fetch/{backend}/{name}`](../../web_dashboard/api/storage.py)
 and drops the text into the textarea. The operator can still tweak
 it before submitting; a blue subtitle echoes which backend + name
 the script came from so an edited version doesn't quietly drift
@@ -228,7 +230,7 @@ from its stored copy.
 
 This means you can keep your hardening scripts version-controlled
 on disk or in object storage, upload them once via
-[Storage Management](./storage-management.md), and pick them from
+[Storage Management](../storage-management.md), and pick them from
 the dropdown for every build instead of copy-pasting. Useful when
 the same script is reused across cloud providers — store it once on
 a cloud backend and load it for all three builds.
@@ -247,7 +249,7 @@ Each row has a **secret ref** toggle:
 - **Off (literal).** The value is inlined into the generated Packer
   template verbatim.
 - **On (secret reference).** The value is a reference into your
-  configured [secrets backend](./secrets-management.md) —
+  configured [secrets backend](../access/secrets-management.md) —
   `aws_sm://dashboard/db_password`, `azure_kv://db-password`,
   `gcp_sm://db-password`, or `bt_safe://…`. It's resolved at
   build-launch (close to when the provisioner runs) via
@@ -269,10 +271,10 @@ so a name can't break out of the `environment_vars` array.
 > dedicated **BeyondTrust provisioner options** block (admin user,
 > Install EPM-L deb/rpm, Entitle SSH public key) — a convenience layer
 > over the same mechanism that drives the
-> [`bt-ready-*` scripts](../provisioners/beyondtrust/README.md). It
+> [`bt-ready-*` scripts](../../provisioners/beyondtrust/README.md). It
 > sets `BT_ADMIN_USER` / `BT_ENTITLE_PUBKEY` and, for EPM-L, resolves a
 > fresh BeyondTrust presigned package URL into `BT_EPML_URL` via the
-> [EPM-L integration](integrations/beyondtrust/epml.md) at build-launch
+> [EPM-L integration](../integrations/beyondtrust/epml.md) at build-launch
 > (those links expire ~30 min). On Azure the panel shows only for
 > Linux builds — the Windows path uses a PowerShell provisioner, not
 > the shell `environment_vars` mechanism.
@@ -302,18 +304,18 @@ from the Linux path:
   nudges Windows presets to `Standard_D2s_v3`. Expect 30–60+ min.
 
 A ready-made starter provisioner ships at
-[`provisioners/beyondtrust/bt-ready-windows.ps1`](../provisioners/beyondtrust/bt-ready-windows.ps1):
+[`provisioners/beyondtrust/bt-ready-windows.ps1`](../../provisioners/beyondtrust/bt-ready-windows.ps1):
 it installs **OpenSSH Server**, enables **RDP + NLA**, sets the SSH
 default shell to PowerShell, and (optionally) authorizes an SSH public
 key — turning a Windows Server Core image into one you can reach by
 `ssh` like a Linux VM, plus agentless RDP through the Gateway. Upload
 it to `/storage` (the layer tags `.ps1` as `powershell`) and Load it,
 or paste it in. See
-[provisioners/beyondtrust/README.md](../provisioners/beyondtrust/README.md#windows-bt-ready-windowsps1).
+[provisioners/beyondtrust/README.md](../../provisioners/beyondtrust/README.md#windows-bt-ready-windowsps1).
 
 Deploying a Windows image (deploy form, bulk deploy, or a Desktops
 pool) generates a strong local-admin password per VM, stores it in
-the configured [secrets backend](secrets-management.md) (the
+the configured [secrets backend](../access/secrets-management.md) (the
 `database` backend works out of the box), and records only the
 `(backend, ref)` pair in job metadata. Retrieve it per VM via
 **Azure → VMs → Password** (`GET /api/azure/vms/{name}/admin-password`).
@@ -448,7 +450,7 @@ transit the dashboard container. With the hub on S3/GCS/OCI and a
 ephemeral disk — which multi-GB VHDs can overflow — so for
 cross-cloud building either put the hub on Azure Blob or match it to
 the build cloud. See `_land_on_hub()` in
-[`services/packer_build_service.py`](../web_dashboard/services/packer_build_service.py).
+[`services/packer_build_service.py`](../../web_dashboard/services/packer_build_service.py).
 
 #### Manual export (recovery path)
 
@@ -532,7 +534,7 @@ final identifier on `RegisteredImage.promotions[<target>]`.
 The runner image is `chrweav/dashboard-promote-runner:latest`
 by default; override via `promote_runner_image` if you maintain a
 hardened private build. See
-[`runners/promote/README.md`](../runners/promote/README.md) for the
+[`runners/promote/README.md`](../../runners/promote/README.md) for the
 operator prerequisites (IAM, quotas, networking) per target cloud,
 the full list of `promote_runner_*` config keys, and local build
 instructions for maintaining a custom or hardened build.
@@ -606,7 +608,7 @@ from manifest" loses meaning.
 
 **Version your provisioner scripts.** The provisioner is part of the
 image's manifest. A `.sh` script in
-[storage](storage-management.md) labelled `harden-base.sh` and
+[storage](../storage-management.md) labelled `harden-base.sh` and
 re-edited in place gives you the same problem as a mutable image:
 you can't reproduce older builds. Date-stamp or version it.
 
@@ -635,7 +637,7 @@ all-or-none outcome.
 ## Where this is heading on SaaS
 
 A few things the community edition does *not* try to do. They're
-SaaS priorities — see [docs/saas-comparison.md](saas-comparison.md)
+SaaS priorities — see [docs/editions/comparison.md](../editions/comparison.md)
 for the hosted-edition philosophy.
 
 > **Already shipped in community (was previously on this list):**

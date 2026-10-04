@@ -69,7 +69,7 @@ Keep `sa-key.json` safe. You'll paste its entire contents into the wizard.
 > fails. And with no storage backend configured at all, state falls back to the
 > container's local disk, where losing that directory **orphans live cloud
 > resources**. See
-> [infrastructure-as-code.md](../infrastructure-as-code.md#state-the-thing-that-makes-iac-work).
+> [infrastructure-as-code.md](../cloud/infrastructure-as-code.md#state-the-thing-that-makes-iac-work).
 
 Optional features need more roles on top:
 
@@ -78,9 +78,9 @@ Optional features need more roles on top:
 | Kubernetes clusters (GKE) | `roles/container.admin`, `roles/gkehub.admin`, `roles/resourcemanager.projectIamAdmin`, `roles/iam.roleAdmin`, `roles/serviceusage.serviceUsageAdmin` — see [kubernetes.md](../kubernetes.md) for why `container.admin` alone is insufficient |
 | Cloud databases (Cloud SQL) | `roles/cloudsql.admin`, `roles/servicenetworking.networksAdmin` |
 | Cloud Functions / Cloud Run | `roles/run.admin`, `roles/run.developer`, `roles/run.invoker`, `roles/cloudfunctions.developer`, `roles/cloudbuild.builds.builder`, `roles/artifactregistry.writer`, `roles/secretmanager.admin` |
-| Image export (VHD) | `roles/cloudbuild.builds.editor`, plus the roles the Cloud Build service identities need — see [image-management.md](../image-management.md) |
+| Image export (VHD) | `roles/cloudbuild.builds.editor`, plus the roles the Cloud Build service identities need — see [image-management.md](../cloud/image-management.md) |
 | Cloud Costs | `roles/bigquery.jobUser`, `roles/bigquery.dataViewer` (see below) |
-| External secrets backend (writing secrets) | `roles/secretmanager.secretVersionAdder`, or `roles/secretmanager.admin` on the project &mdash; see [secrets-management.md](../secrets-management.md#iam-permissions-required-per-backend) |
+| External secrets backend (writing secrets) | `roles/secretmanager.secretVersionAdder`, or `roles/secretmanager.admin` on the project &mdash; see [secrets-management.md](../access/secrets-management.md#iam-permissions-required-per-backend) |
 | Job log viewing | `roles/logging.viewer` |
 
 The full set the sandbox grants is the `for role in ...` loop in

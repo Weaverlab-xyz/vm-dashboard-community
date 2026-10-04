@@ -298,7 +298,7 @@ agent's primary channel and is plain HTTP, not TLS. A tenant onboarded before
 The values in `entitle-agent-install.yml` deliberately override three chart defaults
 that are wrong for one node — three replicas with no anti-affinity, a Datadog sidecar
 that `datadog.enabled: false` does *not* remove, and a cloud `platform.mode`. See
-[docs/kubesolo.md](../../docs/kubesolo.md) for why each one, the two separate trust
+[docs/kubernetes/kubesolo.md](../../docs/kubernetes/kubesolo.md) for why each one, the two separate trust
 stores TLS inspection breaks, and the hardcoded `imagePullPolicy: Always` that stops a
 pod restarting while the WAN is down.
 

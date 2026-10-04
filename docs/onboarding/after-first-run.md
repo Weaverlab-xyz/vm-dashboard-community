@@ -54,7 +54,7 @@ and mounts it into the container as a Docker secret.
 the bootstrap key that decrypts the encrypted database — *including* the
 credentials the dashboard would need to reach any vault — so there's no startup
 ordering that lets it live in a vault (see
-[Why the JWT root key cannot be migrated](../secrets-management.md#why-the-jwt-root-key-cannot-be-migrated)).
+[Why the JWT root key cannot be migrated](../access/secrets-management.md#why-the-jwt-root-key-cannot-be-migrated)).
 At startup the dashboard reads it from `JWT_SECRET_KEY_FILE` → the
 `/run/secrets/jwt_key` Docker secret → the `JWT_SECRET_KEY` env var, in that order.
 
@@ -71,9 +71,9 @@ So, for the community edition:
 > external vault — AWS Secrets Manager, Azure Key Vault, GCP Secret Manager, or
 > BeyondTrust Secrets Safe — from **Settings → Secrets Backend** (`/secrets`).
 > That's a separate feature from the root key; see
-> [`docs/secrets-management.md`](../secrets-management.md). Removing the on-disk root
+> [`docs/access/secrets-management.md`](../access/secrets-management.md). Removing the on-disk root
 > key entirely (fetched at boot via cloud workload identity) is on the
-> **SaaS-edition roadmap** — see [`docs/saas-comparison.md`](../saas-comparison.md).
+> **SaaS-edition roadmap** — see [`docs/editions/comparison.md`](../editions/comparison.md).
 
 
 ### Platform notes
@@ -105,7 +105,7 @@ So, for the community edition:
   **Entitle** are optional integrations with their own backing infrastructure.
   See the detailed guides in [`docs/integrations/`](../integrations).
 - **Secrets management** — how credentials are encrypted, how to migrate to an
-  external vault, and security best practices: [`docs/secrets-management.md`](../secrets-management.md).
+  external vault, and security best practices: [`docs/access/secrets-management.md`](../access/secrets-management.md).
 - **Storage management** — where playbooks and asset files live, and how to
   migrate between cloud object stores or a corporate file share:
   [`docs/storage-management.md`](../storage-management.md).
@@ -114,17 +114,17 @@ So, for the community edition:
   [`docs/config-management.md`](../config-management.md).
 - **Infrastructure as code** — how cloud VMs, Shell Jumps, and images
   are provisioned through Terraform/Packer modules with per-job state:
-  [`docs/infrastructure-as-code.md`](../infrastructure-as-code.md).
+  [`docs/cloud/infrastructure-as-code.md`](../cloud/infrastructure-as-code.md).
 - **Image management** — the build-once-promote-many lifecycle: build
   a portable image artefact, store it in your storage backend, then
   promote it to AWS / Azure / GCP:
-  [`docs/image-management.md`](../image-management.md).
+  [`docs/cloud/image-management.md`](../cloud/image-management.md).
 - **Hosting it in a cloud instead of on this host** — Azure Container Apps,
   Cloud Run or ECS, with a gateway sidecar that keeps the agent endpoint
   public and the UI private. Note that a cloud-hosted dashboard has no route
   to on-premises hypervisors and cannot use the local Ansible runner:
-  [`docs/cloud-hosting.md`](../cloud-hosting.md).
+  [`docs/operations/cloud-hosting.md`](../operations/cloud-hosting.md).
 - **Moving configuration to a second instance** — every Settings value, without
-  re-typing it: [`docs/config-migration.md`](../config-migration.md).
+  re-typing it: [`docs/operations/config-migration.md`](../operations/config-migration.md).
 
 ---

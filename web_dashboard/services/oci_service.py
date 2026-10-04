@@ -283,7 +283,7 @@ def _check_launch_placement_sync(
     LaunchInstance answers an absent shape, an incompatible image and a genuine
     policy denial with the *same* opaque ``404 NotAuthorizedOrNotFound`` — no
     field named, nothing to act on (see the troubleshooting note in
-    docs/image-management.md). An image the shape cannot boot can instead come
+    docs/cloud/image-management.md). An image the shape cannot boot can instead come
     back as ``400 InvalidParameter`` naming both, a second into the build.
     Checking the placement first is what turns either into a sentence naming the
     shape *before* a job is queued.

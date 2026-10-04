@@ -30,7 +30,7 @@ The companion docs:
 - [`examples/playbooks/spire/`](../../examples/playbooks/spire/README.md) — the playbooks
   that build the lab, and what each one is actually proving
 - [Config Management](../config-management.md) — how those playbooks get run
-- [Cloud VMs](../cloud-vms.md) — where the SPIRE server lives
+- [Cloud VMs](../cloud/vms.md) — where the SPIRE server lives
 - [Certificates](certificates.md) — the sibling feature, for a plugin that has a human
   approval in its path
 
@@ -321,7 +321,7 @@ is explicit about being a downgrade. This is the un-downgraded path: a workload 
 itself, fetches a token that lives five minutes, and reaches a Kubernetes API server with it.
 Nothing is stored in a vault, on disk, or anywhere else. (The dashboard's own token
 endpoint is the other relying party — see
-[Service accounts → SPIFFE workloads](../service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing).)
+[Service accounts → SPIFFE workloads](../access/service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing).)
 
 The linked k3s node is also **the one host in the lab that runs a SPIRE agent**, which
 makes it where the [agent demo cell](../profiles/demo/agent-demo-cell.md)'s worker goes.

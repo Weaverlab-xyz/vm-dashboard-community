@@ -107,7 +107,7 @@ an explicit act.
 **`pov` is worth calling out.** Its `use` role is what lets a customer stakeholder tick
 off their own use cases without being able to create, destroy or share a POV. Which POVs
 they can reach is a separate, non-Entitle setting on the user — see
-[Permissions](../../permissions.md).
+[Permissions](../../access/permissions.md).
 
 **Actors** are dashboard users — local and OIDC alike. An actor resolves by username
 *or* email, case-insensitively.

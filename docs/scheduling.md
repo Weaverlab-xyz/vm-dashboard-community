@@ -20,7 +20,7 @@ uses.
 | run **one** change later — at a time, or in the next approved window | a **booking** | **When to run** on the form, or **Schedule** on a selection toolbar | [Change Windows — Scheduling one job](scheduling/change-windows.md#scheduling-one-job) |
 | run the **same** change on every occurrence of a window | a **recurring schedule** (Repeat) | **Repeat in a change window** on a finished job's page; listed at **Schedules** (`/schedules`) | [Change Windows — Repeating a change](scheduling/change-windows.md#repeating-a-change) |
 | block a disallowed change before it starts — wrong region, oversized, a change freeze | an **Action Guardrail** | Settings → Action Guardrails | [Action Guardrails](scheduling/policy-guardrails.md) |
-| stop cloud VMs out of business hours to save money | a **suspend schedule** | Settings, per cloud | [Cloud VMs — Suspend schedules](cloud-vms.md#suspend-schedules-all-four-clouds) |
+| stop cloud VMs out of business hours to save money | a **suspend schedule** | Settings, per cloud | [Cloud VMs — Suspend schedules](cloud/vms.md#suspend-schedules-all-four-clouds) |
 
 The first two share one engine — the job queue holds a booked job `pending` until its
 time — and both depend on **change windows**, the named recurring periods defined in
@@ -77,7 +77,7 @@ on-premises power booking needs an agent is under
   and the per-workgroup requirement.
 * [Action Guardrails](scheduling/policy-guardrails.md) — the policy half: what is refused,
   or held for approval, before it is ever queued.
-* [Cloud VMs](cloud-vms.md) — suspend schedules and spend caps.
-* [Job Worker](job-worker.md) — how a booked job gets a turn once its time arrives.
+* [Cloud VMs](cloud/vms.md) — suspend schedules and spend caps.
+* [Job Worker](operations/job-worker.md) — how a booked job gets a turn once its time arrives.
 * [Remote Agents — hypervisors](remote-agents/hypervisors.md) — binding a hypervisor
   connection to an agent, which is what makes its power operations bookable.

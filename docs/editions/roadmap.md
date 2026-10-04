@@ -2,14 +2,16 @@
 
 > **Audience:** contributor · **Profile:** `both` · **Read this when:** you want to know which capabilities are reserved for the hosted edition, and why.
 
+Part of [Editions](../editions.md).
+
 The hosted SaaS edition is a target architecture for the dashboard.
 This doc is the consolidated list of features it will add on top of
-the shipping [community edition](../README.md), with honest status
+the shipping [community edition](../../README.md), with honest status
 labels.
 
 For the one piece of SaaS architecture that's already specified in
 detail (the JWT root-key bootstrap problem and its managed-identity
-solution), see [saas-comparison.md](saas-comparison.md).
+solution), see [the edition comparison](comparison.md).
 
 > **Maintenance note (2026-05-30):** several items below have moved off
 > `Planned`/`Researching` — the per-tenant isolation primitive
@@ -25,9 +27,9 @@ solution), see [saas-comparison.md](saas-comparison.md).
 > **tamper-evident (hash-chained) audit trail**, **action-level policy
 > guardrails** (OPA pre-action admission), **config drift-aware runs**, and
 > the staleness-alerting + artefact secret-scanning half of **secret
-> lifecycle** — see [policy-guardrails.md](scheduling/policy-guardrails.md),
-> [config-management.md](config-management.md),
-> [secrets-management.md](secrets-management.md). **(2)** The **per-tenant
+> lifecycle** — see [policy-guardrails.md](../scheduling/policy-guardrails.md),
+> [config-management.md](../config-management.md),
+> [secrets-management.md](../access/secrets-management.md). **(2)** The **per-tenant
 > isolation primitive is now Built (prod)** — the hosted deployment is
 > multi-tenant today; only the root-key *store* is still shared (per-tenant
 > store scoping via federated workload identity remains). **(3)** This doc
@@ -79,7 +81,7 @@ the next things queued for QA.
   without ever writing it to disk. Dev mirrors the same flow against a
   developer identity.
 - **Status:** Built (prod). See
-  [saas-comparison.md](saas-comparison.md) for the mechanics.
+  [the edition comparison](comparison.md) for the mechanics.
 - **Dev-testable?** Yes. Already exercised by the dev rig.
 
 ### Per-tenant workload identity (federated) for the root-key store
@@ -119,7 +121,7 @@ the next things queued for QA.
 ### Approval / change-control gate for destructive automation
 
 > **Shipped in community (was fully on this list):** a **two-person approval gate**.
-> A change booked into a [change window](scheduling/change-windows.md) can require sign-off from
+> A change booked into a [change window](../scheduling/change-windows.md) can require sign-off from
 > a second user holding `change_windows:use` before the worker will claim it; the
 > requester cannot approve their own, rescheduling clears the approval, and the
 > decision is recorded in the audit trail. An Action-Guardrails policy emitting
@@ -152,11 +154,11 @@ the next things queued for QA.
 > Needs-attention rollup — vault refs use the backend's own last-changed
 > date) and **artefact secret-scanning** (uploaded playbooks / scripts are
 > scanned on upload, `secret_scan_enabled`) both run in the community
-> edition — see [secrets-management.md](secrets-management.md) and
-> [config-management.md](config-management.md#secret-scanning-advisory).
+> edition — see [secrets-management.md](../access/secrets-management.md) and
+> [config-management.md](../config-management.md#secret-scanning-advisory).
 > A rotation *primitive* also shipped: a Password Safe managed-account
 > checkout used on a cloud run can be flagged **rotate-on-check-in**
-> ([ansible.md](integrations/ansible\secrets.md#managed-account-checkout-beyondtrust-password-safe)).
+> ([ansible.md](../integrations/ansible\secrets.md#managed-account-checkout-beyondtrust-password-safe)).
 
 - **What community does:** stores + resolves secrets, **alerts on
   staleness**, and **scans executed artefacts** for embedded secrets;
@@ -175,7 +177,7 @@ the next things queued for QA.
 
 > **Shipped in community (was on this list):** one-click cross-cloud
 > promote and live cloud-side checks. The runner-driven flow
-> documented in [Image Management](image-management.md) runs entirely
+> documented in [Image Management](../cloud/image-management.md) runs entirely
 > in the community edition for AWS/Azure/GCP targets. SaaS now layers
 > only the durable-replay guarantee on top — a 45-minute import that
 > survives a dashboard restart mid-poll without orphan cloud-side
@@ -243,8 +245,8 @@ the next things queued for QA.
     Workload Lab trust domains.
 
   Still to build: Dex as the dashboard's SSO provider, and a Dex overlay for the dashboard
-  host. See [design/agent-and-human-identity.md](design/agent-and-human-identity.md) and
-  [design/dashboard-workload-identity.md](design/dashboard-workload-identity.md).
+  host. See [design/agent-and-human-identity.md](../design/agent-and-human-identity.md) and
+  [design/dashboard-workload-identity.md](../design/dashboard-workload-identity.md).
 - **Dev-testable?** Partial. The shared k3s authentication config has been booted on k3s
   1.34. Attestation and the dashboard's identity need the SPIRE overlay
   (`docker-compose.spire.yml`) and a reachable agent or cloud account.
@@ -255,7 +257,7 @@ the next things queued for QA.
   remote runners** (ECS / ACI / Cloud Run) for Ansible, Kubernetes, and
   image-promote runs — those run **cloud-side** and are torn down after
   each job. Community now *also* owns the hub-and-spoke primitive itself:
-  [remote agents](remote-agents.md) are containerised, customer-hosted spokes
+  [remote agents](../remote-agents.md) are containerised, customer-hosted spokes
   that poll out to the dashboard, enrol with a short-lived code, and
   authenticate with an Ed25519 key they generate themselves. Community
   scopes them to **discovery** of on-prem Kubernetes clusters and databases,
@@ -384,7 +386,7 @@ the next things queued for QA.
 > /api/config-mgmt/drift` surfaces **unverified** (no apply within
 > `config_drift_stale_days`) and **changed** (stored playbook now differs
 > from what was applied) targets. See
-> [config-management.md](config-management.md).
+> [config-management.md](../config-management.md).
 
 - **What community does:** records the per-target content/inputs hash of
   the last successful apply and surfaces unverified/changed targets in the
@@ -432,7 +434,7 @@ the next things queued for QA.
 > **locked** (S3 native `use_lockfile`, Terraform ≥ 1.10 — no DynamoDB
 > table), so concurrent `apply`s can't corrupt state. It falls back to the
 > local filesystem only when no storage backend is configured. See
-> [infrastructure-as-code.md → State](infrastructure-as-code.md#state-the-thing-that-makes-iac-work).
+> [infrastructure-as-code.md → State](../cloud/infrastructure-as-code.md#state-the-thing-that-makes-iac-work).
 
 - **What community does:** remote, per-deploy, locked Terraform state in
   the configured storage backend (state-driven destroy survives a
@@ -489,7 +491,7 @@ the next things queued for QA.
 > Config-driven limits are settable without writing Rego, and denials land
 > in the (hash-chained) audit log. Off by default
 > (`admission_control_enabled`). See
-> [policy-guardrails.md](scheduling/policy-guardrails.md).
+> [policy-guardrails.md](../scheduling/policy-guardrails.md).
 
 - **What community does:** OPA pre-action guardrails over deploy
   operations (allowed regions / instance-size caps / prod-window), gated
@@ -629,5 +631,5 @@ scope but not yet specified.
 
 When a feature flips status, this doc updates. When it flips into the
 community open-source surface, the relevant lifecycle doc gets the
-inline tease the way [image-management.md](image-management.md) already
+inline tease the way [image-management.md](../cloud/image-management.md) already
 teases SaaS cross-cloud promote.

@@ -787,7 +787,7 @@
             <strong>not recoverable</strong>. Resources you <em>registered</em> rather than
             provisioned are never touched, and neither is anything that already existed
             before you enabled this: a resource only has a timer once something stamps one.
-            See <a href="/docs/auto-delete-timer" class="text-blue-600 underline">the auto-delete timer doc</a>.
+            See <a href="/docs/operations/auto-delete-timer" class="text-blue-600 underline">the auto-delete timer doc</a>.
           </p>
 
           <label class="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
@@ -1128,7 +1128,7 @@
             worker process, not in the web app. These limits say how many run
             <strong>at the same time</strong>, and are read fresh every couple of seconds,
             so a change here applies without restarting anything.
-            See <a href="/docs/job-worker" class="text-blue-600 underline">the job worker doc</a>.
+            See <a href="/docs/operations/job-worker" class="text-blue-600 underline">the job worker doc</a>.
           </p>
 
           <div class="rounded-lg border border-gray-200 bg-gray-50 p-3 text-[11px] text-gray-600">
@@ -1248,7 +1248,7 @@
           <p class="text-sm text-gray-500">
             Push dashboard events to Slack, Microsoft Teams, or any HTTP endpoint. Delivery
             is <strong>outbound only</strong> — nothing here opens an inbound webhook.
-            See <a href="/docs/notifications" class="text-blue-600 underline">the notifications doc</a>.
+            See <a href="/docs/operations/notifications" class="text-blue-600 underline">the notifications doc</a>.
           </p>
 
           <div class="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[11px] text-amber-800">
@@ -6124,7 +6124,7 @@
           <p class="text-sm text-gray-500">
             Defaults for <strong>desktop pools</strong> on all three clouds. Each pool can
             still override them at create time. Enable/disable the feature with the Preview
-            toggle. See <a href="/docs/virtual-desktops" class="text-blue-600 hover:underline">Virtual Desktops</a>.
+            toggle. See <a href="/docs/cloud/virtual-desktops" class="text-blue-600 hover:underline">Virtual Desktops</a>.
           </p>
           <p class="text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-lg p-3">
             <strong>AWS and GCP pools are Linux-only.</strong> EC2 returns Windows credentials
@@ -6942,7 +6942,7 @@
                 this install holds <strong>no BeyondTrust credential at all</strong>. Registering
                 the trust is a one-time action in the Pathfinder GUI under
                 <strong>Administration → Workload Identities</strong>; there is no API for it.
-                See <a href="/docs/cloud-hosting" target="_blank"
+                See <a href="/docs/operations/cloud-hosting" target="_blank"
                        class="text-blue-600 hover:text-blue-800 underline">Cloud hosting</a>.
               </p>
             </div>
@@ -7400,7 +7400,7 @@
               <p class="text-[11px] text-gray-500 leading-snug mt-1">
                 Accept access tokens this IdP issues to <em>workloads</em> (client credentials,
                 managed identities) and map them to
-                <a href="/docs/service-accounts" class="underline" target="_blank">service accounts</a>
+                <a href="/docs/access/service-accounts" class="underline" target="_blank">service accounts</a>
                 under Users → OAuth clients → External identities. Off until an audience is set.
                 Works without SSO: no client id is needed here.
               </p>

@@ -466,11 +466,11 @@ def test_the_settings_panel_is_registered_in_the_ui():
 
 
 def test_the_feature_is_documented():
-    doc = os.path.join(_ROOT, "docs", "notifications.md")
-    assert os.path.isfile(doc), "docs/notifications.md is missing"
+    doc = os.path.join(_ROOT, "docs", "operations", "notifications.md")
+    assert os.path.isfile(doc), "docs/operations/notifications.md is missing"
     src = _src(doc).lower()
     assert "outbound" in src, (
-        "the doc must say outbound only — docs/saas-roadmap.md reserves the inbound "
+        "the doc must say outbound only — docs/editions/roadmap.md reserves the inbound "
         "webhook endpoint for the hosted edition")
     # The three Teams facts that otherwise generate support tickets.
     assert "power automate" in src

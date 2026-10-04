@@ -80,7 +80,7 @@ Every loop leaves one line carrying both:
 Who it is, what it spent, what it saw.
 
 **Pick a service account as the token user.** A service account can never be an
-administrator and can never hold a PAT ([Service accounts](../../service-accounts.md)),
+administrator and can never hold a PAT ([Service accounts](../../access/service-accounts.md)),
 what reaches `/mcp` expires on its own, and revoking the cell still refuses the very next
 call — the next `/mcp` request, or the next exchange at `/api/oauth/token`, whichever
 comes first. It is the recommended token user, and against a registered trust domain it
@@ -98,7 +98,7 @@ error from the MCP client is scrubbed of anything token-shaped on its way to one
 > dashboard (automatic for a Workload Lab SPIRE lab), the cell binds an OAuth client to
 > the agent's SPIFFE ID. The worker runs with `--token-source spiffe`: it presents a fresh
 > JWT-SVID at `/api/oauth/token` and gets a minutes-long access token, holding nothing on
-> the host. See [Service accounts → SPIFFE workloads](../../service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing).
+> the host. See [Service accounts → SPIFFE workloads](../../access/service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing).
 >
 > What stays unbuilt is the *other* bridge — the SVID minting a credential **inside
 > Password Safe** via the SPIFFE SVID plugin. Whether that plugin can be configured the

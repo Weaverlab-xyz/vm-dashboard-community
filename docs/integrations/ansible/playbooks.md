@@ -101,7 +101,7 @@ A third set, **KubeSolo**
 way: install, status, uninstall for a deliberately *single-node* Kubernetes, plus the
 BeyondTrust Entitle agent on top of it. It is the edge and OT case — one machine, no
 join token, no node-by-node relay — and it runs over the agent path rather than the
-local runner. See [KubeSolo](../../kubesolo.md).
+local runner. See [KubeSolo](../../kubernetes/kubesolo.md).
 
 The [OT demo cell](../../profiles/demo/ot-demo-cell.md) bakes KubeSolo into its image
 and runs the plant simulators on it, so these plays are for the on-prem hosts that cell

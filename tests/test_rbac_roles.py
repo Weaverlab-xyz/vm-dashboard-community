@@ -213,7 +213,7 @@ def test_the_read_only_role_covers_the_whole_catalog():
     (maintain the maintenance calendar) and `use` (approve a change), and listing the
     windows is deliberately authenticated-only — every run form needs that list to
     render its picker, so gating it would make Config Management depend on a second
-    permission, which is the silent-revocation trap docs/permissions.md warns about.
+    permission, which is the silent-revocation trap docs/access/permissions.md warns about.
     A scope with no `read` level has nothing a read-only role could be granted, so
     demanding an entry would mean granting a level the catalog does not offer — which
     `test_the_builtins_grant_only_levels_the_scope_offers` then refuses.

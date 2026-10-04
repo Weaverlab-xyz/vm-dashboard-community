@@ -2,6 +2,8 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you need the Entitle agent on a plant-floor or edge host that will not carry a real Kubernetes cluster — or you are demoing the OT cell, which runs on KubeSolo.
 
+Part of [Kubernetes](../kubernetes.md).
+
 OT customers turn down Kubernetes-based agents for two reasons that have nothing to do
 with the agent: the compute a cluster costs, and the burden of maintaining one at a site
 with no staff. [KubeSolo](https://kubesolo.io/) removes both — a single-node, etcd-free
@@ -14,12 +16,12 @@ like, the two places it is likely to fail, and the one limitation to raise befor
 customer finds it.
 
 The plays live in [`examples/playbooks/kubesolo/`](https://github.com/Weaverlab-xyz/vm-dashboard-community/tree/main/examples/playbooks/kubesolo)
-and run through [Config Management](config-management.md), against an on-prem host
-reached by a [remote agent](remote-agents.md).
+and run through [Config Management](../config-management.md), against an on-prem host
+reached by a [remote agent](../remote-agents.md).
 
 ## Seeing one without an on-prem host
 
-The [OT Demo Cell](profiles/demo/ot-demo-cell.md) **is** a KubeSolo host. Its baked
+The [OT Demo Cell](../profiles/demo/ot-demo-cell.md) **is** a KubeSolo host. Its baked
 image installs KubeSolo (the `-offline` build, pinned at `v1.2.0`) and runs the plant
 simulators and the FUXA HMI as Deployments in its `ot-sim` namespace — a plant IPC with
 a real cluster on it, in a subnet with no route out, which is the configuration this
@@ -36,7 +38,7 @@ agent there with the same play below. Everything this page says about egress sti
 applies, which is exactly why it is a separate host: the broker gets a narrow,
 allow-listed path to `agent.<region>.entitle.io` on 443 and 8080, and the plant floor
 keeps a true air gap. See
-[Who brokers identity in the plant](profiles/demo/ot-demo-cell.md#who-brokers-identity-in-the-plant)
+[Who brokers identity in the plant](../profiles/demo/ot-demo-cell.md#who-brokers-identity-in-the-plant)
 for the rules that make that claim checkable.
 
 ## What KubeSolo brings, and what it does not
@@ -51,7 +53,7 @@ equivalent, and the Config Management runner for an SSH target
 (`chrweav/ansible-winrm`) carries neither kubectl nor helm nor `kubernetes.core`. So
 `kubesolo-install.yml` installs both clients on the host and every play shells out to
 them — the same constraint and the same answer as the
-[k3s samples](integrations/ansible/playbooks.md).
+[k3s samples](../integrations/ansible/playbooks.md).
 
 State lives under `/var/lib/kubesolo`, with Kine over SQLite standing in for etcd. The
 kubeconfig is at `/var/lib/kubesolo/pki/admin/admin.kubeconfig`.
@@ -189,7 +191,7 @@ Prerequisites, in the order their failures masquerade as each other:
    block with `enabled: true` and its own `ansible.targets:` entry covering the guest's
    address on port 22. The top-level `targets:` list is deliberately not consulted.
    `policy.yaml` is written at enrolment, so a change means re-enrolling. See
-   [Agent-executed Config Management](remote-agents/config-runs.md).
+   [Agent-executed Config Management](../remote-agents/config-runs.md).
 2. **The guest reports an address** — its hypervisor connection needs
    `sync_guest_details: true`, or the target is listed but disabled with "no address".
 3. **The plays are uploaded** to a storage backend. A run resolves an asset by bare
@@ -213,12 +215,12 @@ the agent fetches the job bundle, and scrubs the value from job output. Setting
 `entitle_agent_token_secret` instead fetches it from Password Safe mid-run. Either way
 the play hands it to helm through a 0600 values file rather than `--set`, because
 `--set` would put it in argv where `ps` shows it to every local user on the node. See
-[Secrets in a run](integrations/ansible/secrets.md).
+[Secrets in a run](../integrations/ansible/secrets.md).
 
 ## See also
 
-- [Config Management](config-management.md) — the run form, targets and runners
-- [Remote Agents](remote-agents.md) — reaching an on-prem host at all
-- [Entitle](integrations/beyondtrust/entitle.md) — the integration this agent serves
-- [OT Demo Cell](profiles/demo/ot-demo-cell.md) — a cell that already runs KubeSolo, with its plant simulators on top
-- [Kubernetes](kubernetes.md) — the managed-cluster path, where the agent install is a button
+- [Config Management](../config-management.md) — the run form, targets and runners
+- [Remote Agents](../remote-agents.md) — reaching an on-prem host at all
+- [Entitle](../integrations/beyondtrust/entitle.md) — the integration this agent serves
+- [OT Demo Cell](../profiles/demo/ot-demo-cell.md) — a cell that already runs KubeSolo, with its plant simulators on top
+- [Kubernetes](../kubernetes.md) — the managed-cluster path, where the agent install is a button

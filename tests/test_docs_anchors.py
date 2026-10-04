@@ -221,7 +221,7 @@ _REF_EXCLUDED = {
      "docs/resources/protocol_tunnel_jump.md"),
     # The docstring explaining the ``.md.md`` 404 this viewer used to serve: the dead
     # path *is* the example. "Fixing" it would delete the thing being documented.
-    ("web_dashboard/api/docs_pages.py", "docs/cloud-vms.md.md"),
+    ("web_dashboard/api/docs_pages.py", "docs/cloud/vms.md.md"),
 }
 
 

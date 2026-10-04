@@ -371,7 +371,7 @@ SP_PASSWORD="$(jq -r '.password' "$SP_JSON_PATH")"
 
 # ── 6b. Image-hub container + promote-runner Azure plumbing ──────────────────
 # Provisions the prerequisites the dashboard's automated cross-cloud image
-# promote runner needs (see docs/image-management.md, runners/promote/README.md):
+# promote runner needs (see docs/cloud/image-management.md, runners/promote/README.md):
 #
 #   • A `hub` blob container on the storage account that doubles as both the
 #     image-registry hub and the staging container the promote-runner ACI
