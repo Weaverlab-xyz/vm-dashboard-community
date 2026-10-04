@@ -116,6 +116,7 @@ operator-supplied code. The runner stays one-shot; only the thing that launches 
 | [Credentials an agent uses](remote-agents/credentials.md) | What the dashboard holds, what the host seals, and where a credential comes from at run time. |
 | [Agent-executed Config Management](remote-agents/config-runs.md) | What the dashboard sends, the grants it needs, and what a run looks like. |
 | [Agent-brokered file shares](remote-agents/file-shares.md) | A name rather than a path, the grants, and why it needs no Docker socket. |
+| [Attesting an agent through SPIRE](remote-agents/spire-attestation.md) | Moving an agent from an Ed25519 key on disk to a SPIRE attestation at every start: the two overlays, **Migrate to SPIRE**, ports, rollback and the settings. |
 | [The dashboard's own SPIFFE identity](remote-agents/dashboard-identity.md) | The same SPIRE server gives the dashboard short-lived tokens a cloud can trust instead of a stored key. Preview. |
 
 The first two split by **who is reading**: the operator enrols and manages agents from
@@ -314,7 +315,8 @@ Hypervisor brokering followed it and is described above. Next:
 - **On-premises Kubernetes clusters as agent targets.** `cloud="local"` clusters have the
   identical problem an on-prem database had, and the fix is the same shape — an `agent_id` on
   the cluster row and the existing `run_kind` enum grown a third member.
-- **An agent identity with no key at rest.** An opt-in SPIRE sidecar that attests the agent
+- ~~**An agent identity with no key at rest**~~ — shipped; see
+  [Attesting an agent through SPIRE](remote-agents/spire-attestation.md). An opt-in SPIRE sidecar that attests the agent
   and lets it hold its signing key only in memory, beside — never instead of — today's
   Ed25519 enrolment, which stays the default and stays supported (sites behind a
   TLS-inspecting proxy cannot reach a SPIRE server). **Built:** `POST /api/agent/attest`,
@@ -323,7 +325,7 @@ Hypervisor brokering followed it and is described above. Next:
   through the dashboard's own SPIRE server) with a banner recommending it. Agent host side:
   `examples/remote-agent/docker-compose.spire.yml`. Design, including
   what `join_token` hosts still keep on disk: [agent-and-human-identity.md](design/agent-and-human-identity.md).
-- **Credentials held centrally, released to attested agents.** With an agent key that no
+- ~~**Credentials held centrally, released to attested agents**~~ — shipped. With an agent key that no
   longer sits on disk, keeping credentials on the dashboard (`dashboard_secret`, ideally a
   `ps_account://` reference) is the recommended model rather than a trade, and
   host-side storage becomes the fallback. **Built:** the opt-in setting **Release

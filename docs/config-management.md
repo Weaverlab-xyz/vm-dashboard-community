@@ -354,6 +354,22 @@ Most teams pair Local Docker + Local Filesystem (or a cloud bucket) for
 on-prem labs, and one of the cloud runners + a cloud bucket for cloud
 fleets.
 
+**A Password Safe managed account on the ECS or Cloud Run runner** needs one of two
+delivery paths, and the run is refused until one is on:
+
+- **Collect credentials from the dashboard** (`ansible_runner_credential_callback`). The
+  task proves its own cloud identity (the ECS task role, set in
+  `ansible_ecs_task_role_arn`, or the Cloud Run service account) and collects the
+  credential from the dashboard, sealed to a key made inside the container. No copy is
+  written to a cloud secret store. It needs the agent gateway URL pinned, because that is
+  where the task calls back.
+- **Ephemeral cloud secrets.** The dashboard copies the checked-out credential into AWS
+  Secrets Manager or GCP Secret Manager for the run and deletes it afterwards.
+
+Both are under **Settings → Ansible**; how each works, and what each one trusts, is in
+[Secrets management](secrets-management.md#collect-from-the-dashboard-no-store-copy).
+ACI injects the credential inline and needs neither.
+
 ### Why one-shot runners (the security argument)
 
 Every runner — Local Docker, ECS Fargate, ACI, Cloud Run Jobs — is

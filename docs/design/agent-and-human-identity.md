@@ -2,12 +2,13 @@
 
 > **Audience:** contributor · **Profile:** `both` · **Read this when:** you are about to give the remote agent a SPIFFE identity, put Dex in front of the dashboard's SSO or a cluster's API server, or you are wondering why the Ed25519 agent path was not retired when SPIRE arrived.
 
-**Mostly not built.** What exists:
+**Partly built.** What exists:
 - the two compose overlays: [`docker-compose.spire.yml`](../../docker-compose.spire.yml) for the dashboard and [`examples/remote-agent/docker-compose.spire.yml`](../../examples/remote-agent/docker-compose.spire.yml) for the agent,
-- the Dex lab plays: [`examples/playbooks/dex/`](../../examples/playbooks/dex/README.md) and `examples/playbooks/k3s/k3s-dex-auth.yml`,
+- **SPIRE attestation for agents**: `POST /api/agent/attest`, the **Migrate to SPIRE** action and banner, and central credential storage for attested agents (agent 2.6.0 and later),
+- the Dex lab plays: [`examples/playbooks/dex/`](../../examples/playbooks/dex/README.md) and `examples/playbooks/k3s/k3s-dex-auth.yml`, and the **on-prem Dex kubeconfig** for `cloud="local"` clusters,
 - the shared AuthenticationConfiguration handling that lets the SPIFFE and Dex authenticators sit on one k3s API server.
 
-Everything under [Phase 2](#phase-2-what-is-specified-here-and-not-built) is design only. None of it has run against a live host.
+[Phase 2](#phase-2-what-is-specified-here-and-not-built) lists each of these with its details, then what is still to build (Dex as the dashboard's SSO provider, a Dex overlay for the dashboard host, and the rest). Managed clusters on Dex are [paused](#managed-clusters-paused). None of it has run against a live host. The dashboard's *own* SPIFFE identity, which came after this note, has its own: [dashboard-workload-identity.md](dashboard-workload-identity.md).
 
 ## The problem
 

@@ -218,6 +218,26 @@ Switch before you migrate agents to SPIRE, or plan the re-attestation. A self-ho
 host with no cloud identity has nothing to authenticate to a KMS with, so it stays on `disk`.
 Protect that volume as you would the key itself.
 
+## Settings
+
+All on **Settings → Integrations → Remote Agents**, under **Give the dashboard its own SPIFFE
+identity**. The SPIRE server itself is set up in
+[Attesting an agent through SPIRE](spire-attestation.md#settings).
+
+| Setting | Key | Default | What it does |
+|---|---|---|---|
+| Give the dashboard its own SPIFFE identity | `dashboard_spiffe_identity_enabled` | off | Keeps the token files and publishes `<issuer>/.well-known/openid-configuration` and the keys |
+| Issuer | `dashboard_spiffe_issuer` | blank: the pinned agent audience plus `/spiffe` | Must equal `SPIRE_JWT_ISSUER` exactly; HTTPS and internet-reachable for AWS and Azure |
+| AWS | `dashboard_spiffe_aud_aws` | off | Keeps `aws.jwt` (`aud` `sts.amazonaws.com`) |
+| AWS role | `aws_federation_role_arn` | blank | The role the dashboard assumes with `AssumeRoleWithWebIdentity` |
+| Azure | `dashboard_spiffe_aud_azure` | off | Keeps `azure.jwt`. Uses the Azure setup's client and tenant ids; clear its client secret to switch |
+| GCP workload identity provider | `dashboard_spiffe_aud_gcp` | blank | The provider's full resource name, which is also the token's `aud`; blank keeps no `gcp.jwt` |
+| GCP service account to impersonate | `gcp_federation_service_account` | blank | Optional: impersonate this service account after the STS exchange, instead of granting the federated principal directly |
+| Workload Credentials | `dashboard_spiffe_aud_wlc` | off | Keeps `wlc.jwt` for the identity audience set under Settings → Workload Credentials |
+
+The k3s side is per cluster: **Trusts dashboard identity?** on the cluster, described
+[above](#on-prem-k3s).
+
 ## Troubleshooting
 
 | Symptom | Cause |

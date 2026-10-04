@@ -337,6 +337,33 @@ the dashboard container — see the `--corp-ca` overlay).
 | Terraform provider | `beyondtrust/beyondtrust` (registry), Terraform ≥ 1.11 |
 | Provider env vars | `BEYONDTRUST_ACCESS_TOKEN`, `BEYONDTRUST_SITE_ID` |
 
+### Settings
+
+All on the **Configure** panel of **Workload Credentials (BeyondTrust)** under Settings →
+Preview features. `secrets_wlc_folder` is also on the Secrets page.
+
+| Key | Default | What it is |
+|---|---|---|
+| `workload_credentials_enabled` | off | The preview flag |
+| `wlc_api_base_url` | `https://api.beyondtrust.io` | API base URL |
+| `wlc_site_id` | blank | The site (tenant) GUID: the `tenant_id` claim in your access token |
+| `wlc_api_version` | `2026-04-28` | Sent as `bt-secrets-api-version`. A wrong value fails like an authentication error |
+| `wlc_api_path_version` | blank | An optional version segment in the path (such as `v1`) |
+| `wlc_auth_mode` | `pat` | `pat`, or `workload` to authenticate with the container's own cloud identity and store no credential ([How the dashboard authenticates](#how-the-dashboard-authenticates)) |
+| `wlc_pat` | blank | The Personal Access Token, for `pat` mode. A secret, and the one secret that cannot be migrated into WC |
+| `wlc_identity_platform` | `azure` | `workload` mode: `azure`, `gcp`, `aws` (EKS only) or `file` |
+| `wlc_service_name` | blank | `workload` mode: the registration's Service Name, sent as `X-BT-Service-Name`. Required |
+| `wlc_identity_audience` | blank | `workload` mode on `azure` and `gcp`: the identity token's `aud` |
+| `wlc_identity_token_file` | blank: the platform default | `workload` mode on `aws` and `file`: where the projected token is mounted |
+| `wlc_entra_resource` | blank | The older name for `wlc_identity_audience`, still read when that is blank |
+| `wlc_entra_client_id` | blank: system-assigned | Azure only: a user-assigned managed identity's client id |
+| `wlc_aws_enabled` / `wlc_azure_enabled` | off | Per-cloud opt-in for [dynamic credentials](dynamic-credentials.md). GCP is not covered by WC |
+| `wlc_aws_folder` / `wlc_azure_folder` | blank | The folder holding that cloud's dynamic secret |
+| `wlc_aws_secret_name` / `wlc_azure_secret_name` | blank | The provisioning dynamic secret |
+| `wlc_aws_readonly_secret_name` | blank | Optional read-only dynamic secret for the job-boundary split |
+| `wlc_refresh_margin_pct` | `50` | Regenerate a lease once less than this percentage of its TTL remains (1–99) |
+| `secrets_wlc_folder` | `dashboard` | The folder the `wlc://` static-secret backend uses |
+
 The Terraform provider manages folders, static secrets, AWS and Azure
 integrations, AWS and Azure dynamic secrets, and workload-identity (OIDC issuer
 trust) registrations — so the whole configuration side can be provisioned as

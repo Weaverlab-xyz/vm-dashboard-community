@@ -326,6 +326,10 @@ uses, and nothing durable sits on the host.
   left in `shares.yaml`, so while a password is set the dashboard refuses to queue
   for one. Clear the field to go back to the host-side password.
 
+The agent side of this, `shares.yaml` and the policy, is in
+[Agent-brokered file shares](remote-agents/file-shares.md); moving the agent to SPIRE is
+[Attesting an agent through SPIRE](remote-agents/spire-attestation.md).
+
 #### Three grants, all required
 
 | Where | What |

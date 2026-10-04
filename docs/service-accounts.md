@@ -136,11 +136,11 @@ and maps it to a service account. Permissions still come only from the service a
 
 **Settings → Single sign-on (OIDC) → Workload tokens**:
 
-| Setting | |
-|---|---|
-| Workload issuer | the IdP's issuer URL. Blank reuses the SSO issuer. SSO itself is *not* required. |
-| Audience | **required** — the value your IdP puts in `aud` for tokens meant for the dashboard. A token minted for any other API at the same IdP is refused. Space-separate to accept several. |
-| Extra accepted issuers | optional — other exact `iss` values signed by the same keys (see Entra below). |
+| Setting | Key | |
+|---|---|---|
+| Workload issuer | `workload_idp_issuer` | the IdP's issuer URL. Blank reuses the SSO issuer. SSO itself is *not* required. |
+| Audience | `workload_idp_audience` | **required** — the value your IdP puts in `aud` for tokens meant for the dashboard. A token minted for any other API at the same IdP is refused. Space-separate to accept several. |
+| Extra accepted issuers | `workload_idp_extra_issuers` | optional — other exact `iss` values signed by the same keys (see Entra below). |
 
 **Test workload trust** fetches the IdP's discovery document and signing keys, and warns
 if the issuer the IdP reports is not one you accept.

@@ -90,7 +90,7 @@ gets copied into repos, tickets and backups in a way the state volume does not. 
 [docs/remote-agents.md](../../docs/remote-agents/credentials.md#sealing-a-credential-this-host-keeps)
 for the full trade against `ps_managed_account` and `dashboard_secret`. Where the site
 allows it, the recommended model stores nothing here at all: `dashboard_secret: true`, with
-this agent attested through SPIRE — see
+this agent attested through SPIRE ([how to attest it](../../docs/remote-agents/spire-attestation.md)) — see
 [Central storage with SPIRE](../../docs/remote-agents/credentials.md#central-storage-with-spire-the-recommended-model).
 
 ## Bind mounts need `:ro,Z` on SELinux hosts

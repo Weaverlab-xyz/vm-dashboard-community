@@ -590,6 +590,35 @@ relationships.
 Neither SPIRE server has fetched the other's bundle, and no workload has run the proof, in
 a live run yet.
 
+## Settings
+
+**Settings → SPIRE Lab**, plus the preview toggle `spire_lab_enabled` under **Settings →
+Preview features**. Nothing here is a secret.
+
+| Setting | Key | Default | What it does |
+|---|---|---|---|
+| Allowed source CIDRs | `spire_lab_source_cidrs` | blank | Who may reach tcp/8081, and 8443 and 8082 with it. Blank changes no cloud ACL: it does not open anything |
+| SPIRE version | `spire_lab_version` | `1.15.3` | What the `vm` and `docker` modes install, and what **Upgrade** moves to |
+| CA TTL | `spire_lab_ca_ttl` | `168h` | Caps every SVID the server issues, the admin credential included |
+| Admin SVID TTL | `spire_lab_admin_ttl` | `720h` | What the admin mint asks for; the CA TTL decides what it gets |
+| Secrets Safe safe | `spire_lab_ps_safe` | `Automation` | Where the admin credential lands. It must exist already, with create rights |
+| Folder root | `spire_lab_secret_root` | `spire` | Four titles land under `<root>/<lab>`: the PKCS#12, its passphrase, the trust bundle and the granted expiry |
+| Playbook storage backend | `spire_lab_asset_backend` | blank: the active storage backend | Where a run fetches the `spire-*.yml` playbooks by filename |
+| SPIRE chart version | `spire_lab_helm_chart_version` | blank: the pin, `0.30.2` | `k8s` mode. Never "latest" |
+| SPIRE CRDs chart version | `spire_lab_helm_crds_chart_version` | blank: the pin, `0.6.1` | `k8s` mode |
+| k3s version | `spire_lab_k3s_version` | blank: what get.k3s.io serves | `k8s` mode and the k3s link. At least 1.34; the playbook refuses older |
+| Helm tarball SHA-256 | `spire_lab_helm_sha256` | blank, which warns | `k8s` mode. From `get.helm.sh/helm-v<ver>-linux-<arch>.tar.gz.sha256sum` |
+| Extra chart values (YAML) | `spire_lab_helm_values_extra` | blank | `k8s` mode. Merged over the play's values, so it can undo them, hardening included |
+| Allow unpinned downloads | `spire_lab_allow_unpinned` | off | Takes a SPIRE version the plays hold no checksum for, on TLS alone. Leave off |
+
+Two more are read but not shown on the page. Set them with the headless import
+(`POST /api/setup/import`) if a Password Safe admin has renamed something:
+
+| Key | Default | What it does |
+|---|---|---|
+| `spire_ps_platform` | `SPIFFE SVID` | The platform name **Govern** looks for, if the imported `.psplugin`'s platform was renamed |
+| `spire_ps_workgroup` | blank: `passwordsafe_workgroup` | The workgroup **Govern** creates the managed system in |
+
 ## Boundaries
 
 - **No revocation.** Deleting a registration entry stops renewal; an SVID already in a
