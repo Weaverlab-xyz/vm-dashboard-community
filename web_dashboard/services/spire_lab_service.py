@@ -2144,6 +2144,7 @@ def _helm_vars(row: SpireLab) -> dict:
            "spire_crds_chart_version": (_cfg("spire_lab_helm_crds_chart_version", "")
                                         or SPIRE_CRDS_CHART_VERSION),
            "helm_values_extra": _cfg("spire_lab_helm_values_extra", ""),
+           "federation_port": FEDERATION_PORT,
            # Helm's checksums live only on get.helm.sh; blank downloads with a warning.
            "helm_sha256": _cfg("spire_lab_helm_sha256", "")}
     if row.admin_spiffe_id:
@@ -2351,8 +2352,9 @@ async def run_upgrade(db: Session, *, lab_id: str, job_id: str) -> None:
 # stage is what puts the bundle endpoint on a lab built before this feature, and the
 # dashboard's first fetch needs that endpoint up.
 #
-# vm and docker modes only. The chart can serve a bundle endpoint too, but getting it out
-# of k3s needs a NodePort and chart values nothing else here uses yet.
+# Every mode. A k8s lab's chart serves the bundle endpoint (spire-helm.yml turns on
+# `spire-server.federation`) and a ServiceLB Service publishes it on the node's tcp/8082;
+# its relationship is a ClusterFederatedTrustDomain, not a CLI call (spire-federation.yml).
 
 FEDERATION_JOB_TYPE = "spirelab_federate"
 
@@ -2370,6 +2372,9 @@ def _dashboard_side() -> dict:
 def _federation_vars(row: SpireLab, state: str = "present") -> dict:
     dash = _dashboard_side()
     out = {"trust_domain": row.trust_domain, **cli_vars(row), "state": state,
+           # k8s declares the relationship for the chart's controller manager, which
+           # deletes any relationship no ClusterFederatedTrustDomain names.
+           "deployment_mode": deployment_mode(row),
            "dashboard_trust_domain": dash["trust_domain"],
            # The linked k3s workload's entry gains (or loses) the dashboard in its
            # federatesWith, so its SVID response carries the dashboard's bundle.
@@ -2457,9 +2462,6 @@ def federation_problem(db: Session, row: SpireLab) -> str:
     from . import dashboard_spire
     if row.status != "available":
         return f"{row.name} is {row.status}, not available — only a running lab federates"
-    if deployment_mode(row) == "k8s":
-        return ("federation is built for the vm and docker modes. A k8s lab's bundle "
-                "endpoint runs inside k3s, and nothing exposes it outside the cluster yet")
     if not (row.public_ip or row.private_ip):
         return f"{row.name} reports no address for the dashboard to fetch its bundle from"
     if not _captured_bundle(db, row):

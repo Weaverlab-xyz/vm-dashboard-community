@@ -10,11 +10,14 @@ is a playbook rendered or stubbed. Pinned:
     endpoint ID that is not the trust domain's own SPIRE server, an http URL, no seed;
   * ``unfederate`` removes the relationship AND the bundle, tolerating either missing;
   * every argument comes from the lab row and the dashboard's server, never a request;
-  * the refusals: k8s mode, no captured bundle, the dashboard's SPIRE off, no address,
+  * the refusals: no captured bundle, the dashboard's SPIRE off, no address,
     not available;
   * the run: the lab's half (install re-applied, ACL with 8082 kept beside 8081/8443 and a
     linked node, host firewall, relationship) BEFORE the dashboard's; teardown unfederates;
-  * both servers publish the bundle endpoint, directly and not through Caddy.
+  * both servers publish the bundle endpoint, directly and not through Caddy;
+  * k8s mode: the chart serves the endpoint, a node Service publishes it, and the
+    relationship is DECLARED as a ClusterFederatedTrustDomain (the chart's controller
+    manager deletes any relationship no resource names), never created with the CLI.
 
 Run: python tests/test_spire_lab_federation.py   (or under pytest)
 """
@@ -199,7 +202,6 @@ def _dashboard_on(on=True):
 def test_the_refusals_each_name_their_remedy():
     _dashboard_on()
     cases = (
-        (dict(deployment_mode="k8s"), True, "vm and docker"),
         (dict(status="building"), True, "not available"),
         (dict(public_ip="", private_ip=""), True, "no address"),
         ({}, False, "Refresh keys"),
@@ -208,6 +210,12 @@ def test_the_refusals_each_name_their_remedy():
         db, row = _save(_lab(**kw), bundle=bundle)
         try:
             assert why in svc.federation_problem(db, row), (kw, svc.federation_problem(db, row))
+        finally:
+            db.close()
+    for mode in ("vm", "docker", "k8s"):
+        db, row = _save(_lab(deployment_mode=mode))
+        try:
+            assert svc.federation_problem(db, row) == "", mode
         finally:
             db.close()
     db, row = _save(_lab())
@@ -412,6 +420,170 @@ def test_both_servers_serve_their_bundle_on_8082_directly():
                    encoding="utf-8").read()
         assert "port    = {{ federation_port }}" in src, play
     assert svc._install_vars(_lab())["federation_port"] == 8082
+    helm = open(os.path.join(_ROOT, "examples", "playbooks", "spire", "spire-helm.yml"),
+                encoding="utf-8").read()
+    assert "port: {{ federation_port }}" in helm and "spire-federation-lab" in helm
+    assert svc._helm_vars(_lab(deployment_mode="k8s"))["federation_port"] == 8082
+
+
+# ── k8s mode: declared for the controller manager ─────────────────────────────
+
+def _jinja():
+    import re
+    import jinja2
+    env = jinja2.Environment()
+    env.filters["regex_replace"] = lambda v, pat, rep: re.sub(pat, rep, v)
+    env.filters["to_json"] = json.dumps
+    env.tests["match"] = lambda v, pat: re.match(pat, v) is not None
+    return env
+
+
+def _play_vars(**extra):
+    env = _jinja()
+    v = dict(_play()["vars"])
+    v.update(extra)
+    for _ in range(3):
+        v = {k: (env.from_string(x).render(**v) if isinstance(x, str) else x)
+             for k, x in v.items()}
+    return v
+
+
+def _task(name):
+    return next(t for t in _walk(_play()["tasks"]) if t.get("name") == name)
+
+
+def _walk(tasks):
+    for t in tasks:
+        yield t
+        yield from _walk(t.get("block", []))
+
+
+def _when(task):
+    w = task.get("when", [])
+    return [w] if isinstance(w, str) else list(w)
+
+
+def _cftd(**extra):
+    env = _jinja()
+    v = _play_vars(trust_domain=LAB_TD, dashboard_trust_domain=DASH_TD,
+                   dashboard_bundle_endpoint_url="https://agents.fed.test:8082",
+                   dashboard_bundle_json=BUNDLE, deployment_mode="k8s", **extra)
+    v.setdefault("_cftd_class", "")
+    content = _task("Write the ClusterFederatedTrustDomain, seeded with the dashboard's "
+                    "bundle")["ansible.builtin.copy"]["content"]
+    return yaml.safe_load(env.from_string(content).render(**v)), v
+
+
+def test_k8s_declares_a_cluster_federated_trust_domain_the_manager_accepts():
+    """Field names as spire-controller-manager 0.7.0 spells them
+    (api/v1alpha1/clusterfederatedtrustdomain_types.go)."""
+    cr, v = _cftd(_cftd_class="spire-mgmt-spire")
+    assert cr["apiVersion"] == "spire.spiffe.io/v1alpha1"
+    assert cr["kind"] == "ClusterFederatedTrustDomain"
+    assert cr["metadata"]["name"] == DASH_TD
+    spec = cr["spec"]
+    assert spec["className"] == "spire-mgmt-spire", (
+        "the chart sets watchClassless false: a resource without the class is ignored")
+    assert spec["trustDomain"] == DASH_TD
+    assert spec["bundleEndpointURL"] == "https://agents.fed.test:8082"
+    assert spec["bundleEndpointProfile"] == {
+        "type": "https_spiffe", "endpointSPIFFEID": f"spiffe://{DASH_TD}/spire/server"}
+    assert json.loads(spec["trustDomainBundle"]) == json.loads(BUNDLE), (
+        "the seed is the SPIFFE bundle JSON the manager reads with spiffebundle.Read")
+    assert v["_cftd_file"] == f"/opt/spire/federation-{DASH_TD}.yaml"
+    assert v["_k8s"] == "True"
+
+
+def test_no_class_name_is_written_when_none_was_read():
+    cr, _ = _cftd()
+    assert "className" not in cr["spec"]
+
+
+def test_the_class_name_is_read_from_the_rendered_manager_config():
+    import re
+    pat = _play()["vars"]["_class_re"]
+    quoted = json.dumps({"data": {"controller-manager-config.yaml":
+                                  'clusterName: lab\nclassName: "spire-mgmt-spire"\n'}})
+    assert re.search(pat, quoted).group(1) == "spire-mgmt-spire"
+    assert re.search(pat, "className: other-class\n").group(1) == "other-class"
+    task = _task("Work out the controller manager's className")
+    assert "regex_findall(_class_re)" in task["ansible.builtin.set_fact"]["_cftd_class"]
+
+
+def test_a_k8s_prefix_alone_selects_the_declared_path():
+    v = _play_vars(spire_cli_prefix=svc.K8S_CLI_PREFIX, dashboard_trust_domain=DASH_TD)
+    assert v["_k8s"] == "True", "a hand run with only the CLI prefix must not use the CLI create"
+    for prefix in ("", "docker exec spire-server "):
+        assert _play_vars(spire_cli_prefix=prefix,
+                          dashboard_trust_domain=DASH_TD)["_k8s"] == "False", prefix
+
+
+def test_the_cli_create_and_the_declaration_never_both_run():
+    create = _task("Write the relationship, seeded with the dashboard's bundle")
+    assert "not _k8s | bool" in _when(create), (
+        "the controller manager deletes a relationship no resource declares")
+    for name in ("Read the controller manager's configuration",
+                 "Write the ClusterFederatedTrustDomain, seeded with the dashboard's bundle",
+                 "Apply the ClusterFederatedTrustDomain",
+                 "Wait for the controller manager to create the relationship",
+                 "Refuse a declaration the controller manager did not act on"):
+        assert "_k8s | bool" in _when(_task(name)), name
+    names = [t.get("name") for t in _walk(_play()["tasks"])]
+    assert (names.index("Apply the ClusterFederatedTrustDomain")
+            < names.index("Wait for the controller manager to create the relationship")
+            < names.index("Fetch the dashboard's bundle from its endpoint now")), (
+        "the shared refresh proves the k8s relationship too, once it exists")
+    wait = _task("Wait for the controller manager to create the relationship")
+    assert wait["until"] == "declared.rc == 0" and wait["retries"] >= 10
+
+
+def test_unfederating_k8s_withdraws_the_declaration_before_the_bundle():
+    names = [t.get("name") for t in _walk(_play()["tasks"])]
+    assert (names.index("Delete the ClusterFederatedTrustDomain")
+            < names.index("Wait for the controller manager to remove the relationship")
+            < names.index("Delete the federated bundle"))
+    assert "not _k8s | bool" in _when(_task("Delete the relationship"))
+    delete = _task("Delete the ClusterFederatedTrustDomain")
+    assert "--ignore-not-found" in delete["ansible.builtin.command"]
+
+
+def test_the_stage_vars_name_the_mode():
+    _dashboard_on()
+    saved = (dashboard_spire.trust_domain, dashboard_spire.live_bundle)
+    dashboard_spire.trust_domain = lambda timeout=30: DASH_TD
+    dashboard_spire.live_bundle = lambda: json.loads(BUNDLE)
+    try:
+        v = svc.FEDERATION_STAGE["vars_for"](_lab(deployment_mode="k8s"))
+        assert v["deployment_mode"] == "k8s"
+        assert v["spire_cli_prefix"] == svc.K8S_CLI_PREFIX
+        assert svc.UNFEDERATION_STAGE["vars_for"](_lab())["deployment_mode"] == "vm"
+    finally:
+        dashboard_spire.trust_domain, dashboard_spire.live_bundle = saved
+
+
+def test_a_k8s_lab_reapplies_its_helm_install_before_federating():
+    _dashboard_on()
+    db, row = _save(_lab(deployment_mode="k8s"))
+    try:
+        job = svc.start_federation(db, lab_id=row.id, created_by="tester")
+        calls = _run(db, row, job["job_id"])
+        stages = [c[1:] for c in calls if c[0] == "stage"]
+        assert stages[:3] == [("install", "spire-helm.yml"),
+                              ("ports", "spire-open-ports.yml"),
+                              ("federation", "spire-federation.yml")], stages
+        assert calls.index(("stage", "federation", "spire-federation.yml")) < [
+            c[0] for c in calls].index("dashboard"), "the lab's half goes first"
+        row = db.query(SpireLab).filter(SpireLab.id == row.id).one()
+        assert row.federation_status == "federated"
+    finally:
+        db.close()
+
+
+def test_teardown_withdraws_a_k8s_labs_declarations_and_service():
+    src = open(os.path.join(_ROOT, "examples", "playbooks", "spire", "spire-remove.yml"),
+               encoding="utf-8").read()
+    assert "delete clusterfederatedtrustdomains --all" in src
+    assert "spire-federation-lab" in src
 
 
 if __name__ == "__main__":

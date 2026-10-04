@@ -202,6 +202,45 @@ def test_the_helm_values_use_the_pinned_charts_key_names():
         "verifies oidc.<td>")
 
 
+
+def test_the_helm_values_serve_an_https_spiffe_bundle_endpoint_on_8082():
+    """Key paths as chart 0.30.2 reads them (spire-server/templates/configmap.yaml renders
+    federation.bundle_endpoint from federation.bundleEndpoint.*, and https_spiffe from
+    federation.tls.spire.enabled, which defaults on)."""
+    fed = _helm_values()["spire-server"]["federation"]
+    assert fed["enabled"] is True
+    assert fed["bundleEndpoint"] == {"address": "0.0.0.0", "port": 8082}
+    assert "tls" not in fed, "https_spiffe is the chart's default; https_web needs a cert"
+    assert svc._helm_vars(_row(deployment_mode="k8s"))["federation_port"] == svc.FEDERATION_PORT
+
+
+def test_the_helm_play_reads_back_and_publishes_the_bundle_endpoint():
+    tasks = _play("spire-helm.yml")["tasks"]
+    names = [t["name"] for t in tasks]
+    check = tasks[names.index("Confirm the bundle endpoint reached the server configuration")]
+    assert "'https_spiffe' in server_cm.stdout" in check["ansible.builtin.assert"]["that"]
+    assert names.index("Read the rendered server configuration") < names.index(
+        "Confirm the bundle endpoint reached the server configuration")
+    import json
+    import jinja2
+    env = jinja2.Environment()
+    env.filters["to_json"] = json.dumps
+    content = tasks[names.index("Publish the server API and the OIDC provider on the node")][
+        "ansible.builtin.copy"]["content"]
+    services = list(yaml.safe_load_all(env.from_string(content).render(
+        bind_port=8081, oidc_port=8443, federation_port=8082,
+        _server_sel={"app": "spire-server"}, _server_port=8081,
+        _oidc_sel={"app": "oidc"}, _oidc_port=8443, _federation_target=8082)))
+    fed = next(s for s in services if s["metadata"]["name"] == "spire-federation-lab")
+    assert fed["spec"]["type"] == "LoadBalancer"
+    assert fed["spec"]["selector"] == {"app": "spire-server"}, "the server pod serves it"
+    assert fed["spec"]["ports"] == [{"name": "federation", "port": 8082, "targetPort": 8082}]
+    facts = tasks[names.index("Work out selectors and target ports")]["ansible.builtin.set_fact"]
+    assert "'federation'" in facts["_federation_target"], (
+        "the target port is the chart's own container port named federation")
+    wait = tasks[names.index("Wait for the API and bundle endpoint ports on the node")]
+    assert "{{ federation_port }}" in wait["loop"]
+
 def test_the_helm_values_turn_on_upstreams_hardening():
     g = _helm_values()["global"]["spire"]
     assert g["recommendations"]["enabled"] is True, (

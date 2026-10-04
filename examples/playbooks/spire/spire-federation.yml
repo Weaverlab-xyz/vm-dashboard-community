@@ -1,5 +1,5 @@
 # Federate the lab's SPIRE server with the dashboard's own SPIRE server (SPIFFE federation)
-# Target: the SPIRE server VM (vm or docker mode). Idempotent; re-running is a refresh.
+# Target: the SPIRE server VM (vm, docker or k8s mode). Idempotent; re-running is a refresh.
 #
 # docs/design/dashboard-workload-identity.md, L4. Two SPIRE servers, two trust domains:
 # the lab's, and the dashboard's own (docker-compose.spire.yml). Federation is each one
@@ -22,6 +22,19 @@
 # the lab's source set). The refresh at the end proves the first direction; the dashboard
 # proves the second.
 #
+# K8S MODE DECLARES, IT DOES NOT CREATE. The Helm chart's controller manager reconciles
+# federation relationships from ClusterFederatedTrustDomain resources, and DELETES every
+# relationship no resource declares (spire-controller-manager 0.7.0,
+# pkg/spirefederationrelationship: anything in the server and not in a CR is removed
+# within its 10s gcInterval). So `federation create` would be undone almost at once.
+# Instead the play applies a ClusterFederatedTrustDomain carrying the controller
+# manager's own className (read from its ConfigMap; the chart sets watchClassless false,
+# so a resource without it is ignored) and waits for the server to report the
+# relationship. The manager compares URL and profile only, so the seed bundle is used
+# at creation and SPIRE's own refreshes are never overwritten. The workload entry's
+# federatesWith is still written through the CLI: that entry is the k3s link's, not the
+# manager's, and the manager leaves entries it did not create alone.
+#
 # NEVER LIVE-VALIDATED. The `federation` subcommands and flags are SPIRE 1.15's, read from
 # its CLI docs; the first lab federated is the test.
 #
@@ -33,7 +46,9 @@
 #   state: present                               # absent = remove the relationship + bundle
 #   workload_spiffe_id: ""                       # the linked k3s workload; its entry gains
 #                                                #   (or loses) the dashboard in federatesWith
-#   spire_cli_prefix: ""                         # set by the lab for the docker mode
+#   spire_cli_prefix: ""                         # set by the lab for the docker and k8s modes
+#   deployment_mode: ""                          # vm | docker | k8s (k8s is also inferred
+#                                                #   from a `k3s kubectl` CLI prefix)
 - name: Federate the lab's SPIRE server with the dashboard's
   hosts: all
   become: true
@@ -46,10 +61,21 @@
     workload_spiffe_id: ""
     spire_root: /opt/spire
     spire_cli_prefix: ""
+    deployment_mode: ""
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
     # The seed goes in on stdin, so a container needs `docker exec -i`. A VM runs the binary
     # directly and needs nothing.
     _cli: "{{ spire_cli_prefix | regex_replace('^docker exec ', 'docker exec -i ') }}{{ spire_root }}/bin/spire-server"
     _endpoint_id: "spiffe://{{ dashboard_trust_domain }}/spire/server"
+    _k8s: "{{ deployment_mode == 'k8s' or spire_cli_prefix is match('^k3s kubectl ') }}"
+    # A cluster-scoped resource name: the trust domain is already DNS-shaped.
+    _cftd_name: "{{ dashboard_trust_domain | lower | regex_replace('[^a-z0-9.-]', '-') }}"
+    _cftd_file: "{{ spire_root }}/federation-{{ _cftd_name }}.yaml"
+    # The controller manager's className in its rendered config (quoted or not, and
+    # JSON-escaped inside the ConfigMap's data).
+    _class_re: 'className:\s*\\?"?([A-Za-z0-9._-]+)'
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
   tasks:
     - name: Validate the inputs
       ansible.builtin.assert:
@@ -77,7 +103,45 @@
       block:
         - name: Delete the relationship
           ansible.builtin.command: "{{ _cli }} federation delete -id {{ dashboard_trust_domain }}"
-          when: existing.rc == 0
+          when:
+            - existing.rc == 0
+            - not _k8s | bool
+
+        # k8s: withdraw the declaration; the controller manager deletes the relationship.
+        - name: Delete the ClusterFederatedTrustDomain
+          ansible.builtin.command: >-
+            k3s kubectl delete clusterfederatedtrustdomain {{ _cftd_name }} --ignore-not-found
+          register: cftd_delete
+          changed_when: "'deleted' in cftd_delete.stdout"
+          when: _k8s | bool
+
+        - name: Wait for the controller manager to remove the relationship
+          ansible.builtin.command: "{{ _cli }} federation show -trustDomain {{ dashboard_trust_domain }}"
+          register: gone
+          changed_when: false
+          failed_when: false
+          retries: 10
+          delay: 3
+          until: gone.rc != 0
+          when:
+            - _k8s | bool
+            - existing.rc == 0
+
+        - name: Delete the relationship directly if the manager did not
+          ansible.builtin.command: "{{ _cli }} federation delete -id {{ dashboard_trust_domain }}"
+          register: direct_delete
+          failed_when: false
+          when:
+            - _k8s | bool
+            - existing.rc == 0
+            - gone.rc | default(1) == 0
+
+        - name: Remove the declaration file
+          ansible.builtin.file:
+            path: "{{ _cftd_file }}"
+            state: absent
+          when: _k8s | bool
+
         - name: Delete the federated bundle
           ansible.builtin.command: "{{ _cli }} bundle delete -id spiffe://{{ dashboard_trust_domain }}"
           register: bundle_delete
@@ -88,6 +152,7 @@
       when: state == 'present'
       block:
         - name: Write the relationship, seeded with the dashboard's bundle
+          when: not _k8s | bool
           ansible.builtin.command:
             cmd: >-
               {{ _cli }} federation {{ 'update' if existing.rc == 0 else 'create' }}
@@ -98,6 +163,69 @@
               -trustDomainBundleFormat spiffe
               -trustDomainBundlePath /dev/stdin
             stdin: "{{ dashboard_bundle_json }}"
+
+        # ── k8s: declare it for the controller manager ──────────────────────
+        - name: Read the controller manager's configuration
+          when: _k8s | bool
+          ansible.builtin.command: >-
+            k3s kubectl -n spire-server get configmap spire-controller-manager -o json
+          register: cm_config
+          changed_when: false
+          failed_when: false
+
+        - name: Work out the controller manager's className
+          when: _k8s | bool
+          ansible.builtin.set_fact:
+            _cftd_class: "{{ cm_config.stdout | default('') | regex_findall(_class_re) | first | default('') }}"
+
+        - name: Write the ClusterFederatedTrustDomain, seeded with the dashboard's bundle
+          when: _k8s | bool
+          ansible.builtin.copy:
+            dest: "{{ _cftd_file }}"
+            mode: "0644"
+            content: |
+              apiVersion: spire.spiffe.io/v1alpha1
+              kind: ClusterFederatedTrustDomain
+              metadata:
+                name: {{ _cftd_name }}
+              spec:
+              {% if _cftd_class | length > 0 %}
+                className: {{ _cftd_class | to_json }}
+              {% endif %}
+                trustDomain: {{ dashboard_trust_domain | to_json }}
+                bundleEndpointURL: {{ dashboard_bundle_endpoint_url | to_json }}
+                bundleEndpointProfile:
+                  type: https_spiffe
+                  endpointSPIFFEID: {{ _endpoint_id | to_json }}
+                trustDomainBundle: {{ dashboard_bundle_json | to_json }}
+
+        - name: Apply the ClusterFederatedTrustDomain
+          when: _k8s | bool
+          ansible.builtin.command: k3s kubectl apply -f {{ _cftd_file }}
+          register: cftd_apply
+          changed_when: "'created' in cftd_apply.stdout or 'configured' in cftd_apply.stdout"
+
+        - name: Wait for the controller manager to create the relationship
+          when: _k8s | bool
+          ansible.builtin.command: "{{ _cli }} federation show -trustDomain {{ dashboard_trust_domain }}"
+          register: declared
+          changed_when: false
+          failed_when: false
+          retries: 20
+          delay: 3
+          until: declared.rc == 0
+
+        - name: Refuse a declaration the controller manager did not act on
+          when: _k8s | bool
+          ansible.builtin.assert:
+            that: declared.rc == 0
+            fail_msg: >-
+              The ClusterFederatedTrustDomain {{ _cftd_name }} was applied, but the lab's
+              SPIRE server has no relationship for {{ dashboard_trust_domain }} after a minute.
+              Its className is "{{ _cftd_class }}"; the controller manager only acts on its
+              own class (spire-controller-manager ConfigMap in spire-server) and on
+              reconcile.clusterFederatedTrustDomains. Check
+              `k3s kubectl -n spire-server logs spire-server-0 -c spire-controller-manager`.
 
         # The proof of the lab->dashboard direction. Fails here, with the likely cause, rather
         # than leaving a relationship that silently keeps the seed until it goes stale.

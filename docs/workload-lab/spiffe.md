@@ -491,7 +491,7 @@ The full argument, including the four traps the playbooks encode, is in
 
 ## Federating with the dashboard
 
-**Preview, vm and docker modes.** A lab's trust domain can be federated with the
+**Preview, every deployment mode.** A lab's trust domain can be federated with the
 dashboard's own SPIRE server ([the dashboard's SPIFFE identity](../remote-agents/dashboard-identity.md)),
 two trust domains that each trust the other. That is the setup customers who run more than
 one trust domain ask about. Press **Federate** on an available lab's row.
@@ -522,6 +522,32 @@ removes the dashboard's relationship with it.
 
 The playbook is `spire-federation.yml`. Upload it with the rest of the `spire-*.yml` set on
 the Storage page. Bundles are public keys, so nothing secret moves in either direction.
+
+### Helm-mode (k8s) labs
+
+The same button and the same job. Three things differ:
+
+- **The bundle endpoint.** `spire-helm.yml` turns on the chart's `spire-server.federation`
+  (an `https_spiffe` bundle endpoint on 8082) and publishes it on the lab host's tcp/8082
+  with a third ServiceLB Service, `spire-federation-lab`, beside the API and OIDC ones.
+  The play reads the rendered server config back and fails, naming the fix, if the chart
+  did not take the values. Federating re-applies this install (a `helm upgrade`), so a
+  k8s lab built before this gets the endpoint then.
+- **The relationship is declared, not created.** The chart's controller manager
+  reconciles federation relationships from `ClusterFederatedTrustDomain` resources and
+  deletes any relationship no resource declares, within about 10 seconds. A CLI
+  `federation create` would be undone, so `spire-federation.yml` applies a
+  `ClusterFederatedTrustDomain` instead, with the controller manager's own `className`
+  read from its ConfigMap (the chart ignores a resource without it). It then waits for the
+  server to report the relationship and refreshes it, as in the other modes. The seed
+  bundle is used once, at creation. The manager compares only the URL and profile, so it
+  never overwrites a bundle SPIRE has refreshed since.
+- **Unfederate** deletes the resource, waits for the manager to remove the relationship,
+  then deletes the federated bundle. Decommissioning deletes the lab's resources and its
+  `spire-federation-lab` Service before uninstalling the charts.
+
+The workload's `federatesWith` is still written through the CLI: that entry belongs to the
+k3s link, not to the controller manager, which leaves entries it did not create alone.
 
 ### The workloads, and the proof
 
@@ -559,7 +585,6 @@ ansible-playbook -i '<cell host>,' examples/playbooks/spire/spire-federation-pro
 **Unfederate** removes the trust domain from both sides' workloads first, then the
 relationships.
 
-Not yet: Helm-mode labs, where the bundle endpoint runs inside k3s and nothing exposes it.
 Neither SPIRE server has fetched the other's bundle, and no workload has run the proof, in
 a live run yet.
 
