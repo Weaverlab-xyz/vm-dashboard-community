@@ -168,6 +168,12 @@ _MOVED = {
     "integrations/spiffe":                       "workload-lab/spiffe",
     "integrations/workload-credentials":         "workload-lab/workload-credentials",
     "integrations/certificates":                 "workload-lab/certificates",
+    # The OIDC section, 2026-10: SSO, Dex, the two Entra pages and the dashboard's own
+    # identity (which had lived under remote-agents/ though it is about the clouds).
+    "integrations/oidc":                         "oidc",
+    "integrations/entra-oauth":                  "oidc/entra-oauth",
+    "integrations/entra-k8s-federation":         "oidc/entra-k8s-federation",
+    "remote-agents/dashboard-identity":          "oidc/dashboard-identity",
 }
 
 
@@ -275,7 +281,12 @@ _TITLE_OVERRIDES = {
     "onboarding/after-first-run":        "After the first run",
     "onboarding/feature-test":           "Feature-test checklist",
     "onboarding/troubleshooting":        "Onboarding troubleshooting",
-    "integrations/entra-oauth":          "Sign in with Microsoft (Entra)",
+    # The OIDC section. "Oidc" and "Entra K8s Federation" read as filenames.
+    "oidc":                              "OIDC and single sign-on",
+    "oidc/entra-oauth":                  "Sign in with Microsoft (Entra)",
+    "oidc/entra-k8s-federation":         "Entra → Kubernetes federation",
+    "oidc/dashboard-identity":           "The dashboard's own identity",
+    "oidc/dex":                          "Dex",
     # The BeyondTrust folder. "Epml" is not a word, and "Entitle Dashboard Permissions"
     # reads as a settings page rather than the Entitle mechanism it describes.
     "integrations/beyondtrust/epml":     "EPM for Linux",

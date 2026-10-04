@@ -752,7 +752,7 @@ def test_the_profile_doc_says_the_name_is_narrower_than_the_profile():
 # tree until the docs adopted "estate instance", and each one told a community operator
 # running real infrastructure that this tool thought their estate was pretend.
 #
-# "demo tenant" is deliberately absent: docs/integrations/entra-k8s-federation.md means an
+# "demo tenant" is deliberately absent: docs/oidc/entra-k8s-federation.md means an
 # ENTRA tenant used for lab work there, which is a different thing wearing the same word.
 _NOT_AN_INSTANCE = ("demo instance", "demo-owned", "demo-only", "demo stack", "demo estate")
 

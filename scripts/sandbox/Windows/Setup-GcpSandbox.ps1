@@ -143,7 +143,7 @@ Write-Section 'Enable APIs'
 # container.googleapis.com is the Kubernetes Engine API — GKE provisioning
 # (google_container_cluster / node pools) fails SERVICE_DISABLED without it.
 # gkehub/connectgateway/gkeconnect power GKE Entra federation (Workforce Identity
-# + Connect Gateway; see docs/integrations/entra-k8s-federation.md) — pre-enabling
+# + Connect Gateway; see docs/oidc/entra-k8s-federation.md) — pre-enabling
 # them here makes the dashboard's Enable-federation step a fast no-op instead of a
 # cold API enable.
 # cloudresourcemanager.googleapis.com backs the project-level get/setIamPolicy the
@@ -385,7 +385,7 @@ if ($LASTEXITCODE -ne 0) {
 # logging.viewer lets the dashboard READ Cloud Logging so it can surface the real
 # Cloud Build export failure on the job page instead of a generic "Build failed".
 # The next three roles power GKE Entra federation (Workforce Identity + Connect
-# Gateway; see docs/integrations/entra-k8s-federation.md). serviceusage.serviceUsageAdmin
+# Gateway; see docs/oidc/entra-k8s-federation.md). serviceusage.serviceUsageAdmin
 # lets the dashboard enable the Connect Gateway APIs (the "403 Forbidden … services:batchEnable"
 # at Enable-federation time otherwise); gkehub.admin lets it register the cluster to the
 # fleet; resourcemanager.projectIamAdmin lets it grant the workforce principalSet the

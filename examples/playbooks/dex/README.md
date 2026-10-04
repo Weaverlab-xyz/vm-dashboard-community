@@ -7,7 +7,7 @@ server trust one issuer and see the same user and groups.
 Where it is required and where it is optional:
 - **On-prem clusters (k3s): required.** Dex is the only way people reach an on-prem cluster. The admin kubeconfig stays as the dashboard's own credential and break-glass, and is never handed to people. Run `k3s/k3s-dex-auth.yml` on every k3s server you build.
 - **Managed clusters (EKS, GKE, OKE, AKS): optional, and not the default.** They keep their native authentication unless an administrator switches a cluster to Dex.
-- **Dashboard sign-in: optional.** Direct OIDC ([docs/integrations/oidc.md](../../../docs/integrations/oidc.md)) keeps working, pointed straight at your IdP.
+- **Dashboard sign-in: optional.** Direct OIDC ([docs/oidc.md](../../../docs/oidc.md)) keeps working, pointed straight at your IdP.
 
 Why Dex for people and SPIRE for workloads, and how the two share a k3s API server:
 [docs/design/agent-and-human-identity.md](../../../docs/design/agent-and-human-identity.md).

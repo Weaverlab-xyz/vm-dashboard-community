@@ -86,7 +86,7 @@ class RoleAssigneeMapping(BaseModel):
     display_name: str
     # The IdP's group object id. Named for Entra because that is the stored column and the
     # API contract; the UI labels it neutrally, since any OIDC provider's groups claim feeds
-    # it. See docs/integrations/oidc.md.
+    # it. See docs/oidc.md.
     entra_group_id: str
 
 

@@ -117,7 +117,10 @@ operator-supplied code. The runner stays one-shot; only the thing that launches 
 | [Agent-executed Config Management](remote-agents/config-runs.md) | What the dashboard sends, the grants it needs, and what a run looks like. |
 | [Agent-brokered file shares](remote-agents/file-shares.md) | A name rather than a path, the grants, and why it needs no Docker socket. |
 | [Attesting an agent through SPIRE](remote-agents/spire-attestation.md) | Moving an agent from an Ed25519 key on disk to a SPIRE attestation at every start: the two overlays, **Migrate to SPIRE**, ports, rollback and the settings. |
-| [The dashboard's own SPIFFE identity](remote-agents/dashboard-identity.md) | The same SPIRE server gives the dashboard short-lived tokens a cloud can trust instead of a stored key. Preview. |
+
+The same SPIRE server also gives the **dashboard** an identity of its own, which AWS, Azure,
+GCP and k3s can trust instead of a stored key. That is not about agents, so it lives with the
+other OIDC pages: [The dashboard's own identity](oidc/dashboard-identity.md).
 
 The first two split by **who is reading**: the operator enrols and manages agents from
 the dashboard, and the host owner runs the container and writes its policy. They are

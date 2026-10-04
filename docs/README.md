@@ -51,6 +51,7 @@ demoing, running a lab, or running production.
 | [Auto-delete Timer](auto-delete-timer.md) | you want lab resources to clean themselves up — read it before enabling it, because it deletes infrastructure. |
 | [Inventory](inventory.md) | you want one list of everything across every cloud and hypervisor, to filter it by tag or Password Safe attribute, or to act on a selection. |
 | [Notifications](notifications.md) | you want to hear about expiring resources and failed jobs without opening the dashboard. |
+| [OIDC and single sign-on](oidc.md) | you want single sign-on, Dex in front of your clusters, Entra federation to Kubernetes, or the dashboard reaching AWS, Azure, GCP and k3s with its own short-lived identity instead of a stored key. The pages are under [`oidc/`](oidc.md). |
 | [Service Accounts](service-accounts.md) | something that is not a person — a CI job, an MCP agent, a script — needs to call the API, and you would otherwise hand it a PAT. OAuth 2.0 client credentials, built in, no IdP needed. |
 | [Permissions](permissions.md) | you are deciding what a user may see or do — and especially before ticking "Full access", or handing a POV to a customer stakeholder. |
 | [Audit Log](audit-log.md) | you need to show who did what, or to satisfy yourself that the record has not been edited. |
@@ -66,7 +67,8 @@ demoing, running a lab, or running production.
 | Folder | What's in it |
 |---|---|
 | [profiles/](profiles/README.md) | The `demo` / `pov` gate, the per-feature matrix, and everything specific to one profile or the other. |
-| [integrations/](integrations/README.md) | One page per external system the dashboard talks to — the BeyondTrust products, the hypervisors, the runners, SSO. |
+| [integrations/](integrations/README.md) | One page per external system the dashboard talks to — the BeyondTrust products, the hypervisors, the runners. |
+| [oidc/](oidc.md) | Single sign-on, Dex, Entra federation and the dashboard's own identity for the clouds. Indexed by [oidc.md](oidc.md) rather than a README. |
 | [workload-lab/](workload-lab.md) | Giving a credential to something that is not a person: the four mechanisms, the Workload Credentials product, and what consumes each. Indexed by [workload-lab.md](workload-lab.md) rather than a README. |
 | [design/](design/README.md) | Why a subsystem is shaped the way it is. Facts that are not recoverable from reading the code. |
 | [runbooks/](runbooks/README.md) | Procedures to run against a real instance, usually to prove a phase of work landed. |

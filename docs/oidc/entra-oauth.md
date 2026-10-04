@@ -3,7 +3,7 @@
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you want the legacy per-tenant Entra sign-in button rather than the generic OIDC path.
 
 The older, Entra-specific sign-in path. For any other identity provider — or for
-Entra via discovery — use [Generic OIDC](oidc.md) instead; that page notes this
+Entra via discovery — use [Generic OIDC](../oidc.md) instead; that page notes this
 one is configured separately and is unaffected by it.
 
 

@@ -2069,7 +2069,7 @@ async def groups_page(request: Request):
     """The Groups TAB of the RBAC page -- identity-provider group mappings.
 
     Kept as a real route for the same reasons as /users above, and rather more of them: the
-    two Entitle runbooks and `docs/integrations/oidc.md` walk an operator through opening
+    two Entitle runbooks and `docs/oidc.md` walk an operator through opening
     `/groups`, and `templates/settings.html` links it from the single-sign-on panel.
 
     Not gated on an identity provider being configured, even though the tab is only useful

@@ -313,7 +313,7 @@ secrets)**, and **Entitle + Entra federation (Layer 3 — time-boxed access)**.
   The dashboard itself still operates a `cloud=local` cluster (manifests, Helm, RBAC,
   ServiceAccount tokens, Ansible k8s targets) with the admin kubeconfig from
   `k3s-kubeconfig.yml` — a `system:masters` client certificate that never expires. With
-  the [dashboard's own SPIFFE identity](remote-agents/dashboard-identity.md#on-prem-k3s)
+  the [dashboard's own SPIFFE identity](oidc/dashboard-identity.md#on-prem-k3s)
   turned on, it can use a short-lived token instead:
   1. Run `k3s/k3s-dashboard-auth.yml` on the server node. **Trusts dashboard identity?** on
      the cluster's row shows the exact command, with this cluster's audience
@@ -334,8 +334,8 @@ secrets)**, and **Entitle + Entra federation (Layer 3 — time-boxed access)**.
   (`POST /clusters/{id}/entra-group`, default role `entra_rbac_group_role=cluster-admin`);
   members sign in **as themselves** (group Object ID is the RBAC subject), and Entitle's
   Entra-ID integration JIT-grants membership. Per-provider trust mechanism (full detail in
-  [Entra ↔ Kubernetes federation](integrations/entra-k8s-federation.md); not to be confused
-  with dashboard-login SSO in [oidc.md](integrations/oidc.md)):
+  [Entra ↔ Kubernetes federation](oidc/entra-k8s-federation.md); not to be confused
+  with dashboard-login SSO in [oidc.md](oidc.md)):
   - **AKS** — native managed-AAD; federation is a no-op; auth via `kubelogin` over the API
     tunnel.
   - **EKS** — associates a shared **Entra app as the cluster's OIDC IdP**
@@ -368,7 +368,7 @@ secrets)**, and **Entitle + Entra federation (Layer 3 — time-boxed access)**.
       ASSIGNED TO THE WIF ENTERPRISE APP** or it never appears in the token's `groups`
       claim, and *every* binding on it (RBAC and Cloud IAM) silently matches nothing. Read
       the ⚠️ in
-      [the federation guide §1b](integrations/entra-k8s-federation.md#1b-gke-app-registration-eg-gke-entra-wif)
+      [the federation guide §1b](oidc/entra-k8s-federation.md#1b-gke-app-registration-eg-gke-entra-wif)
       before debugging anything else. Until the group was assigned, three escalating IAM
       grants (custom role, custom role + `container.clusters.get`, then
       `roles/container.admin`) all appeared to do nothing, which looked like a GKE

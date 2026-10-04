@@ -35,7 +35,7 @@ so tightening it does not cost anyone an outage.
 An engineer requests cluster access for the length of an incident and gets an RBAC binding named
 after them, which removes itself afterwards. No permanent cluster-admin group.
 
-**Guide:** [Entra → Kubernetes federation](../../../integrations/entra-k8s-federation.md)
+**Guide:** [Entra → Kubernetes federation](../../../oidc/entra-k8s-federation.md)
 
 ### Reach a private cluster API server
 
@@ -55,7 +55,7 @@ picking up the new value.
 Federate cluster access to the corporate directory, so joining a team grants the right access
 everywhere and leaving revokes it — instead of per-cluster identity nobody deprovisions.
 
-**Guide:** [Entra → Kubernetes federation](../../../integrations/entra-k8s-federation.md)
+**Guide:** [Entra → Kubernetes federation](../../../oidc/entra-k8s-federation.md)
 
 ### A container platform with a vaulted admin
 

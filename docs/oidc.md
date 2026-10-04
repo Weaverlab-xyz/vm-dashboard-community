@@ -1,6 +1,16 @@
-# Generic OIDC Integration
+# OIDC and single sign-on
 
-> **Audience:** operator · **Profile:** `both` · **Read this when:** you want single sign-on for the dashboard instead of local passwords.
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you want single sign-on for the dashboard instead of local passwords, or you are working out which of the dashboard's OIDC features you need.
+
+This page sets up **single sign-on** for the dashboard. The dashboard speaks OIDC in
+several other places too, each with its own page:
+
+| Page | Read it when |
+|---|---|
+| [The dashboard's own identity](oidc/dashboard-identity.md) | you want the dashboard to reach AWS, Azure, GCP or a k3s cluster with a short-lived token instead of a stored key. Here the dashboard is the **issuer**. Its tokens come from the SPIRE server that [Remote Agents](remote-agents/spire-attestation.md) also uses |
+| [Dex](oidc/dex.md) | you want one issuer that both the dashboard and your on-prem clusters trust |
+| [Entra → Kubernetes federation](oidc/entra-k8s-federation.md) | you want people signing in to managed clusters as themselves, with their Entra groups as RBAC subjects |
+| [Sign in with Microsoft (Entra OAuth)](oidc/entra-oauth.md) | you want the legacy per-tenant Entra sign-in button rather than the generic path below |
 
 ## What is it?
 
@@ -145,7 +155,7 @@ On every SSO login the dashboard:
 > authenticates them.
 
 For the permission model and how group-derived permissions combine with
-admin-granted ones, see the [Entitle user-JIT design doc](../design/entitle-user-jit.md).
+admin-granted ones, see the [Entitle user-JIT design doc](design/entitle-user-jit.md).
 
 ---
 
@@ -157,46 +167,15 @@ admin-granted ones, see the [Entitle user-JIT design doc](../design/entitle-user
 | **Auto-provisioning** | Users in a mapped group are created automatically on first login. |
 | **Group-driven access** | Workgroups and permissions are derived from IdP group membership and re-synced on every login. |
 | **Permission enforcement** | Derived permissions feed the dashboard's scope/level checks (`vms`, `aws`, `k8s`, `cloud_database`, …). |
-| **Workload tokens** | Optional, separate from sign-in: the same (or another) IdP's *access tokens* for workloads, mapped to [service accounts](../service-accounts.md#tokens-from-your-own-idp-no-dashboard-secret). Configured under **Workload tokens** in this panel; needs an audience, not a client id. |
+| **Workload tokens** | Optional, separate from sign-in: the same (or another) IdP's *access tokens* for workloads, mapped to [service accounts](service-accounts.md#tokens-from-your-own-idp-no-dashboard-secret). Configured under **Workload tokens** in this panel; needs an audience, not a client id. |
 
 ---
 
 ## Dex (optional)
 
-[Dex](https://dexidp.io) can sit between the dashboard and your IdP. It is **optional**:
-pointing the dashboard straight at your IdP, as above, is the default and stays fully
-supported. Dex earns its place when you also want **clusters** to trust the same issuer, so
-a person and their groups mean the same thing in the dashboard and in `kubectl`. On-prem
-(k3s) clusters require it for people. Managed clusters (EKS, GKE, OKE, AKS) stay on their
-native authentication: Dex for them is
-[paused](../design/agent-and-human-identity.md#managed-clusters-paused).
-
-Nothing in the dashboard changes to use it — Dex is just another issuer:
-
-| Field | Value |
-|---|---|
-| Issuer URL | Dex's issuer, e.g. `https://dex.example.com:5554` |
-| Client ID | `dashboard` |
-| Client secret | the `dashboard` client's secret (the lab play leaves it in `/opt/dex/dashboard-client-secret`) |
-| Groups claim | `groups` — Dex passes the upstream IdP's groups through |
-
-Register the dashboard's callback, `https://<dashboard>/api/auth/oauth/oidc/callback`, as the
-`dashboard` client's redirect URI in Dex, and Dex's own callback
-(`https://<dex>/callback`) at the upstream IdP. To go back, put the upstream IdP's issuer
-and client back in these fields.
-
-**For on-prem clusters** the dashboard needs Dex's issuer separately from SSO, because
-the kubeconfig it hands people logs in to Dex with its own public client: **Settings →
-Kubernetes → Dex** (`dex_issuer_url`, `dex_k8s_client_id`, and `dex_ca_pem` for a lab Dex
-with its own CA), then **Trusts Dex** on the cluster's row. See
-[Kubernetes](../kubernetes.md), where the API-tunnel download for a `cloud=local` cluster
-is described.
-
-A lab Dex on k3s, and the play that makes the k3s API server trust it:
-[`examples/playbooks/dex/`](../../examples/playbooks/dex/README.md). Why Dex for people and
-SPIRE for workloads: [design/agent-and-human-identity.md](../design/agent-and-human-identity.md).
-
----
+[Dex](https://dexidp.io) can sit between the dashboard and your IdP, so that on-prem
+clusters trust the same issuer people sign in to the dashboard with. It is optional for the
+dashboard, and the only way people reach an on-prem (k3s) cluster. See [Dex](oidc/dex.md).
 
 ## Provider quick reference
 
@@ -254,9 +233,9 @@ are configured elsewhere:
 
 | Feature | What it is | Where |
 |---|---|---|
-| Entra for cluster RBAC | federating **Kubernetes cluster RBAC** to Entra via OIDC | [entra-k8s-federation.md](entra-k8s-federation.md) |
-| Workload tokens | a CI job or service calls the dashboard's API with an access token its own IdP issued; no SSO client needed | [Service accounts → Tokens from your own IdP](../service-accounts.md#tokens-from-your-own-idp-no-dashboard-secret) |
-| SPIFFE workloads | a workload presents a JWT-SVID at `/api/oauth/token` | [Service accounts → SPIFFE workloads](../service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing) |
-| The dashboard as an issuer | the dashboard publishes `<issuer>/.well-known/openid-configuration` so AWS, Azure, GCP and k3s can trust its own SPIFFE identity | [The dashboard's own SPIFFE identity](../remote-agents/dashboard-identity.md) |
-| A Workload Lab trust domain as an issuer | a SPIRE lab's OIDC Discovery Provider, which the dashboard and a k3s API server verify JWT-SVIDs against | [SPIFFE and SPIRE](../workload-lab/spiffe.md) |
-| Dex for on-prem `kubectl` | the kubeconfig people download for a `cloud=local` cluster | [Dex](#dex-optional) above, and [Kubernetes](../kubernetes.md) |
+| Entra for cluster RBAC | federating **Kubernetes cluster RBAC** to Entra via OIDC | [Entra → Kubernetes federation](oidc/entra-k8s-federation.md) |
+| Workload tokens | a CI job or service calls the dashboard's API with an access token its own IdP issued; no SSO client needed | [Service accounts → Tokens from your own IdP](service-accounts.md#tokens-from-your-own-idp-no-dashboard-secret) |
+| SPIFFE workloads | a workload presents a JWT-SVID at `/api/oauth/token` | [Service accounts → SPIFFE workloads](service-accounts.md#spiffe-workloads-authenticate-with-the-svid-hold-nothing) |
+| The dashboard as an issuer | the dashboard publishes `<issuer>/.well-known/openid-configuration` so AWS, Azure, GCP and k3s can trust its own SPIFFE identity | [The dashboard's own identity](oidc/dashboard-identity.md) |
+| A Workload Lab trust domain as an issuer | a SPIRE lab's OIDC Discovery Provider, which the dashboard and a k3s API server verify JWT-SVIDs against | [SPIFFE and SPIRE](workload-lab/spiffe.md) |
+| Dex for on-prem `kubectl` | the kubeconfig people download for a `cloud=local` cluster | [Dex](oidc/dex.md), and [Kubernetes](kubernetes.md) |

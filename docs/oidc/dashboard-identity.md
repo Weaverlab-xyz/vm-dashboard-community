@@ -1,8 +1,8 @@
-# The dashboard's own SPIFFE identity
+# The dashboard's own identity: federating with the clouds
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you want the dashboard to authenticate to a cloud with a short-lived token from its own SPIRE server instead of a stored key, or you are checking why a token file is missing or refused.
 
-Part of [Remote Agents](../remote-agents.md). The same SPIRE server that attests agents can give the dashboard an identity of its own, which a cloud can trust instead of a stored key.
+Part of [OIDC and single sign-on](../oidc.md). The dashboard publishes an OIDC issuer of its own, and AWS, Azure, GCP and k3s can trust the short-lived tokens it signs instead of a stored key. The tokens come from the same SPIRE server that [attests remote agents](../remote-agents/spire-attestation.md).
 
 **Preview.** The dashboard keeps a short-lived JWT-SVID per audience in a file, publishes
 the discovery document and keys a cloud fetches to verify it, and — once you retire a
@@ -222,7 +222,7 @@ Protect that volume as you would the key itself.
 
 All on **Settings → Integrations → Remote Agents**, under **Give the dashboard its own SPIFFE
 identity**. The SPIRE server itself is set up in
-[Attesting an agent through SPIRE](spire-attestation.md#settings).
+[Attesting an agent through SPIRE](../remote-agents/spire-attestation.md#settings).
 
 | Setting | Key | Default | What it does |
 |---|---|---|---|

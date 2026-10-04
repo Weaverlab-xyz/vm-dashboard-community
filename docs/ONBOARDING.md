@@ -258,8 +258,8 @@ that is maintained.
 | Remote Worker (Ansible + k8s runners) | [integrations/ansible.md](integrations/ansible.md) |
 | Cloud Functions | [integrations/cloud-functions.md](integrations/cloud-functions.md) |
 | MCP server (AI clients) | [integrations/mcp-server.md](integrations/mcp-server.md) |
-| Single sign-on (any IdP) | [integrations/oidc.md](integrations/oidc.md) |
-| Sign in with Microsoft (legacy Entra) | [integrations/entra-oauth.md](integrations/entra-oauth.md) |
+| Single sign-on (any IdP) | [OIDC and single sign-on](oidc.md) |
+| Sign in with Microsoft (legacy Entra) | [oidc/entra-oauth.md](oidc/entra-oauth.md) |
 
 Anything the dashboard cannot route to — a hypervisor on another network, a database
 behind NAT — is reached through an agent instead: see [Remote Agents](remote-agents.md).
