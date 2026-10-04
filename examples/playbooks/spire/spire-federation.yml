@@ -1,0 +1,127 @@
+# Federate the lab's SPIRE server with the dashboard's own SPIRE server (SPIFFE federation)
+# Target: the SPIRE server VM (vm or docker mode). Idempotent; re-running is a refresh.
+#
+# docs/design/dashboard-workload-identity.md, L4. Two SPIRE servers, two trust domains:
+# the lab's, and the dashboard's own (docker-compose.spire.yml). Federation is each one
+# holding the OTHER's trust bundle, fetched from the other's bundle endpoint and kept
+# current through rotation by SPIRE itself — so a workload in one trust domain can
+# authenticate a workload in the other (an X.509-SVID over mTLS, or a JWT-SVID).
+#
+# THIS PLAY IS THE LAB'S HALF: a federation relationship naming the dashboard's trust
+# domain, its bundle endpoint (https://<dashboard>:8082), and the SPIFFE ID that endpoint
+# presents (spiffe://<dashboard td>/spire/server). The dashboard creates the mirror-image
+# relationship on its own server after this succeeds (dashboard_spire.federate).
+#
+# THE SEED BUNDLE. An https_spiffe endpoint is authenticated with the other trust domain's
+# own roots, so the very first fetch needs a copy of them. The dashboard passes its current
+# bundle as `dashboard_bundle_json` — public keys, nothing secret — and SPIRE replaces it
+# with what the endpoint serves from then on.
+#
+# REACHABILITY, BOTH WAYS. The lab fetches from the dashboard host's tcp/8082 (outbound
+# from here); the dashboard fetches from this host's tcp/8082 (opened on the lab's ACL to
+# the lab's source set). The refresh at the end proves the first direction; the dashboard
+# proves the second.
+#
+# NEVER LIVE-VALIDATED. The `federation` subcommands and flags are SPIRE 1.15's, read from
+# its CLI docs; the first lab federated is the test.
+#
+# extra_vars:
+#   trust_domain: lab.example.test               # REQUIRED — this lab's trust domain
+#   dashboard_trust_domain: dashboard.example.com # REQUIRED
+#   dashboard_bundle_endpoint_url: https://dashboard.example.com:8082   # REQUIRED
+#   dashboard_bundle_json: '{"keys": [...]}'      # REQUIRED when state=present (the seed)
+#   state: present                               # absent = remove the relationship + bundle
+#   spire_cli_prefix: ""                         # set by the lab for the docker mode
+- name: Federate the lab's SPIRE server with the dashboard's
+  hosts: all
+  become: true
+  vars:
+    trust_domain: ""
+    dashboard_trust_domain: ""
+    dashboard_bundle_endpoint_url: ""
+    dashboard_bundle_json: ""
+    state: present
+    spire_root: /opt/spire
+    spire_cli_prefix: ""
+    # The seed goes in on stdin, so a container needs `docker exec -i`. A VM runs the binary
+    # directly and needs nothing.
+    _cli: "{{ spire_cli_prefix | regex_replace('^docker exec ', 'docker exec -i ') }}{{ spire_root }}/bin/spire-server"
+    _endpoint_id: "spiffe://{{ dashboard_trust_domain }}/spire/server"
+  tasks:
+    - name: Validate the inputs
+      ansible.builtin.assert:
+        that:
+          - trust_domain | length > 0
+          - dashboard_trust_domain | length > 0
+          - "'/' not in dashboard_trust_domain"
+          - dashboard_trust_domain != trust_domain
+          - state in ['present', 'absent']
+          - state == 'absent' or dashboard_bundle_endpoint_url is match('^https://[^/]+:[0-9]+$')
+          - state == 'absent' or '"keys"' in dashboard_bundle_json
+        fail_msg: >-
+          trust_domain, dashboard_trust_domain (a bare name, not this lab's), and for
+          state=present an https bundle endpoint URL (https://<host>:<port>, no path) and
+          the dashboard's SPIFFE bundle as the seed are required.
+
+    - name: Look for an existing relationship
+      ansible.builtin.command: "{{ _cli }} federation show -trustDomain {{ dashboard_trust_domain }}"
+      register: existing
+      changed_when: false
+      failed_when: false
+
+    - name: Remove the relationship and the federated bundle
+      when: state == 'absent'
+      block:
+        - name: Delete the relationship
+          ansible.builtin.command: "{{ _cli }} federation delete -id {{ dashboard_trust_domain }}"
+          when: existing.rc == 0
+        - name: Delete the federated bundle
+          ansible.builtin.command: "{{ _cli }} bundle delete -id spiffe://{{ dashboard_trust_domain }}"
+          register: bundle_delete
+          failed_when: false
+          changed_when: bundle_delete.rc == 0
+
+    - name: Create or update the relationship
+      when: state == 'present'
+      block:
+        - name: Write the relationship, seeded with the dashboard's bundle
+          ansible.builtin.command:
+            cmd: >-
+              {{ _cli }} federation {{ 'update' if existing.rc == 0 else 'create' }}
+              -trustDomain {{ dashboard_trust_domain }}
+              -bundleEndpointURL {{ dashboard_bundle_endpoint_url }}
+              -bundleEndpointProfile https_spiffe
+              -endpointSpiffeID {{ _endpoint_id }}
+              -trustDomainBundleFormat spiffe
+              -trustDomainBundlePath /dev/stdin
+            stdin: "{{ dashboard_bundle_json }}"
+
+        # The proof of the lab->dashboard direction. Fails here, with the likely cause, rather
+        # than leaving a relationship that silently keeps the seed until it goes stale.
+        - name: Fetch the dashboard's bundle from its endpoint now
+          ansible.builtin.command: "{{ _cli }} federation refresh -id {{ dashboard_trust_domain }}"
+          register: refresh
+          changed_when: false
+          failed_when: false
+
+        - name: Refuse a relationship that cannot fetch
+          ansible.builtin.assert:
+            that: refresh.rc == 0
+            fail_msg: >-
+              This lab's SPIRE server could not fetch the dashboard's bundle from
+              {{ dashboard_bundle_endpoint_url }}: {{ (refresh.stderr or refresh.stdout) | trim }}.
+              Check that the dashboard host publishes tcp/8082 (docker-compose.spire.yml,
+              SPIRE_FEDERATION_PORT) and that this host can reach it. The relationship is kept
+              with its seed bundle; re-run once the port is open.
+
+        - name: Read the federated bundle back
+          ansible.builtin.command: "{{ _cli }} bundle list -id spiffe://{{ dashboard_trust_domain }} -format spiffe"
+          register: federated
+          changed_when: false
+
+        - name: What this server now trusts
+          ansible.builtin.debug:
+            msg:
+              - "Federated with {{ dashboard_trust_domain }} via {{ dashboard_bundle_endpoint_url }}"
+              - "Endpoint SPIFFE ID: {{ _endpoint_id }}"
+              - "Keys held for it: {{ federated.stdout | regex_findall('\"use\"') | length }}"

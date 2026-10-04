@@ -158,6 +158,20 @@
                       :title="'Upgrade ' + (lab.spire_version || 'this lab') + ' to ' + lab.target_release
                               + ': the server, the OIDC provider, then a linked node\'s agent.'">
                 Upgrade</button>
+              <!-- SPIFFE federation with the dashboard's own SPIRE server. Disabled with the
+                   reason when it cannot work (k8s mode, no captured bundle, dashboard SPIRE off). -->
+              <button @click="federate(lab)"
+                      x-show="lab.status === 'available' && lab.federation_status !== 'federated'"
+                      x-cloak :disabled="busy || !!lab.federation_problem || lab.federation_status === 'federating'"
+                      class="text-indigo-700 hover:underline text-xs mr-2 disabled:opacity-50 disabled:no-underline"
+                      :title="lab.federation_problem || (lab.federation_status === 'failed' ? 'Last attempt failed: ' + lab.federation_error + '\n\n' : '') + ('Federate ' + lab.trust_domain + ' with this dashboard\'s SPIRE server over tcp/' + lab.federation_port + ', both ways.')"
+                      x-text="lab.federation_status === 'federating' ? 'Federating…'
+                              : (lab.federation_status === 'failed' ? 'Federate (retry)' : 'Federate')"></button>
+              <button @click="unfederate(lab)" x-show="lab.federation_status === 'federated'" x-cloak
+                      :disabled="busy"
+                      class="text-green-700 hover:underline text-xs mr-2 disabled:opacity-50"
+                      :title="'Federated with this dashboard since ' + (lab.federated_at || '') + '. Click to remove both halves.'">
+                Federated ✓</button>
               <button @click="govern(lab)" x-show="lab.status === 'available' && !lab.ps_governed"
                       x-cloak :disabled="busy"
                       class="text-blue-600 hover:underline text-xs mr-2 disabled:opacity-50">
@@ -1107,6 +1121,38 @@ function spireLabPage() {
         await this.load();
       } catch (e) {
         this.notify('Could not upgrade: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+
+    async federate(lab) {
+      if (!confirm('Federate ' + lab.trust_domain + ' with this dashboard\'s SPIRE server?\n\n'
+                   + 'Each server serves its trust bundle on tcp/' + lab.federation_port
+                   + ' and fetches the other\'s:\n'
+                   + '  • the dashboard host must be able to reach ' + lab.federation_lab_url + '\n'
+                   + '  • the lab host must be able to reach this dashboard\'s SPIRE host on tcp/'
+                   + lab.federation_port + ' (docker-compose.spire.yml publishes it)\n\n'
+                   + 'The lab\'s install playbook is re-applied, which restarts its SPIRE server. '
+                   + 'Bundles are public keys; nothing secret moves.')) return;
+      this.busy = true;
+      try {
+        await API.post('/api/spire-lab/' + lab.id + '/federation', {});
+        this.notify('Federating ' + lab.name + ' — follow it in Jobs.');
+        await this.load();
+      } catch (e) {
+        this.notify('Could not federate: ' + (e.message || e), 'error');
+      } finally { this.busy = false; }
+    },
+
+    async unfederate(lab) {
+      if (!confirm('Remove the federation between ' + lab.trust_domain + ' and this dashboard? '
+                   + 'Both servers drop the other\'s bundle; neither trust domain is otherwise changed.')) return;
+      this.busy = true;
+      try {
+        await API.delete('/api/spire-lab/' + lab.id + '/federation');
+        this.notify('Removing the federation — follow it in Jobs.');
+        await this.load();
+      } catch (e) {
+        this.notify('Could not remove the federation: ' + (e.message || e), 'error');
       } finally { this.busy = false; }
     },
 

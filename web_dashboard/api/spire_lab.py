@@ -79,6 +79,16 @@ def _upgrade_active(row) -> bool:
     return bool(db) and spire_lab_service.upgrade_active(db, row.id)
 
 
+def _federation_problem(row) -> str:
+    """Why "Federate with this dashboard" would be refused now, or "" — read the same way
+    _upgrade_active reads the job table, from the row's own session."""
+    from sqlalchemy.orm import object_session
+    db = object_session(row)
+    if not db or row.federation_status in ("federated", "federating"):
+        return ""
+    return spire_lab_service.federation_problem(db, row)
+
+
 def _shape(row) -> dict:
     return {
         "id": row.id, "name": row.name, "trust_domain": row.trust_domain,
@@ -152,6 +162,16 @@ def _shape(row) -> dict:
         "k8s_credential_account": (
             (spire_lab_service.managed_ref_for(row, "k8s") or {}).get("account_name") or ""),
         "k8s_credential_login_user": row.k8s_login_user or "",
+        # ── SPIFFE federation with the dashboard's own SPIRE server ───────────
+        # Separate from `status` like k8s_status: a failed federation leaves a working
+        # trust domain working. `federation_problem` is why the button is disabled, so the
+        # page can say it instead of failing on click.
+        "federation_status": row.federation_status or "",
+        "federation_error": row.federation_error,
+        "federated_at": row.federated_at.isoformat() if row.federated_at else None,
+        "federation_lab_url": spire_lab_service.lab_federation_url(row),
+        "federation_port": spire_lab_service.FEDERATION_PORT,
+        "federation_problem": _federation_problem(row),
         # Governance state. `ps_system_id` being set is what "this trust domain is
         # governed" means; `ps_account_id` stays empty by design (the plugin discovers its
         # accounts), so the page must not read its absence as an incomplete onboard.
@@ -535,6 +555,35 @@ def capture_jwt_bundle(lab_id: str, db: Session = Depends(get_db),
     try:
         return spire_lab_service.start_jwt_bundle_capture(
             db, lab_id=lab_id, created_by=user.username)
+    except SpireLabError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/{lab_id}/federation")
+def federate_lab(lab_id: str, db: Session = Depends(get_db),
+                 user: User = Depends(require_permission("cloud_function", "write"))):
+    """Federate this lab's trust domain with the dashboard's own SPIRE server: each
+    server's bundle endpoint (tcp/8082) and a relationship naming the other's, so a
+    workload in one trust domain can authenticate one in the other. Every argument is
+    derived from the lab row and the dashboard's own server; the request carries none."""
+    _require_enabled()
+    _visible_or_404(db, lab_id, user)
+    try:
+        return spire_lab_service.start_federation(db, lab_id=lab_id,
+                                                  created_by=user.username)
+    except SpireLabError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.delete("/{lab_id}/federation")
+def unfederate_lab(lab_id: str, db: Session = Depends(get_db),
+                   user: User = Depends(require_permission("cloud_function", "write"))):
+    """Remove both halves of the federation. The lab and the dashboard keep working."""
+    _require_enabled()
+    _visible_or_404(db, lab_id, user)
+    try:
+        return spire_lab_service.start_federation(db, lab_id=lab_id,
+                                                  created_by=user.username, enable=False)
     except SpireLabError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

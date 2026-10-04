@@ -417,9 +417,9 @@ def test_the_teardown_closes_the_port_and_leaves_the_vm_alone():
     a server nothing can reach — and the VM has its own timer and its own Destroy."""
     svc = _read("web_dashboard", "services", "spire_lab_service.py")
     block = svc.split("async def run_decommission(")[1]
-    # Both ports: every build opens 8081 AND the OIDC provider's 8443, so closing only
-    # one would leave the JWKS endpoint reachable after the lab is gone.
-    assert "apply_ingress(placement, [row.bind_port, OIDC_PORT], [])" in block
+    # Every port: the build opens 8081, the OIDC provider's 8443 and the federation bundle
+    # endpoint's 8082 through ONE converged rule, so closing it closes all three.
+    assert "apply_ingress(placement, _acl_ports(row), [])" in block
     assert "terminate" not in block, "the teardown must not destroy the host VM"
     assert '"vm_destroyed": False' in block
 
