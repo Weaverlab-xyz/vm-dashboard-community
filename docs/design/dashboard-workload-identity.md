@@ -189,14 +189,16 @@ a bundle endpoint on both servers) would let a lab workload be authorized by the
 dashboard and the reverse. That is a core SPIFFE capability the lab cannot show today, and
 it is the honest demonstration for customers who run more than one trust domain.
 
-**In progress.** The servers federate: both serve a bundle endpoint on tcp/8082
+**Built** (vm and docker modes). The servers federate: both serve a bundle endpoint on tcp/8082
 (`https_spiffe`). **Federate** on a vm or docker lab re-applies the lab's install, opens
 8082 on its ACL and host firewall, and creates the lab's relationship
 (`spire-federation.yml`), then the dashboard's (`dashboard_spire.federate`). Each is seeded
 with the other's current bundle and refreshed once to prove the fetch. Decommissioning
-unfederates. **Still to come:** workloads with `-federatesWith` (the agent cell and the
-lab's k8s workload) and a step that proves each sees the other's trust domain. Helm-mode
-labs come after that.
+unfederates. The workloads federate too: the lab's k8s workload gets the dashboard in its
+`federatesWith`, and agent cells on the dashboard's trust domain get the lab, at mint or
+when the lab federates. `spire-federation-proof.yml` proves it on the linked k3s node, as
+the workload. **Not built:** Helm-mode labs, and a dashboard-run proof on a cell host,
+since the dashboard runs no playbooks there and the operator runs it by hand.
 
 ### L5. Bring the two servers' settings in line
 
@@ -349,7 +351,7 @@ held. Username, domain and path stay in `shares.yaml`.
 3. ~~**Slice 3:** AWS and GCP (configuration and docs, plus the `packer_service` fix), then
    Azure (the `ClientAssertionCredential` branch).~~ Built.
 4. ~~**Slice 4:** on-prem k3s through the dashboard's SVID.~~ Built.
-5. **L3 and L4:** after the lab answers the Password Safe attribute question. ~~L5~~ built.
+5. **L3:** after the lab answers the Password Safe attribute question. ~~L4 and L5~~ built.
 6. **Slice 5:** ~~agent file-share credentials~~ built; the ECS and Cloud Run runners remain.
 
 ## Not verified

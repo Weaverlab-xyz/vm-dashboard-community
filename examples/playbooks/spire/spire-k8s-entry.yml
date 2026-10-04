@@ -49,6 +49,9 @@
     workload_path: /ns/kube-system/sa/deploy-bot
     node_path: /node/k3s-01
     jwt_svid_ttl: 300
+    # Trust domains this workload's SVID response also carries the bundle of (SPIFFE
+    # federation, spire-federation.yml). The lab passes the dashboard's while federated.
+    federates_with: []
     join_token_ttl: 600
     spire_root: /opt/spire
     # How the SPIRE CLI is reached. Empty on a VM (the systemd install). The Workload Lab
@@ -148,6 +151,7 @@
         -spiffeID {{ _workload_id }}
         -selector unix:uid:{{ workload_uid }}
         -jwtSVIDTTL {{ jwt_svid_ttl }}
+        {% for td in federates_with %}-federatesWith spiffe://{{ td }} {% endfor %}
       register: k8s_workload_entry
       changed_when: "'already exists' not in (k8s_workload_entry.stdout + k8s_workload_entry.stderr)"
       failed_when:

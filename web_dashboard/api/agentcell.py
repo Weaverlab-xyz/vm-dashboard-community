@@ -125,8 +125,11 @@ def create_agent(
     spire_facts = {}
     if payload.trust_source == "dashboard":
         try:
-            join_token = dashboard_spire.register_workload(node_id, spiffe_id,
-                                                           payload.worker_uid)
+            # Federated from the start with every lab the dashboard's server already
+            # federates with (docs/workload-lab/spiffe.md, "Federating with the dashboard").
+            join_token = dashboard_spire.register_workload(
+                node_id, spiffe_id, payload.worker_uid,
+                federates_with=spire_lab_service.federated_lab_tds(db))
             dashboard_spire.sync_trust_domain(db, trust_domain)
             spire_facts = dashboard_spire.install_facts(trust_domain)
         except dashboard_spire.DashboardSpireError as exc:

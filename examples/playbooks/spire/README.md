@@ -23,6 +23,7 @@ network ACL is opened — see [Opening the port](#opening-the-port).
 | `spire-helm.yml` | Linux VM (SSH) | `ansible-winrm` | `k8s` mode: the hardened Helm charts on k3s (after `k3s/k3s-server-init.yml`), pinned to `spire` 0.30.2 / `spire-crds` 0.6.1 with upstream's recommended (non-root, restricted) settings; 8081/8443 as LoadBalancer Services; reads back `admin_ids` and fetches the discovery document. Values checked with `helm template`; **never run on a live node** |
 | `spire-jwt-bundle.yml` | the SPIRE VM (SSH) | `ansible-winrm` | Publishes the JWT bundle and the X.509 trust bundle PEM for the dashboard's key refresh |
 | `spire-federation.yml` | the SPIRE VM (SSH) | `ansible-winrm` | SPIFFE federation with the dashboard's own SPIRE server: a relationship naming its bundle endpoint (tcp/8082), seeded with its bundle on stdin, refreshed once to prove the fetch; `state=absent` removes it. `vm`/`docker` mode. **Never live-validated** |
+| `spire-federation-proof.yml` | the **k3s node** (or a cell host, by hand) | `ansible-winrm` | Proves a workload holds a federated trust domain's bundle: `spire-agent api fetch x509` as the workload, no_log (it carries the private key), reporting trust domain names only. **Never live-validated** |
 | `spire-remove.yml` | the SPIRE VM (SSH) | `ansible-winrm` | Optional teardown: removes SPIRE for any mode, **including `/opt/spire` and the CA key** |
 
 All four are `--syntax-check` clean against `chrweav/ansible-winrm`, which is the image

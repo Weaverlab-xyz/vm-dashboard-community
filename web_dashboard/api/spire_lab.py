@@ -169,6 +169,8 @@ def _shape(row) -> dict:
         "federation_status": row.federation_status or "",
         "federation_error": row.federation_error,
         "federated_at": row.federated_at.isoformat() if row.federated_at else None,
+        # What the proof showed on the linked k3s node, as the workload; "" = not run.
+        "federation_proof": row.federation_proof or "",
         "federation_lab_url": spire_lab_service.lab_federation_url(row),
         "federation_port": spire_lab_service.FEDERATION_PORT,
         "federation_problem": _federation_problem(row),

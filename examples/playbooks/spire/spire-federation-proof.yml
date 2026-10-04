@@ -1,0 +1,70 @@
+# Prove a workload holds a federated trust domain's bundle (SPIFFE federation)
+# Target: a host running a SPIRE agent — the lab's linked k3s node, run by the dashboard;
+# or an agent cell's host, run by hand. Read-only.
+#
+# docs/workload-lab/spiffe.md, "Federating with the dashboard". A federation relationship
+# makes a SERVER hold the other trust domain's bundle; an entry's federatesWith is what
+# hands that bundle to a WORKLOAD, in its SVID response. This asks the agent's Workload API
+# for exactly that, as the workload (its uid is the attestation), and asserts the federated
+# trust domain is among the bundles it was given — which is what lets it authenticate a
+# peer from that trust domain over mTLS.
+#
+# THE RESPONSE CARRIES THE WORKLOAD'S PRIVATE KEY. The fetch is no_log, its output is never
+# printed or registered past the task that parses it, and what this reports is trust domain
+# NAMES and a count — nothing else.
+#
+# The agent receives an entry change within its sync interval (seconds), so the fetch
+# retries for a minute before concluding the workload was not federated.
+#
+# NEVER LIVE-VALIDATED. `spire-agent api fetch x509 -output json` and its
+# `federated_bundles` map (keyed by trust domain ID) are SPIRE 1.15's, read from its docs.
+#
+# extra_vars:
+#   federated_trust_domain: dashboard.example.com   # REQUIRED — the OTHER trust domain
+#   workload_user: deploy-bot                       # the uid the entry selects
+#   agent_socket: /tmp/spire-agent/public/api.sock
+- name: Prove the workload holds the federated bundle
+  hosts: all
+  become: true
+  vars:
+    federated_trust_domain: ""
+    workload_user: "deploy-bot"
+    spire_root: /opt/spire
+    agent_socket: /tmp/spire-agent/public/api.sock
+    proof_retries: 12
+    proof_delay: 5
+  tasks:
+    - name: Validate the inputs
+      ansible.builtin.assert:
+        that:
+          - federated_trust_domain | length > 0
+          - "'/' not in federated_trust_domain"
+        fail_msg: federated_trust_domain (a bare trust domain name) is required.
+
+    # no_log: the response holds the X.509-SVID's private key. Only the derived list of
+    # trust domain names leaves this task.
+    - name: Fetch the workload's X.509 SVID response, as the workload
+      ansible.builtin.command: >-
+        {{ spire_root }}/bin/spire-agent api fetch x509 -socketPath {{ agent_socket }}
+        -output json
+      become_user: "{{ workload_user }}"
+      register: fetch
+      changed_when: false
+      no_log: true
+      retries: "{{ proof_retries }}"
+      delay: "{{ proof_delay }}"
+      until: >-
+        fetch.rc == 0 and
+        ('spiffe://' ~ federated_trust_domain) in
+        ((fetch.stdout | from_json).federated_bundles | default({}, true) | list)
+
+    - name: Keep only the trust domain names
+      ansible.builtin.set_fact:
+        _federated: "{{ (fetch.stdout | from_json).federated_bundles | default({}, true) | list | sort }}"
+      no_log: true
+
+    - name: What the workload holds
+      ansible.builtin.debug:
+        msg:
+          - "Workload {{ workload_user }} holds the bundles of: {{ _federated | join(', ') or 'no other trust domain' }}"
+          - "Federated with spiffe://{{ federated_trust_domain }}: {{ ('spiffe://' ~ federated_trust_domain) in _federated }}"
