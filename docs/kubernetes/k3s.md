@@ -28,7 +28,7 @@ The dashboard creates k3s in three places.
 The dashboard's Terraform modules are cloud-only and Rancher is import-only, so an on-prem
 cluster is built with the `hosts: all`, `become: true` plays in
 [`examples/playbooks/k3s/`](../../examples/playbooks/k3s/), run from
-[Config Management](../config-management.md) one host at a time:
+[Config Management](../operations/config-management.md) one host at a time:
 
 1. `k3s-open-ports.yml` on every node (6443/tcp, 8472/udp, 10250/tcp, plus etcd for HA).
 2. `k3s-server-init.yml` on the first server. It gives you `server_url` and the node token.
