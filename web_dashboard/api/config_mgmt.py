@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 
 from ..database import Job, User, get_db
 from ..services import config_mgmt_route_service as cmr
-from .auth import get_current_user, require_permission
+from .auth import get_current_user, has_explicit_permission, require_permission
 from ..services import job_service
 from ..services import storage_service
 from ..services.storage_service import StorageError
@@ -243,7 +243,9 @@ def get_agent_targets(
                   transport, cloud, reason, discovered_by_agent_id,
                   discovered_by_agent_name, executor_source, executor_via,
                   executor_note}, …],
-         "databases": [{id, name, agent_id, agent_name, target_id, host, engine, reason}, …]}
+         "databases": [{id, name, agent_id, agent_name, target_id, host, engine, reason}, …],
+         "directories": [{id, name, agent_id, agent_name, target_id, host, port, provider,
+                          reason}, …]}
     """
     from ..database import RemoteAgent
     from ..services import inventory_service
@@ -254,7 +256,7 @@ def get_agent_targets(
     # inventory_service loads it once.
     routes = cmr.load_table(db)
     accessible = inventory_service.accessible_workgroups(current_user)
-    out: dict = {"vms": [], "databases": []}
+    out: dict = {"vms": [], "databases": [], "directories": []}
     for item in inventory_service.collect(db):
         if not item.get("agent_id"):
             continue
@@ -270,6 +272,12 @@ def get_agent_targets(
                         "host": item.get("private_host") or "",
                         "target_id": item["id"].split(":", 1)[1]})
             out["databases"].append(row)
+        elif item.get("kind") == "directory":
+            row.update({"provider": item.get("provider") or "",
+                        "host": item.get("host") or "",
+                        "port": item.get("port") or 0,
+                        "target_id": item["id"].split(":", 1)[1]})
+            out["directories"].append(row)
         else:
             broker = item.get("broker_agent_id") or ""
             route = routes.match_for(item.get("ip") or "")
@@ -454,8 +462,10 @@ class RunRequest(BaseModel):
     # "portainer" is the same localhost shape with no resource behind it: the target is
     # the ONE configured Portainer, its connection is the PORTAINER_* env every runner
     # already gets, and target_id is therefore not required.
-    target_kind: str = "vm"  # "vm" | "k8s" | "database" | "portainer"
-    target_id: str = ""      # K8sCluster.id / CloudDatabase.id when target_kind != "vm"
+    # "directory" is an on-premises AD or LDAP directory (ManagedDirectory, cloud="local").
+    # It always runs through the directory's own remote agent, so agent_id is required.
+    target_kind: str = "vm"  # "vm" | "k8s" | "database" | "portainer" | "directory"
+    target_id: str = ""      # K8sCluster.id / CloudDatabase.id / ManagedDirectory.id
     extra_vars: dict = {}
     # Use Secrets-Management secrets in the run WITHOUT ever seeing the value.
     # Requires the `secrets:use` permission (admins bypass). A "source" is a
@@ -505,6 +515,10 @@ class RunRequest(BaseModel):
     connection_id: str = ""   # the agent-bound hypervisor connection a VM was synced from
     transport: str = ""       # "ssh" | "winrm" | "local"
     port: int = 0             # the port on the target; 0 = derive from the transport
+    # A directory run over WinRM: the domain controller or management host the
+    # microsoft.ad modules run on. Blank = the directory's own host. Still checked by the
+    # agent's policy.yaml targets like every other address.
+    winrm_host: str = ""
     # ── Change window ─────────────────────────────────────────────────────────
     # Leave all three blank and the run starts as soon as the worker has capacity, which
     # is what every existing caller does and what every existing caller keeps doing.
@@ -709,6 +723,48 @@ def _resolve_agent_target(payload: "RunRequest", db) -> dict:
                     "dashboard's own runner, not through a remote agent. Leave the "
                     "agent unset for this target."))
 
+    if payload.target_kind == "directory":
+        from ..database import ManagedDirectory
+        if not agent_service.supports_directory(agent):
+            raise HTTPException(status_code=400,
+                                detail=agent_service.directory_upgrade_hint(agent))
+        row = (db.query(ManagedDirectory)
+               .filter(ManagedDirectory.id == payload.target_id).first())
+        if not row or row.cloud != "local":
+            raise HTTPException(status_code=404, detail="No such on-premises directory.")
+        if (row.agent_id or "") != agent.id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"That directory is not reachable through agent '{agent.name}'.")
+        transport = (payload.transport or "local").strip().lower()
+        if transport not in ("local", "winrm"):
+            raise HTTPException(
+                status_code=400,
+                detail="A directory run uses transport 'local' (LDAP from the runner) or "
+                       "'winrm' (the microsoft.ad modules on a Windows host).")
+        if transport == "winrm":
+            if row.provider != "onprem_ad":
+                raise HTTPException(
+                    status_code=400,
+                    detail="WinRM runs are for Active Directory; an LDAP directory is "
+                           "changed over LDAP (transport 'local').")
+            host = (payload.winrm_host or row.host or "").strip()
+            # 5986, not the VM default 5985: this run carries a domain credential, so it
+            # goes over HTTPS. A port the operator set explicitly still wins.
+            port = payload.port or 5986
+        else:
+            host, port = row.host or "", row.port or 0
+        if not host:
+            raise HTTPException(
+                status_code=400,
+                detail="That directory has no host recorded, so there is nothing for the "
+                       "agent to connect to.")
+        return {"run_kind": "directory", "transport": transport,
+                "target_host": host, "target_port": port,
+                "target_id": row.id, "connection_id": "",
+                "target_label": f"{row.provider}/{row.name}",
+                "executor_name": agent.name}
+
     if payload.target_kind == "database":
         row = (db.query(CloudDatabase)
                .filter(CloudDatabase.id == payload.target_id).first())
@@ -829,6 +885,14 @@ async def _run_agent_ansible(payload: "RunRequest", db, current_user):
         has_managed=False, password_safe_enabled=True)
     if _refusal:
         raise HTTPException(status_code=_refusal.status, detail=_refusal.detail)
+    # A directory run changes AD or LDAP with a domain credential, so it needs the
+    # directories grant on top of config_mgmt:write. Explicit, like every directories
+    # route: a legacy unrestricted user has not been given it.
+    if payload.target_kind == "directory" and not has_explicit_permission(
+            current_user, "directories", "write"):
+        raise HTTPException(
+            status_code=403,
+            detail="Requires 'directories:write' permission or administrator.")
 
     overrides = _resolve_agent_target(payload, db)
     # Popped, not left in: `run_meta` silently drops any key outside RUN_META_KEYS, so
@@ -1036,6 +1100,11 @@ async def run_playbook(
     # target_kind="database" and still cannot use any runner the dashboard launches.
     if payload.agent_id:
         return await _run_agent_ansible(payload, db, current_user)
+    if payload.target_kind == "directory":
+        raise HTTPException(
+            status_code=400,
+            detail="An on-premises directory is reached only through its remote agent; "
+                   "choose the agent it was registered with.")
 
     if payload.target_kind in ("k8s", "database", "portainer"):
         return await _run_cloud_localhost(payload, db, current_user)

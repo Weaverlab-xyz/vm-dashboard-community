@@ -1014,6 +1014,10 @@ class Policy:
         self.ansible_enabled = bool(ansible.get("enabled"))
         self.ansible_vm_image = str(ansible.get("vm_image") or "")
         self.ansible_db_image = str(ansible.get("db_image") or "")
+        # A directory run needs python-ldap and the microsoft.ad collection. Blank falls
+        # back to db_image: the shipped localhost image carries both, so an operator who
+        # already runs database plays has nothing new to pull.
+        self.ansible_directory_image = str(ansible.get("directory_image") or "")
         # Defaults to the sibling network so an operator who already configured one does not
         # have to say it twice; `none` is refused before create because it makes every run
         # fail with an unreachable host and no explanation.
@@ -1153,7 +1157,10 @@ class Policy:
                 "grant from `targets:` and `sibling:` on purpose: it allows a playbook to "
                 "be applied to a host, not merely a port to be probed.")
         images = {"vm": ("vm_image", self.ansible_vm_image),
-                  "database": ("db_image", self.ansible_db_image)}
+                  "database": ("db_image", self.ansible_db_image),
+                  "directory": (("directory_image" if self.ansible_directory_image
+                                 else "directory_image (or db_image)"),
+                                self.ansible_directory_image or self.ansible_db_image)}
         if run_kind not in images:
             raise PolicyRefusal(
                 f"{run_kind!r} is not a kind of Config-Management run this agent build "
@@ -1928,6 +1935,10 @@ class Dashboard:
         for value in (bundle.get("env") or {}).values():
             if isinstance(value, str) and len(value) >= 4:
                 self.hold_secret(value)
+        # Only the password: holding the whole dict as the db loop does would redact the
+        # domain and base DN out of every line an LDAP play prints, which is the output.
+        if (bundle.get("directory") or {}).get("dir_bind_password"):
+            self.hold_secret(str(bundle["directory"]["dir_bind_password"]))
         return bundle, scrub
 
 
@@ -4705,7 +4716,9 @@ def _ansible_argv(*, run_kind: str, transport: str, has_key: bool,
     The database shape is the ``hosts: localhost`` play instead, matching
     ``services/ansible_localhost_cmd.build_localhost_command``.
     """
-    if run_kind == "database":
+    # A directory run over LDAP is the same localhost play as a database run; over WinRM
+    # it is the VM shape against the domain controller, below.
+    if run_kind == "database" or (run_kind == "directory" and transport == "local"):
         argv = ["ansible-playbook", "-i", "localhost,", "-c", "local",
                 f"{_JOB_DIR}/playbook.yml"]
         if has_vars:
@@ -4799,8 +4812,14 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
         files[f"{_JOB_DIR.strip('/')}/assets/{bundle['asset_name']}"] = \
             base64.b64decode(bundle["asset_b64"])
 
+    if run_kind == "directory" and transport not in ("local", "winrm"):
+        # The dashboard refuses this at enqueue; refused again here because the envelope
+        # is the dashboard's word, and an ssh "directory" run would be a VM run in disguise.
+        raise PolicyRefusal(f"a directory run uses transport local or winrm, not "
+                            f"{transport!r}.")
+
     has_key = False
-    if run_kind == "vm":
+    if run_kind == "vm" or (run_kind == "directory" and transport == "winrm"):
         files[f"{_JOB_DIR.strip('/')}/inventory.json"] = _vm_inventory(
             ip=ip, port=port, transport=transport,
             login_user=str(bundle.get("login_user") or ""),
@@ -4817,6 +4836,10 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
     # reason `_check_extra_vars` runs against the dashboard's dict and not against this one.
     play_vars = dict(extra_vars)
     play_vars.update(bundle.get("db") or {})
+    # dir_* bind vars for the LDAP / microsoft.ad modules. Only keys with that prefix: the
+    # dict is the dashboard's, and this is the agent choosing which names it accepts.
+    play_vars.update({k: v for k, v in (bundle.get("directory") or {}).items()
+                      if str(k).startswith("dir_")})
     if bundle.get("login_password"):
         play_vars["ansible_password"] = bundle["login_password"]     # WinRM
         play_vars["ansible_ssh_pass"] = bundle["login_password"]     # SSH

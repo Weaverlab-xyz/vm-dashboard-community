@@ -35,7 +35,7 @@ import copy
 
 # What the agent runs, and which sibling image the policy must name for it. An enum, so
 # no image string ever crosses the wire — the image comes from the operator's policy.yaml.
-VALID_RUN_KINDS = ("vm", "database")
+VALID_RUN_KINDS = ("vm", "database", "directory")
 
 # How the play reaches the target. "local" is a ``hosts: localhost, connection: local``
 # play that reaches *out* to an endpoint (the database case); the other two SSH/WinRM *to*
@@ -45,6 +45,11 @@ VALID_TRANSPORTS = ("ssh", "winrm", "local")
 # Which transport a run_kind implies, for the kinds where it is not the operator's choice.
 # A database run is always a localhost play; a VM run is ssh or winrm depending on guest OS.
 _FORCED_TRANSPORT = {"database": "local"}
+
+# The transports a kind may use at all. A directory run is either a localhost play
+# speaking LDAP to the directory (community.general.ldap_*) or a WinRM play on a domain
+# controller or management host (microsoft.ad); ssh to a directory means nothing.
+_ALLOWED_TRANSPORTS = {"directory": ("local", "winrm")}
 
 # Everything an agent_ansible run needs to be reconstructed, and nothing else.
 #
@@ -59,6 +64,7 @@ RUN_META_KEYS = (
     "target_port",            # int
     "connection_id",          # uuid of the agent-bound hypervisor_connections row (vm)
     "target_id",              # hypervisor vm_id (vm) | cloud_databases.id (database)
+                              # | managed_directories.id (directory)
     "target_label",           # str — display only, for the job description
     "asset",                  # storage KEY, resolved dashboard-side. Never sent to the agent.
     "asset_backend",
@@ -298,4 +304,10 @@ def check(meta: dict) -> str:
                     "from, or the POV environment and VM it belongs to.")
     if meta["run_kind"] == "database" and not meta["target_id"]:
         return "A database run must name the database it targets."
+    allowed = _ALLOWED_TRANSPORTS.get(meta["run_kind"])
+    if allowed and meta["transport"] not in allowed:
+        return (f"A {meta['run_kind']} run uses transport {' or '.join(allowed)} "
+                f"(got {meta['transport']!r}).")
+    if meta["run_kind"] == "directory" and not meta["target_id"]:
+        return "A directory run must name the directory it targets."
     return ""

@@ -271,6 +271,12 @@ def _directory_item(row) -> dict:
         "expires_at": _iso(row.expires_at),
         "job_id": row.deploy_job_id,
         "detail_href": "/directories",
+        # On-prem directories only: the agent that reaches it, and where. _target_spec
+        # aims a Config-Management run with these.
+        "provider": row.provider or "",
+        "agent_id": getattr(row, "agent_id", None) or "",
+        "host": getattr(row, "host", None) or "",
+        "port": getattr(row, "port", None) or 0,
     }
 
 
@@ -919,6 +925,21 @@ def _target_spec(item: dict):
                     "agent_id": item["agent_id"], "target": item["private_host"],
                     "port": item.get("port") or 0, "transport": "local"}
         return {"target_kind": "database", "target_id": item["id"].split(":", 1)[1]}
+
+    if kind == "directory":
+        # Only an on-premises directory has a run path: it is changed through the agent
+        # that reaches it, with its own Password Safe account. A cloud-managed directory
+        # has no host this dashboard can aim a play at.
+        if cloud != "local" or not item.get("agent_id"):
+            return ("only an on-premises directory registered through a remote agent can "
+                    "be configured here.")
+        if not item.get("host"):
+            return "this directory has no host recorded. Re-register it with its host."
+        # LDAP by default: it works for both AD and other directories. The run form
+        # switches an AD directory to WinRM for the microsoft.ad playbooks.
+        return {"target_kind": "directory", "target_id": item["id"].split(":", 1)[1],
+                "agent_id": item["agent_id"], "target": item["host"],
+                "port": item.get("port") or 0, "transport": "local"}
 
     return f"{kind!r} resources have no Config-Management path."
 

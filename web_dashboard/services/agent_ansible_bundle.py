@@ -382,6 +382,30 @@ async def build(db, *, job, agent) -> tuple:
         if conn.get("db_login_password"):
             scrub.append(conn["db_login_password"])
 
+    if run_kind == "directory":
+        from ..database import ManagedDirectory
+        from . import directory_service
+        row = (db.query(ManagedDirectory)
+               .filter(ManagedDirectory.id == meta["target_id"]).first())
+        if not row or row.cloud != "local":
+            raise BundleError("That on-premises directory is no longer registered.")
+        try:
+            conn = await directory_service.directory_connection_vars(row)
+        except directory_service.DirectoryError as exc:
+            raise BundleError(str(exc)) from exc
+        # dir_* keys, not ansible_* — play data for the LDAP modules' bind arguments, the
+        # same reason db_* is allowed through.
+        bundle["directory"] = conn
+        if conn.get("dir_bind_password"):
+            scrub.append(conn["dir_bind_password"])
+        if transport == "winrm":
+            # One credential for both halves: WinRM logs on as the directory's Password
+            # Safe account (a UPN, which NTLM accepts), and the microsoft.ad modules then
+            # act as that same identity. An operator-chosen managed account would be a
+            # second checkout of a domain credential for no gain.
+            bundle["login_user"] = conn.get("dir_bind_dn") or ""
+            bundle["login_password"] = conn.get("dir_bind_password") or ""
+
     # In-playbook BeyondTrust / Portainer lookups, the same auto-injected env the other
     # runners get. Non-`ansible_*` by construction, and carried as env rather than vars.
     from . import password_safe_runner as _psr, portainer_runner as _ptr

@@ -239,6 +239,18 @@
                 </optgroup>
               </template>
 
+              <!-- On-prem AD / LDAP directories behind a remote agent. Changed with the
+                   directory's own Password Safe account, checked out per run. -->
+              <template x-if="agentDirectories.length > 0">
+                <optgroup label="On-Prem Directories (via agent)">
+                  <template x-for="d in agentDirectories" :key="`agentdir:${d.id}`">
+                    <option :value="`agentdir:${d.id}`" :disabled="!!d.reason"
+                            :title="d.reason || `${d.host}:${d.port} via ${d.agent_name}`"
+                            x-text="`${d.name} · ${d.provider === 'ldap' ? 'LDAP' : 'AD'} — ${d.agent_name}`"></option>
+                  </template>
+                </optgroup>
+              </template>
+
               <!-- Ad-hoc on-prem host (bare IP / hostname) -->
               <optgroup label="Other">
                 <option value="__host__">On-prem host (IP / hostname)…</option>
@@ -251,7 +263,23 @@
                    placeholder="10.0.0.5 or host.example.com"
                    class="w-full mt-2 border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono
                           focus:outline-none focus:ring-2 focus:ring-blue-500">
-            <p x-show="targetKind !== 'vm'" x-cloak class="text-xs text-blue-600 mt-1">
+            <!-- Directory runs: how the play reaches the directory. -->
+            <div x-show="targetKind === 'directory'" x-cloak class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <select x-model="dirTransport"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="local">LDAP (community.general.ldap_*)</option>
+                <option value="winrm" :disabled="agentTarget && agentTarget.provider === 'ldap'">
+                  WinRM to a Windows host (microsoft.ad)</option>
+              </select>
+              <input x-show="dirTransport === 'winrm'" x-model="dirWinrmHost"
+                     :placeholder="(agentTarget && agentTarget.host) || 'dc01.corp.example.com'"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+              <p class="text-xs text-gray-500 sm:col-span-2">
+                Runs on the directory's agent as its Password Safe account, checked out for
+                this run only. WinRM uses HTTPS (5986); blank host means the directory's own.
+              </p>
+            </div>
+            <p x-show="targetKind !== 'vm' && targetKind !== 'directory'" x-cloak class="text-xs text-blue-600 mt-1">
               Runs a localhost play on the in-cloud runner; connection details
               (kubeconfig / DB admin credentials / the Portainer URL and API token)
               are injected automatically — no SSH user or key.
@@ -849,6 +877,11 @@ function configMgmt() {
     // /agent-targets — on-prem resources reachable only through a remote agent.
     agentVms: [],
     agentDatabases: [],
+    agentDirectories: [],
+    // A directory run: 'local' = LDAP from the runner (community.general.ldap_*),
+    // 'winrm' = the microsoft.ad modules on a domain controller or management host.
+    dirTransport: 'local',
+    dirWinrmHost: '',
     managedAccountKey: '',
     managedBecomeKey: '',
     // ── Per-target managed accounts (bulk mode) ───────────────────────────────
@@ -885,7 +918,8 @@ function configMgmt() {
     // yet — so it counts toward "has targets" only when something is actually runnable.
     get hasAgentTargets() {
       return this.agentVms.some(t => !t.reason)
-          || this.agentDatabases.some(t => !t.reason);
+          || this.agentDatabases.some(t => !t.reason)
+          || this.agentDirectories.some(t => !t.reason);
     },
 
     // Whether the run panel has anything to offer. Single source of truth for the
@@ -921,6 +955,7 @@ function configMgmt() {
       if (t.startsWith('k8s:')) return 'k8s';
       if (t.startsWith('db:'))  return 'database';
       if (t.startsWith('agentdb:')) return 'database';
+      if (t.startsWith('agentdir:')) return 'directory';
       if (t.startsWith('portainer:')) return 'portainer';
       return 'vm';
     },
@@ -936,6 +971,8 @@ function configMgmt() {
         return this.agentVms.find(v => 'agent:' + v.id === t) || null;
       if (t.startsWith('agentdb:'))
         return this.agentDatabases.find(d => 'agentdb:' + d.id === t) || null;
+      if (t.startsWith('agentdir:'))
+        return this.agentDirectories.find(d => 'agentdir:' + d.id === t) || null;
       return null;
     },
 
@@ -1316,10 +1353,12 @@ function configMgmt() {
         const data = await API.get('/api/config-mgmt/agent-targets') || {};
         this.agentVms = data.vms || [];
         this.agentDatabases = data.databases || [];
+        this.agentDirectories = data.directories || [];
       } catch (e) {
         // A 404 is the ordinary case: remote agents are off. Empty lists, no error.
         this.agentVms = [];
         this.agentDatabases = [];
+        this.agentDirectories = [];
       }
     },
 
@@ -1469,7 +1508,10 @@ function configMgmt() {
       // not an instruction, which is why it is safe for them to come from the browser.
       const at = this.agentTarget;
       if (at) {
-        const isDb = this.form.target.startsWith('agentdb:');
+        const isDir = this.form.target.startsWith('agentdir:');
+        // A directory run is a localhost LDAP play or a WinRM play as the directory's own
+        // account: like a database, no operator connection identity or become applies.
+        const isDb = this.form.target.startsWith('agentdb:') || isDir;
         const s = this.buildSecretPayload();
         // A localhost play has no SSH connection to authenticate, so the connection-identity
         // fields are omitted for a database rather than sent and ignored.
@@ -1483,11 +1525,12 @@ function configMgmt() {
           const result = await API.post('/api/config-mgmt/run', {
             asset: assetName,
             asset_backend: assetBackend,
-            target_kind: isDb ? 'database' : 'vm',
+            target_kind: isDir ? 'directory' : (isDb ? 'database' : 'vm'),
             target_id: at.target_id,
             agent_id: at.agent_id,
             connection_id: isDb ? '' : (at.connection_id || ''),
-            transport: isDb ? 'local' : (at.transport || ''),
+            transport: isDir ? this.dirTransport : (isDb ? 'local' : (at.transport || '')),
+            winrm_host: isDir && this.dirTransport === 'winrm' ? (this.dirWinrmHost || '').trim() : '',
             target: isDb ? (at.host || '') : (at.ip || ''),
             ansible_user: isDb ? '' : (this.form.ansible_user || '').trim(),
             extra_vars,
