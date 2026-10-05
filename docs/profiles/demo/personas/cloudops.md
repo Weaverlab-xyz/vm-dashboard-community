@@ -64,7 +64,7 @@ every region starts from the same audited baseline.
 Admission policy turns down a non-compliant request up front; the auto-delete timer removes
 what did get built. The two halves of not accumulating privileged infrastructure by accident.
 
-**Guide:** [Policy Guardrails](../../../scheduling/policy-guardrails.md) ·
+**Guide:** [Policy Guardrails](../../../operations/scheduling/policy-guardrails.md) ·
 [Auto-delete Timer](../../../operations/auto-delete-timer.md)
 
 ## What to enable

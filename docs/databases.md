@@ -25,7 +25,7 @@ privileged-access problem (the same model used across the [Cloud VMs](cloud/vms.
 
 The other path is [registration](#registering-an-existing-database): record a database
 the dashboard did **not** create — on-premises (`cloud = local`) or in a cloud — so it
-can be a [Configuration Management](config-management.md) target. Nothing is built and no
+can be a [Configuration Management](operations/config-management.md) target. Nothing is built and no
 credential is stored; the admin login is a Password Safe **managed account** checked out
 at run time. The fastest way to register is
 [**Import from Password Safe**](#importing-from-password-safe), which lists what Password
@@ -49,7 +49,7 @@ differs by cloud/engine:
 run**; it also always provisions into `oci_region`. See [OCI](#oci-autonomous-database--read-the-caveats).
 
 Everything is driven by Terraform from the job worker; deploy state is written to the
-active [storage backend](storage-management.md).
+active [storage backend](operations/storage-management.md).
 
 ---
 
@@ -207,7 +207,7 @@ unchanged, including that no credential is stored.
 ## Registering an existing database
 
 Registration records a database the dashboard **didn't create**, so it can be a
-[Configuration Management](config-management.md) target. It is the database sibling of
+[Configuration Management](operations/config-management.md) target. It is the database sibling of
 registering a Kubernetes cluster from a kubeconfig ([Kubernetes](kubernetes.md)): the
 dashboard builds nothing, changes nothing, and stores no credential. `cloud = local` is
 the on-premises case.
@@ -595,7 +595,7 @@ Assign one and the whole workgroup can see and manage it:
 Retagging is admin-only because it is a **transfer**, not a filter. Everyone in the chosen
 workgroup gains the row in `/api/databases`, every by-id action on it (connection details,
 decommission, Entitle and Password Safe registration), the ability to run
-[Config Management](config-management.md) against it, and the ability to change its
+[Config Management](operations/config-management.md) against it, and the ability to change its
 [auto-delete timer](operations/auto-delete-timer.md). The person who loses it is not in the dialog.
 
 > **Not the same as a Password Safe workgroup.** Password Safe has its own, unrelated

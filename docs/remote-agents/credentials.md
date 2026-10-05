@@ -24,7 +24,7 @@ fetch the credential per job. In practice:
 
 File shares work the same way: put `dashboard_secret: true` on the share's entry in
 `shares.yaml` and set the SMB password on `/storage`
-([Storage Management](../storage-management.md#the-smb-password-can-live-in-the-dashboard)).
+([Storage Management](../operations/storage-management.md#the-smb-password-can-live-in-the-dashboard)).
 Its releases are audited as `agent.share_secret`.
 
 Earlier versions of these docs treated a host-side credential as the default and central

@@ -96,7 +96,7 @@ route, or you get a link to a 404.
 **Storage stays**, and it is load-bearing rather than an oversight. Config Management is
 gated on there being an active storage backend, so without one a POV instance cannot run
 a playbook at all — and it has no cloud to put one in. The
-[agent-brokered filesystem backend](../storage-management.md#remote-filesystem--unc-via-agent)
+[agent-brokered filesystem backend](../operations/storage-management.md#remote-filesystem--unc-via-agent)
 is the answer: a POV already runs an agent inside the customer's environment, and that
 agent can reach a share the dashboard cannot.
 

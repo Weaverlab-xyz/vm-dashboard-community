@@ -110,7 +110,7 @@ Things to know:
 * **Cloud pages** (AWS, Azure, GCP, OCI) can book any selection.
 * **On-premises pages** (Proxmox, vSphere, Hyper-V, XCP-ng, VMware Workstation) can book
   only VMs on an **agent-bound** connection. There the job waits in the queue and the
-  [remote agent](../remote-agents/hypervisors.md) is simply not offered it until its time.
+  [remote agent](../../remote-agents/hypervisors.md) is simply not offered it until its time.
   A connection the dashboard dials **directly** runs a power operation in the dashboard
   process, right now — a booking there would create a scheduled-looking job and power the
   machine off immediately. So each direct-connection VM in the selection is refused on its
@@ -123,7 +123,7 @@ Things to know:
   VM instead of failing — so every Nutanix target is direct, and a booking would be a lie.
 * **For a recurring power schedule, use Repeat instead** — open the resulting job and
   repeat it in a window. And for plain business hours, the
-  [suspend schedule](../cloud/vms.md) is the better tool: it understands per-VM
+  [suspend schedule](../../cloud/vms.md) is the better tool: it understands per-VM
   eligibility, which a generic power booking does not.
 
 ### Bulk deploys book as a unit
@@ -192,7 +192,7 @@ Two reasons, and the message says which:
 * **Nobody approved it.** It was never eligible. Approve before the window closes.
 * **It never got a turn.** The worker was saturated, the app was down, or an earlier
   change overran. Either widen the window or raise the worker's concurrency — see
-  [Job Worker](../operations/job-worker.md).
+  [Job Worker](../job-worker.md).
 
 ---
 
@@ -226,7 +226,7 @@ change window is about. Two consequences worth knowing:
   window and still allow everything, if no action is gated.
 * **Power operations are not on it by default**, so a window does not block start/stop
   unless an administrator adds them. That is usually right — powering a VM off is
-  reversible, and the [suspend schedule](../cloud/vms.md) is the better tool for it.
+  reversible, and the [suspend schedule](../../cloud/vms.md) is the better tool for it.
 
 You do **not** need to enable the policy engine. `admission_control_enabled` switches
 *OPA* on; a maintenance window is enforced in the dashboard and needs no Rego.
@@ -269,7 +269,7 @@ the job page and presses **Approve**.
 The permission is deliberately separate from `config_mgmt:write`: maintaining the
 maintenance calendar (`change_windows:write`) and signing off a production change
 (`change_windows:use`) are different authorities from being allowed to run a playbook. See
-[Permissions](../access/permissions.md).
+[Permissions](../../access/permissions.md).
 
 ---
 
@@ -337,7 +337,7 @@ whose timezone was mistyped, is reported as misconfigured there.
 **A change was missed even though the worker looked idle.**
 The window has to be open when a worker polls, which it does every couple of seconds. If
 the window is shorter than the time the queue takes to drain ahead of it, widen the window
-or see [Job Worker](../operations/job-worker.md) for concurrency.
+or see [Job Worker](../job-worker.md) for concurrency.
 
 **Approval does not appear.**
 The Approve button shows only for a job that requires approval and has not had it. If you
@@ -358,8 +358,8 @@ zone you meant.
 
 * [Config Management](../config-management.md) — what a scheduled run actually does, and how
   its credentials are handled.
-* [Job Worker](../operations/job-worker.md) — why a job might not get a turn inside its window.
-* [Permissions](../access/permissions.md) — the `change_windows` scope and its two levels.
-* [Notifications](../operations/notifications.md) — routing `job.window_missed` somewhere you will see it.
-* [Auto-delete Timer](../operations/auto-delete-timer.md) — the other time-based feature, and the one
+* [Job Worker](../job-worker.md) — why a job might not get a turn inside its window.
+* [Permissions](../../access/permissions.md) — the `change_windows` scope and its two levels.
+* [Notifications](../notifications.md) — routing `job.window_missed` somewhere you will see it.
+* [Auto-delete Timer](../auto-delete-timer.md) — the other time-based feature, and the one
   that destroys things.

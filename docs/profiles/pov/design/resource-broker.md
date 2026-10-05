@@ -40,7 +40,7 @@ customer downloads RB package from their Password Safe tenant
         │                                     8 MiB parts straight into the bucket. The
         │                                     inline path — and /config-mgmt's own form —
         │                                     still caps at 64 MB. See
-        │                                     docs/storage-management.md#two-lanes-and-why-a-311-mb-installer-needs-the-second)
+        │                                     docs/operations/storage-management.md#two-lanes-and-why-a-311-mb-installer-needs-the-second)
         ▼
 storage backend (S3 / Azure blob / GCS)  ← a POV configures one on the wizard's
         │                                  Storage step; see §1a

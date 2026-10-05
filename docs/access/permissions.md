@@ -124,7 +124,7 @@ scopes offer it:
   alongside.
 - **`change_windows:use`** — approve a change booked into a change window. Deliberately a
   different authority from `change_windows:write`, which maintains the calendar. See
-  [Change Windows](../scheduling/change-windows.md).
+  [Change Windows](../operations/scheduling/change-windows.md).
 
 **Every scope offers exactly the levels something enforces**, so every checkbox on the grid
 does something. vSphere has nothing to delete, so it shows no Delete checkbox. If you send a

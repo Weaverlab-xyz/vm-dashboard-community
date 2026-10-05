@@ -136,7 +136,7 @@ dashboard-owned keys, and the audit entry are all in
 **Scheduling power.** On a connection bound to a
 [remote agent](../remote-agents/hypervisors.md), the bulk power toolbar's **Schedule**
 tick books the operation for a time or a change window. A directly dialled connection
-cannot be booked, and each of its VMs is refused by name. See [Scheduling](../scheduling.md).
+cannot be booked, and each of its VMs is refused by name. See [Scheduling](../operations/scheduling.md).
 
 ---
 

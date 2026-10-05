@@ -47,10 +47,10 @@ The four backends:
   side-steps the proxy.
 
 > **Read these first:**
-> - [`docs/config-management.md`](../config-management.md) — philosophy,
+> - [`docs/operations/config-management.md`](../operations/config-management.md) — philosophy,
 >   best practices, the security argument for one-shot runners, and where
 >   SaaS extends this.
-> - [`docs/storage-management.md`](../storage-management.md) — full
+> - [`docs/operations/storage-management.md`](../operations/storage-management.md) — full
 >   reference for the four storage backends (AWS S3, Azure Blob, GCS,
 >   Local / UNC) the **Ansible** runner pulls assets from, and the migrate flow.
 > - [`runners/promote/README.md`](../../runners/promote/README.md) — the
@@ -65,7 +65,7 @@ The four backends:
 store assets in S3 and run them against on-premises Proxmox hosts, or store
 them on a corporate UNC share and target EC2 instances — any combination
 works (with one constraint: cloud runners can't read from a UNC backend; see
-[storage-management.md](../storage-management.md#constraint-local-backend-only-works-with-the-local-ansible-runner)).
+[storage-management.md](../operations/storage-management.md#constraint-local-backend-only-works-with-the-local-ansible-runner)).
 The Kubernetes runner has no storage dependency — it streams manifests over
 stdin.
 

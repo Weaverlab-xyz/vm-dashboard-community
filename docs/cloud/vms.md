@@ -112,7 +112,7 @@ expensive and silent:
 **Stopping saves compute and nothing else.** Disks, public addresses and reserved capacity
 keep billing. A stopped VM is cheaper, not free.
 
-Power is deliberately **not** behind [Action Guardrails](../scheduling/policy-guardrails.md), where
+Power is deliberately **not** behind [Action Guardrails](../operations/scheduling/policy-guardrails.md), where
 destroy is. A reversible action earns a lighter brake than an irreversible one, and a
 change-freeze that forbade *suspending* a VM would forbid the cheapest thing an operator
 can do during one.
@@ -132,7 +132,7 @@ instance you cannot reach fails on its own without stopping the rest — the res
 each one and why.
 
 To run the selection later, or in the next change window, tick **Schedule** on the same
-toolbar. See [Scheduling power operations](../scheduling/change-windows.md#scheduling-power-operations).
+toolbar. See [Scheduling power operations](../operations/scheduling/change-windows.md#scheduling-power-operations).
 
 Four things worth knowing before ticking fifty boxes:
 
@@ -420,7 +420,7 @@ Use Count for "five identical lab boxes"; use Bulk Deploy for "one each of these
 images". GCP and OCI gained Bulk Deploy after AWS and Azure, so older screenshots may show
 their image lists without checkboxes.
 
-Policy guardrails ([Policy Guardrails](../scheduling/policy-guardrails.md)) are enforced **per VM** on every
+Policy guardrails ([Policy Guardrails](../operations/scheduling/policy-guardrails.md)) are enforced **per VM** on every
 path — count batches and multi-select bulk included — before any job row is created.
 
 ### AWS (EC2)
@@ -834,4 +834,4 @@ no tags to edit.
   or was reconciled away, its children have nothing to drive them.
 
 For the sandbox network topology see [Cloud Sandbox](sandbox.md); for day-2 Ansible
-against deployed VMs see [Config Management](../config-management.md).
+against deployed VMs see [Config Management](../operations/config-management.md).

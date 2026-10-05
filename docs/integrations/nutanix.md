@@ -71,7 +71,7 @@ that reports tags today; see
 **Scheduling power is not available on Nutanix.** A Nutanix power change is a full VM spec
 write carrying a version number, so there is no agent power path, and every target runs
 immediately. The toolbar does not offer **Schedule** here. See
-[Scheduling](../scheduling.md).
+[Scheduling](../operations/scheduling.md).
 
 ---
 

@@ -151,8 +151,8 @@ _DOCS_DIR = (Path(__file__).resolve().parents[2] / "docs").resolve()
 # carries a #fragment across the 301 itself, so deep links keep their section.
 _MOVED = {
     # Hub folders, 2026-09 (docs/scheduling/, docs/integrations/beyondtrust/, ot-demo-cell/)
-    "change-windows":                            "scheduling/change-windows",
-    "policy-guardrails":                         "scheduling/policy-guardrails",
+    "change-windows":                            "operations/scheduling/change-windows",
+    "policy-guardrails":                         "operations/scheduling/policy-guardrails",
     "integrations/password-safe":                "integrations/beyondtrust/password-safe",
     "integrations/privileged-remote-access":     "integrations/beyondtrust/privileged-remote-access",
     "integrations/gateways":                     "integrations/beyondtrust/gateways",
@@ -195,6 +195,11 @@ _MOVED = {
     "kubesolo":                                  "kubernetes/kubesolo",
     "saas-comparison":                           "editions/comparison",
     "saas-roadmap":                              "editions/roadmap",
+    # Operations, 2026-10: managing what already runs and what the user built --
+    # scheduling (with its folder), Config Management and storage join the section.
+    "scheduling":                                "operations/scheduling",
+    "config-management":                         "operations/config-management",
+    "storage-management":                        "operations/storage-management",
 }
 
 
@@ -232,7 +237,7 @@ _INDEX_SECTIONS = {
     "General", "integrations",
     "profiles", "profiles/demo", "profiles/demo/personas", "profiles/pov",
     "integrations/beyondtrust", "integrations/beyondtrust/databases", "onboarding",
-    "integrations/ansible", "remote-agents", "workload-lab", "scheduling",
+    "integrations/ansible", "remote-agents", "workload-lab", "operations/scheduling",
     "profiles/demo/ot-demo-cell", "oidc", "cloud", "access", "operations", "kubernetes",
     "editions",
 }
@@ -252,7 +257,7 @@ _SECTION_LABELS = {
     "integrations/ansible":       "Remote Worker runners",
     "remote-agents":              "Remote agents",
     "workload-lab":               "Workload Lab",
-    "scheduling":                 "Scheduling",
+    "operations/scheduling":      "Operations · scheduling",
     "profiles/demo/ot-demo-cell": "OT Demo Cell",
     "oidc":                       "OIDC and single sign-on",
     "cloud":                      "Cloud",
@@ -336,7 +341,7 @@ _TITLE_OVERRIDES = {
     "integrations/beyondtrust/gateways": "Gateway hosts",
     "profiles/demo/ot-demo-cell/ot-protocol-clients": "OT protocol clients on Windows",
     # The filename predates the product name; Settings and the page's own H1 say this.
-    "scheduling/policy-guardrails":      "Action Guardrails",
+    "operations/scheduling/policy-guardrails": "Action Guardrails",
     # The Workload Lab folder. Derived titles read as filenames here -- "Spiffe", "Cloud",
     # "Kubernetes", "Subordinate Ca" -- and the last of those is simply wrong. "Cloud" and
     # "Kubernetes" are also the short names of two unrelated top-level pages, so without
