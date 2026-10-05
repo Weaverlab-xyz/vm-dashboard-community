@@ -58,7 +58,7 @@
       ansible.builtin.debug:
         msg:
           - "{% for k, v in (_report | default({})).items() %}{{ k }}: {{ v | length }}{% if not loop.last %}, {% endif %}{% endfor %}"
-          - "Not found in this domain: {{ ad_privileged_groups | difference((_report | default({})).keys() | list) | join(', ') or 'none' }}"
+          - "Not found in this domain: {{ ad_privileged_groups | reject('in', (_report | default({})).keys() | list) | join(', ') or 'none' }}"
           - "{{ _report | default({}) }}"
 
     - name: Record the report as job stats

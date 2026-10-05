@@ -297,6 +297,16 @@ probing, always:
 443 is shared by vSphere and XCP-ng, so the agent probes each host:port **once** and
 classifies whichever answered.
 
+**Directories** is a separate scan kind (agent 2.8.0 or later). It looks for domain
+controllers and LDAP servers on 389 and 636 and reads the anonymous LDAP **rootDSE**: a
+single base-scope search, with TLS on 636. It never binds, so it sends no credential.
+A finding names the product (Active Directory, OpenLDAP or another LDAP server), the
+domain and base DN, the DC's host name and, for AD, the functional level. You can scope
+the scan by a **domain name**: the domain's A records are its domain controllers, so
+`corp.example.com` finds every DC. **All** stays hypervisor-only. A finding has a
+**Register directory** link, covered in
+[On-premises directories](../cloud/directories.md#on-premises-directories-through-a-remote-agent).
+
 **WinRM is the honest limit of the set.** It identifies WinRM on Windows — and nearly
 every domain-joined Windows Server has WinRM enabled, the overwhelming majority of them
 not hypervisors. Those findings are marked *possible only* and rendered differently.

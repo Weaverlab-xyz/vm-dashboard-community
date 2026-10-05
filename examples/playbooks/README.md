@@ -594,6 +594,21 @@ The runner image (`chrweav/ansible-cloud`) carries `python-ldap`, `pywinrm` and 
 `microsoft.ad` collection. An agent picks it through `ansible.directory_image`, falling
 back to `ansible.db_image`.
 
+## Network: AD over a site-to-site VPN (`network/`)
+
+| File | Purpose |
+|---|---|
+| `vyos-ad-site-vpn.yml` | Configure an **on-prem VyOS 1.4** router for the cloud's managed VPN, so cloud servers reach the domain controllers: two IKEv2 tunnels with BGP, only the DC subnets advertised and only the cloud networks accepted, and a forward firewall that allows only the AD ports to the DCs |
+
+It runs against the router over SSH (`network_cli`), from the local runner or a remote
+agent that reaches it, and refuses without `confirm: true`. The tunnel keys come from
+`psk` (Use a secret) or `psk_secret` (a Password Safe path). They are applied in a
+`no_log` task, and the configuration the play prints never contains them. Run it with
+`--check` first. The runner needs the `vyos.vyos` and `ansible.netcommon` collections.
+
+Why VyOS on-prem with the cloud's managed VPN, and what it costs: see
+[Connecting on-prem AD to the cloud](../../docs/cloud/directories.md#connecting-on-prem-ad-to-the-cloud).
+
 ## Notes
 
 - These are starting points — review and adapt before running against real hosts.
