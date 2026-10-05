@@ -95,7 +95,10 @@
               <button x-show="d.source !== 'registered' && d.admin_password_backend && d.admin_password_custody !== 'passwordsafe_managed'"
                       @click="showPassword(d)"
                       class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Password</button>
-              <button x-show="d.source !== 'registered' && d.status === 'available' && d.admin_password_custody !== 'passwordsafe_managed'"
+              <button x-show="d.cloud === 'local' && d.provider === 'onprem_ad' && d.status === 'available'"
+                      @click="openExtend(d, 'aws')"
+                      class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Extend to AWS</button>
+              <button x-show="d.source !== 'registered' && d.status === 'available' && d.admin_password_custody !== 'passwordsafe_managed' && d.provider !== 'aws_ad_connector'"
                       @click="resetPassword(d)"
                       class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Reset admin password</button>
               <button @click="remove(d)"
@@ -314,6 +317,44 @@
     </div>
   </div>
 
+  <!-- Extend an on-prem domain to a cloud -->
+  <div x-show="ext.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="ext.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-3 max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-semibold text-gray-800" x-text="'Extend ' + (ext.dir?.name || '') + ' to ' + (ext.cloud === 'aws' ? 'AWS' : 'GCP')"></h3>
+      <template x-if="ext.cloud === 'aws'">
+        <div class="space-y-3">
+          <p class="text-xs text-gray-500">Builds an <strong>AWS AD Connector</strong>: a proxy to your domain controllers, so
+            AWS Windows servers join this domain at deploy. It needs a VPN or Direct Connect from the VPC to the DCs.
+            The connector's service account is a Password Safe managed account, used once at build.
+            <strong>Turn off its automatic rotation</strong>: AWS offers no API to update the connector's copy.</p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <input x-model="ext.region" placeholder="Region, e.g. us-east-2" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <input x-model="ext.vpc_id" placeholder="vpc-…" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <input x-model="ext.subnets" placeholder="Two subnets: subnet-a, subnet-b" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono sm:col-span-2">
+            <input x-model="ext.dns_ips" placeholder="On-prem DNS / DC IPs: 10.0.0.10, 10.0.0.11" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono sm:col-span-2">
+            <select x-model="ext.size" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="Small">Small (about $36/month)</option>
+              <option value="Large">Large (about $110/month)</option>
+            </select>
+            <input x-model="ext.netbios" placeholder="NetBIOS name (optional)" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+          </div>
+          <p class="text-xs text-gray-500">Service account: the directory's own Password Safe account
+            (<span x-text="ext.dir?.bind_account || 'managed account'"></span>). It needs only read and join rights.</p>
+        </div>
+      </template>
+      <label class="flex items-center gap-2 text-sm text-gray-700">
+        <input type="checkbox" x-model="ext.ack" class="rounded text-blue-600"> I understand this bills monthly and has no auto-delete timer
+      </label>
+      <div x-show="ext.error" class="text-sm text-red-600" x-text="ext.error"></div>
+      <div class="flex justify-end gap-2">
+        <button @click="ext.open = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+        <button @click="submitExtend()" :disabled="ext.saving || !ext.ack"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg">Build</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Import from Password Safe -->
   <div x-show="psi.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
        @click.self="psi.open = false">
@@ -399,6 +440,7 @@ function directoriesPage() {
     pw: { open: false, data: null, error: '' },
     op: { open: false, systems: [] },
     psi: { open: false, systems: [] },
+    ext: { open: false },
     agents: [],
 
     async init() {
@@ -446,6 +488,26 @@ function directoriesPage() {
         await this.load();
       } catch (e) { o.error = e.message; }
       finally { o.saving = false; }
+    },
+    openExtend(d, cloud) {
+      const ip = /^\d+\.\d+\.\d+\.\d+$/.test(d.host || '') ? d.host : '';
+      this.ext = { open: true, dir: d, cloud, region: (this.opts.defaults || {}).aws_region || '',
+                   vpc_id: '', subnets: '', dns_ips: ip, size: 'Small', netbios: '',
+                   network: '', project: '', ack: false, saving: false, error: '' };
+    },
+    async submitExtend() {
+      const e = this.ext;
+      e.saving = true; e.error = '';
+      try {
+        const r = await API.post('/api/directories/ad-connector', {
+          onprem_directory_id: e.dir.id, region: e.region.trim(), vpc_id: e.vpc_id.trim(),
+          subnet_ids: this.split(e.subnets), dns_ips: this.split(e.dns_ips), size: e.size,
+          netbios: e.netbios.trim(), acknowledge_cost: !!e.ack });
+        e.open = false;
+        this.note('AD Connector queued — job ' + r.job_id.slice(0, 8));
+        await this.load();
+      } catch (err) { e.error = err.message; }
+      finally { e.saving = false; }
     },
     async openPsImport() {
       this.psi = { open: true, loading: true, systems: [], warnings: [], failed: [], error: '',

@@ -9,6 +9,7 @@ Managed Active Directory API (gated by ``directories_enabled``).
   POST   /api/directories/register-onprem       — record an on-prem AD/LDAP via an agent
   GET    /api/directories/ps-candidates         — directories Password Safe manages
   POST   /api/directories/ps-import             — register the chosen ones via an agent
+  POST   /api/directories/ad-connector          — build an AWS AD Connector to an on-prem AD
   GET    /api/directories/joinable?cloud=…      — what a Windows deploy can join
   GET    /api/directories/{id}                  — one directory
   GET    /api/directories/{id}/admin-password   — the stored admin credential (audited)
@@ -144,6 +145,40 @@ def build_directory(req: BuildRequest, db: Session = Depends(get_db),
         raise HTTPException(status_code=400, detail=str(e))
     job_service.log_audit(db, user.username, "directory_provision",
                           details={"name": req.name, "cloud": req.cloud})
+    return out
+
+
+class ADConnectorRequest(BaseModel):
+    onprem_directory_id: str
+    region: str = ""
+    vpc_id: str
+    subnet_ids: List[str]
+    dns_ips: List[str]
+    size: str = "Small"
+    netbios: str = ""
+    acknowledge_cost: bool = False
+    workgroup: Optional[str] = None
+
+
+@router.post("/ad-connector")
+def build_ad_connector(req: ADConnectorRequest, db: Session = Depends(get_db),
+                       user: User = Depends(require_explicit_permission("directories", "write"))):
+    """An AWS AD Connector for a registered on-prem AD. The service account is the on-prem
+    directory's own Password Safe account, checked out once by the worker."""
+    row = directory_service.get_directory(db, req.onprem_directory_id)
+    if not row or not _visible(row, user):
+        raise HTTPException(status_code=404, detail="directory not found")
+    try:
+        out = directory_service.provision_ad_connector(
+            db, onprem_directory_id=row.id, region=req.region, vpc_id=req.vpc_id,
+            subnet_ids=req.subnet_ids, dns_ips=req.dns_ips, size=req.size,
+            netbios=req.netbios, acknowledge_cost=req.acknowledge_cost,
+            created_by=user.username, workgroup=req.workgroup)
+    except DirectoryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    job_service.log_audit(db, user.username, "directory_ad_connector",
+                          details={"name": row.name, "region": req.region,
+                                   "onprem_directory_id": row.id})
     return out
 
 

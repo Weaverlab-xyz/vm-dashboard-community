@@ -75,6 +75,12 @@ APPROX_MONTHLY_COST = {
     ("gcp", ""): "about $300/month per region",
 }
 
+# An AD Connector proxies to on-prem domain controllers instead of running its own.
+# Approximate list prices; the AWS pricing page is authoritative.
+CONNECTOR_SIZES = ("Small", "Large")
+CONNECTOR_MONTHLY_COST = {"Small": "about $36/month", "Large": "about $110/month"}
+_IPV4_RE = re.compile(r"^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$")
+
 AWS_ADMIN_USER = "Admin"
 GCP_ADMIN_USER = "setupadmin"
 
@@ -143,6 +149,7 @@ def to_dict(row: ManagedDirectory) -> dict:
         "use_ldaps": bool(row.use_ldaps), "base_dn": row.base_dn,
         # The account NAME only, so the page can say who the playbooks bind as.
         "bind_account": (_managed_ref_or_none(row) or {}).get("account_name"),
+        "linked_directory_id": row.linked_directory_id,
     }
 
 
@@ -285,6 +292,198 @@ def provision(db: Session, *, cloud: str, name: str, created_by: str,
     db.commit()
     logger.info("directory: queued %s %r as job %s", cloud, name, job.id)
     return {"directory_id": row.id, "job_id": job.id}
+
+
+# ── AWS AD Connector: an on-prem domain extended to AWS ───────────────────────
+
+def provision_ad_connector(db: Session, *, onprem_directory_id: str, region: str,
+                           vpc_id: str, subnet_ids: list, dns_ips: list,
+                           created_by: str, size: str = "Small", netbios: str = "",
+                           connector_account: Optional[dict] = None,
+                           acknowledge_cost: bool = False,
+                           workgroup: Optional[str] = None) -> dict:
+    """Validate, record and enqueue an AWS AD Connector for a registered on-prem AD.
+
+    The connector is created through the Directory Service API rather than Terraform,
+    because ConnectDirectory takes the service account's password and Terraform would
+    keep it in state. The password is checked out of Password Safe in the worker, used
+    once, and never stored.
+
+    AWS has no API to change that password afterwards (botocore's ds model offers
+    ConnectDirectory but no credential update), so the account's automatic rotation in
+    Password Safe must be off; the docs and the build form say so."""
+    onprem = get_directory(db, onprem_directory_id)
+    if not onprem or onprem.cloud != "local" or onprem.provider != "onprem_ad":
+        raise DirectoryError("an AD Connector extends a registered on-premises Active "
+                             "Directory — register the domain on this page first")
+    if onprem.status != "available":
+        raise DirectoryError(f"{onprem.name} is {onprem.status}, not available")
+    size = (size or "Small").strip().capitalize()
+    if size not in CONNECTOR_SIZES:
+        raise DirectoryError(f"size must be one of {', '.join(CONNECTOR_SIZES)}")
+    if not acknowledge_cost:
+        raise DirectoryError(
+            f"An AD Connector bills around the clock ({CONNECTOR_MONTHLY_COST[size]}, "
+            f"plus the VPN or Direct Connect it needs) and has no auto-delete timer. "
+            f"Confirm the cost to build it.")
+    region = (region or "").strip() or _cfg("aws_region", "us-east-2")
+    subnet_ids = [x.strip() for x in (subnet_ids or []) if x and x.strip()]
+    if not vpc_id or len(subnet_ids) != 2:
+        raise DirectoryError("an AD Connector needs a VPC and exactly two subnets in "
+                             "different Availability Zones")
+    dns_ips = [x.strip() for x in (dns_ips or []) if x and x.strip()]
+    bad = [x for x in dns_ips if not _IPV4_RE.match(x)]
+    if not dns_ips or bad:
+        raise DirectoryError(
+            "list the IPv4 addresses of on-prem DNS servers (normally your domain "
+            "controllers) reachable from the VPC over the VPN"
+            + (f" — not addresses: {', '.join(bad)}" if bad else ""))
+    netbios = (netbios or "").strip().upper()
+    if netbios and not _NETBIOS_RE.match(netbios):
+        raise DirectoryError(f"NetBIOS name {netbios!r} must be 1–15 letters, digits or "
+                             f"hyphens.")
+    ref = connector_account or _managed_ref_or_none(onprem) or {}
+    if not (ref.get("system_id") and ref.get("account_id")):
+        raise DirectoryError("the connector's service account must be a Password Safe "
+                             "managed account")
+    clash = db.query(ManagedDirectory).filter(
+        ManagedDirectory.linked_directory_id == onprem.id,
+        ManagedDirectory.provider == "aws_ad_connector",
+        ManagedDirectory.region == region,
+        ManagedDirectory.status != "deleted").first()
+    if clash:
+        raise DirectoryError(f"{onprem.name} already has an AD Connector in {region}")
+
+    row = ManagedDirectory(
+        name=onprem.name, netbios=netbios or None, cloud="aws",
+        provider="aws_ad_connector", source="provisioned", status="provisioning",
+        edition=size, region=region, vpc_id=vpc_id, subnet_ids=json.dumps(subnet_ids),
+        dns_ips=json.dumps(dns_ips), linked_directory_id=onprem.id,
+        credentials_ref=_MANAGED_REF_PREFIX + json.dumps({
+            "system_id": ref["system_id"], "account_id": ref["account_id"],
+            "account_name": ref.get("account_name") or "",
+        }, sort_keys=True),
+        workgroup=workgroup, created_by=created_by, expires_at=None)
+    db.add(row)
+    db.flush()
+    job = job_service.create_job(
+        db, PROVISION_JOB_TYPE, created_by, workgroup=workgroup,
+        metadata={"directory_id": row.id, "name": row.name, "cloud": "aws",
+                  "kind": "ad_connector", "linked_directory_id": onprem.id})
+    row.deploy_job_id = job.id
+    db.commit()
+    logger.info("directory: queued AD Connector for %s in %s as job %s",
+                onprem.name, region, job.id)
+    return {"directory_id": row.id, "job_id": job.id}
+
+
+def connector_username(account_name: str) -> str:
+    """The bare sAMAccountName ConnectDirectory wants, from DOMAIN\\user or a UPN."""
+    name = (account_name or "").strip()
+    name = name.split("\\")[-1]
+    return name.split("@")[0]
+
+
+def _aws_connect_sync(row: ManagedDirectory, password: str, username: str) -> str:
+    import boto3
+    from . import aws_service
+    ds = boto3.client("ds", **aws_service._aws_kwargs(row.region))
+    kw = dict(
+        Name=row.name, Password=password, Size=row.edition or "Small",
+        Description=f"AD Connector for on-prem {row.name}"[:128],
+        ConnectSettings={"VpcId": row.vpc_id, "SubnetIds": _jl(row.subnet_ids),
+                         "CustomerDnsIps": _jl(row.dns_ips),
+                         "CustomerUserName": username},
+        Tags=[{"Key": "vm-dashboard-directory", "Value": row.id}])
+    if row.netbios:
+        kw["ShortName"] = row.netbios
+    return ds.connect_directory(**kw)["DirectoryId"]
+
+
+def _aws_wait_active_sync(region: str, directory_id: str, *, timeout: int = 1800,
+                          interval: int = 20, sleep=None) -> dict:
+    """Poll until the connector is Active, or raise with AWS's own reason."""
+    import time
+    import boto3
+    from . import aws_service
+    sleep = sleep or time.sleep
+    ds = boto3.client("ds", **aws_service._aws_kwargs(region))
+    waited = 0
+    while True:
+        desc = (ds.describe_directories(DirectoryIds=[directory_id])
+                .get("DirectoryDescriptions") or [{}])[0]
+        stage = desc.get("Stage")
+        if stage == "Active":
+            return desc
+        if stage in ("Failed", "Impaired", "Inoperable", "Deleted"):
+            raise DirectoryError(
+                f"AWS reports the connector {stage}: {desc.get('StageReason') or 'no reason given'}"
+                " — check that the VPC reaches the DNS addresses over the VPN on 53, 88 and "
+                "389, and that the service account's password is current")
+        if waited >= timeout:
+            raise DirectoryError(f"the connector was still {stage} after {timeout // 60} "
+                                 f"minutes")
+        sleep(interval)
+        waited += interval
+
+
+def _aws_delete_sync(region: str, directory_id: str) -> None:
+    import boto3
+    from . import aws_service
+    ds = boto3.client("ds", **aws_service._aws_kwargs(region))
+    try:
+        ds.delete_directory(DirectoryId=directory_id)
+    except ds.exceptions.EntityDoesNotExistException:
+        pass
+
+
+async def _run_connector_apply(db: Session, row: ManagedDirectory, job_id: str) -> None:
+    import asyncio
+    from ..api.websocket import broadcast_progress
+    from . import btapi_service
+    job_service.set_running(db, job_id)
+    try:
+        ref = _managed_ref_or_none(row)
+        if not ref:
+            raise DirectoryError("the connector has no Password Safe service account recorded")
+        await broadcast_progress(job_id, 5, "Checking out the connector service account…")
+        duration = int(_cfg("ansible_managed_request_duration_min", "60") or 60)
+        try:
+            _req, password = await btapi_service.get_ps_credential_with_request(
+                ref["system_id"], ref["account_id"], duration_min=duration)
+        except btapi_service.BTAPIError as exc:
+            raise DirectoryError(f"Password Safe checkout failed: {exc}") from exc
+        if not password:
+            raise DirectoryError("Password Safe returned an empty credential")
+        await broadcast_progress(job_id, 15, "Creating the AD Connector…")
+        try:
+            row.directory_id = await asyncio.to_thread(
+                _aws_connect_sync, row, password, connector_username(ref.get("account_name")))
+        finally:
+            password = ""
+        db.commit()
+        await broadcast_progress(job_id, 30, "Waiting for AWS to reach your domain "
+                                             "controllers (5–20 minutes)…")
+        desc = await asyncio.to_thread(_aws_wait_active_sync, row.region, row.directory_id)
+        settings = desc.get("ConnectSettings") or {}
+        row.dns_ips = json.dumps(desc.get("DnsIpAddrs") or settings.get("CustomerDnsIps")
+                                 or _jl(row.dns_ips))
+        row.security_group_id = settings.get("SecurityGroupId") or row.security_group_id
+        row.status = "available"
+        row.error_message = None
+        row.updated_at = datetime.utcnow()
+        db.commit()
+        job_service.set_completed(db, job_id, result={
+            "directory_id": row.id, "name": row.name, "aws_directory_id": row.directory_id})
+    except Exception as exc:  # noqa: BLE001
+        # A connector AWS created but could not activate still bills; directory_id stays
+        # recorded so Destroy can delete it.
+        row.status = "failed"
+        row.error_message = str(exc)[:2000]
+        row.updated_at = datetime.utcnow()
+        db.commit()
+        logger.error("directory: AD Connector failed for %s: %s", row.id, exc)
+        job_service.set_failed(db, job_id, str(exc)[:2000])
 
 
 def _qualify_network(network: str, project: str) -> str:
@@ -452,6 +651,8 @@ async def run_provision_apply(db: Session, *, directory_id: str, job_id: str) ->
     if not row:
         logger.warning("directory: row %s vanished before apply", directory_id)
         return
+    if row.provider == "aws_ad_connector":
+        return await _run_connector_apply(db, row, job_id)
     job = job_service.get_job(db, job_id)
     want_ps = bool((job.metadata_dict if job else {}).get("register_in_passwordsafe"))
     job_service.set_running(db, job_id)
@@ -546,6 +747,20 @@ async def run_decommission(db: Session, *, directory_id: str, job_id: str) -> No
         return
     job_service.set_running(db, job_id)
     try:
+        if row.provider == "aws_ad_connector":
+            # Created through the API, not Terraform, so it is deleted the same way.
+            # Nothing else to clean up: the connector holds no stored credential here.
+            import asyncio
+            await broadcast_progress(job_id, 20, "Deleting the AD Connector…")
+            if row.directory_id:
+                await asyncio.to_thread(_aws_delete_sync, row.region, row.directory_id)
+            row.status = "deleted"
+            row.error_message = None
+            row.updated_at = datetime.utcnow()
+            db.commit()
+            job_service.set_completed(db, job_id, result={"directory_id": row.id,
+                                                          "name": row.name})
+            return
         if row.ps_tf_state:
             await broadcast_progress(job_id, 10, "Removing the Password Safe objects…")
             try:
@@ -587,6 +802,9 @@ async def reset_admin_password(db: Session, *, directory_id: str) -> dict:
     if row.admin_password_custody == "passwordsafe_managed":
         raise DirectoryError("Password Safe manages this administrator account — rotate "
                              "it in Password Safe.")
+    if row.provider == "aws_ad_connector":
+        raise DirectoryError("an AD Connector has no administrator of its own — its "
+                             "domain's administrators are on-premises")
     if row.status != "available":
         raise DirectoryError(f"{row.name} is {row.status}, not available")
     password = await set_admin_password(row)
@@ -847,6 +1065,14 @@ def unregister(db: Session, *, directory_id: str) -> None:
         raise DirectoryError(f"directory {directory_id} not found")
     if row.source != "registered":
         raise DirectoryError(f"{row.name} was built here — destroy it instead")
+    linked = db.query(ManagedDirectory).filter(
+        ManagedDirectory.linked_directory_id == row.id,
+        ManagedDirectory.status != "deleted").all()
+    if linked:
+        raise DirectoryError(
+            f"{row.name} is extended to the cloud by "
+            f"{', '.join(PROVIDER_LABELS.get(r.provider, r.provider) for r in linked)} — "
+            f"destroy that first")
     joined = joined_vms(db, row.id)
     if joined:
         raise DirectoryError(f"{row.name} still has joined server(s): "

@@ -2501,6 +2501,10 @@ class ManagedDirectory(Base):
     # "psmanaged:{system_id, account_id, account_name}" — the Password Safe account the
     # playbooks bind as, checked out per run. Never a secret.
     credentials_ref = Column(Text, nullable=True)
+    # A cloud-side extension of an on-prem directory (an AWS AD Connector, a GCP DNS
+    # link) points at the on-prem row it extends. Not a FK: unregistering the on-prem
+    # row is refused while a link exists, and a dangling id reads as "on-prem row gone".
+    linked_directory_id = Column(String(36), nullable=True, index=True)
 
     admin_username = Column(String(64), nullable=True)
     admin_password_backend = Column(String(32), nullable=True)
@@ -4718,6 +4722,8 @@ def init_db():
             "ALTER TABLE managed_directories ADD COLUMN use_ldaps BOOLEAN",
             "ALTER TABLE managed_directories ADD COLUMN base_dn VARCHAR(255)",
             "ALTER TABLE managed_directories ADD COLUMN credentials_ref TEXT",
+            "ALTER TABLE managed_directories ADD COLUMN linked_directory_id VARCHAR(36)",
+            "CREATE INDEX ix_managed_directories_linked_directory_id ON managed_directories(linked_directory_id)",
             "CREATE INDEX ix_cloud_databases_expires_at ON cloud_databases(expires_at)",
             "ALTER TABLE k8s_clusters ADD COLUMN expires_at TIMESTAMP",
             "ALTER TABLE k8s_clusters ADD COLUMN expiry_warned_at TIMESTAMP",
