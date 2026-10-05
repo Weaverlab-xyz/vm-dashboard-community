@@ -343,32 +343,49 @@ async def register_windows(db, job_id: str, vm_name: str, hostname: str, *,
     Password Safe reaches the guest itself to rotate (SMB/WinRM from the appliance or a
     Resource Broker), so a private VM needs a route — ``passwordsafe_application_host_id``
     or a resource zone covering its subnet."""
+    fa_name = _windows_functional_account_name(tag)
+    await register_password_managed(
+        db, job_id, name=vm_name, host_name=vm_name, address=hostname, port=3389,
+        username=username, password=password, result=result, fa_name=fa_name,
+        fa_missing=("no Password Safe functional account configured for Windows guests "
+                    f"(set passwordsafe_vm_functional_account_windows or "
+                    f"passwordsafe_vm_functional_account_windows_{(tag or '').lower()})"),
+        platform_tokens=("windows",), platform_label="Windows",
+        rotate_key="passwordsafe_windows_change_password_on_register")
+
+
+async def register_password_managed(db, job_id: str, *, name: str, host_name: str,
+                                    address: str, port: int, username: str, password: str,
+                                    result: dict, fa_name: str, fa_missing: str,
+                                    platform_tokens: tuple, platform_label: str,
+                                    rotate_key: str, entity_type_id: int = 0) -> None:
+    """Onboard one PASSWORD-managed system + account, seeded with ``password`` and then
+    rotated (``rotate_key``, default on). Shared by Windows VMs and managed directories.
+    Non-fatal: any failure lands in ``result["ps_error"]``."""
     from . import ps_api_service, ps_resource_service, job_service, config_service
     try:
-        fa_name = _windows_functional_account_name(tag)
         if not fa_name:
-            raise ps_resource_service.PSResourceError(
-                "no Password Safe functional account configured for Windows guests "
-                f"(set passwordsafe_vm_functional_account_windows or "
-                f"passwordsafe_vm_functional_account_windows_{(tag or '').lower()})")
+            raise ps_resource_service.PSResourceError(fa_missing)
         fa = await ps_api_service.get_functional_account(fa_name)
         pname = fa.get("platform_name") or ""
-        if not _platform_name_ok(pname, "windows"):
+        if not _platform_name_ok(pname, *platform_tokens):
             raise ps_resource_service.PSResourceError(
-                f"functional account {fa_name!r} is on platform {pname!r}, not a Windows "
-                "platform — the managed system would land on the wrong platform.")
+                f"functional account {fa_name!r} is on platform {pname!r}, not a "
+                f"{platform_label} platform — the managed system would land on the "
+                "wrong platform.")
         workgroup_id = await ps_api_service.get_workgroup_id(_cfg("passwordsafe_workgroup"))
-        job_service.update_progress(db, job_id, 94, "Onboarding into Password Safe (Windows)…")
+        job_service.update_progress(db, job_id, 94,
+                                    f"Onboarding into Password Safe ({platform_label})…")
         r = await ps_resource_service.register_managed_system(
-            name=vm_name,
-            host_name=vm_name,
-            dns_name=hostname,
-            ip_address=hostname,
-            port=3389,
+            name=name,
+            host_name=host_name,
+            dns_name=address,
+            ip_address=address,
+            port=port,
             functional_account_id=fa["id"],
             platform_id=fa["platform_id"],
             workgroup_id=workgroup_id,
-            entity_type_id=int(_cfg("passwordsafe_entity_type_id") or "1"),
+            entity_type_id=entity_type_id or int(_cfg("passwordsafe_entity_type_id") or "1"),
             managed_account_name=username,
             initial_password=password,
             application_host_id=int(_cfg("passwordsafe_application_host_id") or "0"),
@@ -379,20 +396,20 @@ async def register_windows(db, job_id: str, vm_name: str, hostname: str, *,
         result["ps_registration_tf_state"] = r.get("tf_state_json")
         result["ps_initial_password_seeded"] = bool(r.get("initial_password_seeded"))
 
-        if (r.get("managed_account_id") and config_service.get_bool(
-                "passwordsafe_windows_change_password_on_register", True)):
+        if r.get("managed_account_id") and config_service.get_bool(rotate_key, True):
             try:
                 await ps_api_service.change_managed_account_password(int(r["managed_account_id"]))
                 result["ps_change_password_triggered"] = True
             except Exception as ce:  # noqa: BLE001
                 result["ps_change_password_error"] = str(ce)
                 logger.warning("Password Safe initial Change Password failed for %s: %s",
-                               vm_name, ce)
+                               name, ce)
         job_service.update_progress(
             db, job_id, 96, f"Onboarded into Password Safe (system {r.get('managed_system_id')}).")
-    except Exception as e:  # noqa: BLE001 — registration must never fail the deploy
+    except Exception as e:  # noqa: BLE001 — registration must never fail the build
         result["ps_error"] = str(e)
-        logger.warning("Password Safe Windows registration failed for %s: %s", vm_name, e)
+        logger.warning("Password Safe %s registration failed for %s: %s",
+                       platform_label, name, e)
 
 
 def password_safe_holds_credential(result: dict) -> bool:

@@ -46,7 +46,7 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ..database import (CertLab, CloudDatabase, Job, JobLog, K8sCluster,
+from ..database import (CertLab, CloudDatabase, Job, JobLog, K8sCluster, ManagedDirectory,
                         PovEnvironment, SpireLab, WorkloadCloudCredential,
                         WorkloadK8sToken)
 from . import expiry_policy, job_service
@@ -588,6 +588,15 @@ def _reap_row(db: Session, target: dict) -> str:
         from . import cert_lab_service
         out = cert_lab_service.start_decommission(db, lab_id=rid, created_by=REAPER_ACTOR)
         model, jid = CertLab, out.get("job_id")
+    elif kind == "directory":
+        from . import directory_service
+        try:
+            out = directory_service.start_decommission(db, directory_id=rid,
+                                                       created_by=REAPER_ACTOR)
+        except directory_service.DirectoryError as e:
+            # Joined servers: the guard is the point, so the timer just doesn't fire.
+            raise ReapRefused(str(e)) from e
+        model, jid = ManagedDirectory, out.get("job_id")
     elif kind == "spirelab":
         from . import spire_lab_service
         out = spire_lab_service.start_decommission(db, lab_id=rid, created_by=REAPER_ACTOR)
@@ -932,6 +941,8 @@ def _resolve_row(db: Session, inv_id: str):
         row = db.query(CertLab).filter(CertLab.id == rid).first()
     elif prefix == "spirelab":
         row = db.query(SpireLab).filter(SpireLab.id == rid).first()
+    elif prefix == "directory":
+        row = db.query(ManagedDirectory).filter(ManagedDirectory.id == rid).first()
     elif prefix == "workloadk8s":
         row = db.query(WorkloadK8sToken).filter(WorkloadK8sToken.id == rid).first()
     elif prefix == "workloadcloud":

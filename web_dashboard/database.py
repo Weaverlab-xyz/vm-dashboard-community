@@ -2446,6 +2446,71 @@ class CertLab(Base):
     expires_at = Column(DateTime, nullable=True, index=True)
     expiry_warned_at = Column(DateTime, nullable=True)
 
+class ManagedDirectory(Base):
+    """A Microsoft Active Directory that Windows servers can be domain-joined to.
+
+    AWS (Directory Service: Managed Microsoft AD, AD Connector, Simple AD) and GCP
+    (Managed Service for Microsoft Active Directory). Azure is absent on purpose: Windows
+    VMs there join Entra ID directly (windows_server_hook.entra_join_azure).
+
+    ``source`` follows the CloudDatabase / K8sCluster convention. A ``provisioned`` row
+    was built here from ``terraform/directory/<module>`` and can be destroyed here; a
+    ``registered`` row is a directory that already existed, found by discovery, and
+    deleting it only forgets it.
+
+    No secret is stored on this row. The administrator password of a provisioned
+    directory lives in Password Safe / an external secret manager (never the dashboard
+    database); only its (backend, ref) pair is kept here. A registered directory carries
+    none at all — joining a server needs no domain credential on either cloud.
+    """
+    __tablename__ = "managed_directories"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(255), nullable=False)                 # FQDN, e.g. corp.example.com
+    netbios = Column(String(15), nullable=True)
+    cloud = Column(String(20), nullable=False)                 # aws | gcp
+    # aws_managed_ad | aws_ad_connector | aws_simple_ad | gcp_managed_ad
+    provider = Column(String(32), nullable=False)
+    source = Column(String(16), nullable=False, default="provisioned")  # provisioned | registered
+    status = Column(String(32), nullable=False, default="provisioning", index=True)
+    edition = Column(String(32), nullable=True)                # AWS Standard | Enterprise
+
+    region = Column(String(64), nullable=True)                 # AWS region
+    locations = Column(Text, nullable=True)                    # GCP: JSON array of regions
+    project = Column(String(120), nullable=True)               # GCP project
+    directory_id = Column(String(64), nullable=True)           # AWS d-xxxxxxxxxx
+    resource_name = Column(String(255), nullable=True)         # GCP projects/…/domains/…
+    vpc_id = Column(String(64), nullable=True)                 # AWS
+    subnet_ids = Column(Text, nullable=True)                   # AWS: JSON array
+    networks = Column(Text, nullable=True)                     # GCP: JSON array (authorized)
+    reserved_ip_range = Column(String(32), nullable=True)      # GCP
+    dns_ips = Column(Text, nullable=True)                      # JSON array
+    security_group_id = Column(String(64), nullable=True)      # AWS
+
+    admin_username = Column(String(64), nullable=True)
+    admin_password_backend = Column(String(32), nullable=True)
+    admin_password_ref = Column(String(255), nullable=True)
+    admin_password_custody = Column(String(32), nullable=True)  # secret_manager | passwordsafe_managed
+
+    ps_system_id = Column(String(36), nullable=True)
+    ps_account_id = Column(String(36), nullable=True)
+    ps_tf_state = Column(Text, nullable=True)                  # scrubbed
+    ps_error = Column(Text, nullable=True)
+
+    # Terraform state lives in the storage backend under terraform-state/<job id>.
+    deploy_job_id = Column(String(36), nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    workgroup = Column(String(100), nullable=True, index=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+    # NULL by default: a directory is long-lived infrastructure that joined servers
+    # depend on. An operator may set one through /api/expiry/set.
+    expires_at = Column(DateTime, nullable=True, index=True)
+    expiry_warned_at = Column(DateTime, nullable=True)
+
+
 class SpireLab(Base):
     """Inventory of dashboard-provisioned SPIRE trust domains for the Password Safe
     SPIFFE SVID plugin's lab.

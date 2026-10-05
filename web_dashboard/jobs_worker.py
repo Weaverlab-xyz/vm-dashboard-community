@@ -69,6 +69,7 @@ HANDLED_TYPES = (
     "cloudfn_entitle_register",
     "clouddb_adapter_pair", "clouddb_dbops_deploy",
     "certca_provision", "certca_decommission", "cert_ps_register",
+    "directory_provision", "directory_decommission",
     "spirelab_provision", "spirelab_decommission", "spirelab_k8s_link",
     "spirelab_ps_register", "spirelab_jwt_bundle", "spirelab_upgrade", "spirelab_federate",
     "spirelab_attr_probe",
@@ -117,6 +118,7 @@ HEAVY_TYPES = (
     "cloudfn_deploy", "cloudfn_update",               # cloud_function_service, same
     "cloudfn_decommission",
     "certca_provision", "certca_decommission",        # cert_lab_service, terraform apply/destroy
+    "directory_provision", "directory_decommission",  # directory_service, terraform apply/destroy
     "clouddb_adapter_pair",                           # drives cloudfn_deploy's apply inline
     "portainer_adapter_pair",                         # same, for the portainer_access adapter
     "clouddb_dbops_deploy",                           # same, twice (deploy then audience)
@@ -569,6 +571,14 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             from .services import cert_lab_service
             await cert_lab_service.run_decommission(
                 db, lab_id=meta["lab_id"], job_id=job_id)
+        elif job_type == "directory_provision":
+            from .services import directory_service
+            await directory_service.run_provision_apply(
+                db, directory_id=meta["directory_id"], job_id=job_id)
+        elif job_type == "directory_decommission":
+            from .services import directory_service
+            await directory_service.run_decommission(
+                db, directory_id=meta["directory_id"], job_id=job_id)
         elif job_type == "cert_ps_register":
             from .services import cert_lab_service
             await cert_lab_service.run_ps_register(

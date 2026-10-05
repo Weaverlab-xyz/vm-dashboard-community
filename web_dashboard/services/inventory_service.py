@@ -19,7 +19,7 @@ from typing import Optional, Set
 
 from sqlalchemy.orm import Session
 
-from ..database import (CertLab, CloudDatabase, CloudFunction,
+from ..database import (CertLab, CloudDatabase, CloudFunction, ManagedDirectory,
                         HypervisorConnection, HypervisorVMCache, Job, K8sCluster,
                         PovEnvironment, SpireLab, VirtualDesktop, WorkloadCloudCredential,
                         WorkloadK8sToken)
@@ -253,6 +253,26 @@ def _certlab_item(row) -> dict:
         "job_id": row.deploy_job_id,
         "detail_href": "/workload-lab#certificates",
     }
+
+def _directory_item(row) -> dict:
+    """A managed Active Directory as one inventory row. ``source`` is the row's own:
+    a registered directory is listed but never reaped (expiry_policy.ttl_capable)."""
+    return {
+        "id": f"directory:{row.id}",
+        "cloud": row.cloud,
+        "kind": "directory",
+        "source": row.source or "provisioned",
+        "name": row.name,
+        "region": row.region or "",
+        "state": row.status,
+        "workgroup": row.workgroup,
+        "deployed_by": row.created_by,
+        "created_at": _iso(row.created_at),
+        "expires_at": _iso(row.expires_at),
+        "job_id": row.deploy_job_id,
+        "detail_href": "/directories",
+    }
+
 
 def _spirelab_item(row) -> dict:
     """A SPIRE trust domain as one inventory row.
@@ -662,6 +682,11 @@ def collect(db: Session) -> list:
     # a pool left behind keeps billing whether or not anyone can see it.
     for row in db.query(CertLab).filter(CertLab.status != "deleted").all():
         items.append(_certlab_item(row))
+
+    # Queried unconditionally for the same reason: hiding the Directories page does not
+    # stop two domain controllers billing.
+    for row in db.query(ManagedDirectory).filter(ManagedDirectory.status != "deleted").all():
+        items.append(_directory_item(row))
 
     # Queried unconditionally for the same reason, with a different cost: turning the
     # SPIRE Lab feature off hides its page, it does not close tcp/8081 — and a trust

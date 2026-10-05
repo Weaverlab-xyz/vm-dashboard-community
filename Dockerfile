@@ -190,6 +190,10 @@ COPY terraform/cloud_function/ ./terraform/cloud_function/
 # deploy time, in the published image only. The google provider is already pre-cached
 # below, so no new init leg is needed.
 COPY terraform/cert_ca/ ./terraform/cert_ca/
+# Managed Active Directory modules (driven by directory_service): AWS Managed Microsoft AD
+# (hashicorp/aws ~> 5.0) and GCP Managed AD (hashicorp/google ~> 6.0). Both providers are
+# already in the pre-cache inits below.
+COPY terraform/directory/ ./terraform/directory/
 # Action-level admission-control policies (Rego), evaluated by admission_service
 # via the bundled OPA binary (installed below). Ship the tree so operators can
 # add/edit rules; admission_service reads terraform/policy/admission/ pre-action.
