@@ -178,8 +178,7 @@ def delete(backend: str, ref: str) -> str:
         fn(ref)
         return ""
     except Exception as e:  # noqa: BLE001
-        # Neither the reference nor the backend's error text is logged: either can carry
-        # material derived from the secret. The caller records the returned text on the row.
-        logger.warning("could not delete a Windows admin secret from %s (%s)",
-                       backend, type(e).__name__)
+        # Nothing about the secret is logged (CodeQL traces the reference and the backend
+        # name back to the password). The caller records the returned text on the row.
+        logger.warning("could not delete a Windows admin secret (%s)", type(e).__name__)
         return str(e)

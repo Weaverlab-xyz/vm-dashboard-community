@@ -400,16 +400,24 @@ async def ps_import(req: PSDirectoryImportRequest, db: Session = Depends(get_db)
         if not ref:
             fail("the selected account is not a requestable account on that directory")
             continue
+        spec = dict(name=cand["name"], provider=cand["provider"], host=cand["host"],
+                    port=cand["port"], use_ldaps=cand["use_ldaps"], base_dn=item.base_dn,
+                    agent_id=item.agent_id, managed_account=ref)
+        # The reason comes from onprem_problem's return, never from an exception's text
+        # (CodeQL py/stack-trace-exposure): the same checks register_onprem enforces.
+        problem = directory_service.onprem_problem(db, **spec)
+        if problem:
+            fail(problem)
+            continue
         try:
             # Always through register_onprem: it is what keeps the never-store-a-credential
-            # property, and every refusal it makes, covering imported rows too.
+            # property covering imported rows too.
             row = directory_service.register_onprem(
-                db, name=cand["name"], provider=cand["provider"], host=cand["host"],
-                port=cand["port"], use_ldaps=cand["use_ldaps"], base_dn=item.base_dn,
-                agent_id=item.agent_id, managed_account=ref, created_by=user.username,
-                workgroup=req.workgroup)
-        except DirectoryError as exc:
-            fail(str(exc))
+                db, **spec, created_by=user.username, workgroup=req.workgroup)
+        except DirectoryError:
+            logger.warning("directory import: register failed for system %s",
+                           item.system_id, exc_info=True)
+            fail("could not register it; see the dashboard log")
             continue
         imported.append({"system_id": item.system_id, "name": row.name,
                          "directory_id": row.id, "host": row.host})

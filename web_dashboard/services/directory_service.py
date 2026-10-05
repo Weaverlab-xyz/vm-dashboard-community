@@ -1028,6 +1028,55 @@ def _managed_ref_or_none(row) -> Optional[dict]:
         return None
 
 
+def _normalize_onprem(*, name: str, provider: str, base_dn: str, host: str, port: int,
+                      use_ldaps: bool) -> tuple:
+    provider = (provider or "").strip().lower()
+    name = (name or "").strip().lower().rstrip(".")
+    base_dn = (base_dn or "").strip()
+    if provider == "onprem_ad" and _FQDN_RE.match(name):
+        base_dn = base_dn or base_dn_for(name)
+    host = (host or "").strip()
+    port = int(port or (636 if use_ldaps else 389))
+    return provider, name, base_dn, host, port
+
+
+def onprem_problem(db: Session, *, name: str, provider: str, host: str, port: int = 0,
+                   use_ldaps: bool = True, base_dn: str = "", agent_id: str,
+                   managed_account: dict) -> str:
+    """Why an on-prem directory cannot be registered, or "" when it can.
+
+    Returns rather than raises so a batch caller (the Password Safe import) can report
+    each reason without turning an exception into response text."""
+    from ..database import RemoteAgent
+    from . import agent_service
+    provider, name, base_dn, host, port = _normalize_onprem(
+        name=name, provider=provider, base_dn=base_dn, host=host, port=port,
+        use_ldaps=use_ldaps)
+    if provider not in ONPREM_PROVIDERS:
+        return f"provider must be one of {', '.join(ONPREM_PROVIDERS)}"
+    if provider == "onprem_ad" and not _FQDN_RE.match(name):
+        return f"{name!r} is not a usable AD domain name (e.g. corp.example.com)"
+    if provider == "ldap" and not (name and base_dn):
+        return "an LDAP directory needs a name and its base DN"
+    if not host:
+        return "a host is required — a domain controller or LDAP server the agent can reach"
+    for key in ("system_id", "account_id"):
+        if not (managed_account or {}).get(key):
+            return ("a Password Safe managed account is required: the dashboard checks the "
+                    "credential out at run time rather than storing one")
+    agent = db.query(RemoteAgent).filter(RemoteAgent.id == (agent_id or ""),
+                                         RemoteAgent.is_active.is_(True)).first()
+    if not agent:
+        return "that remote agent is not registered"
+    if not agent_service.supports_directory(agent):
+        return agent_service.directory_upgrade_hint(agent)
+    if db.query(ManagedDirectory).filter(ManagedDirectory.host == host,
+                                         ManagedDirectory.port == port,
+                                         ManagedDirectory.status != "deleted").first():
+        return f"a directory at {host}:{port} is already registered"
+    return ""
+
+
 def register_onprem(db: Session, *, name: str, provider: str, host: str, port: int = 0,
                     use_ldaps: bool = True, base_dn: str = "", agent_id: str,
                     managed_account: dict, created_by: str,
@@ -1038,43 +1087,18 @@ def register_onprem(db: Session, *, name: str, provider: str, host: str, port: i
     no cloud API, no Terraform, just an inventory row and the references needed to reach
     it. ``managed_account`` is a Password Safe system/account pair — the credential the
     playbooks bind with is checked out at run time (:func:`directory_connection_vars`)
-    and never stored here."""
-    from ..database import RemoteAgent
-    from . import agent_service
-    provider = (provider or "").strip().lower()
-    if provider not in ONPREM_PROVIDERS:
-        raise DirectoryError(f"provider must be one of {', '.join(ONPREM_PROVIDERS)}")
-    name = (name or "").strip().lower().rstrip(".")
-    base_dn = (base_dn or "").strip()
-    if provider == "onprem_ad":
-        if not _FQDN_RE.match(name):
-            raise DirectoryError(f"{name!r} is not a usable AD domain name (e.g. corp.example.com)")
-        base_dn = base_dn or base_dn_for(name)
-    elif not (name and base_dn):
-        raise DirectoryError("an LDAP directory needs a name and its base DN")
-    host = (host or "").strip()
-    if not host:
-        raise DirectoryError("a host is required — a domain controller or LDAP server "
-                             "the agent can reach")
-    port = int(port or (636 if use_ldaps else 389))
-    for key in ("system_id", "account_id"):
-        if not (managed_account or {}).get(key):
-            raise DirectoryError(
-                "a Password Safe managed account is required: the dashboard checks the "
-                "credential out at run time rather than storing one")
-    agent = db.query(RemoteAgent).filter(RemoteAgent.id == (agent_id or ""),
-                                         RemoteAgent.is_active.is_(True)).first()
-    if not agent:
-        raise DirectoryError("that remote agent is not registered")
-    if not agent_service.supports_directory(agent):
-        raise DirectoryError(agent_service.directory_upgrade_hint(agent))
-    if db.query(ManagedDirectory).filter(ManagedDirectory.host == host,
-                                         ManagedDirectory.port == port,
-                                         ManagedDirectory.status != "deleted").first():
-        raise DirectoryError(f"a directory at {host}:{port} is already registered")
+    and never stored here. Every refusal is :func:`onprem_problem`'s."""
+    problem = onprem_problem(db, name=name, provider=provider, host=host, port=port,
+                             use_ldaps=use_ldaps, base_dn=base_dn, agent_id=agent_id,
+                             managed_account=managed_account)
+    if problem:
+        raise DirectoryError(problem)
+    provider, name, base_dn, host, port = _normalize_onprem(
+        name=name, provider=provider, base_dn=base_dn, host=host, port=port,
+        use_ldaps=use_ldaps)
     row = ManagedDirectory(
         name=name, cloud="local", provider=provider, source="registered",
-        status="available", agent_id=agent.id, host=host, port=port,
+        status="available", agent_id=agent_id, host=host, port=port,
         use_ldaps=bool(use_ldaps), base_dn=base_dn,
         credentials_ref=_MANAGED_REF_PREFIX + json.dumps({
             "system_id": managed_account["system_id"],
@@ -1086,7 +1110,7 @@ def register_onprem(db: Session, *, name: str, provider: str, host: str, port: i
     db.commit()
     db.refresh(row)
     logger.info("directory: registered on-prem %s %s at %s:%s via agent %s",
-                provider, name, host, port, agent.id)
+                provider, name, host, port, agent_id)
     return row
 
 
