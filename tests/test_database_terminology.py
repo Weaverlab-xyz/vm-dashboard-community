@@ -132,12 +132,12 @@ def test_no_doc_links_to_the_old_filename():
 
 
 def test_the_oci_heading_anchor_is_intact():
-    """docs/kubernetes.md deep-links this heading; retitling it silently 404s the
+    """docs/kubernetes/k8s.md deep-links this heading; retitling it silently 404s the
     anchor, which nothing else would catch."""
     anchor = "#oci-autonomous-database--read-the-caveats"
     assert "### OCI (Autonomous Database) — read the caveats" in _read(
         os.path.join(_ROOT, "docs", "databases.md"))
-    assert anchor in _read(os.path.join(_ROOT, "docs", "kubernetes.md"))
+    assert anchor in _read(os.path.join(_ROOT, "docs", "kubernetes", "k8s.md"))
 
 
 # ── the identifier half must NOT be renamed ───────────────────────────────────
