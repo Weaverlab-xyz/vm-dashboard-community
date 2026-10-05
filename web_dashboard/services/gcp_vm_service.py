@@ -308,6 +308,11 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
     # the dict they are normally recorded into — is not built until after the launch
     # returns, so a failure before that point had nothing to write them onto.
     nat_name = None
+    # What this deploy records about an AD join, and whether the instance exists. Hoisted
+    # for the same reason as nat_name: a join requested at create is real once the VM is,
+    # and the directory's destroy guard must see it even if a later step fails.
+    ad_meta: dict = {}
+    launched = False
     try:
         job_service.set_running(db, job_id)
 
@@ -341,8 +346,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         # Windows images take a different path from here: no SSH key, a password from
         # the windows-keys exchange, and an RDP jump instead of a Shell Jump.
         is_windows = await gcp_service.image_is_windows(payload.image_self_link)
-        ad_meta: dict = {}          # what this deploy records about a requested AD join
-        join_md: dict = {}          # instance metadata that performs it
+        join_md: dict = {}          # instance metadata that performs the AD join
         join_sa = ""
         if is_windows:
             from ..services import windows_admin_secret
@@ -427,6 +431,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             extra_metadata=join_md or None,
             service_account_email=join_sa,
         )
+        launched = True
 
         hostname = result.get("private_ip") or result.get("public_ip") or payload.instance_name
 
@@ -589,6 +594,8 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         partial: dict = {}
         if nat_name:
             partial["nat_name"] = nat_name
+        if launched:
+            partial.update(ad_meta)
         if jp:
             jp.record(partial)
         job_service.set_failed(db, job_id, str(exc), partial or None)
