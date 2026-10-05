@@ -9,6 +9,7 @@ instance.
 Lives in ``services/`` because the job runner has to import it, and a worker reaching
 into the API package is backwards (see services/aws_vm_service for the AWS counterpart).
 """
+import asyncio
 import logging
 from typing import Optional
 
@@ -16,6 +17,7 @@ from ..config import settings
 from ..database import Job
 from ..models.gcp import GCPDeployRequest
 from . import cache_service, gcp_service, job_service, region_catalog, tunnel_pool
+from .gcp_service import GCPError
 
 logger = logging.getLogger(__name__)
 
@@ -336,11 +338,22 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                     f"Shared Gateway unavailable ({jp.error}) — continuing with VM launch…"
                 )
 
+        # Windows images take a different path from here: no SSH key, a password from
+        # the windows-keys exchange, and an RDP jump instead of a Shell Jump.
+        is_windows = await gcp_service.image_is_windows(payload.image_self_link)
+        if is_windows:
+            from ..services import windows_admin_secret
+            try:
+                # Fail before launching if there is nowhere acceptable to keep the password.
+                windows_admin_secret.resolve_backend("gcp")
+            except windows_admin_secret.WindowsSecretError as e:
+                raise GCPError(str(e)) from e
+
         # Retrieve SSH public key (per-launch override wins over the region default)
         secret_name = getattr(payload, "ssh_key_secret_override", None) or _rc["ssh_key_secret"]
         ssh_username = _cfg_svc.get("gcp_ssh_username") or payload.ssh_username or "gcp-user"
         ssh_public_key = ""
-        if secret_name:
+        if secret_name and not is_windows:
             job_service.update_progress(db, job_id, 18, "Retrieving SSH public key from Secret Manager…")
             try:
                 ssh_public_key = await gcp_service.get_ssh_public_key(
@@ -388,6 +401,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             disk_size_gb=payload.disk_size_gb,
             network_tags=merged_tags,
             labels={"workgroup": wg} if wg else None,
+            windows=is_windows,
         )
 
         hostname = result.get("private_ip") or result.get("public_ip") or payload.instance_name
@@ -413,8 +427,33 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         if jp:
             jp.record(final_meta)
 
-        # ── BeyondTrust PRA — Shell Jump (optional) ───────────────────────────
-        if _cfg_svc.get_bool("pra_enabled"):
+        # ── Windows: the administrator password → secret manager ──────────────
+        admin_password = ""
+        win_user = ""
+        if is_windows:
+            from ..services import windows_admin_secret
+            final_meta["os_type"] = "windows"
+            win_user = _cfg_svc.get("gcp_windows_admin_username") or "gcpadmin"
+            job_service.update_progress(
+                db, job_id, 60, "Waiting for Windows to finish first boot and set the password…")
+            admin_password = await gcp_service.reset_windows_password(
+                project_id, result["zone"], payload.instance_name, win_user,
+                on_wait=lambda s: job_service.update_progress(
+                    db, job_id, 60,
+                    f"Waiting for Windows to finish first boot ({s // 60} min)…"))
+            try:
+                backend, ref = await asyncio.to_thread(
+                    windows_admin_secret.store, "gcp", payload.instance_name, job_id[:8],
+                    admin_password)
+            except windows_admin_secret.WindowsSecretError as e:
+                raise GCPError(str(e)) from e
+            final_meta["admin_username"] = win_user
+            final_meta["admin_password_backend"] = backend
+            final_meta["admin_password_ref"] = ref
+            job_service.update_progress(db, job_id, 80, f"Administrator password stored in {backend}.")
+
+        # ── BeyondTrust PRA — Shell Jump (optional; SSH, so Linux only) ───────
+        if _cfg_svc.get_bool("pra_enabled") and not is_windows:
             from ..services import terraform_pra_service
             jump_group = ((payload.jump_group or "").strip() or _cfg_svc.get("gcp_bt_jump_group_name")
                           or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name)
@@ -445,12 +484,13 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                     db, job_id, 95,
                     f"Instance deployed but Shell Jump provisioning failed: {bt_exc}"
                 )
-        else:
+        elif not is_windows:
             job_service.update_progress(db, job_id, 95, "Instance launched.")
 
         # Entitle — register as SSH ephemeral-accounts integration (per-build opt-in).
         from ..services import entitle_vm_hook
-        if getattr(payload, "register_in_entitle", False) and entitle_vm_hook.registration_enabled():
+        if (getattr(payload, "register_in_entitle", False) and not is_windows
+                and entitle_vm_hook.registration_enabled()):
             # An OT cell is brokered by the agent running in its own plant (on the
             # cell's DMZ broker), whose token name the cell orchestrator stamped on
             # this job before it ran. Blank everywhere else = the install-wide agent,
@@ -473,7 +513,8 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         # GCP defaults to the cloud-native "GCP VM SSH Rotation" plugin (managed system
         # address = projectId/zone/instanceName), so pass the project + zone.
         from ..services import ps_vm_hook
-        if getattr(payload, "register_in_passwordsafe", False) and ps_vm_hook.registration_enabled():
+        if (getattr(payload, "register_in_passwordsafe", False) and not is_windows
+                and ps_vm_hook.registration_enabled()):
             await ps_vm_hook.register(db, job_id, payload.instance_name, hostname,
                                       result=final_meta, tag="GCP", ssh_key_secret=secret_name,
                                       # The job's project, not _gcp_project() — see this
@@ -488,6 +529,23 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                                       # rotates by writing instance metadata that nothing
                                       # on the guest would ever read.
                                       method=getattr(payload, "passwordsafe_method", "") or "")
+
+        # Windows: Password Safe managed account + PRA Remote RDP jump.
+        if is_windows:
+            from ..services import windows_server_hook
+            await windows_server_hook.wire(
+                db, job_id, vm_name=payload.instance_name, hostname=hostname,
+                username=win_user, password=admin_password, result=final_meta, tag="GCP",
+                register_in_passwordsafe=bool(getattr(payload, "register_in_passwordsafe", False)),
+                pra_enabled=_cfg_svc.get_bool("pra_enabled"),
+                jump_group=((payload.jump_group or "").strip()
+                            or _cfg_svc.get("gcp_bt_jump_group_name")
+                            or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name),
+                jumpoint_name=((payload.jumpoint_name or "").strip()
+                               or _cfg_svc.get("gcp_jumpoint_name")
+                               or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name),
+            )
+            admin_password = ""
 
         job_service.set_completed(db, job_id, final_meta)
         await cache_service.invalidate_prefix("gcp_instances")
@@ -731,6 +789,10 @@ async def _run_destroy(
                 result["ot_agent_token_error"] = note
             else:
                 result["ot_agent_token_destroyed"] = deploy_meta.get("ot_agent_token_name")
+
+        # Windows: the RDP jump and the stored administrator password.
+        from ..services import windows_server_hook
+        await windows_server_hook.teardown(deploy_meta, result)
 
         # Off-board the Password Safe managed system if this deploy registered one.
         if deploy_meta.get("ps_registration_tf_state"):

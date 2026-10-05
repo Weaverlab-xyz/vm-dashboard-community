@@ -39,6 +39,7 @@ class GCPInstanceInfo(BaseModel):
     # on the page: the rule turns on WHICH address was wired, which the row's other
     # fields do not reveal. A warning, never a refusal.
     suspend_warning: Optional[str] = None
+    os_type: str = ""        # "windows" for a Windows instance this dashboard deployed
     # Tags as the page renders them, already classified and coloured by
     # services/tag_policy.normalise. The raw provider dict stays in the service
     # layer, where unmanaged-VM discovery and the workgroup lookup read it.

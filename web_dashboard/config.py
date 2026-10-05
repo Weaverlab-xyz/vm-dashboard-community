@@ -1245,6 +1245,8 @@ class Settings(BaseSettings):
     # Blank = automatic: Password Safe, else the global external secrets backend, else the
     # cloud's own vault. "database" is refused — it is never kept in the dashboard DB.
     windows_admin_secret_backend: str = ""
+    # GCP Windows servers: the local account the windows-keys exchange creates at deploy.
+    gcp_windows_admin_username: str = "gcpadmin"
     # ACR credentials (leave empty to pull from Docker Hub without auth).
     # Direct fields are preferred; values are stored encrypted in the DB and
     # transparently resolved through the chosen secrets backend (PS / AWS SM /

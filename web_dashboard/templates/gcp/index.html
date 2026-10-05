@@ -11,6 +11,30 @@
 <div class="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8"
      x-data="gcpDashboard()"
      x-init="init()">
+  <!-- Windows administrator password -->
+  <div x-show="adminPw.open" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="adminPw.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-3">
+      <div class="flex items-center justify-between">
+        <h3 class="text-lg font-semibold text-gray-800">Administrator password</h3>
+        <button @click="adminPw.open = false" class="text-gray-400 hover:text-gray-600 text-xl">×</button>
+      </div>
+      <p class="text-xs text-gray-500" x-text="adminPw.inst?.instance_name"></p>
+      <div x-show="adminPw.loading" class="py-4 text-center text-sm text-gray-400">Loading…</div>
+      <div x-show="adminPw.error" x-cloak
+           class="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700"
+           x-text="adminPw.error"></div>
+      <div x-show="adminPw.data" x-cloak class="space-y-2 text-sm">
+        <div>Username: <code class="bg-gray-100 px-1 rounded" x-text="adminPw.data?.username"></code></div>
+        <div>Password: <code class="bg-gray-100 px-1 rounded break-all" x-text="adminPw.data?.password"></code></div>
+        <div class="text-xs text-gray-400">Stored in <code x-text="adminPw.data?.backend"></code>.</div>
+        <button @click="navigator.clipboard.writeText(adminPw.data.password).then(() => toast('Password copied', 'success'))"
+                class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Copy</button>
+      </div>
+    </div>
+  </div>
+
 
   <!-- Page header -->
   <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-6">
@@ -354,6 +378,11 @@
               </button>
               <a x-show="inst.job_id" :href="'/jobs/' + inst.job_id"
                  class="text-xs text-blue-600 hover:underline">Job</a>
+              <button x-show="inst.os_type === 'windows'" x-cloak @click="openAdminPassword(inst)"
+                      class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg transition"
+                      title="Retrieve the administrator password from Password Safe / the secret manager">
+                Password
+              </button>
               <button @click="confirmDestroyInstance(inst)"
                       class="text-xs border border-red-200 text-red-600 hover:bg-red-50 px-2.5 py-1.5 rounded-lg transition">
                 Terminate
@@ -1646,6 +1675,18 @@ function gcpDashboard() {
     // deploy submit is what makes it do anything.
     ...scheduleState(),
     // State
+    adminPw: { open: false, inst: null, loading: false, error: '', data: null },
+    async openAdminPassword(inst) {
+      this.adminPw = { open: true, inst, loading: true, error: '', data: null };
+      try {
+        this.adminPw.data = await API.get(
+          `/api/gcp/instances/${encodeURIComponent(inst.instance_name)}/admin-password`);
+      } catch (e) {
+        this.adminPw.error = e.message || 'Failed to retrieve the administrator password';
+      } finally {
+        this.adminPw.loading = false;
+      }
+    },
     activeTab:       'public',
     projectId:       '',
     loading:         false,
