@@ -98,14 +98,15 @@ job output).
 
 A third set, **KubeSolo**
 ([`examples/playbooks/kubesolo/`](../../../examples/playbooks/kubesolo)), goes the other
-way: install, status, uninstall for a deliberately *single-node* Kubernetes, plus the
-BeyondTrust Entitle agent on top of it. It is the edge and OT case — one machine, no
-join token, no node-by-node relay — and it runs over the agent path rather than the
-local runner. See [KubeSolo](../../kubernetes/kubesolo.md).
+way: install, status, uninstall for a deliberately *single-node* Kubernetes. It is the
+edge case — one machine, no join token, no node-by-node relay — and it runs over the
+agent path rather than the local runner. See [KubeSolo](../../kubernetes/kubesolo.md).
 
-The [OT demo cell](../../profiles/demo/ot-demo-cell.md) bakes KubeSolo into its image
-and runs the plant simulators on it, so these plays are for the on-prem hosts that cell
-stands in for rather than for the cell itself.
+The BeyondTrust Entitle agent plays that go on top of it live in
+[`examples/playbooks/ot/`](../../../examples/playbooks/ot), beside the other plays the
+[OT demo cell](../../profiles/demo/ot-demo-cell.md) runs against its DMZ broker. The cell
+and broker run k3s rather than KubeSolo, so those plays find either cluster's
+kubeconfig themselves.
 
 The k3s set closes the loop with the section below: `k3s-kubeconfig.yml` rewrites k3s's
 loopback API address to the node's real one and prints a registration-ready payload, so

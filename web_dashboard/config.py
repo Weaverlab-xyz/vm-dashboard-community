@@ -1063,7 +1063,7 @@ class Settings(BaseSettings):
     # ── The plant's function runtime (ot_faas_service) ───────────────────────
     # An Entitle "REST API" integration is an HTTP server Entitle drives, and the
     # targets worth gating in a plant sit behind a boundary no cloud function can
-    # reach without punching through it. So the adapter runs on the broker's KubeSolo,
+    # reach without punching through it. So the adapter runs on the broker's k3s,
     # beside the Entitle agent that calls it, and the integration is registered
     # agent-brokered — no inbound hole, and not one new egress destination.
     #

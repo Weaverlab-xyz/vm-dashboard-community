@@ -9,10 +9,10 @@ and the result boots in a subnet with no egress. So these are the structural rul
 that make it survivable, each standing for a failure that would otherwise surface in
 front of a customer:
 
-* the broker must never install Docker — KubeSolo's installer refuses a host that
-  carries it, and the cell already pays for that with a whole purge dance; so the one
-  image the broker builds is built with buildah, which is daemonless;
-* every image must be pre-loaded into KubeSolo's containerd AND named in images.txt,
+* the broker never installs Docker — it runs the Entitle agent and nothing else, and an
+  engine nobody uses is surface; so the one image the broker builds is built with
+  buildah, which is daemonless, and purged afterwards;
+* every image must be pre-loaded into k3s's containerd AND named in images.txt,
   because the manifests pull nothing: a name containerd does not hold is a pod that
   dies ErrImageNeverPull on a host with no egress, which reads like a firewall block;
 * ``imagePullPolicy: Never`` must survive into the RENDER, because this is the one
@@ -140,9 +140,8 @@ def test_the_broker_builds_its_image_without_docker():
     assert "buildah" in section, "the broker has no builder"
     code = _code_only(section)
     assert "docker build" not in code and "docker save" not in code, (
-        "the broker reached for Docker — KubeSolo's installer refuses a host that "
-        "carries it, and the cell's purge dance (iptables chains, docker0, a "
-        "reinstalled iptables package) is the price of getting that wrong")
+        "the broker reached for Docker — it runs the agent and nothing else, so it "
+        "gets no engine just to build one image")
     assert "--isolation chroot" in section, (
         "buildah without --isolation chroot wants user namespaces, which vary by "
         "cloud image")
@@ -158,16 +157,16 @@ def test_buildah_and_its_layer_store_are_purged_after_the_build():
         "buildah's layer store (~150 MB of base-image layers) ships in the image")
 
 
-def test_ctr_comes_from_a_pinned_release_not_from_a_package():
-    body = _SRC[_SRC.index("install_ctr() {"):]
-    body = body[:body.index("\n}\n")]
-    assert "OT_CONTAINERD_VERSION" in body, "ctr is not pinned"
-    assert "tar -xzf /tmp/containerd.tar.gz -C /tmp bin/ctr" in body, (
-        "the whole containerd archive is extracted — that drops containerd and its "
-        "shim into /usr/local/bin, where KubeSolo's own copies belong")
-    assert "containerd.io" not in _code_only(body), (
-        "installing the containerd.io package would put a second container runtime "
-        "and a service on the host, which is what the cell has to purge")
+def test_images_move_through_k3s_own_ctr_only():
+    """`k3s ctr` talks to k3s's containerd and is always its version. A bare `ctr` is
+    a different client: on the cell it is Docker's (containerd.io), which defaults to
+    Docker's socket — the wrong store, silently."""
+    assert 'K3S_CTR="k3s ctr --namespace k8s.io"' in _SRC
+    section = _code_only(_faas_section())
+    assert "$K3S_CTR images pull" in section and "$K3S_CTR images import" in section
+    assert not re.search(r"(^|[\s;(])ctr --address", section), (
+        "an image is moved with a bare ctr pointed at a socket by hand")
+    assert "install_ctr" not in _SRC, "the bake still fetches a separate ctr"
 
 
 # ── Images: pre-loaded, listed, and never pulled at boot ─────────────────────
@@ -325,9 +324,9 @@ def test_the_bake_checks_the_operator_reconciles_a_deletion():
 
 # ── The unit, and the cleanup ────────────────────────────────────────────────
 
-def test_the_unit_waits_for_kubesolo_and_is_allowed_to_take_its_time():
+def test_the_unit_waits_for_k3s_and_is_allowed_to_take_its_time():
     unit = _heredoc("/etc/systemd/system/ot-faas.service")
-    assert "Requires=kubesolo.service" in unit and "After=kubesolo.service" in unit
+    assert "Requires=k3s.service" in unit and "After=k3s.service" in unit
     found = re.search(r"TimeoutStartSec=(\d+)", unit)
     assert found and int(found.group(1)) >= 1200, (
         "a first boot mints the cluster CA and imports the baked tarballs; the "
@@ -340,12 +339,12 @@ def test_the_cleanup_stops_the_new_unit_before_wiping_the_cluster():
         "the identity reset stops ot-sim but not ot-faas, so a oneshot still mid-apply "
         "would be writing to the containerd store this block is about to prune")
     assert _SRC.index("systemctl stop ot-faas.service") < \
-           _SRC.index("systemctl stop kubesolo"), (
+           _SRC.index("systemctl stop k3s "), (
         "ot-faas must stop before the API server it is talking to goes away")
 
 
 def test_the_broker_apply_script_mints_the_basic_auth_secret_itself():
-    apply = _heredoc('"$OT_FAAS_DIR/kubesolo/apply.sh"')
+    apply = _heredoc('"$OT_FAAS_DIR/k3s/apply.sh"')
     assert "basic-auth" in apply, (
         "the chart generates this with a Helm HOOK, and hooks do not run through "
         "helm template — so without this the gateway has no secret to mount and "

@@ -57,7 +57,7 @@ _CLOUD_RESTRICTED = {
     # would be a credential-changing endpoint nothing ever calls.
     "ps_dbops": ("gcp",),
     # NO cloud. This one runs on the plant's own function runtime (the OT broker's
-    # KubeSolo), because the HMI it manages sits behind the Purdue boundary: the cell
+    # k3s), because the HMI it manages sits behind the Purdue boundary: the cell
     # admits the PRA Gateway and the broker and nothing else. Deployed to a cloud it
     # would be a credential-minting endpoint that cannot reach its target, so the
     # picker must not offer it - see services/ot_faas_service.py.

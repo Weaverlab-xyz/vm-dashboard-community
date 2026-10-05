@@ -21,13 +21,12 @@ import sys
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SCRIPTS = sorted(glob.glob(os.path.join(_ROOT, "provisioners", "ot", "*.sh")))
 
-# "Does this provisioner install KubeSolo?", matched on the installer's own download
-# line rather than on the bare hostname — the script also NAMES the host in its failure
-# message, and only the download makes it a KubeSolo bake. Keeping the scheme in the
-# pattern is also what stops it reading as incomplete URL sanitization
-# (py/incomplete-url-substring-sanitization); the dots are escaped for the sibling
-# hostname-regexp rule.
-_INSTALLS_KUBESOLO = re.compile(r"https://get\.kubesolo\.io\b")
+# "Does this provisioner install k3s?", matched on the release download URL rather than
+# on the bare name — the script also NAMES k3s in comments and failure messages, and
+# only the download makes it a k3s bake. Keeping the scheme in the pattern is also what
+# stops it reading as incomplete URL sanitization (py/incomplete-url-substring-
+# sanitization); the dots are escaped for the sibling hostname-regexp rule.
+_INSTALLS_K3S = re.compile(r"https://github\.com/k3s-io/k3s/releases/download/")
 
 
 def _read(path):
@@ -84,17 +83,18 @@ def test_the_zero_runtime_egress_contract_holds():
         assert "compose" in src and "up -d" in src, (
             f"{os.path.basename(path)}: the bake-time smoke test is gone — a dead "
             "stack would only be discovered inside an air-gapped subnet")
-        if not _INSTALLS_KUBESOLO.search(src):
+        if not _INSTALLS_K3S.search(src):
             continue
-        # Same contract one layer down for the KubeSolo runtime: a cluster whose
-        # images live in a registry, or whose workloads were never started here,
-        # would only fail on a cell — where there is no egress to fix it with.
-        assert "KUBESOLO_OFFLINE=true" in src, (
-            f"{os.path.basename(path)}: KubeSolo's default build pulls its images at "
-            "first start; the cell has nowhere to pull them from")
-        assert re.search(r"ctr --address .* images import", src), (
-            f"{os.path.basename(path)}: the workload images are never imported into "
-            "KubeSolo's containerd — the cell would boot ErrImageNeverPull")
+        # Same contract one layer down for the k3s runtime: a cluster whose images
+        # live in a registry, or whose workloads were never started here, would only
+        # fail on a cell — where there is no egress to fix it with.
+        assert "k3s-airgap-images-" in src and "INSTALL_K3S_SKIP_DOWNLOAD=true" in src, (
+            f"{os.path.basename(path)}: k3s is not installed air-gapped — its own "
+            "images would be pulled at first start, and the cell has nowhere to pull "
+            "them from")
+        assert re.search(r'docker save [^\n]*"\$K3S_IMAGES/', src), (
+            f"{os.path.basename(path)}: the workload images never reach k3s's image "
+            "directory — the cell would boot ErrImageNeverPull")
         assert "imagePullPolicy: Never" in src, (
             f"{os.path.basename(path)}: without imagePullPolicy Never a missing image "
             "reads as a firewall problem rather than a missing image")
@@ -185,7 +185,7 @@ def test_the_fuxa_seed_never_fails_the_bake():
         if "fuxa_seed.py" not in src:
             continue
         # Runtime-agnostic: the seed used to run in a container and now runs on the
-        # host (the KubeSolo runtime has no docker left to run it with), but either
+        # host (it needs nothing a container would add), but either
         # way it has to sit inside a guard that tolerates failure.
         m = re.search(r"\nif [^\n]*fuxa_seed[^\n]*\n(.*?)\nfi\n", src, re.S)
         assert m, f"{os.path.basename(path)}: the FUXA seed is not in an if/else guard"

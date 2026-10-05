@@ -11,7 +11,7 @@ Two surfaces share this module:
   the shared GCP gateway via ``active_standalone_tunnel_count()``, which
   ``jumpoint_host_service`` adds to its idle-teardown sum.
 
-  The cell's own KubeSolo API is one of these presets: the baked image runs its
+  The cell's own k3s API is one of these presets: the baked image runs its
   simulators on single-node Kubernetes, so brokered ``kubectl`` into the plant is
   the same kind of jump item as brokered Modbus.
 
@@ -54,7 +54,7 @@ class OTCellError(Exception):
 #
 # ``cell`` marks what the baked ``ot-sim`` image actually SERVES
 # (provisioners/ot/ot-sim-debian.sh runs a simulator per marked protocol, and
-# KubeSolo itself serves the Kubernetes API). The rest are still offered for
+# k3s itself serves the Kubernetes API). The rest are still offered for
 # standalone tunnels to real lab gear — but a cell form must not offer one,
 # because a tunnel to a port with no listener is a session failure
 # indistinguishable from a firewall block. tests/test_ot_ports.py holds this table
@@ -72,11 +72,22 @@ OT_PORT_PRESETS = {
     "dnp3":        {"port": 20000, "label": "DNP3",            "cell": False, "plc": True},
     "s7":          {"port": 102,   "label": "Siemens S7comm",  "cell": True,  "plc": True},
     "ethernet-ip": {"port": 44818, "label": "EtherNet/IP",     "cell": True,  "plc": True},
-    # The cell's own single-node Kubernetes (KubeSolo), which is what runs the
+    # The cell's own single-node Kubernetes (k3s), which is what runs the
     # simulators above. Brokered like everything else here: a rep gets kubectl into
     # the plant cluster through a recorded PRA session and no other way in exists.
-    "kubesolo":    {"port": 6443,  "label": "Kubernetes API (KubeSolo)",
+    "k3s":         {"port": 6443,  "label": "Kubernetes API (k3s)",
                     "cell": True,  "plc": False},
+}
+
+# Preset keys a cell can still CARRY but no form offers. Cells baked before the move to
+# k3s ran KubeSolo, and their tunnel to :6443 is recorded under "kubesolo" -- in
+# ot_params.protocols and in the tunnel entry itself. Re-wire, the readiness check and
+# teardown all read those keys back, so each must keep resolving to the port it was
+# built for, or an old cell would read as half-wired and a Re-wire would try to build a
+# second tunnel to the same port. Never offered, never valid on a new deploy.
+LEGACY_PORT_PRESETS = {
+    "kubesolo":    {"port": 6443,  "label": "Kubernetes API (KubeSolo)",
+                    "cell": False, "plc": False},
 }
 
 # The default a cell deploys with when the form sends nothing.
@@ -96,12 +107,16 @@ def plc_protocols() -> list:
 # What the baked image actually runs. The dashboard cannot see this — an image is
 # picked by name, and both runtimes produce an `ot-sim` image — so it is the operator's
 # assertion, made in the form and recorded on the cell. It matters for exactly one
-# thing today, and that thing is expensive to get wrong: the KubeSolo preset brokers
-# :6443, which only the kubesolo runtime serves. Ticking it on a docker-baked cell
+# thing today, and that thing is expensive to get wrong: the k3s preset brokers
+# :6443, which only the k3s runtime serves. Ticking it on a docker-baked cell
 # provisions a tunnel to a port with no listener, and a session that fails against a
 # dead port is indistinguishable from one blocked by a firewall — which this feature's
 # own docs call the most expensive kind of demo failure.
-CELL_RUNTIMES = ("kubesolo", "docker")
+CELL_RUNTIMES = ("k3s", "docker")
+# A runtime a cell may have been DEPLOYED with but no new cell can be: the image ran
+# KubeSolo before the move to k3s. Recorded truthfully on those cells, refused on a new
+# deploy (cell_runtime_problem), because the bake no longer produces such an image.
+LEGACY_CELL_RUNTIMES = ("kubesolo",)
 # Presets the docker runtime does NOT serve. Derived from the preset table rather than
 # hardcoded, so a platform endpoint added later is covered the day it is added.
 def runtime_only_presets() -> list:
@@ -113,12 +128,17 @@ def runtime_only_presets() -> list:
 def cell_runtime(ot_params: dict) -> str:
     """The runtime a cell was baked with. Defaults to the bake's own default."""
     raw = ((ot_params or {}).get("runtime") or "").strip().lower()
-    return raw if raw in CELL_RUNTIMES else "kubesolo"
+    return raw if raw in CELL_RUNTIMES + LEGACY_CELL_RUNTIMES else "k3s"
 
 
 def cell_runtime_problem(protocols: list, runtime: str) -> str:
     """"" when every requested tunnel has a listener on this runtime, else the remedy."""
     runtime = (runtime or "").strip().lower()
+    if runtime in LEGACY_CELL_RUNTIMES:
+        return ("KubeSolo is no longer a cell runtime: the ot-sim and broker images now "
+                "run k3s, with Docker kept beside it. Re-bake from "
+                "provisioners/ot/ot-sim-debian.sh (OT_RUNTIME=k3s is the default) and "
+                "deploy with the k3s runtime. No VM was launched.")
     if runtime not in CELL_RUNTIMES:
         return (f"Unknown cell runtime '{runtime}' — it must be one of "
                 f"{', '.join(CELL_RUNTIMES)}. No VM was launched.")
@@ -133,7 +153,7 @@ def cell_runtime_problem(protocols: list, runtime: str) -> str:
             f"docker compose and no cluster — so nothing listens on {ports}. Brokering "
             f"{labels} would build a tunnel to a dead port, and that session failure looks "
             f"exactly like a blocked firewall. Either untick it, or deploy from an image "
-            f"baked with the default KubeSolo runtime. No VM was launched.")
+            f"baked with the default k3s runtime. No VM was launched.")
 
 
 def resolve_cell_protocols(ot_params: dict) -> list:
@@ -172,7 +192,7 @@ def resolve_ports(protocol: str, remote_port: Optional[int] = None,
             raise OTError("protocol 'custom' requires remote_port")
         rp = int(remote_port)
     else:
-        preset = OT_PORT_PRESETS.get(key)
+        preset = OT_PORT_PRESETS.get(key) or LEGACY_PORT_PRESETS.get(key)
         if not preset:
             raise OTError(
                 f"unknown OT protocol '{protocol}' — one of "
@@ -1021,7 +1041,8 @@ def _purdue_rule_names(vm: str) -> dict:
 OT_DMZ_NETWORK_TAG = "ot-dmz"
 _DMZ_EGRESS_ALLOW_PRIORITY = 790
 # The agent's channel. 8080 is not telemetry and not optional — it carries
-# ENTITLE_PROXY_URL, the agent's primary channel, in plain HTTP (docs/kubernetes/kubesolo.md).
+# ENTITLE_PROXY_URL, the agent's primary channel, in plain HTTP (docs/kubernetes/kubesolo.md,
+# which documents the agent's chart for any single-node cluster).
 ENTITLE_AGENT_PORTS = ("443", "8080")
 # A cloud VM resolves through the link-local metadata server, and the 800 deny covers
 # it like everything else. One rule carries one protocol, so DNS costs two.
@@ -1243,7 +1264,7 @@ def purdue_cell_ports(cmeta: dict) -> list:
 
     22 (Shell Jump) and the HMI are always there; the PLC port is whatever the deploy
     chose. The remaining preset ports ride along because the baked image answers OPC UA
-    and EtherNet/IP too — and, on the KubeSolo runtime, the cluster API on 6443 — and a
+    and EtherNet/IP too — and, on the k3s runtime, the cluster API on 6443 — and a
     standalone tunnel to this cell on one of them is a supported demo; an allow-list
     that only knew about the cell's OWN tunnel would make those quietly fail.
     """
@@ -1764,7 +1785,7 @@ async def _wire_cell(db, parent_id: str, child_id: str, cmeta: dict,
 # moment that matters — the vendor's login. Same posture as pra_preflight_problem and
 # the gateway sizing guard.
 #
-# 8 GB, not 4: the agent alone requests 1Gi and KubeSolo idles at ~200 MB. The estimate
+# 8 GB, not 4: the agent alone requests 1Gi and k3s idles at ~500 MB. The estimate
 # comes from gateway_mem_mb, which is deliberately pessimistic for families it has not
 # met, so the floor is set below e2-standard-2's true 8192 MB rather than at it.
 MIN_BROKER_MEM_MB = 7000
@@ -1815,7 +1836,7 @@ def broker_shape_problem(machine_type: str, cloud: str = "gcp") -> str:
         return ""
     bigger = {"aws": "t3.large", "azure": "Standard_D2s_v3"}.get(cloud, "e2-standard-2")
     return (f"The DMZ broker is {machine_type} (~{mem} MB). The Entitle agent requests "
-            f"1Gi on its own and KubeSolo idles at ~200 MB on top, so the pod would sit "
+            f"1Gi on its own and k3s idles at ~500 MB on top, so the pod would sit "
             f"Pending with no other symptom. Pick {bigger} (8 GB) or larger for the "
             f"broker. No VM was launched.")
 

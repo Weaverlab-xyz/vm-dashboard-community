@@ -1,5 +1,7 @@
-# Install the BeyondTrust Entitle agent on a KubeSolo node
-# Target: an on-prem Linux host already running KubeSolo (kubesolo-install.yml).
+# Install the BeyondTrust Entitle agent on a single-node k3s or KubeSolo host
+# Target: the OT demo's DMZ broker (k3s), or an on-prem host already running k3s or
+# KubeSolo (examples/playbooks/kubesolo/kubesolo-install.yml). The play finds the
+# cluster's admin kubeconfig itself.
 # Idempotent — `helm upgrade --install` converges an existing release.
 #
 # TOKEN — bind it, do not type it. In the run form use "Use a secret" and map a
@@ -42,7 +44,7 @@
 #                                       # a DIFFERENT trust store from the node's.
 #   entitle_agent_replicas: 1
 #   entitle_agent_kms_type: kubernetes_secret_manager   # or hashicorp_vault
-- name: Install the Entitle agent on KubeSolo
+- name: Install the Entitle agent on k3s or KubeSolo
   hosts: all
   become: true
   vars:
@@ -53,6 +55,7 @@
     ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
     ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
     ps_verify_ca: true          # set false only for a self-signed Password Safe
+    k3s_kubeconfig: /etc/rancher/k3s/k3s.yaml
     kubesolo_path: /var/lib/kubesolo
     entitle_agent_namespace: entitle
     entitle_agent_release: entitle-agent
@@ -130,17 +133,36 @@
           A chart is required too: either entitle_agent_chart_repo, or an absolute
           path in entitle_agent_chart to an archive already on this host.
 
-    - name: Confirm KubeSolo is here
+    # k3s (the OT demo's cell and broker) or KubeSolo (a standalone edge host): the
+    # admin kubeconfig is the tell for which, and every kubectl and helm call below
+    # uses whichever one is here.
+    - name: Look for k3s's kubeconfig
+      ansible.builtin.stat:
+        path: "{{ k3s_kubeconfig }}"
+      register: _k3s_kc
+
+    - name: Look for KubeSolo's kubeconfig
       ansible.builtin.stat:
         path: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
-      register: kubeconfig
+      register: _kubesolo_kc
+      when: not _k3s_kc.stat.exists
+
+    - name: Use whichever cluster this host runs
+      ansible.builtin.set_fact:
+        kube_kubeconfig: >-
+          {{ k3s_kubeconfig if _k3s_kc.stat.exists
+             else (kubesolo_path ~ '/pki/admin/admin.kubeconfig') }}
+        kube_present: >-
+          {{ _k3s_kc.stat.exists or (_kubesolo_kc.stat.exists | default(false)) }}
 
     - name: Require a cluster to install into
       ansible.builtin.assert:
-        that: kubeconfig.stat.exists
+        that: kube_present | bool
         fail_msg: >-
-          No kubeconfig at {{ kubesolo_path }}/pki/admin/admin.kubeconfig — run
-          kubesolo-install.yml against this host first.
+          Neither k3s ({{ k3s_kubeconfig }}) nor KubeSolo
+          ({{ kubesolo_path }}/pki/admin/admin.kubeconfig) is on this host. For an OT
+          broker, check the image was baked with OT_ROLE=broker; elsewhere, install a
+          cluster first.
 
     # ── Pre-flight: prove the path the agent will need, from where it will need it ──
     # A pod, not the host: the agent is a pod, and whether pod traffic leaves with the
@@ -150,7 +172,7 @@
     - name: Prove the agent's network path from inside the cluster
       ansible.builtin.shell:
         cmd: |
-          export KUBECONFIG={{ kubesolo_path }}/pki/admin/admin.kubeconfig
+          export KUBECONFIG={{ kube_kubeconfig }}
           /usr/local/bin/kubectl delete pod entitle-egress-probe \
             --ignore-not-found >/dev/null 2>&1 || true
           /usr/local/bin/kubectl run entitle-egress-probe --restart=Never --attach --rm \
@@ -242,7 +264,7 @@
 
     - name: Install the Entitle agent
       environment:
-        KUBECONFIG: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+        KUBECONFIG: "{{ kube_kubeconfig }}"
       block:
         - name: Look for the namespace
           ansible.builtin.command: /usr/local/bin/kubectl get namespace {{ entitle_agent_namespace }}
@@ -305,8 +327,8 @@
               - "  Pending          — the node cannot satisfy the requests. Lower"
               - "                     entitle_agent_cpu_request / _memory_request."
               - "  ErrImagePull     — either no route to the registry, or an inspecting"
-              - "                     proxy the NODE does not trust. Re-run"
-              - "                     kubesolo-install.yml with node_ca_pem set."
+              - "                     proxy the NODE does not trust. Add the proxy's"
+              - "                     root to the node (kubesolo-install.yml: node_ca_pem)."
               - "  Init:CrashLoop   — the healthcheck validators failed; the agent could"
               - "                     not reach agent.<region>.entitle.io on 443 and 8080."
               - "{{ diagnostics.stdout_lines | default([]) }}"

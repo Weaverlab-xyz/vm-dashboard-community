@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 _ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 _SCRIPT = os.path.join(_ROOT, "provisioners", "ot", "ot-sim-debian.sh")
-_PLAY = os.path.join(_ROOT, "examples", "playbooks", "kubesolo",
+_PLAY = os.path.join(_ROOT, "examples", "playbooks", "ot",
                      "fuxa-admin-rotate.yml")
 _SRC = io.open(_SCRIPT, encoding="utf-8").read()
 
@@ -99,7 +99,7 @@ def test_the_settings_are_written_before_fuxa_ever_starts():
     seeded. Writing the file while nothing is running has no ordering problem at all.
     """
     settings_write = _SRC.index("mysettings.json")
-    first_apply = _SRC.index("/opt/ot-sim/kubesolo/apply.sh")
+    first_apply = _SRC.index("/opt/ot-sim/k3s/apply.sh")
     assert settings_write < first_apply, (
         "the settings are written after the workloads start, so FUXA read the old "
         "ones and the change only takes effect on some later restart")
@@ -133,7 +133,7 @@ def test_the_baked_signing_key_is_a_placeholder():
 
 
 def test_each_cell_mints_its_own_key_on_first_boot():
-    apply_start = _SRC.index("cat > /opt/ot-sim/kubesolo/apply.sh")
+    apply_start = _SRC.index("cat > /opt/ot-sim/k3s/apply.sh")
     apply_body = _SRC[apply_start:_SRC.index("\nEOF\n", apply_start)]
     assert _PLACEHOLDER in apply_body, "apply.sh never replaces the placeholder"
     assert "secrets.token_urlsafe" in apply_body, "the key is not randomly generated"

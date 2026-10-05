@@ -1,5 +1,5 @@
-# Remove the Entitle agent from a KubeSolo node
-# Target: the KubeSolo host holding the release. Idempotent — a host with no release
+# Remove the Entitle agent from a single-node k3s or KubeSolo host
+# Target: the host holding the release (the OT demo's DMZ broker runs k3s). Idempotent — a host with no release
 # is a no-op, not a failure.
 #
 # DESTRUCTIVE, and requires confirm: true to do anything.
@@ -15,6 +15,7 @@
 # extra_vars:
 #   confirm: true                 # required — nothing happens without it
 #   delete_namespace: false       # also remove the namespace and its Secrets
+#   k3s_kubeconfig: /etc/rancher/k3s/k3s.yaml
 #   kubesolo_path: /var/lib/kubesolo
 - name: Uninstall the Entitle agent
   hosts: all
@@ -22,31 +23,49 @@
   vars:
     confirm: false
     delete_namespace: false
+    k3s_kubeconfig: /etc/rancher/k3s/k3s.yaml
     kubesolo_path: /var/lib/kubesolo
     entitle_agent_namespace: entitle
     entitle_agent_release: entitle-agent
   tasks:
-    - name: Look for the admin kubeconfig
+    # k3s (the OT demo's cell and broker) or KubeSolo (a standalone edge host): the
+    # admin kubeconfig is the tell for which, and every kubectl and helm call below
+    # uses whichever one is here.
+    - name: Look for k3s's kubeconfig
+      ansible.builtin.stat:
+        path: "{{ k3s_kubeconfig }}"
+      register: _k3s_kc
+
+    - name: Look for KubeSolo's kubeconfig
       ansible.builtin.stat:
         path: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
-      register: kubeconfig
+      register: _kubesolo_kc
+      when: not _k3s_kc.stat.exists
+
+    - name: Use whichever cluster this host runs
+      ansible.builtin.set_fact:
+        kube_kubeconfig: >-
+          {{ k3s_kubeconfig if _k3s_kc.stat.exists
+             else (kubesolo_path ~ '/pki/admin/admin.kubeconfig') }}
+        kube_present: >-
+          {{ _k3s_kc.stat.exists or (_kubesolo_kc.stat.exists | default(false)) }}
 
     - name: Nothing to do
       ansible.builtin.debug:
         msg: >-
-          No kubeconfig at {{ kubesolo_path }}/pki/admin/admin.kubeconfig — KubeSolo
-          does not appear to be installed here, so there is no release to remove.
-      when: not kubeconfig.stat.exists
+          Neither k3s nor KubeSolo appears to be installed here, so there is no
+          release to remove.
+      when: not (kube_present | bool)
 
     - name: Look for the release
       ansible.builtin.command: >-
         /usr/local/bin/helm status {{ entitle_agent_release }} -n {{ entitle_agent_namespace }}
       environment:
-        KUBECONFIG: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+        KUBECONFIG: "{{ kube_kubeconfig }}"
       register: release_probe
       changed_when: false
       failed_when: false
-      when: kubeconfig.stat.exists
+      when: kube_present | bool
 
     - name: Report a host with no release
       ansible.builtin.debug:
@@ -54,7 +73,7 @@
           No helm release '{{ entitle_agent_release }}' in namespace
           '{{ entitle_agent_namespace }}' — nothing to remove.
       when:
-        - kubeconfig.stat.exists
+        - kube_present | bool
         - release_probe.rc != 0
 
     - name: Require explicit confirmation
@@ -65,7 +84,7 @@
           access this agent brokers{{ ', and delete_namespace: true would also destroy
           the agent Secrets in the namespace' if delete_namespace | bool else '' }}.
       when:
-        - kubeconfig.stat.exists
+        - kube_present | bool
         - release_probe.rc == 0
 
     # ── Uninstall ────────────────────────────────────────────────────────────
@@ -74,11 +93,11 @@
         /usr/local/bin/helm uninstall {{ entitle_agent_release }}
         -n {{ entitle_agent_namespace }} --wait --timeout 300s
       environment:
-        KUBECONFIG: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+        KUBECONFIG: "{{ kube_kubeconfig }}"
       register: removed
       changed_when: removed.rc == 0
       when:
-        - kubeconfig.stat.exists
+        - kube_present | bool
         - release_probe.rc == 0
         - confirm | bool
 
@@ -86,11 +105,11 @@
       ansible.builtin.command: >-
         /usr/local/bin/kubectl delete namespace {{ entitle_agent_namespace }} --wait=false
       environment:
-        KUBECONFIG: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+        KUBECONFIG: "{{ kube_kubeconfig }}"
       register: ns_removed
       changed_when: ns_removed.rc == 0
       when:
-        - kubeconfig.stat.exists
+        - kube_present | bool
         - confirm | bool
         - delete_namespace | bool
 
@@ -103,6 +122,6 @@
           The agent token is still valid in Entitle; retire it in Org Settings if this
           host is not coming back.
       when:
-        - kubeconfig.stat.exists
+        - kube_present | bool
         - release_probe.rc == 0
         - confirm | bool

@@ -44,7 +44,7 @@ mid-run; leave it blank and the play behaves exactly as before:
 | `windows/win-create-local-admin.yml` | `new_admin_password_secret` |
 | `database/postgres-create-role.yml` | `target_role_password_secret` |
 | `database/mysql-create-user.yml` | `target_user_password_secret` |
-| `kubesolo/entitle-agent-install.yml` | `entitle_agent_token_secret` |
+| `ot/entitle-agent-install.yml` | `entitle_agent_token_secret` |
 | `portainer/*.yml` | `portainer_pat_secret` |
 
 The `PASSWORD_SAFE_*` credentials are auto-injected into every runner, so nothing else
@@ -265,9 +265,10 @@ the datacenter.
 |---|---|
 | `kubesolo-install.yml` | Install KubeSolo, plus helm and kubectl; optionally trust a corporate root CA first |
 | `kubesolo-status.yml` | Read-only — node, pods, footprint, and the agent release if present |
-| `entitle-agent-install.yml` | Install the Entitle agent chart with single-node values |
-| `entitle-agent-uninstall.yml` | Remove the release (guarded; `confirm: true` required) |
 | `kubesolo-uninstall.yml` | Remove KubeSolo and its state (guarded; `confirm: true` required) |
+
+The Entitle agent plays are shared with the OT broker and live in [`ot/`](#ot-demo-the-dmz-brokers-plays-ot);
+they find KubeSolo's kubeconfig themselves.
 
 KubeSolo bundles CoreDNS, kube-proxy, containerd's CNI plugins and local-path storage,
 so there is no networking step. It does **not** bundle a kubectl — there is no
@@ -277,16 +278,13 @@ image ships no `kubernetes.core`.
 
 ### Installing the agent
 
-The [OT demo cell](../../docs/profiles/demo/ot-demo-cell.md) already runs KubeSolo —
-its image bakes it in and runs the plant simulators on it — so these plays are for the
-on-prem hosts the cell stands in for. The exception is `entitle-agent-install.yml`: the
-cell has no egress, and the agent needs some, so the agent half belongs on a real host
-reached by a remote agent.
+The [OT demo cell](../../docs/profiles/demo/ot-demo-cell.md) runs k3s, not KubeSolo, so
+these plays are for edge and plant-floor hosts where KubeSolo is the right fit.
 
 1. `kubesolo-install.yml` — set `node_ca_pem` if an inspecting proxy re-signs your
    egress, because containerd's pull fails first and looks like a blocked port.
 2. `kubesolo-status.yml` — captures the idle baseline.
-3. `entitle-agent-install.yml` — bind the agent token to `entitle_agent_token` with the
+3. `ot/entitle-agent-install.yml` — bind the agent token to `entitle_agent_token` with the
    run form's **Use a secret**, or set `entitle_agent_token_secret` to a Password Safe
    path. The play hands it to helm in a 0600 values file, never `--set`.
 4. `kubesolo-status.yml` again — the delta is your sizing number.
@@ -295,12 +293,26 @@ reached by a remote agent.
 agent's primary channel and is plain HTTP, not TLS. A tenant onboarded before
 2026-07-07 also needs `ghcr.io` and `gcr.io/datadoghq`.
 
-The values in `entitle-agent-install.yml` deliberately override three chart defaults
+The values in `ot/entitle-agent-install.yml` deliberately override three chart defaults
 that are wrong for one node — three replicas with no anti-affinity, a Datadog sidecar
 that `datadog.enabled: false` does *not* remove, and a cloud `platform.mode`. See
 [docs/kubernetes/kubesolo.md](../../docs/kubernetes/kubesolo.md) for why each one, the two separate trust
 stores TLS inspection breaks, and the hardcoded `imagePullPolicy: Always` that stops a
 pod restarting while the WAN is down.
+
+## OT demo: the DMZ broker's plays (`ot/`)
+
+The [OT demo cell](../../docs/profiles/demo/ot-demo-cell.md)'s DMZ broker runs k3s with
+the Entitle agent and an OpenFaaS function runtime, and the cell's deploy queues these
+against it. Each finds the cluster itself (k3s first, then KubeSolo), so the agent plays
+also serve a standalone KubeSolo host. See [`ot/README.md`](ot/README.md).
+
+| File | Purpose |
+|---|---|
+| `entitle-agent-install.yml` | Install the Entitle agent chart with single-node values, after a pre-flight egress probe from a pod |
+| `entitle-agent-uninstall.yml` | Remove the release (guarded; `confirm: true` required) |
+| `openfaas-function-deploy.yml` | Deploy an Entitle REST adapter onto the broker's OpenFaaS runtime |
+| `fuxa-admin-rotate.yml` | Rotate the cell HMI's admin password, from the broker |
 
 ## Windows (`windows/`)
 

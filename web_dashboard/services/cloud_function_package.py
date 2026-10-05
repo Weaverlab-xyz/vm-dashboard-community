@@ -121,7 +121,7 @@ _LAYOUT = {
         "extra": (("fnentry/host.json", "host.json"),),
     },
     # NOT a cloud — a TARGET. ``openfaas`` is any runtime we put the container on
-    # ourselves (OpenFaaS on the OT broker's KubeSolo, Nuclio, or a plain
+    # ourselves (OpenFaaS on the OT broker's k3s, Nuclio, or a plain
     # Deployment), so it is absent from ``VALID_CLOUDS`` and reaches no Terraform
     # module and no object store. ``collect_entries`` gates on this table rather
     # than on VALID_CLOUDS, which is why adding the row is the whole change.

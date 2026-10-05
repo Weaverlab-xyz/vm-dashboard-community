@@ -31,7 +31,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 _OT = os.path.join(_ROOT, "web_dashboard", "services", "ot_service.py")
 _API = os.path.join(_ROOT, "web_dashboard", "api", "ot.py")
-_PLAY = os.path.join(_ROOT, "examples", "playbooks", "kubesolo",
+_PLAY = os.path.join(_ROOT, "examples", "playbooks", "ot",
                      "entitle-agent-install.yml")
 
 
