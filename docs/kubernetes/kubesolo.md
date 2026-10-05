@@ -1,6 +1,6 @@
 # KubeSolo
 
-> **Audience:** operator · **Profile:** `both` · **Read this when:** you need the Entitle agent on a plant-floor or edge host that will not carry a real Kubernetes cluster — or you are demoing the OT cell, which runs on KubeSolo.
+> **Audience:** operator · **Profile:** `both` · **Read this when:** you need the Entitle agent on a plant-floor or edge host that will not carry a real Kubernetes cluster.
 
 Part of [Kubernetes](../kubernetes.md).
 
@@ -15,31 +15,26 @@ on a plant IPC as in the datacenter. This page covers what that install actually
 like, the two places it is likely to fail, and the one limitation to raise before a
 customer finds it.
 
-The plays live in [`examples/playbooks/kubesolo/`](https://github.com/Weaverlab-xyz/vm-dashboard-community/tree/main/examples/playbooks/kubesolo)
-and run through [Config Management](../config-management.md), against an on-prem host
+The KubeSolo plays live in [`examples/playbooks/kubesolo/`](https://github.com/Weaverlab-xyz/vm-dashboard-community/tree/main/examples/playbooks/kubesolo),
+and the Entitle agent plays, which serve KubeSolo and k3s alike, in
+[`examples/playbooks/ot/`](https://github.com/Weaverlab-xyz/vm-dashboard-community/tree/main/examples/playbooks/ot).
+Both run through [Config Management](../config-management.md), against an on-prem host
 reached by a [remote agent](../remote-agents.md).
 
-## Seeing one without an on-prem host
+## KubeSolo or k3s
 
-The [OT Demo Cell](../profiles/demo/ot-demo-cell.md) **is** a KubeSolo host. Its baked
-image installs KubeSolo (the `-offline` build, pinned at `v1.2.0`) and runs the plant
-simulators and the FUXA HMI as Deployments in its `ot-sim` namespace — a plant IPC with
-a real cluster on it, in a subnet with no route out, which is the configuration this
-page describes. Deploy a cell, tick **Kubernetes API (KubeSolo)** on the form, and
-`kubectl` reaches it through a PRA protocol tunnel and nowhere else.
+The [OT Demo Cell](../profiles/demo/ot-demo-cell.md) used to run KubeSolo and now runs
+**k3s**. KubeSolo's installer refuses any host that still carries Docker, and a demo
+host, like many real ones, runs containers that are not Kubernetes workloads. k3s keeps
+its own containerd beside Docker's, so the cell keeps both. See
+[The cell runs on k3s](../profiles/demo/ot-demo-cell.md#the-cell-runs-on-k3s).
 
-What the cell shows: the footprint on a 4 GB machine, that stock manifests and Helm
-charts apply unchanged, that a single-node cluster survives with no registry to pull
-from, and what brokered `kubectl` into a plant looks like in a recorded session.
-
-**The agent runs there too — on a host of its own.** Ticking Entitle on a cell deploys a
-second KubeSolo machine beside it, the plant's industrial-DMZ broker, and installs the
-agent there with the same play below. Everything this page says about egress still
-applies, which is exactly why it is a separate host: the broker gets a narrow,
-allow-listed path to `agent.<region>.entitle.io` on 443 and 8080, and the plant floor
-keeps a true air gap. See
-[Who brokers identity in the plant](../profiles/demo/ot-demo-cell.md#who-brokers-identity-in-the-plant)
-for the rules that make that claim checkable.
+That is a reason about the host, not about KubeSolo. On a plant IPC that runs nothing but
+the agent, KubeSolo's smaller footprint (about 200 MB against k3s's 500 MB or so) is
+still the better fit, and everything below applies. What this page says about the
+**agent** (egress, the two trust stores, the values overrides, the
+`imagePullPolicy: Always` limitation) applies on k3s too: the cell's DMZ broker installs
+it with the same play.
 
 ## What KubeSolo brings, and what it does not
 
@@ -206,7 +201,7 @@ Then:
 |---|---|---|
 | 1 | `kubesolo-install.yml` | Set `node_ca_pem` if a proxy inspects TLS |
 | 2 | `kubesolo-status.yml` | Captures the idle baseline — the first half of the sizing answer |
-| 3 | `entitle-agent-install.yml` | Bind the token to `entitle_agent_token` via **Use a secret** |
+| 3 | `ot/entitle-agent-install.yml` | Bind the token to `entitle_agent_token` via **Use a secret**. It finds KubeSolo's kubeconfig itself |
 | 4 | `kubesolo-status.yml` | The delta is the second half |
 
 The token never needs typing. The run form's **Use a secret** panel binds a
@@ -222,5 +217,5 @@ the play hands it to helm through a 0600 values file rather than `--set`, becaus
 - [Config Management](../config-management.md) — the run form, targets and runners
 - [Remote Agents](../remote-agents.md) — reaching an on-prem host at all
 - [Entitle](../integrations/beyondtrust/entitle.md) — the integration this agent serves
-- [OT Demo Cell](../profiles/demo/ot-demo-cell.md) — a cell that already runs KubeSolo, with its plant simulators on top
+- [OT Demo Cell](../profiles/demo/ot-demo-cell.md) — the demo cell, which runs k3s, and its DMZ broker, which installs this agent
 - [Kubernetes](../kubernetes.md) — the managed-cluster path, where the agent install is a button

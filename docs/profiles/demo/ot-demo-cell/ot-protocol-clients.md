@@ -200,8 +200,8 @@ pure-Python server; the reads still work.
 
 ### Kubernetes API — `127.0.0.1:6443`
 
-Not a fieldbus protocol: this is the cell's own [KubeSolo](../../../kubernetes/kubesolo.md) cluster,
-the thing the four simulators run on. The client is `kubectl`, and the only setup is
+Not a fieldbus protocol: this is the cell's own k3s cluster, the thing the four
+simulators run on. The client is `kubectl`, and the only setup is
 collecting the kubeconfig the cell writes for exactly this path — once, through the
 Shell Jump:
 
@@ -210,14 +210,14 @@ sudo cat /var/lib/ot-sim/kubeconfig-via-tunnel.yaml
 ```
 
 Save it on the rep machine as `ot-cell.yaml`. It is the cell's admin kubeconfig with
-`server: https://127.0.0.1:6443` (the tunnel's local end) and a `tls-server-name` of
-the cell's private IP, because the API server's certificate is issued to the cell and
-not to your loopback. With the `ot-<cell>-kubesolo` jump started:
+`server: https://127.0.0.1:6443`, the tunnel's local end. k3s's API certificate already
+names `127.0.0.1`, so nothing else needs changing. With the `ot-<cell>-k3s` jump
+started (`ot-<cell>-kubesolo` on a cell deployed before the move to k3s):
 
-```bash
-kubectl --kubeconfig ot-cell.yaml get nodes
-kubectl --kubeconfig ot-cell.yaml -n ot-sim get pods -o wide
-kubectl --kubeconfig ot-cell.yaml -n ot-sim logs deploy/ot-plc --tail=5
+```powershell
+kubectl --kubeconfig .\ot-cell.yaml get nodes
+kubectl --kubeconfig .\ot-cell.yaml -n ot-sim get pods -o wide
+kubectl --kubeconfig .\ot-cell.yaml -n ot-sim logs deploy/ot-plc --tail=5
 ```
 
 The pods answer on the node's own address — that is `hostNetwork`, and it is why the
@@ -280,7 +280,7 @@ port, so a client that wanders off it just hangs.
 | Nothing listening on **one** protocol | That jump item uses a different local port — check the jump item and pass `--<protocol>-port` |
 | Listener answers nothing | That sim was not baked into the image (`OT_SIMS` selects them at bake time; an image baked before Siemens was added has no `ot-s7`), or its pod died. Shell Jump to the cell and run `kubectl -n ot-sim get pods` |
 | Values answer but never change | The sim's updater thread is wedged — `kubectl -n ot-sim rollout restart deploy/ot-plc` (or the sim's own deployment), or redeploy the cell |
-| `kubectl` says `x509: certificate is valid for …, not 127.0.0.1` | You are not using the cell's `/var/lib/ot-sim/kubeconfig-via-tunnel.yaml`, which carries the `tls-server-name` that makes the tunnel verify |
+| `kubectl` says `x509: certificate is valid for …, not 127.0.0.1` | You are not using the cell's `/var/lib/ot-sim/kubeconfig-via-tunnel.yaml`, whose server is `https://127.0.0.1:6443` — a name k3s's certificate covers. (A cell deployed on KubeSolo wrote a `tls-server-name` into that file instead; it still works) |
 | The tunnel will not bind the local port | Something else holds it: `Get-NetTCPConnection -LocalPort 502`. Hyper-V and WSL also reserve port ranges — `netsh int ipv4 show excludedportrange protocol=tcp`. Give the jump item a different local port and pass it to the script |
 | pip fails with `CERTIFICATE_VERIFY_FAILED` | TLS-inspecting proxy — set `PIP_CERT` to your corporate root CA (above) |
 | `TypeError` on `read_holding_registers` | pymodbus version drift on the unit-id kwarg — try `slave=1` instead of `device_id=1` |

@@ -38,14 +38,22 @@ import yaml
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _KS_DIR = os.path.join(_ROOT, "examples", "playbooks", "kubesolo")
-_PLAYBOOKS = sorted(glob.glob(os.path.join(_KS_DIR, "*.yml")))
+# The agent and broker plays moved to ot/ when the OT cell moved to k3s. They still
+# serve a KubeSolo host (they find either cluster's kubeconfig), so the invariants here
+# cover both folders.
+_OT_DIR = os.path.join(_ROOT, "examples", "playbooks", "ot")
+_PLAYBOOKS = sorted(glob.glob(os.path.join(_KS_DIR, "*.yml"))
+                    + glob.glob(os.path.join(_OT_DIR, "*.yml")))
 
 _CMD_KEYS = ("ansible.builtin.command", "command", "ansible.builtin.shell", "shell")
 
-_EXPECTED = {
+_EXPECTED_KUBESOLO = {
     "kubesolo-install.yml",
     "kubesolo-status.yml",
     "kubesolo-uninstall.yml",
+}
+
+_EXPECTED_OT = {
     "entitle-agent-install.yml",
     "entitle-agent-uninstall.yml",
     # Puts a function on the runtime the OT broker's bake installs beside the agent.
@@ -65,6 +73,8 @@ _ALL_PLAYBOOKS = sorted(glob.glob(
     os.path.join(_ROOT, "examples", "playbooks", "**", "*.yml"), recursive=True))
 
 _KUBECONFIG = "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+# What the ot/ plays point KUBECONFIG at: whichever cluster their first tasks found.
+_DISCOVERED_KUBECONFIG = ("{{ kube_kubeconfig }}", "{{ kube_kubeconfig | default('') }}")
 _VALUES_FILE = "/root/.entitle-agent-values.yaml"
 
 
@@ -114,18 +124,29 @@ def _command_of(task):
     return None
 
 
+def _path_of(name):
+    for folder in (_KS_DIR, _OT_DIR):
+        path = os.path.join(folder, name)
+        if os.path.isfile(path):
+            return path
+    raise FileNotFoundError(name)
+
+
 def _play_of(name):
-    path = os.path.join(_KS_DIR, name)
+    path = _path_of(name)
     return path, yaml.safe_load(open(path, encoding="utf-8").read())[0]
 
 
 def _text_of(name):
-    return open(os.path.join(_KS_DIR, name), encoding="utf-8").read()
+    return open(_path_of(name), encoding="utf-8").read()
 
 
 def test_kubesolo_playbooks_exist():
-    found = {os.path.basename(p) for p in _PLAYBOOKS}
-    assert found == _EXPECTED, f"unexpected file set in examples/playbooks/kubesolo/: {found}"
+    found = {os.path.basename(p) for p in glob.glob(os.path.join(_KS_DIR, "*.yml"))}
+    assert found == _EXPECTED_KUBESOLO, (
+        f"unexpected file set in examples/playbooks/kubesolo/: {found}")
+    found = {os.path.basename(p) for p in glob.glob(os.path.join(_OT_DIR, "*.yml"))}
+    assert found == _EXPECTED_OT, f"unexpected file set in examples/playbooks/ot/: {found}"
 
 
 def test_filenames_are_globally_unique():
@@ -203,14 +224,18 @@ def test_uninstalls_are_gated_on_confirmation():
 
 
 def test_kubeconfig_is_read_from_the_kubesolo_layout():
-    """KubeSolo puts the admin kubeconfig under its state dir, not /etc/rancher."""
+    """KubeSolo puts the admin kubeconfig under its state dir, not /etc/rancher. The
+    ot/ plays read whichever kubeconfig they found (k3s's or this one) instead."""
     for path, play in _plays():
-        for task in _tasks(play):
-            env = task.get("environment") or {}
+        want = (_DISCOVERED_KUBECONFIG if os.path.dirname(path) == _OT_DIR
+                else (_KUBECONFIG,))
+        envs = [play.get("environment") or {}]
+        envs += [task.get("environment") or {} for task in _tasks(play)]
+        for env in envs:
             if "KUBECONFIG" not in env:
                 continue
-            assert env["KUBECONFIG"] == _KUBECONFIG, (
-                f"{_rel(path)}: {task.get('name')!r} points KUBECONFIG at {env['KUBECONFIG']!r}")
+            assert env["KUBECONFIG"] in want, (
+                f"{_rel(path)}: KUBECONFIG points at {env['KUBECONFIG']!r}")
 
 
 # ── The token ────────────────────────────────────────────────────────────────

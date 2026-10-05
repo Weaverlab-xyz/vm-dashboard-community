@@ -325,7 +325,7 @@ function functionsPage() {
           API.get('/api/functions/options'),
         ]);
         // A workload restricted to NO cloud is not deployable from this page — it
-        // targets a self-hosted runtime somewhere else (the OT broker's KubeSolo,
+        // targets a self-hosted runtime somewhere else (the OT broker's k3s,
         // via the OT cell's own wiring). Listing it would let someone pick it and
         // then find the cloud dropdown empty, with nothing saying why.
         this.workloads = (w.workloads || []).filter(w => (w.clouds || []).length);

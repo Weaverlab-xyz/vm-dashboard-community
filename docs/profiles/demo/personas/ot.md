@@ -31,7 +31,7 @@ What a demo has to show, concretely:
 
 | layer | what it does here |
 |---|---|
-| **Provisioning** | Stands up a simulated cell — PLC simulators plus a web SCADA/HMI, running on KubeSolo — inside a private, egress-less subnet. The air gap *is* the demo. |
+| **Provisioning** | Stands up a simulated cell — PLC simulators plus a web SCADA/HMI, running on k3s — inside a private, egress-less subnet. The air gap *is* the demo. |
 | **PRA** | The only way in. A Web Jump to the HMI, and one protocol-aware tunnel per protocol, so a policy can grant Siemens and Rockwell separately rather than as one opaque item. |
 | **Password Safe** | Owns the cell's admin credential, mirrors it into the PRA vault and rotates it, so a rep injects a real secret without seeing it. |
 | **Entitle** | Makes the vendor's access time-boxed instead of standing. |
@@ -59,17 +59,17 @@ a Rockwell shop" into the same demo rather than two.
 
 ### kubectl into the plant, through PRA
 
-The cell's simulators are workloads of [KubeSolo](../../../kubernetes/kubesolo.md), the single-node
-Kubernetes small enough for plant hardware — so the answer to "we cannot run a cluster on
-the plant floor" is a running cell rather than a slide. Its API gets a tunnel of its own,
+The cell's simulators are workloads of k3s, a single-node Kubernetes that keeps Docker
+on the host beside it, so the answer to "can a plant IPC run a cluster?" is a running
+cell rather than a slide. Its API gets a tunnel of its own,
 which is what makes "this vendor may read the PLC but not the cluster" a policy decision
 instead of a network one.
 
-The agent half of that story runs next door, on the cell's DMZ broker — same KubeSolo,
+The agent half of that story runs next door, on the cell's DMZ broker — same k3s,
 same chart, inside the plant. See
 [Who brokers identity in the plant](../ot-demo-cell.md#who-brokers-identity-in-the-plant).
 
-**Guide:** [KubeSolo](../../../kubernetes/kubesolo.md) · [OT Demo Cell](../ot-demo-cell.md)
+**Guide:** [The cell runs on k3s](../ot-demo-cell.md#the-cell-runs-on-k3s) · [KubeSolo, for edge hosts](../../../kubernetes/kubesolo.md)
 
 ### Time-bound vendor access to one cell
 

@@ -6,7 +6,7 @@ This page covers managed and registered clusters. One more page sits under it:
 
 | Page | Read it when |
 |---|---|
-| [KubeSolo](kubernetes/kubesolo.md) | you need the Entitle agent on an edge or plant-floor host that will not carry a real cluster, or want to see the single-node cluster the OT demo cell runs on |
+| [KubeSolo](kubernetes/kubesolo.md) | you need the Entitle agent on an edge or plant-floor host that will not carry a real cluster |
 
 The dashboard provisions (or imports) managed Kubernetes clusters and layers management +
 privileged access on top — the same **provisioning + stacked layers** model as

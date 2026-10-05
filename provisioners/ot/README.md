@@ -5,14 +5,16 @@ image via the dashboard's in-app Packer feature. The deployed VM needs **zero
 outbound internet** — everything is built/pulled at bake time — so it runs in the
 sandbox's air-gapped private subnet, which doubles as the "plant network" in demos.
 
-The simulators run on **[KubeSolo](../../docs/kubernetes/kubesolo.md)**, the single-node
-Kubernetes this repo puts on plant hosts: the cell is a plant IPC with a real cluster
-on it, rather than a Docker host pretending to be one. `OT_RUNTIME=docker` bakes the
-previous compose stack instead — same images, same ports, no cluster — and is the
-fallback if a KubeSolo bake fails on a platform this script has not met.
+The simulators run on **k3s**, a single-node Kubernetes, so the cell is a plant IPC with
+a real cluster on it. **Docker stays installed beside it**: k3s runs its own containerd
+and does not need the host to be Docker-free, and not everything a plant (or this
+dashboard) runs is Kubernetes-native. `OT_RUNTIME=docker` bakes the plain compose stack
+instead — same images, same ports, no cluster — and is the fallback if a k3s bake
+fails on a platform this script has not met. `OT_RUNTIME=kubesolo`, which the cell ran
+before, is refused with that explanation.
 
 **Two roles, two images.** `OT_ROLE=cell` (the default) is the plant floor, described
-below. `OT_ROLE=broker` is the plant's **industrial-DMZ host**: the same KubeSolo, the
+below. `OT_ROLE=broker` is the plant's **industrial-DMZ host**: the same k3s, the
 same clients, the BeyondTrust Entitle agent's Helm chart baked in, and *no simulators* —
 a DMZ host that answers Modbus is a lie about where it sits. A cell deployed with
 Entitle gets one of each, and only the broker is given a way out. The role cannot be
@@ -21,8 +23,8 @@ chosen at deploy time (the VM deploy paths have no user-data hook), so bake both
 | | `OT_ROLE=cell` | `OT_ROLE=broker` |
 |---|---|---|
 | Simulators + FUXA | yes | no |
-| KubeSolo + kubectl + helm | yes | yes |
-| Docker during the bake | yes, then purged | never installed |
+| k3s + kubectl + helm | yes | yes |
+| Docker | yes, and it stays | never installed |
 | Entitle agent chart | no | `/opt/entitle/charts/entitle-agent.tgz` (+ `CHART.txt`) |
 | Egress probe image | no | `busybox:1.36`, pre-pulled into containerd |
 | Bake time | ~10–15 min | ~5 min |
@@ -42,10 +44,11 @@ what the 443 hole is for. See
 | EtherNet/IP tag server | `:44818` | cpppo; the same four values as `DINT` CIP tags, driven on the same one-second tick |
 | Siemens S7comm server | `:102` | python-snap7's **pure-Python** S7 server (no libsnap7); the same four values as big-endian DB1 words at offsets 0/2/4/6 |
 | FUXA web SCADA/HMI | `:1881` | `frangoteam/fuxa` (pinned tag); project data persists in `/var/lib/ot-sim/fuxa`, **pre-seeded** with the PLC connection and its four register tags |
-| Kubernetes API | `:6443` | KubeSolo, `-offline` build, pinned (`OT_KUBESOLO_VERSION`, default `v1.2.0`). Brokered by its own PRA tunnel when the deploy form's *Kubernetes API (KubeSolo)* entry is ticked |
-| kubectl + helm | `/usr/local/bin` | KubeSolo ships neither, and `examples/playbooks/kubesolo/` expects both on the host |
+| Kubernetes API | `:6443` | k3s, installed air-gapped and pinned (`OT_K3S_VERSION`, default `v1.31.4+k3s1`), with traefik, servicelb and metrics-server off. Brokered by its own PRA tunnel when the deploy form's *Kubernetes API (k3s)* entry is ticked |
+| kubectl + helm | `/usr/local/bin` | kubectl is k3s's own (linked by its installer); helm is installed by the bake. `examples/playbooks/ot/` expects both on the host |
+| Docker | `docker.service` | The engine that built the images, left installed and enabled. Its copies of the baked images are removed (they live in k3s's store); the build context stays in `/opt/ot-sim/plc-sim` |
 | Password Safe bootstrap account | `adminuser` | NOPASSWD sudo; the account `register_in_passwordsafe` onboards and rotates |
-| Autostart | systemd unit `ot-sim` | `/opt/ot-sim/kubesolo/apply.sh` — waits for the API, imports any missing image, applies `/opt/ot-sim/kubesolo/ot-sim.yaml`. (`OT_RUNTIME=docker`: `docker compose up -d` on `/opt/ot-sim/docker-compose.yml`) |
+| Autostart | systemd unit `ot-sim` | `/opt/ot-sim/k3s/apply.sh` — waits for the API, imports any missing image, applies `/opt/ot-sim/k3s/ot-sim.yaml`. (`OT_RUNTIME=docker`: `docker compose up -d` on `/opt/ot-sim/docker-compose.yml`) |
 
 All four simulators share **one image and one `pip install`**, baked from
 `python:3.12-slim` — the cell carries a single copy of the base layer. `OT_SIMS`
@@ -75,21 +78,32 @@ provides. On GCP the cell can also be fenced into its own Purdue zone
 
 ### How the cluster survives an egress-less subnet
 
-Docker cannot stay on the cell: KubeSolo's installer refuses a host that still carries
-it (`docker` on PATH, a `docker.sock` or an active service), because it runs its own
-containerd and CNI. So the bake **builds the images with Docker, exports them, purges
-Docker, installs KubeSolo, and imports them into its containerd** — in that order, or
-the install fails. Two consequences worth knowing before debugging a cell:
+The bake **installs k3s air-gapped**: it downloads the pinned k3s binary, that
+release's air-gap image bundle (CoreDNS, pause, local-path) and its installer while the
+build VM still has egress, and runs the installer with `INSTALL_K3S_SKIP_DOWNLOAD=true`.
+Then three things worth knowing before debugging a cell:
 
-- `/var/lib/ot-sim/images/*.tar` (plus `images.txt`, naming what containerd calls each
-  one) are the cell's image registry. `apply.sh` re-imports anything missing at boot,
-  so a lost containerd store costs minutes, not the cell.
-- the bake **wipes the cluster's identity** at the end — PKI, kine, node state, but not
-  the image store — so every cell mints its own CA and registers its own node. Without
-  that, each cell would carry the build VM's Node object (a hostname it does not have)
-  and every cell in the estate would share one admin credential. This is the same
-  reasoning as the ssh host keys and machine-id the cleanup already drops, and it is
-  why a first boot takes a few minutes: `systemctl status ot-sim` shows the progress.
+- `/var/lib/rancher/k3s/agent/images/` is the cell's image registry. The air-gap bundle
+  and every baked image (`ot-plc-sim.tar`, `fuxa.tar`) are tarballs there, and **k3s
+  imports that directory on every start**. `/var/lib/ot-sim/images.txt` names what
+  containerd calls each one, and `apply.sh` checks them at boot and imports anything
+  missing, so a lost containerd store costs minutes, not the cell.
+- images move only through **`k3s ctr`**, never a bare `ctr`. On the cell `ctr` is
+  Docker's client (from `containerd.io`), which defaults to Docker's containerd: the
+  wrong store, with no error.
+- the bake **wipes the cluster's identity** at the end (the whole `server/` tree, the
+  agent's certificates, `/etc/rancher/node`, but not `agent/images` or
+  `agent/containerd`), so every cell mints its own CA and registers its own node.
+  Without that, each cell would carry the build VM's Node object (a hostname it does
+  not have) and every cell in the estate would share one admin credential. This is the
+  same reasoning as the ssh host keys and machine-id the cleanup already drops, and it
+  is why a first boot takes a few minutes: `systemctl status ot-sim` shows the progress.
+
+**Docker and k3s on one host.** Docker sets the iptables FORWARD policy to DROP. The
+plant workloads use `hostNetwork` and do not care, but CoreDNS (and OpenFaaS on the
+broker) use pod networking, which k3s's flannel keeps working with its own accept
+rules. The bake waits for CoreDNS to become ready, so a host where that is not true
+fails the bake rather than a demo.
 
 ## Building the image
 
@@ -105,7 +119,7 @@ the install fails. Two consequences worth knowing before debugging a cell:
 
 The Packer build VM runs in the project's `default` VPC and has egress — that is
 where the pulls happen. Build-time overrides (Packer env vars): `OT_RUNTIME`,
-`OT_KUBESOLO_VERSION`, `OT_HELM_VERSION`, `OT_KUBECTL_VERSION`, `OT_ADMIN_USER`,
+`OT_K3S_VERSION`, `OT_HELM_VERSION`, `OT_ADMIN_USER`,
 `OT_FUXA_IMAGE`, `OT_PYMODBUS_VERSION`, `OT_ASYNCUA_VERSION`, `OT_CPPPO_VERSION`,
 `OT_SNAP7_VERSION`, `OT_SIMS`, `OT_SKIP_UPDATES=1`, `OT_SKIP_CLEANUP=1`.
 
@@ -124,9 +138,9 @@ VM's cluster. A broker bake takes the same treatment, and the same overrides:
 | asyncua | `1.1.5` | `OT_ASYNCUA_VERSION` env |
 | cpppo | `5.2.5` | `OT_CPPPO_VERSION` env |
 | python-snap7 | `3.1.2` | `OT_SNAP7_VERSION` env |
-| KubeSolo | `v1.2.0` (`-offline` build) | `OT_KUBESOLO_VERSION` env — it must be a release that publishes an `-offline` archive, or the cell would need a registry at first start |
-| helm | `v3.16.3` | `OT_HELM_VERSION` env (the pin `examples/playbooks/kubesolo/` uses) |
-| kubectl | whatever `dl.k8s.io` calls stable at bake time | `OT_KUBECTL_VERSION` env |
+| k3s | `v1.31.4+k3s1` | `OT_K3S_VERSION` env — the binary, the air-gap image bundle and the installer are all fetched for that tag |
+| helm | `v3.16.3` | `OT_HELM_VERSION` env (the pin `examples/playbooks/ot/` uses) |
+| kubectl | k3s's own | follows `OT_K3S_VERSION` |
 | Sim base image | `python:3.12-slim` | edit the script |
 
 **cpppo must be 5.x.** The 4.x series rewrites code objects at import and dies on
@@ -138,22 +152,14 @@ that is every bake, at the smoke test. `test_ot_provisioner.py` refuses a 4.x pi
 From 3.0 the server is pure Python, so it installs as a plain wheel. A 2.x pin brings
 the native dependency back and the bake fails at the smoke test.
 
-**Image loads must pass `--local` to `ctr`.** The cell lifts `ctr` out of Docker's
-`containerd.io` package just before purging Docker, so its version is whatever Docker
-ships on the day of the bake — 2.x now. From containerd 2.0 `ctr` routes image
-imports, pulls and exports through the *transfer* service, and KubeSolo's embedded
-containerd does not register the streaming API that needs: the bake stops at
-`unknown service containerd.services.streaming.v1.Streaming` on a socket where
-listing images answers perfectly, which reads like a broken containerd rather than a
-client asking for an API this one never had. `--local` is the pre-2.0 path, and a
-no-op on the containerd 1.7 client the broker pins, where it is already the default.
-`test_ot_kubesolo.py` refuses any of the three without it — including inside the
-`apply.sh` the bake writes, since a cell re-imports from the tarballs on every boot
-with that same client.
+**Image loads go through `k3s ctr`.** It is the client that ships with the k3s binary,
+so it always matches k3s's containerd and talks to k3s's socket.
+`test_ot_k3s.py` refuses any image move through another client — including inside the
+`apply.sh` the bake writes, since a cell checks and re-imports at every boot.
 
 The bake smoke-tests **every** workload it assembled — the sims `OT_SIMS` selected plus
 FUXA — and fails the build if any is not running, rather than shipping an image that
-boots dead inside an air-gapped subnet. On the KubeSolo runtime it goes one step
+boots dead inside an air-gapped subnet. On the k3s runtime it goes one step
 further and proves each port *answers*, because a Ready rollout is not the same claim
 as a listening PLC.
 
@@ -197,9 +203,9 @@ not generate one.
 
 For a demo that needs the OpenPLC brand, build it at bake time in a customized copy of
 this script (`docker build https://github.com/thiagoralves/OpenPLC_v3.git -t
-openplc:local`, pinning a commit with `#<sha>`, before the Docker purge), export it
-alongside the others, and point the `ot-plc` Deployment in
-`/opt/ot-sim/kubesolo/ot-sim.yaml` at it — adding `8080` for its web UI. Doing it on a
-deployed cell instead means giving that cell egress *and* a way to build images, which
-it no longer has: the honest options are a custom bake or `OT_RUNTIME=docker` plus a
-temporary `gcp_vm_nat_enabled`.
+openplc:local`, pinning a commit with `#<sha>`), save it into
+`/var/lib/rancher/k3s/agent/images/` alongside the others, and point the `ot-plc`
+Deployment in `/opt/ot-sim/k3s/ot-sim.yaml` at it — adding `8080` for its web UI. Doing
+it on a deployed cell instead means giving that cell egress, which it does not have:
+Docker is on the cell, but there is nothing for it to pull from. The honest options are
+a custom bake, or a temporary `gcp_vm_nat_enabled`.

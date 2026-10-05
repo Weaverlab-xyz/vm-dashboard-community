@@ -75,7 +75,7 @@ NAMESPACE = "openfaas-fn"
 FUNCTION_IMAGE = "ot-faas-python:baked"
 
 # In-cluster, and that is the whole point. Entitle never learns an address outside the
-# plant: this resolves only inside the broker's KubeSolo, and the agent is what dials
+# plant: this resolves only inside the broker's k3s, and the agent is what dials
 # it. `_split_base_url` keeps the `/function/<name>` prefix on every route field, which
 # is the machinery that was built for Azure's `/api` doing the same job here.
 GATEWAY_BASE = "http://gateway.openfaas.svc.cluster.local:8080"
@@ -336,7 +336,7 @@ def skip_reason(cmeta: dict, bmeta: Optional[dict] = None) -> str:
                 "plant.")
     if not cmeta.get("ot_broker_job_id"):
         return ("This cell has no DMZ broker, and the adapter runs on the broker's "
-                "KubeSolo beside the Entitle agent that calls it. Deploy the cell with "
+                "k3s beside the Entitle agent that calls it. Deploy the cell with "
                 "Entitle to get one.")
     if not (cmeta.get("ot_agent_token_name") or "").strip():
         return ("This cell has no Entitle agent token recorded, and the integration is "

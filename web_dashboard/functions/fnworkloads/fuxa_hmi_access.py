@@ -5,7 +5,7 @@ console an operator or a visiting vendor uses to see and change the process — 
 until now the OT demo handed out a standing admin account. This mints one on
 approval and deletes it on expiry.
 
-It runs on the plant's own function runtime (the OT broker's KubeSolo), because the
+It runs on the plant's own function runtime (the OT broker's k3s), because the
 HMI sits behind the Purdue boundary: the cell admits the PRA Gateway and the broker
 and nothing else. So Entitle's agent, a pod on that same cluster, is what calls this
 adapter, and Entitle itself never needs a route into the plant.

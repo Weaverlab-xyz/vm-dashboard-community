@@ -540,7 +540,7 @@ def test_describe_is_safe_on_a_cell_that_predates_the_feature():
 # halves are held against each other rather than documented.
 
 _PLAY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
-                     "examples", "playbooks", "kubesolo",
+                     "examples", "playbooks", "ot",
                      "openfaas-function-deploy.yml")
 
 

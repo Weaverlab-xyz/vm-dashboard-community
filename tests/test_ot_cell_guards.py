@@ -12,7 +12,7 @@ the damage surfaces somewhere nobody is looking.
 3. **A `routing: v0` tenant was accepted.** Those agents pull from ghcr.io and
    gcr.io/datadoghq, which no narrow allow-list can name, so the agent reached
    CrashLoopBackOff inside a subnet with no egress to debug from.
-4. **A docker-baked cell could be given the KubeSolo tunnel.** Nothing listens on 6443
+4. **A docker-baked cell could be given the cluster (k3s) tunnel.** Nothing listens on 6443
    there, and a tunnel to a dead port fails exactly like a blocked firewall — which
    this feature's own docs call the most expensive kind of demo failure.
 
@@ -136,21 +136,41 @@ def test_the_token_is_checked_between_the_mint_and_the_first_launch():
 
 def test_a_docker_cell_may_not_be_given_the_cluster_tunnel():
     ot = _load_ot()
-    problem = ot.cell_runtime_problem(["modbus", "kubesolo"], "docker")
+    problem = ot.cell_runtime_problem(["modbus", "k3s"], "docker")
     assert problem, "a docker-baked cell was allowed to broker :6443"
     assert "6443" in problem and "No VM was launched" in problem
 
 
 def test_a_docker_cell_keeps_every_fieldbus_protocol():
     """The guard is about the CLUSTER's endpoints, not about the runtime being lesser —
-    docker cells serve every PLC protocol exactly as KubeSolo ones do."""
+    docker cells serve every PLC protocol exactly as k3s ones do."""
     ot = _load_ot()
     assert ot.cell_runtime_problem(ot.plc_protocols(), "docker") == ""
 
 
-def test_the_kubesolo_runtime_may_broker_anything_the_image_serves():
+def test_the_k3s_runtime_may_broker_anything_the_image_serves():
     ot = _load_ot()
-    assert ot.cell_runtime_problem(ot.cell_protocols(), "kubesolo") == ""
+    assert ot.cell_runtime_problem(ot.cell_protocols(), "k3s") == ""
+
+
+def test_a_new_kubesolo_cell_is_refused_with_the_remedy():
+    """The bake no longer produces a KubeSolo image, so a deploy that asserts one is
+    describing an image that cannot exist — refuse it, and say what to bake instead."""
+    ot = _load_ot()
+    problem = ot.cell_runtime_problem(["modbus"], "kubesolo")
+    assert problem and "k3s" in problem and "No VM was launched" in problem
+
+
+def test_a_cell_deployed_on_kubesolo_still_reads_and_rewires():
+    """Cells deployed before the move to k3s carry runtime "kubesolo" and a tunnel
+    recorded under the "kubesolo" key. Reading them back must not lie about the runtime,
+    and the old key must still resolve to :6443, or Re-wire and teardown break."""
+    ot = _load_ot()
+    assert ot.cell_runtime({"runtime": "kubesolo"}) == "kubesolo"
+    assert ot.cell_runtime({}) == "k3s"
+    assert ot.resolve_ports("kubesolo") == (6443, 6443)
+    assert "kubesolo" not in ot.cell_protocols(), "a new cell is still offered KubeSolo"
+    assert "kubesolo" not in ot.OT_PORT_PRESETS, "KubeSolo is still an offered preset"
 
 
 def test_an_unknown_runtime_is_refused_rather_than_assumed():
@@ -162,7 +182,7 @@ def test_the_runtime_only_presets_come_from_the_table():
     """Derived, not hardcoded: a platform endpoint added to OT_PORT_PRESETS later is
     covered the day it is added, without anyone remembering this guard exists."""
     ot = _load_ot()
-    assert "kubesolo" in ot.runtime_only_presets()
+    assert "k3s" in ot.runtime_only_presets()
     assert not set(ot.runtime_only_presets()) & set(ot.plc_protocols()), (
         "a fieldbus protocol is being treated as a cluster endpoint")
     body = _fn_body(_OT, "runtime_only_presets")
