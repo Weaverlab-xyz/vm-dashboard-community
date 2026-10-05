@@ -173,6 +173,7 @@ _NAV_SCOPE = {
     "connections": "connections", "aws": "aws", "azure": "azure", "gcp": "gcp",
     "oci": "oci", "containers": "containers", "images": "images", "storage": "storage",
     "databases": "cloud_database", "functions": "cloud_function", "k8s": "k8s",
+    "directories": "directories",
     "costs": "costs", "config_mgmt": "config_mgmt", "inventory": "inventory",
     "agents": "agents", "audit": "audit",
 }

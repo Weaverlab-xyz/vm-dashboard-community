@@ -125,7 +125,7 @@ _BUILTIN_ROLES = (
             "proxmox": _R, "vsphere": _R, "hyperv": _R, "nutanix": _R, "xcpng": _R,
             "connections": _R,
             "images": _R, "containers": _R, "k8s": _R, "cloud_function": _R,
-            "cloud_database": _R, "storage": _R, "config_mgmt": _R,
+            "cloud_database": _R, "directories": _R, "storage": _R, "config_mgmt": _R,
             "pov": _R, "pov_own": _R, "pov_templates": _R,
             "gateways": _R, "agents": _R, "notifications": _R, "epml": _R, "ot": _R,
         },

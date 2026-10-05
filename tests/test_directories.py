@@ -331,6 +331,77 @@ def test_expiry_honours_provisioned_and_refuses_registered():
     assert item["id"] == "directory:x" and item["source"] == "registered"
 
 
+def _client(user):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from web_dashboard.api import directories as api
+    from web_dashboard.api.auth import get_current_user
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[get_current_user] = lambda: user
+    return TestClient(app)
+
+
+class _User:
+    def __init__(self, perms, admin=False, username="alice"):
+        import json as _j
+        self.username = username
+        self.is_admin = admin
+        self.is_effective_admin = admin
+        self.permissions = _j.dumps(perms) if perms is not None else None
+        self.is_active = True
+        self.workgroups = "[]"
+        self.must_change_password = False
+
+
+def test_api_routes_need_an_explicit_grant():
+    from web_dashboard.api import directories as api
+    import inspect
+    src = inspect.getsource(api)
+    assert 'require_permission("directories"' not in src
+    assert src.count('require_explicit_permission("directories"') >= 8
+
+
+def test_admin_password_route_refuses_password_safe_custody():
+    _cfg()
+    db = _db()
+    row = ManagedDirectory(name="ps.example.com", cloud="aws", provider="aws_managed_ad",
+                           source="provisioned", status="available", created_by="alice",
+                           admin_password_custody="passwordsafe_managed", ps_account_id="8")
+    db.add(row)
+    db.commit()
+    c = _client(_User(None, admin=True))
+    r = c.get(f"/api/directories/{row.id}/admin-password")
+    assert r.status_code == 409, r.text
+    assert "Password Safe" in r.json()["detail"]
+    db.close()
+
+
+def test_joinable_needs_the_clouds_write_permission():
+    _cfg()
+    db = _db()
+    db.add(ManagedDirectory(name="join.example.com", cloud="aws", provider="aws_managed_ad",
+                            source="registered", status="available", region="us-west-2",
+                            directory_id="d-join"))
+    db.commit()
+    from web_dashboard.api import directories as api
+    orig = api.has_permission
+    api.has_permission = lambda user, scope, level: level in (user.grants.get(scope) or [])
+    try:
+        u = _User(None)
+        u.grants = {"aws": ["read"]}
+        r = _client(u).get("/api/directories/joinable?cloud=aws")
+        assert r.status_code == 403, r.text
+        u.grants = {"aws": ["read", "write"]}
+        r = _client(u).get("/api/directories/joinable?cloud=aws&region=us-west-2")
+    finally:
+        api.has_permission = orig
+    assert r.status_code == 200, r.text
+    names = [d["name"] for d in r.json()["directories"]]
+    assert names == ["join.example.com"]
+    db.close()
+
+
 def test_password_generator_rules():
     for _ in range(50):
         pw = ds.generate_admin_password()

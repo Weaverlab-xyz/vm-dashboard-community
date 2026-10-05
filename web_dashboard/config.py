@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     xcpng_enabled: bool = False         # XCP-ng/XenServer router + /xcpng page (XAPI XML-RPC)
     vdesktops_enabled: bool = False     # Virtual desktops router + /desktops page (Azure pools + PRA brokering)
     cloud_database_enabled: bool = False  # /api/databases router — private managed DBs brokered via a PRA tunnel
+    directories_enabled: bool = False     # /directories — managed Active Directory (AWS + GCP) and AD join for Windows servers
     k8s_management_enabled: bool = False  # /api/k8s router — provision/register/manage Kubernetes clusters
     cloud_functions_enabled: bool = False  # /api/functions router — Lambda / Function App / Cloud Run function lifecycle
     # /api/agent router + /agents page — containerised agents inside private networks
@@ -1247,6 +1248,19 @@ class Settings(BaseSettings):
     windows_admin_secret_backend: str = ""
     # GCP Windows servers: the local account the windows-keys exchange creates at deploy.
     gcp_windows_admin_username: str = "gcpadmin"
+    # Managed Active Directory (services/directory_service). No timer by default: servers
+    # joined to a directory break when it goes.
+    directory_aws_default_edition: str = "Standard"   # Standard | Enterprise
+    directory_gcp_reserved_ip_range: str = ""          # an unused /24 for GCP domain controllers
+    directory_join_default_ou: str = ""                # OU distinguished name for joined servers ("" = Computers)
+    # GCE domain join runs as the VM's service account, which needs
+    # roles/managedidentities.domainJoin. Blank = no service account → no GCP join.
+    gcp_domain_join_service_account: str = ""
+    # Directory administrator in Password Safe: a functional account on an Active Directory
+    # platform, and the managed system's entity type (0 = passwordsafe_entity_type_id).
+    passwordsafe_directory_functional_account: str = ""
+    passwordsafe_directory_entity_type_id: int = 0
+    passwordsafe_directory_change_password_on_register: bool = True
     # ACR credentials (leave empty to pull from Docker Hub without auth).
     # Direct fields are preferred; values are stored encrypted in the DB and
     # transparently resolved through the chosen secrets backend (PS / AWS SM /

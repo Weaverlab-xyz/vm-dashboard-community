@@ -1022,6 +1022,7 @@ templates.env.globals["static_url"] = static_assets.url
 from fastapi import Depends  # noqa: E402
 from .api import auth, jobs, websocket, aws, azure, gcp, oci, packer, mfa, tokens, oauth, users, groups, setup, secrets, storage, images, regions as regions_api  # noqa: E402
 from .api import cloud_databases  # noqa: E402
+from .api import directories as directories_api  # noqa: E402
 from .api import cert_lab as cert_lab_api  # noqa: E402
 from .api import spire_lab as spire_lab_api  # noqa: E402
 from .api import spiffe_oidc as spiffe_oidc_api  # noqa: E402
@@ -1235,6 +1236,8 @@ app.include_router(websocket.router)
 app.include_router(aws.router,
                    dependencies=[_profile_page_gate("cloud_pages")])
 app.include_router(cloud_databases.router)
+app.include_router(directories_api.router,
+                   dependencies=[_feature_gate("directories_enabled")])
 # Preview feature: the flag is owned by the Settings → Preview features card, and
 # the router 404s entirely while it is off (the handlers also self-gate with 403,
 # so a stale route can't leak either).
@@ -1828,6 +1831,13 @@ async def desktops_page(request: Request):
     """Virtual-desktop management page. Nav-, page- and router-gated on
     vdesktops_enabled."""
     return templates.TemplateResponse("desktops/index.html", {"request": request})
+
+
+@app.get("/directories", response_class=HTMLResponse, include_in_schema=False,
+         dependencies=[_feature_gate("directories_enabled")])
+async def directories_page(request: Request):
+    """Managed Active Directory (AWS + GCP): build, discover, register, destroy."""
+    return templates.TemplateResponse("directories/index.html", {"request": request})
 
 
 @app.get("/databases", response_class=HTMLResponse, include_in_schema=False,

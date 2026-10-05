@@ -247,6 +247,7 @@ class FeaturesSetup(BaseModel):
     cost_explorer_enabled: bool = False
     admission_control_enabled: bool = False
     cloud_database_enabled: bool = False
+    directories_enabled: bool = False
     k8s_management_enabled: bool = False
     cloud_functions_enabled: bool = False
     remote_agents_enabled: bool = False
@@ -578,6 +579,7 @@ def _apply_config(payload: SetupPayload) -> None:
         "cost_explorer_enabled":    "1" if payload.features.cost_explorer_enabled else "0",
         "admission_control_enabled": "1" if payload.features.admission_control_enabled else "0",
         "cloud_database_enabled":   "1" if payload.features.cloud_database_enabled else "0",
+        "directories_enabled":      "1" if payload.features.directories_enabled else "0",
         "k8s_management_enabled":   "1" if payload.features.k8s_management_enabled else "0",
         "cloud_functions_enabled":  "1" if payload.features.cloud_functions_enabled else "0",
         "remote_agents_enabled":    "1" if payload.features.remote_agents_enabled else "0",
@@ -1913,6 +1915,20 @@ class OidcFeatureConfig(BaseModel):
     workload_idp_extra_issuers: str = ""
 
 
+class DirectoriesFeatureConfig(BaseModel):
+    """Config panel for managed Active Directory (services/directory_service). The toggle
+    owns `directories_enabled` via `enabled`. The Password Safe keys for the directory
+    administrator live here rather than on the Password Safe panel because they only
+    mean anything when this feature is on."""
+    enabled: bool = False
+    directory_aws_default_edition: str = "Standard"
+    directory_gcp_reserved_ip_range: str = ""
+    directory_join_default_ou: str = ""
+    gcp_domain_join_service_account: str = ""
+    passwordsafe_directory_functional_account: str = ""
+    passwordsafe_directory_change_password_on_register: bool = True
+
+
 class CloudFunctionsFeatureConfig(BaseModel):
     """Config panel for the Cloud Functions feature. Graduated from preview to GA once
     a dashboard-authored handler was deployed and invoked end-to-end against both a
@@ -2178,6 +2194,7 @@ _FEATURE_MODELS = {
     "nutanix":      NutanixFeatureConfig,
     "xcpng":        XcpNgFeatureConfig,
     "cloud_database": CloudDatabaseFeatureConfig,
+    "directories":    DirectoriesFeatureConfig,
     "k8s_management": K8sManagementFeatureConfig,
     "vdesktops":      VirtualDesktopsFeatureConfig,
     "cost_explorer":  CostExplorerFeatureConfig,

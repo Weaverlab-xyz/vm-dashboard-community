@@ -4166,6 +4166,10 @@ _BACKFILL_V1_DELIBERATELY_EMPTY = (
     # of its routes, which is what test_the_form_of_every_gate_agrees_with_the_backfill
     # checks this decision against.
     "change_windows",
+    # Brand-new for the same reason as change_windows: managed Active Directory is a new
+    # page over new routes, every one behind require_explicit_permission. Nobody had
+    # access yesterday, so a backfill would grant, not preserve.
+    "directories",
     # Same reason: a brand-new authority (create, and run/destroy your own POVs), so no
     # prior access to preserve. The one place it IS added on upgrade is the built-in POV
     # Presenter role, which is the point of it -- `_grant_presenter_own_pov`.
