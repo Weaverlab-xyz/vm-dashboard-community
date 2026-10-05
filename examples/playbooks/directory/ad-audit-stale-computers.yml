@@ -1,0 +1,51 @@
+# Audit: stale computer objects in Active Directory (read-only)
+# Target: an on-prem AD directory, run through its remote agent over WinRM.
+# Changes nothing. Lists enabled computer accounts with no logon in ad_stale_days
+# (default 90), the usual leftovers of servers destroyed without leaving the domain.
+# Remove them with ad-remove-computer.yml once you have checked the list.
+# Optional:
+#   ad_stale_days: 90
+#   ad_search_base: OU=Servers,DC=corp,DC=example,DC=com  # blank = the whole domain
+- name: Audit stale AD computer objects
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: winrm
+    ad_stale_days: 90
+    ad_search_base: ""
+    _cutoff_filetime: "{{ (((now().timestamp() | int) - (ad_stale_days | int) * 86400 + 11644473600) * 10000000) | int }}"
+  tasks:
+    - name: Fail early on a bad window
+      ansible.builtin.assert:
+        that:
+          - ad_stale_days | int > 0
+        fail_msg: ad_stale_days must be a positive number of days.
+
+    - name: Find stale computers
+      microsoft.ad.object_info:
+        ldap_filter: >-
+          (&(objectCategory=computer)(!(userAccountControl:1.2.840.113556.1.4.803:=2))(|(lastLogonTimestamp<={{ _cutoff_filetime }})(!(lastLogonTimestamp=*))))
+        properties: [sAMAccountName, dNSHostName, operatingSystem, lastLogonTimestamp]
+        search_base: "{{ ad_search_base if ad_search_base | length > 0 else omit }}"
+        domain_server: "{{ dir_host | default(omit) }}"
+        domain_username: "{{ dir_bind_dn | default(omit) }}"
+        domain_password: "{{ dir_bind_password | default(omit) }}"
+      register: _found
+      no_log: true              # carries the bind password
+
+    - name: Build the report
+      ansible.builtin.set_fact:
+        _report: >-
+          {{ _found.objects | map(attribute='sAMAccountName')
+             | map('regex_replace', '\$$', '') | list | sort }}
+
+    - name: Print the report
+      ansible.builtin.debug:
+        msg:
+          - "{{ _report | length }} enabled computer(s) with no logon in {{ ad_stale_days }} days"
+          - "{{ _report }}"
+
+    - name: Record the report as job stats
+      ansible.builtin.set_stats:
+        data:
+          ad_audit_stale_computers: "{{ _report }}"

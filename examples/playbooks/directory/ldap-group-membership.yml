@@ -1,0 +1,46 @@
+# Add or remove members of an LDAP group
+# Target: an on-prem directory, run through its remote agent with transport "LDAP".
+#
+# Required:
+#   ldap_group_dn: cn=developers,ou=Groups,dc=example,dc=com
+#   ldap_members: [uid=jdoe,ou=People,dc=example,dc=com]
+# Optional:
+#   ldap_member_attribute: member           # member (groupOfNames, AD) | uniqueMember |
+#                                           # memberUid (posixGroup: give bare uids)
+#   ldap_membership_state: present          # present = add | absent = remove
+#   ldap_validate_certs: true
+# Supports --check.
+- name: Manage LDAP group membership
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ldap_group_dn: ""
+    ldap_members: []
+    ldap_member_attribute: member
+    ldap_membership_state: present
+    ldap_validate_certs: true
+    ldap_server_uri: "{{ ('ldaps' if dir_use_ldaps | default(true) | bool else 'ldap') ~ '://' ~ dir_host ~ ':' ~ dir_port }}"
+  tasks:
+    - name: Fail early if required vars are missing
+      ansible.builtin.assert:
+        that:
+          - dir_host is defined and dir_host | length > 0
+          - ldap_group_dn | length > 0
+          - ldap_members | length > 0
+          - ldap_member_attribute in ['member', 'uniqueMember', 'memberUid']
+          - ldap_membership_state in ['present', 'absent']
+        fail_msg: >-
+          Set ldap_group_dn and ldap_members; ldap_member_attribute is member,
+          uniqueMember or memberUid.
+
+    - name: Change the membership
+      community.general.ldap_attrs:
+        dn: "{{ ldap_group_dn }}"
+        attributes: "{{ {ldap_member_attribute: ldap_members} }}"
+        state: "{{ ldap_membership_state }}"
+        server_uri: "{{ ldap_server_uri }}"
+        bind_dn: "{{ dir_bind_dn }}"
+        bind_pw: "{{ dir_bind_password }}"
+        validate_certs: "{{ ldap_validate_certs }}"
+      no_log: true              # carries the bind password

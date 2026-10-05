@@ -46,6 +46,9 @@ mid-run; leave it blank and the play behaves exactly as before:
 | `database/mysql-create-user.yml` | `target_user_password_secret` |
 | `ot/entitle-agent-install.yml` | `entitle_agent_token_secret` |
 | `portainer/*.yml` | `portainer_pat_secret` |
+| `directory/ad-user.yml` | `ad_user_password_secret` |
+| `directory/ad-reset-password.yml` | `ad_new_password_secret` |
+| `directory/ldap-password.yml` | `ldap_new_password_secret` |
 
 The `PASSWORD_SAFE_*` credentials are auto-injected into every runner, so nothing else
 is needed. The lookup runs on the **controller** (the runner container), so a remote
@@ -532,6 +535,63 @@ ephemeral-secrets gate). Both runner images ship the collection.
 
 See [password-safe/README.md](password-safe/README.md) for the credential contract, path
 formats, and a standalone `docker run` smoke test.
+
+## Directories: Active Directory and LDAP (`directory/`)
+
+Plays that change an **on-premises directory** registered on the Directories page
+through a remote agent (see [docs/cloud/directories.md](../../docs/cloud/directories.md#on-premises-directories-through-a-remote-agent)).
+In Config Management, pick the directory under **On-Prem Directories (via agent)** and
+choose the transport:
+
+- **LDAP** for the `ldap-*` plays: a `hosts: localhost` play on the agent's runner that
+  connects to the directory with `community.general.ldap_*`. Works with OpenLDAP, 389-DS,
+  FreeIPA and Active Directory.
+- **WinRM** for the `ad-*` plays: `microsoft.ad` modules on a domain controller, or on a
+  domain-joined management host you name, over HTTPS (5986).
+
+You supply no credential. The run checks out the directory's **Password Safe managed
+account** for that run only, and injects it with the connection as `dir_host`,
+`dir_port`, `dir_use_ldaps`, `dir_base_dn`, `dir_domain`, `dir_bind_dn` and
+`dir_bind_password`. A WinRM run also logs on as that account. Every task that touches
+a password is `no_log`, and the agent redacts the bind password from the output.
+
+To run these plays outside the dashboard, set the `dir_*` vars yourself, plus
+`ansible_user` / `ansible_password` for WinRM.
+
+**Changes (Active Directory, WinRM):**
+
+| File | Purpose | Required vars |
+|---|---|---|
+| `ad-user.yml` | Create, update, disable or remove a user; add it to or take it out of groups | `ad_user_name` |
+| `ad-group.yml` | Create a group; add, remove or set its members | `ad_group_name` |
+| `ad-ou.yml` | Create an OU, protected from accidental deletion | `ad_ou_name` |
+| `ad-reset-password.yml` | Reset a password, optionally forcing a change at next logon and unlocking the account | `ad_user_name`, `ad_new_password` or `ad_new_password_secret` |
+| `ad-remove-computer.yml` | Delete computer objects, for example those left behind by destroyed servers | `ad_computers`, `confirm: true` |
+
+**Changes (any LDAP directory):**
+
+| File | Purpose | Required vars |
+|---|---|---|
+| `ldap-entry.yml` | Add or remove an entry (removing needs `confirm: true`) | `ldap_dn`, `ldap_object_class` |
+| `ldap-attrs.yml` | Replace, add or remove attribute values | `ldap_dn`, `ldap_attributes` |
+| `ldap-group-membership.yml` | Add or remove group members (`member`, `uniqueMember` or `memberUid`) | `ldap_group_dn`, `ldap_members` |
+| `ldap-password.yml` | Set a password with the Password Modify operation; for AD use `ad-reset-password.yml` | `ldap_user_dn`, `ldap_new_password` or `ldap_new_password_secret` |
+
+**Read-only reports:**
+
+| File | Purpose |
+|---|---|
+| `ldap-search.yml` | Search with a filter and attributes; print the results |
+| `ad-audit-stale-accounts.yml` | Enabled users with no logon in N days (default 90) or never logged on, plus "password never expires" and "password not required" |
+| `ad-audit-privileged-groups.yml` | Recursive members of Domain Admins, Enterprise Admins, Schema Admins, Administrators and the other operator groups |
+| `ad-audit-stale-computers.yml` | Enabled computer accounts with no logon in N days. Clean them up with `ad-remove-computer.yml` |
+
+The reports print a summary and record it with `set_stats`, so it is in the job's
+output. Every play supports `--check`.
+
+The runner image (`chrweav/ansible-cloud`) carries `python-ldap`, `pywinrm` and the
+`microsoft.ad` collection. An agent picks it through `ansible.directory_image`, falling
+back to `ansible.db_image`.
 
 ## Notes
 

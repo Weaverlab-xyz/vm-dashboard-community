@@ -1,0 +1,40 @@
+# Remove computer objects from Active Directory
+# Target: an on-prem AD directory, run through its remote agent over WinRM.
+#
+# Destroying a domain-joined cloud server does not remove its computer object; this
+# play is the cleanup. It deletes objects, so it refuses to run without confirm: true.
+# Required:
+#   ad_computers: [WEB01, WEB02]           # computer names (sAMAccountName without $)
+#   confirm: true
+# Run with --check first to see what would be removed.
+- name: Remove AD computer objects
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: winrm
+    ad_computers: []
+    confirm: false
+  tasks:
+    - name: Refuse unless confirmed
+      ansible.builtin.assert:
+        that:
+          - confirm | bool
+          - ad_computers | length > 0
+        fail_msg: >-
+          This play deletes computer objects. List them in ad_computers and set
+          confirm: true to proceed.
+
+    - name: Remove each computer object
+      microsoft.ad.computer:
+        identity: "{{ item }}"
+        name: "{{ item }}"
+        state: absent
+        domain_server: "{{ dir_host | default(omit) }}"
+        domain_username: "{{ dir_bind_dn | default(omit) }}"
+        domain_password: "{{ dir_bind_password | default(omit) }}"
+      loop: "{{ ad_computers }}"
+      no_log: true              # carries the bind password
+
+    - name: Report what was removed
+      ansible.builtin.debug:
+        msg: "Removed (or already absent): {{ ad_computers | join(', ') }}"

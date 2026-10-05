@@ -1,0 +1,53 @@
+# Create an Active Directory group and manage its members
+# Target: an on-prem AD directory, run through its remote agent over WinRM.
+#
+# HOW TO RUN — through the dashboard the domain credential is injected (dir_bind_dn /
+# dir_bind_password, the directory's Password Safe account, checked out per run).
+# Required:
+#   ad_group_name: App Operators
+# Optional:
+#   ad_group_state: present                  # present | absent
+#   ad_group_scope: global                   # domainlocal | global | universal
+#   ad_group_category: security              # security | distribution
+#   ad_group_path: OU=Groups,DC=corp,DC=example,DC=com
+#   ad_group_members_add: [jdoe]
+#   ad_group_members_remove: []
+#   ad_group_members_set: []                 # non-empty = exactly these members
+# Supports --check.
+- name: Manage an Active Directory group
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: winrm
+    ad_group_name: ""
+    ad_group_state: present
+    ad_group_scope: global
+    ad_group_category: security
+    ad_group_path: ""
+    ad_group_members_add: []
+    ad_group_members_remove: []
+    ad_group_members_set: []
+  tasks:
+    - name: Fail early if required vars are missing
+      ansible.builtin.assert:
+        that:
+          - ad_group_name | length > 0
+          - ad_group_state in ['present', 'absent']
+          - ad_group_scope in ['domainlocal', 'global', 'universal']
+          - ad_group_category in ['security', 'distribution']
+        fail_msg: Set ad_group_name; scope and category must be valid values.
+
+    - name: Create or update the group
+      microsoft.ad.group:
+        name: "{{ ad_group_name }}"
+        state: "{{ ad_group_state }}"
+        scope: "{{ ad_group_scope if ad_group_state == 'present' else omit }}"
+        category: "{{ ad_group_category if ad_group_state == 'present' else omit }}"
+        path: "{{ ad_group_path if ad_group_path | length > 0 else omit }}"
+        members: >-
+          {{ {'set': ad_group_members_set} if ad_group_members_set | length > 0
+             else {'add': ad_group_members_add, 'remove': ad_group_members_remove} }}
+        domain_server: "{{ dir_host | default(omit) }}"
+        domain_username: "{{ dir_bind_dn | default(omit) }}"
+        domain_password: "{{ dir_bind_password | default(omit) }}"
+      no_log: true              # carries the bind password
