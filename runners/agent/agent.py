@@ -2274,6 +2274,9 @@ def probe_directory(ip: str, port: int, timeout: float) -> Optional[dict]:
         sock.settimeout(timeout)
         if port == 636:
             ctx = ssl.create_default_context()
+            # The same floor as every other TLS client in this agent. A DC that offers only
+            # TLS 1.0/1.1 is reported as "not a directory" on 636; 389 still finds it.
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
             sock = ctx.wrap_socket(sock, server_hostname=ip)

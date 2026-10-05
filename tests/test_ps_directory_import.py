@@ -10,8 +10,8 @@ What these pin:
   chosen system is refused, and host/port never come from the request;
 - import goes through register_onprem, so an old agent is refused per item and nothing
   secret is stored;
-- a duplicate selection is refused before anything is written; an already-registered
-  directory is reported, not re-registered;
+- a duplicate selection is refused (400) before anything is written; per-item failures,
+  such as an already-registered directory, come back in `failed` with a count of 0;
 - both routes need directories:write explicitly and secrets:use.
 
 Uses a real temp SQLite database; Password Safe is stubbed.
@@ -179,7 +179,7 @@ def test_import_registers_through_register_onprem():
     assert rows[101]["already_registered"] is True
     r = c.post("/api/directories/ps-import", json={"items": [
         {"system_id": 101, "account_id": 501, "agent_id": agent}]})
-    assert r.status_code == 400 and "already registered" in r.text
+    assert r.status_code == 200 and r.json()["count"] == 0 and "already registered" in r.text
 
 
 def test_an_account_from_another_system_is_refused():
@@ -187,7 +187,7 @@ def test_an_account_from_another_system_is_refused():
     agent = _agent()
     r = _client().post("/api/directories/ps-import", json={"items": [
         {"system_id": 101, "account_id": 503, "agent_id": agent}]})
-    assert r.status_code == 400 and "not a requestable account on that directory" in r.text
+    assert r.status_code == 200 and r.json()["count"] == 0 and "not a requestable account on that directory" in r.text
 
 
 def test_old_agent_is_refused_per_item():
@@ -195,7 +195,7 @@ def test_old_agent_is_refused_per_item():
     old = _agent("2.7.0")
     r = _client().post("/api/directories/ps-import", json={"items": [
         {"system_id": 101, "account_id": 501, "agent_id": old}]})
-    assert r.status_code == 400 and "2.8" in r.text
+    assert r.status_code == 200 and r.json()["count"] == 0 and "2.8" in r.text
 
 
 def test_selection_problems_refuse_the_whole_request():

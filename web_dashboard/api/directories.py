@@ -111,8 +111,12 @@ def build_options(user: User = Depends(require_explicit_permission("directories"
     for cloud in directory_service.PROVISIONING_CLOUDS:
         try:
             windows_admin_secret.resolve_backend(cloud)
-        except windows_admin_secret.WindowsSecretError as e:
-            missing.append(f"{cloud}: {e}")
+        except windows_admin_secret.WindowsSecretError:
+            # Fixed wording rather than the exception's text, so nothing from the secrets
+            # layer reaches the response.
+            missing.append(f"{cloud}: no place to store the administrator password — "
+                           f"configure Password Safe, an external secrets backend, or "
+                           f"the cloud's own vault")
     return {
         "clouds": list(directory_service.PROVISIONING_CLOUDS),
         "aws_editions": list(directory_service.AWS_EDITIONS),
@@ -415,11 +419,8 @@ async def ps_import(req: PSDirectoryImportRequest, db: Session = Depends(get_db)
         "batch_id": batch_id, "count": len(imported),
         "system_ids": [i["system_id"] for i in imported],
         "failed": [f["system_id"] for f in failed]})
-    if not imported:
-        raise HTTPException(
-            status_code=400,
-            detail=(f"No directories were imported. First failure: {failed[0]['error']}"
-                    if failed else "No directories were imported."))
+    # A batch where every item failed still answers 200 with the per-item reasons, which
+    # the dialog lists; folding the first reason into an error message would lose the rest.
     return {"batch_id": batch_id, "count": len(imported),
             "imported": imported, "failed": failed}
 

@@ -555,7 +555,8 @@ function directoriesPage() {
           system_id: c.system_id, account_id: Number(c._account), agent_id: c._agent,
           base_dn: c._base_dn || '' })) });
         p.failed = r.failed || [];
-        this.note(r.count + ' director' + (r.count === 1 ? 'y' : 'ies') + ' imported');
+        this.note(r.count + ' director' + (r.count === 1 ? 'y' : 'ies') + ' imported',
+                  r.count ? 'success' : 'error');
         if (!p.failed.length) p.open = false;
         await this.load();
       } catch (e) { p.error = e.message; }
