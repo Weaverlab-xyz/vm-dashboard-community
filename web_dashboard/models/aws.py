@@ -45,6 +45,7 @@ class EC2InstanceInfo(BaseModel):
     availability_zone: str = ""
     region: str = ""  # AWS region the instance lives in (recorded on the deploy job)
     key_name: Optional[str] = None
+    platform: str = ""          # "windows" for Windows instances, "" for Linux
     workgroup: Optional[str] = None  # from Job.workgroup; None = unassigned
     # Dashboard-specific fields (from DB)
     job_id: Optional[str] = None

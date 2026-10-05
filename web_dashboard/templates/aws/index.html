@@ -437,8 +437,15 @@
                           title="Add or remove tags on this instance">Tags</button>
                   <a x-show="inst.job_id" :href="'/jobs/' + inst.job_id"
                      class="text-xs text-blue-500 hover:underline">Job</a>
+                  <button @click="openAdminPasswordModal(inst)"
+                          x-show="inst.platform === 'windows'" x-cloak
+                          class="px-3 py-1.5 bg-gray-700 hover:bg-gray-800
+                                 text-white text-xs font-medium rounded-lg transition"
+                          title="Retrieve the Administrator password from Password Safe / the secret manager">
+                    Password
+                  </button>
                   <button @click="openSshKeyModal(inst)"
-                          x-show="inst.key_name"
+                          x-show="inst.key_name && inst.platform !== 'windows'"
                           class="px-3 py-1.5 bg-gray-700 hover:bg-gray-800
                                  text-white text-xs font-medium rounded-lg transition"
                           title="Retrieve SSH private key from Secrets Manager">
@@ -593,6 +600,30 @@
           </button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- ── Windows Administrator password modal ─────────────────────────── -->
+  <div x-show="adminPw.open" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="adminPw.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-3">
+      <div class="flex items-center justify-between">
+        <h3 class="text-lg font-semibold text-gray-800">Administrator password</h3>
+        <button @click="adminPw.open = false" class="text-gray-400 hover:text-gray-600 text-xl">×</button>
+      </div>
+      <p class="text-xs text-gray-500" x-text="adminPw.inst?.name"></p>
+      <div x-show="adminPw.loading" class="py-4 text-center text-sm text-gray-400">Loading…</div>
+      <div x-show="adminPw.error" x-cloak
+           class="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700"
+           x-text="adminPw.error"></div>
+      <div x-show="adminPw.data" x-cloak class="space-y-2 text-sm">
+        <div>Username: <code class="bg-gray-100 px-1 rounded" x-text="adminPw.data?.username"></code></div>
+        <div>Password: <code class="bg-gray-100 px-1 rounded break-all" x-text="adminPw.data?.password"></code></div>
+        <div class="text-xs text-gray-400">Stored in <code x-text="adminPw.data?.backend"></code>.</div>
+        <button @click="copyText(adminPw.data.password, 'Password copied')"
+                class="px-3 py-1.5 bg-gray-700 hover:bg-gray-800 text-white text-xs font-medium rounded-lg">Copy</button>
+      </div>
     </div>
   </div>
 
@@ -1008,6 +1039,7 @@
             </label>
             <p class="mt-1 text-xs text-gray-400 ml-6">
               Requires Password Safe registration enabled. AWS uses the cloud-native AWS Systems Manager plugin by default (configurable in Settings → Integrations → BeyondTrust).
+              Windows AMIs onboard the Administrator as a password-managed account (needs a Windows functional account); Password Safe rotates it immediately and then owns it.
             </p>
           </div>
           {% endif %}
@@ -2033,6 +2065,7 @@
 
       // SSH Key modal
       showSshKeyModal: false,
+      adminPw: { open: false, inst: null, loading: false, error: '', data: null },
       sshKeyInst: null,
       sshKeyLoading: false,
       sshKeyError: '',
@@ -3124,6 +3157,17 @@
           this.sshKeyError = e.message;
         } finally {
           this.sshKeyLoading = false;
+        }
+      },
+
+      async openAdminPasswordModal(inst) {
+        this.adminPw = { open: true, inst, loading: true, error: '', data: null };
+        try {
+          this.adminPw.data = await API.get(`/api/aws/instances/${inst.instance_id}/admin-password`);
+        } catch (e) {
+          this.adminPw.error = e.message || 'Failed to retrieve the Administrator password';
+        } finally {
+          this.adminPw.loading = false;
         }
       },
 

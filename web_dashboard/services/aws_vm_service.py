@@ -339,6 +339,18 @@ async def _register_vm_in_passwordsafe(db, job_id: str, vm_name: str, hostname: 
                               method=method)
 
 
+async def _drop_windows_key_pair(region: str, name: str, result: dict) -> None:
+    """Best-effort removal of the one-time Windows key pair when the launch never got
+    as far as reading the password with it."""
+    if not name:
+        return
+    try:
+        await aws_service.delete_key_pair(region, name)
+        result["windows_key_pair_deleted"] = True
+    except AWSError as e:
+        result["windows_key_pair_error"] = str(e)
+
+
 async def _run_deploy(
     job_id: str,
     ami_id: str,
@@ -394,9 +406,22 @@ async def _run_deploy(
         # ── Step 2: identify the AMI, and fetch a key if it needs one ─────────
         ami_info = await aws_service.describe_ami(_aws_region, ami_id)
         is_windows = "windows" in (ami_info.get("platform", "") or "").lower()
+        win_key_name = win_private_key = ""
         if is_windows:
             public_key = ""
             os_type = "windows"
+            # Fail before launching if there is nowhere acceptable to keep the password —
+            # never the dashboard database (windows_admin_secret).
+            from ..services import windows_admin_secret
+            try:
+                windows_admin_secret.resolve_backend("aws")
+            except windows_admin_secret.WindowsSecretError as e:
+                raise AWSError(str(e)) from e
+            # A throwaway key pair is what makes the Administrator password retrievable.
+            win_key_name = aws_service.windows_key_pair_name(job_id)
+            job_service.update_progress(db, job_id, 38, "Creating a one-time key pair for the Windows password…")
+            win_private_key = await aws_service.create_windows_key_pair(_aws_region, win_key_name)
+            result["windows_key_pair"] = win_key_name
         else:
             from ..services.os_detection import detect_os_type
             os_type, ssh_user = detect_os_type(ami_info.get("name", ""))
@@ -448,15 +473,18 @@ async def _run_deploy(
                     os_type=os_type,
                     workgroup=workgroup,
                     correlation_tag=_elev.correlation_tag,
+                    key_name=win_key_name,
                 )
             result.update(instance_result)
             if instance_result.get("instance_id"):
                 job_service.set_cloud_resource_id(db, job_id, instance_result["instance_id"])
         except CloudIdentityError as e:
+            await _drop_windows_key_pair(_aws_region, win_key_name, result)
             job_service.set_failed(db, job_id,
                                    f"Cloud-identity elevation refused EC2 deploy: {e}", result)
             return
         except AWSError as e:
+            await _drop_windows_key_pair(_aws_region, win_key_name, result)
             # EC2 failed. The shared Gateway host is ref-counted and may serve
             # other resources, so we don't tear it down here — an idle host is
             # reclaimed on the next destroy/decommission.
@@ -473,8 +501,39 @@ async def _run_deploy(
             f"Instance {instance_id} launched ({hostname}), provisioning Shell Jump…"
         )
 
-        # ── Step 3: BeyondTrust PRA — Shell Jump (optional) ───────────────────
-        if _cfg_svc.get_bool("pra_enabled"):
+        # ── Step 3w: Windows Administrator password → secret manager ──────────
+        admin_password = ""
+        if is_windows:
+            from ..services import windows_admin_secret
+            try:
+                job_service.update_progress(
+                    db, job_id, 72, "Waiting for EC2 to publish the Administrator password…")
+                admin_password = await aws_service.get_windows_password(
+                    _aws_region, instance_id, win_private_key,
+                    on_wait=lambda s: job_service.update_progress(
+                        db, job_id, 72,
+                        f"Waiting for EC2 to publish the Administrator password ({s // 60} min)…"))
+            finally:
+                # The private key is no longer needed whatever happened; drop it and the
+                # pair, so the only copy of the password is the one stored below.
+                win_private_key = ""
+                try:
+                    await aws_service.delete_key_pair(_aws_region, win_key_name)
+                    result["windows_key_pair_deleted"] = True
+                except AWSError as e:
+                    result["windows_key_pair_error"] = str(e)
+            try:
+                backend, ref = await asyncio.to_thread(
+                    windows_admin_secret.store, "aws", instance_name, job_id[:8], admin_password)
+            except windows_admin_secret.WindowsSecretError as e:
+                raise AWSError(str(e)) from e
+            result["admin_username"] = "Administrator"
+            result["admin_password_backend"] = backend
+            result["admin_password_ref"] = ref
+            job_service.update_progress(db, job_id, 80, f"Administrator password stored in {backend}.")
+
+        # ── Step 3: BeyondTrust PRA — Shell Jump (optional; SSH, so Linux only) ─
+        if _cfg_svc.get_bool("pra_enabled") and not is_windows:
             from ..services import terraform_pra_service
             try:
                 _client_secret = _cfg_svc.resolve_reference(pra_credential_ref.strip()) if pra_credential_ref else ""
@@ -500,7 +559,7 @@ async def _run_deploy(
                     db, job_id, 90,
                     f"Instance deployed but Shell Jump provisioning failed: {e}"
                 )
-        else:
+        elif not is_windows:
             job_service.update_progress(db, job_id, 90, "Instance deployed.")
 
         # ── Step 4: Entitle — register as SSH ephemeral-accounts integration (optional)
@@ -523,6 +582,20 @@ async def _run_deploy(
                 # Password Safe opt-in from metadata too (`_psreg` above), because
                 # _run_deploy is called with unpacked arguments rather than a request.
                 method=str((_job.metadata_dict or {}).get("passwordsafe_method") or "") if _job else "")
+
+        # ── Step 5w: Windows — Password Safe managed account + PRA RDP jump ──
+        if is_windows:
+            from ..services import windows_server_hook
+            await windows_server_hook.wire(
+                db, job_id, vm_name=instance_name, hostname=hostname,
+                username="Administrator", password=admin_password, result=result,
+                tag="AWS", register_in_passwordsafe=_psreg,
+                pra_enabled=_cfg_svc.get_bool("pra_enabled"),
+                jump_group=(jump_group or "").strip() or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name,
+                jumpoint_name=(jumpoint_name or "").strip() or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name,
+                client_secret=_cfg_svc.resolve_reference(pra_credential_ref.strip()) if pra_credential_ref else "",
+            )
+            admin_password = ""
 
         job_service.set_completed(db, job_id, result)
         await cache_service.invalidate(cache_service.key_global("aws_instances"))
@@ -816,6 +889,10 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
                 from ..services import entitle_vm_hook
                 await entitle_vm_hook.deregister(meta, result)
                 job_service.update_progress(db, destroy_job_id, 88, "Entitle integration removed.")
+
+            # Windows: the RDP jump and the stored Administrator password.
+            from ..services import windows_server_hook
+            await windows_server_hook.teardown(meta, result)
 
             # Off-board the Password Safe managed system if this deploy registered one.
             if meta.get("ps_registration_tf_state"):

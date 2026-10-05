@@ -424,6 +424,118 @@ def test_teardown_entra_only_removes_what_it_created():
     assert calls == [("delete", "mine")]
 
 
+# ── AWS: Administrator password through a one-time key pair ──────────────────
+
+def _rsa_pair():
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(serialization.Encoding.PEM,
+                            serialization.PrivateFormat.TraditionalOpenSSL,
+                            serialization.NoEncryption()).decode()
+    return key, pem
+
+
+def _ec2_password_blob(key, password):
+    """What GetPasswordData returns: PKCS#1 v1.5, base64."""
+    import base64
+    from cryptography.hazmat.primitives.asymmetric import padding
+    return base64.b64encode(key.public_key().encrypt(password.encode(), padding.PKCS1v15())).decode()
+
+
+def test_decrypt_matches_ec2s_encryption():
+    from web_dashboard.services import aws_service
+    key, pem = _rsa_pair()
+    blob = _ec2_password_blob(key, "Zq9!kL2#vbn")
+    # EC2 returns the blob with line breaks in it.
+    wrapped = "\n".join(blob[i:i + 64] for i in range(0, len(blob), 64))
+    assert aws_service.decrypt_windows_password(wrapped, pem) == "Zq9!kL2#vbn"
+
+
+def test_password_poll_waits_for_ec2_then_decrypts():
+    from web_dashboard.services import aws_service
+    key, pem = _rsa_pair()
+    answers = ["", "", _ec2_password_blob(key, "S3cret!pw")]
+    waits = []
+    orig = aws_service._get_password_data_sync
+    aws_service._get_password_data_sync = lambda region, iid: answers.pop(0)
+    try:
+        pw = asyncio.run(aws_service.get_windows_password(
+            "us-east-1", "i-1", pem, timeout_s=60, interval_s=0, on_wait=waits.append))
+    finally:
+        aws_service._get_password_data_sync = orig
+    assert pw == "S3cret!pw"
+    assert len(waits) == 2
+
+
+def test_password_poll_gives_up_with_a_reason():
+    from web_dashboard.services import aws_service
+    _key, pem = _rsa_pair()
+    orig = aws_service._get_password_data_sync
+    aws_service._get_password_data_sync = lambda region, iid: ""
+    try:
+        asyncio.run(aws_service.get_windows_password("us-east-1", "i-1", pem,
+                                                     timeout_s=0, interval_s=0))
+    except aws_service.AWSError as e:
+        assert "EC2Launch" in str(e)
+    else:
+        raise AssertionError("never timed out")
+    finally:
+        aws_service._get_password_data_sync = orig
+
+
+def test_launch_attaches_the_key_pair_only_when_given():
+    from web_dashboard.services import aws_service
+    sent = []
+
+    class _EC2:
+        def run_instances(self, **kw):
+            sent.append(kw)
+            return {"Instances": [{"InstanceId": "i-1", "State": {"Name": "pending"}}]}
+
+    saved = (aws_service._get_ec2, aws_service._root_bdm_sync)
+    aws_service._get_ec2 = lambda region: _EC2()
+    aws_service._root_bdm_sync = lambda region, ami: []
+    try:
+        aws_service._launch_instance_sync("us-east-1", "ami-1", "w", "t3.medium", "",
+                                          "subnet-1", ["sg-1"], "", "windows", "", "",
+                                          "vmdash-win-abcd1234")
+        aws_service._launch_instance_sync("us-east-1", "ami-1", "l", "t3.medium", "",
+                                          "subnet-1", ["sg-1"], "", "ubuntu", "", "")
+    finally:
+        aws_service._get_ec2, aws_service._root_bdm_sync = saved
+    assert sent[0]["KeyName"] == "vmdash-win-abcd1234"
+    assert "UserData" not in sent[0]       # no password or key material in UserData
+    assert "KeyName" not in sent[1]
+
+
+def test_failed_launch_drops_the_key_pair():
+    from web_dashboard.services import aws_service, aws_vm_service
+    deleted = []
+
+    async def delete_key_pair(region, name):
+        deleted.append(name)
+
+    orig = aws_service.delete_key_pair
+    aws_service.delete_key_pair = delete_key_pair
+    try:
+        result = {}
+        asyncio.run(aws_vm_service._drop_windows_key_pair("us-east-1", "vmdash-win-x", result))
+        asyncio.run(aws_vm_service._drop_windows_key_pair("us-east-1", "", {}))
+    finally:
+        aws_service.delete_key_pair = orig
+    assert deleted == ["vmdash-win-x"]
+    assert result["windows_key_pair_deleted"] is True
+
+
+def test_aws_endpoint_requires_write_and_refuses_ps_managed():
+    import inspect
+    from web_dashboard.api import aws as api_aws
+    src = inspect.getsource(api_aws.get_instance_admin_password)
+    assert 'require_permission("aws", "write")' in src
+    assert "passwordsafe_managed" in src and "409" in src
+
+
 # ── the admin-password endpoint ───────────────────────────────────────────────
 
 def test_endpoint_requires_write_and_refuses_ps_managed():
