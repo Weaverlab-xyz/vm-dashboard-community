@@ -320,6 +320,110 @@ def test_register_windows_needs_its_own_functional_account():
     assert "passwordsafe_vm_functional_account_windows" in result["ps_error"]
 
 
+# ── Entra ID join (Azure) ─────────────────────────────────────────────────────
+
+def test_extension_payload_serializes_to_the_arm_shape():
+    from web_dashboard.services import azure_service
+
+    class _Poller:
+        def done(self):
+            return True
+
+        def result(self):
+            return type("R", (), {"provisioning_state": "Succeeded"})()
+
+    sent = {}
+
+    class _Ext:
+        def begin_create_or_update(self, rg, vm, name, ext):
+            body = ext.as_dict() if hasattr(ext, "as_dict") else ext.serialize()
+            sent.update(rg=rg, vm=vm, name=name, body=body)
+            return _Poller()
+
+    orig = azure_service._get_compute
+    azure_service._get_compute = lambda cred, sub: type("C", (), {"virtual_machine_extensions": _Ext()})()
+    try:
+        out = azure_service._enable_entra_login_sync(None, "sub", "rg1", "web01", "eastus", True)
+    finally:
+        azure_service._get_compute = orig
+    props = sent["body"]["properties"]
+    assert sent["name"] == "AADLoginForWindows"
+    assert props["publisher"] == "Microsoft.Azure.ActiveDirectory"
+    assert props["type"] == "AADLoginForWindows"
+    assert props["settings"] == {"mdmId": azure_service.INTUNE_MDM_ID}
+    assert out["provisioning_state"] == "Succeeded"
+
+
+def test_entra_defaults_come_from_config():
+    class R:
+        entra_join = None
+        entra_intune_enroll = None
+    _set_cfg()
+    assert wsh.entra_requested(R()) == (False, False)
+    _set_cfg(azure_windows_entra_join="1", azure_windows_entra_intune_enroll="1")
+    assert wsh.entra_requested(R()) == (True, True)
+    r = R()
+    r.entra_join = False
+    assert wsh.entra_requested(r) == (False, False)   # the request wins
+
+
+def _patch_azure_entra(fail_role=None):
+    from web_dashboard.services import azure_service
+    import web_dashboard.services.job_service as js
+    js.update_progress = lambda *a, **k: None
+    calls = []
+
+    async def enable(rg, vm, loc, intune=False):
+        calls.append(("enable", vm, intune))
+        return {"extension": "AADLoginForWindows"}
+
+    async def ensure(*, scope, role, principal_id, principal_type):
+        calls.append(("assign", role, principal_id, principal_type))
+        if fail_role and role == fail_role:
+            raise azure_service.AzureError("role assignment failed (403): denied")
+        return {"name": f"n-{principal_id}", "created": True}
+
+    async def delete(scope, name):
+        calls.append(("delete", name))
+
+    azure_service.enable_entra_login = enable
+    azure_service.ensure_role_assignment = ensure
+    azure_service.delete_role_assignment = delete
+    return calls, azure_service
+
+
+def test_entra_join_assigns_login_roles_to_groups():
+    _set_cfg(azure_entra_vm_admin_group_ids="g-admin", azure_entra_vm_user_group_ids="g1, g2")
+    calls, az = _patch_azure_entra()
+    result = {}
+    asyncio.run(wsh.entra_join_azure(None, "j", rg="rg", vm_name="web01", location="eastus",
+                                     vm_id="/sub/vm", intune=False, result=result))
+    assigns = [c for c in calls if c[0] == "assign"]
+    assert ("assign", az.ENTRA_VM_LOGIN_ROLES["admin"], "g-admin", "Group") in assigns
+    assert len(assigns) == 3
+    assert len(result["entra_role_assignments"]) == 3
+    assert "entra_role_errors" not in result
+
+
+def test_entra_role_403_is_a_warning_with_a_remedy():
+    _set_cfg(azure_entra_vm_admin_group_ids="g-admin")
+    _calls, az = _patch_azure_entra(fail_role="1c0163c0-47e6-4577-8991-ea5c82e286e4")
+    result = {}
+    asyncio.run(wsh.entra_join_azure(None, "j", rg="rg", vm_name="web01", location="eastus",
+                                     vm_id="/sub/vm", intune=False, result=result))
+    assert "roleAssignments/write" in result["entra_role_errors"][0]
+    assert result["entra_join"]   # the join itself stands
+
+
+def test_teardown_entra_only_removes_what_it_created():
+    calls, _az = _patch_azure_entra()
+    meta = {"entra_role_assignments": [
+        {"scope": "/s", "name": "mine", "created": True},
+        {"scope": "/s", "name": "theirs", "created": False}]}
+    asyncio.run(wsh.teardown_entra(meta, {}))
+    assert calls == [("delete", "mine")]
+
+
 # ── the admin-password endpoint ───────────────────────────────────────────────
 
 def test_endpoint_requires_write_and_refuses_ps_managed():

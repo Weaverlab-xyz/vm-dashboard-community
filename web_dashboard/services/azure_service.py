@@ -1401,6 +1401,7 @@ def _deploy_vm_sync(
     workgroup: str = "",
     os_type: str = "Linux", admin_password: str = "",
     trusted_launch: bool = False,
+    entra_join: bool = False,
 ) -> dict:
     is_windows = (os_type or "Linux").lower() == "windows"
     if is_windows:
@@ -1560,6 +1561,13 @@ def _deploy_vm_sync(
         logger.info("Azure deploy %s: Trusted Launch (secure boot + vTPM)%s", vm_name,
                     ", Windows_Client license" if is_windows else "")
 
+    # Entra ID join needs the VM's own identity: AADLoginForWindows registers the
+    # device with it. Set at create time so the extension (enable_entra_login, run by
+    # the caller after this returns) has nothing to wait for.
+    if entra_join and is_windows:
+        from azure.mgmt.compute.models import VirtualMachineIdentity
+        vm_params.identity = VirtualMachineIdentity(type="SystemAssigned")
+
     # Create the VM with a bounded wait: a stuck "Creating" must fail the job, not
     # hang it forever. On any failure, best-effort remove the NIC/PIP/VM we created
     # so a half-deploy doesn't orphan billable resources.
@@ -1629,6 +1637,7 @@ async def deploy_vm(
     workgroup: str = "",
     os_type: str = "Linux", admin_password: str = "",
     trusted_launch: bool = False,
+    entra_join: bool = False,
 ) -> dict:
     try:
         cred, sub_id = await _ensure_creds()
@@ -1640,12 +1649,92 @@ async def deploy_vm(
             image_publisher, image_offer, image_sku, image_version,
             workgroup,
             os_type=os_type, admin_password=admin_password,
-            trusted_launch=trusted_launch,
+            trusted_launch=trusted_launch, entra_join=entra_join,
         )
     except AzureError:
         raise
     except Exception as e:
         raise AzureError(f"Failed to deploy VM {vm_name}: {e}") from e
+
+
+# ── Entra ID join for Windows VMs ─────────────────────────────────────────────
+# Microsoft supports Entra join + Entra RDP sign-in for Windows only on Azure VMs:
+# a system-assigned identity (set by _deploy_vm_sync when entra_join=True), the
+# AADLoginForWindows extension, and an Azure role granting login on the VM. The
+# guest needs outbound HTTPS to login.microsoftonline.com,
+# enterpriseregistration.windows.net and pas.windows.net.
+
+AADLOGIN_EXTENSION = "AADLoginForWindows"
+# Intune's MDM application id: passing it as mdmId makes the join enrol the device.
+INTUNE_MDM_ID = "0000000a-0000-0000-c000-000000000000"
+ENTRA_VM_LOGIN_ROLES = {
+    "admin": "1c0163c0-47e6-4577-8991-ea5c82e286e4",   # Virtual Machine Administrator Login
+    "user":  "fb879df8-f326-4884-b1cf-06f3ad86be52",   # Virtual Machine User Login
+}
+_EXTENSION_TIMEOUT_S = 900
+
+
+def _enable_entra_login_sync(cred, sub_id: str, rg: str, vm_name: str, location: str,
+                             intune: bool) -> dict:
+    from azure.mgmt.compute.models import VirtualMachineExtension
+    compute = _get_compute(cred, sub_id)
+    # The extension's own type is `type` on the typespec models (38.x, flattened from
+    # `properties`) and `type_properties_type` on the msrest ones (<38), where `type` is
+    # the read-only ARM resource type. requirements.txt spans both.
+    flattened = getattr(VirtualMachineExtension,
+                        "_VirtualMachineExtension__flattened_items", None)
+    type_kw = "type" if flattened and "type" in flattened else "type_properties_type"
+    ext = VirtualMachineExtension(
+        location=location,
+        publisher="Microsoft.Azure.ActiveDirectory",
+        type_handler_version="2.0",
+        auto_upgrade_minor_version=True,
+        settings={"mdmId": INTUNE_MDM_ID} if intune else None,
+        **{type_kw: AADLOGIN_EXTENSION},
+    )
+    poller = compute.virtual_machine_extensions.begin_create_or_update(
+        rg, vm_name, AADLOGIN_EXTENSION, ext)
+    deadline = time.monotonic() + _EXTENSION_TIMEOUT_S
+    while not poller.done():
+        if time.monotonic() > deadline:
+            raise AzureError(
+                f"{AADLOGIN_EXTENSION} on {vm_name} did not finish within "
+                f"{_EXTENSION_TIMEOUT_S // 60} min. The usual cause is the guest having no "
+                "outbound route to login.microsoftonline.com / "
+                "enterpriseregistration.windows.net.")
+        poller.wait(15)
+    res = poller.result()
+    return {"extension": AADLOGIN_EXTENSION,
+            "provisioning_state": getattr(res, "provisioning_state", None),
+            "intune": bool(intune)}
+
+
+async def enable_entra_login(rg: str, vm_name: str, location: str, *,
+                             intune: bool = False) -> dict:
+    """Install AADLoginForWindows on a VM created with ``entra_join=True``."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(_enable_entra_login_sync, cred, sub_id, rg, vm_name,
+                                location, intune)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Entra ID join of {vm_name} failed: {e}") from e
+
+
+async def delete_role_assignment(scope: str, name: str) -> None:
+    """Remove a role assignment made by :func:`ensure_role_assignment`. A 404 (already
+    gone, or removed with its scope) is success."""
+    import httpx
+    from . import azure_role_rules as rules
+    credential, _sub = await _ensure_creds()
+    token = await _arm_token(credential)
+    url = f"{_ARM}{rules.assignment_path(scope, name)}?api-version=2022-04-01"
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.delete(url, headers={"Authorization": f"Bearer {token}"})
+    if resp.status_code not in (200, 204, 404):
+        raise AzureError(
+            f"role assignment delete failed ({resp.status_code}): {resp.text[:400]}")
 
 
 # ── Compute Gallery (Trusted Launch image publishing for Windows 11) ──────────

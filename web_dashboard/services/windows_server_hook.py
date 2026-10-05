@@ -108,6 +108,89 @@ async def wire(db, job_id: str, *, vm_name: str, hostname: str, username: str,
         result["bt_rdp_error"] = str(e)
 
 
+def entra_requested(req) -> tuple[bool, bool]:
+    """``(join, intune)`` for one Azure Windows deploy: the request's own choice, else the
+    ``azure_windows_entra_join`` / ``azure_windows_entra_intune_enroll`` defaults."""
+    from . import config_service
+
+    def pick(field, key):
+        v = getattr(req, field, None)
+        return bool(v) if v is not None else config_service.get_bool(key, False)
+
+    join = pick("entra_join", "azure_windows_entra_join")
+    return join, join and pick("entra_intune_enroll", "azure_windows_entra_intune_enroll")
+
+
+def _group_ids(key: str) -> list:
+    return [g.strip() for g in _cfg(key).replace(";", ",").split(",") if g.strip()]
+
+
+async def entra_join_azure(db, job_id: str, *, rg: str, vm_name: str, location: str,
+                           vm_id: str, intune: bool, result: dict) -> None:
+    """Finish an Entra ID join on an Azure VM created with a system identity.
+
+    Installs AADLoginForWindows, then grants the configured Entra groups login on THIS
+    VM: ``azure_entra_vm_admin_group_ids`` → Virtual Machine Administrator Login,
+    ``azure_entra_vm_user_group_ids`` → Virtual Machine User Login. Assignments are
+    recorded in ``entra_role_assignments`` so destroy can remove them.
+
+    Never fails the deploy: the local administrator (vaulted / Password Safe-managed)
+    still reaches the VM, so a failure is a warning on the job (``entra_error``,
+    ``entra_role_errors``)."""
+    from . import azure_service, job_service
+    job_service.update_progress(db, job_id, 92, "Joining the VM to Entra ID…")
+    try:
+        result["entra_join"] = await azure_service.enable_entra_login(
+            rg, vm_name, location, intune=intune)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Entra join of %s failed: %s", vm_name, e)
+        result["entra_error"] = str(e)
+        return
+
+    assignments, errors = [], []
+    for key, role in (("azure_entra_vm_admin_group_ids", "admin"),
+                      ("azure_entra_vm_user_group_ids", "user")):
+        for gid in _group_ids(key):
+            try:
+                r = await azure_service.ensure_role_assignment(
+                    scope=vm_id, role=azure_service.ENTRA_VM_LOGIN_ROLES[role],
+                    principal_id=gid, principal_type="Group")
+                assignments.append({"scope": vm_id, "name": r["name"], "role": role,
+                                    "group": gid, "created": r.get("created", True)})
+            except Exception as e:  # noqa: BLE001
+                hint = (" — the dashboard's service principal needs "
+                        "Microsoft.Authorization/roleAssignments/write (Role Based Access "
+                        "Control Administrator or User Access Administrator) on the VM's "
+                        "resource group" if "403" in str(e) else "")
+                errors.append(f"{role} login for group {gid}: {e}{hint}")
+    if assignments:
+        result["entra_role_assignments"] = assignments
+    if errors:
+        result["entra_role_errors"] = errors
+    if not (_group_ids("azure_entra_vm_admin_group_ids")
+            or _group_ids("azure_entra_vm_user_group_ids")):
+        result["entra_note"] = ("joined, but no Entra groups are configured for login "
+                                "(azure_entra_vm_admin_group_ids / _user_group_ids) — "
+                                "assign Virtual Machine Administrator/User Login by hand")
+
+
+async def teardown_entra(meta: dict, result: dict) -> None:
+    """Remove the role assignments :func:`entra_join_azure` CREATED. Run before the VM
+    is deleted, while their scope still exists. One that already existed (``created``
+    False) was someone else's and stays."""
+    from . import azure_service
+    errors = []
+    for a in (meta or {}).get("entra_role_assignments") or []:
+        if not a.get("created", True):
+            continue
+        try:
+            await azure_service.delete_role_assignment(a["scope"], a["name"])
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{a.get('name')}: {e}")
+    if errors:
+        result["entra_role_errors"] = errors
+
+
 async def teardown(meta: dict, result: dict) -> None:
     """Undo :func:`wire` and the stored password. Best-effort, never raises.
 

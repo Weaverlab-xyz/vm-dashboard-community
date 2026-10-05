@@ -1722,7 +1722,12 @@ async def aws_page(request: Request):
          dependencies=[_profile_page_gate("cloud_pages")])
 async def azure_page(request: Request):
     location = config_service.get("azure_location") or settings.azure_location
-    return templates.TemplateResponse("azure/index.html", {"request": request, "default_location": location})
+    return templates.TemplateResponse("azure/index.html", {
+        "request": request, "default_location": location,
+        # Initial state of the Windows deploy form's Entra ID checkboxes.
+        "entra_join_default": config_service.get_bool("azure_windows_entra_join", False),
+        "entra_intune_default": config_service.get_bool("azure_windows_entra_intune_enroll", False),
+    })
 
 
 @app.get("/gcp", response_class=HTMLResponse, include_in_schema=False,
