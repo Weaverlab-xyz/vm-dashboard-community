@@ -1704,6 +1704,39 @@
                          placeholder="name or id">
                 </div>
               </div>
+              <div class="border border-gray-200 rounded-lg p-3 space-y-2">
+                <p class="text-sm font-medium text-gray-700">Windows VMs <span class="text-gray-400 font-normal">(Azure + AWS)</span></p>
+                <p class="text-xs text-gray-400">
+                  The local administrator is onboarded as a <strong>password-managed</strong> account,
+                  seeded with the generated password. Needs a functional account on a Windows
+                  platform — not the SSH-rotation accounts above. Password Safe rotates over
+                  SMB/WinRM, so private VMs need a Resource Broker.
+                </p>
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Functional account — Windows</label>
+                    <input type="text" x-model="panelCfg.passwordsafe_vm_functional_account_windows"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="name or id">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Override — Azure</label>
+                    <input type="text" x-model="panelCfg.passwordsafe_vm_functional_account_windows_azure"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="blank → Windows account">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Override — AWS</label>
+                    <input type="text" x-model="panelCfg.passwordsafe_vm_functional_account_windows_aws"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="blank → Windows account">
+                  </div>
+                </div>
+                <label class="flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" x-model="panelCfg.passwordsafe_windows_change_password_on_register" class="rounded text-blue-600">
+                  Rotate the password on onboard, so only Password Safe knows it
+                </label>
+              </div>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Managed account name</label>
@@ -2991,6 +3024,17 @@
                 the same <span class="font-mono">/jpt</span> share, so they contend over one
                 Gateway identity. A deploy that supplies its own Gateway deploy key always
                 gets ACI, since the shared host uses the configured key.
+              </p>
+            </div>
+            <div class="mb-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Vault account group — Windows server RDP jumps</label>
+              <input type="text" x-model="panelCfg.pra_windows_vault_account_group_id"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="numeric id (optional)">
+              <p class="text-xs text-gray-400 mt-1">
+                Where a Windows server build's administrator credential is vaulted for RDP
+                injection (Azure + AWS). Not used when Password Safe manages the account —
+                PRA then injects it through its Password Safe integration.
               </p>
             </div>
             <div class="mb-3">

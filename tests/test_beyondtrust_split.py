@@ -72,10 +72,19 @@ FLAGS = ("password_safe_enabled", "pra_enabled", "epml_enabled")
 # distinct credential per database. It defaults off because that account is created
 # privilege-free (see config.py), so enabling it without granting the account anything
 # turns working runs into permission errors.
+# The five Windows-server keys came later still: `passwordsafe_vm_functional_account_windows`
+# (+ `_windows_azure` / `_windows_aws`) and `passwordsafe_windows_change_password_on_register`
+# on the Password Safe panel, because a Windows guest is onboarded PASSWORD-managed and needs
+# a functional account on a Windows platform rather than the SSH-rotation ones; and
+# `pra_windows_vault_account_group_id` on the PRA panel, the Vault group a Windows server
+# build's RDP credential lands in (services/windows_server_hook).
 # A key that vanishes from all three models is a field an
 # operator can no longer set; one that appears on two breaks the union-check equivalence
 # test_setup_feature_roundtrip documents in its own docstring.
 LEGACY_KEYS = frozenset("""
+passwordsafe_vm_functional_account_windows passwordsafe_vm_functional_account_windows_azure
+passwordsafe_vm_functional_account_windows_aws passwordsafe_windows_change_password_on_register
+pra_windows_vault_account_group_id
 pscli_api_url pscli_client_id pscli_client_secret pscli_api_account_name
 passwordsafe_registration_enabled passwordsafe_workgroup
 passwordsafe_vm_functional_account_aws passwordsafe_vm_functional_account_azure

@@ -38,7 +38,8 @@ CUSTODY_PASSWORD_SAFE = "passwordsafe_managed"
 
 def _cfg(key: str) -> str:
     from . import config_service
-    return (config_service.get(key) or "").strip()
+    from ..config import settings
+    return str(config_service.get(key) or getattr(settings, key, "") or "").strip()
 
 
 def _vault_group_id():

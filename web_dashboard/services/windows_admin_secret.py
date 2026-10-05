@@ -46,7 +46,8 @@ class WindowsSecretError(Exception):
 
 def _cfg(key: str) -> str:
     from . import config_service
-    return (config_service.get(key) or "").strip()
+    from ..config import settings
+    return str(config_service.get(key) or getattr(settings, key, "") or "").strip()
 
 
 def _bt_configured() -> bool:
