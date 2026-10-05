@@ -18,12 +18,17 @@ governed and audited on its own terms.
      VM is then onboarded as a managed system (``ps_vm_hook.register_windows``), this
      build-time copy is retired once Password Safe has rotated the account.
   3. The global ``secrets_backend``, when it is an EXTERNAL manager.
-  4. The cloud's own vault: Azure Key Vault for an Azure VM, AWS Secrets Manager for EC2.
+  4. The cloud's own vault: Azure Key Vault for an Azure VM, AWS Secrets Manager for EC2,
+     GCP Secret Manager for GCE.
   5. Nothing — :class:`WindowsSecretError`. The build refuses rather than fall back to
      the database.
 
 ``"database"`` is refused at every step, including an explicit
 ``windows_admin_secret_backend = database``.
+
+The same rules hold for the other machine credential the dashboard creates: a managed
+Active Directory's administrator (``directory_service``), stored under an ``ad-admin-``
+key through :func:`store`'s ``prefix``.
 """
 from __future__ import annotations
 
@@ -37,7 +42,7 @@ FORBIDDEN_BACKEND = "database"
 _EXTERNAL_BACKENDS = ("bt_secrets_safe", "azure_kv", "aws_sm", "gcp_sm", "wlc")
 
 # The cloud-native fallback per cloud (step 4).
-_CLOUD_NATIVE = {"azure": "azure_kv", "aws": "aws_sm"}
+_CLOUD_NATIVE = {"azure": "azure_kv", "aws": "aws_sm", "gcp": "gcp_sm"}
 
 
 class WindowsSecretError(Exception):
@@ -68,10 +73,16 @@ def _aws_sm_configured() -> bool:
                 or getattr(settings, "aws_region", ""))
 
 
+def _gcp_sm_configured() -> bool:
+    # The same project resolution secrets_backend_service._gcp_cfg uses.
+    return bool(_cfg("secrets_gcp_project") or _cfg("gcp_project") or _cfg("gcp_project_id"))
+
+
 _CONFIGURED = {
     "bt_secrets_safe": _bt_configured,
     "azure_kv":        _azure_kv_configured,
     "aws_sm":          _aws_sm_configured,
+    "gcp_sm":          _gcp_sm_configured,
 }
 
 
@@ -79,8 +90,8 @@ def _usable(backend: str) -> bool:
     if backend not in _EXTERNAL_BACKENDS:
         return False
     check = _CONFIGURED.get(backend)
-    # gcp_sm / wlc have no cheap precondition here; an operator who chose them as the
-    # global backend has configured them, and a failed write still fails the build.
+    # wlc has no cheap precondition here; an operator who chose it as the global backend
+    # has configured it, and a failed write still fails the build.
     return check() if check else True
 
 
@@ -111,7 +122,8 @@ def resolve_backend(cloud: str) -> str:
         return native
 
     hint = {"azure": "Azure Key Vault (Secrets → Azure Key Vault URL)",
-            "aws": "AWS Secrets Manager (an AWS region)"}.get((cloud or "").lower(), "")
+            "aws": "AWS Secrets Manager (an AWS region)",
+            "gcp": "GCP Secret Manager (a GCP project)"}.get((cloud or "").lower(), "")
     raise WindowsSecretError(
         "No secret manager is configured for the Windows administrator password, and it "
         "is never kept in the dashboard database. Configure Password Safe (ps-cli client "
@@ -119,22 +131,31 @@ def resolve_backend(cloud: str) -> str:
         + (f" or {hint}" if hint else "") + ", then retry the build.")
 
 
-def secret_key(vm_name: str, suffix: str) -> str:
-    return f"windows-admin-{vm_name}-{suffix}"
+WINDOWS_PREFIX = "windows-admin"
+DIRECTORY_PREFIX = "ad-admin"
 
 
-def store(cloud: str, vm_name: str, suffix: str, password: str) -> tuple[str, str]:
+def secret_key(vm_name: str, suffix: str, prefix: str = WINDOWS_PREFIX) -> str:
+    return f"{prefix}-{vm_name}-{suffix}"
+
+
+def store(cloud: str, vm_name: str, suffix: str, password: str, *,
+          prefix: str = WINDOWS_PREFIX) -> tuple[str, str]:
     """Write the password; return ``(backend, ref)`` for job metadata.
+
+    ``vm_name`` names the machine (or directory) the credential belongs to; ``prefix``
+    says what kind of credential it is.
 
     Raises :class:`WindowsSecretError` when there is nowhere acceptable to write it or the
     write fails — callers store BEFORE creating the VM, so a failure here costs nothing."""
     from . import secrets_backend_service
     backend = resolve_backend(cloud)
     try:
-        ref = secrets_backend_service.write_sync(backend, secret_key(vm_name, suffix), password)
+        ref = secrets_backend_service.write_sync(
+            backend, secret_key(vm_name, suffix, prefix), password)
     except Exception as e:  # noqa: BLE001 — every SDK raises its own type
         raise WindowsSecretError(
-            f"Failed to store the Windows admin password for {vm_name} in "
+            f"Failed to store the {prefix} password for {vm_name} in "
             f"secrets backend '{backend}': {e}") from e
     return backend, ref
 

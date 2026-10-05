@@ -89,8 +89,24 @@ def test_password_safe_needs_a_numeric_owner():
 
 
 def test_external_global_backend_is_used():
-    _set_cfg(secrets_backend="gcp_sm")
+    _set_cfg(secrets_backend="gcp_sm", gcp_project="p1")
     assert was.resolve_backend("azure") == "gcp_sm"
+
+
+def test_global_gcp_sm_without_a_project_is_not_usable():
+    _set_cfg(secrets_backend="gcp_sm", secrets_azure_kv_url="https://kv")
+    assert was.resolve_backend("azure") == "azure_kv"
+
+
+def test_gcp_falls_back_to_secret_manager():
+    _set_cfg(secrets_backend="database", secrets_gcp_project="p1")
+    assert was.resolve_backend("gcp") == "gcp_sm"
+
+
+def test_directory_prefix_keys_apart_from_windows():
+    assert was.secret_key("corp.example.com", "ab12", was.DIRECTORY_PREFIX) == \
+        "ad-admin-corp.example.com-ab12"
+    assert was.secret_key("web01", "ab12") == "windows-admin-web01-ab12"
 
 
 def test_cloud_native_fallback_per_cloud():

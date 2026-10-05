@@ -885,18 +885,27 @@ def _run_ssm_command_sync(region: str, instance_id: str, commands: list,
     Used to run DB-client SQL on the shared Jumpoint host (the only dashboard
     component with line-of-sight to the private DB) — the same SSM SendCommand
     path Password Safe's DB custom plugin uses for rotation."""
+    return _run_ssm_document_sync(
+        region, instance_id, "AWS-RunShellScript",
+        {"commands": list(commands),
+         # SSM caps executionTimeout at 172800; keep it >= our poll window.
+         "executionTimeout": [str(max(int(timeout), 60))]},
+        timeout, poll_interval, comment="vm-dashboard cloud-db onboarding")
+
+
+def _run_ssm_document_sync(region: str, instance_id: str, document: str,
+                           parameters: dict, timeout: int, poll_interval: int,
+                           comment: str = "vm-dashboard") -> dict:
+    """Send any SSM document to one managed instance and poll to a terminal status.
+    Returns {status, response_code, stdout, stderr, command_id}."""
     import time
     _require_boto3()
     ssm = boto3.client("ssm", **_aws_kwargs(region))
     send = ssm.send_command(
         InstanceIds=[instance_id],
-        DocumentName="AWS-RunShellScript",
-        Comment="vm-dashboard cloud-db onboarding"[:100],
-        Parameters={
-            "commands": list(commands),
-            # SSM caps executionTimeout at 172800; keep it >= our poll window.
-            "executionTimeout": [str(max(int(timeout), 60))],
-        },
+        DocumentName=document,
+        Comment=comment[:100],
+        Parameters=parameters,
     )
     command_id = send["Command"]["CommandId"]
     # The invocation isn't queryable for a beat after send — tolerate the
@@ -921,6 +930,51 @@ def _run_ssm_command_sync(region: str, instance_id: str, commands: list,
         "stdout": inv.get("StandardOutputContent", "") or "",
         "stderr": inv.get("StandardErrorContent", "") or "",
     }
+
+
+async def ssm_send_document(region: str, instance_id: str, document: str,
+                            parameters: dict, *, timeout: int = 600,
+                            poll_interval: int = 5, comment: str = "vm-dashboard") -> dict:
+    """Run an SSM ``document`` on one instance and wait. Same contract as
+    :func:`ssm_send_command`: never raises on a failed command, only on AWS errors."""
+    try:
+        return await _to_thread(_run_ssm_document_sync, region, instance_id, document,
+                                parameters, timeout, poll_interval, comment)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"SSM SendCommand ({document}) to {instance_id} failed: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _ssm_ping_status_sync(region: str, instance_id: str) -> str:
+    _require_boto3()
+    ssm = boto3.client("ssm", **_aws_kwargs(region))
+    resp = ssm.describe_instance_information(
+        Filters=[{"Key": "InstanceIds", "Values": [instance_id]}])
+    info = resp.get("InstanceInformationList") or []
+    return (info[0].get("PingStatus") or "") if info else ""
+
+
+async def wait_ssm_online(region: str, instance_id: str, *, timeout_s: int = 900,
+                          interval_s: int = 15) -> None:
+    """Wait until the instance's SSM agent reports ``Online``. Raises AWSError at the
+    deadline, naming the usual causes."""
+    import asyncio
+    import time as _time
+    start = _time.monotonic()
+    while True:
+        try:
+            status = await _to_thread(_ssm_ping_status_sync, region, instance_id)
+        except (ClientError, BotoCoreError) as e:
+            raise AWSError(f"SSM DescribeInstanceInformation for {instance_id} failed: {e}") from e
+        if status == "Online":
+            return
+        if _time.monotonic() - start >= timeout_s:
+            raise AWSError(
+                f"{instance_id} never came online in Systems Manager (last status "
+                f"{status or 'not registered'}). It needs the SSM instance profile and a "
+                f"route to the SSM endpoints (NAT or VPC interface endpoints).")
+        await asyncio.sleep(interval_s)
 
 
 async def ssm_send_command(region: str, instance_id: str, commands: list, *,
