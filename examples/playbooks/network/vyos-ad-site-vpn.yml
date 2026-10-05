@@ -80,16 +80,26 @@
           Set vyos_local_address, vpn_tunnels (1–4), both BGP ASNs, onprem_dc_subnets,
           onprem_dc_addresses and cloud_networks, and confirm: true — this changes a router.
 
-    - name: Resolve each tunnel's pre-shared key (Password Safe wins when a path was given)
+    # Fetched into a private fact keyed by peer, never onto the caller's psk: extra vars
+    # outrank set_fact, so writing back would be silently ignored.
+    - name: Fetch tunnel keys from Password Safe
       ansible.builtin.set_fact:
-        _psks: >-
-          {{ (_psks | default([])) + [
+        _ps_psks: >-
+          {{ (_ps_psks | default({})) | combine({item.peer_address:
                lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
                       api_url=ps_api_url, api_version='3.1', retrieval_type='SECRET',
                       client_id=ps_client_id, client_secret=ps_client_secret,
                       secret_list=item.psk_secret, decrypt=True, verify_ca=ps_verify_ca,
-                      wantlist=False)
-               if (item.psk_secret | default('')) | length > 0 else (item.psk | default(''))] }}
+                      wantlist=False)}) }}
+      loop: "{{ vpn_tunnels }}"
+      when: (item.psk_secret | default('')) | length > 0
+      no_log: true
+
+    - name: Resolve each tunnel's pre-shared key (Password Safe wins when a path was given)
+      ansible.builtin.set_fact:
+        _psks: >-
+          {{ (_psks | default([])) + [(_ps_psks | default({})).get(item.peer_address)
+                                      or (item.psk | default(''))] }}
       loop: "{{ vpn_tunnels }}"
       no_log: true
 

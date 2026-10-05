@@ -49,6 +49,7 @@ mid-run; leave it blank and the play behaves exactly as before:
 | `directory/ad-user.yml` | `ad_user_password_secret` |
 | `directory/ad-reset-password.yml` | `ad_new_password_secret` |
 | `directory/ldap-password.yml` | `ldap_new_password_secret` |
+| `network/vyos-ad-site-vpn.yml` | `psk_secret` on each entry of `vpn_tunnels` |
 
 The `PASSWORD_SAFE_*` credentials are auto-injected into every runner, so nothing else
 is needed. The lookup runs on the **controller** (the runner container), so a remote
