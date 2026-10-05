@@ -218,4 +218,6 @@ the play hands it to helm through a 0600 values file rather than `--set`, becaus
 - [Remote Agents](../remote-agents.md) — reaching an on-prem host at all
 - [Entitle](../integrations/beyondtrust/entitle.md) — the integration this agent serves
 - [OT Demo Cell](../profiles/demo/ot-demo-cell.md) — the demo cell, which runs k3s, and its DMZ broker, which installs this agent
-- [Kubernetes](../kubernetes.md) — the managed-cluster path, where the agent install is a button
+- [Kubernetes](../kubernetes.md) — the hub for all three kinds of cluster the dashboard builds
+- [Managed Kubernetes](k8s.md) — the cloud clusters, where the agent install is a button
+- [k3s](k3s.md) — the self-managed Kubernetes for on-prem clusters, the OT demo cell and the Workload Lab

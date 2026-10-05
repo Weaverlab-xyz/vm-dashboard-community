@@ -476,7 +476,7 @@ the `tcp` tunnel can connect over TLS without a client wallet. It's reached over
 > though `("oracle", "oci")` is listed in `_IMPLEMENTED`. The module now ships, but that means
 > this path has **never completed a live run**: treat the first provision as a bring-up, and make
 > sure you are on an image built after the fix. The OCI **OKE** module was missing the same way —
-> see [Kubernetes → OCI OKE](kubernetes.md#oci-oke--experimental).
+> see [Kubernetes → OCI OKE](kubernetes/k8s.md#oci-oke--experimental).
 
 **Config keys** (all Settings fields): `oci_tenancy_ocid`, `oci_user_ocid`,
 `oci_fingerprint`, `oci_private_key` (+ `oci_private_key_passphrase`), `oci_region`

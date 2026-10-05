@@ -291,6 +291,8 @@ _TITLE_OVERRIDES = {
     # Not personas. The derived title is the filename title-cased, which reads as a
     # filename ("Ps Runbook", "Standing One Up") rather than as the page.
     "kubernetes/kubesolo":               "KubeSolo",
+    "kubernetes/k8s":                    "Managed Kubernetes (k8s)",
+    "kubernetes/k3s":                    "k3s",
     "profiles/demo/ot-demo-cell":        "OT Demo Cell",
     "profiles/demo/net-demo-cell":       "Network Demo Cell",
     "profiles/demo/agent-demo-cell":     "Agent Demo Cell",
