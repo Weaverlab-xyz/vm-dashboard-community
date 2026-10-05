@@ -40,7 +40,10 @@ DISCOVER_META_KEYS = (
 # Note these are VALUES, not keys, so test_no_field_can_carry_executable_content does
 # not scan them — worth knowing before anyone adds a value-scanning assertion, which
 # would flag "vmware" for containing nothing of the sort.
-VALID_SCAN_KINDS = ("vmware", "proxmox", "nutanix", "xcpng", "winrm", "all")
+# "directory" (agent 2.8) is an anonymous LDAP rootDSE read on 389/636 — AD domain
+# controllers and other LDAP servers. It is never part of "all", which stays the
+# hypervisor sweep it has always been.
+VALID_SCAN_KINDS = ("vmware", "proxmox", "nutanix", "xcpng", "winrm", "directory", "all")
 
 _DEFAULTS = {
     "scan_kind": "all",
@@ -51,7 +54,7 @@ _DEFAULTS = {
     # one question that tells them apart), 8006 Proxmox VE, 9440 Nutanix Prism,
     # 5985/5986 WinRM.
     "ports": {"vmware": [443], "proxmox": [8006], "nutanix": [9440],
-              "xcpng": [443], "winrm": [5985, 5986]},
+              "xcpng": [443], "winrm": [5985, 5986], "directory": [389, 636]},
     "timeout_s": 3,
     "max_hosts": 1024,
     "concurrency": 32,
@@ -163,8 +166,7 @@ def _clamp(value, default: int, low: int, high: int) -> int:
 # an unidentified host on a network the dashboard cannot see. `already_registered` is the
 # exception — the dashboard computes that one itself (api/agent._annotate_findings).
 FINDING_KEYS = (
-    "kind",               # "hypervisor" — one value today; the column stays so the
-                          #   table can grow without a migration of the projection
+    "kind",               # "hypervisor" | "directory" (agent 2.8)
     "product",            # vsphere|esxi|proxmox|nutanix|xcpng|winrm — maps to a
                           #   connection kind via api/agent._PRODUCT_TO_KIND
     "host",               # str — the IP the probe connected to
@@ -178,6 +180,12 @@ FINDING_KEYS = (
     "tls_issuer",         # str — cert issuer; corroborates Nutanix and XenServer
     "suggested_name",     # str — a name to prefill the connection form with
     "source",             # str — "probe"
+    # Directory findings (rootDSE). All target-controlled, so sanitised like the rest.
+    "domain",             # str — e.g. corp.example.com, derived from the naming context
+    "base_dn",            # str — DC=corp,DC=example,DC=com
+    "dc_hostname",        # str — the DC's own dnsHostName
+    "functional_level",   # str — "Windows Server 2016"
+    "vendor",             # str — "Microsoft Active Directory" | "OpenLDAP 2.6.7" | …
     "already_registered",  # bool — computed HERE, not reported by the agent
 )
 

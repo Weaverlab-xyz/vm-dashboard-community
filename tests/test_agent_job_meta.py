@@ -39,7 +39,7 @@ def _payload(**over):
                 # Every family, because normalize() fills in the ones you omit — a
                 # partial dict here would fail the round-trip for the right reason.
                 ports={"vmware": [443], "proxmox": [8006], "nutanix": [9440],
-                       "xcpng": [443], "winrm": [5985]},
+                       "xcpng": [443], "winrm": [5985], "directory": [636]},
                 timeout_s=3, max_hosts=256, concurrency=16)
     base.update(over)
     return types.SimpleNamespace(**base)

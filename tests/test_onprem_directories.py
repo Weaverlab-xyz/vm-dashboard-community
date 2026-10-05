@@ -130,6 +130,22 @@ def test_connection_vars_check_out_just_in_time():
     db.close()
 
 
+def test_findings_are_annotated_against_registered_directories():
+    from web_dashboard.api.agent import _annotate_findings
+    db = SessionLocal()
+    a = _agent(db)
+    _reg(db, agent_id=a.id, host="10.9.9.9", port=636)
+    result = {"findings": [
+        {"kind": "directory", "product": "active_directory", "host": "10.9.9.9", "port": 636},
+        {"kind": "directory", "product": "active_directory", "host": "10.9.9.10", "port": 636},
+        {"kind": "hypervisor", "product": "proxmox", "host": "10.9.9.9", "port": 8006}]}
+    out = _annotate_findings(db, result)["findings"]
+    assert out[0]["already_registered"] is True
+    assert out[1]["already_registered"] is False
+    assert out[2]["already_registered"] is False
+    db.close()
+
+
 def test_api_endpoint_needs_explicit_grant():
     import inspect
     from web_dashboard.api import directories as api

@@ -396,7 +396,9 @@
                       x-text="'CN=' + f.tls_cn"></span>
               </td>
               <td class="px-4 py-3 text-gray-700">
-                <span x-text="[f.server_version, f.build && ('build ' + f.build)].filter(Boolean).join(' ') || 'responded, version unknown'"></span>
+                <span x-show="f.kind !== 'directory'" x-text="[f.server_version, f.build && ('build ' + f.build)].filter(Boolean).join(' ') || 'responded, version unknown'"></span>
+                <span x-show="f.kind === 'directory'" x-cloak
+                      x-text="[f.domain, f.functional_level || f.vendor, f.dc_hostname].filter(Boolean).join(' · ') || 'LDAP server'"></span>
               </td>
               <td class="px-4 py-3 font-mono text-xs text-gray-600" x-text="f.suggested_name || '–'"></td>
               <td class="px-4 py-3 text-right whitespace-nowrap">
@@ -412,8 +414,8 @@
                   their own permissions.
                 -->
                 <a x-show="!f.already_registered" x-cloak :href="connectHref(f)"
-                   class="inline-flex px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded transition">
-                  Add connection…
+                   class="inline-flex px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded transition"
+                   x-text="f.kind === 'directory' ? 'Register directory…' : 'Add connection…'">
                 </a>
               </td>
             </tr>
@@ -853,7 +855,8 @@
       productLabel(product) {
         return ({vsphere: 'vCenter', esxi: 'ESXi', proxmox: 'Proxmox VE',
                  nutanix: 'Nutanix Prism', xcpng: 'XCP-ng',
-                 winrm: 'WinRM (Windows)'})[product] || product || 'unknown';
+                 winrm: 'WinRM (Windows)', active_directory: 'Active Directory',
+                 openldap: 'OpenLDAP', ldap: 'LDAP'})[product] || product || 'unknown';
       },
 
       productClass(product) {
@@ -861,13 +864,28 @@
                  proxmox: 'bg-orange-100 text-orange-700',
                  nutanix: 'bg-indigo-100 text-indigo-700',
                  xcpng: 'bg-emerald-100 text-emerald-700',
-                 winrm: 'bg-amber-100 text-amber-700'})[product] || 'bg-gray-100 text-gray-700';
+                 winrm: 'bg-amber-100 text-amber-700',
+                 active_directory: 'bg-blue-100 text-blue-700',
+                 openldap: 'bg-teal-100 text-teal-700',
+                 ldap: 'bg-teal-100 text-teal-700'})[product] || 'bg-gray-100 text-gray-700';
       },
 
       // Hands off to the Connections form with the non-secret fields prefilled.
       // Deliberately not a one-click add: a connection needs a credential the scan
       // never had, and the form runs under the operator's own permissions.
       connectHref(f) {
+        if (f.kind === 'directory') {
+          // Same hand-off as a connection: the non-secret fields prefilled, and the bind
+          // account chosen from Password Safe on the Directories page itself.
+          const d = new URLSearchParams({register: '1',
+            provider: f.product === 'active_directory' ? 'onprem_ad' : 'ldap'});
+          if (f.host) d.set('host', f.host);
+          if (f.port) d.set('port', String(f.port));
+          if (f.domain || f.suggested_name) d.set('name', f.domain || f.suggested_name);
+          if (f.base_dn) d.set('base_dn', f.base_dn);
+          if (this.job && this.job.agent_id) d.set('agent', this.job.agent_id);
+          return '/directories?' + d.toString();
+        }
         // A probe reports a PRODUCT; the form takes a connection KIND. ESXi and vCenter
         // are both vsphere connections and WinRM is the Hyper-V case, so map rather
         // than pass through — the form ignores an unrecognised kind, which would

@@ -496,6 +496,7 @@
             <option value="nutanix">Nutanix Prism only (9440)</option>
             <option value="xcpng">XCP-ng / XenServer only (443)</option>
             <option value="winrm">WinRM / possible Hyper-V only (5985-6)</option>
+            <option value="directory">AD domain controllers / LDAP servers (389, 636) — agent 2.8+</option>
           </select>
         </div>
         <div>
@@ -509,7 +510,8 @@
           <label class="block text-xs font-medium text-gray-600 mb-1">
             Hosts <span class="text-gray-400">(optional, comma-separated)</span>
           </label>
-          <input type="text" x-model="discover.hostnames" placeholder="pg01.lab.local"
+          <input type="text" x-model="discover.hostnames"
+                 :placeholder="discover.scan_kind === 'directory' ? 'corp.example.com (a domain resolves to its DCs)' : 'pg01.lab.local'"
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"/>
         </div>
         <p class="text-xs text-gray-400">

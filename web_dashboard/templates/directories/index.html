@@ -342,6 +342,14 @@ function directoriesPage() {
     async init() {
       await this.load();
       try { this.agents = (await API.get('/api/agents')).agents || []; } catch (e) { this.agents = []; }
+      // Arriving from a discovery finding: open Register on-prem with what the probe saw.
+      const q = new URLSearchParams(window.location.search);
+      if (q.get('register') === '1') {
+        const port = Number(q.get('port') || 0);
+        this.openOnprem({provider: q.get('provider') || 'onprem_ad', host: q.get('host') || '',
+                         port: port || null, use_ldaps: port !== 389, name: q.get('name') || '',
+                         base_dn: q.get('base_dn') || '', agent_id: q.get('agent') || ''});
+      }
     },
     agentName(id) { const a = this.agents.find(x => x.id === id); return a ? a.name : ''; },
 
