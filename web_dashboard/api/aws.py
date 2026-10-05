@@ -670,6 +670,8 @@ async def _fan_out_batch(
                 "bulk": True,
                 "register_in_entitle": req.register_in_entitle,
                 "register_in_passwordsafe": req.register_in_passwordsafe,
+                "ad_directory_id": req.ad_directory_id,
+                "ad_ou": req.ad_ou,
                 "ssh_key_secret_override": req.ssh_key_secret_override,
             },
         )
@@ -776,6 +778,8 @@ async def deploy_ami(
             "workgroup": workgroup,
             "register_in_entitle": req.register_in_entitle,
             "register_in_passwordsafe": req.register_in_passwordsafe,
+            "ad_directory_id": req.ad_directory_id,
+            "ad_ou": req.ad_ou,
             "ssh_key_secret_override": req.ssh_key_secret_override,
             # PRA jump-group fields: the runner rebuilds the whole call from this
             # metadata, so anything omitted here is silently skipped at deploy time
@@ -872,6 +876,8 @@ async def bulk_deploy_amis(
                 "bulk": True,
                 "register_in_entitle": req.register_in_entitle,
                 "register_in_passwordsafe": req.register_in_passwordsafe,
+                "ad_directory_id": req.ad_directory_id,
+                "ad_ou": req.ad_ou,
                 "ssh_key_secret_override": req.ssh_key_secret_override,
             },
         )

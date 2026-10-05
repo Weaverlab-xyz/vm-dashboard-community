@@ -418,11 +418,23 @@ async def _run_deploy(
             except windows_admin_secret.WindowsSecretError as e:
                 raise AWSError(str(e)) from e
             # A throwaway key pair is what makes the Administrator password retrievable.
+            # A requested AD join is checked now, so a bad choice is reported before the
+            # instance exists; it never stops the deploy (domain_join_service).
+            ad_row = None
+            if _meta.get("ad_directory_id"):
+                from ..services import domain_join_service
+                try:
+                    ad_row = domain_join_service.resolve(
+                        db, _meta["ad_directory_id"], "aws", _aws_region)
+                except domain_join_service.DomainJoinError as e:
+                    result["ad_join_error"] = str(e)
             win_key_name = aws_service.windows_key_pair_name(job_id)
             job_service.update_progress(db, job_id, 38, "Creating a one-time key pair for the Windows password…")
             win_private_key = await aws_service.create_windows_key_pair(_aws_region, win_key_name)
             result["windows_key_pair"] = win_key_name
         else:
+            if _meta.get("ad_directory_id"):
+                result["ad_join_error"] = "AD join applies to Windows images only; skipped"
             from ..services.os_detection import detect_os_type
             os_type, ssh_user = detect_os_type(ami_info.get("name", ""))
             if resources.ssh_key_error:
@@ -531,6 +543,11 @@ async def _run_deploy(
             result["admin_password_backend"] = backend
             result["admin_password_ref"] = ref
             job_service.update_progress(db, job_id, 80, f"Administrator password stored in {backend}.")
+            if ad_row is not None:
+                from ..services import domain_join_service
+                await domain_join_service.join_aws(
+                    db, job_id, row=ad_row, ou=_meta.get("ad_ou") or "",
+                    region=_aws_region, instance_id=instance_id, result=result)
 
         # ── Step 3: BeyondTrust PRA — Shell Jump (optional; SSH, so Linux only) ─
         if _cfg_svc.get_bool("pra_enabled") and not is_windows:

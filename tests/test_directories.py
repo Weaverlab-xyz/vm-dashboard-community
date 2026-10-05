@@ -402,6 +402,122 @@ def test_joinable_needs_the_clouds_write_permission():
     db.close()
 
 
+# ── domain join ────────────────────────────────────────────────────────────────
+
+def _aws_dir(db, **kw):
+    row = ManagedDirectory(name="corp.example.com", cloud="aws", provider="aws_managed_ad",
+                           source="provisioned", status="available", region="us-east-1",
+                           directory_id="d-77", dns_ips=json.dumps(["10.0.1.10", "10.0.2.10"]),
+                           **kw)
+    db.add(row)
+    db.commit()
+    return row
+
+
+def test_aws_join_sends_the_seamless_join_document():
+    from web_dashboard.services import aws_service, domain_join_service as dj
+    _cfg(directory_join_default_ou="OU=Servers,DC=corp,DC=example,DC=com")
+    db = _db()
+    row = _aws_dir(db)
+    sent = {}
+
+    async def online(region, iid, **k):
+        sent["online"] = iid
+
+    async def send(region, iid, document, params, **k):
+        sent.update(document=document, params=params)
+        return {"status": "Success"}
+
+    aws_service.wait_ssm_online, aws_service.ssm_send_document = online, send
+    job_service.update_progress = lambda *a, **k: None
+    result = {}
+    asyncio.run(dj.join_aws(db, "j", row=row, ou="", region="us-east-1",
+                            instance_id="i-9", result=result))
+    assert sent["document"] == "AWS-JoinDirectoryServiceDomain"
+    assert sent["params"]["directoryId"] == ["d-77"]
+    assert sent["params"]["directoryName"] == ["corp.example.com"]
+    assert sent["params"]["dnsIpAddresses"] == ["10.0.1.10", "10.0.2.10"]
+    assert sent["params"]["directoryOU"] == ["OU=Servers,DC=corp,DC=example,DC=com"]
+    assert result["ad_joined"] is True and result["ad_directory_id"] == row.id
+    db.close()
+
+
+def test_aws_join_failure_is_a_warning_naming_the_usual_cause():
+    from web_dashboard.services import aws_service, domain_join_service as dj
+    _cfg()
+    db = _db()
+    row = _aws_dir(db)
+
+    async def online(*a, **k):
+        pass
+
+    async def send(*a, **k):
+        return {"status": "Failed", "stderr": "Access denied to ds:CreateComputer"}
+
+    aws_service.wait_ssm_online, aws_service.ssm_send_document = online, send
+    result = {}
+    asyncio.run(dj.join_aws(db, "j", row=row, ou="", region="us-east-1",
+                            instance_id="i-9", result=result))
+    assert "ad_joined" not in result
+    assert "AmazonSSMDirectoryServiceAccess" in result["ad_join_error"]
+    db.close()
+
+
+def test_resolve_checks_cloud_region_and_state():
+    from web_dashboard.services import domain_join_service as dj
+    _cfg()
+    db = _db()
+    row = _aws_dir(db)
+    assert dj.resolve(db, "", "aws") is None
+    assert dj.resolve(db, row.id, "aws", "us-east-1").id == row.id
+    for args, needle in (((row.id, "gcp"), "aws directory"),
+                         ((row.id, "aws", "eu-west-1"), "us-east-1"),
+                         (("nope", "aws"), "does not exist")):
+        try:
+            dj.resolve(db, *args)
+        except dj.DomainJoinError as e:
+            assert needle in str(e), str(e)
+        else:
+            raise AssertionError(f"resolve accepted {args}")
+    db.close()
+
+
+def test_gcp_join_metadata_and_service_account():
+    from web_dashboard.services import domain_join_service as dj
+    row = ManagedDirectory(name="g.example.com", cloud="gcp", provider="gcp_managed_ad",
+                           resource_name="projects/p/locations/global/domains/g.example.com")
+    _cfg()
+    md = dj.gcp_join_metadata(row)
+    assert md["managed-ad-domain"] == row.resource_name
+    assert md["managed-ad-domain-join-failure-stop"] == "false"
+    assert "managed-ad-ou-name" not in md
+    assert dj.gcp_join_metadata(row, "OU=X,DC=g")["managed-ad-ou-name"] == "OU=X,DC=g"
+    try:
+        dj.gcp_join_service_account()
+    except dj.DomainJoinError as e:
+        assert "roles/managedidentities.domainJoin" in str(e)
+    else:
+        raise AssertionError("no service account accepted")
+    _cfg(gcp_domain_join_service_account="join@p.iam.gserviceaccount.com")
+    assert dj.gcp_join_service_account() == "join@p.iam.gserviceaccount.com"
+
+
+def test_deploys_carry_the_join_through():
+    """Static: the AWS and GCP deploy paths wire the join where the design says."""
+    import inspect
+    from web_dashboard.services import aws_vm_service, gcp_vm_service
+    aws = inspect.getsource(aws_vm_service)
+    assert "domain_join_service.join_aws" in aws
+    assert aws.index("windows_admin_secret.store") < aws.index("domain_join_service.join_aws")
+    gcp = inspect.getsource(gcp_vm_service)
+    assert "gcp_join_metadata" in gcp and "service_account_email=join_sa" in gcp
+    from web_dashboard.models.aws import BulkDeployRequest, DeployRequest as EC2DeployRequest
+    from web_dashboard.models.gcp import GCPDeployRequest
+    assert "ad_directory_id" in EC2DeployRequest.model_fields
+    assert "ad_directory_id" in BulkDeployRequest.model_fields
+    assert "ad_directory_id" in GCPDeployRequest.model_fields
+
+
 def test_password_generator_rules():
     for _ in range(50):
         pw = ds.generate_admin_password()

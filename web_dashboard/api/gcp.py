@@ -798,6 +798,8 @@ async def bulk_deploy_instances(
             workgroup=workgroup,
             register_in_entitle=req.register_in_entitle,
             register_in_passwordsafe=req.register_in_passwordsafe,
+            ad_directory_id=req.ad_directory_id,
+            ad_ou=req.ad_ou,
             ssh_key_secret_override=req.ssh_key_secret_override,
             jump_group=req.jump_group,
             jumpoint_name=req.jumpoint_name,

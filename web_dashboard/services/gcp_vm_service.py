@@ -341,6 +341,9 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         # Windows images take a different path from here: no SSH key, a password from
         # the windows-keys exchange, and an RDP jump instead of a Shell Jump.
         is_windows = await gcp_service.image_is_windows(payload.image_self_link)
+        ad_meta: dict = {}          # what this deploy records about a requested AD join
+        join_md: dict = {}          # instance metadata that performs it
+        join_sa = ""
         if is_windows:
             from ..services import windows_admin_secret
             try:
@@ -348,6 +351,25 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                 windows_admin_secret.resolve_backend("gcp")
             except windows_admin_secret.WindowsSecretError as e:
                 raise GCPError(str(e)) from e
+            # AD join is set at CREATE: the guest agent joins during first boot. A join that
+            # cannot be attempted is a warning, never a reason to stop the deploy.
+            if getattr(payload, "ad_directory_id", None):
+                from ..services import domain_join_service
+                try:
+                    ad_row = domain_join_service.resolve(db, payload.ad_directory_id, "gcp")
+                    join_sa = domain_join_service.gcp_join_service_account()
+                    join_md = domain_join_service.gcp_join_metadata(ad_row, payload.ad_ou or "")
+                    ad_meta = {"ad_directory_id": ad_row.id, "ad_domain": ad_row.name,
+                               # Requested at create and performed by the guest agent;
+                               # counted as joined so the directory cannot be destroyed
+                               # from under it. Verify membership in AD.
+                               "ad_joined": True, "ad_join_method": "gce-metadata"}
+                    if join_md.get("managed-ad-ou-name"):
+                        ad_meta["ad_ou"] = join_md["managed-ad-ou-name"]
+                except domain_join_service.DomainJoinError as e:
+                    ad_meta = {"ad_join_error": str(e)}
+        elif getattr(payload, "ad_directory_id", None):
+            ad_meta = {"ad_join_error": "AD join applies to Windows images only; skipped"}
 
         # Retrieve SSH public key (per-launch override wins over the region default)
         secret_name = getattr(payload, "ssh_key_secret_override", None) or _rc["ssh_key_secret"]
@@ -402,6 +424,8 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             network_tags=merged_tags,
             labels={"workgroup": wg} if wg else None,
             windows=is_windows,
+            extra_metadata=join_md or None,
+            service_account_email=join_sa,
         )
 
         hostname = result.get("private_ip") or result.get("public_ip") or payload.instance_name
@@ -426,6 +450,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             final_meta["nat_name"] = nat_name
         if jp:
             jp.record(final_meta)
+        final_meta.update(ad_meta)
 
         # ── Windows: the administrator password → secret manager ──────────────
         admin_password = ""

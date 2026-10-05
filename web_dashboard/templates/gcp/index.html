@@ -616,7 +616,27 @@
             Onboard into Password Safe (managed system + account)
           </label>
           <p class="mt-1 text-xs text-gray-400 ml-6">
-            Requires Password Safe registration enabled; onboards the image's adminuser account, SSH-key managed.
+            Requires Password Safe registration enabled. Linux: onboards the image's adminuser account, SSH-key managed. Windows: the administrator is onboarded password-managed and rotated straight away.
+          </p>
+        </div>
+        {% endif %}
+        {% if directories_enabled %}
+        <!-- Active Directory join (Windows images only) -->
+        <div class="pt-1">
+          <label class="block text-sm font-medium text-gray-700 mb-1">Join Active Directory <span class="text-gray-400 font-normal">(Windows only)</span></label>
+          <select x-model="deployForm.ad_directory_id"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">Don't join</option>
+            <template x-for="d in adDirs" :key="d.id">
+              <option :value="d.id" x-text="d.name + ' (' + d.provider_label + ')'"></option>
+            </template>
+          </select>
+          <input x-show="deployForm.ad_directory_id" x-model="deployForm.ad_ou"
+                 class="mt-2 w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono"
+                 placeholder="OU (optional) — OU=Servers,DC=corp,DC=example,DC=com">
+          <p class="mt-1 text-xs text-gray-400">
+            Joined by the guest agent at first boot. The VM runs as the domain-join service
+            account from Settings and must be on one of the domain's authorized networks.
           </p>
         </div>
         {% endif %}
@@ -834,6 +854,26 @@
                  class="rounded border-gray-300 text-green-600 focus:ring-green-500">
           Onboard each VM into Password Safe (managed system + account)
         </label>
+        {% endif %}
+        {% if directories_enabled %}
+        <!-- Active Directory join (Windows images only) -->
+        <div class="pt-1">
+          <label class="block text-sm font-medium text-gray-700 mb-1">Join Active Directory <span class="text-gray-400 font-normal">(Windows only)</span></label>
+          <select x-model="bulkModal.ad_directory_id"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">Don't join</option>
+            <template x-for="d in adDirs" :key="d.id">
+              <option :value="d.id" x-text="d.name + ' (' + d.provider_label + ')'"></option>
+            </template>
+          </select>
+          <input x-show="bulkModal.ad_directory_id" x-model="bulkModal.ad_ou"
+                 class="mt-2 w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono"
+                 placeholder="OU (optional) — OU=Servers,DC=corp,DC=example,DC=com">
+          <p class="mt-1 text-xs text-gray-400">
+            Joined by the guest agent at first boot. The VM runs as the domain-join service
+            account from Settings and must be on one of the domain's authorized networks.
+          </p>
+        </div>
         {% endif %}
 
         <!-- When to run. bulk_deploy_instances has resolved a booking since the
@@ -1728,7 +1768,15 @@ function gcpDashboard() {
       machine_type: 'e2-medium', zone: '', subnetwork: '', disk_size_gb: 20,
       create_external_ip: false,
       register_in_entitle: false, register_in_passwordsafe: false,
+      ad_directory_id: '', ad_ou: '',
       submitting: false, error: '',
+    },
+    adDirs: [],
+    async loadAdDirs() {
+      {% if directories_enabled %}
+      try { this.adDirs = (await API.get('/api/directories/joinable?cloud=gcp')).directories || []; }
+      catch (e) { this.adDirs = []; }
+      {% endif %}
     },
     exportingImages: new Set(),
     exportDialog: { open: false, target: null, label: '', name: '', error: '', submitting: false },
@@ -1773,6 +1821,7 @@ function gcpDashboard() {
       docker_deploy_key_ref: '',
       register_in_entitle: false,
       register_in_passwordsafe: false,
+      ad_directory_id: '', ad_ou: '',
       ssh_key_secret_override: '',
       sshKeySecrets: [],
     },
@@ -2373,9 +2422,11 @@ function gcpDashboard() {
         jump_group: '', jumpoint_name: '',
         register_in_entitle: false,
         register_in_passwordsafe: false,
+        ad_directory_id: '', ad_ou: '',
         ssh_key_secret_override: '',
         sshKeySecrets: [],
       };
+      this.loadAdDirs();
       this.sshKeyPreview = '';
       this.sshKeyLoading = true;
       this.deployModal   = true;
@@ -2426,8 +2477,10 @@ function gcpDashboard() {
           ? 'e2-medium' : (this.networkOpts.machine_types?.[0] || 'e2-medium'),
         zone: '', subnetwork: '', disk_size_gb: 20, create_external_ip: false,
         register_in_entitle: false, register_in_passwordsafe: false,
+        ad_directory_id: '', ad_ou: '',
         submitting: false, error: '',
       };
+      this.loadAdDirs();
       // The modal opens on the configured default zone, so the pickers have to be
       // scoped back to ITS region — a previous deploy may have left networkOpts on
       // another one. (Unconditional: `zones` is initialised to [], so the old
@@ -2456,6 +2509,8 @@ function gcpDashboard() {
           workgroup: m.workgroup,
           register_in_entitle: m.register_in_entitle,
           register_in_passwordsafe: m.register_in_passwordsafe,
+          ad_directory_id: m.ad_directory_id || null,
+          ad_ou: m.ad_ou || '',
           ...this.schedulePayload(),
         });
         m.open = false;
@@ -2513,6 +2568,8 @@ function gcpDashboard() {
           docker_deploy_key_ref: this.deployForm.docker_deploy_key_ref || null,
           register_in_entitle: this.deployForm.register_in_entitle,
           register_in_passwordsafe: this.deployForm.register_in_passwordsafe,
+          ad_directory_id: this.deployForm.ad_directory_id || null,
+          ad_ou: this.deployForm.ad_ou || '',
           ssh_key_secret_override: this.deployForm.ssh_key_secret_override || null,
           ...this.schedulePayload(),
         };
