@@ -728,7 +728,7 @@ account will fight; pick one owner.
 ### PRA RDP jump
 
 With PRA enabled, each Windows VM gets a **Remote RDP** jump item in the cloud's Jump
-Group / Jumpoint, resolved the same way as the Linux Shell Jump.
+Group, through its Gateway, resolved the same way as the Linux Shell Jump.
 
 - When Password Safe manages the account, **no PRA Vault copy** is made. PRA injects the
   current credential through its Password Safe integration, and a copy would go stale at

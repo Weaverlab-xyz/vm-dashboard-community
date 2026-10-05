@@ -31,17 +31,11 @@ _TMPDB = os.path.join(tempfile.mkdtemp(prefix="winsrv-"), "test.db")
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{_TMPDB}")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-windows-server-tests")
 
-try:
-    from web_dashboard.services import (config_service, ps_vm_hook, secrets_backend_service,
-                                        terraform_pra_service, windows_admin_secret as was,
-                                        windows_server_hook as wsh)
-except Exception as exc:  # pragma: no cover — app deps missing
-    try:
-        import pytest
-        pytest.skip(f"app dependencies unavailable: {exc}", allow_module_level=True)
-    except ModuleNotFoundError:
-        print(f"SKIP: {exc}")
-        sys.exit(0)
+# Unguarded on purpose: CI installs the full requirements, and a broken first-party
+# import must fail this file rather than skip it (tests/test_import_guard_narrowness.py).
+from web_dashboard.services import (config_service, ps_vm_hook, secrets_backend_service,  # noqa: E402
+                                    terraform_pra_service, windows_admin_secret as was,
+                                    windows_server_hook as wsh)
 
 
 # ── config stub ───────────────────────────────────────────────────────────────
