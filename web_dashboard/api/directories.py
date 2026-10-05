@@ -10,6 +10,7 @@ Managed Active Directory API (gated by ``directories_enabled``).
   GET    /api/directories/ps-candidates         — directories Password Safe manages
   POST   /api/directories/ps-import             — register the chosen ones via an agent
   POST   /api/directories/ad-connector          — build an AWS AD Connector to an on-prem AD
+  POST   /api/directories/dns-link              — build a GCP DNS link to an on-prem AD
   GET    /api/directories/joinable?cloud=…      — what a Windows deploy can join
   GET    /api/directories/{id}                  — one directory
   GET    /api/directories/{id}/admin-password   — the stored admin credential (audited)
@@ -178,6 +179,34 @@ def build_ad_connector(req: ADConnectorRequest, db: Session = Depends(get_db),
         raise HTTPException(status_code=400, detail=str(e))
     job_service.log_audit(db, user.username, "directory_ad_connector",
                           details={"name": row.name, "region": req.region,
+                                   "onprem_directory_id": row.id})
+    return out
+
+
+class DNSLinkRequest(BaseModel):
+    onprem_directory_id: str
+    project: str = ""
+    networks: List[str] = []
+    dns_ips: List[str]
+    workgroup: Optional[str] = None
+
+
+@router.post("/dns-link")
+def build_dns_link(req: DNSLinkRequest, db: Session = Depends(get_db),
+                   user: User = Depends(require_explicit_permission("directories", "write"))):
+    """A Cloud DNS forwarding zone so GCE Windows servers can join an on-prem AD, joined
+    by the on-prem agent after deploy."""
+    row = directory_service.get_directory(db, req.onprem_directory_id)
+    if not row or not _visible(row, user):
+        raise HTTPException(status_code=404, detail="directory not found")
+    try:
+        out = directory_service.provision_dns_link(
+            db, onprem_directory_id=row.id, project=req.project, networks=req.networks,
+            dns_ips=req.dns_ips, created_by=user.username, workgroup=req.workgroup)
+    except DirectoryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    job_service.log_audit(db, user.username, "directory_dns_link",
+                          details={"name": row.name, "project": req.project,
                                    "onprem_directory_id": row.id})
     return out
 

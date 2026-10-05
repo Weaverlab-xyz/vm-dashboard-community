@@ -98,6 +98,9 @@
               <button x-show="d.cloud === 'local' && d.provider === 'onprem_ad' && d.status === 'available'"
                       @click="openExtend(d, 'aws')"
                       class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Extend to AWS</button>
+              <button x-show="d.cloud === 'local' && d.provider === 'onprem_ad' && d.status === 'available'"
+                      @click="openExtend(d, 'gcp')"
+                      class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Extend to GCP</button>
               <button x-show="d.source !== 'registered' && d.status === 'available' && d.admin_password_custody !== 'passwordsafe_managed' && d.provider !== 'aws_ad_connector'"
                       @click="resetPassword(d)"
                       class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Reset admin password</button>
@@ -343,13 +346,26 @@
             (<span x-text="ext.dir?.bind_account || 'managed account'"></span>). It needs only read and join rights.</p>
         </div>
       </template>
-      <label class="flex items-center gap-2 text-sm text-gray-700">
+      <template x-if="ext.cloud === 'gcp'">
+        <div class="space-y-3">
+          <p class="text-xs text-gray-500">Builds a <strong>DNS link</strong>: a Cloud DNS private forwarding zone (about
+            $0.20/month) that sends this domain's queries to your domain controllers over the VPN. Windows servers
+            deployed on GCP with this directory are then joined by this domain's remote agent over WinRM.
+            On-prem DNS must accept queries from 35.199.192.0/19.</p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <input x-model="ext.project" placeholder="Project (blank = default)" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <input x-model="ext.network" placeholder="VPC networks: default, prod-vpc" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <input x-model="ext.dns_ips" placeholder="On-prem DNS / DC IPs: 10.0.0.10, 10.0.0.11" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono sm:col-span-2">
+          </div>
+        </div>
+      </template>
+      <label x-show="ext.cloud === 'aws'" class="flex items-center gap-2 text-sm text-gray-700">
         <input type="checkbox" x-model="ext.ack" class="rounded text-blue-600"> I understand this bills monthly and has no auto-delete timer
       </label>
       <div x-show="ext.error" class="text-sm text-red-600" x-text="ext.error"></div>
       <div class="flex justify-end gap-2">
         <button @click="ext.open = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
-        <button @click="submitExtend()" :disabled="ext.saving || !ext.ack"
+        <button @click="submitExtend()" :disabled="ext.saving || (ext.cloud === 'aws' && !ext.ack)"
                 class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg">Build</button>
       </div>
     </div>
@@ -499,6 +515,15 @@ function directoriesPage() {
       const e = this.ext;
       e.saving = true; e.error = '';
       try {
+        if (e.cloud === 'gcp') {
+          const r = await API.post('/api/directories/dns-link', {
+            onprem_directory_id: e.dir.id, project: e.project.trim(),
+            networks: this.split(e.network), dns_ips: this.split(e.dns_ips) });
+          e.open = false;
+          this.note('DNS link queued — job ' + r.job_id.slice(0, 8));
+          await this.load();
+          return;
+        }
         const r = await API.post('/api/directories/ad-connector', {
           onprem_directory_id: e.dir.id, region: e.region.trim(), vpc_id: e.vpc_id.trim(),
           subnet_ids: this.split(e.subnets), dns_ips: this.split(e.dns_ips), size: e.size,

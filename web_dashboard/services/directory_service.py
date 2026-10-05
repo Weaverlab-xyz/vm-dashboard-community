@@ -46,6 +46,11 @@ _TEMPLATE_DIRS = {
     "aws": os.path.join(_REPO_ROOT, "terraform", "directory", "aws_managed_ad"),
     "gcp": os.path.join(_REPO_ROOT, "terraform", "directory", "gcp_managed_ad"),
 }
+# Modules chosen by provider rather than cloud: a cloud-side extension of an on-prem
+# directory, which runs no domain controllers of its own.
+_PROVIDER_TEMPLATE_DIRS = {
+    "dns_link": os.path.join(_REPO_ROOT, "terraform", "directory", "gcp_dns_forward"),
+}
 _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
 
 PROVISIONING_CLOUDS = tuple(sorted(_TEMPLATE_DIRS))
@@ -58,6 +63,7 @@ PROVIDER_LABELS = {
     "aws_ad_connector": "AWS AD Connector",
     "aws_simple_ad": "AWS Simple AD",
     "gcp_managed_ad": "GCP Managed Microsoft AD",
+    "dns_link": "GCP DNS link to on-prem AD",
     "onprem_ad": "On-premises Active Directory",
     "ldap": "On-premises LDAP",
 }
@@ -106,8 +112,9 @@ def _cfg(key: str, default: str = "") -> str:
     return default if val in (None, "") else str(val)
 
 
-def template_dir(cloud: str) -> str:
-    path = _TEMPLATE_DIRS.get((cloud or "").lower())
+def template_dir(cloud: str, provider: str = "") -> str:
+    path = (_PROVIDER_TEMPLATE_DIRS.get(provider or "")
+            or _TEMPLATE_DIRS.get((cloud or "").lower()))
     if not path:
         raise DirectoryError(f"no managed-directory module for cloud {cloud!r} — "
                              f"built: {', '.join(PROVISIONING_CLOUDS)}.")
@@ -377,6 +384,61 @@ def provision_ad_connector(db: Session, *, onprem_directory_id: str, region: str
     return {"directory_id": row.id, "job_id": job.id}
 
 
+def provision_dns_link(db: Session, *, onprem_directory_id: str, project: str,
+                       networks: list, dns_ips: list, created_by: str,
+                       workgroup: Optional[str] = None) -> dict:
+    """Validate, record and enqueue a GCP DNS link for a registered on-prem AD.
+
+    A Cloud DNS private forwarding zone, so the listed VPC networks resolve the on-prem
+    domain and find its DCs over the VPN. Joining then needs no Managed AD: the
+    on-prem agent runs the join over WinRM (domain_join_service.queue_agent_join)."""
+    onprem = get_directory(db, onprem_directory_id)
+    if not onprem or onprem.cloud != "local" or onprem.provider != "onprem_ad":
+        raise DirectoryError("a DNS link extends a registered on-premises Active Directory "
+                             "— register the domain on this page first")
+    if onprem.status != "available":
+        raise DirectoryError(f"{onprem.name} is {onprem.status}, not available")
+    if not onprem.agent_id:
+        raise DirectoryError(f"{onprem.name} has no remote agent, and the join runs "
+                             f"through it — re-register it with one")
+    project = (project or "").strip() or _cfg("gcp_project") or _cfg("gcp_project_id")
+    if not project:
+        raise DirectoryError("a GCP project id is required (form or gcp_project)")
+    networks = [x.strip() for x in (networks or []) if x and x.strip()]
+    if not networks and _cfg("gcp_network"):
+        networks = [_cfg("gcp_network")]
+    if not networks:
+        raise DirectoryError("name at least one VPC network your Windows servers are on")
+    networks = [_qualify_network(n, project) for n in networks]
+    dns_ips = [x.strip() for x in (dns_ips or []) if x and x.strip()]
+    bad = [x for x in dns_ips if not _IPV4_RE.match(x)]
+    if not dns_ips or bad:
+        raise DirectoryError(
+            "list the IPv4 addresses of on-prem DNS servers (normally your domain "
+            "controllers) reachable from the VPC over the VPN"
+            + (f" — not addresses: {', '.join(bad)}" if bad else ""))
+    clash = db.query(ManagedDirectory).filter(
+        ManagedDirectory.linked_directory_id == onprem.id,
+        ManagedDirectory.provider == "dns_link", ManagedDirectory.project == project,
+        ManagedDirectory.status != "deleted").first()
+    if clash:
+        raise DirectoryError(f"{onprem.name} already has a DNS link in {project}")
+    row = ManagedDirectory(
+        name=onprem.name, cloud="gcp", provider="dns_link", source="provisioned",
+        status="provisioning", project=project, networks=json.dumps(networks),
+        dns_ips=json.dumps(dns_ips), linked_directory_id=onprem.id,
+        workgroup=workgroup, created_by=created_by, expires_at=None)
+    db.add(row)
+    db.flush()
+    job = job_service.create_job(
+        db, PROVISION_JOB_TYPE, created_by, workgroup=workgroup,
+        metadata={"directory_id": row.id, "name": row.name, "cloud": "gcp",
+                  "kind": "dns_link", "linked_directory_id": onprem.id})
+    row.deploy_job_id = job.id
+    db.commit()
+    return {"directory_id": row.id, "job_id": job.id}
+
+
 def connector_username(account_name: str) -> str:
     """The bare sAMAccountName ConnectDirectory wants, from DOMAIN\\user or a UPN."""
     name = (account_name or "").strip()
@@ -497,6 +559,10 @@ def _qualify_network(network: str, project: str) -> str:
 
 
 def _tf_variables(row: ManagedDirectory, admin_password: str = "") -> dict:
+    if row.provider == "dns_link":
+        return {"project": row.project, "domain_name": row.name,
+                "dns_ips": _jl(row.dns_ips), "networks": _jl(row.networks),
+                "directory_row_id": row.id}
     if row.cloud == "aws":
         return {
             "region": row.region, "domain_name": row.name, "short_name": row.netbios or "",
@@ -518,7 +584,9 @@ def _read_outputs(row: ManagedDirectory, outputs: dict) -> None:
     def val(key):
         v = outputs.get(key)
         return v.get("value") if isinstance(v, dict) and "value" in v else v
-    if row.cloud == "aws":
+    if row.provider == "dns_link":
+        row.resource_name = val("zone_name")
+    elif row.cloud == "aws":
         row.directory_id = val("directory_id")
         row.dns_ips = json.dumps(list(val("dns_ip_addresses") or []))
         row.security_group_id = val("security_group_id")
@@ -661,7 +729,7 @@ async def run_provision_apply(db: Session, *, directory_id: str, job_id: str) ->
         await broadcast_progress(job_id, 5, "Creating the directory…")
         outputs = await terraform.apply(
             _deploy_dir(job_id), _tf_variables(row),
-            template_dir=template_dir(row.cloud),
+            template_dir=template_dir(row.cloud, row.provider),
             env=terraform_provider_env.provider_env(row.cloud),
             on_line=_job_stream(job_id, 5, "Creating the directory…", row.cloud))
         built = True
@@ -670,6 +738,12 @@ async def run_provision_apply(db: Session, *, directory_id: str, job_id: str) ->
         row.error_message = None
         row.updated_at = datetime.utcnow()
         db.commit()
+        if row.provider == "dns_link":
+            # No domain controllers and no administrator here: the domain is on-prem.
+            job_service.set_completed(db, job_id, result={
+                "directory_id": row.id, "name": row.name, "built": True,
+                "zone_name": row.resource_name})
+            return
     except Exception as exc:  # noqa: BLE001
         row.status = "failed"
         row.error_message = str(exc)[:2000]
@@ -774,7 +848,7 @@ async def run_decommission(db: Session, *, directory_id: str, job_id: str) -> No
         await broadcast_progress(job_id, 20, "Destroying the directory…")
         await terraform.destroy(
             _deploy_dir(row.deploy_job_id or job_id), variables=_tf_variables(row),
-            template_dir=template_dir(row.cloud),
+            template_dir=template_dir(row.cloud, row.provider),
             env=terraform_provider_env.provider_env(row.cloud),
             on_line=_job_stream(job_id, 20, "Destroying the directory…", row.cloud))
         err = windows_admin_secret.delete(row.admin_password_backend, row.admin_password_ref)
@@ -802,9 +876,9 @@ async def reset_admin_password(db: Session, *, directory_id: str) -> dict:
     if row.admin_password_custody == "passwordsafe_managed":
         raise DirectoryError("Password Safe manages this administrator account — rotate "
                              "it in Password Safe.")
-    if row.provider == "aws_ad_connector":
-        raise DirectoryError("an AD Connector has no administrator of its own — its "
-                             "domain's administrators are on-premises")
+    if row.provider in ("aws_ad_connector", "dns_link"):
+        raise DirectoryError(f"a {PROVIDER_LABELS[row.provider]} has no administrator of "
+                             f"its own — its domain's administrators are on-premises")
     if row.status != "available":
         raise DirectoryError(f"{row.name} is {row.status}, not available")
     password = await set_admin_password(row)

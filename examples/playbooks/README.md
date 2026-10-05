@@ -567,6 +567,7 @@ To run these plays outside the dashboard, set the `dir_*` vars yourself, plus
 | `ad-ou.yml` | Create an OU, protected from accidental deletion | `ad_ou_name` |
 | `ad-reset-password.yml` | Reset a password, optionally forcing a change at next logon and unlocking the account | `ad_user_name`, `ad_new_password` or `ad_new_password_secret` |
 | `ad-remove-computer.yml` | Delete computer objects, for example those left behind by destroyed servers | `ad_computers`, `confirm: true` |
+| `ad-join-computer.yml` | Join a Windows server to the domain; WinRM logs on as the server's local administrator. The dashboard runs it after a GCE deploy that chose a GCP DNS link | `dir_domain`, `dir_bind_dn`, `dir_bind_password` (injected) |
 
 **Changes (any LDAP directory):**
 

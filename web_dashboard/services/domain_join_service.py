@@ -129,3 +129,83 @@ def gcp_join_service_account() -> str:
             "set gcp_domain_join_service_account (Settings → Managed Active Directory) to "
             "an account holding roles/managedidentities.domainJoin.")
     return sa
+
+
+# ── Joining an ON-PREM domain from the on-prem agent (GCP "DNS link") ─────────
+#
+# GCP has no AD Connector. With a DNS link (a Cloud DNS forwarding zone) the VPC resolves
+# the on-prem domain, and the join is run by the remote agent that already reaches that
+# domain: a WinRM play against the new server, logging on as its local administrator
+# and joining as the directory's Password Safe account. No domain credential goes into
+# instance metadata.
+
+# First-boot script that opens a WinRM HTTPS listener (5986) for that play. Not secret.
+# LocalAccountTokenFilterPolicy lets a LOCAL administrator other than the built-in one
+# act as administrator over WinRM; without it remote UAC filtering refuses the join.
+WINRM_BOOTSTRAP_PS1 = r"""
+$ErrorActionPreference = 'Stop'
+Enable-PSRemoting -SkipNetworkProfileCheck -Force | Out-Null
+$cert = New-SelfSignedCertificate -DnsName $env:COMPUTERNAME -CertStoreLocation Cert:\LocalMachine\My
+if (-not (Get-ChildItem WSMan:\localhost\Listener | Where-Object { $_.Keys -contains 'Transport=HTTPS' })) {
+  New-Item -Path WSMan:\localhost\Listener -Transport HTTPS -Address * -CertificateThumbPrint $cert.Thumbprint -Force | Out-Null
+}
+New-NetFirewallRule -DisplayName 'WinRM HTTPS (vm-dashboard AD join)' -Direction Inbound -Protocol TCP -LocalPort 5986 -Action Allow | Out-Null
+Set-ItemProperty -Path HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System -Name LocalAccountTokenFilterPolicy -Value 1 -Type DWord
+""".strip()
+
+JOIN_PLAYBOOK = "builtin:ad-join-computer"
+WINRM_HTTPS_PORT = 5986
+
+
+def agent_join_metadata() -> dict:
+    """Instance metadata for a server an agent will join: the WinRM bootstrap only."""
+    return {"sysprep-specialize-script-ps1": WINRM_BOOTSTRAP_PS1}
+
+
+def onprem_for_link(db: Session, link_row):
+    """The on-prem directory a DNS link extends, checked for an agent join."""
+    from . import agent_service, directory_service
+    onprem = directory_service.get_directory(db, link_row.linked_directory_id or "")
+    if not onprem or onprem.cloud != "local" or onprem.status != "available":
+        raise DomainJoinError(f"the on-prem directory behind {link_row.name} is no longer "
+                              f"registered")
+    from ..database import RemoteAgent
+    agent = db.query(RemoteAgent).filter(RemoteAgent.id == (onprem.agent_id or ""),
+                                         RemoteAgent.is_active.is_(True)).first()
+    if not agent:
+        raise DomainJoinError(f"{onprem.name} has no active remote agent to run the join")
+    if "agent_ansible" not in agent_service.allowed_job_types(agent):
+        raise DomainJoinError(f"agent '{agent.name}' is not granted Config Management, "
+                              f"which runs the join")
+    if not agent_service.supports_directory(agent):
+        raise DomainJoinError(agent_service.directory_upgrade_hint(agent))
+    return onprem, agent
+
+
+def queue_agent_join(db: Session, *, deploy_job_id: str, link_row, vm_name: str,
+                     private_ip: str, ou: str, created_by: str,
+                     workgroup: Optional[str] = None) -> str:
+    """Queue the agent run that joins a deployed Windows server to the on-prem domain.
+    Returns the job id. Call it after the deploy job has COMPLETED: the run's bundle
+    reads the server's stored administrator password from that job."""
+    from . import agent_ansible_meta, job_service
+    onprem, agent = onprem_for_link(db, link_row)
+    if not private_ip:
+        raise DomainJoinError("the server has no private address for the agent to reach")
+    ou = _ou(ou)
+    meta = agent_ansible_meta.normalize({
+        "description": f"Join {vm_name} to {onprem.name} (agent: {agent.name})",
+        "run_kind": "directory", "transport": "winrm",
+        "target_host": private_ip, "target_port": WINRM_HTTPS_PORT,
+        "target_id": onprem.id, "target_label": f"{vm_name} → {onprem.name}",
+        "asset": JOIN_PLAYBOOK, "asset_backend": "",
+        "extra_vars": {"ad_join_ou": ou} if ou else {},
+        "join_deploy_job_id": deploy_job_id,
+    })
+    problem = agent_ansible_meta.check(meta)
+    if problem:
+        raise DomainJoinError(problem)
+    job = job_service.create_job(db, job_type="agent_ansible", created_by=created_by,
+                                 workgroup=workgroup or "ansible", metadata=meta,
+                                 agent_id=agent.id)
+    return job.id

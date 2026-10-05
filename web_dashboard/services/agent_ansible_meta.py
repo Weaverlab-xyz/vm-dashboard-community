@@ -89,6 +89,11 @@ RUN_META_KEYS = (
     # credential at fetch time, which is why nothing has to be stored for it.
     "pov_environment_id",
     "pov_vm_id",
+    # A directory run that JOINS a freshly deployed Windows server to the domain: the
+    # deploy job whose stored local-administrator password is the WinRM login. An id,
+    # never a credential — the bundle reads the password from its secret store at fetch
+    # time. The dir_* vars are still the directory's own account: the join identity.
+    "join_deploy_job_id",
 )
 
 # The subset that crosses to the agent in the signed envelope. Scalars, enums and a network
@@ -122,6 +127,7 @@ _DEFAULTS = {
     "epml_token_var": "",
     "pov_environment_id": "",
     "pov_vm_id": "",
+    "join_deploy_job_id": "",
 }
 
 # Every RUN_META_KEYS entry that normalize() coerces with str(). Listed rather than derived
@@ -129,7 +135,7 @@ _DEFAULTS = {
 _STRING_KEYS = (
     "connection_id", "target_id", "target_label", "asset", "asset_backend",
     "login_user", "secret_become_source", "secret_ssh_key_source", "epml_token_var",
-    "become_method", "pov_environment_id", "pov_vm_id",
+    "become_method", "pov_environment_id", "pov_vm_id", "join_deploy_job_id",
 )
 
 # Default port per transport, used when a caller supplies none. WinRM over HTTP (5985) is
@@ -310,4 +316,7 @@ def check(meta: dict) -> str:
                 f"(got {meta['transport']!r}).")
     if meta["run_kind"] == "directory" and not meta["target_id"]:
         return "A directory run must name the directory it targets."
+    if meta["join_deploy_job_id"] and not (meta["run_kind"] == "directory"
+                                           and meta["transport"] == "winrm"):
+        return "Only a WinRM directory run can join a deployed server to a domain."
     return ""

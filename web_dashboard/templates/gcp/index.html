@@ -635,8 +635,10 @@
                  class="mt-2 w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono"
                  placeholder="OU (optional) — OU=Servers,DC=corp,DC=example,DC=com">
           <p class="mt-1 text-xs text-gray-400">
-            Joined by the guest agent at first boot. The VM runs as the domain-join service
-            account from Settings and must be on one of the domain's authorized networks.
+            Managed AD: joined by the guest agent at first boot. The VM runs as the domain-join
+            service account from Settings and must be on one of the domain's authorized networks.
+            A DNS link to an on-prem domain: the on-prem remote agent joins the server over
+            WinRM (5986) once it is up, as the directory's Password Safe account.
           </p>
         </div>
         {% endif %}
@@ -870,8 +872,10 @@
                  class="mt-2 w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono"
                  placeholder="OU (optional) — OU=Servers,DC=corp,DC=example,DC=com">
           <p class="mt-1 text-xs text-gray-400">
-            Joined by the guest agent at first boot. The VM runs as the domain-join service
-            account from Settings and must be on one of the domain's authorized networks.
+            Managed AD: joined by the guest agent at first boot. The VM runs as the domain-join
+            service account from Settings and must be on one of the domain's authorized networks.
+            A DNS link to an on-prem domain: the on-prem remote agent joins the server over
+            WinRM (5986) once it is up, as the directory's Password Safe account.
           </p>
         </div>
         {% endif %}

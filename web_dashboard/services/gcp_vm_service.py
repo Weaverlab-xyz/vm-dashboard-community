@@ -313,6 +313,8 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
     # and the directory's destroy guard must see it even if a later step fails.
     ad_meta: dict = {}
     launched = False
+    # A DNS-link directory is joined AFTER the deploy completes, by the on-prem agent.
+    agent_join_row = None
     try:
         job_service.set_running(db, job_id)
 
@@ -361,17 +363,28 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                 from ..services import domain_join_service
                 try:
                     ad_row = domain_join_service.resolve(db, payload.ad_directory_id, "gcp")
-                    join_sa = domain_join_service.gcp_join_service_account()
-                    join_md = domain_join_service.gcp_join_metadata(ad_row, payload.ad_ou or "")
-                    ad_meta = {"ad_directory_id": ad_row.id, "ad_domain": ad_row.name,
-                               # Requested at create and performed by the guest agent;
-                               # counted as joined so the directory cannot be destroyed
-                               # from under it. Verify membership in AD.
-                               "ad_joined": True, "ad_join_method": "gce-metadata"}
-                    if join_md.get("managed-ad-ou-name"):
-                        ad_meta["ad_ou"] = join_md["managed-ad-ou-name"]
+                    if ad_row.provider == "dns_link":
+                        # An on-prem domain reached over a VPN: the guest agent cannot join it.
+                        # Open WinRM at first boot; the on-prem agent joins after the deploy.
+                        domain_join_service.onprem_for_link(db, ad_row)
+                        join_md = domain_join_service.agent_join_metadata()
+                        agent_join_row = ad_row
+                        ad_meta = {"ad_directory_id": ad_row.id, "ad_domain": ad_row.name,
+                                   "ad_joined": True, "ad_join_method": "agent"}
+                    else:
+                        join_sa = domain_join_service.gcp_join_service_account()
+                        join_md = domain_join_service.gcp_join_metadata(ad_row, payload.ad_ou or "")
+                        ad_meta = {"ad_directory_id": ad_row.id, "ad_domain": ad_row.name,
+                                   # Requested at create and performed by the guest agent;
+                                   # counted as joined so the directory cannot be destroyed
+                                   # from under it. Verify membership in AD.
+                                   "ad_joined": True, "ad_join_method": "gce-metadata"}
+                        if join_md.get("managed-ad-ou-name"):
+                            ad_meta["ad_ou"] = join_md["managed-ad-ou-name"]
                 except domain_join_service.DomainJoinError as e:
                     ad_meta = {"ad_join_error": str(e)}
+                    agent_join_row = None
+                    join_md, join_sa = {}, ""
         elif getattr(payload, "ad_directory_id", None):
             ad_meta = {"ad_join_error": "AD join applies to Windows images only; skipped"}
 
@@ -578,6 +591,8 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             admin_password = ""
 
         job_service.set_completed(db, job_id, final_meta)
+        if agent_join_row is not None:
+            _queue_agent_join(db, job_id, agent_join_row, payload, final_meta)
         await cache_service.invalidate_prefix("gcp_instances")
 
     except Exception as exc:
@@ -601,6 +616,28 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         job_service.set_failed(db, job_id, str(exc), partial or None)
     finally:
         db.close()
+
+
+def _queue_agent_join(db, job_id: str, link_row, payload, final_meta: dict) -> None:
+    """Queue the on-prem agent's join of a just-deployed server and record the outcome
+    on the (already completed) deploy job. Queued AFTER completion because the join's
+    bundle reads the server's administrator password from this job's metadata."""
+    from ..services import domain_join_service
+    row = job_service.get_job(db, job_id)
+    update: dict = {}
+    try:
+        update["ad_join_job_id"] = domain_join_service.queue_agent_join(
+            db, deploy_job_id=job_id, link_row=link_row, vm_name=payload.instance_name,
+            private_ip=final_meta.get("private_ip") or "", ou=payload.ad_ou or "",
+            created_by=(row.created_by if row is not None else "") or "system",
+            workgroup=getattr(payload, "workgroup", "") or None)
+    except domain_join_service.DomainJoinError as e:
+        update = {"ad_join_error": str(e), "ad_joined": False}
+    if row is not None:
+        md = row.metadata_dict
+        md.update(update)
+        row.metadata_dict = md
+        db.commit()
 
 
 async def _run_bulk_deploy(job_items: list, project_id: str, zone: str) -> None:
