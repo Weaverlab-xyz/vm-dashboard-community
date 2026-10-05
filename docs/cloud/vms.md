@@ -21,15 +21,15 @@ as [Databases](../databases.md) and [Kubernetes](../kubernetes.md):
 |---|---|---|---|---|
 | **AWS** | EC2 (Linux + Windows) | ✅ (Linux: Shell Jump; Windows: RDP jump) | ✅ `ssm` plugin (or `ssh`); Windows: password-managed | ✅ SSH ephemeral (Linux) |
 | **Azure** | VM (Linux + Windows) | ✅ (Linux: Shell Jump; Windows: RDP jump) | ✅ `azurevm` plugin (or `ssh`); Windows: password-managed | ✅ SSH ephemeral (Linux) |
-| **GCP** | GCE (Linux) | ✅ | ✅ `gcpvm` plugin (or `ssh`) | ✅ SSH ephemeral |
+| **GCP** | GCE (Linux + Windows) | ✅ (Linux: Shell Jump; Windows: RDP jump) | ✅ `gcpvm` plugin (or `ssh`); Windows: password-managed | ✅ SSH ephemeral (Linux) |
 | **OCI** | Compute (Linux) | ✅ (shared gateway, or bring your own¹) | ⚠️ `ssh` method only | ✅ SSH ephemeral |
 
 ¹ OCI has no dashboard-provisioned gateway — you supply your own (see the OCI section).
 
 Unlike the other features, **cloud VM deploy has no feature toggle** — it's core
 functionality available whenever a cloud's credentials are configured, gated only by RBAC
-(`require_permission("aws"|"azure"|"gcp"|"oci", …)`). **Windows** is supported on **AWS and
-Azure** only — see [Windows servers](#windows-servers).
+(`require_permission("aws"|"azure"|"gcp"|"oci", …)`). **Windows** is supported on **AWS,
+Azure and GCP** — see [Windows servers](#windows-servers).
 
 ---
 
@@ -663,9 +663,10 @@ doc. A separate **machine-identity JIT** track (the AWS `elevate()` wrapping of
 
 ## Windows servers
 
-Windows builds on **AWS and Azure** follow a different path from Linux after the VM exists:
-no SSH key, no Shell Jump, no Entitle SSH integration. In their place is the local
-administrator password, a PRA RDP jump and, on Azure, an optional Entra ID join.
+Windows builds on **AWS, Azure and GCP** follow a different path from Linux after the VM
+exists: no SSH key, no Shell Jump, no Entitle SSH integration. In their place is the local
+administrator password, a PRA RDP jump, and a domain identity: an Entra ID join on Azure,
+or an [Active Directory join](directories.md) on AWS and GCP.
 
 ### Where the administrator password goes
 
@@ -679,7 +680,7 @@ the first of these that is configured (`services/windows_admin_secret.py`):
    Owner** (`secrets_bt_owner`) are configured. The secret lands in `secrets_bt_folder`.
 3. The global secrets backend, if it is an external one.
 4. The cloud's own vault: Azure Key Vault (`secrets_azure_kv_url`) for Azure, AWS Secrets
-   Manager (the AWS region) for EC2.
+   Manager (the AWS region) for EC2, GCP Secret Manager (the GCP project) for GCE.
 
 If none of these is configured, **the build is refused** before anything is created.
 Job metadata keeps only the backend and the reference, never the password.
@@ -694,9 +695,18 @@ How the password comes into existence differs per cloud:
   password or key material goes into UserData or SSM command history. An AMI that never
   publishes a password (a custom image built without EC2Launch's random password) fails the
   deploy with that reason after 25 minutes.
+- **GCP** has no "get password" call. After the instance boots, the deploy writes a
+  one-time RSA public key to the `windows-keys` instance metadata. The guest agent creates
+  the local account (`gcp_windows_admin_username`, default `gcpadmin`) with a random
+  password and writes it, encrypted to that key, to serial port 4. The deploy decrypts it
+  in memory, stores it, and removes the key from metadata. This is what
+  `gcloud compute reset-windows-password` does. Windows images get a boot disk of at
+  least 50 GB. A Windows image is recognised by the public `windows-cloud` project or by
+  its Windows licence.
 
-Retrieve it with **VMs → Password** on either cloud's page, or
-`GET /api/azure/vms/{name}/admin-password` / `GET /api/aws/instances/{id}/admin-password`.
+Retrieve it with **Password** on the cloud's VM list, or
+`GET /api/azure/vms/{name}/admin-password` / `GET /api/aws/instances/{id}/admin-password` /
+`GET /api/gcp/instances/{name}/admin-password`.
 Both need the cloud's **write** permission, because they hand out a working
 administrator credential, and both are audited. Destroying the VM deletes the stored
 password.
@@ -769,17 +779,31 @@ local administrator as break-glass. For just-in-time access, an Entitle Azure in
 can grant *Virtual Machine Administrator Login* on the VM for a limited time. That is the
 Windows counterpart of the Linux SSH ephemeral accounts.
 
+### Active Directory join (AWS and GCP)
+
+Microsoft supports Entra join and Entra RDP sign-in for Windows Server only on Azure VMs.
+On AWS and GCP, a Windows server can instead join a managed Active Directory at deploy:
+pick one under **Join Active Directory** on the deploy form. Directories are built or
+registered on the [Managed Active Directory](directories.md) page, which also covers
+what each cloud requires.
+
+- **AWS:** after the password is captured, the instance runs AWS's
+  `AWS-JoinDirectoryServiceDomain` document through Systems Manager, then reboots.
+- **GCP:** the instance is created with `managed-ad-domain` metadata, and the guest agent
+  joins during first boot.
+
+A failed join is a warning on the job, not a failed deploy. To have users sign in with
+Entra identities as well, synchronise that AD with Entra ID (Entra Connect or Cloud Sync).
+
 ### Not yet supported
 
-- **GCP and OCI Windows.** GCE delivers a Windows password through the `windows-keys`
-  metadata RSA exchange, and OCI through its initial-credentials API with a forced change
-  at first logon. Neither is implemented, so Windows images on those clouds are not
-  usable from the dashboard.
-- **Entra join outside Azure.** Microsoft supports Entra join and Entra RDP sign-in for
-  Windows Server only on Azure VMs. For EC2 (and GCE) Windows servers, the options are an
-  Active Directory domain join (AWS Managed Microsoft AD, or on-premises AD synchronised
-  to Entra with Entra Connect) or Azure Arc onboarding for management. Neither is
-  automated here.
+- **OCI Windows.** OCI returns a Windows password through its initial-credentials API, with
+  a forced change at first logon. That is not implemented, so Windows images on OCI are
+  not usable from the dashboard.
+- **Windows desktop pools on AWS and GCP.** Virtual desktop seats there are still
+  Linux-only; see [Virtual Desktops](virtual-desktops.md).
+- **Removing a joined server's computer object from AD on destroy.** Neither cloud does
+  it, and it needs domain credentials on a host that can reach a domain controller.
 
 ---
 
