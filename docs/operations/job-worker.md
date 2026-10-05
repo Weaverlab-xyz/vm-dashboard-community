@@ -2,6 +2,8 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** a long job is sitting queued, or you are sizing the worker for more of them.
 
+Part of [Operations](../operations.md).
+
 Long jobs — cluster and database provisions, Packer builds, image exports and promotes, VM
 deploys — run in a separate `worker` process, not in the web app. This page is about **how
 many of them run at once**, why the limits are split by kind, and why the database
@@ -183,7 +185,7 @@ job is marked missed rather than retried outside it. That is the correct outcome
 special case: the window is the boundary, a retry is just another attempt to start, and an
 attempt that cannot start inside the window must not start at all. If a change is being
 missed this way, the window is too short for the work plus its backoff. See
-[Change Windows](scheduling/change-windows.md), and [Scheduling](scheduling.md) for which surfaces
+[Change Windows](../scheduling/change-windows.md), and [Scheduling](../scheduling.md) for which surfaces
 can book a job at all.
 
 ### The dead-letter tail

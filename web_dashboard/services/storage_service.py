@@ -345,7 +345,7 @@ def _gcs_delete_sync(name: str) -> None:
 # state backend and silently falls through to local for anything it doesn't
 # recognise. Terraform has no first-party OCI state backend, so allowing that
 # selection would strand every deployment's state on the container's ephemeral
-# disk. api/storage.py enforces the restriction; see docs/image-management.md.
+# disk. api/storage.py enforces the restriction; see docs/cloud/image-management.md.
 
 def _oci_os_client():
     from . import oci_service

@@ -62,7 +62,7 @@ Everything past that is per-feature. Each row below names the `Sid` in
 | Cloud databases (RDS) | DB instance and DB subnet group CRUD, `rds:DescribeDBEngineVersions`, `rds:DescribeOrderableDBInstanceOptions`, tag actions | `DashboardRDS` |
 | Cloud Functions (Lambda) | `lambda:*`, plus Secrets Manager on `secret:*-fn-secret-*` | `DashboardLambda`, `DashboardSecretsManager` |
 | Cloud Costs | `ce:GetCostAndUsage`, `ce:GetCostForecast`, `ce:GetDimensionValues`, `ce:GetTags` | `DashboardCostExplorer` |
-| External secrets backend | Secrets Manager CRUD on `secret:dashboard/*` — see [secrets-management.md](../secrets-management.md#iam-permissions-required-per-backend) | `DashboardSecretsManager` |
+| External secrets backend | Secrets Manager CRUD on `secret:dashboard/*` — see [secrets-management.md](../access/secrets-management.md#iam-permissions-required-per-backend) | `DashboardSecretsManager` |
 | Password Safe VM onboarding | `ssm:SendCommand`, `ssm:GetCommandInvocation`, `ssm:ListCommandInvocations` | `DashboardSSMRunCommand` |
 | Job log streaming | `logs:*` | `DashboardLogs` |
 
@@ -82,7 +82,7 @@ broader than necessary and too narrow to work:
   (the dashboard uses S3-native state locking). Read-only fails every apply and
   destroy. Worse, with no storage backend configured at all, state falls back to
   the container's local disk, where losing that directory **orphans live cloud
-  resources** — see [infrastructure-as-code.md](../infrastructure-as-code.md#state-the-thing-that-makes-iac-work).
+  resources** — see [infrastructure-as-code.md](../cloud/infrastructure-as-code.md#state-the-thing-that-makes-iac-work).
 - **`IAMReadOnlyAccess` cannot `iam:PassRole`**, which is the action attaching an
   instance profile actually requires. The old "looking up instance profiles"
   rationale named the wrong mechanism.

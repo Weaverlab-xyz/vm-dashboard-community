@@ -35,7 +35,7 @@ where the credential eventually reaches a person.
 | **SPIRE** | [SPIFFE and SPIRE](workload-lab/spiffe.md) | an SVID issued in a trust domain, to a workload that attested itself | Password Safe |
 | **Kubernetes** | [Workload access to Kubernetes](workload-lab/kubernetes.md) | a bound ServiceAccount token for a machine *outside* the cluster | Password Safe |
 | **Cloud** | [Short-lived cloud credentials](workload-lab/cloud.md) | an AWS or Azure credential minted per run and leased | Workload Credentials |
-| **Agent** | [Agent Demo Cell](profiles/demo/agent-demo-cell.md) | an OAuth client on a [service account](service-accounts.md) (or, for a person-shaped token user, a Personal Access Token) — held by a worker, not a person | this dashboard's own token store |
+| **Agent** | [Agent Demo Cell](profiles/demo/agent-demo-cell.md) | an OAuth client on a [service account](access/service-accounts.md) (or, for a person-shaped token user, a Personal Access Token) — held by a worker, not a person | this dashboard's own token store |
 
 The first four are the way in, and the fifth is what you point at them. Two of the four
 carry more than one page, because two of them carry an argument that is not the tab's own:
@@ -175,7 +175,7 @@ rendering fault.
   tab: the non-human principal this lab was aligned to, and the consumer that holds
   nothing.
 * [Kubernetes](kubernetes.md) — managing the clusters the Kubernetes tab acts on.
-* [Permissions](permissions.md) — who may reach the page. It is all-preview today, so it
+* [Permissions](access/permissions.md) — who may reach the page. It is all-preview today, so it
   carries no RBAC scope of its own.
-* [Auto-delete Timer](auto-delete-timer.md) — the labs create real infrastructure, and the
+* [Auto-delete Timer](operations/auto-delete-timer.md) — the labs create real infrastructure, and the
   argument for reaping it is the same one the SPIRE guide makes.

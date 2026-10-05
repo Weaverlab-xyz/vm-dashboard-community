@@ -134,7 +134,7 @@ It is also a **kube-apiserver flag**, which is the constraint that decides every
   (`k3s-open-ports.yml`) and emits a registration-ready kubeconfig (`k3s-kubeconfig.yml`)
   that registers as a `cloud=local` cluster.
 - **KubeSolo** is on the 1.34 line as of v1.1.0, and its single-process control plane would
-  otherwise suit the edge story in [`docs/kubesolo.md`](../kubesolo.md). It documents no way
+  otherwise suit the edge story in [`docs/kubernetes/kubesolo.md`](../kubernetes/kubesolo.md). It documents no way
   to pass API server arguments. Until that is established by experiment rather than hope, it
   is the riskier host.
 

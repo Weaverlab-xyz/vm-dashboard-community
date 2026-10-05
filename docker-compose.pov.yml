@@ -135,6 +135,6 @@ secrets:
   # two instances sharing it is the only way their encrypted config could be swapped —
   # and two instances with DIFFERENT keys is why a pg_dump restore between them yields
   # unreadable ciphertext with no error. Use the config-migration tool if you need to
-  # copy settings across: docs/config-migration.md.
+  # copy settings across: docs/operations/config-migration.md.
   jwt_key_pov:
     file: .jwt_secret_key.pov

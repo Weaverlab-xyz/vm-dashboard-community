@@ -40,7 +40,7 @@ but adds capabilities the community edition deliberately doesn't ship:
   shared filesystem.
 - **Security uplift** — workload-identity-bootstrapped JWT root key (no
   static credentials anywhere), audit logs for root-key access, managed
-  rotation. See [docs/saas-comparison.md](docs/saas-comparison.md) for
+  rotation. See [docs/editions/comparison.md](docs/editions/comparison.md) for
   the detailed walkthrough.
 - **AI helper services** — e.g. an AI-assisted Ansible playbook
   generator, hosted as a tenant-scoped service rather than embedded in
@@ -109,7 +109,7 @@ every page under it. `tests/test_docs_moved_redirects.py` checks every target ex
 ### Faster lab infra for testing
 
 If your change touches AWS / Azure / GCP integration code, the
-[sandbox bootstrappers](docs/CLOUD_SANDBOX.md) can stand up isolated
+[sandbox bootstrappers](docs/cloud/sandbox.md) can stand up isolated
 lab infra in any cloud with one command and tear it down with another.
 Saves the manual VPC/IAM/SP setup you'd otherwise repeat per-PR. Both
 bash (`scripts/sandbox/Linux/`) and PowerShell
@@ -138,7 +138,7 @@ Adding a fourth target cloud (Oracle Cloud, on-prem KVM, …) means:
    and `api/storage.py`.
 
 [`runners/promote/README.md`](runners/promote/README.md) is the
-runner-internals reference; [`docs/image-management.md`](docs/image-management.md)
+runner-internals reference; [`docs/cloud/image-management.md`](docs/cloud/image-management.md)
 is the operator-facing flow. Update both when adding a target.
 
 ## What to avoid

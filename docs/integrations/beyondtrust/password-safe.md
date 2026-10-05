@@ -195,7 +195,7 @@ resolves them over the public API and creates the managed system/account with Te
 > so check the mode before hunting for a missing account.
 
 > This section is the authoritative reference for **VM** onboarding methods. For the full
-> cloud-VM deploy story (provisioning, PRA Shell Jump, Entitle) see [Cloud VMs](../../cloud-vms.md).
+> cloud-VM deploy story (provisioning, PRA Shell Jump, Entitle) see [Cloud VMs](../../cloud/vms.md).
 
 Three onboarding methods, chosen per cloud:
 

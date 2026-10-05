@@ -2,6 +2,8 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you need a pool of private desktop VMs that reps reach through the PRA Gateway instead of over the open internet.
 
+Part of [Cloud](../cloud.md).
+
 > **Preview.** All three clouds provision and broker seats, but the feature has not been
 > run end to end on AWS or GCP against a live PRA appliance. Off by default; turn it on
 > with the **Virtual Desktops** preview toggle in Settings (`vdesktops_enabled`). The pools
@@ -131,7 +133,7 @@ Seats are exempt from the auto-delete timer: a pool is inventory, not a scratch 
 
 ## Related
 
-- [Cloud VMs](cloud-vms.md) — the single-VM deploy paths these seat backends reuse.
-- [Privileged Remote Access](integrations/beyondtrust/privileged-remote-access.md) — Jump Groups, Jump Items and credential injection.
-- [Gateways](integrations/beyondtrust/gateways.md) — the shared Gateway host and how it is reference-counted.
-- [Cloud sandbox](CLOUD_SANDBOX.md) — the desktops network segment the Azure default points at.
+- [Cloud VMs](vms.md) — the single-VM deploy paths these seat backends reuse.
+- [Privileged Remote Access](../integrations/beyondtrust/privileged-remote-access.md) — Jump Groups, Jump Items and credential injection.
+- [Gateways](../integrations/beyondtrust/gateways.md) — the shared Gateway host and how it is reference-counted.
+- [Cloud sandbox](sandbox.md) — the desktops network segment the Azure default points at.

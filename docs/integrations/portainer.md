@@ -422,7 +422,7 @@ The node's ingress opens **tcp 9443 and 8000** to a merged source set:
   Container Apps. The recent-`/32` heuristic can't cover a pool of several hundred
   addresses that picks one per destination, so the dashboard reads the pool from its
   own Container App and admits all of it. That needs one Reader grant: see
-  [Outbound addresses](../cloud-hosting.md#outbound-addresses-and-the-managed-node-firewalls).
+  [Outbound addresses](../operations/cloud-hosting.md#outbound-addresses-and-the-managed-node-firewalls).
   Settings shows the pool as a count, or shows the reason it couldn't be read.
 - A `/32` per dashboard-deployed Gateway, when the
   [PRA Web Jump](#pra-web-jump-optional) is on.
@@ -718,7 +718,7 @@ stable outbound address, set `portainer_dashboard_egress_cidr` to the whole rang
 rather than a single address (a corporate proxy pool). On Container Apps the dashboard
 reads its own pool instead, so check *Hosting platform outbound pool* in **Settings →
 Containers**: an error there names the missing grant
-([Outbound addresses](../cloud-hosting.md#outbound-addresses-and-the-managed-node-firewalls)).
+([Outbound addresses](../operations/cloud-hosting.md#outbound-addresses-and-the-managed-node-firewalls)).
 If the message says the URL is **not a node this dashboard deployed**, the firewall
 in front of that Portainer is yours to open.
 

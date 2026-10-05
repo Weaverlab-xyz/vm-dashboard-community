@@ -135,7 +135,7 @@ your VMs listed within a few seconds.
 | **Bulk power** | Tick several rows and send Start, Shutdown, Force Off or Restart to the whole selection from the toolbar — one job per VM, sharing a batch you watch on one page. VMs already in the target state are skipped and the dialog says how many; fifty per operation is the cap. See [Powering a selection](../remote-agents/hypervisors.md#powering-a-selection) |
 
 **Tags.** Hyper-V has no native tag concept, so VMs here show no tag chips. See
-[Cloud VMs — Tags and labels](../cloud-vms.md#tags-and-labels).
+[Cloud VMs — Tags and labels](../cloud/vms.md#tags-and-labels).
 
 **Scheduling power.** On a connection bound to a
 [remote agent](../remote-agents/hypervisors.md), the bulk power toolbar's **Schedule**

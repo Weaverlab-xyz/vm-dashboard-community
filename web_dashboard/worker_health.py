@@ -97,7 +97,7 @@ def status() -> tuple[bool, dict]:
     if not healthy:
         # Say WHY, so a failing probe is self-describing in the replica listing rather
         # than sending whoever is paged back to the logs -- which is the one thing a
-        # corp TLS proxy can take away (see docs/cloud-hosting.md).
+        # corp TLS proxy can take away (see docs/operations/cloud-hosting.md).
         if phase != RUNNING:
             payload["reason"] = f"startup has not reached the run loop (phase={phase})"
         elif stale_for is None:

@@ -30,7 +30,7 @@ directory, and both stacks would try to share networks and volume names.
 could be interchanged — and two instances with *different* keys is exactly why a `pg_dump`
 restore from one into the other yields **unreadable ciphertext with no error at all**. If you
 need to copy settings across, use the config-migration tool
-([config-migration.md](../../config-migration.md)); never a database dump.
+([config-migration.md](../../operations/config-migration.md)); never a database dump.
 
 **Bring it up alone the first time.** First boot runs `init_db`, which takes a Postgres
 advisory lock. Two cold instances started together can wedge on it. Start this stack, let it
@@ -44,14 +44,14 @@ The provision refuses the broker step outright when this instance does not know 
 public URL, or when that URL is plaintext: the agent will not sign over `http://`, so a
 broker installed against one would never enrol.
 When you host it beyond your LAN, use the gateway-sidecar split in
-[cloud-hosting.md](../../cloud-hosting.md) so the agent endpoint is separate from the UI, and keep
+[cloud-hosting.md](../../operations/cloud-hosting.md) so the agent endpoint is separate from the UI, and keep
 the UI behind its own allowlist. A UI 404 that returns in microseconds is the allowlist
 doing its job, not a broken deploy.
 
 **Auto-delete is off, observe-only is on, and two one-hour arming clocks have not started.**
 A POV is a 30-day resource, so this is the one piece of configuration a POV instance is not
 useful without — and enabling it is deliberately not something the compose file can do.
-Follow the rollout in [auto-delete-timer.md](../../auto-delete-timer.md) *before* you create a POV
+Follow the rollout in [auto-delete-timer.md](../../operations/auto-delete-timer.md) *before* you create a POV
 you expect to be cleaned up. Note also that `resource_expiry_max_total_hours` defaults to
 `720` — exactly 30 days — so a 30-day POV starts at the ceiling and cannot be extended until
 you raise it.

@@ -2040,7 +2040,7 @@ async def rbac_page(request: Request):
     grantable permission scope either: every route this page calls is `require_admin`,
     because anyone who can edit a user, or a role a user holds, can make themselves an
     administrator. `tests/test_permission_catalog._NAV_EXEMPT` records that reasoning, and
-    `docs/permissions.md` states it in prose.
+    `docs/access/permissions.md` states it in prose.
     """
     return templates.TemplateResponse("rbac/index.html", _rbac_context(request, "users"))
 
@@ -2085,7 +2085,7 @@ async def workgroups_page(request: Request):
 
     A workgroup is the object half of access control -- a permission scope says what a
     principal may DO, a workgroup says which VMs, databases and clusters they may do it TO --
-    so it belongs beside the tabs that grant the scopes. `docs/permissions.md` has always
+    so it belongs beside the tabs that grant the scopes. `docs/access/permissions.md` has always
     opened by calling those two questions the whole model.
 
     Kept as a real route for the same reasons as /users and /groups, plus one of its own:

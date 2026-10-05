@@ -69,7 +69,7 @@ def _fn_body(path, name):
 
 
 def _token(**fields):
-    """A token blob shaped like Entitle's: base64 of JSON (docs/kubesolo.md)."""
+    """A token blob shaped like Entitle's: base64 of JSON (docs/kubernetes/kubesolo.md)."""
     return base64.b64encode(json.dumps(fields).encode()).decode()
 
 

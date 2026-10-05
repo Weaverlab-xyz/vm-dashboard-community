@@ -82,7 +82,7 @@ def _verify():
 def build_custom(event, subject: str, body: str) -> dict:
     """The generic envelope. This is the feature's public contract — receivers parse
     it, so reshaping it casually breaks integrations we cannot see. Version it in
-    docs/notifications.md before changing anything here."""
+    docs/operations/notifications.md before changing anything here."""
     return {
         "version": 1,
         "event": event.event_type,

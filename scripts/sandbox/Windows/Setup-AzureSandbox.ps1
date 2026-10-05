@@ -1,5 +1,5 @@
 # Azure sandbox bootstrap for the VM Dashboard (Windows PowerShell variant).
-# Functional twin of setup-azure.sh. See docs/CLOUD_SANDBOX.md for topology.
+# Functional twin of setup-azure.sh. See docs/cloud/sandbox.md for topology.
 
 [CmdletBinding()] param()
 $ErrorActionPreference = 'Stop'
@@ -358,7 +358,7 @@ $SpPassword = $sp.password
 
 # ── 6b. Image-hub container + promote-runner Azure plumbing ──────────────────
 # Provisions the prerequisites the dashboard's automated cross-cloud image
-# promote runner needs (see docs/image-management.md, runners/promote/README.md):
+# promote runner needs (see docs/cloud/image-management.md, runners/promote/README.md):
 #
 #   • A `hub` blob container on the storage account that doubles as both the
 #     image-registry hub and the staging container the promote-runner ACI

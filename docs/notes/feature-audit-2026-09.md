@@ -6,7 +6,7 @@ An audit of the shipping feature set, and four recommendations for work that is 
 codebase but sits naturally on top of what is.
 
 The hard part was not finding gaps. It was finding gaps that are not already written down.
-[saas-roadmap.md](../saas-roadmap.md) carries about twenty-five capabilities with honest
+[saas-roadmap.md](../editions/roadmap.md) carries about twenty-five capabilities with honest
 status labels, and [design/](../design/README.md) records the alternatives that were
 rejected and why. Continuous Terraform drift detection, compliance-as-code, a two-person
 approval gate, scheduled secret rotation, CVE scanning per image, signed build manifests and
@@ -284,7 +284,7 @@ Facts, listed because each is load-bearing for something above:
 - **Partially built surfaces**, flagged so nobody reads them as finished: virtual desktops
   wire Azure only (*"AWS / GCP create seat records only"*) — **since resolved:** all
   three clouds now provision and broker seats, AWS and GCP Linux-only, see
-  [Virtual Desktops](../virtual-desktops.md); Certificate Lab is preview and
+  [Virtual Desktops](../cloud/virtual-desktops.md); Certificate Lab is preview and
   *"none of its four submission paths has been proven against a live authority"*, with only
   `terraform/cert_ca/gcp_cas` built though AWS Private CA is a named path; Cloud Functions is
   preview.
@@ -392,7 +392,7 @@ community-edition admission control doing exactly what it already does, one seam
 > hourly pass and raises `audit.chain_broken` (critical, bucketed on the offending
 > seq). List/filter/actions/export endpoints and an admin-only `/audit` page ship
 > with it; the export carries the hashes and reads oldest-first so a receiver can
-> recompute the chain. See [audit-log.md](../audit-log.md);
+> recompute the chain. See [audit-log.md](../access/audit-log.md);
 > `tests/test_audit_readable.py` pins it, the refusal most of all.
 
 **The finding:** 75 write sites, one boolean read, no page, no export, nothing scheduled —
@@ -457,7 +457,7 @@ the policy genuinely ports. The cost is everywhere else.
 > all, so the console was still the only way to stop one instance now. Each of the
 > four pages now has per-row Start / Suspend and a bulk toolbar over a selection,
 > queueing one `*_power` job per instance behind a shared `batch_id`. See
-> [Powering a selection](../cloud-vms.md#powering-a-selection).
+> [Powering a selection](../cloud/vms.md#powering-a-selection).
 
 **Phase 0 — the primitive.** `/power/start` and `/power/stop` on the four cloud routers using
 the `_power_endpoint` shape, backed by new `*_power` job types, with the workgroup check

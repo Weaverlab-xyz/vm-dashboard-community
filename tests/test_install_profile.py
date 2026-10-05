@@ -819,7 +819,7 @@ def test_the_page_header_still_names_the_stored_profile_value():
     assert len(carriers) >= 20, (
         f"only {len(carriers)} pages carry {header!r}; the header names the stored "
         f"install_profile value and is not what the prose rename was about")
-    for expected in ("docs/kubernetes.md", "docs/databases.md", "docs/cloud-vms.md"):
+    for expected in ("docs/kubernetes.md", "docs/databases.md", "docs/cloud/vms.md"):
         assert expected in carriers, f"{expected} no longer names its profile"
 
 

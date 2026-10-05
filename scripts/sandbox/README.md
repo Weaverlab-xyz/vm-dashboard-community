@@ -18,8 +18,8 @@ the Jumpoint is the only outbound proxy.
 
 > **This is the script reference.** For what each script *creates*, how it
 > isolates traffic, cost, verification and tear-down, read
-> [`docs/CLOUD_SANDBOX.md`](../../docs/CLOUD_SANDBOX.md) — which the dashboard
-> also serves at `/docs/CLOUD_SANDBOX`, so you can read it without the repo
+> [`docs/cloud/sandbox.md`](../../docs/cloud/sandbox.md) — which the dashboard
+> also serves at `/docs/cloud/sandbox`, so you can read it without the repo
 > open. That guide already points here; this is the way back.
 
 Both variants are functionally equivalent — same tags, same idempotency,
@@ -399,7 +399,7 @@ $env:AZURE_IMAGE_GALLERY_RG = 'corp-images'   # opt IN: external Compute Gallery
 
 The gallery opt-in also takes `AZURE_IMAGE_GALLERY_NAME`, `AZURE_IMAGE_GALLERY_ROLE`
 and `AZURE_IMAGE_GALLERY_SUBSCRIPTION_ID` — see
-[image-management](../../docs/image-management.md). Rollback removes only the role
+[image-management](../../docs/cloud/image-management.md). Rollback removes only the role
 assignment it added; the external RG is never touched.
 
 CIDRs, subnet sizes, machine types, and IAM scope are intentionally not

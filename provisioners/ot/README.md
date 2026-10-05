@@ -5,7 +5,7 @@ image via the dashboard's in-app Packer feature. The deployed VM needs **zero
 outbound internet** — everything is built/pulled at bake time — so it runs in the
 sandbox's air-gapped private subnet, which doubles as the "plant network" in demos.
 
-The simulators run on **[KubeSolo](../../docs/kubesolo.md)**, the single-node
+The simulators run on **[KubeSolo](../../docs/kubernetes/kubesolo.md)**, the single-node
 Kubernetes this repo puts on plant hosts: the cell is a plant IPC with a real cluster
 on it, rather than a Docker host pretending to be one. `OT_RUNTIME=docker` bakes the
 previous compose stack instead — same images, same ports, no cluster — and is the

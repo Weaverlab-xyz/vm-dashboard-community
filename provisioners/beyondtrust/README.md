@@ -120,7 +120,7 @@ These are consumed directly by Packer's shell provisioner. The dashboard build
 form surfaces the common ones for you — a **BeyondTrust provisioner options**
 panel (Admin user → `BT_ADMIN_USER`, Install EPM-L → `BT_EPML_URL`) plus a generic
 **Environment variables** table for the rest (`BT_APPLY_CIS`, `BT_SKIP_UPDATES`, …); see
-[Image Management → Passing environment variables to the provisioner](../../docs/image-management.md#passing-environment-variables-to-the-provisioner).
+[Image Management → Passing environment variables to the provisioner](../../docs/cloud/image-management.md#passing-environment-variables-to-the-provisioner).
 You can still set any of them directly in the build environment when scripting
 Packer outside the dashboard.
 

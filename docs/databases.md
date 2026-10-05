@@ -8,7 +8,7 @@ BeyondTrust PAM stack on top of what it provisions. Provisioning needs a Terrafo
 module, so it is cloud-only; registering needs only somewhere to reach.
 
 The provisioned path is **provisioning + three stacked layers**, each solving a different
-privileged-access problem (the same model used across the [Cloud VMs](cloud-vms.md) and
+privileged-access problem (the same model used across the [Cloud VMs](cloud/vms.md) and
 [Kubernetes](kubernetes.md) docs):
 
 - **Provisioning** — stand up a **private** database (AWS RDS / Azure Flexible Server +
@@ -274,7 +274,7 @@ channel as `CONN_VARS_B64` — the ECS task override env, ACI `secure_value`, th
 env, or a `0600 --env-file` locally — decoded to a `0600` file and passed as `-e @…`.
 Nothing needs to pre-exist in a cloud secret store, so the ephemeral-store opt-in that
 governs a **VM SSH** managed-account run (`ansible_cloud_ephemeral_secrets_enabled`, see
-[Secrets Management](secrets-management.md#ephemeral-cloud-secrets)) does **not** apply
+[Secrets Management](access/secrets-management.md#ephemeral-cloud-secrets)) does **not** apply
 here. That opt-in exists only because the SSH path injects named/become secrets by
 *reference* (`valueFrom`) on ECS and Cloud Run; the database path never does.
 
@@ -596,7 +596,7 @@ Retagging is admin-only because it is a **transfer**, not a filter. Everyone in 
 workgroup gains the row in `/api/databases`, every by-id action on it (connection details,
 decommission, Entitle and Password Safe registration), the ability to run
 [Config Management](config-management.md) against it, and the ability to change its
-[auto-delete timer](auto-delete-timer.md). The person who loses it is not in the dialog.
+[auto-delete timer](operations/auto-delete-timer.md). The person who loses it is not in the dialog.
 
 > **Not the same as a Password Safe workgroup.** Password Safe has its own, unrelated
 > notion of a workgroup, which this page also mentions: `clouddb_ps_import_workgroup`
@@ -604,7 +604,7 @@ decommission, Entitle and Password Safe registration), the ability to run
 > That one names a container in Password Safe. This one names a set of dashboard users.
 > They are never the same value and neither is derived from the other.
 
-See [Permissions](permissions.md) for how workgroups sit alongside permission scopes.
+See [Permissions](access/permissions.md) for how workgroups sit alongside permission scopes.
 
 ---
 
@@ -686,4 +686,4 @@ See [Permissions](permissions.md) for how workgroups sit alongside permission sc
 
 For the base BeyondTrust/PRA setup (OAuth accounts, Jump Group/Jumpoint, deploy keys), see
 the [Privileged Remote Access](integrations/beyondtrust/privileged-remote-access.md) doc. For the sandbox network
-topology, see [Cloud Sandbox](CLOUD_SANDBOX.md).
+topology, see [Cloud Sandbox](cloud/sandbox.md).

@@ -515,7 +515,7 @@ ECS_INSTANCE_ROLE_ARN="$(aws iam get-role --role-name "$ECS_INSTANCE_ROLE" --que
 
 # ── 7b. Image-hub S3 bucket + promote-runner IAM ─────────────────────────────
 # Provisions the prerequisites the dashboard's automated cross-cloud image
-# promote runner needs (see docs/image-management.md, runners/promote/README.md):
+# promote runner needs (see docs/cloud/image-management.md, runners/promote/README.md):
 #
 #   • An S3 bucket that doubles as (a) the image-registry hub for the active
 #     storage backend and (b) the staging bucket the promote-runner Fargate

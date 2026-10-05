@@ -67,8 +67,8 @@ def _relative_link_extension(page: str):
     ``docs/`` is authored and reviewed on GitHub, so a cross-reference is written the way
     GitHub resolves it — ``[Cloud VMs](cloud-vms.md)``, or ``../../cloud-vms.md`` from a
     nested page. Nothing rewrote those, and there is no ``<base>`` in ``_SHELL``, so the
-    browser resolved them against the current route: ``/docs/cloud-vms.md``, which makes
-    ``doc_page`` look for ``docs/cloud-vms.md.md`` and 404. Every relative link in the tree
+    browser resolved them against the current route: ``/docs/cloud/vms.md``, which makes
+    ``doc_page`` look for ``docs/cloud/vms.md.md`` and 404. Every relative link in the tree
     was dead in this viewer while working perfectly on GitHub — the same split
     ``tests/test_app_docs_links.py`` was written about, one layer down.
 
@@ -174,6 +174,27 @@ _MOVED = {
     "integrations/entra-oauth":                  "oidc/entra-oauth",
     "integrations/entra-k8s-federation":         "oidc/entra-k8s-federation",
     "remote-agents/dashboard-identity":          "oidc/dashboard-identity",
+    # Sections, 2026-10: the flat top level grouped into hub + folder sections the way
+    # oidc/ is -- cloud/, access/, operations/, editions/, and kubesolo under kubernetes/.
+    "cloud-vms":                                 "cloud/vms",
+    "cloud-containers":                          "cloud/containers",
+    "costs":                                     "cloud/costs",
+    "image-management":                          "cloud/image-management",
+    "infrastructure-as-code":                    "cloud/infrastructure-as-code",
+    "CLOUD_SANDBOX":                             "cloud/sandbox",
+    "virtual-desktops":                          "cloud/virtual-desktops",
+    "permissions":                               "access/permissions",
+    "service-accounts":                          "access/service-accounts",
+    "audit-log":                                 "access/audit-log",
+    "secrets-management":                        "access/secrets-management",
+    "job-worker":                                "operations/job-worker",
+    "notifications":                             "operations/notifications",
+    "auto-delete-timer":                         "operations/auto-delete-timer",
+    "config-migration":                          "operations/config-migration",
+    "cloud-hosting":                             "operations/cloud-hosting",
+    "kubesolo":                                  "kubernetes/kubesolo",
+    "saas-comparison":                           "editions/comparison",
+    "saas-roadmap":                              "editions/roadmap",
 }
 
 
@@ -212,7 +233,8 @@ _INDEX_SECTIONS = {
     "profiles", "profiles/demo", "profiles/demo/personas", "profiles/pov",
     "integrations/beyondtrust", "integrations/beyondtrust/databases", "onboarding",
     "integrations/ansible", "remote-agents", "workload-lab", "scheduling",
-    "profiles/demo/ot-demo-cell",
+    "profiles/demo/ot-demo-cell", "oidc", "cloud", "access", "operations", "kubernetes",
+    "editions",
 }
 
 # Heading text per section. Without this a nested section renders as
@@ -232,6 +254,12 @@ _SECTION_LABELS = {
     "workload-lab":               "Workload Lab",
     "scheduling":                 "Scheduling",
     "profiles/demo/ot-demo-cell": "OT Demo Cell",
+    "oidc":                       "OIDC and single sign-on",
+    "cloud":                      "Cloud",
+    "access":                     "Identity and access",
+    "operations":                 "Operations",
+    "kubernetes":                 "Kubernetes",
+    "editions":                   "Editions",
 }
 
 # Titles for docs whose filename is an identifier rather than a phrase. The persona pages are
@@ -262,7 +290,7 @@ _TITLE_OVERRIDES = {
     "profiles/demo/personas/aiops":      "AI / agent platform",
     # Not personas. The derived title is the filename title-cased, which reads as a
     # filename ("Ps Runbook", "Standing One Up") rather than as the page.
-    "kubesolo":                          "KubeSolo",
+    "kubernetes/kubesolo":               "KubeSolo",
     "profiles/demo/ot-demo-cell":        "OT Demo Cell",
     "profiles/demo/net-demo-cell":       "Network Demo Cell",
     "profiles/demo/agent-demo-cell":     "Agent Demo Cell",
@@ -287,6 +315,18 @@ _TITLE_OVERRIDES = {
     "oidc/entra-k8s-federation":         "Entra → Kubernetes federation",
     "oidc/dashboard-identity":           "The dashboard's own identity",
     "oidc/dex":                          "Dex",
+    # The section hubs and their pages. Folder names were dropped from the filenames
+    # (cloud-vms -> cloud/vms), so the derived titles lose the word that said what they were.
+    "access":                            "Identity and access",
+    "editions":                          "Editions",
+    "cloud/vms":                         "Cloud VMs",
+    "cloud/containers":                  "Cloud Containers",
+    "cloud/costs":                       "Cloud Costs",
+    "cloud/sandbox":                     "Cloud Sandbox",
+    "cloud/infrastructure-as-code":      "Infrastructure as Code",
+    "operations/auto-delete-timer":      "Auto-delete Timer",
+    "editions/comparison":               "Community vs. hosted",
+    "editions/roadmap":                  "SaaS Roadmap",
     # The BeyondTrust folder. "Epml" is not a word, and "Entitle Dashboard Permissions"
     # reads as a settings page rather than the Entitle mechanism it describes.
     "integrations/beyondtrust/epml":     "EPM for Linux",
@@ -475,8 +515,8 @@ async def doc_index() -> HTMLResponse:
                  or rel.name.replace("-", " ").replace("_", " ").title())
         groups.setdefault(section, []).append((title, href))
 
-    # A folder split out of a page -- databases/, onboarding/, remote-agents/,
-    # integrations/ansible/ -- has no README of its own, because doc_page resolves
+    # A folder split out of a page -- onboarding/, remote-agents/, oidc/, cloud/,
+    # integrations/ansible/ and the rest -- has no README of its own, because doc_page resolves
     # <page>.md before <page>/README.md and the hub has to win that URL. Its index is
     # that sibling hub, so hang the heading off it rather than leaving the section
     # unlinked.

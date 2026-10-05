@@ -66,7 +66,7 @@ will return an error from Prism if the VM does not respond to the ACPI signal.
 **Tags.** Nutanix categories are not read yet, so VMs here show no tag chips and do not
 appear under [Inventory](../inventory.md)'s **Tag** filter. Proxmox is the only hypervisor
 that reports tags today; see
-[Cloud VMs — Tags and labels](../cloud-vms.md#tags-and-labels).
+[Cloud VMs — Tags and labels](../cloud/vms.md#tags-and-labels).
 
 **Scheduling power is not available on Nutanix.** A Nutanix power change is a full VM spec
 write carrying a version number, so there is no agent power path, and every target runs

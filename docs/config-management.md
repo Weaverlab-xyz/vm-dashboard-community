@@ -17,11 +17,11 @@ encodes, and how the on-premises and cloud paths fit together.
 
 The companion docs:
 
-- [Infrastructure as Code](infrastructure-as-code.md) — how the dashboard
+- [Infrastructure as Code](cloud/infrastructure-as-code.md) — how the dashboard
   stands the infra up in the first place
-- [Image Management](image-management.md) — what's *on* the VMs
+- [Image Management](cloud/image-management.md) — what's *on* the VMs
   before config-management runs against them
-- [Secrets Management](secrets-management.md) — where credentials live
+- [Secrets Management](access/secrets-management.md) — where credentials live
 - [Storage Management](storage-management.md) — where playbooks and
   assets live
 
@@ -367,7 +367,7 @@ delivery paths, and the run is refused until one is on:
   Secrets Manager or GCP Secret Manager for the run and deletes it afterwards.
 
 Both are under **Settings → Ansible**; how each works, and what each one trusts, is in
-[Secrets management](secrets-management.md#collect-from-the-dashboard-no-store-copy).
+[Secrets management](access/secrets-management.md#collect-from-the-dashboard-no-store-copy).
 ACI injects the credential inline and needs neither.
 
 ### Why one-shot runners (the security argument)
@@ -472,7 +472,7 @@ and shipped to a target.
   disable.
 
 The right fix when it fires: move the value into a vault reference (see
-[Secrets Management](secrets-management.md)) or Ansible Vault, and reference it
+[Secrets Management](access/secrets-management.md)) or Ansible Vault, and reference it
 from the playbook rather than hard-coding it.
 
 ---
@@ -509,7 +509,7 @@ add a `test` group in your hypervisor hostvars module to make this
 trivial.
 
 **Keep secrets out of playbooks.** Anything sensitive belongs in
-[Secrets Management](secrets-management.md), not embedded in YAML or
+[Secrets Management](access/secrets-management.md), not embedded in YAML or
 shell scripts. Reference secrets via Ansible's `lookup('env', ...)`,
 the `ansible-vault` integration, or fetched-at-runtime variables that
 the runner reads from the cloud secret store.
@@ -584,7 +584,7 @@ is hiding procedural logic and will surprise you on partial failures.
 ## Where this is heading on SaaS
 
 A few things the community edition does *not* try to do. They're SaaS
-priorities — see [docs/saas-comparison.md](saas-comparison.md) for the
+priorities — see [docs/editions/comparison.md](editions/comparison.md) for the
 hosted-edition philosophy.
 
 - **AI-assisted playbook generation.** "Install fail2ban with custom

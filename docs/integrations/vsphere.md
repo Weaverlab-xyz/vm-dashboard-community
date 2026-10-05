@@ -121,7 +121,7 @@ Templates are automatically excluded from the VM list.
 
 **Tags.** vSphere tags are not read yet, so VMs here show no tag chips and do not appear
 under [Inventory](../inventory.md)'s **Tag** filter. Proxmox is the only hypervisor that
-reports tags today; see [Cloud VMs — Tags and labels](../cloud-vms.md#tags-and-labels).
+reports tags today; see [Cloud VMs — Tags and labels](../cloud/vms.md#tags-and-labels).
 
 **Scheduling power.** On a connection bound to a
 [remote agent](../remote-agents/hypervisors.md), the bulk power toolbar's **Schedule**

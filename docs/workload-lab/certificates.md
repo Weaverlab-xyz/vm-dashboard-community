@@ -26,9 +26,9 @@ Three pages, and this is the first:
 
 The companion docs:
 
-- [Infrastructure as Code](../infrastructure-as-code.md) — the closed provision/destroy
+- [Infrastructure as Code](../cloud/infrastructure-as-code.md) — the closed provision/destroy
   lifecycle this feature follows
-- [Auto-delete Timer](../auto-delete-timer.md) — why a CA pool is exactly the thing that
+- [Auto-delete Timer](../operations/auto-delete-timer.md) — why a CA pool is exactly the thing that
   timer is for
 - [Config Management](../config-management.md) — how the mTLS endpoint and the CI runner get
   configured

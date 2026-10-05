@@ -721,7 +721,7 @@ def generate_oci_template(
         # reaches the transient build instance over the public internet. Without a
         # public IP the build hangs at "Waiting for SSH" until it times out. The
         # subnet must also permit ingress on 22 from the dashboard's egress address
-        # — see docs/image-management.md.
+        # — see docs/cloud/image-management.md.
         '  create_vnic_details {\n'
         '    assign_public_ip = true\n'
         '  }\n\n'

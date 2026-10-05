@@ -204,7 +204,7 @@ e.g. require human approval even for `*-read`.
 
 ## 6. Multi-tenancy variation (prod)
 
-Per the [multi-tenancy plan](../saas-roadmap.md#multi-tenancy--audit-cross-cutting),
+Per the [multi-tenancy plan](../editions/roadmap.md#multi-tenancy--audit-cross-cutting),
 prod runs N tenants. The Entitle integration needs per-tenant
 groups + per-tenant virtual applications:
 
@@ -571,7 +571,7 @@ in the first place." Both layers can be active simultaneously:
 > **Note, 2026-09.** The example is the design intent, not what shipped: the Secrets
 > endpoints were always administrator-only, so `secrets:write` never reached them, and it
 > has since been retired as a level nothing enforced (see
-> [Permissions → The sections](../permissions.md#the-sections)). The layering argument
+> [Permissions → The sections](../access/permissions.md#the-sections)). The layering argument
 > holds for any scope that does gate a route, `aws:delete` for instance.
 
 Defence in depth: authorization is gated; action is gated.

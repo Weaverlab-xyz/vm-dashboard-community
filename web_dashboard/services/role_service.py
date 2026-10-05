@@ -135,7 +135,7 @@ _BUILTIN_ROLES = (
         "name": "POV Presenter",
         # No "wake": powering an environment, waking included, is `pov:write`, which this
         # role deliberately omits. A stakeholder who must wake their own POV needs write or
-        # a POV accessor alongside -- see docs/permissions.md.
+        # a POV accessor alongside -- see docs/access/permissions.md.
         "description": "Run a proof of value: create POVs, then see, set up, run, share "
                        "and destroy your own -- created by you or assigned to you -- and "
                        "tick use cases. Other people's POVs are not visible.",

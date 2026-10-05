@@ -28,7 +28,7 @@ nothing else reclaims.
 DevOps tier is about **$20/month** plus roughly $0.30 per certificate; an AWS Private CA is
 about **$400/month** standing. One nobody remembers is invisible on every page this
 dashboard had before this one — which is why every CA built here is a first-class inventory
-row carrying an [auto-delete timer](../auto-delete-timer.md).
+row carrying an [auto-delete timer](../operations/auto-delete-timer.md).
 
 The mTLS endpoint and the CI runner are **ordinary VMs** deployed through the normal cloud
 pages. They already have their own timers, ref-counted NAT and Password Safe onboarding;

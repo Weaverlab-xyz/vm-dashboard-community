@@ -2,6 +2,8 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** something that is not a person — a CI job, an MCP agent, a script — needs to call the dashboard's API, and you would otherwise hand it a PAT.
 
+Part of [Identity and access](../access.md).
+
 A **service account** is a workload identity inside the dashboard. It authenticates with the
 OAuth 2.0 **client credentials** grant (RFC 6749 §4.4): it holds a client ID and secret,
 trades them at the dashboard's own token endpoint for an access token that lives minutes,

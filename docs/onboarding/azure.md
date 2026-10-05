@@ -94,7 +94,7 @@ az role assignment create `
 > **Key Vault: access policy or RBAC.** The command above uses a vault access
 > policy, which is what the sandbox scripts do. If your vault uses the RBAC
 > permission model instead, the equivalent is the **Key Vault Secrets Officer**
-> role — see [secrets-management.md](../secrets-management.md#iam-permissions-required-per-backend).
+> role — see [secrets-management.md](../access/secrets-management.md#iam-permissions-required-per-backend).
 
 For the authoritative list, see the role assignments in
 [`scripts/sandbox/Linux/setup-azure.sh`](../../scripts/sandbox/Linux/setup-azure.sh);

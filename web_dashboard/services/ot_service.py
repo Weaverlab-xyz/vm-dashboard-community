@@ -1021,7 +1021,7 @@ def _purdue_rule_names(vm: str) -> dict:
 OT_DMZ_NETWORK_TAG = "ot-dmz"
 _DMZ_EGRESS_ALLOW_PRIORITY = 790
 # The agent's channel. 8080 is not telemetry and not optional — it carries
-# ENTITLE_PROXY_URL, the agent's primary channel, in plain HTTP (docs/kubesolo.md).
+# ENTITLE_PROXY_URL, the agent's primary channel, in plain HTTP (docs/kubernetes/kubesolo.md).
 ENTITLE_AGENT_PORTS = ("443", "8080")
 # A cloud VM resolves through the link-local metadata server, and the 800 deny covers
 # it like everything else. One rule carries one protocol, so DNS costs two.
@@ -1920,7 +1920,7 @@ def agent_token_profile(token: str) -> dict:
     """What the token says about itself: ``{"routing": ..., "region": ...}``.
 
     The Entitle agent token is a base64 JSON blob, and it is the only authority on two
-    things the plant boundary depends on — see docs/kubesolo.md. Unparseable returns
+    things the plant boundary depends on — see docs/kubernetes/kubesolo.md. Unparseable returns
     ``{}`` rather than raising: an unreadable token is a question for the caller, not a
     crash inside a deploy.
     """

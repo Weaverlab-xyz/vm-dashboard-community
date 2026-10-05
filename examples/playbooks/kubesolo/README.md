@@ -5,7 +5,7 @@ agent on top of it. Five `hosts: all`, `become: true` plays, run through Config
 Management against an on-prem host reached by a remote agent.
 
 The operator-facing write-up — egress, trust stores, sizing, and the limitation worth
-raising before a customer finds it — is [docs/kubesolo.md](../../../docs/kubesolo.md).
+raising before a customer finds it — is [docs/kubernetes/kubesolo.md](../../../docs/kubernetes/kubesolo.md).
 This file is the quick reference.
 
 **On the demo cell, KubeSolo is already there.** The
@@ -108,4 +108,4 @@ misconfiguration — see the docs page for the mitigation.
 out, so Ansible gives none for free) and the three chart values that are load-bearing
 findings rather than preferences. If you change `entitle_agent_replicas`,
 `datadog.sidecarLogs` or `platform.mode`, that test and
-[docs/kubesolo.md](../../../docs/kubesolo.md) both have to move with you.
+[docs/kubernetes/kubesolo.md](../../../docs/kubernetes/kubesolo.md) both have to move with you.

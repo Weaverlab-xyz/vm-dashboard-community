@@ -1,6 +1,6 @@
 # AWS sandbox bootstrap for the VM Dashboard (Windows PowerShell variant).
 # Functional twin of setup-aws.sh — same resources, same tags, same idempotency.
-# See docs/CLOUD_SANDBOX.md for the topology walkthrough.
+# See docs/cloud/sandbox.md for the topology walkthrough.
 
 [CmdletBinding()] param()
 $ErrorActionPreference = 'Stop'
@@ -487,7 +487,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # ── 7b. Image-hub S3 bucket + promote-runner IAM ─────────────────────────────
 # Provisions the prerequisites the dashboard's automated cross-cloud image
-# promote runner needs (see docs/image-management.md, runners/promote/README.md):
+# promote runner needs (see docs/cloud/image-management.md, runners/promote/README.md):
 #
 #   • An S3 bucket that doubles as (a) the image-registry hub for the active
 #     storage backend and (b) the staging bucket the promote-runner Fargate

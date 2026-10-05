@@ -16,7 +16,7 @@ and collapsing them would make the gate meaningless.
 That is the correct form for an authority being delegated out of admin: the permissive
 variant treats an empty permission map as unrestricted, which would silently hand change
 approval to every legacy pre-OIDC user on the install. See ``api/auth.has_permission``
-and ``docs/permissions.md``. No backfill exists for this scope for the same reason —
+and ``docs/access/permissions.md``. No backfill exists for this scope for the same reason —
 every route below is new, so there is no prior access to preserve.
 
 Reading the window LIST is not gated on this scope. The run forms need it to render the

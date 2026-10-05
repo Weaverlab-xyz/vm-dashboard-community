@@ -28,7 +28,7 @@
 #   docker build -t <registry>/dash-gateway:1 examples/cloud-gateway
 #   docker push  <registry>/dash-gateway:1
 #
-# See docs/cloud-hosting.md for how to wire it up per platform.
+# See docs/operations/cloud-hosting.md for how to wire it up per platform.
 {
 	# The platform's ingress already holds the certificate. Without this Caddy
 	# would try to provision its own, fail the challenge, and serve nothing.

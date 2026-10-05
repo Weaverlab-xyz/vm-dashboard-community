@@ -1647,7 +1647,7 @@ class Settings(BaseSettings):
     # Automate Workflows URL, or a signed generic envelope you point at whatever you
     # like — that last one is how email is delivered; there is no SMTP client here).
     # Endpoints themselves are rows in `notification_endpoints`, not keys, because
-    # their URLs are credentials and there can be several. See docs/notifications.md.
+    # their URLs are credentials and there can be several. See docs/operations/notifications.md.
     #
     # Two brakes, because this sends messages to people:
     #   * notifications_enabled off means nothing is emitted, drained or scanned;
@@ -1677,7 +1677,7 @@ class Settings(BaseSettings):
     # provider's secret channel, then force-deleted after the run. Enabling this
     # copies a PAM-vaulted credential into the cloud store for the task's lifetime —
     # pair it with "Change Password After Release" on the managed account so a
-    # missed cleanup leaves only a rotated, dead credential. See docs/secrets-management.md.
+    # missed cleanup leaves only a rotated, dead credential. See docs/access/secrets-management.md.
     ansible_cloud_ephemeral_secrets_enabled: bool = False
     ansible_ephemeral_secret_ttl_min: int = 30       # GC safety-net age (>= max task runtime)
     # The alternative to the store copy above (services/runner_credential): the ECS /
@@ -2345,7 +2345,7 @@ class Settings(BaseSettings):
     # unrecognised value reads as "pat" too, so an install that never sets this is
     # untouched. The older spelling "entra" still reads as "workload", so installs
     # configured before the mode covered more than Azure keep working.
-    # See docs/cloud-hosting.md → "No PAT".
+    # See docs/operations/cloud-hosting.md → "No PAT".
     wlc_auth_mode: str = "pat"
     # Which platform vouches for this container: "azure" | "gcp" | "aws" | "file".
     # Blank reads as "azure", because every install that predates this setting is

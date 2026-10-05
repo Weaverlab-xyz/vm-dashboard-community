@@ -852,7 +852,7 @@ def test_a_system_assigned_identity_sends_no_client_id():
 
 # -- the identity is not Azure-only -------------------------------------------
 #
-# docs/cloud-hosting.md documents this dashboard running as a managed container on
+# docs/operations/cloud-hosting.md documents this dashboard running as a managed container on
 # Azure Container Apps, GCP Cloud Run OR AWS ECS. Wiring only Azure left two of the
 # three unable to use the mode that stores nothing.
 

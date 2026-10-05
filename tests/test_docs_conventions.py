@@ -353,6 +353,31 @@ def test_every_indexed_section_is_a_real_folder():
     assert not missing, f"_INDEX_SECTIONS names folders that do not exist: {missing}"
 
 
+# Folders kept off the operator-facing /docs index on purpose: contributor material that
+# still renders by path. Anything else with a .md in it is a section of the index.
+_UNINDEXED = {"design", "notes", "runbooks", "profiles/pov/design"}
+
+
+def test_every_operator_folder_is_an_indexed_section():
+    """The reverse of the check above, and the one that was missing: docs/oidc/ shipped
+    without a _INDEX_SECTIONS entry, so its four pages rendered by path and never appeared
+    on /docs. A new folder has to be either indexed or deliberately listed above."""
+    src = _read(_DOCS_PAGES)
+    sections = set(re.findall(
+        r'"([^"]+)"', src.split("_INDEX_SECTIONS = {", 1)[1].split("}", 1)[0]))
+    folders = set()
+    for dirpath, _dirs, files in os.walk(_DOCS):
+        if any(f.endswith(".md") for f in files):
+            rel = os.path.relpath(dirpath, _DOCS).replace(os.sep, "/")
+            if rel != ".":
+                folders.add(rel)
+    missing = sorted(folders - sections - _UNINDEXED)
+    assert not missing, (f"these docs folders are neither in _INDEX_SECTIONS nor in "
+                         f"_UNINDEXED, so /docs never lists their pages: {missing}")
+    stale = sorted(_UNINDEXED - folders)
+    assert not stale, f"_UNINDEXED names folders that no longer hold docs: {stale}"
+
+
 def test_the_header_block_mints_no_anchor():
     """The only renderer-dependent check: rendered through the production renderer, the
     block must add no id= of its own to the page."""

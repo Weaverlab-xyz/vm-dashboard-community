@@ -449,7 +449,7 @@ _ENVIRONMENT_CARDS = (
                 "answer to “what happens to our data when the evaluation ends?”",
         target="#overview",
         minutes=8,
-        docs="auto-delete-timer",
+        docs="operations/auto-delete-timer",
     ),
     UseCase(
         id="pov-itops-share-desktop",

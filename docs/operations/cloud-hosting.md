@@ -2,11 +2,13 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you want the dashboard reachable from outside your LAN, or fronting remote agents.
 
+Part of [Operations](../operations.md).
+
 Running **the dashboard itself** as a managed container in your own cloud
 account — Azure Container Apps, GCP Cloud Run, or AWS ECS — instead of Docker
 Compose on a host you maintain.
 
-[ONBOARDING.md](ONBOARDING.md) covers the Compose path and is still the right
+[ONBOARDING.md](../ONBOARDING.md) covers the Compose path and is still the right
 starting point. Come here when you want the dashboard reachable from outside
 your LAN, surviving a laptop reboot, or fronting remote agents.
 
@@ -14,8 +16,8 @@ your LAN, surviving a laptop reboot, or fronting remote agents.
 > edition, single-tenant, with the JWT root key supplied as a platform secret.
 > The hosted edition's differences are narrower and more specific than "runs in
 > a cloud": the root key is never a static credential, and one deployment serves
-> many tenants. See [saas-comparison.md](saas-comparison.md). If you have read
-> [saas-roadmap.md](saas-roadmap.md) and remember Container Apps being ruled
+> many tenants. See [saas-comparison.md](../editions/comparison.md). If you have read
+> [saas-roadmap.md](../editions/roadmap.md) and remember Container Apps being ruled
 > out — that was about *per-tenant* SaaS revisions and their cost, not about
 > self-hosting one instance, which is what the reference install has run all
 > along.
@@ -33,7 +35,7 @@ depend on those, and the rest do not.
 | Kubernetes management — kubectl, helm, External Secrets, Rancher | **Works.** Both binaries are baked into the image and run in-process, specifically so no socket is needed. |
 | Image builds and cross-cloud promotion | **Works.** |
 | Config Management against **cloud** targets | **Works**, but you must set the runner to `ecs` / `aci` / `gcp` in Settings → Ansible. The `local` runner shells out to `docker run`. |
-| Config Management against **on-prem** targets — VMware, Proxmox, Hyper-V, locally-registered clusters | **Broken**, and not only because of the socket: the dashboard has no route to your lab. The run is refused with a message saying so. Use [remote agents](remote-agents.md). |
+| Config Management against **on-prem** targets — VMware, Proxmox, Hyper-V, locally-registered clusters | **Broken**, and not only because of the socket: the dashboard has no route to your lab. The run is refused with a message saying so. Use [remote agents](../remote-agents.md). |
 | Local Filesystem / UNC storage backend | **Unavailable.** Pick a cloud bucket on `/storage`. |
 
 ---
@@ -65,7 +67,7 @@ inside a cloud SDK.
 
 Supply it as a platform secret. Back it up somewhere you can find in a year —
 lose it and every credential must be re-entered by hand. See
-[secrets-management.md](secrets-management.md#why-the-jwt-root-key-cannot-be-migrated)
+[secrets-management.md](../access/secrets-management.md#why-the-jwt-root-key-cannot-be-migrated)
 for why the community edition cannot bootstrap it from a vault.
 
 **3. Terraform state must live in a cloud bucket.** There is no persistent
@@ -81,7 +83,7 @@ minted on an install permanently pins the signing audience, and every agent
 signature is checked against it afterwards. A platform-assigned name — an
 `*.azurecontainerapps.io` default FQDN, a Cloud Run auto-URL — will change, and
 changing it strands the fleet. Bind a custom domain first. See
-[remote-agents.md](remote-agents/enrolment.md#the-signing-audience-is-pinned-by-that-first-code).
+[remote-agents.md](../remote-agents/enrolment.md#the-signing-audience-is-pinned-by-that-first-code).
 
 ---
 
@@ -127,9 +129,9 @@ second is the one people get wrong:
   `127.0.0.1`. A sidecar reaches the app over loopback, so the default is
   already right. A *separate* proxy service gets a platform-assigned address
   that changes on redeploy, and uvicorn 0.27 compares those as plain strings —
-  no CIDR, no hostnames. See [SECURITY.md](../SECURITY.md#reverse-proxies-forwarded-headers-and-the-public-url).
+  no CIDR, no hostnames. See [SECURITY.md](../../SECURITY.md#reverse-proxies-forwarded-headers-and-the-public-url).
 
-A ready-made gateway image is in [`examples/cloud-gateway/`](../examples/cloud-gateway/Dockerfile):
+A ready-made gateway image is in [`examples/cloud-gateway/`](../../examples/cloud-gateway/Dockerfile):
 
 ```bash
 docker build -t <registry>/dash-gateway:1 examples/cloud-gateway
@@ -368,8 +370,8 @@ another sidecar: [job-worker.md](job-worker.md#container-apps).
 A Container Apps environment with no NAT gateway has **no single outbound address**.
 It SNATs traffic out of a shared pool of several hundred addresses, and it picks an
 address per *destination*. That breaks anything that admits the dashboard by source
-address, the managed [Portainer](integrations/portainer.md#firewall) and
-[Rancher](integrations/rancher.md) node firewalls above all. The dashboard learns its
+address, the managed [Portainer](../integrations/portainer.md#firewall) and
+[Rancher](../integrations/rancher.md) node firewalls above all. The dashboard learns its
 address from an echo service, but the echo service and the node see *different*
 addresses, so the node drops the bootstrap. The job reads "serving", then
 `ConnectTimeout`, then "re-detecting … produced no change".
@@ -464,7 +466,7 @@ That copy *can* go stale when Azure grows the pool. The symptom is the same
 
 ### No PAT: authenticate to Pathfinder with a workload identity
 
-> **Applies to:** an install using [Workload Credentials](workload-lab/workload-credentials.md).
+> **Applies to:** an install using [Workload Credentials](../workload-lab/workload-credentials.md).
 > Skip this if you do not. **Status:** run end to end on the Azure Container
 > Apps install on 2026-09-15, so the walkthrough below is a transcript rather
 > than a sketch. Two legs are still unproven: the *worker* minting under a real

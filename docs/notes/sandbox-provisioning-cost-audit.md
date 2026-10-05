@@ -28,7 +28,7 @@ Three findings reframed the exercise:
 
 ## Standing idle cost, corrected
 
-Per cloud, sandbox created, nothing deployed. `docs/CLOUD_SANDBOX.md` previously said
+Per cloud, sandbox created, nothing deployed. `docs/cloud/sandbox.md` previously said
 Azure was ~$5 and omitted the private DNS zones.
 
 | Cloud | Idle/mo | What actually bills | Opt-out |
@@ -180,7 +180,7 @@ silently under-reporting:
 
 | Cloud | What escapes | Why it's structural | Handling |
 |---|---|---|---|
-| GCP | Cloud Router + Cloud NAT — the **entire** GCP idle cost | Neither accepts labels | Query also reads `project.labels`; labelling the project attributes them (forward-only, documented one-liner in `CLOUD_SANDBOX.md`) |
+| GCP | Cloud Router + Cloud NAT — the **entire** GCP idle cost | Neither accepts labels | Query also reads `project.labels`; labelling the project attributes them (forward-only, documented one-liner in `cloud/sandbox.md`) |
 | Azure | Disks, NICs, public IPs, ACI created beside a tagged parent | Azure tags don't inherit RG → child, and Azure creates children untagged | Enable *Cost Management → Manage tag inheritance*; zero code, and inherited tags lose to resource tags so semantics are exactly right |
 | OCI | All tag-based attribution, permanently | The Usage API reports only cost-tracking (defined) tags; the sandbox writes a **freeform** tag (`setup-oci.sh:51`) | Scoped by compartment instead. Honest consequence: `dashboard_total` is `None` and the sandbox figure includes dashboard deploys, since both share the compartment |
 | AWS | Untaggable line items (inter-AZ transfer, some VPC charges) | Nothing to tag | Falls in the account-total remainder |
@@ -268,7 +268,7 @@ unretried `ecsTaskExecutionRole` attach now uses it too.
 1. **Dead VM modules.** `terraform/ec2_instance`, `terraform/azure_vm`,
    `terraform/gce_instance` are referenced by nothing, shipped in nothing, and untouched
    since their initial commits. `terraform.py:35-37`'s vestigial `_TEMPLATE_DIR` default
-   still points at `ec2_instance`. (`docs/infrastructure-as-code.md` claimed VM deploys ran
+   still points at `ec2_instance`. (`docs/cloud/infrastructure-as-code.md` claimed VM deploys ran
    Terraform — corrected in this pass.)
 2. **`rollback.sh` leaves GCP privilege behind.** `:531-533` revokes 6 of the 16 project
    role bindings granted at `setup-gcp.sh:460-470`, and the **10 grants on Cloud Build's

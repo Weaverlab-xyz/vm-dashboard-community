@@ -2,9 +2,15 @@
 
 > **Audience:** operator · **Profile:** `demo` · **Read this when:** you are managing Kubernetes clusters and the privileged access into them.
 
+This page covers managed and registered clusters. One more page sits under it:
+
+| Page | Read it when |
+|---|---|
+| [KubeSolo](kubernetes/kubesolo.md) | you need the Entitle agent on an edge or plant-floor host that will not carry a real cluster, or want to see the single-node cluster the OT demo cell runs on |
+
 The dashboard provisions (or imports) managed Kubernetes clusters and layers management +
 privileged access on top — the same **provisioning + stacked layers** model as
-[Databases](databases.md) and [Cloud VMs](cloud-vms.md), adapted to Kubernetes:
+[Databases](databases.md) and [Cloud VMs](cloud/vms.md), adapted to Kubernetes:
 
 - **Provision / register** *(stand it up)* — Terraform-build a new cluster, or register an
   existing/local one from a kubeconfig.
@@ -188,7 +194,7 @@ The sandbox scripts no longer create k8s subnets — clusters own their networks
 grant the k8s IAM/roles and emit the **peering inputs** the modules consume (AWS:
 `aws_vpc_id`/`aws_vpc_cidr`/`aws_private_route_table_id` + DB/VM SGs; Azure: `azure_vnet_id`;
 GCP: `gcp_network` or the co-location subnet + secondary ranges). See the "Managed
-Kubernetes" row in [Cloud Sandbox](CLOUD_SANDBOX.md).
+Kubernetes" row in [Cloud Sandbox](cloud/sandbox.md).
 
 ---
 
@@ -470,12 +476,12 @@ Assign one and the whole workgroup can see and manage it:
 itself. Tagging a cluster therefore hands its whole workgroup the console link, the
 API-tunnel and Entra kubeconfig downloads, brokered access, tunnel and binding changes,
 Password Safe token registration, decommission, and its
-[auto-delete timer](auto-delete-timer.md). It is a grant, not a label.
+[auto-delete timer](operations/auto-delete-timer.md). It is a grant, not a label.
 
 Requesting a cluster you cannot see answers **404**, not 403 — the same rule the POV and
 lab pages use, so an id cannot be confirmed by probing for it.
 
-See [Permissions](permissions.md) for how workgroups sit alongside permission scopes.
+See [Permissions](access/permissions.md) for how workgroups sit alongside permission scopes.
 
 ---
 
@@ -521,4 +527,4 @@ dashboard.
 
 Source of truth: `web_dashboard/api/k8s.py`, `web_dashboard/services/k8s_service.py`, the
 `terraform/k8s_cluster/*` modules, and `web_dashboard/api/setup.py` (`K8sManagementFeatureConfig`).
-For the network topology see [Cloud Sandbox](CLOUD_SANDBOX.md).
+For the network topology see [Cloud Sandbox](cloud/sandbox.md).

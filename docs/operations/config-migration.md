@@ -2,12 +2,14 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you are standing up a second instance and do not want to re-type months of configuration.
 
+Part of [Operations](../operations.md).
+
 Move a dashboard's **Settings** configuration from one instance to another —
 dev to prod, a laptop to a hosted deployment, or a rebuild after a host dies.
 
 > This is about dashboard *configuration*, not the Config Management feature.
 > For Ansible playbooks and drift detection see
-> [config-management.md](config-management.md).
+> [config-management.md](../config-management.md).
 
 ---
 
@@ -29,7 +31,7 @@ credential.
 
 So the migration moves **plaintext**, and lets the target re-encrypt with its
 own key. That is what `POST /api/setup/import` already does for the
-[sandbox bootstrappers](CLOUD_SANDBOX.md), and this tool is the other half of
+[sandbox bootstrappers](../cloud/sandbox.md), and this tool is the other half of
 that path: the export the sandbox scripts never needed.
 
 ---
@@ -49,7 +51,7 @@ Everything reachable from the **Settings** panel:
 
 Vault references migrate as references. If a secret lives in
 `azure_kv://bt-client-secret`, the bundle carries that pointer and the value
-never leaves the vault — see [secrets-management.md](secrets-management.md).
+never leaves the vault — see [secrets-management.md](../access/secrets-management.md).
 Migrating your secrets to a vault *before* exporting is the cleanest way to run
 this whole exercise.
 
@@ -60,7 +62,7 @@ this whole exercise.
 - **Instance identity.** `public_base_url`, `trusted_proxy_hosts`,
   `agent_base_url`, the WebAuthn origin, listener and database settings. The
   proxy host in particular must be the literal IP of *this* deployment's proxy;
-  see [SECURITY.md](../SECURITY.md).
+  see [SECURITY.md](../../SECURITY.md).
 - **Handles on live resources.** `rancher_server_url`, `portainer_pat`,
   `entitle_agent_token_ref`, Web Jump tfstate, the expiry sweeper's arm time.
   The application writes these itself, and they point at infrastructure the
@@ -83,7 +85,7 @@ remote agents, secret vault registrations.
 - **Personal access tokens.** Stored as hashes; re-issue them.
 - **Remote agents.** The private half of an agent's Ed25519 identity never
   leaves the agent host. Re-enrol against the new audience — see
-  [remote-agents.md](remote-agents.md).
+  [remote-agents.md](../remote-agents.md).
 
 **Deliberately never migrated:** deployed databases, clusters, gateways and
 desktops. Two dashboards holding deploy records for one set of real resources

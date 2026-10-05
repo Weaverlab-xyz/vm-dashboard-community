@@ -217,7 +217,7 @@ pool, so a default deployment holds `3 × (size + overflow)`. On a small managed
 (Azure Burstable B1ms allows 50 connections) that budget, not CPU, is what caps throughput.
 
 Full reference, including running the worker as its own Azure Container App:
-https://github.com/Weaverlab-xyz/vm-dashboard-community/blob/main/docs/job-worker.md
+https://github.com/Weaverlab-xyz/vm-dashboard-community/blob/main/docs/operations/job-worker.md
 
 ---
 
@@ -278,5 +278,5 @@ All six are built from the same release tag and are multi-arch.
   integrations.
 * **Exposure:** the quickstart binds to localhost and is meant for a local host. Put it
   behind TLS and set `PUBLIC_BASE_URL` before exposing it — see
-  https://github.com/Weaverlab-xyz/vm-dashboard-community/blob/main/docs/cloud-hosting.md
+  https://github.com/Weaverlab-xyz/vm-dashboard-community/blob/main/docs/operations/cloud-hosting.md
 * Vulnerability reports: https://github.com/Weaverlab-xyz/vm-dashboard-community/blob/main/SECURITY.md

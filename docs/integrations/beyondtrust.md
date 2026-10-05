@@ -176,7 +176,7 @@ Set these as Packer build env on the build page. Full detail and a smoke-test re
 | [Gateway hosts](beyondtrust/gateways.md) | The managed-vs-requested Gateway lifecycle, placement, naming and node firewalls |
 | [Databases](../databases.md) | Cloud-DB provisioning, PRA tunnels, and Password Safe database onboarding |
 | [Kubernetes](../kubernetes.md) | Cluster provisioning, PRA k8s tunnels, and access identity |
-| [Cloud VMs](../cloud-vms.md) | The full VM deploy story — provisioning, Shell Jump, onboarding, Entitle |
+| [Cloud VMs](../cloud/vms.md) | The full VM deploy story — provisioning, Shell Jump, onboarding, Entitle |
 | [Config management](../config-management.md) | Ansible runs, including managed-account checkout as the login identity |
-| [Secrets management](../secrets-management.md) | Where Password Safe sits among the dashboard's secret backends |
+| [Secrets management](../access/secrets-management.md) | Where Password Safe sits among the dashboard's secret backends |
 | [`provisioners/beyondtrust/README.md`](../../provisioners/beyondtrust/README.md) | The image-prep scripts in depth, with a smoke-test recipe |

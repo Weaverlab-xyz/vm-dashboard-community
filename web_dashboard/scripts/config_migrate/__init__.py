@@ -24,5 +24,5 @@ Four verbs::
 Scope is everything reachable from the Settings panel: the whole ``app_config``
 store plus ``notification_endpoints`` rows, which are edited in
 Settings → Notifications. See :mod:`.classify` for what is deliberately held
-back, and ``docs/config-migration.md`` for the operator walkthrough.
+back, and ``docs/operations/config-migration.md`` for the operator walkthrough.
 """

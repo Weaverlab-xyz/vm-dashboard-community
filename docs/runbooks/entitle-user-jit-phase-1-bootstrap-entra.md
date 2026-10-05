@@ -67,7 +67,7 @@ group per level it declares on the next bootstrap run.
 Adding a scope also **revokes** its feature from every user who has
 an explicit permission map, silently, unless the change shipped a
 backfill alongside it. See
-[Permissions](../permissions.md#adding-a-scope-for-contributors).
+[Permissions](../access/permissions.md#adding-a-scope-for-contributors).
 
 If Graph rejects authentication, fix the app registration before
 proceeding — there is no "skip Graph" mode.

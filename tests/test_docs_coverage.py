@@ -63,8 +63,8 @@ _HINTS = {
     "hyperv": "docs/integrations/hyperv.md", "proxmox": "docs/integrations/proxmox.md",
     "vsphere": "docs/integrations/vsphere.md", "nutanix": "docs/integrations/nutanix.md",
     "xcpng": "docs/integrations/xcpng.md", "schedule": "docs/scheduling.md",
-    "inventory": "docs/inventory.md", "desktop": "docs/virtual-desktops.md",
-    "workgroup": "docs/permissions.md", "notification": "docs/notifications.md",
+    "inventory": "docs/inventory.md", "desktop": "docs/cloud/virtual-desktops.md",
+    "workgroup": "docs/access/permissions.md", "notification": "docs/operations/notifications.md",
     "ansible": "docs/config-management.md",
 }
 

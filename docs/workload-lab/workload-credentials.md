@@ -55,7 +55,7 @@ selects its own:
 
 Turning WC on is what *unlocks* retiring **your** static credentials. It never
 retires them for anyone else, and never as a side effect of an upgrade. See
-[Secrets management](../secrets-management.md) for the wider tiered model.
+[Secrets management](../access/secrets-management.md) for the wider tiered model.
 
 **GCP is absent on purpose.** WC mints AWS and Azure credentials only, so a GCP
 deployment stays on the static tier. A mixed install — say AWS dynamic, Azure
@@ -145,7 +145,7 @@ for its own identity, and Pathfinder accepts it because a **Workload Identity**
 registered there names that identity's issuer and a constraint on its claims.
 
 **It is not Azure-only.** `wlc_identity_platform` selects which platform is
-asked, because [cloud-hosting.md](../cloud-hosting.md) documents this dashboard
+asked, because [cloud-hosting.md](../operations/cloud-hosting.md) documents this dashboard
 running as a managed container on Azure Container Apps, GCP Cloud Run or AWS ECS:
 
 | Platform | Token source | Note |
@@ -190,7 +190,7 @@ other two describe workloads that are not this process.
 
 Full walkthrough, including the v1-versus-v2 issuer trap that makes a perfectly
 valid token silently fail to match:
-[Cloud hosting → No PAT](../cloud-hosting.md#no-pat-authenticate-to-pathfinder-with-a-workload-identity).
+[Cloud hosting → No PAT](../operations/cloud-hosting.md#no-pat-authenticate-to-pathfinder-with-a-workload-identity).
 
 **Assign the identity to the worker too.** `dash-worker` is where credentials are
 minted, so an identity on the web app alone yields a panel that tests green and
@@ -232,7 +232,7 @@ Two things to know before you do it:
   back.
 - **The JWT root key is not part of this** and never can be — it derives the key
   that encrypts the very rows a vault credential lives in. See
-  [why the JWT root key cannot be migrated](../secrets-management.md#why-the-jwt-root-key-cannot-be-migrated).
+  [why the JWT root key cannot be migrated](../access/secrets-management.md#why-the-jwt-root-key-cannot-be-migrated).
 
 Secrets already living in another external vault are left untouched; the
 migration only moves database-stored values.
@@ -370,6 +370,6 @@ trust) registrations — so the whole configuration side can be provisioned as
 code rather than clicked through the console.
 
 Related: [Dynamic AWS and Azure credentials](dynamic-credentials.md) ·
-[Secrets management](../secrets-management.md) ·
+[Secrets management](../access/secrets-management.md) ·
 [Machine-identity JIT design](../design/cloud-identity-jit.md) ·
 [Password Safe](../integrations/beyondtrust/password-safe.md) · [Entitle](../integrations/beyondtrust/entitle.md)

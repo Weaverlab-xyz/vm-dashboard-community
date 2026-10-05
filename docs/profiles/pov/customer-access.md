@@ -228,7 +228,7 @@ grant. If you are emailing a link to an evaluation, mint an accessor.
 
 The `use` level is the important half of that grant. With `read` alone they can look at the
 checklist but not tick it, and a checklist nobody can tick is a screenshot. With `write`
-they could provision and destroy POVs. See [Permissions](../../permissions.md) for the
+they could provision and destroy POVs. See [Permissions](../../access/permissions.md) for the
 whole model; a POV they were not granted answers *"No such POV environment"*, the same as
 an id that does not exist, because confirming somebody else's POV exists is itself a leak.
 

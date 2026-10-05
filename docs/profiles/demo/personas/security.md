@@ -41,7 +41,7 @@ spreadsheet.
 Scan the estate for secrets sitting in configuration. It always turns something up, which is
 the point — a control that finds nothing is indistinguishable from one that is not running.
 
-**Guide:** [Secrets Management](../../../secrets-management.md)
+**Guide:** [Secrets Management](../../../access/secrets-management.md)
 
 ### Refuse the deploy that would have been a finding
 
@@ -55,14 +55,14 @@ can act on. Prevention rather than a quarterly report.
 Stream privileged-access events to Slack, Teams or a signed webhook, so the record lives in the
 tool the team already watches rather than one somebody has to remember to open.
 
-**Guide:** [Notifications](../../../notifications.md)
+**Guide:** [Notifications](../../../operations/notifications.md)
 
 ### Nothing privileged outlives its purpose
 
 Every resource carries an expiry, and the ones that pass it are removed. The antidote to an
 estate nobody can account for.
 
-**Guide:** [Auto-delete Timer](../../../auto-delete-timer.md)
+**Guide:** [Auto-delete Timer](../../../operations/auto-delete-timer.md)
 
 ## What to enable
 
@@ -72,7 +72,7 @@ and the cards that need them will say so. Add **Secrets scanning** for the disco
 Every one of these is profile-neutral, so this focus works identically on an estate instance and a
 [POV instance](../../pov/README.md).
 
-Read [Auto-delete Timer](../../../auto-delete-timer.md) before switching it on. It deletes
+Read [Auto-delete Timer](../../../operations/auto-delete-timer.md) before switching it on. It deletes
 infrastructure, and it has its own second gate for exactly that reason.
 
 ## Talking to this buyer

@@ -2,9 +2,11 @@
 
 > **Audience:** operator · **Profile:** `demo` · **Read this when:** you are deploying cloud VMs and want the full access and onboarding story.
 
+Part of [Cloud](../cloud.md).
+
 The dashboard deploys **cloud virtual machines** across AWS, Azure, GCP, and OCI, then
 layers the BeyondTrust PAM stack on top — the same **provisioning + three layers** model
-as [Databases](databases.md) and [Kubernetes](kubernetes.md):
+as [Databases](../databases.md) and [Kubernetes](../kubernetes.md):
 
 - **Provisioning** *(stand it up)* — launch an instance into a **private** subnet and inject
   an SSH key. Done directly through each cloud's **SDK** (not Terraform — see Architecture).
@@ -73,7 +75,7 @@ deploy still succeeds):
 7. **Layer 2** — Password Safe onboarding (opt-in).
 
 VMs land in a **private** subnet with **no direct internet egress** and are reachable only
-from the gateway (SSH/22); see [Cloud Sandbox](CLOUD_SANDBOX.md) for the per-cloud network
+from the gateway (SSH/22); see [Cloud Sandbox](sandbox.md) for the per-cloud network
 topology. Entry points: `/aws`, `/azure`, `/gcp`, `/oci` (per-cloud deploy + image browser)
 and `/vms` (unified cross-cloud inventory).
 
@@ -110,7 +112,7 @@ expensive and silent:
 **Stopping saves compute and nothing else.** Disks, public addresses and reserved capacity
 keep billing. A stopped VM is cheaper, not free.
 
-Power is deliberately **not** behind [Action Guardrails](scheduling/policy-guardrails.md), where
+Power is deliberately **not** behind [Action Guardrails](../scheduling/policy-guardrails.md), where
 destroy is. A reversible action earns a lighter brake than an irreversible one, and a
 change-freeze that forbade *suspending* a VM would forbid the cheapest thing an operator
 can do during one.
@@ -130,7 +132,7 @@ instance you cannot reach fails on its own without stopping the rest — the res
 each one and why.
 
 To run the selection later, or in the next change window, tick **Schedule** on the same
-toolbar. See [Scheduling power operations](scheduling/change-windows.md#scheduling-power-operations).
+toolbar. See [Scheduling power operations](../scheduling/change-windows.md#scheduling-power-operations).
 
 Four things worth knowing before ticking fifty boxes:
 
@@ -383,7 +385,7 @@ all sharing a `batch_id`; the browser lands on `/jobs?batch_id=…`, which rolls
 into total / running / failed. The children deploy **sequentially** inside a single worker
 slot, so a batch of N takes roughly N × the single-deploy time and occupies one of the
 `WORKER_REPLICAS` slots for the duration — that, plus default cloud vCPU quotas, is why the
-ceiling is 20 (`MAX_DEPLOY_COUNT` in [`services/vm_naming.py`](../web_dashboard/services/vm_naming.py)).
+ceiling is 20 (`MAX_DEPLOY_COUNT` in [`services/vm_naming.py`](../../web_dashboard/services/vm_naming.py)).
 
 Names are expanded by truncating the *base*, never the numeric suffix, so a series stays
 unique at any provider's length limit. Two limits are worth knowing:
@@ -418,12 +420,12 @@ Use Count for "five identical lab boxes"; use Bulk Deploy for "one each of these
 images". GCP and OCI gained Bulk Deploy after AWS and Azure, so older screenshots may show
 their image lists without checkboxes.
 
-Policy guardrails ([Policy Guardrails](scheduling/policy-guardrails.md)) are enforced **per VM** on every
+Policy guardrails ([Policy Guardrails](../scheduling/policy-guardrails.md)) are enforced **per VM** on every
 path — count batches and multi-select bulk included — before any job row is created.
 
 ### AWS (EC2)
 
-Sandbox: [`scripts/sandbox/Linux/setup-aws.sh`](../scripts/sandbox/Linux/setup-aws.sh).
+Sandbox: [`scripts/sandbox/Linux/setup-aws.sh`](../../scripts/sandbox/Linux/setup-aws.sh).
 Creates the VPC + a **private VM subnet** (`10.99.2.0/24`, local-only), the **VM security
 group** (egress to the VPC only, ingress SSH/22 from the gateway SG), the **NAT** + SSM
 endpoint SGs, a Secrets Manager **SSH keypair** secret, the ECS `bt-jumpoint` cluster, and
@@ -446,7 +448,7 @@ retrieve the password via `GET /api/aws/instances/{id}/ssh-key` / the console).
 
 ### Azure (VM)
 
-Sandbox: [`scripts/sandbox/Linux/setup-azure.sh`](../scripts/sandbox/Linux/setup-azure.sh).
+Sandbox: [`scripts/sandbox/Linux/setup-azure.sh`](../../scripts/sandbox/Linux/setup-azure.sh).
 Creates the RG + VNet with a **vm-subnet** (`10.99.2.0/24`, NSG denies Internet egress,
 allows VNet), an **aci-subnet** for the ACI gateway, a Key Vault **SSH keypair** secret,
 and a service principal with **Contributor** on the RG.
@@ -493,7 +495,7 @@ SSH Shell Jump.
 
 ### GCP (GCE)
 
-Sandbox: [`scripts/sandbox/Linux/setup-gcp.sh`](../scripts/sandbox/Linux/setup-gcp.sh).
+Sandbox: [`scripts/sandbox/Linux/setup-gcp.sh`](../../scripts/sandbox/Linux/setup-gcp.sh).
 Creates a **vm-subnet** (`10.99.2.0/24`, **no** Cloud NAT → no internet egress by default)
 and a **jumpoint-subnet** (Cloud NAT), a firewall `…-allow-ssh-from-jumpoint`, a Secret Manager
 SSH keypair, and a service account. The dashboard **auto-attaches** `gcp_default_network_tag`
@@ -554,7 +556,7 @@ so no migration is needed.
 
 ### OCI (Compute) — read the caveats
 
-Sandbox: [`scripts/sandbox/Linux/setup-oci.sh`](../scripts/sandbox/Linux/setup-oci.sh).
+Sandbox: [`scripts/sandbox/Linux/setup-oci.sh`](../../scripts/sandbox/Linux/setup-oci.sh).
 Creates a compartment + VCN (`10.98.0.0/16`) with a **public subnet** (IGW, for your
 gateway), a **vm-subnet** (`10.98.2.0/24`, NAT Gateway egress, no public IP), a scoped IAM
 user + API keypair, and (best-effort) a KMS vault SSH-keypair secret.
@@ -611,7 +613,7 @@ the `bt_*` defaults. AWS + Azure also accept a per-deploy `pra_credential_ref` (
 `bt_client_secret`). **Windows Azure VMs** skip the SSH jump — use an RDP jump.
 
 The shared gateway host, deploy keys, and PRA OAuth setup are described in the
-[Privileged Remote Access](integrations/beyondtrust/privileged-remote-access.md) doc.
+[Privileged Remote Access](../integrations/beyondtrust/privileged-remote-access.md) doc.
 
 ---
 
@@ -627,14 +629,14 @@ method only** (no cloud-native plugin) and therefore needs SSH line-of-sight fro
 Broker / Gateway.
 
 This is documented in full — plugin uploads, per-cloud methods, the `adminuser` account, and
-the config-key table — in the [Password Safe](integrations/beyondtrust/password-safe.md) doc's
+the config-key table — in the [Password Safe](../integrations/beyondtrust/password-safe.md) doc's
 **"Password Safe VM onboarding"** section. Off-boarding is automatic on VM destroy.
 
 With `passwordsafe_vault_sync_enabled` on, the three cloud-native methods additionally
 mirror the VM's rotating SSH key into a **PRA Vault Private Key** account associated to the
 VM's Jump Group, so the key can be checked out in PRA's `/login` and injected into the VM's
 Shell Jump. Password Safe owns the propagation through a `SyncedAccounts` link — see
-[Using the VM's key in PRA](integrations/beyondtrust/password-safe.md#using-the-vms-key-in-pra--the-pra-vault-private-key-sync).
+[Using the VM's key in PRA](../integrations/beyondtrust/password-safe.md#using-the-vms-key-in-pra--the-pra-vault-private-key-sync).
 
 ---
 
@@ -650,9 +652,9 @@ build keypair and `sudo` as the image's cloud-default user (`ubuntu`/`ec2-user`/
 - **Private VM** (the sandbox default) → attaches the **shared Entitle agent** (Kubernetes,
   one per VPC) via `entitle_agent_token_name`.
 
-Requires `entitle_owner_id` + `entitle_workflow_id`. See the [Entitle integration](integrations/beyondtrust/entitle.md)
+Requires `entitle_owner_id` + `entitle_workflow_id`. See the [Entitle integration](../integrations/beyondtrust/entitle.md)
 doc. A separate **machine-identity JIT** track (the AWS `elevate()` wrapping of
-`ec2_deploy`/`ec2_terminate`) is covered in [design/cloud-identity-jit.md](design/cloud-identity-jit.md).
+`ec2_deploy`/`ec2_terminate`) is covered in [design/cloud-identity-jit.md](../design/cloud-identity-jit.md).
 
 ---
 
@@ -660,7 +662,7 @@ doc. A separate **machine-identity JIT** track (the AWS `elevate()` wrapping of
 
 Deploy from a stock marketplace/public image or one the dashboard's Packer flow built
 (`/images/aws|azure|gcp`). The **BT-ready provisioners** under
-[`provisioners/beyondtrust/`](../provisioners/beyondtrust/) harden sshd and create the
+[`provisioners/beyondtrust/`](../../provisioners/beyondtrust/) harden sshd and create the
 cloud-default `adminuser` login with passwordless sudo — the account both the Entitle
 `sudo_user` and the Password Safe managed account rely on. Full build/promote/export flow is
 in [image-management.md](image-management.md).
@@ -683,7 +685,7 @@ chip's tooltip tells you which word applies:
 | GCP | labels | key/value, **lowercase only**, no colons |
 | OCI | freeform tags | key/value |
 | Proxmox | tags | bare labels, no values |
-| Password Safe | attributes | typed values, shown on [Inventory](inventory.md#password-safe-attributes) rather than here |
+| Password Safe | attributes | typed values, shown on [Inventory](../inventory.md#password-safe-attributes) rather than here |
 | PRA | tag | not surfaced yet |
 
 Chips are coloured by **who owns the tag**, not by which cloud it came from:
@@ -719,7 +721,7 @@ vSphere tags, Nutanix categories and XCP-ng tags need reads the remote agent doe
 perform yet, and Hyper-V has no native tag concept. Databases, Kubernetes clusters and
 cloud functions show no tags on Inventory. PRA jump-item tags are not read at all yet.
 Password Safe **attributes** are a separate column on Inventory, with their own filter and
-editor: see [Inventory — Password Safe attributes](inventory.md#password-safe-attributes).
+editor: see [Inventory — Password Safe attributes](../inventory.md#password-safe-attributes).
 
 ### Editing tags
 
@@ -752,14 +754,14 @@ one sentence instead of collecting fifty identical provider errors. This matters
 GCP, whose labels are lowercase-only and reject a colon — `Env=Prod` is valid on AWS and
 rejected on GCE, and the message says so.
 
-Every change is written to the [audit log](audit-log.md), one entry per VM, under the
+Every change is written to the [audit log](../access/audit-log.md), one entry per VM, under the
 action `tags.update` — who, which resource, and what changed. Nothing is recorded for a VM
 that failed or that was already in the requested state.
 
 Editing needs the cloud's existing **write** permission (`aws:write` and friends); there is
 no separate tag permission.
 
-**Proxmox can be edited too** — see [Agent-brokered hypervisors](remote-agents/hypervisors.md#the-verbs)
+**Proxmox can be edited too** — see [Agent-brokered hypervisors](../remote-agents/hypervisors.md#the-verbs)
 for the one difference that matters: a connection the dashboard dials directly is written
 immediately, while an agent-bound one is *queued* as a job. The other hypervisors report
 no tags to edit.
@@ -831,5 +833,5 @@ no tags to edit.
   driven by their `*_bulk_deploy` parent. Check the parent (same `batch_id`): if it failed
   or was reconciled away, its children have nothing to drive them.
 
-For the sandbox network topology see [Cloud Sandbox](CLOUD_SANDBOX.md); for day-2 Ansible
-against deployed VMs see [Config Management](config-management.md).
+For the sandbox network topology see [Cloud Sandbox](sandbox.md); for day-2 Ansible
+against deployed VMs see [Config Management](../config-management.md).

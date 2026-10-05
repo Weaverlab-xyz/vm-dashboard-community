@@ -74,7 +74,7 @@ environment** (not per build).
 > [Who brokers identity in the plant](../../profiles/demo/ot-demo-cell.md#who-brokers-identity-in-the-plant).
 
 "Only in a Kubernetes cluster" does not have to mean a real one. For an edge or
-plant-floor host that will not carry a cluster, [KubeSolo](../../kubesolo.md) is a
+plant-floor host that will not carry a cluster, [KubeSolo](../../kubernetes/kubesolo.md) is a
 single-node, etcd-free distribution that takes the same chart unmodified — Config
 Management playbooks install it and the agent on an on-prem host through a remote
 agent. That page also covers what the chart's defaults get wrong on one node, and why

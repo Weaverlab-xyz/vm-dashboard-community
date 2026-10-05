@@ -200,7 +200,7 @@ pure-Python server; the reads still work.
 
 ### Kubernetes API — `127.0.0.1:6443`
 
-Not a fieldbus protocol: this is the cell's own [KubeSolo](../../../kubesolo.md) cluster,
+Not a fieldbus protocol: this is the cell's own [KubeSolo](../../../kubernetes/kubesolo.md) cluster,
 the thing the four simulators run on. The client is `kubectl`, and the only setup is
 collecting the kubeconfig the cell writes for exactly this path — once, through the
 Shell Jump:

@@ -3,7 +3,7 @@
 #
 # The cell is a plant IPC, so it runs what a plant IPC can run: KubeSolo, the
 # single-node Kubernetes this repo already recommends for OT hosts too small for a
-# real cluster (docs/kubesolo.md). The simulators below are its workloads — same
+# real cluster (docs/kubernetes/kubesolo.md). The simulators below are its workloads — same
 # images, same ports, same PRA wiring as when they ran on docker compose, which is
 # still available as OT_RUNTIME=docker.
 #
@@ -822,7 +822,7 @@ else
 
 # ── 5b. Runtime: KubeSolo — the cell IS a single-node Kubernetes host ─────────
 # Why the demo cell runs Kubernetes at all: KubeSolo is the answer this repo gives an
-# OT customer who cannot put a cluster on the plant floor (docs/kubesolo.md), and the
+# OT customer who cannot put a cluster on the plant floor (docs/kubernetes/kubesolo.md), and the
 # cell is the only plant floor it ships. On docker compose that answer was a slide.
 # The simulators do not change — same images, same ports, same PRA wiring — they just
 # become the workloads of a cluster that also has room for the Entitle agent.

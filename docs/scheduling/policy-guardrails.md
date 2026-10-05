@@ -47,7 +47,7 @@ actions:
 ### Creates and teardowns are not the same question
 
 The teardown actions were added because the asymmetry was hard to defend: the
-[auto-delete timer](../auto-delete-timer.md) needs four gates and two arming clocks before it
+[auto-delete timer](../operations/auto-delete-timer.md) needs four gates and two arming clocks before it
 will delete a VM, while a human pressing **Destroy** on the same VM passed through none of
 them. The reaper was more constrained than the operator.
 
@@ -106,7 +106,7 @@ A denied deploy returns **HTTP 403** with the reasons:
 ```
 
 and writes an `<action>:denied` entry to the **tamper-evident audit log**
-(see [`/api/audit/verify`](../secrets-management.md)). No job is created and no cloud
+(see [`/api/audit/verify`](../access/secrets-management.md)). No job is created and no cloud
 resource is touched.
 
 ## `needs_approval` can be enforced

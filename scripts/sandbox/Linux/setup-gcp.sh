@@ -518,7 +518,7 @@ fi
 
 # ── 5b. Image-hub GCS bucket + promote-runner plumbing ───────────────────────
 # Provisions the prerequisites the dashboard's automated cross-cloud image
-# promote runner needs (see docs/image-management.md, runners/promote/README.md):
+# promote runner needs (see docs/cloud/image-management.md, runners/promote/README.md):
 #
 #   • A GCS bucket that doubles as the image-registry hub and the staging
 #     bucket the promote-runner Cloud Run Job writes converted tar.gz disks
