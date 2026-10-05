@@ -190,7 +190,7 @@ def test_the_panel_links_to_a_doc_that_exists():
     resolved from the filesystem at request time."""
     html = _read(_SETTINGS_HTML)
     panel = html.split("panel?.key === 'worker'")[1].split("</template>")[0]
-    links = re.findall(r'href="/docs/([a-z0-9-]+)"', panel)
+    links = re.findall(r'href="/docs/([a-z0-9/-]+)"', panel)
     assert links, "the Job Worker panel links to no documentation"
     for slug in links:
         assert os.path.isfile(os.path.join(_ROOT, "docs", f"{slug}.md")), \
