@@ -30,7 +30,7 @@ stack. Keeping them separate lets the winrm image stay lean and untouched.
 The dashboard runs k8s/DB config-management jobs **only** on a remote in-cloud
 runner (AWS ECS / Azure ACI / GCP Cloud Run) placed in-subnet with line-of-sight
 to the private endpoint — never the local sibling-Docker path (see
-[docs/config-management.md](../../docs/config-management.md)). The runner shell
+[docs/operations/config-management.md](../../docs/operations/config-management.md)). The runner shell
 decodes the playbook + connection material from env vars and runs:
 
 ```

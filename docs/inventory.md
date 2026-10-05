@@ -124,7 +124,7 @@ while it is active. With a selection you can:
 * **Run a playbook** on every selected resource — one job per resource. To add a
   Secrets-Management secret or a Password Safe managed account to the run, use **Continue
   on the Config Management page**, which carries the selection over. See
-  [Config Management](config-management.md).
+  [Config Management](operations/config-management.md).
 * **Edit attributes on N**, as above.
 
 ---
@@ -143,5 +143,5 @@ before enabling it: it destroys infrastructure.
 * [Cloud VMs](cloud/vms.md) — tags, power and deploys per cloud.
 * [Password Safe](integrations/beyondtrust/password-safe.md) — setup, and the API behaviour behind the
   attributes column.
-* [Scheduling](scheduling.md) — running a change later or on a window.
+* [Scheduling](operations/scheduling.md) — running a change later or on a window.
 * [Permissions](access/permissions.md) — workgroups, and who sees which rows.

@@ -18,7 +18,7 @@ customer finds it.
 The KubeSolo plays live in [`examples/playbooks/kubesolo/`](https://github.com/Weaverlab-xyz/vm-dashboard-community/tree/main/examples/playbooks/kubesolo),
 and the Entitle agent plays, which serve KubeSolo and k3s alike, in
 [`examples/playbooks/ot/`](https://github.com/Weaverlab-xyz/vm-dashboard-community/tree/main/examples/playbooks/ot).
-Both run through [Config Management](../config-management.md), against an on-prem host
+Both run through [Config Management](../operations/config-management.md), against an on-prem host
 reached by a [remote agent](../remote-agents.md).
 
 ## KubeSolo or k3s
@@ -214,7 +214,7 @@ the play hands it to helm through a 0600 values file rather than `--set`, becaus
 
 ## See also
 
-- [Config Management](../config-management.md) — the run form, targets and runners
+- [Config Management](../operations/config-management.md) — the run form, targets and runners
 - [Remote Agents](../remote-agents.md) — reaching an on-prem host at all
 - [Entitle](../integrations/beyondtrust/entitle.md) — the integration this agent serves
 - [OT Demo Cell](../profiles/demo/ot-demo-cell.md) — the demo cell, which runs k3s, and its DMZ broker, which installs this agent

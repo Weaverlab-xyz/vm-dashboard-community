@@ -177,6 +177,6 @@ Set these as Packer build env on the build page. Full detail and a smoke-test re
 | [Databases](../databases.md) | Cloud-DB provisioning, PRA tunnels, and Password Safe database onboarding |
 | [Kubernetes](../kubernetes.md) | Cluster provisioning, PRA k8s tunnels, and access identity |
 | [Cloud VMs](../cloud/vms.md) | The full VM deploy story — provisioning, Shell Jump, onboarding, Entitle |
-| [Config management](../config-management.md) | Ansible runs, including managed-account checkout as the login identity |
+| [Config management](../operations/config-management.md) | Ansible runs, including managed-account checkout as the login identity |
 | [Secrets management](../access/secrets-management.md) | Where Password Safe sits among the dashboard's secret backends |
 | [`provisioners/beyondtrust/README.md`](../../provisioners/beyondtrust/README.md) | The image-prep scripts in depth, with a smoke-test recipe |

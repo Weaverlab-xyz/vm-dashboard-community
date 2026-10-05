@@ -48,7 +48,7 @@ the point — a control that finds nothing is indistinguishable from one that is
 Policy turns down a non-compliant request before anything is built, with a reason the requester
 can act on. Prevention rather than a quarterly report.
 
-**Guide:** [Policy Guardrails](../../../scheduling/policy-guardrails.md)
+**Guide:** [Policy Guardrails](../../../operations/scheduling/policy-guardrails.md)
 
 ### Push the events somewhere that gets read
 

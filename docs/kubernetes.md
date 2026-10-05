@@ -487,11 +487,11 @@ See [Permissions](access/permissions.md) for how workgroups sit alongside permis
 
 ## Config Management
 
-Registered/provisioned clusters appear in the [Config Management](config-management.md) target
+Registered/provisioned clusters appear in the [Config Management](operations/config-management.md) target
 dropdown. They are **not SSH targets** — `kubernetes.core` plays run `hosts: localhost,
 connection: local` and reach the API via an injected token-prepped kubeconfig. These runs
 **always** use a remote in-cloud runner (never local Docker) with the `ansible-cloud` image.
-Starters live in `examples/playbooks/k8s/`. See [Config Management](config-management.md).
+Starters live in `examples/playbooks/k8s/`. See [Config Management](operations/config-management.md).
 
 ---
 

@@ -59,11 +59,8 @@ folder of the pages themselves. A page that stands alone is a row on its own.
 | [Databases](databases.md) | you are standing up a managed database, or want to manage one you already run. |
 | [Kubernetes](kubernetes.md) | you are managing Kubernetes clusters and the privileged access into them. |
 | [KubeSolo](kubernetes/kubesolo.md) | you need the Entitle agent on an edge or plant-floor host that will not carry a real cluster. |
-| [Config Management](config-management.md) | you are about to run an Ansible job and want to know how the runner handles secrets and isolation. |
 | [Inventory](inventory.md) | you want one list of everything across every cloud and hypervisor, to filter it by tag or Password Safe attribute, or to act on a selection. |
-| [Storage Management](storage-management.md) | you are enabling a feature that needs a storage backend, which several of them do. |
 | [Remote Agents](remote-agents.md) | your hypervisors, databases or clusters live somewhere the dashboard cannot reach. The pages are under [`remote-agents/`](remote-agents.md). |
-| [Scheduling](scheduling.md) | you want a change to run later, run repeatedly, or run only inside an approved window, or it has to wait for a second person to sign it off. The hub tells the three kinds of "schedule" apart; the full reference, [Change Windows](scheduling/change-windows.md), and its other half, [Action Guardrails](scheduling/policy-guardrails.md) — disallowed changes blocked before they start — are under [`scheduling/`](scheduling.md). |
 
 ### Identity and access
 
@@ -81,7 +78,10 @@ folder of the pages themselves. A page that stands alone is a row on its own.
 
 | Page | Read this when |
 |---|---|
-| [Operations](operations.md) | the dashboard is installed and you are keeping it running. |
+| [Operations](operations.md) | the dashboard is installed and you are running it day to day: managing the infrastructure that already exists and what you built with it, and keeping the dashboard itself healthy. |
+| [Config Management](operations/config-management.md) | you are about to run an Ansible job and want to know how the runner handles secrets and isolation. |
+| [Scheduling](operations/scheduling.md) | you want a change to run later, run repeatedly, or run only inside an approved window, or it has to wait for a second person to sign it off. The hub tells the three kinds of "schedule" apart; the full reference, [Change Windows](operations/scheduling/change-windows.md), and its other half, [Action Guardrails](operations/scheduling/policy-guardrails.md) — disallowed changes blocked before they start — are under [`scheduling/`](operations/scheduling.md). |
+| [Storage Management](operations/storage-management.md) | you are enabling a feature that needs a storage backend, which several of them do. |
 | [Cloud Hosting](operations/cloud-hosting.md) | you want the dashboard reachable from outside your LAN, or fronting remote agents. |
 | [Job Worker](operations/job-worker.md) | a long job is sitting queued, or you are sizing the worker for more of them. |
 | [Notifications](operations/notifications.md) | you want to hear about expiring resources and failed jobs without opening the dashboard. |
@@ -113,7 +113,7 @@ feature) is indexed by its own `README.md`.
 
 The sections — [`onboarding/`](ONBOARDING.md), [`cloud/`](cloud.md), [`access/`](access.md),
 [`oidc/`](oidc.md), [`workload-lab/`](workload-lab.md), [`remote-agents/`](remote-agents.md),
-[`scheduling/`](scheduling.md), [`operations/`](operations.md), [`kubernetes/`](kubernetes.md)
+[`operations/`](operations.md) (with [`operations/scheduling/`](operations/scheduling.md) inside it), [`kubernetes/`](kubernetes.md)
 and [`editions/`](editions.md) — are listed with their hubs above.
 
 Outside `docs/`: [CONTRIBUTING.md](../CONTRIBUTING.md), [SECURITY.md](../SECURITY.md), and

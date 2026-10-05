@@ -479,7 +479,7 @@ store and passes only the reference.
 > **Workloads are repository files, not uploads.** There is deliberately **no
 > upload path** for handler code: a workload is added by committing a file to
 > `web_dashboard/functions/fnworkloads/` and shipping an image. This is not the
-> same pipeline as [asset uploads](../storage-management.md#what-counts-as-an-asset)
+> same pipeline as [asset uploads](../operations/storage-management.md#what-counts-as-an-asset)
 > and the `.yml`/`.sh`/`.ps1` allowlist there does not apply.
 >
 > The reason is what these handlers hold. A workload runs with the database admin

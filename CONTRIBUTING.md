@@ -261,7 +261,7 @@ share) is worth testing. Specifically useful:
   the radio button on `/storage` should disable with a useful tooltip,
   and `PATCH /api/storage/config` should return 400. Confirm both.
 
-See [docs/storage-management.md → Local Filesystem / UNC](docs/storage-management.md#local-filesystem--unc)
+See [docs/operations/storage-management.md → Local Filesystem / UNC](docs/operations/storage-management.md#local-filesystem--unc)
 for the field-by-field walkthrough.
 
 ### Sanity check: integrations off

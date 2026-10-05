@@ -284,7 +284,7 @@ RUN --mount=type=secret,id=github_token,required=false \
 
 # Install OPA (Open Policy Agent) — the bundled binary admission_service shells
 # for pre-action policy guardrails (services/_opa.py). Static build, arch-aware
-# (multi-arch image: amd64 + arm64). See docs/scheduling/policy-guardrails.md.
+# (multi-arch image: amd64 + arm64). See docs/operations/scheduling/policy-guardrails.md.
 #
 # --retry/--retry-all-errors: the openpolicyagent.org download endpoint
 # intermittently drops the connection mid-transfer — observed as

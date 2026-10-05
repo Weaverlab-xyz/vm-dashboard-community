@@ -44,7 +44,7 @@ the direct `/containers` URL.
 ## Deploy Compose
 
 The compose file is **referenced from the storage backend** (the same store used for
-playbooks and Packer scripts) — upload it once on the [Storage](../storage-management.md) page
+playbooks and Packer scripts) — upload it once on the [Storage](../operations/storage-management.md) page
 and pick it from a dropdown at deploy time. Deploys run as background jobs; watch progress on
 the Jobs page. The deploy endpoint requires the `containers:write` permission (deleting a GCE
 compose instance requires `containers:delete`).

@@ -216,7 +216,7 @@ over and applies the full run form to it — see [Managed-account
 checkout](secrets.md#managed-account-checkout-beyondtrust-password-safe) for how an account is
 matched across many hosts.
 
-Full treatment in [docs/config-management.md](../../config-management.md#bulk-runs-from-the-inventory).
+Full treatment in [docs/operations/config-management.md](../../operations/config-management.md#bulk-runs-from-the-inventory).
 
 ---
 
@@ -224,7 +224,7 @@ Full treatment in [docs/config-management.md](../../config-management.md#bulk-ru
 ## Storage prerequisite (Ansible runner)
 
 The Ansible runner fetches its assets (playbooks, scripts, packages) from a
-[storage backend](../../storage-management.md). At least one backend must be
+[storage backend](../../operations/storage-management.md). At least one backend must be
 configured and active on `/storage` before the Remote Worker / Ansible
 feature flag can be enabled.
 
@@ -238,7 +238,7 @@ configured on the dedicated **`/storage`** page. Picking the right backend:
 | Mixed fleet, dashboard host has internet egress | Any cloud bucket — runner downloads the asset before SSH/WinRM |
 
 Configuration steps, asset upload, migration between backends, and per-backend
-IAM details all live in [docs/storage-management.md](../../storage-management.md).
+IAM details all live in [docs/operations/storage-management.md](../../operations/storage-management.md).
 (The Kubernetes runner has no storage dependency.)
 
 ---
@@ -285,7 +285,7 @@ to it.
 
 > Storage backend configuration, asset-list issues, and per-provider IAM
 > permission errors live in
-> [docs/storage-management.md](../../storage-management.md#troubleshooting).
+> [docs/operations/storage-management.md](../../operations/storage-management.md#troubleshooting).
 > The items below are Ansible-runner-specific concerns that the storage
 > page doesn't cover.
 

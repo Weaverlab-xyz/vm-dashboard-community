@@ -2,11 +2,13 @@
 
 > **Audience:** operator · **Profile:** `both` · **Read this when:** you are enabling a feature that needs a storage backend, which several of them do.
 
+Part of [Operations](../operations.md).
+
 This document explains how the dashboard stores playbooks, scripts, and
 other large assets that don't fit in the encrypted credentials database
 — and how to choose, configure, and migrate between cloud object stores.
 
-The companion to [Secrets Management](access/secrets-management.md): secrets are
+The companion to [Secrets Management](../access/secrets-management.md): secrets are
 small, sensitive, and live in a per-key encrypted store. Storage holds
 bigger, mostly-non-sensitive payloads (playbooks, shell scripts, package
 files, image artefacts) that need to be readable by Ansible runners
@@ -14,9 +16,9 @@ across hosts and by cloud VM-import APIs. For the philosophy and
 best-practice side of running playbooks against your fleet, see
 [Config Management](config-management.md). For the IaC layer that
 stood the targets up in the first place, see
-[Infrastructure as Code](cloud/infrastructure-as-code.md). For the image
+[Infrastructure as Code](../cloud/infrastructure-as-code.md). For the image
 build → promote lifecycle that produces the binaries the IaC layer
-deploys, see [Image Management](cloud/image-management.md).
+deploys, see [Image Management](../cloud/image-management.md).
 
 ---
 
@@ -33,7 +35,7 @@ UI so you can copy assets between them without downtime.
 | **Azure Blob Storage** | Storage account + container + blob prefix | Teams on Azure; integrates with Azure SP creds |
 | **Google Cloud Storage** | GCS bucket + object prefix | Teams on GCP; same SA creds as Compute Engine |
 | **Local Filesystem / UNC** | Filesystem path inside the dashboard container, or a corporate `\\server\share` UNC accessed via SMB | On-prem hypervisor targets when a corporate file share is the source of truth — see [the constraint below](#constraint-local-backend-only-works-with-the-local-ansible-runner) |
-| **Remote Filesystem / UNC (via agent)** | The same kind of target, reached by a [remote agent](remote-agents.md) instead of by the dashboard container | A **cloud-hosted** dashboard — or a [POV instance](profiles/pov/README.md) — that needs an on-prem share it has no network route to. See [below](#remote-filesystem--unc-via-agent) |
+| **Remote Filesystem / UNC (via agent)** | The same kind of target, reached by a [remote agent](../remote-agents.md) instead of by the dashboard container | A **cloud-hosted** dashboard — or a [POV instance](../profiles/pov/README.md) — that needs an on-prem share it has no network route to. See [below](#remote-filesystem--unc-via-agent) |
 
 They are interchangeable from the dashboard's perspective. Switching
 backends does **not** move data; the Migrate panel does that explicitly,
@@ -90,7 +92,7 @@ can share a bucket if the prefix differs.
 > the packager builds the deployable zip in memory, and it goes to a dedicated
 > per-cloud bucket (`function_package_s3_bucket` / `function_package_gcs_bucket` /
 > a container on `storage_azure_account`) rather than to the active storage
-> backend. See [Cloud Functions → package stores](integrations/cloud-functions.md).
+> backend. See [Cloud Functions → package stores](../integrations/cloud-functions.md).
 
 > **Beyond user-uploaded assets, the active backend also holds Terraform
 > remote state.** Cloud VM, cloud-database, and Kubernetes-cluster deploys
@@ -99,7 +101,7 @@ can share a bucket if the prefix differs.
 > here is load-bearing for infrastructure teardown, not just playbooks. The
 > BeyondTrust PRA tunnel state is the one exception — it's scrubbed of
 > credentials and kept in the database instead. See
-> [Infrastructure as Code → State](cloud/infrastructure-as-code.md#state-the-thing-that-makes-iac-work).
+> [Infrastructure as Code → State](../cloud/infrastructure-as-code.md#state-the-thing-that-makes-iac-work).
 
 ## Uploading
 
@@ -274,12 +276,12 @@ agent-brokered backend below instead, which has no runner constraint at all.
 ### Remote Filesystem / UNC (via agent)
 
 The same kind of target as the Local backend, with the constraint removed.
-The dashboard does not open the SMB socket; a [remote agent](remote-agents.md)
+The dashboard does not open the SMB socket; a [remote agent](../remote-agents.md)
 already inside your network does, and reports back over the same
 outbound-polling channel it uses for hypervisor and Config-Management work.
 
 That inverts who has to be where. A dashboard on Azure Container Apps, or a
-[POV instance](profiles/pov/README.md) with no cloud provider at all, can use a
+[POV instance](../profiles/pov/README.md) with no cloud provider at all, can use a
 corporate share as its storage backend — and because the dashboard fetches
 the bytes and hands them to whichever Ansible runner is selected, a **cloud
 runner is fine**. There is no `ansible_runner=local` requirement.
@@ -312,7 +314,7 @@ The one exception, and the one this doc recommends for an agent attested
 through SPIRE: set **SMB password** above, put `dashboard_secret: true` on the
 share's entry in `shares.yaml`, and delete its `password:`. The agent then
 fetches the password for each job through the same sealed per-job fetch a
-[hypervisor connection](remote-agents/credentials.md#central-storage-with-spire-the-recommended-model)
+[hypervisor connection](../remote-agents/credentials.md#central-storage-with-spire-the-recommended-model)
 uses, and nothing durable sits on the host.
 
 - **Only for the configured share and agent.** A storage job for any other share
@@ -327,8 +329,8 @@ uses, and nothing durable sits on the host.
   for one. Clear the field to go back to the host-side password.
 
 The agent side of this, `shares.yaml` and the policy, is in
-[Agent-brokered file shares](remote-agents/file-shares.md); moving the agent to SPIRE is
-[Attesting an agent through SPIRE](remote-agents/spire-attestation.md).
+[Agent-brokered file shares](../remote-agents/file-shares.md); moving the agent to SPIRE is
+[Attesting an agent through SPIRE](../remote-agents/spire-attestation.md).
 
 #### Three grants, all required
 
@@ -341,8 +343,8 @@ The agent side of this, `shares.yaml` and the policy, is in
 Read is implied by naming the share. **Write is off by default** — the
 common case is a share somebody else populates and the dashboard only
 consumes. Without `write: true`, uploads and deletes are refused by name.
-See [`examples/remote-agent/policy.example.yaml`](../examples/remote-agent/policy.example.yaml)
-and [`shares.example.yaml`](../examples/remote-agent/shares.example.yaml).
+See [`examples/remote-agent/policy.example.yaml`](../../examples/remote-agent/policy.example.yaml)
+and [`shares.example.yaml`](../../examples/remote-agent/shares.example.yaml).
 
 #### Two things that behave differently from a cloud backend
 
@@ -385,8 +387,8 @@ The hub backend is the single storage backend that holds the canonical
 VHD/raw artefact for every registered image, regardless of which cloud
 built it. It's the source the cross-cloud promote flow reads from when
 it kicks off a per-target runner — see
-[Image Management](cloud/image-management.md) for the full lifecycle and
-[`runners/promote/README.md`](../runners/promote/README.md) for the
+[Image Management](../cloud/image-management.md) for the full lifecycle and
+[`runners/promote/README.md`](../../runners/promote/README.md) for the
 runner internals.
 
 **Configuration.** On `/storage`, the **Image-registry hub** picker
@@ -427,7 +429,7 @@ The same export-and-land-on-hub path runs when an operator clicks
 (AWS Private AMIs / Azure Managed Images / GCP Custom Images). This
 is the recovery path for builds whose auto-export was skipped (e.g.
 the storage prerequisite was missing at build time). See
-[Image Management → Manual export](cloud/image-management.md#manual-export-recovery-path).
+[Image Management → Manual export](../cloud/image-management.md#manual-export-recovery-path).
 
 **What it doesn't do.** The hub is not where the promote runner
 *uploads* to. Each target cloud has its own staging container the
@@ -442,7 +444,7 @@ role ARNs) are edited in **Settings → Remote Worker → Image-promote
 runner**, one sub-card per target cloud. `PATCH /api/storage/config`
 also accepts them — the promote runner shares the hub backend's
 lifecycle, so the storage API round-trips them for scripted setups. The
-[runner README](../runners/promote/README.md) has the full table.
+[runner README](../../runners/promote/README.md) has the full table.
 
 ---
 
@@ -477,7 +479,7 @@ backend. Operating principles:
   the active backend. So the safe cutover is: migrate assets → switch the
   active backend and confirm the state migration → verify → delete from the
   old backend by hand. Losing that state orphans the resources it tracks
-  (see [Infrastructure as Code → State](cloud/infrastructure-as-code.md#state-the-thing-that-makes-iac-work)).
+  (see [Infrastructure as Code → State](../cloud/infrastructure-as-code.md#state-the-thing-that-makes-iac-work)).
 - **Neither filesystem backend holds Terraform state at all.** Terraform ships
   no state backend for a filesystem, so with `local` *or* `agent_local` active,
   state stays in the container's deploy directory — which on Azure Container

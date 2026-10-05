@@ -108,10 +108,10 @@ So, for the community edition:
   external vault, and security best practices: [`docs/access/secrets-management.md`](../access/secrets-management.md).
 - **Storage management** — where playbooks and asset files live, and how to
   migrate between cloud object stores or a corporate file share:
-  [`docs/storage-management.md`](../storage-management.md).
+  [`docs/operations/storage-management.md`](../operations/storage-management.md).
 - **Config management** — philosophy, best practices, and how the
   dashboard's ephemeral-runner approach reduces secret sprawl:
-  [`docs/config-management.md`](../config-management.md).
+  [`docs/operations/config-management.md`](../operations/config-management.md).
 - **Infrastructure as code** — how cloud VMs, Shell Jumps, and images
   are provisioned through Terraform/Packer modules with per-job state:
   [`docs/cloud/infrastructure-as-code.md`](../cloud/infrastructure-as-code.md).
