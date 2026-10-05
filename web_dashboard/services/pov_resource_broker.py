@@ -13,8 +13,11 @@ so unlike the Gateway slice this costs no image rebuild. What it does cost is a 
 grant* on the broker's policy, and §4 of the design note is about not widening it further
 than one host.
 
-**No new credential in this database.** The Windows login comes from the lab platform's
-own ``stored_credentials``, parsed by ``pov_credentials`` and fetched per run.
+**No new credential in this database — where the platform holds one.** The Windows login
+comes from the lab platform's own ``stored_credentials``, parsed by ``pov_credentials`` and
+fetched per run. AWS, GCP and OCI hold none, so there, and only there, an operator sets the
+login per VM and the password is stored encrypted like the installer key. See
+:func:`platform_login`.
 
 **No Linux Resource Broker.** ``BeyondTrust.Agents.Bootstrapper.exe`` is a Windows program,
 so the RB lives on a *second* special VM and the Gateway stays on the Linux broker.
@@ -111,6 +114,80 @@ def clear_installer_key(env: PovEnvironment) -> None:
         config_service.delete(installer_key_config_key(env.id))
     except Exception:  # noqa: BLE001 — teardown must survive a key that is already gone
         logger.debug("POV %s: no installer key to clear", env.id)
+
+
+# ── the operator-set login, for a platform that stores none ──────────────────
+#
+# AWS, GCP and OCI declare `stored_credentials: False`: a guest's login lives in its image
+# and nowhere the dashboard can read it back. Without this, every WinRM or SSH run against
+# a guest on those clouds -- the Resource Broker, the Entitle agent, a guest step -- failed
+# at bundle time with a remedy ("set it on the POV by hand") that had no control behind it.
+#
+# The username is the existing `PovEnvironmentVM.login_username` column, which on these
+# platforms names the account rather than choosing between stored ones. The password is a
+# per-VM config key, encrypted like the installer key, and never accepted on a platform
+# that holds its own -- there the rule stays "read it live, store nothing".
+
+_LOGIN_PASSWORD_FMT = "pov/{env_id}/vm/{vm_id}/login_password"
+
+
+def login_password_config_key(env_id: str, vm_id: str) -> str:
+    return _LOGIN_PASSWORD_FMT.format(env_id=env_id, vm_id=vm_id)
+
+
+def manual_login(env: PovEnvironment) -> bool:
+    """True when this POV's guest logins are set by an operator rather than read live."""
+    return not lab_platforms.supports(env.platform, "stored_credentials")
+
+
+def has_login_password(env: PovEnvironment, vm_id: str) -> bool:
+    return bool(config_service.get(login_password_config_key(env.id, vm_id)))
+
+
+def set_login_password(env: PovEnvironment, vm_id: str, password: str) -> None:
+    """Store a guest's login password, encrypted. Blank clears it."""
+    key = login_password_config_key(env.id, vm_id)
+    if password:
+        config_service.set(key, password)
+    else:
+        try:
+            config_service.delete(key)
+        except Exception:  # noqa: BLE001 — clearing one already gone is the goal
+            logger.debug("POV %s: no login password to clear for %s", env.id, vm_id)
+
+
+def clear_login_passwords(db: Session, env: PovEnvironment) -> int:
+    """Forget every operator-set guest password on this POV. Returns how many there were."""
+    cleared = 0
+    for row in (db.query(PovEnvironmentVM)
+                  .filter(PovEnvironmentVM.environment_id == env.id).all()):
+        if has_login_password(env, row.platform_vm_id):
+            set_login_password(env, row.platform_vm_id, "")
+            cleared += 1
+    return cleared
+
+
+def login_problem(env: PovEnvironment, vm: PovEnvironmentVM) -> str:
+    """Why a run against ``vm`` would have no login, or ``""``.
+
+    Only answerable before the run on a platform with no stored credentials: there the
+    login is two values on this POV, and a missing one is known now. On a platform that
+    holds its own, the answer is read live at fetch time and :func:`platform_login`
+    refuses there with the platform's own reason.
+    """
+    if not manual_login(env):
+        return ""
+    label = vm.name or vm.platform_vm_id
+    caps = lab_platforms.capabilities(env.platform)
+    platform = caps.get("label", env.platform)
+    if not (vm.login_username or "").strip():
+        return (f"{platform} does not store VM credentials, and {label} has no login set. "
+                f"Enter its username and password in the Login column on this POV's VMs "
+                f"tab, then try again.")
+    if not has_login_password(env, vm.platform_vm_id):
+        return (f"{label} has a login name ({vm.login_username}) but no password. Enter "
+                f"it in the Login column on this POV's VMs tab, then try again.")
+    return ""
 
 
 def installer_key_for_job(db: Session, job: Job) -> str:
@@ -349,6 +426,11 @@ def preflight(db: Session, env: PovEnvironment) -> tuple:
             "and the run hangs until it times out.")
 
     vm = select_rb_vm(db, env)
+    # Checked here rather than left to the bundle fetch: there it fails only once the
+    # agent has leased the job, as a failed run rather than a refusal with a remedy.
+    problem = login_problem(env, vm)
+    if problem:
+        raise ResourceBrokerError(problem)
     return agent, vm
 
 
@@ -402,16 +484,26 @@ async def platform_login(db: Session, env_id: str, vm_id: str) -> tuple:
     The reason slice 5b stores no Windows credential. Fetched per run and never written
     down — which also means it cannot go stale, and that a POV whose template password
     changed picks the new one up on the next run with nothing to update here.
+
+    On a platform with no stored credentials (AWS, GCP, OCI) it is the login an operator
+    set on the VM instead — see :func:`login_problem`.
     """
     env = db.query(PovEnvironment).filter(PovEnvironment.id == env_id).first()
     if env is None:
         raise ResourceBrokerError("the POV environment this job belongs to is gone")
 
-    caps = lab_platforms.capabilities(env.platform)
-    if not caps.get("stored_credentials"):
-        raise ResourceBrokerError(
-            f"{caps.get('label', env.platform)} does not store VM credentials, so the "
-            f"login for this run has to be set on the POV by hand.")
+    if manual_login(env):
+        row = db.query(PovEnvironmentVM).filter(
+            PovEnvironmentVM.environment_id == env.id,
+            PovEnvironmentVM.platform_vm_id == vm_id).first()
+        if row is None:
+            raise ResourceBrokerError(
+                "this POV has no such VM. Re-read its VMs from the platform and try again.")
+        problem = login_problem(env, row)
+        if problem:
+            raise ResourceBrokerError(problem)
+        return (row.login_username.strip(),
+                config_service.get(login_password_config_key(env.id, vm_id)))
 
     mod = lab_platforms.adapter(env.platform)
     try:
@@ -459,6 +551,13 @@ def teardown(db: Session, env: PovEnvironment) -> str:
     if has_installer_key(env):
         clear_installer_key(env)
         lines.append("Cleared the stored Resource Broker installer key.")
+    # Not part of the broker's registration, so it does not earn the "retire it in the
+    # tenant" line below -- returned on its own when it is all there was.
+    passwords = clear_login_passwords(db, env)
+    if passwords and not lines and not env.ps_application_host_id:
+        return f"Cleared {passwords} stored guest login password(s)."
+    if passwords:
+        lines.append(f"Cleared {passwords} stored guest login password(s).")
     if env.ps_application_host_id:
         # Not the broker's registration — that is a customer-side object named by zone and
         # install key, and this column never held it. This is the operator's override, so

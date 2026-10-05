@@ -392,6 +392,17 @@ Config-Management path that does not begin life as a `secret_vars` source. Worth
 during implementation: it may be cleanest to mint it into the per-POV config space just
 long enough for the fetch, or to widen the resolver by one typed field.
 
+### On a platform that stores none
+
+AWS, GCP and OCI declare `stored_credentials: False`, so the fallback in the table above is
+what runs there: the operator sets the guest's username in the **Login** column and a
+password beside it. The password is stored at `pov/<env>/vm/<vm>/login_password`,
+encrypted like the installer key, and `platform_login` returns that pair instead of
+reading the platform. `login_problem` refuses a missing one at preflight — in the
+Resource Broker, Entitle agent and guest-step paths alike — rather than at the bundle
+fetch, where it used to surface as a failed run. On Skytap and Azure a password sent
+to that endpoint is refused: the rule there is still "read it live, store nothing".
+
 WinRM also has to be *reachable and enabled* on that guest, which is a template-contract
 question rather than a dashboard one — see §7.
 

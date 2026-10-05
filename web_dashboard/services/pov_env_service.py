@@ -316,17 +316,26 @@ class VmLoginError(Exception):
     """The per-VM login override could not be set. Operator-facing."""
 
 
-def set_vm_login(db: Session, env: PovEnvironment, vm_id: str, username: str) -> str:
-    """Say which stored credential this guest's runs should use. Returns a job-log line.
+def set_vm_login(db: Session, env: PovEnvironment, vm_id: str, username: str,
+                 password: str | None = None) -> str:
+    """Set the login this guest's runs use. Returns a job-log line.
 
-    A **username**, and nothing else. The password is still read live off the lab platform
-    at the moment of every run and is still stored nowhere in this database — which is the
-    whole reason slice 5b holds no Windows credential, and is not weakened by recording
-    which of several accounts was meant.
+    **On a platform that stores credentials (Skytap, Azure)** it is a **username**, and
+    nothing else: which of the guest's stored credentials to use. The password is still
+    read live off the lab platform at the moment of every run and is still stored nowhere
+    in this database — which is the whole reason slice 5b holds no Windows credential, and
+    is not weakened by recording which of several accounts was meant. A password sent here
+    is refused rather than ignored.
 
-    Blank clears it, and blank is the normal state: it means "decide by guest OS", which
-    is the right answer for every guest whose box holds the ``root`` or ``administrator``
-    its template promised. See ``services/pov_credentials.pick``.
+    Blank clears it, and blank is the normal state there: it means "decide by guest OS",
+    which is the right answer for every guest whose box holds the ``root`` or
+    ``administrator`` its template promised. See ``services/pov_credentials.pick``.
+
+    **On a platform that stores none (AWS, GCP, OCI)** it is the login itself: the username
+    on the row and the password encrypted in the config space, beside the installer key.
+    ``password=None`` leaves the stored one as it is, so renaming the account does not
+    demand retyping it; ``""`` clears it. Clearing the username clears both, because a
+    password for no account is nothing a run can use.
 
     Survives a ``refresh_vms`` because that upserts by ``platform_vm_id`` rather than
     rebuilding the rows — the same property the PAM artifact columns rely on.
@@ -338,10 +347,24 @@ def set_vm_login(db: Session, env: PovEnvironment, vm_id: str, username: str) ->
         raise VmLoginError(
             "this POV has no such VM. Re-read its VMs from the platform and try again.")
 
+    manual = pov_resource_broker.manual_login(env)
+    if password is not None and not manual:
+        raise VmLoginError(
+            f"{env.platform} holds this guest's credentials and they are read from it on "
+            f"every run, so no password is stored here. Set only the username, and only "
+            f"to choose between several stored logins.")
+
     wanted = (username or "").strip()
     if not wanted:
+        if password:
+            raise VmLoginError(
+                f"set the username for {row.name or vm_id} along with its password.")
         row.login_username = None
         db.commit()
+        if manual:
+            pov_resource_broker.set_login_password(env, row.platform_vm_id, "")
+            return (f"Cleared the login on {row.name or vm_id}; runs against it will be "
+                    f"refused until one is set.")
         return (f"Cleared the login override on {row.name or vm_id}; its runs will choose "
                 f"by guest OS again.")
 
@@ -356,8 +379,17 @@ def set_vm_login(db: Session, env: PovEnvironment, vm_id: str, username: str) ->
 
     row.login_username = wanted
     db.commit()
-    logger.info("POV %s: VM %s pinned to the stored login %s", env.id, vm_id, wanted)
-    return f"{row.name or vm_id} will use the stored login {wanted}."
+    if not manual:
+        logger.info("POV %s: VM %s pinned to the stored login %s", env.id, vm_id, wanted)
+        return f"{row.name or vm_id} will use the stored login {wanted}."
+
+    if password is not None:
+        pov_resource_broker.set_login_password(env, row.platform_vm_id, password)
+    # The username is not a secret and is logged; the password never is.
+    logger.info("POV %s: VM %s login set to %s", env.id, vm_id, wanted)
+    if pov_resource_broker.has_login_password(env, row.platform_vm_id):
+        return f"{row.name or vm_id} will log in as {wanted}."
+    return (f"{row.name or vm_id} will log in as {wanted} once its password is set.")
 
 
 class VmOsError(Exception):

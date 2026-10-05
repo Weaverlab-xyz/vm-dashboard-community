@@ -725,6 +725,11 @@ def preflight(db: Session, env: PovEnvironment) -> tuple:
 
     tenant = entitle_tenant(db, env)
     vm = select_host_vm(db, env)
+    # Local import for the same cycle as `pov_guest_step` below.
+    from . import pov_resource_broker
+    problem = pov_resource_broker.login_problem(env, vm)
+    if problem:
+        raise EntitleAgentError(problem)
 
     # The grant this install needs is an ADDRESS, and `reported_job_types` above cannot
     # see it: an agent reports which job types its policy allows, never which hosts. So
