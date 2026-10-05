@@ -58,7 +58,11 @@ PROVIDER_LABELS = {
     "aws_ad_connector": "AWS AD Connector",
     "aws_simple_ad": "AWS Simple AD",
     "gcp_managed_ad": "GCP Managed Microsoft AD",
+    "onprem_ad": "On-premises Active Directory",
+    "ldap": "On-premises LDAP",
 }
+ONPREM_PROVIDERS = ("onprem_ad", "ldap")
+_MANAGED_REF_PREFIX = "psmanaged:"
 _AWS_TYPES = {"MicrosoftAD": "aws_managed_ad", "ADConnector": "aws_ad_connector",
               "SimpleAD": "aws_simple_ad"}
 AWS_EDITIONS = ("Standard", "Enterprise")
@@ -135,6 +139,10 @@ def to_dict(row: ManagedDirectory) -> dict:
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "expires_at": row.expires_at.isoformat() if row.expires_at else None,
         "deploy_job_id": row.deploy_job_id,
+        "agent_id": row.agent_id, "host": row.host, "port": row.port,
+        "use_ldaps": bool(row.use_ldaps), "base_dn": row.base_dn,
+        # The account NAME only, so the page can say who the playbooks bind as.
+        "bind_account": (_managed_ref_or_none(row) or {}).get("account_name"),
     }
 
 
@@ -704,6 +712,132 @@ async def register(db: Session, *, cloud: str, identifier: str, created_by: str,
     db.commit()
     db.refresh(row)
     return row
+
+
+# ── on-prem directories (cloud="local", reached through a remote agent) ───────
+
+def base_dn_for(domain: str) -> str:
+    return ",".join(f"DC={p}" for p in (domain or "").strip(".").split(".") if p)
+
+
+def domain_for(base_dn: str) -> str:
+    parts = [p.split("=", 1)[1] for p in (base_dn or "").split(",")
+             if p.strip().lower().startswith("dc=") and "=" in p]
+    return ".".join(parts).lower()
+
+
+def _managed_ref_or_none(row) -> Optional[dict]:
+    raw = row.credentials_ref or ""
+    if not raw.startswith(_MANAGED_REF_PREFIX):
+        return None
+    try:
+        return json.loads(raw[len(_MANAGED_REF_PREFIX):])
+    except ValueError:
+        return None
+
+
+def register_onprem(db: Session, *, name: str, provider: str, host: str, port: int = 0,
+                    use_ldaps: bool = True, base_dn: str = "", agent_id: str,
+                    managed_account: dict, created_by: str,
+                    workgroup: Optional[str] = None) -> ManagedDirectory:
+    """Record an on-prem AD or LDAP directory reached through a remote agent.
+
+    The sibling of ``cloud_database_service.register_database`` with ``cloud='local'``:
+    no cloud API, no Terraform, just an inventory row and the references needed to reach
+    it. ``managed_account`` is a Password Safe system/account pair — the credential the
+    playbooks bind with is checked out at run time (:func:`directory_connection_vars`)
+    and never stored here."""
+    from ..database import RemoteAgent
+    from . import agent_service
+    provider = (provider or "").strip().lower()
+    if provider not in ONPREM_PROVIDERS:
+        raise DirectoryError(f"provider must be one of {', '.join(ONPREM_PROVIDERS)}")
+    name = (name or "").strip().lower().rstrip(".")
+    base_dn = (base_dn or "").strip()
+    if provider == "onprem_ad":
+        if not _FQDN_RE.match(name):
+            raise DirectoryError(f"{name!r} is not a usable AD domain name (e.g. corp.example.com)")
+        base_dn = base_dn or base_dn_for(name)
+    elif not (name and base_dn):
+        raise DirectoryError("an LDAP directory needs a name and its base DN")
+    host = (host or "").strip()
+    if not host:
+        raise DirectoryError("a host is required — a domain controller or LDAP server "
+                             "the agent can reach")
+    port = int(port or (636 if use_ldaps else 389))
+    for key in ("system_id", "account_id"):
+        if not (managed_account or {}).get(key):
+            raise DirectoryError(
+                "a Password Safe managed account is required: the dashboard checks the "
+                "credential out at run time rather than storing one")
+    agent = db.query(RemoteAgent).filter(RemoteAgent.id == (agent_id or ""),
+                                         RemoteAgent.is_active.is_(True)).first()
+    if not agent:
+        raise DirectoryError("that remote agent is not registered")
+    if not agent_service.supports_directory(agent):
+        raise DirectoryError(agent_service.directory_upgrade_hint(agent))
+    if db.query(ManagedDirectory).filter(ManagedDirectory.host == host,
+                                         ManagedDirectory.port == port,
+                                         ManagedDirectory.status != "deleted").first():
+        raise DirectoryError(f"a directory at {host}:{port} is already registered")
+    row = ManagedDirectory(
+        name=name, cloud="local", provider=provider, source="registered",
+        status="available", agent_id=agent.id, host=host, port=port,
+        use_ldaps=bool(use_ldaps), base_dn=base_dn,
+        credentials_ref=_MANAGED_REF_PREFIX + json.dumps({
+            "system_id": managed_account["system_id"],
+            "account_id": managed_account["account_id"],
+            "account_name": managed_account.get("account_name") or "",
+        }, sort_keys=True),
+        workgroup=workgroup, created_by=created_by, expires_at=None)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    logger.info("directory: registered on-prem %s %s at %s:%s via agent %s",
+                provider, name, host, port, agent.id)
+    return row
+
+
+def bind_identity(row: ManagedDirectory, account_name: str) -> str:
+    """The name to bind as. AD accepts a UPN, so a bare account name on an AD row becomes
+    ``user@domain``; a DOMAIN\\user or an existing UPN/DN is used as given. LDAP takes the
+    account name as given (normally a full DN)."""
+    name = (account_name or "").strip()
+    if row.provider == "onprem_ad" and name and "@" not in name and "\\" not in name \
+            and "=" not in name:
+        return f"{name}@{row.name}"
+    return name
+
+
+async def directory_connection_vars(row: ManagedDirectory) -> dict:
+    """``dir_*`` vars for a playbook run, credential checked out just-in-time.
+
+    Same contract as ``cloud_database_service._registered_connection_vars``: check out
+    against the pinned system/account, hand the value to the run inline, and let the
+    request expire on its duration. Nothing is persisted."""
+    from . import btapi_service
+    ref = _managed_ref_or_none(row)
+    if not ref:
+        raise DirectoryError(f"directory {row.name} has no Password Safe managed account "
+                             f"recorded — re-register it with one")
+    duration = int(_cfg("ansible_managed_request_duration_min", "60") or 60)
+    try:
+        _req, credential = await btapi_service.get_ps_credential_with_request(
+            ref["system_id"], ref["account_id"], duration_min=duration)
+    except btapi_service.BTAPIError as exc:
+        raise DirectoryError(f"Password Safe checkout failed for {row.name}: {exc}") from exc
+    if not credential:
+        raise DirectoryError(f"Password Safe returned an empty credential for {row.name}")
+    return {
+        "dir_provider": row.provider,
+        "dir_domain": row.name if row.provider == "onprem_ad" else domain_for(row.base_dn),
+        "dir_host": row.host or "",
+        "dir_port": int(row.port or (636 if row.use_ldaps else 389)),
+        "dir_use_ldaps": bool(row.use_ldaps),
+        "dir_base_dn": row.base_dn or "",
+        "dir_bind_dn": bind_identity(row, ref.get("account_name") or ""),
+        "dir_bind_password": credential,
+    }
 
 
 def unregister(db: Session, *, directory_id: str) -> None:

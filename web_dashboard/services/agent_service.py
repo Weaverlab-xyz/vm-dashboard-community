@@ -584,6 +584,11 @@ MIN_STORAGE_VERSION = (2, 5)
 # shares.yaml — or none — to the file server.
 MIN_SHARE_SECRET_VERSION = (2, 7)
 
+# The agent build that first understood directories: the `directory` discovery scan (an
+# anonymous LDAP rootDSE read) and the `directory` Config-Management run kind. Below this
+# the scan kind is unknown and a directory run is refused by its closed run-kind map.
+MIN_DIRECTORY_VERSION = (2, 8)
+
 
 def _version_at_least(agent: RemoteAgent, minimum: tuple) -> bool:
     """Whether this agent's self-reported version is at least ``minimum``.
@@ -632,6 +637,18 @@ def ansible_upgrade_hint(agent: RemoteAgent) -> str:
             f"with its own `targets:` list, and the runner image for the kind of run "
             f"pulled — chrweav/ansible-winrm for VMs, chrweav/ansible-cloud for databases, "
             f"not the hypervisor sibling; see docs/remote-agents.md. Nothing was queued.")
+
+
+def supports_directory(agent: RemoteAgent) -> bool:
+    """Whether this agent can discover directories and run playbooks against them."""
+    return _version_at_least(agent, MIN_DIRECTORY_VERSION)
+
+
+def directory_upgrade_hint(agent: RemoteAgent) -> str:
+    return (f"Agent '{agent.name}' reports version {agent.agent_version or 'unknown'} and "
+            f"directories need at least {'.'.join(str(p) for p in MIN_DIRECTORY_VERSION)}. "
+            f"Pull chrweav/dashboard-agent:latest on that host and restart the container — "
+            f"re-enrolment is not needed. Nothing was queued.")
 
 
 def supports_gateway(agent: RemoteAgent) -> bool:

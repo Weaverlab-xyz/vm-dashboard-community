@@ -2468,8 +2468,9 @@ class ManagedDirectory(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String(255), nullable=False)                 # FQDN, e.g. corp.example.com
     netbios = Column(String(15), nullable=True)
-    cloud = Column(String(20), nullable=False)                 # aws | gcp
+    cloud = Column(String(20), nullable=False)                 # aws | gcp | local (on-prem)
     # aws_managed_ad | aws_ad_connector | aws_simple_ad | gcp_managed_ad
+    # | onprem_ad | ldap  (the last two: on-prem, reached through a remote agent)
     provider = Column(String(32), nullable=False)
     source = Column(String(16), nullable=False, default="provisioned")  # provisioned | registered
     status = Column(String(32), nullable=False, default="provisioning", index=True)
@@ -2486,6 +2487,20 @@ class ManagedDirectory(Base):
     reserved_ip_range = Column(String(32), nullable=True)      # GCP
     dns_ips = Column(Text, nullable=True)                      # JSON array
     security_group_id = Column(String(64), nullable=True)      # AWS
+
+    # ── on-prem (cloud="local") ─────────────────────────────────────────────────
+    # The remote agent that can reach this directory. Only meaningful on a local row —
+    # mirrors CloudDatabase.agent_id. SET NULL, so retiring an agent leaves the row
+    # visibly unreachable rather than deleting an inventory record.
+    agent_id = Column(String(36), ForeignKey("remote_agents.id", ondelete="SET NULL"),
+                      index=True, nullable=True)
+    host = Column(String(255), nullable=True)                  # a domain controller / LDAP server
+    port = Column(Integer, nullable=True)                      # 389 | 636
+    use_ldaps = Column(Boolean, nullable=True)
+    base_dn = Column(String(255), nullable=True)               # e.g. DC=corp,DC=example,DC=com
+    # "psmanaged:{system_id, account_id, account_name}" — the Password Safe account the
+    # playbooks bind as, checked out per run. Never a secret.
+    credentials_ref = Column(Text, nullable=True)
 
     admin_username = Column(String(64), nullable=True)
     admin_password_backend = Column(String(32), nullable=True)
@@ -4694,6 +4709,15 @@ def init_db():
             # what they get. No FK in the raw DDL, matching every entry here.
             "ALTER TABLE cloud_databases ADD COLUMN agent_id VARCHAR(36)",
             "CREATE INDEX ix_cloud_databases_agent_id ON cloud_databases(agent_id)",
+            # On-prem directories reached through a remote agent (directory_service.
+            # register_onprem). No-ops on a table create_all made with them already.
+            "ALTER TABLE managed_directories ADD COLUMN agent_id VARCHAR(36)",
+            "CREATE INDEX ix_managed_directories_agent_id ON managed_directories(agent_id)",
+            "ALTER TABLE managed_directories ADD COLUMN host VARCHAR(255)",
+            "ALTER TABLE managed_directories ADD COLUMN port INTEGER",
+            "ALTER TABLE managed_directories ADD COLUMN use_ldaps BOOLEAN",
+            "ALTER TABLE managed_directories ADD COLUMN base_dn VARCHAR(255)",
+            "ALTER TABLE managed_directories ADD COLUMN credentials_ref TEXT",
             "CREATE INDEX ix_cloud_databases_expires_at ON cloud_databases(expires_at)",
             "ALTER TABLE k8s_clusters ADD COLUMN expires_at TIMESTAMP",
             "ALTER TABLE k8s_clusters ADD COLUMN expiry_warned_at TIMESTAMP",

@@ -14,6 +14,10 @@
   <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3 sm:mb-1">
     <h1 class="text-2xl font-bold text-gray-800">Directories</h1>
     <div class="flex items-center gap-2">
+      <button @click="openOnprem()"
+              class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
+        Register on-prem
+      </button>
       <button @click="openDiscover()"
               class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
         Discover existing
@@ -29,6 +33,8 @@
     can join at deploy. <strong>Build</strong> AWS Managed Microsoft AD or GCP Managed AD, or
     <strong>discover</strong> one that already exists (including AWS AD Connector and Simple AD)
     and register it. Directories bill around the clock and have no auto-delete timer.
+    <strong>Register on-prem</strong> records an on-premises AD or LDAP directory reached through a
+    remote agent, so Config Management playbooks can change it.
   </p>
 
   <div x-show="toast" x-cloak x-transition
@@ -60,7 +66,8 @@
             <td class="px-4 py-3 text-gray-600" x-text="d.provider_label + (d.edition ? ' · ' + d.edition : '')"></td>
             <td class="px-4 py-3 text-xs text-gray-600">
               <div x-text="d.cloud.toUpperCase() + ' · ' + (d.region || (d.locations || []).join(', ') || '—')"></div>
-              <div class="font-mono text-gray-400" x-text="d.directory_id || d.resource_name || ''"></div>
+              <div class="font-mono text-gray-400" x-text="d.directory_id || d.resource_name || (d.host ? d.host + ':' + d.port : '')"></div>
+              <div x-show="d.cloud === 'local'" class="text-gray-400" x-text="'via agent ' + (agentName(d.agent_id) || d.agent_id || '— none')"></div>
               <div x-show="(d.dns_ips || []).length" class="text-gray-400" x-text="'DNS ' + (d.dns_ips || []).join(', ')"></div>
             </td>
             <td class="px-4 py-3">
@@ -71,7 +78,8 @@
               <a x-show="d.deploy_job_id" :href="'/jobs/' + d.deploy_job_id" class="text-xs text-blue-600 hover:underline">Job</a>
             </td>
             <td class="px-4 py-3 text-xs text-gray-600">
-              <template x-if="d.source === 'registered'"><span class="text-gray-400">not held — joins need none</span></template>
+              <template x-if="d.source === 'registered' && d.cloud === 'local'"><span x-text="'Password Safe: ' + (d.bind_account || 'managed account')"></span></template>
+              <template x-if="d.source === 'registered' && d.cloud !== 'local'"><span class="text-gray-400">not held — joins need none</span></template>
               <template x-if="d.source !== 'registered'">
                 <span x-text="d.admin_password_custody === 'passwordsafe_managed'
                               ? 'Password Safe (account ' + d.ps_account_id + ')'
@@ -230,6 +238,77 @@
     </div>
   </div>
 
+  <!-- Register on-prem -->
+  <div x-show="op.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="op.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-3 max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-semibold text-gray-800">Register an on-premises directory</h3>
+      <p class="text-xs text-gray-500">Reached through a remote agent (2.8 or later). Its
+        <code>policy.yaml</code> must allow the host on the LDAP port, and on 5986 for WinRM playbooks.
+        The bind account is a Password Safe managed account, checked out for each run.</p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Type</label>
+          <select x-model="op.provider" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="onprem_ad">Active Directory</option>
+            <option value="ldap">Other LDAP</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Remote agent</label>
+          <select x-model="op.agent_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">— select —</option>
+            <template x-for="a in agents" :key="a.id"><option :value="a.id" x-text="a.name + ' (' + (a.agent_version || '?') + ')'"></option></template>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" x-text="op.provider === 'onprem_ad' ? 'Domain' : 'Name'"></label>
+        <input x-model="op.name" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" :placeholder="op.provider === 'onprem_ad' ? 'corp.example.com' : 'ldap.example.com'">
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Host</label>
+          <input x-model="op.host" @change="loadAccounts()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="dc01.corp.example.com">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Port</label>
+          <input x-model.number="op.port" type="number" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" :placeholder="op.use_ldaps ? '636' : '389'">
+        </div>
+      </div>
+      <label class="flex items-center gap-2 text-sm text-gray-700">
+        <input type="checkbox" x-model="op.use_ldaps" class="rounded text-blue-600"> LDAPS (TLS)
+      </label>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Base DN <span class="text-gray-400 font-normal" x-show="op.provider === 'onprem_ad'">(blank = from the domain)</span></label>
+        <input x-model="op.base_dn" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="DC=corp,DC=example,DC=com">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Bind account (Password Safe)</label>
+        <div x-show="op.accountsLoading" class="text-xs text-gray-400">Looking up managed accounts…</div>
+        <div x-show="op.accountsError" class="text-xs text-red-600" x-text="op.accountsError"></div>
+        <select x-show="op.systems.length" x-model="op.accountKey" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <option value="">— select an account —</option>
+          <template x-for="s in op.systems" :key="s.system_id">
+            <optgroup :label="`${s.name} (${s.ip})`">
+              <template x-for="a in s.accounts" :key="a.account_id">
+                <option :value="`${s.system_id}:${a.account_id}:${a.name}`" x-text="a.name"></option>
+              </template>
+            </optgroup>
+          </template>
+        </select>
+        <p x-show="!op.accountsLoading && op.host && !op.systems.length" class="text-xs text-gray-400">
+          No managed system matches this host in Password Safe.</p>
+      </div>
+      <div x-show="op.error" class="text-sm text-red-600" x-text="op.error"></div>
+      <div class="flex justify-end gap-2">
+        <button @click="op.open = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+        <button @click="submitOnprem()" :disabled="op.saving || !op.agent_id || !op.host || !op.accountKey"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg">Register</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Admin password -->
   <div x-show="pw.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
        @click.self="pw.open = false">
@@ -257,8 +336,47 @@ function directoriesPage() {
     build: { open: false },
     disc: { open: false, cloud: 'aws', region: '', project: '', results: [], loading: false, error: '' },
     pw: { open: false, data: null, error: '' },
+    op: { open: false, systems: [] },
+    agents: [],
 
-    async init() { await this.load(); },
+    async init() {
+      await this.load();
+      try { this.agents = (await API.get('/api/agents')).agents || []; } catch (e) { this.agents = []; }
+    },
+    agentName(id) { const a = this.agents.find(x => x.id === id); return a ? a.name : ''; },
+
+    openOnprem(prefill = {}) {
+      this.op = { open: true, provider: 'onprem_ad', agent_id: '', name: '', host: '', port: null,
+                  use_ldaps: true, base_dn: '', accountKey: '', systems: [], accountsLoading: false,
+                  accountsError: '', saving: false, error: '', ...prefill };
+      if (this.op.host) this.loadAccounts();
+    },
+    async loadAccounts() {
+      const o = this.op;
+      o.systems = []; o.accountsError = '';
+      if (!(o.host || '').trim()) return;
+      o.accountsLoading = true;
+      try { o.systems = (await API.get('/api/config-mgmt/managed-accounts?host=' + encodeURIComponent(o.host.trim()))).systems || []; }
+      catch (e) { o.accountsError = e.message; }
+      finally { o.accountsLoading = false; }
+    },
+    async submitOnprem() {
+      const o = this.op;
+      o.saving = true; o.error = '';
+      try {
+        const [systemId, accountId, ...nameParts] = (o.accountKey || '').split(':');
+        await API.post('/api/directories/register-onprem', {
+          provider: o.provider, name: o.name, host: o.host.trim(), port: o.port || 0,
+          use_ldaps: !!o.use_ldaps, base_dn: o.base_dn, agent_id: o.agent_id,
+          managed_account: { system_id: Number(systemId), account_id: Number(accountId),
+                             account_name: nameParts.join(':') },
+        });
+        o.open = false;
+        this.note(o.name + ' registered');
+        await this.load();
+      } catch (e) { o.error = e.message; }
+      finally { o.saving = false; }
+    },
     note(msg, type = 'success') { this.toast = msg; this.toastType = type; setTimeout(() => this.toast = '', 6000); },
     split(s) { return (s || '').split(',').map(x => x.trim()).filter(Boolean); },
 

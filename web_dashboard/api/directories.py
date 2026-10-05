@@ -6,6 +6,7 @@ Managed Active Directory API (gated by ``directories_enabled``).
   POST   /api/directories                       — build one (record + schedule apply)
   GET    /api/directories/discover?cloud=…      — existing directories in the account
   POST   /api/directories/register              — record an existing one
+  POST   /api/directories/register-onprem       — record an on-prem AD/LDAP via an agent
   GET    /api/directories/joinable?cloud=…      — what a Windows deploy can join
   GET    /api/directories/{id}                  — one directory
   GET    /api/directories/{id}/admin-password   — the stored admin credential (audited)
@@ -64,6 +65,24 @@ class BuildRequest(BaseModel):
     locations: List[str] = []
     reserved_ip_range: str = ""
     networks: List[str] = []
+
+
+class ManagedAccountRef(BaseModel):
+    system_id: int
+    account_id: int
+    account_name: str = ""
+
+
+class RegisterOnpremRequest(BaseModel):
+    name: str                       # AD domain (corp.example.com) or a label for LDAP
+    provider: str = "onprem_ad"     # onprem_ad | ldap
+    host: str                       # a DC / LDAP server the agent can reach
+    port: int = 0                   # 0 = 636 with LDAPS, 389 without
+    use_ldaps: bool = True
+    base_dn: str = ""               # blank for AD = derived from the domain
+    agent_id: str
+    managed_account: ManagedAccountRef
+    workgroup: Optional[str] = None
 
 
 class RegisterRequest(BaseModel):
@@ -151,6 +170,23 @@ async def register(req: RegisterRequest, db: Session = Depends(get_db),
         raise HTTPException(status_code=400, detail=str(e))
     job_service.log_audit(db, user.username, "directory_register",
                           details={"cloud": req.cloud, "identifier": req.identifier})
+    return directory_service.to_dict(row)
+
+
+@router.post("/register-onprem")
+def register_onprem(req: RegisterOnpremRequest, db: Session = Depends(get_db),
+                    user: User = Depends(require_explicit_permission("directories", "write"))):
+    try:
+        row = directory_service.register_onprem(
+            db, name=req.name, provider=req.provider, host=req.host, port=req.port,
+            use_ldaps=req.use_ldaps, base_dn=req.base_dn, agent_id=req.agent_id,
+            managed_account=req.managed_account.model_dump(), created_by=user.username,
+            workgroup=req.workgroup)
+    except DirectoryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    job_service.log_audit(db, user.username, "directory_register_onprem",
+                          details={"name": row.name, "host": row.host,
+                                   "agent_id": row.agent_id})
     return directory_service.to_dict(row)
 
 
