@@ -300,6 +300,14 @@ def preflight(db: Session, env: PovEnvironment, *, vm_name: str, asset: str,
             f"{staged!r} is a Windows asset and {vm.name} is a Linux guest. Upload a .sh "
             f"or a playbook for it.")
 
+    # The login, before the run rather than at the bundle fetch: on AWS, GCP and OCI it
+    # is set on the POV by an operator, so a missing one is known now. Local import, the
+    # convention `pov_broker` uses for this module's import triangle.
+    from . import pov_resource_broker
+    problem = pov_resource_broker.login_problem(env, vm)
+    if problem:
+        raise GuestStepError(problem)
+
     granted = granted_addresses(env)
     if granted and (vm.private_ip or "").strip() not in granted:
         raise GuestStepError(

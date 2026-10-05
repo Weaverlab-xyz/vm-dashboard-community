@@ -979,6 +979,156 @@ def test_the_upload_form_offers_every_extension_the_backend_stores():
         assert ext in checked, f"{ext}: uploadFile() rejects it before the request"
     assert offered == checked, "the two client-side lists disagree"
 
+# ── the operator-set login, on a platform that stores none ───────────────────
+#
+# AWS, GCP and OCI declare `stored_credentials: False`. Before this, every WinRM run
+# against one of their guests failed at bundle time with "has to be set on the POV by
+# hand" -- and there was no control to set it with. These pin the control, the refusal
+# that now names it before a job exists, and that the Skytap rule ("read it live, store
+# nothing") is untouched.
+
+def _aws_ready(db):
+    env, agent, vm = _ready(db)
+    env.platform = "aws"
+    db.commit()
+    return env, agent, vm
+
+
+def test_an_aws_rb_with_no_login_is_refused_before_a_job_exists():
+    db = d.SessionLocal()
+    env, _a, _vm = _aws_ready(db)
+    try:
+        rb.preflight(db, env)
+        raise AssertionError("an AWS RB with no login was queued")
+    except rb.ResourceBrokerError as exc:
+        assert "Login column" in str(exc) and "rb" in str(exc)
+    finally:
+        db.close()
+
+
+def test_a_username_without_a_password_is_refused_by_name():
+    db = d.SessionLocal()
+    env, _a, vm = _aws_ready(db)
+    pov_env_service.set_vm_login(db, env, vm.platform_vm_id, "administrator")
+    try:
+        rb.preflight(db, env)
+        raise AssertionError("a login with no password was accepted")
+    except rb.ResourceBrokerError as exc:
+        assert "administrator" in str(exc) and "password" in str(exc)
+    finally:
+        db.close()
+
+
+def test_an_aws_login_set_on_the_pov_reaches_the_run_and_not_the_job_row():
+    db = d.SessionLocal()
+    env, _a, vm = _aws_ready(db)
+    note = pov_env_service.set_vm_login(db, env, vm.platform_vm_id, "Administrator",
+                                        "Aws-Passw0rd!")
+    assert "Administrator" in note and "Aws-Passw0rd!" not in note
+    job = rb.queue(db, env, created_by="t")
+    assert "Aws-Passw0rd!" not in json.dumps(job.metadata_dict)
+    db.refresh(env)
+    assert "Aws-Passw0rd!" not in json.dumps(env.metadata_dict)
+    got = asyncio.run(rb.platform_login(db, env.id, vm.platform_vm_id))
+    assert got == ("Administrator", "Aws-Passw0rd!")
+    db.close()
+
+
+def test_renaming_the_account_keeps_the_stored_password():
+    """`None` means "leave it" so the page can post a username change on its own."""
+    db = d.SessionLocal()
+    env, _a, vm = _aws_ready(db)
+    pov_env_service.set_vm_login(db, env, vm.platform_vm_id, "administrator", "pw-1")
+    pov_env_service.set_vm_login(db, env, vm.platform_vm_id, "rbadmin")
+    got = asyncio.run(rb.platform_login(db, env.id, vm.platform_vm_id))
+    assert got == ("rbadmin", "pw-1")
+    db.close()
+
+
+def test_clearing_the_username_clears_the_password_with_it():
+    db = d.SessionLocal()
+    env, _a, vm = _aws_ready(db)
+    pov_env_service.set_vm_login(db, env, vm.platform_vm_id, "administrator", "pw-1")
+    pov_env_service.set_vm_login(db, env, vm.platform_vm_id, "")
+    assert not rb.has_login_password(env, vm.platform_vm_id)
+    db.refresh(vm)
+    assert vm.login_username is None
+    db.close()
+
+
+def test_a_password_with_no_username_is_refused():
+    db = d.SessionLocal()
+    env, _a, vm = _aws_ready(db)
+    try:
+        pov_env_service.set_vm_login(db, env, vm.platform_vm_id, "", "pw-1")
+        raise AssertionError("a password for no account was stored")
+    except pov_env_service.VmLoginError as exc:
+        assert "username" in str(exc)
+    assert not rb.has_login_password(env, vm.platform_vm_id)
+    db.close()
+
+
+def test_a_platform_that_stores_credentials_never_takes_a_password():
+    """Skytap and Azure keep the 5b rule: the password is read live and stored nowhere.
+    A password sent for one is refused rather than silently dropped or stored."""
+    db = d.SessionLocal()
+    env, _a, vm = _ready(db)   # skytap
+    try:
+        pov_env_service.set_vm_login(db, env, vm.platform_vm_id, "administrator", "pw")
+        raise AssertionError("a password was accepted on a platform that stores its own")
+    except pov_env_service.VmLoginError as exc:
+        assert "read from it on every run" in str(exc)
+    assert not rb.has_login_password(env, vm.platform_vm_id)
+    assert rb.login_problem(env, vm) == ""
+    db.close()
+
+
+def test_every_cloud_without_stored_credentials_takes_a_manual_login():
+    from web_dashboard.services import lab_platforms
+    for platform in ("aws", "gcp", "oci"):
+        assert not lab_platforms.supports(platform, "stored_credentials"), platform
+    for platform in ("skytap", "azure"):
+        assert lab_platforms.supports(platform, "stored_credentials"), platform
+
+
+def test_a_guest_step_on_aws_is_refused_without_a_login():
+    """The guest-step and Entitle-agent preflights share `login_problem` with the RB."""
+    from web_dashboard.services import pov_guest_step
+    db = d.SessionLocal()
+    env, _a, vm = _aws_ready(db)
+    pov_guest_step.configure(db, env, vm_names=[vm.name])
+    try:
+        pov_guest_step.preflight(db, env, vm_name=vm.name, asset="setup.ps1")
+        raise AssertionError("a guest step with no login was accepted")
+    except pov_guest_step.GuestStepError as exc:
+        assert "Login column" in str(exc)
+    pov_env_service.set_vm_login(db, env, vm.platform_vm_id, "administrator", "pw-1")
+    _agent_row, got = pov_guest_step.preflight(db, env, vm_name=vm.name,
+                                               asset="setup.ps1")
+    assert got.id == vm.id
+    db.close()
+
+
+def test_the_entitle_preflight_checks_the_login_too():
+    """Source-level: exercising it needs an Entitle tenant, which is out of scope here."""
+    path = os.path.join(_ROOT, "web_dashboard", "services", "pov_entitle_agent.py")
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
+    body = src.split("def preflight(", 1)[1].split("\ndef ", 1)[0]
+    assert "login_problem(env, vm)" in body
+
+
+def test_teardown_clears_operator_set_passwords():
+    db = d.SessionLocal()
+    env, _a, vm = _aws_ready(db)
+    rb.clear_installer_key(env)
+    pov_env_service.set_vm_login(db, env, vm.platform_vm_id, "administrator", "pw-1")
+    line = rb.teardown(db, env)
+    assert not rb.has_login_password(env, vm.platform_vm_id)
+    assert "1 stored guest login password" in line
+    assert "retire it" not in line, "a password is not a broker registration"
+    db.close()
+
 
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

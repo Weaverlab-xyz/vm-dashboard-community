@@ -233,10 +233,11 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
     # instead of offering it and refusing. `/api/pov/platforms` serves the whole
     # capability map, but the detail page reads one environment, not the registry.
     out["vm_add"] = lab_platforms.supports(env.platform, "vm_add")
-    # Likewise for the per-VM Login column: on a platform that holds no VM credentials
-    # (AWS, GCP, OCI) there is nothing for it to choose between, so the page greys it out
-    # rather than offering a box whose value could never be used.
+    # Likewise for the per-VM Login column, which means two different things: on a
+    # platform that holds VM credentials it chooses between them (a username only); on one
+    # that holds none (AWS, GCP, OCI) it IS the login, and the page adds a password box.
     out["stored_credentials"] = lab_platforms.supports(env.platform, "stored_credentials")
+    manual_login = not out["stored_credentials"]
     if broker is not None:
         out.update(broker)
     out.update(pov_gateway.describe(_db_of(env), env))
@@ -290,6 +291,11 @@ def _serialize(env: PovEnvironment, vms: list | None = None,
             # several. Blank is the normal state and means "choose by guest OS". A
             # username, never a credential — see PovEnvironmentVM.login_username.
             "login_username": v.login_username or "",
+            # Whether an operator-set password is stored, on a platform with no stored
+            # credentials. A boolean, never the value -- the page shows "set", not it.
+            "login_password_set": (manual_login
+                                   and pov_resource_broker.has_login_password(
+                                       env, v.platform_vm_id)),
         } for v in vms]
     # LAST, and that is load-bearing: this reads the keys every `update()` above
     # contributed. Computed any earlier it would see a half-built row and report every step
@@ -1401,15 +1407,21 @@ class VmLoginRequest(BaseModel):
     in ``services/pov_credentials`` cannot separate two logins of equal standing — two
     local service accounts, say. Without a way to answer that, the refusal it raises would
     have no remedy but editing the credential box on the platform.
+
+    ``login_password`` applies only on a platform that stores no VM credentials (AWS, GCP,
+    OCI), where the login is set here or nowhere. It is stored encrypted and never served
+    back. Omitted leaves the stored one as it is; ``""`` clears it. Sent for a platform
+    that holds its own, it is refused.
     """
     login_username: str = ""
+    login_password: str | None = None
 
 
 @router.post("/managed/{env_id}/vms/{vm_id}/login", dependencies=_POV_WRITE_OWN)
 def set_vm_login(env_id: str, vm_id: str, payload: VmLoginRequest,
                        db: Session = Depends(get_db),
                        current_user: User = Depends(get_current_user)):
-    """Pin one POV guest to one stored login, or clear the pin."""
+    """Pin one POV guest to one stored login, or set its login where none is stored."""
     env = pov_env_service.get(db, env_id)
     if env is None:
         raise HTTPException(status_code=404, detail="No such POV environment")
@@ -1417,7 +1429,8 @@ def set_vm_login(env_id: str, vm_id: str, payload: VmLoginRequest,
     if not ok:
         raise HTTPException(status_code=409, detail=why)
     try:
-        note = pov_env_service.set_vm_login(db, env, vm_id, payload.login_username)
+        note = pov_env_service.set_vm_login(db, env, vm_id, payload.login_username,
+                                            payload.login_password)
     except pov_env_service.VmLoginError as exc:
         # 400, not 409: this is about the value in the request, not a step still owed.
         raise HTTPException(status_code=400, detail=str(exc)) from exc

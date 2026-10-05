@@ -521,7 +521,7 @@ Read these off the platform's capability row rather than discovering them:
 |---|---|
 | **Share link** | No cloud has publish sets. The customer's front door is PRA, which makes PRA **required** for a cloud POV where it is optional on Skytap |
 | **Idle suspend** | No cloud has a platform idle timer. The dashboard supplies a scheduled suspend instead |
-| **Stored credentials** | **AWS only.** AWS holds no guest login to read back, so the platform login comes from your image and its Vault account. Azure generates one — see above |
+| **Stored credentials** | **AWS, GCP and OCI.** None holds a guest login to read back, so set it yourself: the **Login** column on the POV's VMs tab takes a username and, on these clouds, a password. The password is stored encrypted, never shown again, and cleared at teardown. The Resource Broker, Entitle agent and guest-step runs are refused until the guest they target has both. Azure generates one — see above |
 | **Published services** | No NAT-a-guest-port primitive, and none needed — access is PRA through this POV's own Gateway |
 
 ---
