@@ -14,6 +14,10 @@
   <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3 sm:mb-1">
     <h1 class="text-2xl font-bold text-gray-800">Directories</h1>
     <div class="flex items-center gap-2">
+      <button @click="openPsImport()"
+              class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
+        Import from Password Safe
+      </button>
       <button @click="openOnprem()"
               class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
         Register on-prem
@@ -34,7 +38,8 @@
     <strong>discover</strong> one that already exists (including AWS AD Connector and Simple AD)
     and register it. Directories bill around the clock and have no auto-delete timer.
     <strong>Register on-prem</strong> records an on-premises AD or LDAP directory reached through a
-    remote agent, so Config Management playbooks can change it.
+    remote agent, so Config Management playbooks can change it; <strong>Import from Password
+    Safe</strong> does the same for directories Password Safe already manages.
   </p>
 
   <div x-show="toast" x-cloak x-transition
@@ -309,6 +314,62 @@
     </div>
   </div>
 
+  <!-- Import from Password Safe -->
+  <div x-show="psi.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="psi.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-3xl p-6 space-y-3 max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-semibold text-gray-800">Import directories from Password Safe</h3>
+      <p class="text-xs text-gray-500">Directories Password Safe already manages. Each one is registered
+        against the account you pick, checked out per run, and reached through the agent you choose.
+        Nothing in Password Safe changes.</p>
+      <div x-show="psi.loading" class="text-sm text-gray-400">Reading Password Safe…</div>
+      <div x-show="psi.reason || psi.error" class="text-sm text-red-600" x-text="psi.reason || psi.error"></div>
+      <template x-for="w in (psi.warnings || [])" :key="w"><div class="text-xs text-amber-700" x-text="w"></div></template>
+      <div x-show="!psi.loading && psi.configured && !psi.systems.length && !psi.error" class="text-sm text-gray-400">
+        Password Safe manages no directories this API identity can see.</div>
+      <div class="space-y-2">
+        <template x-for="c in psi.systems" :key="c.system_id">
+          <div class="border border-gray-200 rounded-lg p-3 text-sm"
+               :class="(!c.eligible || c.already_registered) ? 'opacity-60' : ''">
+            <label class="flex items-start gap-2">
+              <input type="checkbox" class="mt-1 rounded text-blue-600"
+                     :disabled="!c.eligible || c.already_registered" x-model="c._pick">
+              <span class="flex-1">
+                <span class="font-medium" x-text="c.name"></span>
+                <span class="text-gray-500" x-text="' · ' + (c.provider === 'ldap' ? 'LDAP' : 'Active Directory') + ' · ' + c.host + ':' + c.port"></span>
+                <span x-show="c.already_registered" class="text-xs text-gray-500"> (already registered)</span>
+                <span x-show="!c.eligible" class="block text-xs text-red-600" x-text="c.reason"></span>
+              </span>
+            </label>
+            <div x-show="c._pick" class="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
+              <select x-model="c._account" class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <template x-for="a in c.accounts" :key="a.account_id">
+                  <option :value="a.account_id" x-text="a.name"></option>
+                </template>
+              </select>
+              <select x-model="c._agent" class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <option value="">Agent that reaches it…</option>
+                <template x-for="a in agents" :key="a.id"><option :value="a.id" x-text="a.name + ' (' + (a.agent_version || '?') + ')'"></option></template>
+              </select>
+              <input x-show="c.provider === 'ldap'" x-model="c._base_dn" placeholder="Base DN, e.g. dc=example,dc=com"
+                     class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono sm:col-span-2">
+            </div>
+          </div>
+        </template>
+      </div>
+      <div x-show="psi.truncated" class="text-xs text-gray-500">Showing the first entries only.</div>
+      <template x-for="f in (psi.failed || [])" :key="f.system_id">
+        <div class="text-xs text-red-600" x-text="f.name + ': ' + f.error"></div>
+      </template>
+      <div class="flex justify-end gap-2">
+        <button @click="psi.open = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Close</button>
+        <button @click="submitPsImport()" :disabled="psi.saving || !psiPicked().length"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg"
+                x-text="'Import ' + psiPicked().length"></button>
+      </div>
+    </div>
+  </div>
+
   <!-- Admin password -->
   <div x-show="pw.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
        @click.self="pw.open = false">
@@ -337,6 +398,7 @@ function directoriesPage() {
     disc: { open: false, cloud: 'aws', region: '', project: '', results: [], loading: false, error: '' },
     pw: { open: false, data: null, error: '' },
     op: { open: false, systems: [] },
+    psi: { open: false, systems: [] },
     agents: [],
 
     async init() {
@@ -384,6 +446,33 @@ function directoriesPage() {
         await this.load();
       } catch (e) { o.error = e.message; }
       finally { o.saving = false; }
+    },
+    async openPsImport() {
+      this.psi = { open: true, loading: true, systems: [], warnings: [], failed: [], error: '',
+                   reason: '', configured: false, truncated: false, saving: false };
+      try {
+        const r = await API.get('/api/directories/ps-candidates');
+        const agent = this.agents.length === 1 ? this.agents[0].id : '';
+        r.systems = (r.systems || []).map(c => ({ ...c, _pick: false, _agent: agent, _base_dn: '',
+                                                 _account: c.accounts.length ? c.accounts[0].account_id : '' }));
+        Object.assign(this.psi, r);
+      } catch (e) { this.psi.error = e.message; }
+      finally { this.psi.loading = false; }
+    },
+    psiPicked() { return (this.psi.systems || []).filter(c => c._pick && c._agent && c._account); },
+    async submitPsImport() {
+      const p = this.psi;
+      p.saving = true; p.error = ''; p.failed = [];
+      try {
+        const r = await API.post('/api/directories/ps-import', { items: this.psiPicked().map(c => ({
+          system_id: c.system_id, account_id: Number(c._account), agent_id: c._agent,
+          base_dn: c._base_dn || '' })) });
+        p.failed = r.failed || [];
+        this.note(r.count + ' director' + (r.count === 1 ? 'y' : 'ies') + ' imported');
+        if (!p.failed.length) p.open = false;
+        await this.load();
+      } catch (e) { p.error = e.message; }
+      finally { p.saving = false; }
     },
     note(msg, type = 'success') { this.toast = msg; this.toastType = type; setTimeout(() => this.toast = '', 6000); },
     split(s) { return (s || '').split(',').map(x => x.trim()).filter(Boolean); },

@@ -7,6 +7,8 @@ Managed Active Directory API (gated by ``directories_enabled``).
   GET    /api/directories/discover?cloud=…      — existing directories in the account
   POST   /api/directories/register              — record an existing one
   POST   /api/directories/register-onprem       — record an on-prem AD/LDAP via an agent
+  GET    /api/directories/ps-candidates         — directories Password Safe manages
+  POST   /api/directories/ps-import             — register the chosen ones via an agent
   GET    /api/directories/joinable?cloud=…      — what a Windows deploy can join
   GET    /api/directories/{id}                  — one directory
   GET    /api/directories/{id}/admin-password   — the stored admin credential (audited)
@@ -188,6 +190,174 @@ def register_onprem(req: RegisterOnpremRequest, db: Session = Depends(get_db),
                           details={"name": row.name, "host": row.host,
                                    "agent_id": row.agent_id})
     return directory_service.to_dict(row)
+
+
+# ── Import from Password Safe ─────────────────────────────────────────────────
+#
+# Password Safe already manages these directories and their accounts, so it knows the
+# domain, port, SSL setting and requestable accounts authoritatively. Same shape as the
+# database import (api/cloud_databases ps-candidates / ps-import): read the inventory,
+# let the operator pick, and register through register_onprem so every rule it enforces
+# (active agent, version, managed account, no duplicate) applies to imported rows too.
+# Nothing in Password Safe is created or changed.
+
+_MAX_IMPORT_BATCH = 50
+_PS_GENERIC_ERROR = ("Password Safe lookup failed — check the BeyondTrust "
+                     "configuration and server logs.")
+
+
+def _require_secrets_use(user: User) -> None:
+    """Listing Password Safe systems and pinning an account for later checkout is the
+    ``secrets:use`` grant, as for the database import. Reuses config_mgmt's predicate."""
+    from .config_mgmt import _can_use_secrets
+    if not _can_use_secrets(user):
+        raise HTTPException(status_code=403, detail="The 'secrets:use' permission is required.")
+
+
+def _ps_ready() -> str:
+    """Why Password Safe cannot be read, or "" when it can."""
+    from ..config import settings
+    from ..services import config_service, ps_api_service
+    if not config_service.get_bool("password_safe_enabled", settings.password_safe_enabled):
+        return "BeyondTrust Password Safe is disabled in Settings."
+    if not ps_api_service.configured():
+        return ("Password Safe is not configured — set the API URL, client id and secret "
+                "in Settings → Integrations → BeyondTrust.")
+    return ""
+
+
+async def _read_ps_candidates(db: Session) -> dict:
+    from ..database import ManagedDirectory
+    from ..services import ps_api_service, ps_directory_catalog
+    raw = await ps_api_service.read_directory_inventory()
+    rows, truncated = ps_directory_catalog.build_candidates(
+        platforms=raw.get("platforms"), systems=raw.get("systems"),
+        directories=raw.get("directories"), accounts=raw.get("accounts"))
+    # Computed per request, like api/cloud_databases._annotate_imported: not
+    # creator-filtered and not status-filtered, matching register_onprem's own check.
+    known = {((h or "").strip().lower(), int(p or 0)) for h, p in
+             db.query(ManagedDirectory.host, ManagedDirectory.port)
+             .filter(ManagedDirectory.cloud == "local").all()}
+    for row in rows:
+        row["already_registered"] = ((row["host"] or "").lower(), int(row["port"] or 0)) in known
+    return {"systems": rows, "truncated": truncated,
+            "warnings": list(raw.get("warnings") or [])}
+
+
+@router.get("/ps-candidates")
+async def ps_candidates(db: Session = Depends(get_db),
+                        user: User = Depends(require_explicit_permission("directories", "write"))):
+    """Directories Password Safe manages, shaped for the import dialog. A disabled or
+    unconfigured integration is a state, not an error, and Password Safe's own error text
+    never reaches the caller."""
+    from ..services import ps_api_service
+    _require_secrets_use(user)
+    reason = _ps_ready()
+    if reason:
+        return {"configured": False, "reason": reason, "systems": [],
+                "truncated": False, "warnings": []}
+    try:
+        return {"configured": True, **(await _read_ps_candidates(db))}
+    except ps_api_service.PSApiError as exc:
+        logger.warning("Password Safe directory inventory read failed: %s", exc)
+    except Exception:  # noqa: BLE001
+        logger.exception("Password Safe directory import candidates failed")
+    return {"configured": True, "systems": [], "truncated": False, "warnings": [],
+            "error": _PS_GENERIC_ERROR}
+
+
+class PSDirectoryImportItem(BaseModel):
+    """One directory to import, named by Password Safe ids plus the agent that reaches
+    it. No host, port or account name: the server re-resolves those from its own read,
+    so a caller cannot pair an arbitrary host with an arbitrary managed account."""
+    system_id: int
+    account_id: int
+    agent_id: str
+    base_dn: str = ""               # LDAP only, when Password Safe records none
+
+
+class PSDirectoryImportRequest(BaseModel):
+    items: List[PSDirectoryImportItem] = []
+    workgroup: Optional[str] = None
+
+
+@router.post("/ps-import")
+async def ps_import(req: PSDirectoryImportRequest, db: Session = Depends(get_db),
+                    user: User = Depends(require_explicit_permission("directories", "write"))):
+    """Register the selected Password Safe directories. A selection problem refuses the
+    whole request before anything is written; a per-item problem fails that item and the
+    rest carry on. 400 only when nothing was imported."""
+    import uuid
+    from ..services import ps_api_service, ps_directory_catalog
+    _require_secrets_use(user)
+    reason = _ps_ready()
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+    items = req.items or []
+    if not items:
+        raise HTTPException(status_code=400, detail="Select at least one directory to import.")
+    if len(items) > _MAX_IMPORT_BATCH:
+        raise HTTPException(status_code=400,
+                            detail=f"Import at most {_MAX_IMPORT_BATCH} directories at a "
+                                   f"time ({len(items)} selected).")
+    ids = [i.system_id for i in items]
+    if len(set(ids)) != len(ids):
+        raise HTTPException(status_code=400,
+                            detail="The same managed system was selected more than once.")
+    try:
+        found = await _read_ps_candidates(db)
+    except ps_api_service.PSApiError as exc:
+        logger.warning("Password Safe read failed during directory import: %s", exc)
+        raise HTTPException(status_code=503, detail=_PS_GENERIC_ERROR) from exc
+    by_id = {c["system_id"]: c for c in found["systems"]}
+
+    imported, failed = [], []
+    for item in items:
+        cand = by_id.get(item.system_id)
+        name = (cand or {}).get("name") or str(item.system_id)
+
+        def fail(msg):
+            failed.append({"system_id": item.system_id, "name": name, "error": msg})
+
+        if cand is None:
+            fail("no longer present in Password Safe")
+            continue
+        if cand.get("already_registered"):
+            fail("already registered in the dashboard")
+            continue
+        if not cand.get("eligible"):
+            fail(cand.get("reason") or "not importable")
+            continue
+        ref = ps_directory_catalog.managed_account(cand, item.account_id)
+        if not ref:
+            fail("the selected account is not a requestable account on that directory")
+            continue
+        try:
+            # Always through register_onprem: it is what keeps the never-store-a-credential
+            # property, and every refusal it makes, covering imported rows too.
+            row = directory_service.register_onprem(
+                db, name=cand["name"], provider=cand["provider"], host=cand["host"],
+                port=cand["port"], use_ldaps=cand["use_ldaps"], base_dn=item.base_dn,
+                agent_id=item.agent_id, managed_account=ref, created_by=user.username,
+                workgroup=req.workgroup)
+        except DirectoryError as exc:
+            fail(str(exc))
+            continue
+        imported.append({"system_id": item.system_id, "name": row.name,
+                         "directory_id": row.id, "host": row.host})
+
+    batch_id = str(uuid.uuid4())
+    job_service.log_audit(db, user.username, "directory_ps_import", details={
+        "batch_id": batch_id, "count": len(imported),
+        "system_ids": [i["system_id"] for i in imported],
+        "failed": [f["system_id"] for f in failed]})
+    if not imported:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"No directories were imported. First failure: {failed[0]['error']}"
+                    if failed else "No directories were imported."))
+    return {"batch_id": batch_id, "count": len(imported),
+            "imported": imported, "failed": failed}
 
 
 @router.get("/joinable")

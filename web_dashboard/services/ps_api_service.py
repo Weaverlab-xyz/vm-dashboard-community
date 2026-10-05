@@ -889,6 +889,52 @@ async def read_database_inventory(*, workgroup: str = "") -> dict:
             await _sign_out(client)
 
 
+async def read_directory_inventory() -> dict:
+    """Every collection the directory import needs, in ONE signed-in pass.
+
+    The directory twin of :func:`read_database_inventory`, and raw for the same reason:
+    shaping belongs to the pure ``ps_directory_catalog``. ``Directories`` carries the
+    domain name, port and SSL setting of a directory-type managed system; losing it
+    degrades to a warning because the platform name alone still identifies the system.
+    Losing ``ManagedSystems`` is fatal, and losing ``ManagedAccounts`` makes every row
+    ineligible with a reason, exactly as the database read does.
+    """
+    warnings = []
+    async with _list_client() as client:
+        await _sign_in(client)
+        try:
+            platforms = await _get_all(client, "Platforms")
+            systems = await _get_paged(
+                client, "ManagedSystems",
+                id_keys=("ManagedSystemID", "SystemId", "SystemID"))
+            try:
+                directories = await _get_all(client, "Directories")
+            except PSApiError as exc:
+                logger.warning("Password Safe Directories read failed: %s", exc)
+                directories = []
+                warnings.append(
+                    "Could not read the Directories list from Password Safe, so domain "
+                    "names, ports and SSL settings fall back to the managed system and "
+                    "platform defaults.")
+            try:
+                accounts = await _get_paged(
+                    client, "ManagedAccounts",
+                    id_keys=("ManagedAccountID", "AccountId", "AccountID"))
+            except PSApiError as exc:
+                logger.warning("Password Safe ManagedAccounts read failed: %s", exc)
+                accounts = []
+                warnings.append(
+                    "Could not read the requestable accounts from Password Safe, so "
+                    "nothing can be imported. The API identity needs the Requestor "
+                    "role and an access policy granting View on a Smart Rule "
+                    "containing the directory accounts.")
+            return {"platforms": platforms, "systems": systems,
+                    "directories": directories, "accounts": accounts,
+                    "warnings": warnings}
+        finally:
+            await _sign_out(client)
+
+
 async def _platform_id_by_name(client: httpx.AsyncClient, platform_name: str) -> int:
     """Resolve a platform display name → PlatformID via GET Platforms. Used for
     both the built-in DB engines and the operator-installed custom plugins
