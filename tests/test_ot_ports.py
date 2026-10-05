@@ -15,13 +15,13 @@ import sys
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SVC = os.path.join(_ROOT, "web_dashboard", "services", "ot_service.py")
 
-# "Does this provisioner install KubeSolo?", matched on the installer's own download
-# line rather than on the bare hostname. The scheme has to be part of the pattern: a
-# comment or a die message that merely NAMES the host would otherwise read as a
-# KubeSolo bake, and a bare `"get.kubesolo.io" in script` is the substring check
-# CodeQL flags as incomplete URL sanitization (py/incomplete-url-substring-sanitization).
-# The dots are escaped for the same reason py/incomplete-hostname-regexp exists.
-_INSTALLS_KUBESOLO = re.compile(r"https://get\.kubesolo\.io\b")
+# "Does this provisioner install k3s?", matched on the release download line rather
+# than on a bare name. The scheme has to be part of the pattern: a comment or a die
+# message that merely NAMES k3s would otherwise read as a k3s bake, and a bare
+# `"github.com/k3s-io" in script` is the substring check CodeQL flags as incomplete URL
+# sanitization (py/incomplete-url-substring-sanitization). The dots are escaped for the
+# same reason py/incomplete-hostname-regexp exists.
+_INSTALLS_K3S = re.compile(r"https://github\.com/k3s-io/k3s/releases/download/")
 
 
 def _load():
@@ -34,7 +34,7 @@ def _load():
 def test_the_preset_table_carries_the_canonical_ot_ports():
     ot = _load()
     expected = {"modbus": 502, "opcua": 4840, "dnp3": 20000,
-                "s7": 102, "ethernet-ip": 44818, "kubesolo": 6443}
+                "s7": 102, "ethernet-ip": 44818, "k3s": 6443}
     actual = {k: v["port"] for k, v in ot.OT_PORT_PRESETS.items()}
     assert actual == expected, f"preset ports drifted: {actual}"
     for key, info in ot.OT_PORT_PRESETS.items():
@@ -78,8 +78,8 @@ def _baked_listeners(script):
 
     Two sources, because the cell has two kinds of listener. The workloads publish
     their ports 1:1 — compose mappings on the docker runtime, hostPort on the
-    KubeSolo one (the manifests and the compose file are held to each other in
-    tests/test_ot_kubesolo.py, so either is a complete list). KubeSolo itself serves
+    k3s one (the manifests and the compose file are held to each other in
+    tests/test_ot_k3s.py, so either is a complete list). k3s itself serves
     the Kubernetes API, and the port that counts there is the one the baked
     tunnel-ready kubeconfig points a rep at.
 
@@ -91,7 +91,7 @@ def _baked_listeners(script):
              if m.group(1) == m.group(2)}
     ports |= {int(p) for p in re.findall(r"hostPort:\s*(\d+)", script)}
     api = re.search(r"server: https://127\.0\.0\.1:(\d+)", script)
-    if api and _INSTALLS_KUBESOLO.search(script):
+    if api and _INSTALLS_K3S.search(script):
         ports.add(int(api.group(1)))
     return ports
 
@@ -130,7 +130,7 @@ def test_only_the_cells_own_platform_endpoints_are_marked_non_plc():
     customer their PLC speaks Kubernetes."""
     ot = _load()
     assert set(ot.plc_protocols()) == {"modbus", "opcua", "dnp3", "s7", "ethernet-ip"}
-    assert [k for k, v in ot.OT_PORT_PRESETS.items() if not v.get("plc")] == ["kubesolo"]
+    assert [k for k, v in ot.OT_PORT_PRESETS.items() if not v.get("plc")] == ["k3s"]
     # Ticking nothing still deploys a plant, not a bare cluster.
     assert ot.DEFAULT_CELL_PROTOCOLS == ("modbus",)
 

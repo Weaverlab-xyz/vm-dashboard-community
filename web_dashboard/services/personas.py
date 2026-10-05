@@ -623,13 +623,13 @@ _OT = Persona(
         UseCase(
             id="ot-kubectl-brokered",
             title="kubectl into the plant, through PRA",
-            summary="The cell runs its simulators on KubeSolo, so the plant IPC really is "
+            summary="The cell runs its simulators on k3s, so the plant IPC really is "
                     "a single-node Kubernetes host — brokered on a tunnel of its own, so "
                     "a vendor can be granted the PLC and not the cluster, and every "
                     "session is recorded.",
             target="/gcp#ot",
             minutes=10,
-            docs="kubernetes/kubesolo",
+            docs="profiles/demo/ot-demo-cell",
             requires_flags=("pra_enabled",),
             requires_clouds=("gcp", "aws", "azure"),
         ),

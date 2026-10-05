@@ -559,7 +559,7 @@ def test_the_catalog_covers_every_workload_on_disk():
 
     An EMPTY cloud set is now a legitimate entry rather than a bug: a workload can
     target a self-hosted runtime instead of a cloud — `fuxa_hmi_access` runs on the
-    OT broker's KubeSolo, because the HMI it manages is behind the Purdue boundary
+    OT broker's k3s, because the HMI it manages is behind the Purdue boundary
     and a cloud function could not reach it without punching a hole through. Such a
     workload still has to be in the catalog (the page reads `entitle_adapter` off it),
     and the picker filters it out by exactly this emptiness.

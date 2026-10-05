@@ -58,7 +58,7 @@ folder of the pages themselves. A page that stands alone is a row on its own.
 |---|---|
 | [Databases](databases.md) | you are standing up a managed database, or want to manage one you already run. |
 | [Kubernetes](kubernetes.md) | you are managing Kubernetes clusters and the privileged access into them. |
-| [KubeSolo](kubernetes/kubesolo.md) | you need the Entitle agent on an edge or plant-floor host that will not carry a real cluster — or you want to see the single-node cluster the OT demo cell runs on. |
+| [KubeSolo](kubernetes/kubesolo.md) | you need the Entitle agent on an edge or plant-floor host that will not carry a real cluster. |
 | [Config Management](config-management.md) | you are about to run an Ansible job and want to know how the runner handles secrets and isolation. |
 | [Inventory](inventory.md) | you want one list of everything across every cloud and hypervisor, to filter it by tag or Password Safe attribute, or to act on a selection. |
 | [Storage Management](storage-management.md) | you are enabling a feature that needs a storage backend, which several of them do. |

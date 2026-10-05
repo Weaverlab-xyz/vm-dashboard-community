@@ -1,6 +1,6 @@
-# Deploy a function onto a KubeSolo node's OpenFaaS runtime
+# Deploy a function onto a k3s (or KubeSolo) node's OpenFaaS runtime
 # Target: a host baked with OT_FAAS=openfaas (provisioners/ot/ot-sim-debian.sh), i.e.
-# the OT demo's DMZ broker — or any on-prem KubeSolo host set up the same way.
+# the OT demo's DMZ broker (k3s) — or any on-prem single-node host set up the same way.
 #
 # WHAT THIS PLAY KNOWS: how to put a code package and its secrets on a function
 # runtime. It knows NOTHING about Entitle, or FUXA, or what the function does. That is
@@ -36,15 +36,18 @@
 #   otfn_env: {FN_CLOUD: openfaas, FN_SHARED_SECRET_FILE: /var/openfaas/secrets/...}
 #   otfn_secrets: {fn-shared-secret-ab12cd34: otfn_bearer}
 #   otfn_probe_only: true     # probe a deployed function and change nothing
-- name: Deploy a function onto the OpenFaaS runtime on KubeSolo
+- name: Deploy a function onto the OpenFaaS runtime on k3s or KubeSolo
   hosts: all
   become: true
   # Set once for every task below. RHEL's sudo secure_path excludes /usr/local/bin, so
   # kubectl is called by ABSOLUTE PATH throughout — a bare `kubectl` works when tested
-  # by hand and fails under become, and tests/test_playbook_kubesolo.py holds that.
+  # by hand and fails under become, and tests/test_playbook_ot.py holds that. The
+  # kubeconfig is whichever cluster the first tasks find; until then it is blank, and
+  # nothing before them calls kubectl.
   environment:
-    KUBECONFIG: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
+    KUBECONFIG: "{{ kube_kubeconfig | default('') }}"
   vars:
+    k3s_kubeconfig: /etc/rancher/k3s/k3s.yaml
     kubesolo_path: /var/lib/kubesolo
     otfn_name: ""
     otfn_namespace: openfaas-fn
@@ -91,23 +94,38 @@
           a size limit that can truncate it.
       when: not (otfn_probe_only | bool)
 
-    # The kubeconfig is the tell for "is this even a KubeSolo host", and it is worth
-    # its own message: every later failure would otherwise be a confusing kubectl error.
-    - name: Check KubeSolo is present
+    # k3s (the OT demo's cell and broker) or KubeSolo (a standalone edge host): the
+    # admin kubeconfig is the tell for which, and it is worth its own message: every
+    # later failure would otherwise be a confusing kubectl error.
+    - name: Look for k3s's kubeconfig
+      ansible.builtin.stat:
+        path: "{{ k3s_kubeconfig }}"
+      register: _k3s_kc
+
+    - name: Look for KubeSolo's kubeconfig
       ansible.builtin.stat:
         path: "{{ kubesolo_path }}/pki/admin/admin.kubeconfig"
-      register: otfn_kubeconfig
+      register: _kubesolo_kc
+      when: not _k3s_kc.stat.exists
 
-    - name: Explain a host that is not running KubeSolo
+    - name: Use whichever cluster this host runs
+      ansible.builtin.set_fact:
+        kube_kubeconfig: >-
+          {{ k3s_kubeconfig if _k3s_kc.stat.exists
+             else (kubesolo_path ~ '/pki/admin/admin.kubeconfig') }}
+        kube_present: >-
+          {{ _k3s_kc.stat.exists or (_kubesolo_kc.stat.exists | default(false)) }}
+
+    - name: Explain a host that is not running a cluster
       ansible.builtin.fail:
         msg: >-
-          No KubeSolo admin kubeconfig at {{ kubesolo_path }}/pki/admin/admin.kubeconfig.
-          Run kubesolo-install.yml first, or — for an OT broker — check the image was
-          baked from provisioners/ot/ot-sim-debian.sh with OT_ROLE=broker.
-      when: not otfn_kubeconfig.stat.exists
+          No k3s ({{ k3s_kubeconfig }}) or KubeSolo admin kubeconfig on this host. For an
+          OT broker, check the image was baked from provisioners/ot/ot-sim-debian.sh
+          with OT_ROLE=broker.
+      when: not (kube_present | bool)
 
     # THE error an operator will actually hit: a broker baked before the function
-    # runtime existed has KubeSolo and the Entitle agent but no gateway, and every
+    # runtime existed has a cluster and the Entitle agent but no gateway, and every
     # symptom after this point would be a Function object that is accepted and then
     # ignored. Named here, once, with the remedy.
     - name: Check the OpenFaaS gateway is rolled out

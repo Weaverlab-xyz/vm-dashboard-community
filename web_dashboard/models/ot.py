@@ -12,7 +12,7 @@ class OTPresetInfo(BaseModel):
     # points at real gear.
     cell: bool = False
     # True for a fieldbus protocol, False for a platform endpoint on the same host
-    # (the cell's KubeSolo API). Both are brokered identically; the forms group
+    # (the cell's k3s API). Both are brokered identically; the forms group
     # them so "Kubernetes API" is not listed as something a PLC speaks.
     plc: bool = True
 
@@ -61,14 +61,14 @@ class OTCellDeployRequest(BaseModel):
     """One-click OT demo cell: a VM from the Packer-baked ``ot-sim`` image plus the
     BeyondTrust access layer (Web Jump → HMI, a protocol tunnel per brokered
     endpoint, and the Shell Jump / Password Safe onboarding the normal GCE deploy
-    already does). The image runs its simulators on KubeSolo, so the cell is also a
+    already does). The image runs its simulators on k3s, so the cell is also a
     single-node Kubernetes host and its API is one of the endpoints on offer."""
     image_self_link: str
     image_name: str = ""
     instance_name: str
-    # e2-medium, not e2-small: the cell runs KubeSolo, the PLC sims and FUXA, and a
-    # 2 GB e2-small proved too tight in live use (validated on ot-cell-01). The
-    # KubeSolo control plane idles at ~200 MB on top; installing the Entitle agent
+    # e2-medium, not e2-small: the cell runs k3s, the PLC sims and FUXA (with Docker
+    # installed beside them), and a 2 GB e2-small proved too tight in live use
+    # (validated on ot-cell-01). The k3s server idles at ~500 MB; installing the Entitle agent
     # into the cell as well wants an 8 GB shape, for the agent's own 1Gi request.
     machine_type: str = "e2-medium"
     zone: str = ""                    # defaults to configured gcp_zone
@@ -89,8 +89,8 @@ class OTCellDeployRequest(BaseModel):
     # Which runtime the chosen image was baked with (provisioners/ot/README.md).
     # The dashboard cannot read this off an image, so it is asserted here and
     # recorded on the cell; it gates the platform presets, which only the
-    # KubeSolo runtime serves.
-    runtime: str = "kubesolo"
+    # k3s runtime serves.
+    runtime: str = "k3s"
     register_in_passwordsafe: bool = True
     # Ticking this deploys the plant's own industrial-DMZ broker beside the cell and
     # runs the Entitle agent on it: an agent that manages access to plant resources
@@ -99,7 +99,7 @@ class OTCellDeployRequest(BaseModel):
     register_in_entitle: bool = False
     broker_image_self_link: str = ""
     broker_image_name: str = ""
-    # 8 GB: the agent alone requests 1Gi, on top of KubeSolo's own ~200 MB.
+    # 8 GB: the agent alone requests 1Gi, on top of k3s's own ~500 MB.
     broker_machine_type: str = "e2-standard-2"
     jump_group: Optional[str] = None
     jumpoint_name: Optional[str] = None
@@ -114,7 +114,7 @@ class OTCellDeployRequestAWS(BaseModel):
     ami_name: str = ""
     instance_name: str
     # t3.medium (4 GB) — the same budget as the GCP default e2-medium: the cell
-    # runs KubeSolo, the PLC sims and FUXA, and 2 GB proved too tight in live use.
+    # runs k3s, the PLC sims and FUXA, and 2 GB proved too tight in live use.
     instance_type: str = "t3.medium"
     region: Optional[str] = None      # defaults to the configured aws_region
     subnet_id: str
@@ -128,8 +128,8 @@ class OTCellDeployRequestAWS(BaseModel):
     # Which runtime the chosen image was baked with (provisioners/ot/README.md).
     # The dashboard cannot read this off an image, so it is asserted here and
     # recorded on the cell; it gates the platform presets, which only the
-    # KubeSolo runtime serves.
-    runtime: str = "kubesolo"
+    # k3s runtime serves.
+    runtime: str = "k3s"
     register_in_passwordsafe: bool = True
     register_in_entitle: bool = False
     # The plant's DMZ broker, from a second image baked with OT_ROLE=broker. Only read
@@ -137,7 +137,7 @@ class OTCellDeployRequestAWS(BaseModel):
     # in the plant, so there is no shared-agent path to fall back to.
     broker_ami_id: str = ""
     broker_ami_name: str = ""
-    # t3.large (8 GB): the agent alone requests 1Gi and KubeSolo idles at ~200 MB, so
+    # t3.large (8 GB): the agent alone requests 1Gi and k3s idles at ~500 MB, so
     # the cell's own t3.medium would leave the pod Pending with no other symptom.
     broker_instance_type: str = "t3.large"
     jump_group: Optional[str] = None
@@ -165,8 +165,8 @@ class OTCellDeployRequestAzure(BaseModel):
     # Which runtime the chosen image was baked with (provisioners/ot/README.md).
     # The dashboard cannot read this off an image, so it is asserted here and
     # recorded on the cell; it gates the platform presets, which only the
-    # KubeSolo runtime serves.
-    runtime: str = "kubesolo"
+    # k3s runtime serves.
+    runtime: str = "k3s"
     register_in_passwordsafe: bool = True
     register_in_entitle: bool = False
     # The plant's DMZ broker — see OTCellDeployRequestAWS above.

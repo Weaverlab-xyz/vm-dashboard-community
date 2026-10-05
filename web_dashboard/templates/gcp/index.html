@@ -1173,7 +1173,7 @@
           <label class="block text-xs font-medium text-gray-600 mb-1">Image runtime</label>
           <select x-model="otForm.runtime" @change="onOTRuntimeChange()"
                   class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
-            <option value="kubesolo">KubeSolo (the default bake)</option>
+            <option value="k3s">k3s (the default bake)</option>
             <option value="docker">docker compose (OT_RUNTIME=docker)</option>
           </select>
           <p class="text-xs text-gray-400 mt-1">
@@ -1201,7 +1201,7 @@
             <p class="text-xs text-gray-400 mt-1">
               The cell simulates every PLC protocol at once — each gets its own PRA protocol
               tunnel, so access can be granted per vendor. It also runs those simulators on
-              KubeSolo, so the cell's own Kubernetes API can be brokered the same way: a
+              k3s, so the cell's own Kubernetes API can be brokered the same way: a
               recorded <span class="font-mono">kubectl</span> into the plant cluster, with no
               other route in. Protocols the image does not simulate (e.g. DNP3) stay available
               on the standalone tunnel card below.
@@ -1795,10 +1795,10 @@ function gcpDashboard() {
       zone: '', subnetwork: '', workgroup: '',
       protocols: ['modbus'], plc_port: null, hmi_port: 1881,
       jump_group: '', jumpoint_name: '',
-      runtime: 'kubesolo',
+      runtime: 'k3s',
       register_in_passwordsafe: true, register_in_entitle: false,
       // The plant's DMZ broker, deployed alongside the cell when Entitle is ticked.
-      // 8 GB because the agent alone requests 1Gi on top of KubeSolo.
+      // 8 GB because the agent alone requests 1Gi on top of k3s.
       broker_image_self_link: '', broker_image_name: '',
       broker_machine_type: 'e2-standard-2',
     },
@@ -1951,7 +1951,7 @@ function gcpDashboard() {
       }
     },
 
-    // The DMZ broker is a different bake (OT_ROLE=broker): KubeSolo and the Entitle
+    // The DMZ broker is a different bake (OT_ROLE=broker): k3s and the Entitle
     // agent's chart, no simulators. Filtered on its own name so it cannot be confused
     // with the cell's image, which would put PLCs on the plant's DMZ host.
     otBrokerImages() {
@@ -1966,7 +1966,7 @@ function gcpDashboard() {
     },
 
     // Split for the form: the fieldbus protocols a PLC speaks, and the cell's own
-    // platform endpoints — today its KubeSolo API. Both are brokered identically,
+    // platform endpoints — today its k3s API. Both are brokered identically,
     // one tunnel jump each, but listing "Kubernetes API" as a PLC protocol would
     // tell the customer something untrue.
     cellPlcPresets() {
@@ -1974,7 +1974,7 @@ function gcpDashboard() {
     },
 
     cellPlatformPresets() {
-      // Only the KubeSolo runtime serves these — they exist because the cell runs a
+      // Only the k3s runtime serves these — they exist because the cell runs a
       // cluster, not because a PLC speaks them. On a docker-baked cell they would be
       // tunnels to a port with no listener, and the server refuses that anyway; hiding
       // them here means the operator never has to be refused in the first place.

@@ -1,13 +1,14 @@
 #!/bin/sh
 # ot-sim-debian.sh — bake a self-contained OT/ICS demo cell into a Debian-family image.
 #
-# The cell is a plant IPC, so it runs what a plant IPC can run: KubeSolo, the
-# single-node Kubernetes this repo already recommends for OT hosts too small for a
-# real cluster (docs/kubernetes/kubesolo.md). The simulators below are its workloads — same
-# images, same ports, same PRA wiring as when they ran on docker compose, which is
-# still available as OT_RUNTIME=docker.
+# The cell is a plant IPC running k3s: a single-node Kubernetes whose workloads are the
+# simulators below — same images, same ports, same PRA wiring as when they ran on
+# docker compose, which is still available as OT_RUNTIME=docker. Docker stays on the
+# host beside k3s, because not everything a plant (or this dashboard) runs is
+# Kubernetes-native, and k3s keeps its own containerd rather than demanding the host
+# be Docker-free.
 #
-# The same script also bakes the plant's DMZ broker (OT_ROLE=broker): KubeSolo and the
+# The same script also bakes the plant's DMZ broker (OT_ROLE=broker): k3s and the
 # Entitle agent's chart, no simulators. That host is what makes the identity half of
 # the demo honest — the agent runs inside the plant, and it is the only machine there
 # with a way out.
@@ -38,7 +39,7 @@
 # Operator-overridable via Packer build env:
 #   OT_ROLE          which machine this image is: cell (default) or broker. `cell` is
 #                    the plant floor — the simulators and the HMI. `broker` is the
-#                    plant's industrial DMZ host: the same KubeSolo carrying the
+#                    plant's industrial DMZ host: the same k3s carrying the
 #                    BeyondTrust Entitle agent and nothing else, so the thing that
 #                    brokers access to plant resources sits IN the plant. Bake one of
 #                    each; the role cannot be chosen at deploy time, because the VM
@@ -49,18 +50,14 @@
 #                    Also OT_ENTITLE_CHART_REPO / OT_ENTITLE_CHART.
 #   OT_PROBE_IMAGE   broker only: the image the agent install's egress probe runs as a
 #                    pod (default busybox:1.36, pulled at bake time)
-#   OT_RUNTIME       what runs the workloads: kubesolo (default) or docker. KubeSolo
-#                    makes the cell a single-node Kubernetes host — Docker is then a
-#                    BUILD-time dependency only and is purged before KubeSolo goes on
-#                    (its installer refuses a host that still has Docker).
-#   OT_KUBESOLO_VERSION  KubeSolo release to bake (default: v1.2.0). It must have an
-#                    -offline build: that variant carries every image KubeSolo itself
-#                    needs inside the binary, which is what lets the cell boot with no
-#                    egress at all.
+#   OT_RUNTIME       what runs the workloads: k3s (default) or docker. k3s makes the
+#                    cell a single-node Kubernetes host; Docker stays installed beside
+#                    it on the cell either way.
+#   OT_K3S_VERSION   k3s release to bake (default: v1.31.4+k3s1). The binary and that
+#                    release's air-gap image bundle are both fetched at bake time, so
+#                    the cell boots with no egress at all.
 #   OT_HELM_VERSION      helm to put on the host (default: v3.16.3 — the pin the
-#                    KubeSolo plays in examples/playbooks/kubesolo/ use)
-#   OT_KUBECTL_VERSION   kubectl to put on the host (default: whatever dl.k8s.io calls
-#                    stable at bake time). KubeSolo ships neither client.
+#                    plays in examples/playbooks/ot/ use). kubectl comes with k3s.
 #   OT_ADMIN_USER    Password-Safe-managed bootstrap account name (default: adminuser)
 #   OT_FUXA_IMAGE    FUXA image ref (default: frangoteam/fuxa:1.3.4 — pin a version,
 #                    never :latest; a floating tag makes bakes unreproducible)
@@ -84,19 +81,26 @@ set -eu
 log() { echo "[ot-sim] $*"; }
 die() { echo "[ot-sim] ERROR: $*" >&2; exit 1; }
 
-# What runs the cell's workloads. `kubesolo` is the default because the cell is the
-# only plant floor this repo ships: KubeSolo is offered to OT customers as the way to
-# carry Kubernetes on plant hardware, and a demo cell running docker compose could
-# never show it. `docker` keeps the previous compose stack, unchanged — the fallback
-# if a KubeSolo bake ever fails on a platform this script has not met.
-OT_RUNTIME="$(echo "${OT_RUNTIME:-kubesolo}" | tr '[:upper:]' '[:lower:]')"
+# What runs the cell's workloads. `k3s` is the default: the plant IPC carries a real
+# cluster, and Docker stays beside it, because k3s brings its own containerd and does
+# not need the host to be Docker-free. `docker` keeps the previous compose stack,
+# unchanged — the fallback if a k3s bake ever fails on a platform this script has not
+# met.
+#
+# `kubesolo` is refused rather than mapped. The cell ran KubeSolo once, and KubeSolo
+# refuses any host that still carries Docker, so the bake purged it — but much of what
+# runs beside a demo is not Kubernetes-native. KubeSolo is still documented as an edge
+# option (docs/kubernetes/kubesolo.md); it is just not what this image is.
+OT_RUNTIME="$(echo "${OT_RUNTIME:-k3s}" | tr '[:upper:]' '[:lower:]')"
 case "$OT_RUNTIME" in
-  kubesolo|docker) ;;
-  *) die "OT_RUNTIME must be 'kubesolo' or 'docker' (got '$OT_RUNTIME')" ;;
+  k3s|docker) ;;
+  kubesolo) die "OT_RUNTIME=kubesolo is no longer baked: the cell and the broker run \
+k3s, which keeps Docker on the host. Use OT_RUNTIME=k3s (the default)." ;;
+  *) die "OT_RUNTIME must be 'k3s' or 'docker' (got '$OT_RUNTIME')" ;;
 esac
 
 # Which machine this image is. `cell` is the plant floor: the simulators and the HMI.
-# `broker` is the plant's industrial DMZ host — the same KubeSolo, carrying the
+# `broker` is the plant's industrial DMZ host — the same k3s, carrying the
 # BeyondTrust Entitle agent and nothing else, because a DMZ host that answers Modbus
 # is a lie about where it sits. The two are separate images because there is no
 # user-data hook on the deploy paths, so the role cannot be chosen at launch.
@@ -111,13 +115,20 @@ agent's Helm chart, which needs Kubernetes"
   *) die "OT_ROLE must be 'cell' or 'broker' (got '$OT_ROLE')" ;;
 esac
 
-# ── KubeSolo, its clients, and the Entitle chart (both roles) ────────────────
-OT_KUBESOLO_VERSION="${OT_KUBESOLO_VERSION:-v1.2.0}"
+# ── k3s, helm, and the Entitle chart (both roles) ────────────────────────────
+OT_K3S_VERSION="${OT_K3S_VERSION:-v1.31.4+k3s1}"
 OT_HELM_VERSION="${OT_HELM_VERSION:-v3.16.3}"
-OT_KUBECTL_VERSION="${OT_KUBECTL_VERSION:-}"
-KUBESOLO_PATH=/var/lib/kubesolo
-KUBESOLO_KUBECONFIG=$KUBESOLO_PATH/pki/admin/admin.kubeconfig
-KUBESOLO_SOCK=$KUBESOLO_PATH/containerd/containerd.sock
+K3S_DATA=/var/lib/rancher/k3s
+K3S_KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+# k3s imports every image tarball in this directory each time it starts, before it
+# runs a pod. That is the whole air-gap story in one place: k3s's own images (CoreDNS,
+# pause, local-path) ride in the release's bundle here, and so does every image this
+# bake builds or pulls — so a cell that lost its containerd store still boots whole.
+K3S_IMAGES=$K3S_DATA/agent/images
+# k3s's own ctr, which talks to k3s's containerd and is always the same version as it.
+# Never a bare `ctr`: on the cell that name is Docker's client (containerd.io), which
+# defaults to Docker's containerd socket — the wrong store, silently.
+K3S_CTR="k3s ctr --namespace k8s.io"
 OT_ARCH="$(dpkg --print-architecture)"
 # Broker only: the Entitle agent chart and the probe image, baked so neither the
 # Helm repo nor Docker Hub has to be reachable from a plant DMZ at run time.
@@ -187,13 +198,10 @@ OT_FAAS_PYTHON_IMAGE="${OT_FAAS_PYTHON_IMAGE:-docker.io/library/python:3.12-slim
 # simulator image, and for the same reason: it exists only in this host's containerd,
 # so a manifest that says imagePullPolicy:Never is stating a fact.
 OT_FAAS_IMAGE="${OT_FAAS_IMAGE:-ot-faas-python:baked}"
-# Only to extract bin/ctr. The cell gets ctr from Docker's containerd.io package and
-# then purges Docker around it; the broker has no Docker at all, so it takes the one
-# binary out of the upstream release tarball instead — no package, no service, and
-# nothing for KubeSolo's pre-flight check to object to.
-OT_CONTAINERD_VERSION="${OT_CONTAINERD_VERSION:-1.7.24}"
 OT_FAAS_DIR=/opt/ot-faas
-OT_FAAS_IMAGE_DIR=/var/lib/ot-faas/images
+# The broker's image list. The tarballs themselves live in $K3S_IMAGES with every
+# other baked image; this records which ref each one carries, for apply.sh's check.
+OT_FAAS_IMAGE_LIST=/var/lib/ot-faas/images.txt
 if [ "$OT_FAAS" != "none" ]; then
   for _img in "$OT_OPENFAAS_GATEWAY_IMAGE" "$OT_OPENFAAS_NETES_IMAGE" \
               "$OT_FAAS_PYTHON_IMAGE" "$OT_FAAS_IMAGE"; do
@@ -209,85 +217,114 @@ re-enable NATS or Prometheus on its own and quietly outgrow a 2-vCPU broker" ;;
   esac
 fi
 
-install_k8s_clients() {
-  log "installing kubectl and helm — KubeSolo ships neither, and the plays expect both"
-  if [ -z "$OT_KUBECTL_VERSION" ]; then
-    OT_KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
-  fi
-  curl -fsSLo /usr/local/bin/kubectl \
-    "https://dl.k8s.io/release/$OT_KUBECTL_VERSION/bin/linux/$OT_ARCH/kubectl"
-  chmod 0755 /usr/local/bin/kubectl
+install_helm() {
+  # k3s ships kubectl (the installer links it into /usr/local/bin) but not helm, and
+  # the plays in examples/playbooks/ot/ expect both.
+  log "installing helm $OT_HELM_VERSION"
   curl -fsSL "https://get.helm.sh/helm-$OT_HELM_VERSION-linux-$OT_ARCH.tar.gz" -o /tmp/helm.tar.gz
   tar -xzf /tmp/helm.tar.gz -C /tmp
   install -m 0755 "/tmp/linux-$OT_ARCH/helm" /usr/local/bin/helm
   rm -rf /tmp/helm.tar.gz "/tmp/linux-$OT_ARCH"
 }
 
-install_ctr() {
-  # containerd's CLI, and the only way an image gets into a containerd that has no
-  # registry behind it. The cell takes it out of Docker's containerd.io package just
-  # before purging Docker (section 5b); the broker never installs Docker, so it takes
-  # the single binary out of the upstream release tarball. A CLI, not an engine —
-  # nothing is installed as a service and nothing appears on the host that KubeSolo's
-  # "is Docker here?" pre-flight check could object to.
-  if [ -x /usr/local/bin/ctr ]; then
-    log "ctr is already present ($(/usr/local/bin/ctr --version 2>/dev/null | head -n 1))"
-    return 0
-  fi
-  log "installing ctr from containerd $OT_CONTAINERD_VERSION (the binary only)"
-  curl -fsSL -o /tmp/containerd.tar.gz \
-    "https://github.com/containerd/containerd/releases/download/v$OT_CONTAINERD_VERSION/containerd-$OT_CONTAINERD_VERSION-linux-$OT_ARCH.tar.gz" \
-    || die "could not download the containerd $OT_CONTAINERD_VERSION release tarball"
-  # Only bin/ctr. Extracting the whole archive would drop containerd and
-  # containerd-shim into /usr/local/bin, where KubeSolo's own copies belong.
-  tar -xzf /tmp/containerd.tar.gz -C /tmp bin/ctr \
-    || die "the containerd tarball did not contain bin/ctr"
-  install -m 0755 /tmp/bin/ctr /usr/local/bin/ctr
-  rm -rf /tmp/containerd.tar.gz /tmp/bin
-  /usr/local/bin/ctr --version >/dev/null || die "the extracted ctr does not run"
-}
+install_k3s() {
+  # Air-gapped by construction: the binary, the release's image bundle and the
+  # installer are all fetched HERE, on a build VM that has egress, and the installer is
+  # told not to download anything. A k3s that fetched its images at first start would
+  # be a cluster that never comes up in an egress-less subnet — and the bake would not
+  # notice, because the BUILD VM has egress.
+  log "installing k3s $OT_K3S_VERSION (air-gapped: binary and image bundle baked)"
+  case "$OT_ARCH" in
+    amd64) _k3s_bin="k3s"; _k3s_bundle="k3s-airgap-images-amd64.tar.zst" ;;
+    arm64) _k3s_bin="k3s-arm64"; _k3s_bundle="k3s-airgap-images-arm64.tar.zst" ;;
+    *) die "no k3s release asset for architecture '$OT_ARCH'" ;;
+  esac
+  # The `+` in a k3s version is part of the tag, and has to be escaped in the URL.
+  _k3s_tag="$(echo "$OT_K3S_VERSION" | sed 's/+/%2B/g')"
+  _k3s_url="https://github.com/k3s-io/k3s/releases/download/$_k3s_tag"
+  curl -fsSL -o /usr/local/bin/k3s "$_k3s_url/$_k3s_bin" \
+    || die "could not download the k3s $OT_K3S_VERSION binary"
+  chmod 0755 /usr/local/bin/k3s
+  mkdir -p "$K3S_IMAGES"
+  curl -fsSL -o "$K3S_IMAGES/$_k3s_bundle" "$_k3s_url/$_k3s_bundle" \
+    || die "could not download the k3s $OT_K3S_VERSION air-gap image bundle"
+  # The installer for THIS release, not get.k3s.io's latest: the two are versioned
+  # together. Downloaded, then run — not piped: sh in a pipeline reports ITS status,
+  # so a failed download would silently install nothing.
+  curl -fsSL -o /tmp/k3s-install.sh \
+    "https://raw.githubusercontent.com/k3s-io/k3s/$_k3s_tag/install.sh" \
+    || die "could not download the k3s $OT_K3S_VERSION installer"
 
-install_kubesolo() {
-  # The -offline build, not the default one: it carries CoreDNS, the CNI plugins and
-  # the rest of what KubeSolo starts INSIDE the binary. The default build pulls them
-  # from a registry at first start, which in an egress-less subnet means a cluster
-  # that never comes up — and the bake would not notice, because the BUILD VM has
-  # egress.
-  log "installing KubeSolo $OT_KUBESOLO_VERSION (-offline build: its images ride in the binary)"
-  # Downloaded, then run — not piped: sh in a pipeline reports ITS status, so a failed
-  # download would silently install nothing and only surface five minutes later as
-  # "KubeSolo never wrote its kubeconfig".
-  curl -sfL https://get.kubesolo.io -o /tmp/kubesolo-install.sh \
-    || die "could not download the KubeSolo installer from get.kubesolo.io"
-  KUBESOLO_VERSION="$OT_KUBESOLO_VERSION" KUBESOLO_OFFLINE=true \
-    KUBESOLO_PATH="$KUBESOLO_PATH" sh /tmp/kubesolo-install.sh \
-    || die "the KubeSolo installer failed — its own output is above; \
-a release with no -offline build is the usual cause"
-  rm -f /tmp/kubesolo-install.sh
+  # Configuration as a file rather than installer flags, so `cat` on a cell says how
+  # its cluster was set up. What is switched off, and why:
+  #   traefik, servicelb — an ingress controller and a LoadBalancer shim that would both
+  #     claim host ports (80/443) on a machine whose ports are the plant's protocols, and
+  #     nothing here is published through either;
+  #   metrics-server     — ~70 MB for `kubectl top`, on a host sized for the workloads.
+  # The kubeconfig stays root-only: it is cluster-admin.
+  mkdir -p /etc/rancher/k3s
+  cat > /etc/rancher/k3s/config.yaml <<'K3SEOF'
+# Baked by provisioners/ot/ot-sim-debian.sh.
+write-kubeconfig-mode: "0600"
+disable:
+  - traefik
+  - servicelb
+  - metrics-server
+K3SEOF
+  INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_VERSION="$OT_K3S_VERSION" \
+    sh /tmp/k3s-install.sh \
+    || die "the k3s installer failed — its own output is above"
+  rm -f /tmp/k3s-install.sh
 
-  export KUBECONFIG="$KUBESOLO_KUBECONFIG"
-  log "waiting for the KubeSolo API and a Ready node"
+  export KUBECONFIG="$K3S_KUBECONFIG"
+  command -v kubectl >/dev/null 2>&1 || ln -sf /usr/local/bin/k3s /usr/local/bin/kubectl
+  log "waiting for the k3s API and a Ready node"
   # `kubectl wait node --all` is not a wait until a Node object EXISTS: with nothing
   # matching it prints "error: no matching resources found" and exits 1 at once,
-  # --timeout unread. The installer returns as soon as it has written the kubeconfig,
-  # seconds before kubesolo registers its node, so waiting on --all alone turns the
-  # very race this is here to absorb into an instant failed bake. Wait for the file,
-  # then for the API to serve, then for the object to exist — THEN on Ready.
+  # --timeout unread. The installer returns as soon as the service has started,
+  # before k3s registers its node, so waiting on --all alone turns the very race this
+  # is here to absorb into an instant failed bake. Wait for the file, then for the API
+  # to serve, then for the object to exist — THEN on Ready.
   _waited=0
   while [ ! -f "$KUBECONFIG" ] \
     || ! kubectl get --raw /readyz >/dev/null 2>&1 \
     || [ -z "$(kubectl get nodes -o name 2>/dev/null)" ]; do
     _waited=$((_waited + 1))
     if [ "$_waited" -gt 60 ]; then
-      journalctl -u kubesolo --no-pager -n 40 2>/dev/null || true
-      die "KubeSolo's API never came up with a registered node ($KUBECONFIG)"
+      journalctl -u k3s --no-pager -n 40 2>/dev/null || true
+      die "k3s's API never came up with a registered node ($KUBECONFIG)"
     fi
     sleep 5
   done
   kubectl wait --for=condition=Ready node --all --timeout=300s || {
-    journalctl -u kubesolo --no-pager -n 40 2>/dev/null || true
-    die "the KubeSolo node never became Ready (journalctl -u kubesolo)"
+    journalctl -u k3s --no-pager -n 40 2>/dev/null || true
+    die "the k3s node never became Ready (journalctl -u k3s)"
   }
+  # CoreDNS is the first thing that breaks when pod networking does, and pod
+  # networking is the thing a host with Docker on it can get wrong: Docker sets the
+  # FORWARD policy to DROP. k3s's flannel adds its own accept rules for the pod network,
+  # so it should not matter — this is where "should" becomes a fact or a failed bake.
+  kubectl -n kube-system rollout status deploy/coredns --timeout=300s || {
+    kubectl -n kube-system get pods -o wide || true
+    die "CoreDNS never became ready — pod networking is broken on this host. If Docker \\
+is installed, check \`iptables -S FORWARD\` for flannel's accept rules."
+  }
+}
+
+# containerd normalises a bare image name to docker.io/library/<name> and a
+# single-slash name to docker.io/<name>; a name that already carries a registry host
+# is stored verbatim. Recording what it ends up called is what lets the boot-time
+# check tell "loaded" from "missing" without re-deriving these rules.
+normalize_ref() {
+  case "$1" in
+    */*/*) echo "$1" ;;
+    */*)
+      case "${1%%/*}" in
+        *.*|*:*|localhost) echo "$1" ;;
+        *) echo "docker.io/$1" ;;
+      esac ;;
+    *) echo "docker.io/library/$1" ;;
+  esac
 }
 
 # ── 1. OS-family gate ────────────────────────────────────────────────────────
@@ -334,13 +371,12 @@ fi
 log "installing base packages"
 apt-get -y -q install ca-certificates curl gnupg python3
 
-# Docker builds the simulators and pulls FUXA, and on the KubeSolo runtime section 5b
-# then purges it, because KubeSolo's installer refuses a host that still has Docker on
-# it. The broker never installs Docker in the first place — and therefore has nothing
-# to purge before that check runs. It does build ONE image (the function runtime's, in
-# section 5E), and it uses buildah for it precisely to keep that true: buildah is
-# daemonless, so it leaves no docker0, no second containerd and no service for
-# KubeSolo's pre-flight check to object to, and section 5E purges it afterwards.
+# Docker builds the simulators and pulls FUXA, and on the cell it then STAYS: k3s runs
+# its own containerd beside Docker's, so the cell can carry the containers that are not
+# Kubernetes workloads as well as the ones that are. The broker never installs Docker —
+# not because k3s minds, but because the broker runs the Entitle agent and nothing else,
+# and an engine nobody uses is surface. It builds ONE image (the function runtime's, in
+# section 5E) with buildah, which is daemonless and purged afterwards.
 if [ "$OT_ROLE" = "cell" ]; then
 log "installing Docker Engine + compose plugin"
 . /etc/os-release
@@ -415,18 +451,18 @@ OT_FUXA_TOKEN_EXPIRES="${OT_FUXA_TOKEN_EXPIRES:-15m}"
 # FUXA's own seeded account, created only when users.fuxap.db does not yet exist.
 # The bake CANNOT usefully change this password: the file it would write ships inside
 # the image, so every cell built from it would share one credential. It is rotated
-# per-cell at wire time instead (examples/playbooks/kubesolo/fuxa-admin-rotate.yml),
+# per-cell at wire time instead (examples/playbooks/ot/fuxa-admin-rotate.yml),
 # which is also the only point at which a password can be handed to the adapter.
 OT_FUXA_ADMIN_USER="${OT_FUXA_ADMIN_USER:-admin}"
 case "$OT_FUXA_SECURE" in
   0|1) ;;
   *) die "OT_FUXA_SECURE must be 0 or 1 (got '$OT_FUXA_SECURE')" ;;
 esac
-if [ "$OT_FUXA_SECURE" = "1" ] && [ "$OT_RUNTIME" != "kubesolo" ]; then
-  # The settings file lives in FUXA's appdata, which the KubeSolo runtime mounts from
+if [ "$OT_FUXA_SECURE" = "1" ] && [ "$OT_RUNTIME" != "k3s" ]; then
+  # The settings file lives in FUXA's appdata, which the k3s runtime mounts from
   # a hostPath this script primes. The docker fallback uses a named volume that only
   # exists once the container has run, so there is nothing to write into at bake time.
-  die "OT_FUXA_SECURE=1 needs OT_RUNTIME=kubesolo (the docker fallback's appdata is a \
+  die "OT_FUXA_SECURE=1 needs OT_RUNTIME=k3s (the docker fallback's appdata is a \
 named volume that does not exist until first run). Use OT_FUXA_SECURE=0 for a docker \
 bake, and know that its HMI applies NO authorization at all."
 fi
@@ -710,13 +746,13 @@ EOF
 # One image, four entrypoints: the sims share a base layer and a single pip
 # install, so a bake pulls python:3.12-slim once and the cell carries one copy.
 # Built here, before the runtime split below, because both runtimes run the same
-# images — the KubeSolo one just carries them as tarballs instead of in Docker's
-# store.
+# images — the k3s one just carries them as tarballs in its air-gap image directory
+# instead of in Docker's store.
 log "building the simulators and pre-pulling FUXA ($OT_FUXA_IMAGE)"
 docker build -t ot-plc-sim:baked /opt/ot-sim/plc-sim
 docker pull "$OT_FUXA_IMAGE"
 
-# What has to answer once the stack is up. Only the KubeSolo runtime consumes this:
+# What has to answer once the stack is up. Only the k3s runtime consumes this:
 # it waits on the rollouts and THEN proves each listener, because "the pod is Ready"
 # has never been the same claim as "the PLC answers". The docker runtime keeps the
 # container-state check it has always had, deliberately — it is the tested path, and
@@ -727,12 +763,12 @@ if sim_enabled enip; then OT_SMOKE_PORTS="$OT_SMOKE_PORTS 44818"; fi
 if sim_enabled s7; then OT_SMOKE_PORTS="$OT_SMOKE_PORTS 102"; fi
 
 # Where FUXA dials the Modbus PLC: a compose service name on docker, the node's own
-# loopback on KubeSolo (the pods share the node's network namespace — see 5b).
+# loopback on k3s (the pods share the node's network namespace — see 5b).
 FUXA_PLC_ADDRESS=plc
 
 if [ "$OT_RUNTIME" = "docker" ]; then
 
-# ── 5a. Runtime: docker compose (the pre-KubeSolo stack, kept as the fallback) ─
+# ── 5a. Runtime: docker compose (the pre-Kubernetes stack, kept as the fallback) ─
 cat > /opt/ot-sim/docker-compose.yml <<EOF
 # OT demo cell -- baked by provisioners/ot/ot-sim-debian.sh. Real compose on the
 # VM (volumes allowed), unlike the dashboard's cloud-compose subset.
@@ -820,28 +856,30 @@ done
 
 else
 
-# ── 5b. Runtime: KubeSolo — the cell IS a single-node Kubernetes host ─────────
-# Why the demo cell runs Kubernetes at all: KubeSolo is the answer this repo gives an
-# OT customer who cannot put a cluster on the plant floor (docs/kubernetes/kubesolo.md), and the
-# cell is the only plant floor it ships. On docker compose that answer was a slide.
+# ── 5b. Runtime: k3s — the cell IS a single-node Kubernetes host ──────────────
 # The simulators do not change — same images, same ports, same PRA wiring — they just
-# become the workloads of a cluster that also has room for the Entitle agent.
+# become the workloads of a cluster, so the plant IPC really carries Kubernetes, takes
+# stock Helm charts, and has an API PRA can broker.
 #
-# Docker cannot stay. KubeSolo's installer refuses a host with docker on PATH, a
-# docker.sock, or an active docker service: it brings its own containerd and CNI, and
-# two of those arguing over iptables is precisely the failure that only shows up in
-# front of a customer. So the order is: build with Docker, export, purge Docker,
-# install KubeSolo, import into ITS containerd.
-OT_IMAGE_DIR=/var/lib/ot-sim/images
+# Docker stays. k3s brings its own containerd and CNI and runs beside Docker's, so the
+# cell keeps an engine for whatever is not a Kubernetes workload. The images are handed
+# to k3s as tarballs in its air-gap image directory, which it imports on every start.
 
 # The pods run with hostNetwork (see the manifest), so FUXA reaches the PLC on the
 # node's own loopback rather than by a compose service name.
 FUXA_PLC_ADDRESS=127.0.0.1
 
-log "exporting the built images — the cell has no registry to pull them back from"
-mkdir -p "$OT_IMAGE_DIR" /var/lib/ot-sim/fuxa
-docker save ot-plc-sim:baked -o "$OT_IMAGE_DIR/ot-plc-sim.tar"
-docker save "$OT_FUXA_IMAGE" -o "$OT_IMAGE_DIR/fuxa.tar"
+log "exporting the built images into k3s's image directory — the cell has no \
+registry to pull them back from"
+mkdir -p "$K3S_IMAGES" /var/lib/ot-sim/fuxa
+docker save ot-plc-sim:baked -o "$K3S_IMAGES/ot-plc-sim.tar"
+docker save "$OT_FUXA_IMAGE" -o "$K3S_IMAGES/fuxa.tar"
+# Docker's own copies go. The engine stays, but these layers now live in k3s's
+# containerd and in the tarballs above; a third copy is ~1 GB on every cell for nothing.
+# The build context stays in /opt/ot-sim/plc-sim, so `docker build` still works.
+docker image rm ot-plc-sim:baked "$OT_FUXA_IMAGE" >/dev/null 2>&1 || true
+docker image prune -af >/dev/null 2>&1 || true
+docker builder prune -af >/dev/null 2>&1 || true
 
 # FUXA's project data is a hostPath here, not a named volume. This used to try to
 # copy the image's own _appdata into it first, on the assumption that a fresh named
@@ -906,99 +944,29 @@ fi
 # permissive mode beats guessing which UID the pinned FUXA image runs as.
 chmod 0777 /var/lib/ot-sim/fuxa
 
-# containerd's own client, kept because it is how an image gets into a containerd that
-# has no registry behind it. A CLI, not an engine — KubeSolo's prerequisite check is
-# about Docker, and /usr/local/bin survives the purge because apt does not own it.
-if [ ! -x /usr/bin/ctr ]; then
-  die "containerd.io did not provide /usr/bin/ctr — without it the baked images cannot \
-be loaded into KubeSolo, and the cell has no registry to pull them from"
-fi
-install -m 0755 /usr/bin/ctr /usr/local/bin/ctr
+install_helm
+install_k3s
 
-log "removing Docker — KubeSolo's installer refuses a host that still carries it"
-systemctl disable --now docker.service docker.socket containerd.service >/dev/null 2>&1 || true
-apt-get -y -q purge docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-apt-get -y -q autoremove
-rm -rf /var/lib/docker /var/lib/containerd /etc/docker /var/run/docker.sock
-rm -f /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.asc
-ip link delete docker0 >/dev/null 2>&1 || true
-# `command -v` is not a filesystem probe. Both dash and bash answer it out of the
-# shell's own command hash before they ever look at PATH, and this script has just
-# run docker a dozen times to build and export the images — so the purged
-# /usr/bin/docker is still cached and the guard fires on a host where Docker is
-# genuinely gone. Drop the cache first, then hold whatever survives against the
-# filesystem: the -x is what keeps this honest in a shell whose `hash -r` did
-# nothing, and it is the only one of the two tests that cannot be fooled.
-hash -r 2>/dev/null || true
-_docker_left=$(command -v docker 2>/dev/null || true)
-if [ -n "$_docker_left" ] && [ -x "$_docker_left" ]; then
-  die "docker is still on PATH after the purge ($_docker_left) — KubeSolo's \
-installer would refuse this host"
-fi
-apt-get update -q
-# Docker pulled iptables in as a dependency, so autoremove above may have taken it
-# with it — and kube-proxy needs it. Ask for it by name, so it is a manual package
-# nothing can reclaim.
-apt-get -y -q install iptables
-# Docker's chains and its FORWARD policy of DROP live in the running kernel, not in
-# the packages, so they would outlive the purge until a reboot the bake never does —
-# and the first thing they break is KubeSolo's pod networking, starting with CoreDNS.
-iptables -P FORWARD ACCEPT >/dev/null 2>&1 || true
-for _table in filter nat mangle; do
-  iptables -t "$_table" -F >/dev/null 2>&1 || true
-  iptables -t "$_table" -X >/dev/null 2>&1 || true
-done
-
-install_k8s_clients
-install_kubesolo
-
-# containerd normalises a bare image name to docker.io/library/<name> and a
-# single-slash name to docker.io/<name>; a name that already carries a registry host
-# is stored verbatim. Recording what it ends up called is what lets the boot-time
-# importer tell "already loaded" from "must import" without re-deriving these rules.
-normalize_ref() {
-  case "$1" in
-    */*/*) echo "$1" ;;
-    */*)
-      case "${1%%/*}" in
-        *.*|*:*|localhost) echo "$1" ;;
-        *) echo "docker.io/$1" ;;
-      esac ;;
-    *) echo "docker.io/library/$1" ;;
-  esac
-}
-
-log "importing the baked images into KubeSolo's containerd"
-: > "$OT_IMAGE_DIR/images.txt"
-# --local on every import, and it is not decoration. containerd 2.0 changed `ctr
-# images import` to hand the tarball to the TRANSFER service, which is served over
-# containerd.services.streaming.v1.Streaming — an API KubeSolo's embedded containerd
-# does not register. The cell's ctr is whatever Docker's containerd.io package ships
-# on the day of the bake, and that is now 2.x, so the default path dies with "unknown
-# service containerd.services.streaming.v1.Streaming" against a socket where `images
-# ls` answers perfectly: it reads like a broken containerd rather than a client that
-# asked for an API this one does not have. --local is the pre-2.0 path — the client
-# reads the tarball and writes through the content and images services KubeSolo does
-# serve — and it is a no-op on the 1.7 ctr the broker pins, where it already defaults
-# to true. Every `images import` in this script and in the apply.sh it writes carries
-# it, because the cell re-imports at boot with this same client.
+# k3s imported the tarballs when it started (they were in $K3S_IMAGES first). Proven
+# here rather than assumed: the manifests pull nothing (imagePullPolicy: Never), so a
+# name containerd does not hold is a cell that boots ErrImageNeverPull.
+log "checking the baked images are in k3s's containerd"
+: > /var/lib/ot-sim/images.txt
 for _pair in "ot-plc-sim:baked|ot-plc-sim.tar" "$OT_FUXA_IMAGE|fuxa.tar"; do
   _ref="$(normalize_ref "${_pair%%|*}")"
   _tarball="${_pair##*|}"
-  ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images import --local \
-    "$OT_IMAGE_DIR/$_tarball" \
-    || die "ctr could not import $_tarball into KubeSolo's containerd"
-  # Proven here rather than assumed: the manifests pull nothing (imagePullPolicy:
-  # Never), so a name containerd does not hold is a cell that boots ErrImageNeverPull.
-  if ! ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images ls -q | grep -qx "$_ref"; then
-    die "$_tarball imported but containerd does not list $_ref — the pods would never start"
+  if ! $K3S_CTR images ls -q | grep -qx "$_ref"; then
+    $K3S_CTR images import "$K3S_IMAGES/$_tarball" \
+      || die "k3s could not import $_tarball"
+    $K3S_CTR images ls -q | grep -qx "$_ref" \
+      || die "$_tarball imported but containerd does not list $_ref — the pods would never start"
   fi
-  echo "$_ref $_tarball" >> "$OT_IMAGE_DIR/images.txt"
+  echo "$_ref $_tarball" >> /var/lib/ot-sim/images.txt
 done
 
-log "writing /opt/ot-sim/kubesolo (the plant workloads, as KubeSolo runs them)"
-mkdir -p /opt/ot-sim/kubesolo
-cat > /opt/ot-sim/kubesolo/ot-sim.yaml <<EOF
+log "writing /opt/ot-sim/k3s (the plant workloads, as k3s runs them)"
+mkdir -p /opt/ot-sim/k3s
+cat > /opt/ot-sim/k3s/ot-sim.yaml <<EOF
 # The OT demo cell's plant workloads -- baked by provisioners/ot/ot-sim-debian.sh.
 # Same images and same ports as the docker runtime's compose stack.
 #
@@ -1008,7 +976,8 @@ cat > /opt/ot-sim/kubesolo/ot-sim.yaml <<EOF
 # cell cannot boot with Kubernetes healthy and the plant unreachable.
 #
 # imagePullPolicy: Never, because there is no registry and no egress: the images come
-# from the tarballs in /var/lib/ot-sim/images, loaded by apply.sh. A missing one then
+# from the tarballs in k3s's air-gap image directory, which k3s imports on start. A
+# missing one then
 # fails as ErrImageNeverPull -- "it is not in the local store" -- instead of an
 # ImagePullBackOff that reads like a blocked firewall.
 #
@@ -1086,7 +1055,7 @@ EOF
 OT_SMOKE_DEPLOYS="ot-plc ot-hmi"
 
 if sim_enabled opcua; then
-  cat >> /opt/ot-sim/kubesolo/ot-sim.yaml <<'EOF'
+  cat >> /opt/ot-sim/k3s/ot-sim.yaml <<'EOF'
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1120,7 +1089,7 @@ EOF
 fi
 
 if sim_enabled enip; then
-  cat >> /opt/ot-sim/kubesolo/ot-sim.yaml <<'EOF'
+  cat >> /opt/ot-sim/k3s/ot-sim.yaml <<'EOF'
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1158,7 +1127,7 @@ if sim_enabled s7; then
   # CAP_NET_BIND_SERVICE in the default set, so the bind succeeds exactly as it did
   # under docker. The pure-python server logs a COTP framing warning on some client
   # handshakes; reads are unaffected, so it must not be read as a failure.
-  cat >> /opt/ot-sim/kubesolo/ot-sim.yaml <<'EOF'
+  cat >> /opt/ot-sim/k3s/ot-sim.yaml <<'EOF'
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1191,18 +1160,18 @@ EOF
   OT_SMOKE_DEPLOYS="$OT_SMOKE_DEPLOYS ot-s7"
 fi
 
-cat > /opt/ot-sim/kubesolo/apply.sh <<'EOF'
+cat > /opt/ot-sim/k3s/apply.sh <<'EOF'
 #!/bin/sh
-# Bring the OT demo cell's plant workloads up on KubeSolo. Baked by
+# Bring the OT demo cell's plant workloads up on k3s. Baked by
 # provisioners/ot/ot-sim-debian.sh, run at boot by ot-sim.service, and safe to re-run
 # by hand: kubectl apply is declarative and an image already in the store is skipped.
 set -eu
 
-KUBESOLO_PATH=/var/lib/kubesolo
-KUBECONFIG=$KUBESOLO_PATH/pki/admin/admin.kubeconfig
+KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 export KUBECONFIG
-IMAGE_DIR=/var/lib/ot-sim/images
-CTR="ctr --address $KUBESOLO_PATH/containerd/containerd.sock --namespace k8s.io"
+PATH=/usr/local/bin:$PATH
+IMAGE_DIR=/var/lib/rancher/k3s/agent/images
+CTR="k3s ctr --namespace k8s.io"
 
 log() { echo "[ot-sim] $*"; }
 
@@ -1219,25 +1188,24 @@ while [ ! -f "$KUBECONFIG" ] \
   || [ -z "$(kubectl get nodes -o name 2>/dev/null)" ]; do
   tries=$((tries + 1))
   if [ "$tries" -gt 120 ]; then
-    echo "[ot-sim] ERROR: KubeSolo's API never came up (journalctl -u kubesolo)" >&2
+    echo "[ot-sim] ERROR: k3s's API never came up (journalctl -u k3s)" >&2
     exit 1
   fi
   sleep 5
 done
 kubectl wait --for=condition=Ready node --all --timeout=300s >/dev/null
 
-# 2. Load the images. There is no registry inside the plant network: these tarballs
-#    ARE the image source, which is why the manifest sets imagePullPolicy: Never.
+# 2. The images. k3s imported every tarball in its image directory when it started,
+#    so this is a check, with an import only for a ref that is somehow missing. There
+#    is no registry inside the plant network: these tarballs ARE the image source,
+#    which is why the manifest sets imagePullPolicy: Never.
 while read -r ref tarball; do
   [ -n "${ref:-}" ] || continue
   if $CTR images ls -q | grep -qx "$ref"; then continue; fi
   log "importing $ref"
-  # --local because a 2.x ctr would otherwise route the tarball through containerd's
-  # transfer service, and KubeSolo does not serve the streaming API that needs; on
-  # the 1.7 client it is already the default. See the bake's own import loop.
   # </dev/null so the import cannot consume the image list this loop is reading.
-  $CTR images import --local "$IMAGE_DIR/$tarball" </dev/null
-done < "$IMAGE_DIR/images.txt"
+  $CTR images import "$IMAGE_DIR/$tarball" </dev/null
+done < /var/lib/ot-sim/images.txt
 
 # 3. Apply, then wait on each Deployment, so a boot that only half-worked says so in
 #    `systemctl status ot-sim` instead of in front of a customer.
@@ -1271,37 +1239,28 @@ PY
   chmod 0666 "$FUXA_SETTINGS" 2>/dev/null || true
 fi
 
-kubectl apply -f /opt/ot-sim/kubesolo/ot-sim.yaml
+kubectl apply -f /opt/ot-sim/k3s/ot-sim.yaml
 for deploy in $(kubectl -n ot-sim get deploy -o name); do
   kubectl -n ot-sim rollout status "$deploy" --timeout=300s
 done
 
 # 4. A kubeconfig that works through the PRA protocol tunnel. The tunnel listens on
-#    127.0.0.1:6443 on the REP's machine, while the API server's certificate is issued
-#    to this node -- so the name to verify against has to travel with the file rather
-#    than be something the rep is expected to know.
-node_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-if [ -n "$node_ip" ] && [ -f "$KUBECONFIG" ]; then
-  KUBECONFIG_SRC="$KUBECONFIG" NODE_IP="$node_ip" python3 - \
-    > /var/lib/ot-sim/kubeconfig-via-tunnel.yaml <<'PY'
-import os
-import re
-
-src = open(os.environ["KUBECONFIG_SRC"], encoding="utf-8").read()
-print(re.sub(r"(?m)^(\s*)server: https://.*$",
-             lambda m: "%sserver: https://127.0.0.1:6443\n%stls-server-name: %s"
-                       % (m.group(1), m.group(1), os.environ["NODE_IP"]),
-             src), end="")
-PY
+#    127.0.0.1:6443 on the REP's machine, and k3s's admin kubeconfig already points at
+#    https://127.0.0.1:6443 with a serving certificate that names 127.0.0.1 — so the
+#    file works through the tunnel as written. It is copied out under a name a rep can
+#    find, and rewritten only to pin that server line, in case a future k3s changes it.
+if [ -f "$KUBECONFIG" ]; then
+  sed 's#^\( *\)server: https://.*$#\1server: https://127.0.0.1:6443#' "$KUBECONFIG" \
+    > /var/lib/ot-sim/kubeconfig-via-tunnel.yaml
   chmod 0600 /var/lib/ot-sim/kubeconfig-via-tunnel.yaml
 fi
 
 log "the plant workloads are up (kubectl -n ot-sim get pods)"
 EOF
-chmod 0755 /opt/ot-sim/kubesolo/apply.sh
+chmod 0755 /opt/ot-sim/k3s/apply.sh
 
-log "starting the plant workloads on KubeSolo ($OT_SMOKE_DEPLOYS)"
-/opt/ot-sim/kubesolo/apply.sh || die "the workloads did not come up on KubeSolo — \
+log "starting the plant workloads on k3s ($OT_SMOKE_DEPLOYS)"
+/opt/ot-sim/k3s/apply.sh || die "the workloads did not come up on k3s — \
 refusing to bake an image whose plant is dead"
 
 # A Ready rollout still is not a listener: the same distinction verify_tunnels.py
@@ -1354,7 +1313,7 @@ Modbus addressing, per FUXA's modbus driver:
   So holding register 0 (what plc_sim.py ticks first) is address "1".
 
 The PLC's address comes from FUXA_PLC_ADDRESS, because the two runtimes reach it
-differently: `plc` is the compose service name on docker, and 127.0.0.1 on KubeSolo,
+differently: `plc` is the compose service name on docker, and 127.0.0.1 on k3s,
 where the pods share the node's network namespace.
 """
 import json
@@ -1456,7 +1415,7 @@ def _device():
         "id": DEVICE_ID, "name": DEVICE_NAME, "enabled": True, "type": "ModbusTCP",
         "polling": 1000, "tags": tags,
         # Reachable only from inside the cell either way: a compose service name on
-        # the cell's own docker network, or the node's loopback under KubeSolo.
+        # the cell's own docker network, or the node's loopback under k3s.
         "property": {"address": PLC_ADDRESS, "port": "502", "slaveid": "1",
                      "options": {}},
     }
@@ -1505,8 +1464,7 @@ if __name__ == "__main__":
 EOF
 
 # Run on the HOST with stdlib python3, not inside a container: FUXA answers on the
-# node's :1881 under either runtime, and the KubeSolo one has no docker left to run
-# the seed with.
+# node's :1881 under either runtime, and the seed needs nothing a container would add.
 log "seeding the FUXA project (device + holding-register tags, PLC at $FUXA_PLC_ADDRESS)"
 export FUXA_ADMIN_USER="$OT_FUXA_ADMIN_USER"
 if FUXA_PLC_ADDRESS="$FUXA_PLC_ADDRESS" python3 /opt/ot-sim/plc-sim/fuxa_seed.py; then
@@ -1529,7 +1487,7 @@ fi
 # 401 to an anonymous caller. With it OFF, verifyGroups hands that caller
 # adminGroups[0] and the same request returns 200 with the user list. So the status
 # code IS the answer.
-if [ "$OT_RUNTIME" = "kubesolo" ]; then
+if [ "$OT_RUNTIME" = "k3s" ]; then
   _fuxa_anon_status="$(python3 - <<'PY'
 import urllib.error
 import urllib.request
@@ -1584,9 +1542,9 @@ EOF
 else
 cat > /etc/systemd/system/ot-sim.service <<'EOF'
 [Unit]
-Description=OT demo cell workloads on KubeSolo (PLC simulators + FUXA HMI)
-After=kubesolo.service
-Requires=kubesolo.service
+Description=OT demo cell workloads on k3s (PLC simulators + FUXA HMI)
+After=k3s.service
+Requires=k3s.service
 
 [Service]
 Type=oneshot
@@ -1595,7 +1553,7 @@ RemainAfterExit=yes
 # tarballs, because there is no registry to pull from; the default 90s start timeout
 # would kill that half way through and leave the plant dark.
 TimeoutStartSec=1200
-ExecStart=/opt/ot-sim/kubesolo/apply.sh
+ExecStart=/opt/ot-sim/k3s/apply.sh
 
 [Install]
 WantedBy=multi-user.target
@@ -1613,11 +1571,11 @@ else
 # and that way out is two ports to one destination — see the zoning rules the cell
 # deploy applies (services/ot_service.py) and docs/profiles/demo/ot-demo-cell.md.
 #
-# Same KubeSolo as the cell, on purpose: what a customer would put on a plant IPC.
+# Same k3s as the cell, on purpose: what a customer would put on a plant IPC.
 # No simulators, also on purpose.
-log "baking the plant's DMZ broker (KubeSolo + the Entitle agent's chart)"
-install_k8s_clients
-install_kubesolo
+log "baking the plant's DMZ broker (k3s + the Entitle agent's chart)"
+install_helm
+install_k3s
 
 # The chart is baked because the agent install must not need the Helm repo at run
 # time: anycred.github.io is a CDN, and a CDN cannot be named honestly in the narrow
@@ -1687,9 +1645,9 @@ if [ "$OT_FAAS" = "openfaas" ]; then
 # time in the Function's `environment:`. So an adapter fix ships in the dashboard image
 # and a broker baked weeks ago still runs it.
 log "baking the plant's function runtime (OpenFaaS CE $OT_OPENFAAS_CHART_VERSION)"
-install_ctr
-mkdir -p "$OT_FAAS_DIR/image" "$OT_FAAS_DIR/kubesolo" "$OT_FAAS_DIR/charts" \
-         "$OT_FAAS_IMAGE_DIR"
+mkdir -p "$OT_FAAS_DIR/image" "$OT_FAAS_DIR/k3s" "$OT_FAAS_DIR/charts" \
+         "$(dirname "$OT_FAAS_IMAGE_LIST")" "$K3S_IMAGES"
+: > "$OT_FAAS_IMAGE_LIST"
 
 log "fetching of-watchdog $OT_OF_WATCHDOG_VERSION"
 case "$OT_ARCH" in
@@ -1828,13 +1786,9 @@ EXPOSE 8080
 CMD ["fwatchdog"]
 EOF
 
-# buildah, not Docker. KubeSolo's installer refuses a host that still carries Docker,
-# and the cell pays for that with a whole purge dance — apt purge, rm -rf
-# /var/lib/docker, ip link delete docker0, reinstalling iptables by name, then
-# flushing every chain in filter/nat/mangle — because Docker's chains and its FORWARD
-# DROP policy outlive the packages. Repeating all of it for ONE small image build
-# doubles the surface where a broker bake can fail. buildah is daemonless: no
-# docker0, no containerd, no service, nothing for the pre-flight check to see.
+# buildah, not Docker. The broker runs the Entitle agent and nothing else, so it does
+# not get an engine just to build ONE small image: buildah is daemonless — no docker0,
+# no second containerd, no service — and it is purged once the image is exported.
 #
 # --storage-driver vfs deliberately: overlay wants kernel overlayfs or fuse-overlayfs
 # and its availability varies by cloud image. vfs is slower and hungrier, which for
@@ -1848,9 +1802,9 @@ buildah --storage-driver vfs bud --isolation chroot \
   -t "$OT_FAAS_IMAGE" "$OT_FAAS_DIR/image" \
   || die "buildah could not build $OT_FAAS_IMAGE (its output is above)"
 # docker-archive is byte-for-byte what `docker save` writes, so everything downstream
-# of here is the cell's already-proven ctr import path, unchanged.
+# of here is the cell's already-proven import path, unchanged.
 buildah --storage-driver vfs push \
-  "$OT_FAAS_IMAGE" "docker-archive:$OT_FAAS_IMAGE_DIR/ot-faas-python.tar:$OT_FAAS_IMAGE" \
+  "$OT_FAAS_IMAGE" "docker-archive:$K3S_IMAGES/ot-faas-python.tar:$OT_FAAS_IMAGE" \
   || die "buildah could not export $OT_FAAS_IMAGE to a docker-archive tarball"
 log "purging buildah and its layer store (~150 MB that would otherwise ship)"
 apt-get -y -q purge buildah >/dev/null 2>&1 || true
@@ -1858,10 +1812,10 @@ apt-get -y -q autoremove >/dev/null 2>&1 || true
 rm -rf /var/lib/containers /var/cache/buildah
 
 # The upstream images go straight into the containerd the pods will run from, while
-# this VM still has egress. Exported to tarballs as well, and listed in images.txt,
-# because the cleanup in section 6 preserves */containerd but that is a convenience
-# rather than a contract — apply.sh re-imports from these on boot.
-log "loading the runtime's images into KubeSolo's containerd"
+# this VM still has egress, and are exported into k3s's image directory as well: k3s
+# re-imports from there on every start, so the containerd store surviving the cleanup
+# in section 6 is a convenience rather than a contract.
+log "loading the runtime's images into k3s's containerd"
 for _pair in \
   "$OT_OPENFAAS_GATEWAY_IMAGE|openfaas-gateway.tar|pull" \
   "$OT_OPENFAAS_NETES_IMAGE|openfaas-netes.tar|pull" \
@@ -1872,30 +1826,21 @@ for _pair in \
   _how="${_rest##*|}"
   _ref="$(normalize_ref "$_img")"
   if [ "$_how" = "pull" ]; then
-    # --local on pull and export for the same reason as on import below: containerd
-    # 2.0 routes all three through the transfer service, which KubeSolo does not
-    # serve. On the 1.7 client this role pins, all three already default to local.
-    ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images pull --local "$_ref" \
+    $K3S_CTR images pull "$_ref" \
       || die "could not pull $_ref — the broker bake needs egress to the registry"
-    ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images export --local \
-      "$OT_FAAS_IMAGE_DIR/$_tarball" "$_ref" \
+    $K3S_CTR images export "$K3S_IMAGES/$_tarball" "$_ref" \
       || die "could not export $_ref to $_tarball"
   else
-    # --local, exactly as the cell's import loop explains: the transfer service a 2.x
-    # ctr would use by default needs a streaming API KubeSolo does not serve. Harmless
-    # on the 1.7 client this role pins, where local is already the default — and it is
-    # what keeps a bump of OT_CONTAINERD_VERSION to 2.x from breaking the broker.
-    ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images import --local \
-      "$OT_FAAS_IMAGE_DIR/$_tarball" \
-      || die "ctr could not import $_tarball into KubeSolo's containerd"
+    $K3S_CTR images import "$K3S_IMAGES/$_tarball" \
+      || die "k3s could not import $_tarball"
   fi
   # Proven, not assumed: every manifest below sets imagePullPolicy: Never, so a name
   # containerd does not hold is a pod that dies ErrImageNeverPull on a host with no
   # egress — which reads like a blocked firewall instead of a missing local image.
-  if ! ctr --address "$KUBESOLO_SOCK" --namespace k8s.io images ls -q | grep -qx "$_ref"; then
+  if ! $K3S_CTR images ls -q | grep -qx "$_ref"; then
     die "$_tarball is loaded but containerd does not list $_ref — the pods would never start"
   fi
-  echo "$_ref $_tarball" >> "$OT_FAAS_IMAGE_DIR/images.txt"
+  echo "$_ref $_tarball" >> "$OT_FAAS_IMAGE_LIST"
 done
 
 # The chart is baked for the same reason the Entitle chart above is: a Helm repo is a
@@ -1964,7 +1909,7 @@ EOF
 # --include-crds is load-bearing: without it the functions.openfaas.com CRD is absent
 # and the operator crash-loops on a resource type that does not exist.
 log "rendering the chart to a static manifest"
-_rendered="$OT_FAAS_DIR/kubesolo/openfaas.yaml"
+_rendered="$OT_FAAS_DIR/k3s/openfaas.yaml"
 # The chart creates neither namespace, and the labels are not decoration: faas-netes
 # finds function namespaces by the `openfaas: "1"` label.
 cat > "$_rendered" <<'EOF'
@@ -2019,7 +1964,7 @@ for _img in $(sed -nE 's/^[[:space:]]*image:[[:space:]]*"?([^"[:space:]]+).*/\1/
               "$_rendered" | sort -u); do
   _r="$(normalize_ref "$_img")"
   awk -v want="$_r" '$1 == want { found = 1 } END { exit !found }' \
-    "$OT_FAAS_IMAGE_DIR/images.txt" || _unexpected="$_unexpected $_img"
+    "$OT_FAAS_IMAGE_LIST" || _unexpected="$_unexpected $_img"
 done
 if [ -n "$_unexpected" ]; then
   die "the rendered manifest needs images this bake never loaded:$_unexpected — a \
@@ -2028,19 +1973,19 @@ disagrees with the chart's default. Every one of these would be ErrImageNeverPul
 a plant host."
 fi
 
-cat > "$OT_FAAS_DIR/kubesolo/apply.sh" <<'EOF'
+cat > "$OT_FAAS_DIR/k3s/apply.sh" <<'EOF'
 #!/bin/sh
-# Bring the plant's function runtime up on KubeSolo. Baked by
+# Bring the plant's function runtime up on k3s. Baked by
 # provisioners/ot/ot-sim-debian.sh, run at boot by ot-faas.service, and safe to re-run
 # by hand: kubectl apply is declarative and an image already in the store is skipped.
 set -eu
 
-KUBESOLO_PATH=/var/lib/kubesolo
-KUBECONFIG=$KUBESOLO_PATH/pki/admin/admin.kubeconfig
+KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 export KUBECONFIG
+PATH=/usr/local/bin:$PATH
 FAAS_DIR=/opt/ot-faas
-IMAGE_DIR=/var/lib/ot-faas/images
-CTR="ctr --address $KUBESOLO_PATH/containerd/containerd.sock --namespace k8s.io"
+IMAGE_DIR=/var/lib/rancher/k3s/agent/images
+CTR="k3s ctr --namespace k8s.io"
 
 log() { echo "[ot-faas] $*"; }
 
@@ -2055,24 +2000,24 @@ while [ ! -f "$KUBECONFIG" ] \
   || [ -z "$(kubectl get nodes -o name 2>/dev/null)" ]; do
   tries=$((tries + 1))
   if [ "$tries" -gt 120 ]; then
-    echo "[ot-faas] ERROR: KubeSolo's API never came up (journalctl -u kubesolo)" >&2
+    echo "[ot-faas] ERROR: k3s's API never came up (journalctl -u k3s)" >&2
     exit 1
   fi
   sleep 5
 done
 kubectl wait --for=condition=Ready node --all --timeout=300s >/dev/null
 
-# 2. Load the images. There is no registry inside the plant network: these tarballs
-#    ARE the image source, which is why the manifest says imagePullPolicy: Never.
+# 2. The images: imported by k3s from its image directory when it started, so this is
+#    a check, with an import only for a ref that is somehow missing. There is no
+#    registry inside the plant network, which is why the manifest says
+#    imagePullPolicy: Never.
 while read -r ref tarball; do
   [ -n "${ref:-}" ] || continue
   if $CTR images ls -q | grep -qx "$ref"; then continue; fi
   log "importing $ref"
-  # --local: a 2.x ctr routes an import through the transfer service, and KubeSolo
-  # serves no streaming API for it. Already the default on the 1.7 client.
   # </dev/null so the import cannot consume the image list this loop is reading.
-  $CTR images import --local "$IMAGE_DIR/$tarball" </dev/null
-done < "$IMAGE_DIR/images.txt"
+  $CTR images import "$IMAGE_DIR/$tarball" </dev/null
+done < /var/lib/ot-faas/images.txt
 
 # 3. The gateway's admin credential. The chart generates this with a Helm HOOK, and
 #    hooks do not run through `helm template` — so without this step the gateway comes
@@ -2091,19 +2036,19 @@ fi
 
 # 4. Apply, then wait, so a boot that only half-worked says so in
 #    `systemctl status ot-faas` instead of in front of a customer.
-kubectl apply -f "$FAAS_DIR/kubesolo/openfaas.yaml"
+kubectl apply -f "$FAAS_DIR/k3s/openfaas.yaml"
 kubectl -n openfaas rollout status deploy/gateway --timeout=300s
 
 log "the function runtime is up (kubectl -n openfaas get pods)"
 EOF
-chmod 0755 "$OT_FAAS_DIR/kubesolo/apply.sh"
+chmod 0755 "$OT_FAAS_DIR/k3s/apply.sh"
 
 log "installing the ot-faas systemd unit"
 cat > /etc/systemd/system/ot-faas.service <<'EOF'
 [Unit]
-Description=OpenFaaS on KubeSolo (the plant's function runtime for Entitle adapters)
-After=kubesolo.service
-Requires=kubesolo.service
+Description=OpenFaaS on k3s (the plant's function runtime for Entitle adapters)
+After=k3s.service
+Requires=k3s.service
 
 [Service]
 Type=oneshot
@@ -2112,7 +2057,7 @@ RemainAfterExit=yes
 # because there is no registry to pull from; the default 90s start timeout would kill
 # that half way through and leave the broker with no runtime.
 TimeoutStartSec=1200
-ExecStart=/opt/ot-faas/kubesolo/apply.sh
+ExecStart=/opt/ot-faas/k3s/apply.sh
 
 [Install]
 WantedBy=multi-user.target
@@ -2121,7 +2066,7 @@ systemctl daemon-reload
 systemctl enable ot-faas.service
 
 log "starting the function runtime"
-"$OT_FAAS_DIR/kubesolo/apply.sh" \
+"$OT_FAAS_DIR/k3s/apply.sh" \
   || die "the function runtime did not come up — refusing to bake a broker whose \
 adapters could never run"
 
@@ -2261,11 +2206,11 @@ log "function runtime smoke test passed (CRD, 1 pod, gateway, sub-path routing, 
 fi   # OT_FAAS = openfaas
 
 if [ "$OT_FAAS" = "none" ]; then
-  log "the broker is ready: KubeSolo up, chart at $OT_ENTITLE_CHART_DIR/entitle-agent.tgz"
+  log "the broker is ready: k3s up, chart at $OT_ENTITLE_CHART_DIR/entitle-agent.tgz"
   log "         (OT_FAAS=none — no function runtime, so this broker cannot host the"
   log "          Entitle REST adapters; re-bake with OT_FAAS=openfaas if you need them)"
 else
-  log "the broker is ready: KubeSolo up, Entitle chart at \
+  log "the broker is ready: k3s up, Entitle chart at \
 $OT_ENTITLE_CHART_DIR/entitle-agent.tgz, OpenFaaS gateway on :8080 in-cluster"
 fi
 
@@ -2285,28 +2230,40 @@ else
   rm -rf /var/lib/cloud/instances /var/lib/cloud/instance
   find /var/log -type f -name 'cloud-init*.log' -exec truncate -s 0 {} + 2>/dev/null || true
   apt-get -y -q clean
-  if [ "$OT_ROLE" = "broker" ] || [ "$OT_RUNTIME" = "kubesolo" ]; then
+  if [ "$OT_ROLE" = "broker" ] || [ "$OT_RUNTIME" = "k3s" ]; then
     # Same reasoning as the ssh host keys above, one layer up: a baked cluster would
     # hand every cell the same CA and admin credential, and its Node object still
     # carries the BAKE VM's hostname — which no cell will ever have, so the pods bound
     # to it would sit there unscheduled while Kubernetes reported itself healthy.
     log "resetting the cluster's identity (each cell mints its own CA, node and state)"
     systemctl stop ot-sim.service >/dev/null 2>&1 || true
-    # The broker's function runtime, if this image has one. Stopped BEFORE kubesolo
-    # for the same reason its sibling above is: a oneshot unit that is still mid-apply
-    # when the API server goes away leaves half-applied objects in the state directory
-    # this block is about to delete anyway — but it also writes to the containerd store
-    # it must NOT be interrupted in the middle of.
+    # The broker's function runtime, if this image has one. Stopped BEFORE k3s for
+    # the same reason its sibling above is: a oneshot unit that is still mid-apply when
+    # the API server goes away leaves half-applied objects in the state this block is
+    # about to delete anyway — but it also writes to the containerd store it must NOT
+    # be interrupted in the middle of.
     systemctl stop ot-faas.service >/dev/null 2>&1 || true
-    systemctl stop kubesolo >/dev/null 2>&1 || true
-    for _dir in /var/lib/kubesolo/*; do
+    systemctl stop k3s >/dev/null 2>&1 || true
+    # k3s leaves its pods' shims running after the service stops, by design (so a
+    # restart does not restart workloads). Its own killall stops them and tears down
+    # the CNI interfaces, so nothing below is deleted out from under a live process.
+    if [ -x /usr/local/bin/k3s-killall.sh ]; then
+      /usr/local/bin/k3s-killall.sh >/dev/null 2>&1 || true
+    fi
+    # The whole server side: the datastore (with the BUILD VM's Node object in it),
+    # the CA, the tokens and the generated manifests. k3s mints all of it again on a
+    # cell's first boot.
+    rm -rf "$K3S_DATA/server"
+    for _dir in "$K3S_DATA"/agent/*; do
       [ -e "$_dir" ] || continue
-      # Everything but the image store: those layers cannot be re-pulled inside the
-      # plant network. (Losing them is survivable, not fatal — apply.sh re-imports
-      # from /var/lib/ot-sim/images on boot — but it costs minutes on every cell.)
-      case "$_dir" in */containerd) continue ;; esac
+      # Everything on the agent side but the images: the containerd store, and the
+      # tarballs k3s imports from. Those layers cannot be re-pulled inside the plant
+      # network. (Losing the store is survivable — k3s re-imports from images/ on
+      # every start — but it costs minutes on every cell.)
+      case "$_dir" in */containerd|*/images) continue ;; esac
       rm -rf "$_dir"
     done
+    rm -rf /var/lib/kubelet /etc/rancher/node "$K3S_KUBECONFIG"
     # Written by the bake's own run of apply.sh, and describing the BUILD VM: its CA
     # and address, both wrong on a cell. Each cell writes its own at boot.
     rm -f /var/lib/ot-sim/kubeconfig-via-tunnel.yaml
@@ -2332,10 +2289,10 @@ PY
 fi
 
 if [ "$OT_ROLE" = "broker" ]; then
-  log "ot-broker bake complete — KubeSolo on :6443, Entitle agent chart baked, \
+  log "ot-broker bake complete — k3s on :6443, Entitle agent chart baked, \
 no simulators, PS account '$OT_ADMIN_USER'"
-elif [ "$OT_RUNTIME" = "kubesolo" ]; then
-  log "ot-sim bake complete — KubeSolo runtime, sims [$OT_SIMS], FUXA HMI on :1881, \
+elif [ "$OT_RUNTIME" = "k3s" ]; then
+  log "ot-sim bake complete — k3s runtime (Docker alongside), sims [$OT_SIMS], FUXA HMI on :1881, \
 Kubernetes API on :6443, PS account '$OT_ADMIN_USER'"
 else
   log "ot-sim bake complete — docker runtime, sims [$OT_SIMS], FUXA HMI on :1881, \

@@ -5,7 +5,7 @@ Two features, gated behind ``pra_enabled`` at router-include time (see main.py):
 
 * Standalone OT protocol tunnels — a generic-TCP PRA protocol tunnel to ANY
   reachable OT endpoint, with port presets (Modbus/OPC UA/DNP3/S7/EtherNet-IP,
-  plus the KubeSolo API an edge host serves). Each tunnel rides one cloud's
+  plus the cell's own k3s API). Each tunnel rides one cloud's
   shared gateway (``cloud`` on the request).
 * The one-click OT demo cell — a queued VM-deploy child (the VM from the
   Packer-baked ``ot-sim`` image; ``gce_deploy`` / ``ec2_deploy`` /
@@ -323,7 +323,7 @@ def deploy_cell(
             "ot_cell":         True,
             "ot_params": {
                 # What the image was baked with, asserted by the operator: it gates the
-                # platform presets, which only the KubeSolo runtime serves.
+                # platform presets, which only the k3s runtime serves.
                 "runtime":           payload.runtime,
                 "protocols":         protocols,
                 "protocol":          protocols[0],
@@ -338,7 +338,7 @@ def deploy_cell(
     )
     job_service.set_cloud_resource_id(db, child.id, payload.instance_name)
 
-    # The plant's own identity broker. A second VM, in its own zone, carrying KubeSolo
+    # The plant's own identity broker. A second VM, in its own zone, carrying k3s
     # and the Entitle agent and nothing else — because an agent that manages access to
     # plant resources belongs in the plant. Created here, not in the worker, so it
     # meets the same name validation and admission policy as any other VM.
@@ -508,7 +508,7 @@ def deploy_cell_aws(
             "ot_cell":                  True,
             "ot_params": {
                 # What the image was baked with, asserted by the operator: it gates the
-                # platform presets, which only the KubeSolo runtime serves.
+                # platform presets, which only the k3s runtime serves.
                 "runtime":           payload.runtime,
                 "protocols":         protocols,
                 "protocol":          protocols[0],
@@ -707,7 +707,7 @@ async def deploy_cell_azure(
             "ot_cell":        True,
             "ot_params": {
                 # What the image was baked with, asserted by the operator: it gates the
-                # platform presets, which only the KubeSolo runtime serves.
+                # platform presets, which only the k3s runtime serves.
                 "runtime":           payload.runtime,
                 "protocols":         protocols,
                 "protocol":          protocols[0],
