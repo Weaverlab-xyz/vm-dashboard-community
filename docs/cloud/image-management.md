@@ -13,9 +13,9 @@ The companion docs:
 
 - [Infrastructure as Code](infrastructure-as-code.md) — what consumes
   images (Terraform deploys, Packer build orchestration)
-- [Storage Management](../storage-management.md) — where image artefacts
+- [Storage Management](../operations/storage-management.md) — where image artefacts
   live between build and promotion
-- [Config Management](../config-management.md) — what runs *on* the
+- [Config Management](../operations/config-management.md) — what runs *on* the
   resulting VMs after deployment
 - [Secrets Management](../access/secrets-management.md) — credentials feeding
   the build/promote process
@@ -38,7 +38,7 @@ upstream release timing. Build the artefact once; promote that exact
 artefact everywhere.
 
 **2. Storage-backed portability.** The image artefact lives in your
-[storage backend](../storage-management.md) of record (S3 / Azure Blob /
+[storage backend](../operations/storage-management.md) of record (S3 / Azure Blob /
 GCS / OCI Object Storage / Local-or-UNC). It's a versioned, named, source-controlled
 binary blob. The cloud-specific images (AMI / Managed Image / Custom
 Image) are *consumers* of that artefact, not the source of truth. If
@@ -230,7 +230,7 @@ from its stored copy.
 
 This means you can keep your hardening scripts version-controlled
 on disk or in object storage, upload them once via
-[Storage Management](../storage-management.md), and pick them from
+[Storage Management](../operations/storage-management.md), and pick them from
 the dropdown for every build instead of copy-pasting. Useful when
 the same script is reused across cloud providers — store it once on
 a cloud backend and load it for all three builds.
@@ -608,7 +608,7 @@ from manifest" loses meaning.
 
 **Version your provisioner scripts.** The provisioner is part of the
 image's manifest. A `.sh` script in
-[storage](../storage-management.md) labelled `harden-base.sh` and
+[storage](../operations/storage-management.md) labelled `harden-base.sh` and
 re-edited in place gives you the same problem as a mutable image:
 you can't reproduce older builds. Date-stamp or version it.
 

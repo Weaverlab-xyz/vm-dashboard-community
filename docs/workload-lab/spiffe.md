@@ -29,7 +29,7 @@ The companion docs:
 
 - [`examples/playbooks/spire/`](../../examples/playbooks/spire/README.md) — the playbooks
   that build the lab, and what each one is actually proving
-- [Config Management](../config-management.md) — how those playbooks get run
+- [Config Management](../operations/config-management.md) — how those playbooks get run
 - [Cloud VMs](../cloud/vms.md) — where the SPIRE server lives
 - [Certificates](certificates.md) — the sibling feature, for a plugin that has a human
   approval in its path

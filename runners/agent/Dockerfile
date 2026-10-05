@@ -3,7 +3,7 @@
 #
 # Deliberately NOT built FROM chrweav/ansible-cloud. That is the *payload* image, and
 # merging a persistent process with a code-execution runtime is exactly what
-# docs/config-management.md argues against. This image carries no ansible, no kubectl,
+# docs/operations/config-management.md argues against. This image carries no ansible, no kubectl,
 # no helm and no container client, so it is structurally incapable of running
 # operator-supplied code — a property tests/test_agent_runner_contract.py asserts
 # rather than trusts. When agent-executed Ansible lands it will spawn a one-shot

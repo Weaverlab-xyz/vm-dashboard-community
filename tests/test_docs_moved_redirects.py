@@ -94,7 +94,7 @@ def test_an_old_url_redirects():
     if _skip():
         return
     c = _client()
-    for old, new in (("/docs/change-windows", "/docs/scheduling/change-windows"),
+    for old, new in (("/docs/change-windows", "/docs/operations/scheduling/change-windows"),
                      ("/docs/integrations/password-safe",
                       "/docs/integrations/beyondtrust/password-safe"),
                      ("/docs/integrations/databases/password-safe-gcp",
@@ -110,7 +110,7 @@ def test_live_pages_and_misses_are_unchanged():
     if _skip():
         return
     c = _client()
-    for live in ("/docs/integrations/beyondtrust", "/docs/scheduling",
+    for live in ("/docs/integrations/beyondtrust", "/docs/operations/scheduling",
                  "/docs/integrations/beyondtrust/databases"):
         assert c.get(live, follow_redirects=False).status_code == 200, live
     assert c.get("/docs/no-such-page", follow_redirects=False).status_code == 404

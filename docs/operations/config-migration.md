@@ -9,7 +9,7 @@ dev to prod, a laptop to a hosted deployment, or a rebuild after a host dies.
 
 > This is about dashboard *configuration*, not the Config Management feature.
 > For Ansible playbooks and drift detection see
-> [config-management.md](../config-management.md).
+> [config-management.md](config-management.md).
 
 ---
 

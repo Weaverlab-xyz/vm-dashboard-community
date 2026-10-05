@@ -17,7 +17,7 @@ Apps has no route to a file server, and a [POV instance](../profiles/pov/README.
 provider to fall back on, so it has nowhere to put a playbook at all. The agent is
 already inside; this makes it the path.
 
-Full setup, fields and limits: [Storage Management → Remote Filesystem / UNC](../storage-management.md#remote-filesystem--unc-via-agent).
+Full setup, fields and limits: [Storage Management → Remote Filesystem / UNC](../operations/storage-management.md#remote-filesystem--unc-via-agent).
 
 ### The dashboard holds a name, not a path
 

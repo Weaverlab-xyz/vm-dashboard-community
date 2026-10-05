@@ -1348,7 +1348,7 @@ class Settings(BaseSettings):
     # or a UNC \\server\share[\subpath]. UNC paths are read via the
     # smbprotocol library — no host-side mount required. Username /
     # password / domain only apply to UNC paths. Only useful for
-    # on-premises hypervisor targets — see storage-management.md.
+    # on-premises hypervisor targets — see docs/operations/storage-management.md.
     storage_local_path: str = ""
     storage_local_username: str = ""
     storage_local_password: str = ""           # encrypted at rest

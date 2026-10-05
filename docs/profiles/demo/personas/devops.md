@@ -145,13 +145,13 @@ anything on.
 Configuration drift against the last known-good run: the question every incident review opens
 with, answered without logging into anything.
 
-**Guide:** [Configuration Management](../../../config-management.md)
+**Guide:** [Configuration Management](../../../operations/config-management.md)
 
 ## What to enable
 
 **Configuration Management** (Ansible), **Password Safe** and **Entitle**. Configuration
 Management additionally requires an active storage backend — it has nowhere to read a playbook
-from otherwise — so see [Storage Management](../../../storage-management.md) before enabling it.
+from otherwise — so see [Storage Management](../../../operations/storage-management.md) before enabling it.
 
 This focus is one of the few that works essentially unchanged on a
 [POV instance](../../pov/README.md): Ansible, Password Safe, Entitle and the remote agent are

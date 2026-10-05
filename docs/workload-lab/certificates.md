@@ -30,7 +30,7 @@ The companion docs:
   lifecycle this feature follows
 - [Auto-delete Timer](../operations/auto-delete-timer.md) — why a CA pool is exactly the thing that
   timer is for
-- [Config Management](../config-management.md) — how the mTLS endpoint and the CI runner get
+- [Config Management](../operations/config-management.md) — how the mTLS endpoint and the CI runner get
   configured
 - [What consumes these credentials](consumers.md) — the plays that spend a certificate this
   family issued

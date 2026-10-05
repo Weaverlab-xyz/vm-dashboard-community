@@ -27,8 +27,8 @@ solution), see [the edition comparison](comparison.md).
 > **tamper-evident (hash-chained) audit trail**, **action-level policy
 > guardrails** (OPA pre-action admission), **config drift-aware runs**, and
 > the staleness-alerting + artefact secret-scanning half of **secret
-> lifecycle** — see [policy-guardrails.md](../scheduling/policy-guardrails.md),
-> [config-management.md](../config-management.md),
+> lifecycle** — see [policy-guardrails.md](../operations/scheduling/policy-guardrails.md),
+> [config-management.md](../operations/config-management.md),
 > [secrets-management.md](../access/secrets-management.md). **(2)** The **per-tenant
 > isolation primitive is now Built (prod)** — the hosted deployment is
 > multi-tenant today; only the root-key *store* is still shared (per-tenant
@@ -121,7 +121,7 @@ the next things queued for QA.
 ### Approval / change-control gate for destructive automation
 
 > **Shipped in community (was fully on this list):** a **two-person approval gate**.
-> A change booked into a [change window](../scheduling/change-windows.md) can require sign-off from
+> A change booked into a [change window](../operations/scheduling/change-windows.md) can require sign-off from
 > a second user holding `change_windows:use` before the worker will claim it; the
 > requester cannot approve their own, rescheduling clears the approval, and the
 > decision is recorded in the audit trail. An Action-Guardrails policy emitting
@@ -155,7 +155,7 @@ the next things queued for QA.
 > date) and **artefact secret-scanning** (uploaded playbooks / scripts are
 > scanned on upload, `secret_scan_enabled`) both run in the community
 > edition — see [secrets-management.md](../access/secrets-management.md) and
-> [config-management.md](../config-management.md#secret-scanning-advisory).
+> [config-management.md](../operations/config-management.md#secret-scanning-advisory).
 > A rotation *primitive* also shipped: a Password Safe managed-account
 > checkout used on a cloud run can be flagged **rotate-on-check-in**
 > ([ansible.md](../integrations/ansible\secrets.md#managed-account-checkout-beyondtrust-password-safe)).
@@ -386,7 +386,7 @@ the next things queued for QA.
 > /api/config-mgmt/drift` surfaces **unverified** (no apply within
 > `config_drift_stale_days`) and **changed** (stored playbook now differs
 > from what was applied) targets. See
-> [config-management.md](../config-management.md).
+> [config-management.md](../operations/config-management.md).
 
 - **What community does:** records the per-target content/inputs hash of
   the last successful apply and surfaces unverified/changed targets in the
@@ -491,7 +491,7 @@ the next things queued for QA.
 > Config-driven limits are settable without writing Rego, and denials land
 > in the (hash-chained) audit log. Off by default
 > (`admission_control_enabled`). See
-> [policy-guardrails.md](../scheduling/policy-guardrails.md).
+> [policy-guardrails.md](../operations/scheduling/policy-guardrails.md).
 
 - **What community does:** OPA pre-action guardrails over deploy
   operations (allowed regions / instance-size caps / prod-window), gated

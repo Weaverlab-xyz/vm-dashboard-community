@@ -93,7 +93,7 @@ Three independent guards, all pinned by `tests/test_agent_lease_invariants.py`:
 
 ### Reconciling with "why one-shot runners"
 
-[`config-management.md`](config-management.md) argues against long-lived runners. Read
+[`config-management.md`](operations/config-management.md) argues against long-lived runners. Read
 its wording precisely: *no escape hatch for "give me a long-lived worker **for
 performance reasons**"*. An agent is not asking for persistence for performance. It
 asks for it for **reachability** — you cannot launch a one-shot container inside a

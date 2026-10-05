@@ -124,7 +124,7 @@ details are worth knowing because they are not obvious:
 - **Across many hosts, the account is matched by name.** A managed account reference
   pins a system id *and* an account id, both specific to one managed system — reusing
   one across a fleet would check out a single machine's credential and connect to every
-  host with it. A [bulk run](../../config-management.md#bulk-runs-from-the-inventory)
+  host with it. A [bulk run](../../operations/config-management.md#bulk-runs-from-the-inventory)
   therefore sends the account **name**, and each job resolves it against the host it is
   configuring, so every host checks out its own credential.
 - **On the ECS / Cloud Run runners it needs an opt-in.** Those runners *reference* a

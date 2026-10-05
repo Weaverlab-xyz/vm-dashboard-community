@@ -14,13 +14,13 @@ The companion docs:
   Terraform deploys consume are built, hubbed in a single storage
   backend, and one-click promoted to AWS / Azure / GCP via the
   per-target promote runners
-- [Config Management](../config-management.md) — what to install on the
+- [Config Management](../operations/config-management.md) — what to install on the
   infra you've stood up
-- [Storage Management](../storage-management.md) — where your IaC-side
+- [Storage Management](../operations/storage-management.md) — where your IaC-side
   artefacts (playbooks, Packer manifests) live
 - [Secrets Management](../access/secrets-management.md) — credentials feeding
   the IaC layer
-- [Policy Guardrails](../scheduling/policy-guardrails.md) — optional pre-action OPA
+- [Policy Guardrails](../operations/scheduling/policy-guardrails.md) — optional pre-action OPA
   checks that can block a deploy before it starts (allowed regions,
   instance-size caps, change-freeze windows)
 
@@ -154,7 +154,7 @@ dashboard keeps state in **two places, by design**.
 
 **Most state lives in your active storage backend.** [Cloud VM](vms.md),
 [cloud-database](../databases.md), and [Kubernetes-cluster](../kubernetes.md) deploys write their state to the
-same backend the [/storage](../storage-management.md) system uses (AWS S3 /
+same backend the [/storage](../operations/storage-management.md) system uses (AWS S3 /
 Azure Blob / GCS), keyed per job at
 `terraform-state/{job_id}/terraform.tfstate`, authenticated with the same
 credentials. It's remote and **locked**: S3 uses native state locking
@@ -203,7 +203,7 @@ Two operating rules follow:
   tracker, which reads outcomes from `Job.extra_data`, not by re-running
   `terraform refresh`.
 
-Note the deliberate asymmetry with [config-management.md](../config-management.md):
+Note the deliberate asymmetry with [config-management.md](../operations/config-management.md):
 **Ansible runs are ephemeral by design; Terraform state is persistent
 by necessity.** The runner that *does* the apply is short-lived (one
 Terraform process, exits when done); the *state* that apply produces
@@ -302,7 +302,7 @@ build/deploy split natively but doesn't enforce naming hygiene.
 
 Remote state with locking already ships in community (see
 [State](#state-the-thing-that-makes-iac-work) above), as do pre-action
-policy guardrails ([Policy Guardrails](../scheduling/policy-guardrails.md)). A few
+policy guardrails ([Policy Guardrails](../operations/scheduling/policy-guardrails.md)). A few
 things the community edition still leaves to the hosted edition — see
 [docs/editions/comparison.md](../editions/comparison.md) for the philosophy.
 
@@ -319,7 +319,7 @@ things the community edition still leaves to the hosted edition — see
   offer for config management.
 - **Post-apply compliance-as-code.** Community enforces policy
   *pre-action* — the OPA guardrails block a disallowed deploy before it
-  starts ([Policy Guardrails](../scheduling/policy-guardrails.md)). SaaS adds the
+  starts ([Policy Guardrails](../operations/scheduling/policy-guardrails.md)). SaaS adds the
   *post-apply* half: continuously evaluating already-deployed
   infrastructure against policy and flagging resources that have drifted
   out of compliance. Pre-action gate + post-apply scan = one policy
