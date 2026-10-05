@@ -481,10 +481,15 @@ async def get_vm_ssh_key(
 async def get_vm_admin_password(
     vm_name: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("azure", "read")),
+    current_user: User = Depends(require_permission("azure", "write")),
 ):
     """Return the generated local-admin password for a Windows VM deployed via
     this dashboard.
+
+    ``azure:write``, not ``read``: this hands out a working administrator
+    credential, which is more than seeing that the VM exists. When Password
+    Safe manages the account the dashboard no longer holds a valid copy, so it
+    answers 409 and points at Password Safe / PRA instead.
 
     Windows deploys store the password in the configured secrets backend and
     keep only the (backend, ref) pair in job metadata, so this resolves the
@@ -503,6 +508,14 @@ async def get_vm_admin_password(
                 break
     if job is not None:
         meta = job.metadata_dict
+        if meta.get("admin_password_custody") == "passwordsafe_managed":
+            raise HTTPException(
+                status_code=409,
+                detail=(f"Password Safe manages the administrator account on '{vm_name}' "
+                        f"(managed account {meta.get('ps_managed_account_id')}). Check the "
+                        "credential out from Password Safe, or connect through the PRA RDP "
+                        "jump item, which injects it."),
+            )
         if meta.get("admin_password_ref"):
             backend = meta.get("admin_password_backend") or "database"
             ref = meta["admin_password_ref"]

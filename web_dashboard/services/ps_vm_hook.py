@@ -313,6 +313,100 @@ async def register(db, job_id: str, vm_name: str, hostname: str, *,
         await wire_pra_vault_key_sync(db, job_id, vm_name, result=result, tag=tag)
 
 
+def _windows_functional_account_name(tag: str) -> str:
+    """The functional account a Windows guest on this cloud is managed through.
+
+    Its own keys, never the Linux ones: the Linux accounts sit on SSH-rotation plugins
+    (SSM, Azure VM SSH Rotation, GCP VM SSH Rotation), and a managed system takes its
+    platform from the functional account — so reusing one would put a Windows guest on
+    a plugin that can only push SSH keys. POV keeps Windows and Linux accounts apart for
+    the same reason (``pov_wireup.onboard_vm``)."""
+    t = (tag or "").lower()
+    return (_cfg(f"passwordsafe_vm_functional_account_windows_{t}")
+            or _cfg("passwordsafe_vm_functional_account_windows"))
+
+
+async def register_windows(db, job_id: str, vm_name: str, hostname: str, *,
+                           result: dict, tag: str, username: str, password: str) -> None:
+    """Onboard a Windows VM as a PASSWORD-managed system + account. Non-fatal.
+
+    The build-time administrator password is seeded as the account's credential, then —
+    unless ``passwordsafe_windows_change_password_on_register`` is off — Password Safe is
+    asked to change it at once, so the only working credential is the one Password Safe
+    holds. Same ``method="password"`` shape POV already onboards Windows guests with.
+
+    Writes ``ps_managed_system_id`` / ``ps_managed_account_id`` /
+    ``ps_registration_tf_state`` (so :func:`deregister` tears it down unchanged), plus
+    ``ps_initial_password_seeded`` and ``ps_change_password_triggered`` /
+    ``ps_change_password_error``. Any failure lands in ``ps_error``.
+
+    Password Safe reaches the guest itself to rotate (SMB/WinRM from the appliance or a
+    Resource Broker), so a private VM needs a route — ``passwordsafe_application_host_id``
+    or a resource zone covering its subnet."""
+    from . import ps_api_service, ps_resource_service, job_service, config_service
+    try:
+        fa_name = _windows_functional_account_name(tag)
+        if not fa_name:
+            raise ps_resource_service.PSResourceError(
+                "no Password Safe functional account configured for Windows guests "
+                f"(set passwordsafe_vm_functional_account_windows or "
+                f"passwordsafe_vm_functional_account_windows_{(tag or '').lower()})")
+        fa = await ps_api_service.get_functional_account(fa_name)
+        pname = fa.get("platform_name") or ""
+        if not _platform_name_ok(pname, "windows"):
+            raise ps_resource_service.PSResourceError(
+                f"functional account {fa_name!r} is on platform {pname!r}, not a Windows "
+                "platform — the managed system would land on the wrong platform.")
+        workgroup_id = await ps_api_service.get_workgroup_id(_cfg("passwordsafe_workgroup"))
+        job_service.update_progress(db, job_id, 94, "Onboarding into Password Safe (Windows)…")
+        r = await ps_resource_service.register_managed_system(
+            name=vm_name,
+            host_name=vm_name,
+            dns_name=hostname,
+            ip_address=hostname,
+            port=3389,
+            functional_account_id=fa["id"],
+            platform_id=fa["platform_id"],
+            workgroup_id=workgroup_id,
+            entity_type_id=int(_cfg("passwordsafe_entity_type_id") or "1"),
+            managed_account_name=username,
+            initial_password=password,
+            application_host_id=int(_cfg("passwordsafe_application_host_id") or "0"),
+            method="password",
+        )
+        result["ps_managed_system_id"] = r.get("managed_system_id")
+        result["ps_managed_account_id"] = r.get("managed_account_id")
+        result["ps_registration_tf_state"] = r.get("tf_state_json")
+        result["ps_initial_password_seeded"] = bool(r.get("initial_password_seeded"))
+
+        if (r.get("managed_account_id") and config_service.get_bool(
+                "passwordsafe_windows_change_password_on_register", True)):
+            try:
+                await ps_api_service.change_managed_account_password(int(r["managed_account_id"]))
+                result["ps_change_password_triggered"] = True
+            except Exception as ce:  # noqa: BLE001
+                result["ps_change_password_error"] = str(ce)
+                logger.warning("Password Safe initial Change Password failed for %s: %s",
+                               vm_name, ce)
+        job_service.update_progress(
+            db, job_id, 96, f"Onboarded into Password Safe (system {r.get('managed_system_id')}).")
+    except Exception as e:  # noqa: BLE001 — registration must never fail the deploy
+        result["ps_error"] = str(e)
+        logger.warning("Password Safe Windows registration failed for %s: %s", vm_name, e)
+
+
+def password_safe_holds_credential(result: dict) -> bool:
+    """Whether Password Safe now holds a WORKING credential for the account.
+
+    True when the account exists and either the build-time password was seeded (Password
+    Safe holds it, rotated or not) or a Change Password went through (Password Safe minted
+    a new one). Either way a copy kept anywhere else is redundant at best and stale at
+    worst."""
+    return bool(result.get("ps_managed_account_id") and not result.get("ps_error")
+                and (result.get("ps_initial_password_seeded")
+                     or result.get("ps_change_password_triggered")))
+
+
 async def wire_pra_vault_key_sync(db, job_id: str, vm_name: str, *,
                                   result: dict, tag: str = "cloud") -> None:
     """Mirror the VM's Password Safe-managed SSH key into a **PRA Vault Private Key**

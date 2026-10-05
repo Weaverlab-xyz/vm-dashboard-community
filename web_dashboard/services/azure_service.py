@@ -1190,21 +1190,17 @@ def _azure_compliant_password() -> str:
 
 
 def store_windows_admin_password(vm_name: str, key_suffix: str, password: str) -> tuple[str, str]:
-    """Store a generated Windows admin password in the configured secrets
-    backend. Returns ``(backend, ref)`` for job metadata — job records carry
+    """Store a generated Windows admin password in an external secret manager
+    (see ``windows_admin_secret.resolve_backend`` — never the dashboard
+    database). Returns ``(backend, ref)`` for job metadata — job records carry
     the reference, never the plaintext. Raises AzureError when the write
     fails: a Windows VM whose password can't be retrieved later is useless,
     so callers must store before deploying."""
-    from . import config_service, secrets_backend_service
-    backend = config_service.get("secrets_backend") or "database"
-    key = f"windows-admin-{vm_name}-{key_suffix}"
+    from . import windows_admin_secret
     try:
-        ref = secrets_backend_service.write_sync(backend, key, password)
-    except Exception as e:
-        raise AzureError(
-            f"Failed to store Windows admin password for {vm_name} in secrets backend '{backend}': {e}"
-        ) from e
-    return backend, ref
+        return windows_admin_secret.store("azure", vm_name, key_suffix, password)
+    except windows_admin_secret.WindowsSecretError as e:
+        raise AzureError(str(e)) from e
 
 
 # Deploy bounded-wait timeout: a VM that never leaves "Creating" (e.g. an
