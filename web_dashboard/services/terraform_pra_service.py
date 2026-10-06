@@ -405,17 +405,15 @@ def _provision_sync(
     want_vault = bool(vault_account_name and admin_password)
     vaulted = want_vault
 
-    def hcl(with_vault: bool) -> str:
-        if not with_vault:
-            return _generate_hcl(vm_name, hostname, jump_group_name, jumpoint_name, port, tag)
-        return _generate_hcl(vm_name, hostname, jump_group_name, jumpoint_name, port, tag,
-                             vault_account_name=vault_account_name,
-                             vault_username=vault_username,
-                             vault_account_group_id=vault_account_group_id)
-
     with tempfile.TemporaryDirectory(prefix="pra_tf_") as work_dir:
         # Write HCL
-        Path(work_dir, "main.tf").write_text(hcl(want_vault))
+        # The password is never in the HCL: it is TF_VAR_ssh_password, below.
+        Path(work_dir, "main.tf").write_text(
+            _generate_hcl(vm_name, hostname, jump_group_name, jumpoint_name, port, tag,
+                          vault_account_name=vault_account_name if want_vault else "",
+                          vault_username=vault_username,
+                          vault_account_group_id=vault_account_group_id)
+        )
 
         # terraform init (uses pre-cached provider — should be fast)
         init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60, tenant=tenant)
@@ -439,7 +437,9 @@ def _provision_sync(
             vaulted = False
             _run_tf(["state", "rm", "sra_vault_username_password_account.ssh_admin"],
                     work_dir, timeout=30, tenant=tenant)
-            Path(work_dir, "main.tf").write_text(hcl(False))
+            Path(work_dir, "main.tf").write_text(
+                _generate_hcl(vm_name, hostname, jump_group_name, jumpoint_name, port, tag)
+            )
             apply = _run_tf(["apply", "-auto-approve", "-refresh=false"], work_dir,
                             timeout=120, extra_env=cred_env or None, tenant=tenant)
             if apply.returncode != 0:
