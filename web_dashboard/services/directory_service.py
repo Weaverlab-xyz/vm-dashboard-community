@@ -78,6 +78,23 @@ PROVIDER_LABELS = {
 }
 ONPREM_PROVIDERS = ("onprem_ad", "ldap")
 IDP_PROVIDERS = ("entra_id", "okta", "pingone")    # == tuple(directory_idp.PROVIDERS)
+# LDAP servers a provider="ldap" row can name as its vendor.
+LDAP_VENDORS = {
+    "openldap": "OpenLDAP",
+    "pingdirectory": "PingDirectory",
+    "okta_ldap": "Okta LDAP Interface",
+    "389ds": "389 Directory Server",
+    "freeipa": "FreeIPA",
+}
+# rootDSE vendorName / Password Safe platform fragments → vendor. Checked in order.
+_VENDOR_RULES = (
+    ("pingdirectory", ("ping identity", "pingdirectory", "ping directory", "unboundid")),
+    ("okta_ldap", ("okta",)),
+    ("freeipa", ("freeipa", "red hat idm")),
+    ("389ds", ("389", "fedora project", "red hat directory server")),
+    ("openldap", ("openldap",)),
+)
+OKTA_LDAP_READONLY_PLAYBOOKS = ("ldap-search.yml",)
 IDP_CLOUD = "saas"
 _MANAGED_REF_PREFIX = "psmanaged:"
 _AWS_TYPES = {"MicrosoftAD": "aws_managed_ad", "ADConnector": "aws_ad_connector",
@@ -148,7 +165,9 @@ def to_dict(row: ManagedDirectory) -> dict:
     """What the API returns. Never a credential — only where it lives."""
     return {
         "id": row.id, "name": row.name, "netbios": row.netbios, "cloud": row.cloud,
-        "provider": row.provider, "provider_label": PROVIDER_LABELS.get(row.provider, row.provider),
+        "provider": row.provider, "provider_label": _provider_label(row),
+        "vendor": row.vendor, "entitle_integration_id": row.entitle_integration_id,
+        "entitle_integration_name": row.entitle_integration_name,
         "source": row.source, "status": row.status, "edition": row.edition,
         "region": row.region, "locations": _jl(row.locations), "project": row.project,
         "directory_id": row.directory_id, "resource_name": row.resource_name,
@@ -174,6 +193,12 @@ def to_dict(row: ManagedDirectory) -> dict:
         "credential_kind": _credential_kind(row),
         "is_idp": row.provider in IDP_PROVIDERS,
     }
+
+
+def _provider_label(row) -> str:
+    if row.provider == "ldap" and row.vendor in LDAP_VENDORS:
+        return LDAP_VENDORS[row.vendor]
+    return PROVIDER_LABELS.get(row.provider, row.provider)
 
 
 def _credential_kind(row) -> str:
@@ -1051,32 +1076,64 @@ def _managed_ref_or_none(row) -> Optional[dict]:
         return None
 
 
+def okta_org(value: str) -> str:
+    """The Okta org name in ``acme``, ``acme.okta.com`` or ``acme.ldap.okta.com``."""
+    value = (value or "").strip().lower().rstrip(".")
+    value = re.sub(r"^[a-z]+://", "", value).split("/", 1)[0]
+    for suffix in (".ldap.okta.com", ".okta.com"):
+        if value.endswith(suffix):
+            value = value[:-len(suffix)]
+            break
+    return value if re.match(r"^[a-z0-9][a-z0-9-]{0,62}$", value) else ""
+
+
 def _normalize_onprem(*, name: str, provider: str, base_dn: str, host: str, port: int,
-                      use_ldaps: bool) -> tuple:
+                      use_ldaps: bool, vendor: str = "") -> dict:
     provider = (provider or "").strip().lower()
+    vendor = (vendor or "").strip().lower()
     name = (name or "").strip().lower().rstrip(".")
     base_dn = (base_dn or "").strip()
+    host = (host or "").strip()
     if provider == "onprem_ad" and _FQDN_RE.match(name):
         base_dn = base_dn or base_dn_for(name)
-    host = (host or "").strip()
+    if provider == "ldap" and vendor == "okta_ldap":
+        # Okta's LDAP Interface has one shape per org: LDAPS on 636 at
+        # <org>.ldap.okta.com, base DN dc=<org>,dc=okta,dc=com. Fill what was left blank.
+        org = okta_org(name) or okta_org(host)
+        if org:
+            host = host or f"{org}.ldap.okta.com"
+            base_dn = base_dn or f"dc={org},dc=okta,dc=com"
+            name = name or f"{org}.okta.com"
+        use_ldaps = True
+        port = port or 636
     port = int(port or (636 if use_ldaps else 389))
-    return provider, name, base_dn, host, port
+    return {"provider": provider, "name": name, "base_dn": base_dn, "host": host,
+            "port": port, "use_ldaps": bool(use_ldaps), "vendor": vendor}
 
 
 def onprem_problem(db: Session, *, name: str, provider: str, host: str, port: int = 0,
                    use_ldaps: bool = True, base_dn: str = "", agent_id: str,
-                   managed_account: dict) -> str:
+                   managed_account: dict, vendor: str = "") -> str:
     """Why an on-prem directory cannot be registered, or "" when it can.
 
     Returns rather than raises so a batch caller (the Password Safe import) can report
     each reason without turning an exception into response text."""
     from ..database import RemoteAgent
     from . import agent_service
-    provider, name, base_dn, host, port = _normalize_onprem(
-        name=name, provider=provider, base_dn=base_dn, host=host, port=port,
-        use_ldaps=use_ldaps)
+    n = _normalize_onprem(name=name, provider=provider, base_dn=base_dn, host=host,
+                          port=port, use_ldaps=use_ldaps, vendor=vendor)
+    provider, name, base_dn, host, port = (n["provider"], n["name"], n["base_dn"],
+                                           n["host"], n["port"])
     if provider not in ONPREM_PROVIDERS:
         return f"provider must be one of {', '.join(ONPREM_PROVIDERS)}"
+    if n["vendor"] and (provider != "ldap" or n["vendor"] not in LDAP_VENDORS):
+        return (f"vendor must be one of {', '.join(LDAP_VENDORS)}, and only for an LDAP "
+                f"directory")
+    if n["vendor"] == "okta_ldap":
+        if not (okta_org(name) or okta_org(host)):
+            return "an Okta LDAP Interface needs the org name, e.g. acme or acme.okta.com"
+        if port != 636 or not n["use_ldaps"]:
+            return "Okta's LDAP Interface is LDAPS on port 636 only"
     if provider == "onprem_ad" and not _FQDN_RE.match(name):
         return f"{name!r} is not a usable AD domain name (e.g. corp.example.com)"
     if provider == "ldap" and not (name and base_dn):
@@ -1103,7 +1160,7 @@ def onprem_problem(db: Session, *, name: str, provider: str, host: str, port: in
 def register_onprem(db: Session, *, name: str, provider: str, host: str, port: int = 0,
                     use_ldaps: bool = True, base_dn: str = "", agent_id: str,
                     managed_account: dict, created_by: str,
-                    workgroup: Optional[str] = None) -> ManagedDirectory:
+                    workgroup: Optional[str] = None, vendor: str = "") -> ManagedDirectory:
     """Record an on-prem AD or LDAP directory reached through a remote agent.
 
     The sibling of ``cloud_database_service.register_database`` with ``cloud='local'``:
@@ -1113,16 +1170,15 @@ def register_onprem(db: Session, *, name: str, provider: str, host: str, port: i
     and never stored here. Every refusal is :func:`onprem_problem`'s."""
     problem = onprem_problem(db, name=name, provider=provider, host=host, port=port,
                              use_ldaps=use_ldaps, base_dn=base_dn, agent_id=agent_id,
-                             managed_account=managed_account)
+                             managed_account=managed_account, vendor=vendor)
     if problem:
         raise DirectoryError(problem)
-    provider, name, base_dn, host, port = _normalize_onprem(
-        name=name, provider=provider, base_dn=base_dn, host=host, port=port,
-        use_ldaps=use_ldaps)
+    n = _normalize_onprem(name=name, provider=provider, base_dn=base_dn, host=host,
+                          port=port, use_ldaps=use_ldaps, vendor=vendor)
     row = ManagedDirectory(
-        name=name, cloud="local", provider=provider, source="registered",
-        status="available", agent_id=agent_id, host=host, port=port,
-        use_ldaps=bool(use_ldaps), base_dn=base_dn,
+        name=n["name"], cloud="local", provider=n["provider"], source="registered",
+        status="available", agent_id=agent_id, host=n["host"], port=n["port"],
+        use_ldaps=n["use_ldaps"], base_dn=n["base_dn"], vendor=n["vendor"] or None,
         credentials_ref=_MANAGED_REF_PREFIX + json.dumps({
             "system_id": managed_account["system_id"],
             "account_id": managed_account["account_id"],
@@ -1133,8 +1189,35 @@ def register_onprem(db: Session, *, name: str, provider: str, host: str, port: i
     db.commit()
     db.refresh(row)
     logger.info("directory: registered on-prem %s %s at %s:%s via agent %s",
-                provider, name, host, port, agent_id)
+                row.provider, row.name, row.host, row.port, agent_id)
     return row
+
+
+def vendor_for(vendor_name: str) -> str:
+    """An LDAP vendor key from a rootDSE ``vendorName`` (or a Password Safe platform
+    name), or "" when it is not one this dashboard treats differently."""
+    text = (vendor_name or "").lower()
+    for vendor, needles in _VENDOR_RULES:
+        if any(n in text for n in needles):
+            return vendor
+    return ""
+
+
+def run_refusal(row: ManagedDirectory, asset: str) -> str:
+    """Why this playbook may not run against this directory, or "".
+
+    Okta's LDAP Interface answers binds and searches only, so a write play would fail
+    halfway through its first task. Refusing it up front is a usability guard rather
+    than a security boundary: playbook filenames are operator-chosen, and Okta itself
+    rejects the write."""
+    if (row.vendor or "") == "okta_ldap":
+        base = os.path.basename((asset or "").replace("\\", "/"))
+        if base not in OKTA_LDAP_READONLY_PLAYBOOKS:
+            return (f"Okta's LDAP Interface is search-only, so {base or 'that playbook'} "
+                    f"cannot run against {row.name}. Use "
+                    f"{' or '.join(OKTA_LDAP_READONLY_PLAYBOOKS)}, or change users and "
+                    f"groups through the Okta identity provider instead.")
+    return ""
 
 
 def bind_identity(row: ManagedDirectory, account_name: str) -> str:

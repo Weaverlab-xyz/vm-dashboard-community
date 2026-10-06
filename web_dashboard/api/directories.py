@@ -30,6 +30,11 @@ Cloud identity providers (Entra ID, Okta, PingOne):
   POST   /api/directories/{id}/groups/{gid}/members/{uid}   — add (writes on, audited)
   DELETE /api/directories/{id}/groups/{gid}/members/{uid}   — remove (writes on, audited)
 
+Entitle (any directory):
+
+  GET    /api/directories/{id}/entitle-candidates   — the tenant's integrations, likely first
+  PUT    /api/directories/{id}/entitle-integration  — pin one ({"integration_id": ""} unpins)
+
 The admin password route is ``directories:write`` and refuses (409) when Password Safe
 manages the account — the dashboard then holds no valid copy.
 
@@ -100,6 +105,7 @@ class RegisterOnpremRequest(BaseModel):
     agent_id: str
     managed_account: ManagedAccountRef
     workgroup: Optional[str] = None
+    vendor: str = ""                # LDAP only: openldap | pingdirectory | okta_ldap | …
 
 
 class RegisterRequest(BaseModel):
@@ -264,7 +270,7 @@ def register_onprem(req: RegisterOnpremRequest, db: Session = Depends(get_db),
             db, name=req.name, provider=req.provider, host=req.host, port=req.port,
             use_ldaps=req.use_ldaps, base_dn=req.base_dn, agent_id=req.agent_id,
             managed_account=req.managed_account.model_dump(), created_by=user.username,
-            workgroup=req.workgroup)
+            workgroup=req.workgroup, vendor=req.vendor)
     except DirectoryError as e:
         raise HTTPException(status_code=400, detail=str(e))
     job_service.log_audit(db, user.username, "directory_register_onprem",
@@ -415,7 +421,8 @@ async def ps_import(req: PSDirectoryImportRequest, db: Session = Depends(get_db)
             continue
         spec = dict(name=cand["name"], provider=cand["provider"], host=cand["host"],
                     port=cand["port"], use_ldaps=cand["use_ldaps"], base_dn=item.base_dn,
-                    agent_id=item.agent_id, managed_account=ref)
+                    agent_id=item.agent_id, managed_account=ref,
+                    vendor=cand.get("vendor") or "")
         # The reason comes from onprem_problem's return, never from an exception's text
         # (CodeQL py/stack-trace-exposure): the same checks register_onprem enforces.
         problem = directory_service.onprem_problem(db, **spec)
@@ -690,3 +697,60 @@ async def idp_remove_member(directory_id: str, group_id: str, user_id: str,
                             db: Session = Depends(get_db),
                             user: User = Depends(require_explicit_permission("directories", "write"))):
     return await _change_membership(directory_id, group_id, user_id, "remove", db, user)
+
+
+# ── Entitle: which integration governs this directory ─────────────────────────
+#
+# Pinned by an operator, never inferred. Read-only against Entitle: nothing is created
+# there, and the pin is only a label on this row.
+
+class EntitleLinkRequest(BaseModel):
+    integration_id: str = ""        # "" unpins
+
+
+@router.get("/{directory_id}/entitle-candidates")
+async def entitle_candidates(directory_id: str, db: Session = Depends(get_db),
+                             user: User = Depends(require_explicit_permission("directories", "write"))):
+    from ..services import entitle_directory_link as link
+    row = _row_or_404(db, directory_id, user)
+    if not link.configured():
+        return {"configured": False, "integrations": [],
+                "reason": "Entitle is not configured — set its API URL and token in "
+                          "Settings → Integrations → Entitle."}
+    try:
+        items = await link.list_integrations(row.provider)
+    except link.EntitleLinkError as e:
+        return {"configured": True, "integrations": [], "error": str(e)}
+    return {"configured": True, "integrations": items,
+            "pinned": row.entitle_integration_id or ""}
+
+
+@router.put("/{directory_id}/entitle-integration")
+async def pin_entitle_integration(directory_id: str, req: EntitleLinkRequest,
+                                  db: Session = Depends(get_db),
+                                  user: User = Depends(require_explicit_permission("directories", "write"))):
+    """Pin (or with "" unpin) the Entitle integration that governs this directory. The id
+    is checked against Entitle's own list, and the NAME recorded is Entitle's."""
+    from datetime import datetime
+    from ..services import entitle_directory_link as link
+    row = _row_or_404(db, directory_id, user)
+    wanted = (req.integration_id or "").strip()
+    name = ""
+    if wanted:
+        try:
+            items = await link.list_integrations(row.provider)
+        except link.EntitleLinkError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        found = next((i for i in items if i["id"] == wanted), None)
+        if not found:
+            raise HTTPException(status_code=400,
+                                detail="That integration is not in this Entitle tenant.")
+        name = found["name"]
+    row.entitle_integration_id = wanted or None
+    row.entitle_integration_name = name or None
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(row)
+    job_service.log_audit(db, user.username, "directory_entitle_pin", details={
+        "directory": row.name, "integration_id": wanted, "integration_name": name})
+    return directory_service.to_dict(row)

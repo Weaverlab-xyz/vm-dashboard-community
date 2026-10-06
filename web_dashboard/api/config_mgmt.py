@@ -736,6 +736,10 @@ def _resolve_agent_target(payload: "RunRequest", db) -> dict:
             raise HTTPException(
                 status_code=400,
                 detail=f"That directory is not reachable through agent '{agent.name}'.")
+        from ..services import directory_service
+        refusal = directory_service.run_refusal(row, getattr(payload, "asset", "") or "")
+        if refusal:
+            raise HTTPException(status_code=400, detail=refusal)
         transport = (payload.transport or "local").strip().lower()
         if transport not in ("local", "winrm"):
             raise HTTPException(
