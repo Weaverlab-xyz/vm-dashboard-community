@@ -173,7 +173,10 @@ _NAV_SCOPE = {
     "connections": "connections", "aws": "aws", "azure": "azure", "gcp": "gcp",
     "oci": "oci", "containers": "containers", "images": "images", "storage": "storage",
     "databases": "cloud_database", "functions": "cloud_function", "k8s": "k8s",
-    "directories": "directories",
+    # "directories" is absent while it is a PREVIEW flag (see
+    # test_preview_sections_are_excluded_rather_than_listed). Unlike the Workload Lab it
+    # already has a scope of its own, `directories`, enforced on every route; put
+    # `"directories": "directories"` back here when it graduates.
     "costs": "costs", "config_mgmt": "config_mgmt", "inventory": "inventory",
     "agents": "agents", "audit": "audit",
 }

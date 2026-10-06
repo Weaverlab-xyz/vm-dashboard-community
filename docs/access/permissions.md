@@ -182,14 +182,15 @@ The rest are one per navigation section:
 | `ot` | read, write, delete | the OT demo cell and its protocol tunnels. Building a cell also needs the cloud's own `write` |
 | `change_windows` | write, use | `write` defines change windows and recurring schedules; `use` approves a booked change. No `read`: every run form reads windows. Both levels need an **explicit** grant — see [If a user reports a 403](#if-a-user-reports-a-403) |
 
-Preview features have no scope of their own. They are turned on and off in Settings →
-Preview features, and each is gated like this:
+Preview features are turned on and off in Settings → Preview features. All but one have
+no scope of their own; each is gated like this:
 
 | Preview feature | Gate |
 |---|---|
 | Virtual Desktops | administrator |
 | Certificate Lab, SPIRE Lab | `cloud_function:read` to see, `cloud_function:write` to change |
 | Agent Cell | `config_mgmt:write` |
+| Directories | its own `directories` scope (read, write, delete), which must be granted explicitly. See [Directories → Permissions](../cloud/directories.md#permissions) |
 
 ## Giving a customer read access to their own POV
 

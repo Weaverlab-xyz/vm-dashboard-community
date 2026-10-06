@@ -106,7 +106,7 @@ _FLAG_LABELS = {
     "xcpng_enabled": "XCP-ng",
     "vdesktops_enabled": "Virtual desktops",
     "cloud_database_enabled": "Cloud databases",
-    "directories_enabled": "Managed Active Directory",
+    "directories_enabled": "Directories",
     "cloud_functions_enabled": "Cloud functions",
     "cert_lab_enabled": "Certificate Lab",
     "spire_lab_enabled": "SPIRE Lab",
