@@ -155,6 +155,7 @@ ot_ps_checkout_converge ot_aws_require_private_subnet ot_purdue_firewall_enabled
 ot_entitle_egress_cidrs ot_dmz_egress_open_ports ot_config_runner_source_cidr
 passwordsafe_vault_sync_enabled passwordsafe_vault_sync_converge
 passwordsafe_vault_sync_platform passwordsafe_vault_sync_functional_account
+windows_ssh_enabled windows_rdp_default
 """.split())
 
 # ADDED since the split, deliberately: the four `passwordsafe_vault_sync_*` keys — the
@@ -226,6 +227,13 @@ passwordsafe_vault_sync_platform passwordsafe_vault_sync_functional_account
 # have to be findable here for a second reason — all three deploy guards refuse by name
 # and send the operator to "Settings → Integrations → Privileged Remote Access", so a key
 # declared and unbound would make the remedy a dead end.
+
+# ADDED since the split, deliberately: `windows_ssh_enabled` and `windows_rdp_default`.
+# A Windows server build used to get a Remote RDP jump and nothing else; it now switches
+# on OpenSSH at first boot and gets a Shell Jump, with the RDP jump opt-in per deploy
+# (services/windows_server_hook.access_modes). On the PRA panel beside
+# `pra_windows_vault_account_group_id`, because both decide which jump items a Windows
+# build gets and neither names a Password Safe object.
 
 # RETIRED, deliberately absent from LEGACY_KEYS above: the six `k8s_token_sync_*` keys
 # (enabled / interval_minutes / request_duration_min / max_per_pass / max_failures /
