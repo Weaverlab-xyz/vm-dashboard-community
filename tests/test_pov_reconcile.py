@@ -360,6 +360,42 @@ def test_the_interval_has_a_floor():
         pr.interval_seconds = saved
 
 
+
+# ── /jobs noise: hidden by default, pruned on the same terms ─────────────────────
+
+def test_a_reconcile_pass_is_a_routine_job_on_jobs():
+    """144 rows a day at the ten-minute default, every one enqueued by `system`. Out of
+    ROUTINE_JOB_TYPES they bury a real provision off the first page of /jobs in hours."""
+    from web_dashboard.services import job_service
+    assert pr.RECONCILE_JOB_TYPE in job_service.ROUTINE_JOB_TYPES
+
+
+def test_the_pass_prunes_its_own_type_and_no_other():
+    """The prune's job_type is the load-bearing filter: a deploy Job row IS a VM's
+    inventory record, so pruning any other type would delete VMs from the dashboard."""
+    from web_dashboard.services import expiry_reaper
+    seen = []
+    real = expiry_reaper.prune_sweep_history
+    expiry_reaper.prune_sweep_history = lambda db, *, job_type: seen.append(job_type) or 3
+    try:
+        assert pr._prune_history(object()) == 3
+    finally:
+        expiry_reaper.prune_sweep_history = real
+    assert seen == [pr.RECONCILE_JOB_TYPE], seen
+
+
+def test_a_failed_prune_does_not_fail_the_pass():
+    from web_dashboard.services import expiry_reaper
+    real = expiry_reaper.prune_sweep_history
+
+    def boom(db, *, job_type):
+        raise RuntimeError("db exploded mid-prune")
+    expiry_reaper.prune_sweep_history = boom
+    try:
+        assert pr._prune_history(object()) == 0
+    finally:
+        expiry_reaper.prune_sweep_history = real
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

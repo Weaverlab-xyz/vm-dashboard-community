@@ -113,7 +113,9 @@ suspend an environment and the POV page would go on saying `running` indefinitel
 gates the Start button on that value, so the environment you most needed to wake was the one
 whose Start button was hidden. A **reconcile sweep** (`services/pov_reconcile`) now reads
 every managed environment back every ten minutes — one paginated collection read — and the
-POV page shows when each row was last confirmed rather than implying it is live.
+POV page shows when each row was last confirmed rather than implying it is live. Each pass
+is a `pov_env_reconcile` job; completed ones are hidden on Job History unless you tick
+**Show routine sweeps**, and are pruned on the same retention as the other sweeps.
 
 **Collections paginate by count/offset.** A single GET returns a first page that looks
 exactly like a complete answer, so listings are walked to the end.

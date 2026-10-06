@@ -40,8 +40,12 @@ ACTIVE_STATUSES = ("queued", "pending", "running")
 # deletes exactly the set that is hidden, so "hidden" and "eventually discarded" never
 # disagree.
 #
+# ``pov_env_reconcile`` is the third: the POV instance's ten-minute platform read-back
+# (``pov_reconcile``), 144 rows/day, enqueued by ``system`` and prunes its own history the
+# same way ``schedule_sweep`` does.
+#
 # Display and retention only — nothing authorizes off this tuple.
-ROUTINE_JOB_TYPES = ("expiry_sweep", "schedule_sweep")
+ROUTINE_JOB_TYPES = ("expiry_sweep", "schedule_sweep", "pov_env_reconcile")
 
 # The same noise, one level down. A job type here is unattended for SOME of its rows and
 # operator work for the rest, told apart by the verb in its metadata — so it cannot join
