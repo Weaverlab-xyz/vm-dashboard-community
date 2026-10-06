@@ -118,14 +118,14 @@ def _tf_env(tenant: Optional[dict] = None) -> dict:
     return env
 
 
-def _vault_password_account_hcl(*, label: str, password_var: str, account_name: str,
+def _vault_password_account_hcl(*, label: str, tf_var_name: str, account_name: str,
                                 username: str, description: str,
                                 group_id: Optional[int], jump_name: str,
                                 jump_resource: str, jump_label: str) -> str:
     """One ``sra_vault_username_password_account`` injected into ONE jump item.
 
     Shared by the Remote RDP jump and the Windows Shell Jump. The password is never in
-    the HCL: it is ``var.<password_var>``, supplied as a sensitive TF_VAR.
+    the HCL: it is ``var.<tf_var_name>``, supplied as a sensitive TF_VAR.
 
     Schema (provider v1.3.0): jump_item_association is a SINGLE nested attribute.
     `criteria` and every sub-field are optional+COMPUTED — force them to empty [] and the
@@ -142,7 +142,7 @@ def _vault_password_account_hcl(*, label: str, password_var: str, account_name: 
 resource "sra_vault_username_password_account" "{label}" {{
   name        = {json.dumps(account_name)}
   username    = {json.dumps(username)}
-  password    = var.{password_var}
+  password    = var.{tf_var_name}
   description = "Auto-provisioned by Infrastructure Management Dashboard ({description})"
 {group_line}  jump_item_association = {{
     filter_type = "criteria"
@@ -192,7 +192,7 @@ def _generate_hcl(
     if vault_account_name:
         var_block = 'variable "ssh_password"     { sensitive = true }\n'
         vault_block = _vault_password_account_hcl(
-            label="ssh_admin", password_var="ssh_password",
+            label="ssh_admin", tf_var_name="ssh_password",
             account_name=vault_account_name, username=vault_username,
             description="Windows server", group_id=vault_account_group_id,
             jump_name=vm_name, jump_resource="sra_shell_jump", jump_label=safe_name)
@@ -1348,7 +1348,7 @@ def _generate_rdp_hcl(
     if vault_account_name:
         var_block = 'variable "rdp_password"     { sensitive = true }\n'
         vault_block = _vault_password_account_hcl(
-            label="rdp_admin", password_var="rdp_password",
+            label="rdp_admin", tf_var_name="rdp_password",
             account_name=vault_account_name, username=q_user,
             description="VDI desktop", group_id=vault_account_group_id,
             jump_name=name, jump_resource="sra_remote_rdp", jump_label=safe_name)
