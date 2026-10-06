@@ -35,6 +35,9 @@
 # may reach anything on this subnet".
 # 443 vCenter/ESXi and XCP-ng XAPI, 8006 Proxmox VE, 9440 Nutanix Prism,
 # 5985/5986 WinRM. Trim this to the products you actually run.
+# For a Directories scan (agent 2.8.0+), add 389/636 on the range your domain
+# controllers or LDAP servers are in. That scan only reads the anonymous rootDSE and
+# never binds.
 targets:
   - cidr: 10.20.0.0/24
     ports: [443, 8006, 9440, 5985, 5986]
@@ -187,7 +190,7 @@ job_types:
 # yourself; the agent will not:
 #
 #   docker pull chrweav/ansible-winrm:latest     # VM targets  (SSH and WinRM)
-#   docker pull chrweav/ansible-cloud:latest     # database targets (localhost play)
+#   docker pull chrweav/ansible-cloud:latest     # database and directory targets
 #
 # Name only the one you need — a run of a kind with no image is refused, by name.
 #
@@ -195,15 +198,24 @@ job_types:
 #   enabled: true
 #   vm_image: chrweav/ansible-winrm:latest
 #   db_image: chrweav/ansible-cloud:latest
+#   # On-prem AD / LDAP directory runs (agent 2.8.0+). Blank falls back to db_image,
+#   # which carries python-ldap, pywinrm and microsoft.ad, so this is only needed for a
+#   # different image.
+#   # directory_image: chrweav/ansible-cloud:latest
 #
 #   # Where a playbook may be applied. Its own list, NOT the `targets:` one above.
-#   # Name the ports: 22 for Linux over SSH, 5985/5986 for Windows over WinRM, and the
-#   # database port for a database target (5432 postgres, 3306 mysql, 1433 sqlserver).
+#   # Name the ports: 22 for Linux over SSH, 5985/5986 for Windows over WinRM, the
+#   # database port for a database target (5432 postgres, 3306 mysql, 1433 sqlserver),
+#   # and for a directory 389 or 636 (LDAP runs) plus 5986 on the DC or management host
+#   # (WinRM runs). A GCE server joined through a GCP DNS link is reached on 5986 too,
+#   # so its subnet belongs here as well.
 #   targets:
 #     - cidr: 10.20.10.0/24
 #       ports: [22, 5985, 5986]
 #     # - cidr: 10.20.20.0/24
 #     #   ports: [5432]
+#     # - cidr: 10.20.30.0/28        # domain controllers
+#     #   ports: [636, 5986]
 #
 #   # Ceiling on one run, after which the container is stopped. Guards against a playbook
 #   # that hangs waiting on something that will never answer.
