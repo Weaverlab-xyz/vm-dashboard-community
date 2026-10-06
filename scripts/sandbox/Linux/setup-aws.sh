@@ -321,6 +321,12 @@ aws ec2 authorize-security-group-egress --region "$REGION" --group-id "$VM_SG" \
   --ip-permissions '[{"IpProtocol":"tcp","FromPort":80,"ToPort":80,"IpRanges":[{"CidrIp":"0.0.0.0/0"}]},{"IpProtocol":"tcp","FromPort":443,"ToPort":443,"IpRanges":[{"CidrIp":"0.0.0.0/0"}]},{"IpProtocol":"tcp","FromPort":53,"ToPort":53,"IpRanges":[{"CidrIp":"0.0.0.0/0"}]},{"IpProtocol":"udp","FromPort":53,"ToPort":53,"IpRanges":[{"CidrIp":"0.0.0.0/0"}]}]' >/dev/null 2>&1 || true
 aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$VM_SG" \
   --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":22,\"ToPort\":22,\"UserIdGroupPairs\":[{\"GroupId\":\"$JUMPOINT_SG\"}]}]" >/dev/null 2>&1 || true
+# RDP from the Gateway too: a Windows server's opt-in Remote RDP jump, and its fallback
+# when OpenSSH does not come up. Separate call so an existing 22 rule (a re-run) does not
+# make AWS reject the pair as a duplicate. Sourced by SG, so the Gateway's secondary
+# (network-tunnel lease) addresses match as well.
+aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$VM_SG" \
+  --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":3389,\"ToPort\":3389,\"UserIdGroupPairs\":[{\"GroupId\":\"$JUMPOINT_SG\"}]}]" >/dev/null 2>&1 || true
 
 # DB SG: attached to dashboard-managed RDS instances (the /databases feature).
 # The PRA protocol tunnel terminates on the Jumpoint, which then dials the
@@ -344,7 +350,7 @@ aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$NAT_SG"
   --ip-permissions '[{"IpProtocol":"-1","IpRanges":[{"CidrIp":"10.99.0.0/16"}]}]' >/dev/null 2>&1 || true
 
 ok "Jumpoint SG $JUMPOINT_SG (default egress 0.0.0.0/0)"
-ok "VM SG       $VM_SG (egress: VPC + internet 80/443/53; ingress 22/tcp from Jumpoint SG)"
+ok "VM SG       $VM_SG (egress: VPC + internet 80/443/53; ingress 22+3389/tcp from Jumpoint SG)"
 ok "DB SG       $DB_SG (ingress 5432/3306/1433 from Jumpoint SG; no egress)"
 ok "NAT SG      $NAT_SG (ingress all from VPC; egress all — for the on-demand NAT instance)"
 state_write aws jumpoint_sg "$JUMPOINT_SG"

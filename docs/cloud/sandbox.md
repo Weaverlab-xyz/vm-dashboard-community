@@ -181,7 +181,7 @@ Security groups:
     ingress: none — egress-only; the Gateway dials out, nothing connects in
   dashboard-sandbox-vm-sg
     egress: 10.99.0.0/16 only — no internet
-    ingress: tcp/22 from dashboard-sandbox-jumpoint-sg
+    ingress: tcp/22 and tcp/3389 from dashboard-sandbox-jumpoint-sg  (Shell Jump; Windows RDP jump)
   dashboard-sandbox-fn-vpce-sg
     ingress: tcp/443 from 10.99.0.0/16  (Secrets Manager interface endpoint)
 
@@ -316,6 +316,8 @@ Firewall rules:
     ingress, all protos, source 10.99.0.0/16
   dashboard-sandbox-allow-ssh-from-jumpoint
     ingress tcp/22, source-tag bt-jumpoint, target-tag dashboard-sandbox-vm
+  dashboard-sandbox-allow-rdp-from-jumpoint                [Windows RDP jump]
+    ingress tcp/3389, source-tag bt-jumpoint, target-tag dashboard-sandbox-vm
   dashboard-sandbox-allow-ssh-from-k8s                   [co-located GKE agent]
     ingress tcp/22, source = k8s node subnet + GKE pod range, target-tag dashboard-sandbox-vm
   dashboard-sandbox-deny-vm-egress

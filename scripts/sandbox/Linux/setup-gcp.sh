@@ -325,6 +325,17 @@ gcloud compute firewall-rules create "${NAME}-allow-ssh-from-jumpoint" \
   --source-tags "$NETWORK_TAG_JP" --target-tags "$NETWORK_TAG_VM" \
   --quiet >/dev/null 2>&1 || true
 
+# RDP from Jumpoint → user VMs: a Windows server's opt-in Remote RDP jump, and its
+# fallback when OpenSSH does not come up. allow-internal already admits it, but at the
+# lowest priority and only where the supernet was widened for this region; this states
+# it, scoped like the SSH rule.
+gcloud compute firewall-rules create "${NAME}-allow-rdp-from-jumpoint" \
+  --project "$PROJECT_ID" --network "$VPC" \
+  --direction INGRESS --priority 1000 \
+  --action ALLOW --rules tcp:3389 \
+  --source-tags "$NETWORK_TAG_JP" --target-tags "$NETWORK_TAG_VM" \
+  --quiet >/dev/null 2>&1 || true
+
 # Parity for a CO-LOCATED GKE cluster (PR #370): let the Entitle agent (pods AND
 # nodes) SSH sandbox VMs on :22 to enumerate accounts. Pod IPs aren't masqueraded to
 # RFC1918 dests, so source by BOTH the k8s node subnet and the GKE pod secondary range
@@ -368,7 +379,7 @@ gcloud compute firewall-rules create "${NAME}-allow-vm-egress-vpc" \
        --project "$PROJECT_ID" --destination-ranges "$GCP_SANDBOX_SUPERNET" \
        --quiet >/dev/null 2>&1 || true
 
-ok "Firewall rules: allow-internal, allow-ssh-from-jumpoint, allow-ssh-from-k8s, deny-vm-egress, allow-vm-egress-vpc"
+ok "Firewall rules: allow-internal, allow-ssh-from-jumpoint, allow-rdp-from-jumpoint, allow-ssh-from-k8s, deny-vm-egress, allow-vm-egress-vpc"
 
 # ── 4b. Private Services Access + Cloud SQL reachability (managed databases) ──
 # The cloud-database feature provisions a PRIVATE Cloud SQL Postgres instance
@@ -724,6 +735,7 @@ Sandbox topology summary
   Firewall:
     • allow-internal      : within $GCP_SANDBOX_SUPERNET
     • allow-ssh-from-jumpoint : tag $NETWORK_TAG_JP → tag $NETWORK_TAG_VM, tcp/22
+    • allow-rdp-from-jumpoint : tag $NETWORK_TAG_JP → tag $NETWORK_TAG_VM, tcp/3389
     • allow-ssh-from-k8s  : ${GCP_CIDR_PREFIX}.3.0/24,${GCP_CIDR_PREFIX}.128.0/18 (co-located GKE nodes+pods) → tag $NETWORK_TAG_VM, tcp/22
     • deny-vm-egress      : tag $NETWORK_TAG_VM → 0.0.0.0/0 (any proto)
     • allow-vm-egress-vpc : tag $NETWORK_TAG_VM → $GCP_SANDBOX_SUPERNET

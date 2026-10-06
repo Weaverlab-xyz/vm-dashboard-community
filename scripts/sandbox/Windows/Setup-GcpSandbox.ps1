@@ -279,6 +279,14 @@ gcloud compute firewall-rules create "$Name-allow-ssh-from-jumpoint" `
     --action ALLOW --rules tcp:22 `
     --source-tags $NetTagJp --target-tags $NetTagVm --quiet 2>$null | Out-Null
 
+# RDP from Jumpoint -> user VMs: a Windows server's opt-in Remote RDP jump, and its
+# fallback when OpenSSH does not come up. allow-internal already admits it, but at the
+# lowest priority; this states it, scoped like the SSH rule.
+gcloud compute firewall-rules create "$Name-allow-rdp-from-jumpoint" `
+    --project $ProjectId --network $Vpc --direction INGRESS --priority 1000 `
+    --action ALLOW --rules tcp:3389 `
+    --source-tags $NetTagJp --target-tags $NetTagVm --quiet 2>$null | Out-Null
+
 # Parity for a CO-LOCATED GKE cluster (PR #370): let the Entitle agent (pods AND nodes)
 # SSH sandbox VMs on :22. Pod IPs aren't masqueraded to RFC1918 dests, so source by BOTH
 # the k8s node subnet and the GKE pod secondary range (pod IPs carry no tag).
@@ -308,7 +316,7 @@ if ($LASTEXITCODE -ne 0) {
         --project $ProjectId --destination-ranges $Supernet --quiet 2>$null | Out-Null
 }
 
-Write-Ok 'Firewall rules: allow-internal, allow-ssh-from-jumpoint, deny-vm-egress, allow-vm-egress-vpc'
+Write-Ok 'Firewall rules: allow-internal, allow-ssh-from-jumpoint, allow-rdp-from-jumpoint, deny-vm-egress, allow-vm-egress-vpc'
 
 # ── 4b. Private Services Access + Cloud SQL reachability (managed databases) ──
 # Private-IP Cloud SQL needs a reserved IP range + a servicenetworking VPC
@@ -656,6 +664,7 @@ Sandbox topology summary
   Firewall:
     • allow-internal      : within $Supernet
     • allow-ssh-from-jumpoint : tag $NetTagJp → tag $NetTagVm, tcp/22
+    • allow-rdp-from-jumpoint : tag $NetTagJp → tag $NetTagVm, tcp/3389
     • allow-ssh-from-k8s  : ${CidrPrefix}.3.0/24,${CidrPrefix}.128.0/18 (co-located GKE nodes+pods) → tag $NetTagVm, tcp/22
     • deny-vm-egress      : tag $NetTagVm → 0.0.0.0/0 (any proto)
     • allow-vm-egress-vpc : tag $NetTagVm → $Supernet

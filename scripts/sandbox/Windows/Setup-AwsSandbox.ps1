@@ -285,6 +285,12 @@ aws ec2 authorize-security-group-egress --region $Region --group-id $VmSg `
 $ingressJson = "[{`"IpProtocol`":`"tcp`",`"FromPort`":22,`"ToPort`":22,`"UserIdGroupPairs`":[{`"GroupId`":`"$JumpointSg`"}]}]"
 aws ec2 authorize-security-group-ingress --region $Region --group-id $VmSg `
     --ip-permissions $ingressJson 2>$null | Out-Null
+# RDP from the Gateway too: a Windows server's opt-in Remote RDP jump, and its fallback
+# when OpenSSH does not come up. Separate call so an existing 22 rule (a re-run) does not
+# make AWS reject the pair as a duplicate.
+$rdpJson = "[{`"IpProtocol`":`"tcp`",`"FromPort`":3389,`"ToPort`":3389,`"UserIdGroupPairs`":[{`"GroupId`":`"$JumpointSg`"}]}]"
+aws ec2 authorize-security-group-ingress --region $Region --group-id $VmSg `
+    --ip-permissions $rdpJson 2>$null | Out-Null
 
 # DB SG: attached to dashboard-managed RDS instances (the /databases feature).
 # The PRA protocol tunnel terminates on the Jumpoint, which then dials the
@@ -305,7 +311,7 @@ aws ec2 authorize-security-group-ingress --region $Region --group-id $NatSg `
     --ip-permissions '[{"IpProtocol":"-1","IpRanges":[{"CidrIp":"10.99.0.0/16"}]}]' 2>$null | Out-Null
 
 Write-Ok "Jumpoint SG $JumpointSg (default egress 0.0.0.0/0)"
-Write-Ok "VM SG       $VmSg (egress: VPC + internet 80/443/53; ingress 22/tcp from Jumpoint SG)"
+Write-Ok "VM SG       $VmSg (egress: VPC + internet 80/443/53; ingress 22+3389/tcp from Jumpoint SG)"
 Write-Ok "DB SG       $DbSg (ingress 5432/3306/1433 from Jumpoint SG; no egress)"
 Write-Ok "NAT SG      $NatSg (ingress all from VPC; egress all — for the on-demand NAT instance)"
 Set-StateValue aws jumpoint_sg $JumpointSg
