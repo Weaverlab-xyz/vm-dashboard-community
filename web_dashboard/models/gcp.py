@@ -80,6 +80,9 @@ class GCPDeployRequest(ScheduleRequestMixin, BaseModel):
     # with the computer object in ad_ou (blank = directory_join_default_ou).
     ad_directory_id: Optional[str] = None
     ad_ou: str = ""
+    # Windows only: also create a PRA Remote RDP jump beside the SSH Shell Jump.
+    # None = the windows_rdp_default setting.
+    enable_rdp: Optional[bool] = None
     # Password Safe onboarding method for THIS deploy, overriding the cloud default
     # (services/ps_vm_hook._resolve_method). Blank everywhere but a network cell,
     # whose VyOS guest runs none of the agents the cloud-native plugins drive.
@@ -122,6 +125,7 @@ class GCPBulkDeployRequest(ScheduleRequestMixin, BaseModel):
     register_in_passwordsafe: bool = False
     ad_directory_id: Optional[str] = None   # Windows only — see GCPDeployRequest
     ad_ou: str = ""
+    enable_rdp: Optional[bool] = None       # Windows only — see GCPDeployRequest
     ssh_key_secret_override: Optional[str] = None
     jump_group: Optional[str] = None
     jumpoint_name: Optional[str] = None

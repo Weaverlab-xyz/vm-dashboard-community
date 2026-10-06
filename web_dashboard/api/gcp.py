@@ -547,8 +547,8 @@ async def get_instance_admin_password(
             status_code=409,
             detail=(f"Password Safe manages the administrator account on {instance_name} "
                     f"(managed account {meta.get('ps_managed_account_id')}). Check the "
-                    "credential out from Password Safe, or connect through the PRA RDP "
-                    "jump item, which injects it."))
+                    "credential out from Password Safe, or connect through the PRA Shell Jump "
+                    "(or RDP jump), which injects it."))
     backend, ref = meta.get("admin_password_backend"), meta.get("admin_password_ref")
     if not (backend and ref):
         raise HTTPException(status_code=404,
@@ -800,6 +800,7 @@ async def bulk_deploy_instances(
             register_in_passwordsafe=req.register_in_passwordsafe,
             ad_directory_id=req.ad_directory_id,
             ad_ou=req.ad_ou,
+            enable_rdp=req.enable_rdp,
             ssh_key_secret_override=req.ssh_key_secret_override,
             jump_group=req.jump_group,
             jumpoint_name=req.jumpoint_name,

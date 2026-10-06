@@ -1233,9 +1233,15 @@ class Settings(BaseSettings):
     # to corrupt. "aci" starts a dedicated ACI container group per deploy (Shell Jump
     # only; ACI cannot protocol-tunnel). Batches always share one ACI group.
     azure_vm_jumpoint_mode: str = "shared"        # "shared" | "aci"
-    # PRA Vault account group for the RDP jump's vaulted administrator credential on
-    # Windows server builds (Azure + AWS). Unused when Password Safe owns the account.
+    # PRA Vault account group for the vaulted administrator credential on Windows server
+    # builds (Azure, AWS, GCP) -- injected into the Shell Jump and/or the RDP jump.
+    # Unused when Password Safe owns the account.
     pra_windows_vault_account_group_id: str = ""
+    # How Windows server builds are reached through PRA (services/windows_server_hook).
+    # SSH: OpenSSH Server is switched on at first boot and the VM gets a Shell Jump.
+    # RDP is opt-in per deploy; this is the checkbox's default. SSH off forces RDP on.
+    windows_ssh_enabled: bool = True
+    windows_rdp_default: bool = False
     # Windows server builds: Entra ID join (Azure only — services/windows_server_hook).
     # The per-deploy checkbox defaults to these; the group lists are Entra group OBJECT
     # ids (comma-separated) granted Virtual Machine Administrator / User Login on each

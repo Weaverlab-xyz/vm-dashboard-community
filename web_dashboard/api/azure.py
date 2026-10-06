@@ -513,8 +513,8 @@ async def get_vm_admin_password(
                 status_code=409,
                 detail=(f"Password Safe manages the administrator account on '{vm_name}' "
                         f"(managed account {meta.get('ps_managed_account_id')}). Check the "
-                        "credential out from Password Safe, or connect through the PRA RDP "
-                        "jump item, which injects it."),
+                        "credential out from Password Safe, or connect through the PRA Shell Jump "
+                        "(or RDP jump), which injects it."),
             )
         if meta.get("admin_password_ref"):
             backend = meta.get("admin_password_backend") or "database"

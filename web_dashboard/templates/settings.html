@@ -3027,14 +3027,38 @@
               </p>
             </div>
             <div class="mb-3">
-              <label class="block text-sm font-medium text-gray-700 mb-1">Vault account group — Windows server RDP jumps</label>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Vault account group — Windows server jumps</label>
               <input type="text" x-model="panelCfg.pra_windows_vault_account_group_id"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                      placeholder="numeric id (optional)">
               <p class="text-xs text-gray-400 mt-1">
-                Where a Windows server build's administrator credential is vaulted for RDP
-                injection (Azure + AWS). Not used when Password Safe manages the account —
-                PRA then injects it through its Password Safe integration.
+                Where a Windows server build's administrator credential is vaulted for
+                injection into its Shell Jump and RDP jump (Azure, AWS, GCP). Not used when
+                Password Safe manages the account — PRA then injects it through its Password
+                Safe integration.
+              </p>
+            </div>
+            <div class="mb-3">
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" x-model="panelCfg.windows_ssh_enabled" class="rounded text-blue-600">
+                Windows servers: reach them over SSH (Shell Jump)
+              </label>
+              <p class="text-xs text-gray-400 mt-1">
+                A Windows build switches on OpenSSH Server at first boot and gets a Shell Jump
+                on port 22 that opens in PowerShell. Server 2019 and 2022 download OpenSSH from
+                Windows Update, so the VM needs outbound access. If OpenSSH does not come up,
+                the build gets an RDP jump instead, with a warning on the job. Unchecked, every
+                Windows build gets an RDP jump.
+              </p>
+            </div>
+            <div class="mb-3">
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" x-model="panelCfg.windows_rdp_default" class="rounded text-blue-600">
+                Windows servers: also create an RDP jump by default
+              </label>
+              <p class="text-xs text-gray-400 mt-1">
+                The default for the deploy form's <em>Also enable RDP</em> checkbox. Each deploy
+                can still change it.
               </p>
             </div>
             <div class="mb-3">

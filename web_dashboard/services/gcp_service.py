@@ -1150,13 +1150,24 @@ def _set_windows_key_sync(project_id: str, zone: str, instance_name: str,
     op.result(timeout=120)
 
 
-def _serial_port_4_sync(project_id: str, zone: str, instance_name: str) -> str:
+def _serial_port_sync(project_id: str, zone: str, instance_name: str, port: int) -> str:
     _require_compute()
     from google.cloud import compute_v1
     client = compute_v1.InstancesClient(credentials=_gcp_creds())
     out = client.get_serial_port_output(project=project_id, zone=zone,
-                                        instance=instance_name, port=4)
+                                        instance=instance_name, port=port)
     return out.contents or ""
+
+
+def _serial_port_4_sync(project_id: str, zone: str, instance_name: str) -> str:
+    return _serial_port_sync(project_id, zone, instance_name, 4)
+
+
+async def serial_port_output(project_id: str, zone: str, instance_name: str, *,
+                             port: int = 1) -> str:
+    """The retained output of one serial port. Port 1 is where GCE's metadata-script
+    runner logs what a startup script prints; raises until the instance is up."""
+    return await _to_thread(_serial_port_sync, project_id, zone, instance_name, port)
 
 
 def parse_windows_password_reply(serial: str, modulus_b64: str) -> Optional[dict]:
@@ -3936,6 +3947,11 @@ def _fetch_cloud_run_job_logs(project_id: str, job_name: str, execution_name: st
     return "\n".join(lines)
 
 
+def _windows_ssh_args(windows: bool) -> str:
+    from . import ansible_vm_cmd
+    return ansible_vm_cmd.windows_ssh_args() if windows else ""
+
+
 def _run_cloud_run_ansible_sync(
     project_id: str, region: str, image: str,
     target_ip: str, ansible_user: str,
@@ -3946,6 +3962,7 @@ def _run_cloud_run_ansible_sync(
     service_account: str = "",
     ps_env: dict | None = None,
     runner_fetch: dict | None = None,
+    windows: bool = False,
 ) -> tuple:
     """
     Create a Cloud Run Job that runs a single Ansible playbook, wait for it to
@@ -3985,7 +4002,7 @@ def _run_cloud_run_ansible_sync(
         "--forks 1 "
         f"-u {ansible_user} "
         "--private-key /tmp/ssh_key "
-        + _secret_ev +
+        + _windows_ssh_args(windows) + _secret_ev +
         "--ssh-extra-args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' "
         "/tmp/playbook.yml"
     )
@@ -4105,6 +4122,7 @@ async def run_cloud_run_ansible_task(
     secret_entries: list | None = None, manifest_b64: str = "",
     ps_env: dict | None = None,
     runner_fetch: dict | None = None,
+    windows: bool = False,
 ) -> tuple:
     """
     Run an Ansible playbook via a GCP Cloud Run Job.
@@ -4123,6 +4141,7 @@ async def run_cloud_run_ansible_task(
             service_account,
             ps_env,
             runner_fetch,
+            windows,
         )
     except GCPError:
         raise

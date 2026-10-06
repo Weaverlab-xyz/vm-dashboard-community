@@ -81,6 +81,18 @@ def _find_cloud_deploy_meta(db, cloud: str, ip: str) -> dict:
     return {}
 
 
+def windows_target(meta: dict) -> dict:
+    """``{"user": <admin>}`` when the deploy job ``meta`` built a Windows server, else
+    ``{}``. Each cloud records it differently: GCP sets ``os_type``, Azure keeps its
+    request (``req.os_type``), and every Windows build carries
+    ``admin_password_custody`` (windows_server_hook.wire)."""
+    meta = meta or {}
+    os_type = str(meta.get("os_type") or (meta.get("req") or {}).get("os_type") or "")
+    if os_type.lower() != "windows" and not meta.get("admin_password_custody"):
+        return {}
+    return {"user": meta.get("ssh_user") or meta.get("admin_username") or ""}
+
+
 def _managed_name_hint(db, cloud: str, target: str,
                        managed_account, managed_become) -> str:
     """The extra name a Password Safe managed-system lookup should also try.
@@ -406,8 +418,12 @@ async def _run_job(
                 "azure": "azureuser",
                 "gcp":   "gcp-user",
             }.get(key_cloud, "ec2-user")
+            # A Windows server over OpenSSH logs on as the administrator its deploy
+            # recorded, never the Linux image's user.
+            win = windows_target(_find_cloud_deploy_meta(db, key_cloud, target))
             resolved_user = (
                 ansible_user
+                or win.get("user")
                 or _cfg(cloud_user_keys.get(key_cloud, ""))
                 or _cfg("ansible_default_user")
                 or cloud_default
@@ -521,6 +537,7 @@ async def _run_job(
                     manifest_b64=cloud_manifest_b64,
                     ps_env=ps_env,
                     runner_fetch=runner_fetch or None,
+                    windows=bool(win),
                 )
             finally:
                 # Value already fetched by the task identity at launch — safe to reap
@@ -561,6 +578,15 @@ async def _run_job(
             except Exception as exc:
                 logger.warning("Failed to retrieve SSH key for %s: %s — proceeding without key", cloud, exc)
 
+        # The local runner takes inline extra vars, so a Windows server's connection
+        # rides there. The operator's own ansible_user still wins.
+        if cloud in ("aws", "gcp", "azure"):
+            win = windows_target(_find_cloud_deploy_meta(db, cloud, target))
+            if win:
+                from . import ansible_vm_cmd
+                extra_vars = {**ansible_vm_cmd.WINDOWS_SSH_VARS, **(extra_vars or {})}
+                if win.get("user") and not extra_vars.get("ansible_user"):
+                    extra_vars["ansible_user"] = win["user"]
         job_service.update_progress(db, job_id, 20, f"Running {asset} against {target}…")
         output, rc = await ansible_local_service.run_playbook(
             asset_b64=asset_b64,
@@ -611,8 +637,12 @@ async def _dispatch_cloud_runner(
     manifest_b64: str = "",
     ps_env: dict | None = None,
     runner_fetch: dict | None = None,
+    windows: bool = False,
 ) -> tuple:
     """Route to the configured cloud Ansible runner. Returns (exit_code, output).
+
+    ``windows``: the target is a Windows server over OpenSSH, so each runner adds
+    ``ansible_vm_cmd.WINDOWS_SSH_VARS``.
 
     secret_entries/manifest_b64 (when present) carry per-provider secret refs — the
     runner injects each via the provider's secret channel and the container builds a
@@ -647,6 +677,7 @@ async def _dispatch_cloud_runner(
             secret_entries=secret_entries,
             manifest_b64=manifest_b64,
             ps_env=ps_env,
+            windows=windows,
         )
 
     if runner == "aci":
@@ -676,6 +707,7 @@ async def _dispatch_cloud_runner(
             secret_entries=secret_entries,
             manifest_b64=manifest_b64,
             ps_env=ps_env,
+            windows=windows,
         )
 
     if runner == "gcp":
@@ -701,6 +733,7 @@ async def _dispatch_cloud_runner(
             manifest_b64=manifest_b64,
             ps_env=ps_env,
             runner_fetch=runner_fetch,
+            windows=windows,
         )
 
     raise ValueError(f"Unknown ansible_runner: {runner!r}")

@@ -155,7 +155,8 @@ class _Rec:
 
 
 def _patch_wire(rec, *, ps_result=None, delete_err=""):
-    async def register_windows(db, job_id, vm_name, hostname, *, result, tag, username, password):
+    async def register_windows(db, job_id, vm_name, hostname, *, result, tag, username, password,
+                               port=3389):
         rec.calls.append(("register_windows", username, password))
         result.update(ps_result or {})
 

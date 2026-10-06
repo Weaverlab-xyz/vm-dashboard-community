@@ -339,6 +339,27 @@ async def _register_vm_in_passwordsafe(db, job_id: str, vm_name: str, hostname: 
                               method=method)
 
 
+async def _windows_public_key(region: str, secret_name: str, result: dict) -> str:
+    """The Linux workflow's public key, for a Windows build. Never fatal: without one the
+    server still takes the password over SSH, and the job says why it got no key."""
+    if not secret_name:
+        result["windows_ssh_key_error"] = "no SSH key secret configured for this region"
+        return ""
+    try:
+        key = (await aws_service.get_ssh_public_key_from_secret(region, secret_name))[
+            "public_key"]
+    except Exception as e:  # noqa: BLE001
+        result["windows_ssh_key_error"] = f"could not read {secret_name}: {e}"
+        return ""
+    from ..services import windows_server_hook
+    if not windows_server_hook.clean_public_key(key):
+        result["windows_ssh_key_error"] = f"{secret_name} holds no OpenSSH public key"
+        return ""
+    result["ssh_secret_name"] = secret_name
+    result["ssh_user"] = "Administrator"
+    return key
+
+
 async def _drop_windows_key_pair(region: str, name: str, result: dict) -> None:
     """Best-effort removal of the one-time Windows key pair when the launch never got
     as far as reading the password with it."""
@@ -407,9 +428,22 @@ async def _run_deploy(
         ami_info = await aws_service.describe_ami(_aws_region, ami_id)
         is_windows = "windows" in (ami_info.get("platform", "") or "").lower()
         win_key_name = win_private_key = ""
+        win_ssh = win_rdp = False
+        win_user_data = ""
         if is_windows:
             public_key = ""
             os_type = "windows"
+            from types import SimpleNamespace
+            from ..services import windows_server_hook
+            win_ssh, win_rdp = windows_server_hook.access_modes(
+                SimpleNamespace(enable_rdp=_meta.get("enable_rdp")))
+            if win_ssh:
+                # OpenSSH is switched on by EC2Launch at first boot; its verdict is read
+                # back over SSM once the password is in hand (step 3w). The same public
+                # key a Linux build gets, from the same secret, is authorized for the
+                # Administrator -- so the Ansible runner logs on exactly as for Linux.
+                win_pub = await _windows_public_key(_aws_region, ssh_secret_name, result)
+                win_user_data = windows_server_hook.ssh_bootstrap_user_data(win_pub)
             # Fail before launching if there is nowhere acceptable to keep the password —
             # never the dashboard database (windows_admin_secret).
             from ..services import windows_admin_secret
@@ -486,6 +520,7 @@ async def _run_deploy(
                     workgroup=workgroup,
                     correlation_tag=_elev.correlation_tag,
                     key_name=win_key_name,
+                    user_data=win_user_data,
                 )
             result.update(instance_result)
             if instance_result.get("instance_id"):
@@ -543,6 +578,21 @@ async def _run_deploy(
             result["admin_password_backend"] = backend
             result["admin_password_ref"] = ref
             job_service.update_progress(db, job_id, 80, f"Administrator password stored in {backend}.")
+            # Before any AD join, whose reboot would only make the check wait longer.
+            win_ssh_status = win_ssh_detail = ""
+            if win_ssh and not _rc["ssm_instance_profile"]:
+                # Without an instance profile SSM never comes online; say so rather than
+                # waiting ten minutes to find out.
+                win_ssh_status = windows_server_hook.SSH_UNVERIFIED
+                win_ssh_detail = ("no SSM instance profile is configured "
+                                  "(ssm_instance_profile), so the OpenSSH bootstrap's result "
+                                  "cannot be read")
+            elif win_ssh:
+                from ..services import windows_server_hook
+                job_service.update_progress(
+                    db, job_id, 81, "Waiting for OpenSSH Server to come up on the instance…")
+                win_ssh_status, win_ssh_detail = await windows_server_hook.confirm_ssh_aws(
+                    _aws_region, instance_id)
             if ad_row is not None:
                 from ..services import domain_join_service
                 await domain_join_service.join_aws(
@@ -600,7 +650,7 @@ async def _run_deploy(
                 # _run_deploy is called with unpacked arguments rather than a request.
                 method=str((_job.metadata_dict or {}).get("passwordsafe_method") or "") if _job else "")
 
-        # ── Step 5w: Windows — Password Safe managed account + PRA RDP jump ──
+        # ── Step 5w: Windows — Password Safe managed account + PRA Shell/RDP jump ─
         if is_windows:
             from ..services import windows_server_hook
             await windows_server_hook.wire(
@@ -611,6 +661,8 @@ async def _run_deploy(
                 jump_group=(jump_group or "").strip() or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name,
                 jumpoint_name=(jumpoint_name or "").strip() or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name,
                 client_secret=_cfg_svc.resolve_reference(pra_credential_ref.strip()) if pra_credential_ref else "",
+                ssh=win_ssh, rdp=win_rdp,
+                ssh_status=win_ssh_status, ssh_detail=win_ssh_detail,
             )
             admin_password = ""
 
