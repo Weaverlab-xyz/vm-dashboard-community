@@ -484,6 +484,8 @@ def _format_instance(inst: dict) -> dict:
         "launch_time": inst.get("LaunchTime", "").isoformat() if inst.get("LaunchTime") else "",
         "availability_zone": inst.get("Placement", {}).get("AvailabilityZone", ""),
         "key_name": inst.get("KeyName"),
+        # "windows" for Windows instances; EC2 omits the field for Linux.
+        "platform": (inst.get("Platform") or "").lower(),
         "tags": tags,
     }
 
@@ -610,6 +612,7 @@ def _launch_instance_sync(
     os_type: str = "",
     workgroup: str = "",
     correlation_tag: str = "",
+    key_name: str = "",
 ) -> dict:
     ec2 = _get_ec2(region)
     tags = [
@@ -646,6 +649,10 @@ def _launch_instance_sync(
         kwargs["UserData"] = userdata  # boto3 base64-encodes blob types automatically
     if iam_instance_profile:
         kwargs["IamInstanceProfile"] = _iam_instance_profile_ref(iam_instance_profile)
+    if key_name:
+        # Windows only: EC2 encrypts the generated Administrator password to this key
+        # pair, and without one GetPasswordData has nothing to return — ever.
+        kwargs["KeyName"] = key_name
     resp = ec2.run_instances(**kwargs)
     inst = resp["Instances"][0]
     return {
@@ -654,6 +661,100 @@ def _launch_instance_sync(
         "private_ip": inst.get("PrivateIpAddress"),
         "public_ip": inst.get("PublicIpAddress"),
     }
+
+
+# ── Windows Administrator password (ephemeral key pair) ──────────────────────
+#
+# EC2 generates a Windows instance's Administrator password at first boot and
+# publishes it, RSA-encrypted to the instance's key pair, through GetPasswordData.
+# With no key pair there is nothing to decrypt with, which is how every Windows
+# instance this dashboard launched used to end up: running, and unreachable.
+#
+# The pair here lives only for one launch. Its private half never leaves process
+# memory, is used once to decrypt, and the pair is deleted from EC2 right after —
+# so the password is never in UserData or SSM command history, and the only copy
+# left is the one written to the secret manager.
+
+def windows_key_pair_name(job_id: str) -> str:
+    return f"vmdash-win-{(job_id or '')[:8]}"
+
+
+def _create_key_pair_sync(region: str, name: str) -> str:
+    ec2 = _get_ec2(region)
+    resp = ec2.create_key_pair(
+        KeyName=name, KeyType="rsa", KeyFormat="pem",
+        TagSpecifications=[{"ResourceType": "key-pair", "Tags": [
+            {"Key": "ManagedBy", "Value": "vm-dashboard"},
+            {"Key": "Purpose", "Value": "windows-password-decrypt"}]}],
+    )
+    return resp["KeyMaterial"]
+
+
+async def create_windows_key_pair(region: str, name: str) -> str:
+    """Create a throwaway RSA key pair; return its private key PEM (memory only)."""
+    try:
+        return await _to_thread(_create_key_pair_sync, region, name)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Could not create key pair {name}: {e}") from e
+
+
+def _delete_key_pair_sync(region: str, name: str) -> None:
+    _get_ec2(region).delete_key_pair(KeyName=name)
+
+
+async def delete_key_pair(region: str, name: str) -> None:
+    try:
+        await _to_thread(_delete_key_pair_sync, region, name)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Could not delete key pair {name}: {e}") from e
+
+
+def decrypt_windows_password(password_data_b64: str, private_key_pem: str) -> str:
+    """Decrypt GetPasswordData's blob (RSA PKCS#1 v1.5, base64) with the pair's key."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    key = serialization.load_pem_private_key(private_key_pem.encode(), password=None)
+    blob = base64.b64decode("".join(password_data_b64.split()))
+    return key.decrypt(blob, padding.PKCS1v15()).decode("utf-8")
+
+
+def _get_password_data_sync(region: str, instance_id: str) -> str:
+    return (_get_ec2(region).get_password_data(InstanceId=instance_id)
+            .get("PasswordData") or "").strip()
+
+
+async def get_windows_password(region: str, instance_id: str, private_key_pem: str, *,
+                               timeout_s: int = 1500, interval_s: int = 15,
+                               on_wait=None) -> str:
+    """Poll GetPasswordData until EC2 publishes it (EC2Launch does so a few minutes
+    after first boot; 4–15 minutes is normal), then decrypt it.
+
+    ``on_wait(elapsed_s)`` is called between polls so the caller can report progress.
+    Raises AWSError at ``timeout_s``."""
+    import asyncio
+    import time as _time
+    start = _time.monotonic()
+    while True:
+        try:
+            data = await _to_thread(_get_password_data_sync, region, instance_id)
+        except (ClientError, BotoCoreError) as e:
+            raise AWSError(f"GetPasswordData for {instance_id} failed: {e}") from e
+        if data:
+            try:
+                return decrypt_windows_password(data, private_key_pem)
+            except Exception as e:  # noqa: BLE001
+                raise AWSError(f"Could not decrypt the Administrator password of "
+                               f"{instance_id}: {e}") from e
+        elapsed = _time.monotonic() - start
+        if elapsed >= timeout_s:
+            raise AWSError(
+                f"EC2 had not published the Administrator password of {instance_id} after "
+                f"{int(elapsed // 60)} min. The AMI may not run EC2Launch, or it was built "
+                f"with a fixed password (a custom image that skipped Sysprep / "
+                f"'random password' on first boot).")
+        if on_wait:
+            on_wait(int(elapsed))
+        await asyncio.sleep(interval_s)
 
 
 def _terminate_instance_sync(region: str, instance_id: str) -> dict:
@@ -675,6 +776,7 @@ async def launch_instance(
     os_type: str = "",
     workgroup: str = "",
     correlation_tag: str = "",
+    key_name: str = "",
 ) -> dict:
     """Launch a new EC2 instance and return its ID and initial state.
 
@@ -687,6 +789,8 @@ async def launch_instance(
     *correlation_tag*, when non-empty, is written as `EntitleRequestId=<tag>`
     so audit can join to the dashboard's entitle_activations row
     (cloud-identity JIT Phase 2).
+    *key_name* attaches an EC2 key pair — used for Windows, where it is what
+    makes the Administrator password retrievable (see get_windows_password).
     """
     try:
         return await _to_thread(
@@ -694,7 +798,7 @@ async def launch_instance(
             region, ami_id, instance_name, instance_type,
             public_key, subnet_id, security_group_ids,
             iam_instance_profile, os_type, workgroup,
-            correlation_tag,
+            correlation_tag, key_name,
         )
     except (ClientError, BotoCoreError) as e:
         msg = str(e)
@@ -781,18 +885,27 @@ def _run_ssm_command_sync(region: str, instance_id: str, commands: list,
     Used to run DB-client SQL on the shared Jumpoint host (the only dashboard
     component with line-of-sight to the private DB) — the same SSM SendCommand
     path Password Safe's DB custom plugin uses for rotation."""
+    return _run_ssm_document_sync(
+        region, instance_id, "AWS-RunShellScript",
+        {"commands": list(commands),
+         # SSM caps executionTimeout at 172800; keep it >= our poll window.
+         "executionTimeout": [str(max(int(timeout), 60))]},
+        timeout, poll_interval, comment="vm-dashboard cloud-db onboarding")
+
+
+def _run_ssm_document_sync(region: str, instance_id: str, document: str,
+                           parameters: dict, timeout: int, poll_interval: int,
+                           comment: str = "vm-dashboard") -> dict:
+    """Send any SSM document to one managed instance and poll to a terminal status.
+    Returns {status, response_code, stdout, stderr, command_id}."""
     import time
     _require_boto3()
     ssm = boto3.client("ssm", **_aws_kwargs(region))
     send = ssm.send_command(
         InstanceIds=[instance_id],
-        DocumentName="AWS-RunShellScript",
-        Comment="vm-dashboard cloud-db onboarding"[:100],
-        Parameters={
-            "commands": list(commands),
-            # SSM caps executionTimeout at 172800; keep it >= our poll window.
-            "executionTimeout": [str(max(int(timeout), 60))],
-        },
+        DocumentName=document,
+        Comment=comment[:100],
+        Parameters=parameters,
     )
     command_id = send["Command"]["CommandId"]
     # The invocation isn't queryable for a beat after send — tolerate the
@@ -817,6 +930,51 @@ def _run_ssm_command_sync(region: str, instance_id: str, commands: list,
         "stdout": inv.get("StandardOutputContent", "") or "",
         "stderr": inv.get("StandardErrorContent", "") or "",
     }
+
+
+async def ssm_send_document(region: str, instance_id: str, document: str,
+                            parameters: dict, *, timeout: int = 600,
+                            poll_interval: int = 5, comment: str = "vm-dashboard") -> dict:
+    """Run an SSM ``document`` on one instance and wait. Same contract as
+    :func:`ssm_send_command`: never raises on a failed command, only on AWS errors."""
+    try:
+        return await _to_thread(_run_ssm_document_sync, region, instance_id, document,
+                                parameters, timeout, poll_interval, comment)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"SSM SendCommand ({document}) to {instance_id} failed: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _ssm_ping_status_sync(region: str, instance_id: str) -> str:
+    _require_boto3()
+    ssm = boto3.client("ssm", **_aws_kwargs(region))
+    resp = ssm.describe_instance_information(
+        Filters=[{"Key": "InstanceIds", "Values": [instance_id]}])
+    info = resp.get("InstanceInformationList") or []
+    return (info[0].get("PingStatus") or "") if info else ""
+
+
+async def wait_ssm_online(region: str, instance_id: str, *, timeout_s: int = 900,
+                          interval_s: int = 15) -> None:
+    """Wait until the instance's SSM agent reports ``Online``. Raises AWSError at the
+    deadline, naming the usual causes."""
+    import asyncio
+    import time as _time
+    start = _time.monotonic()
+    while True:
+        try:
+            status = await _to_thread(_ssm_ping_status_sync, region, instance_id)
+        except (ClientError, BotoCoreError) as e:
+            raise AWSError(f"SSM DescribeInstanceInformation for {instance_id} failed: {e}") from e
+        if status == "Online":
+            return
+        if _time.monotonic() - start >= timeout_s:
+            raise AWSError(
+                f"{instance_id} never came online in Systems Manager (last status "
+                f"{status or 'not registered'}). It needs the SSM instance profile and a "
+                f"route to the SSM endpoints (NAT or VPC interface endpoints).")
+        await asyncio.sleep(interval_s)
 
 
 async def ssm_send_command(region: str, instance_id: str, commands: list, *,

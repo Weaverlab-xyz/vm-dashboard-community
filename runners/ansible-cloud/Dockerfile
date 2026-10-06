@@ -9,6 +9,11 @@
 #   community.postgresql       -> psycopg2    (postgresql_db / postgresql_user)
 #   community.mysql            -> PyMySQL     (mysql_db / mysql_user)
 #   community.general (mssql)  -> pymssql     (mssql_db)
+#   community.general (ldap_*) -> python-ldap (ldap_entry / ldap_attrs / ldap_search)
+#   microsoft.ad               -> pywinrm + requests-ntlm (AD objects over WinRM)
+#
+# The directory plays (examples/playbooks/directory/) run here too, through a remote
+# agent's `ansible.directory_image` (falling back to `db_image`).
 #
 # Used by every remote runner the dashboard drives for k8s/DB targets (AWS ECS,
 # Azure ACI, GCP Cloud Run). Selected via the `ansible_cloud_image` config key
@@ -39,6 +44,8 @@ RUN apt-get update \
         gcc \
         freetds-dev \
         freetds-bin \
+        libldap2-dev \
+        libsasl2-dev \
         curl \
         tar \
         ca-certificates \
@@ -75,6 +82,9 @@ RUN pip install --no-cache-dir \
         "psycopg2-binary>=2.9" \
         "PyMySQL>=1.1" \
         "pymssql>=2.2" \
+        "python-ldap>=3.4" \
+        "pywinrm>=0.4.3" \
+        "requests-ntlm>=1.2" \
         "beyondtrust-bips-library>=2.0.0,<3.0.0"
 
 # Ansible collections for the localhost k8s/DB plays. community.general carries
@@ -86,6 +96,7 @@ RUN ansible-galaxy collection install \
         community.postgresql \
         community.mysql \
         community.general \
+        microsoft.ad \
         beyondtrust.secrets_safe \
         beyondtrust.password_safe \
         -p /usr/share/ansible/collections \
@@ -93,10 +104,12 @@ RUN ansible-galaxy collection install \
 
 # Fail the build early if a client lib can't import or a module can't be resolved
 # on the collections path — a broken image should never reach a runner.
-RUN python -c "import kubernetes, psycopg2, pymysql, pymssql; print('client libs OK')" \
+RUN python -c "import kubernetes, psycopg2, pymysql, pymssql, ldap, winrm; print('client libs OK')" \
  && ansible-doc kubernetes.core.k8s_info      >/dev/null \
  && ansible-doc community.postgresql.postgresql_db >/dev/null \
  && ansible-doc community.mysql.mysql_db      >/dev/null \
  && ansible-doc community.general.mssql_db    >/dev/null \
+ && ansible-doc community.general.ldap_entry  >/dev/null \
+ && ansible-doc microsoft.ad.user             >/dev/null \
  && ansible-doc beyondtrust.secrets_safe.secrets_safe_lookup >/dev/null \
  && echo "ansible-cloud collections + client libs OK"

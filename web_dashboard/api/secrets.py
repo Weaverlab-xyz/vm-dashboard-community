@@ -122,6 +122,7 @@ class BackendConfigPayload(BaseModel):
     secrets_bt_owner: str = ""
     secrets_wlc_folder: str = "dashboard"
     secret_max_age_days: int = 0   # flag secrets older than this; 0 = disabled
+    windows_admin_secret_backend: str = ""   # "" = automatic; never "database"
 
 
 class MigratePayload(BaseModel):
@@ -272,6 +273,7 @@ async def get_backend_config(request: Request):
         "secrets_bt_owner":    cs.get("secrets_bt_owner", ""),
         "secrets_wlc_folder":  cs.get("secrets_wlc_folder", "dashboard"),
         "secret_max_age_days": int(cs.get("secret_max_age_days") or 0),
+        "windows_admin_secret_backend": cs.get("windows_admin_secret_backend", ""),
     }
 
 
@@ -280,6 +282,15 @@ async def update_backend_config(payload: BackendConfigPayload, request: Request)
     _require_admin(request)
     if payload.backend not in _VALID_BACKENDS:
         raise HTTPException(status_code=400, detail=f"Unknown backend: {payload.backend!r}")
+    from ..services import windows_admin_secret
+    win = (payload.windows_admin_secret_backend or "").strip().lower()
+    if win and (win == windows_admin_secret.FORBIDDEN_BACKEND
+                or win not in _VALID_BACKENDS):
+        raise HTTPException(
+            status_code=400,
+            detail=f"windows_admin_secret_backend {win!r} is not allowed — Windows "
+                   "administrator passwords go to an external secret manager, never the "
+                   "dashboard database. Leave it blank for automatic.")
     from ..services import config_service as cs
     cs.set_many({
         "secrets_backend":      payload.backend,
@@ -293,6 +304,7 @@ async def update_backend_config(payload: BackendConfigPayload, request: Request)
         "secrets_bt_owner":     payload.secrets_bt_owner,
         "secrets_wlc_folder":   payload.secrets_wlc_folder,
         "secret_max_age_days":  str(max(0, payload.secret_max_age_days)),
+        "windows_admin_secret_backend": win,
     })
     logger.info("Secrets backend config updated: backend=%s", payload.backend)
     return {"ok": True}

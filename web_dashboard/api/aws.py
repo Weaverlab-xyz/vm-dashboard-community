@@ -670,6 +670,8 @@ async def _fan_out_batch(
                 "bulk": True,
                 "register_in_entitle": req.register_in_entitle,
                 "register_in_passwordsafe": req.register_in_passwordsafe,
+                "ad_directory_id": req.ad_directory_id,
+                "ad_ou": req.ad_ou,
                 "ssh_key_secret_override": req.ssh_key_secret_override,
             },
         )
@@ -776,6 +778,8 @@ async def deploy_ami(
             "workgroup": workgroup,
             "register_in_entitle": req.register_in_entitle,
             "register_in_passwordsafe": req.register_in_passwordsafe,
+            "ad_directory_id": req.ad_directory_id,
+            "ad_ou": req.ad_ou,
             "ssh_key_secret_override": req.ssh_key_secret_override,
             # PRA jump-group fields: the runner rebuilds the whole call from this
             # metadata, so anything omitted here is silently skipped at deploy time
@@ -872,6 +876,8 @@ async def bulk_deploy_amis(
                 "bulk": True,
                 "register_in_entitle": req.register_in_entitle,
                 "register_in_passwordsafe": req.register_in_passwordsafe,
+                "ad_directory_id": req.ad_directory_id,
+                "ad_ou": req.ad_ou,
                 "ssh_key_secret_override": req.ssh_key_secret_override,
             },
         )
@@ -1435,6 +1441,64 @@ def create_image_from_instance(
 
 
 # ── SSH key retrieval from Secrets Manager ────────────────────────────────────
+
+@router.get("/instances/{instance_id}/admin-password")
+async def get_instance_admin_password(
+    instance_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("aws", "write")),
+):
+    """Return the Administrator password of a Windows instance deployed via this
+    dashboard.
+
+    The deploy recovers it with a one-time key pair and writes it to Password
+    Safe / a secret manager (never the dashboard database), keeping only the
+    (backend, ref) pair in job metadata. ``aws:write`` because this hands out a
+    working administrator credential. 409 when Password Safe manages the account:
+    the dashboard no longer holds a valid copy."""
+    import asyncio
+    from ..services import windows_admin_secret
+
+    meta = None
+    for job in db.query(Job).filter(Job.job_type == "ec2_deploy").all():
+        m = job.metadata_dict
+        if m.get("instance_id") == instance_id and not m.get("destroyed"):
+            meta = m
+            break
+    if meta is None:
+        raise HTTPException(status_code=404,
+                            detail=f"No active deployment record for instance {instance_id}.")
+    if meta.get("admin_password_custody") == "passwordsafe_managed":
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Password Safe manages the Administrator account on {instance_id} "
+                    f"(managed account {meta.get('ps_managed_account_id')}). Check the "
+                    "credential out from Password Safe, or connect through the PRA RDP "
+                    "jump item, which injects it."))
+    backend, ref = meta.get("admin_password_backend"), meta.get("admin_password_ref")
+    if not (backend and ref):
+        raise HTTPException(
+            status_code=404,
+            detail=f"No stored Administrator password for {instance_id} — Linux, or "
+                   "deployed before Windows password capture existed.")
+    try:
+        password = await asyncio.to_thread(windows_admin_secret.read, backend, ref)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Secrets backend read failed: {e}")
+    if not password:
+        raise HTTPException(status_code=404,
+                            detail=f"Secret '{ref}' is empty or missing in backend '{backend}'.")
+    job_service.log_audit(db, current_user.username, "aws_instance_admin_password_read",
+                          details={"instance_id": instance_id, "backend": backend})
+    return {
+        "instance_id": instance_id,
+        "username": meta.get("admin_username") or "Administrator",
+        "password": password,
+        "ip": meta.get("private_ip") or meta.get("public_ip"),
+        "backend": backend,
+        "secret_ref": ref,
+    }
+
 
 @router.get("/instances/{instance_id}/ssh-key")
 async def get_instance_ssh_key(

@@ -553,22 +553,44 @@
         </div>
         {% endif %}
         {% if password_safe_enabled %}
-        <!-- Password Safe registration opt-in (Linux only — managed system + account) -->
-        <div x-show="deployModal.osType !== 'Windows'">
+        <!-- Password Safe registration opt-in (managed system + account) -->
+        <div>
           <label class="flex items-center gap-2 text-sm text-gray-700">
             <input type="checkbox" x-model="deployModal.register_in_passwordsafe" class="rounded text-blue-600">
             Onboard into Password Safe (managed system + account)
           </label>
-          <p class="mt-1 text-xs text-gray-400 ml-6">
+          <p x-show="deployModal.osType !== 'Windows'" class="mt-1 text-xs text-gray-400 ml-6">
             Requires Password Safe registration enabled; onboards the image's adminuser account, SSH-key managed.
+          </p>
+          <p x-show="deployModal.osType === 'Windows'" x-cloak class="mt-1 text-xs text-gray-400 ml-6">
+            Onboards the local administrator as a password-managed account (needs a Windows
+            functional account). Password Safe rotates it immediately, then owns it — check it
+            out there or connect through the PRA RDP jump.
           </p>
         </div>
         {% endif %}
+        <!-- Entra ID join (Windows only) -->
+        <div x-show="deployModal.osType === 'Windows'" x-cloak>
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" x-model="deployModal.entra_join" class="rounded text-blue-600">
+            Join to Microsoft Entra ID
+          </label>
+          <label x-show="deployModal.entra_join" class="mt-1 ml-6 flex items-center gap-2 text-xs text-gray-700">
+            <input type="checkbox" x-model="deployModal.entra_intune_enroll" class="rounded text-blue-600">
+            Also enrol in Intune
+          </label>
+          <p class="mt-1 text-xs text-gray-400 ml-6">
+            Adds a system identity and the AADLoginForWindows extension, and grants the Entra
+            groups configured in Settings login on this VM. Needs Windows Server 2019+ and
+            outbound HTTPS to Entra.
+          </p>
+        </div>
         <div x-show="deployModal.osType === 'Windows'" x-cloak
              class="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-800">
-          A strong local-admin password is generated automatically and stored in the
-          secrets backend — retrieve it after deploy via <strong>VMs → Password</strong>.
-          No SSH key is injected on Windows.
+          A strong local-admin password is generated automatically and stored in Password
+          Safe or your secret manager — never in the dashboard database. Retrieve it after
+          deploy via <strong>VMs → Password</strong> (or from Password Safe, if it manages the
+          account). No SSH key is injected on Windows.
         </div>
       </div>
 
@@ -781,9 +803,14 @@
         <label class="flex items-center gap-2 text-sm text-gray-700">
           <input type="checkbox" x-model="bulkModal.register_in_passwordsafe"
                  class="rounded border-gray-300 text-green-600 focus:ring-green-500">
-          Onboard each Linux VM into Password Safe (managed system + account)
+          Onboard each VM into Password Safe (managed system + account)
         </label>
         {% endif %}
+        <label x-show="bulkHasWindows()" x-cloak class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="bulkModal.entra_join"
+                 class="rounded border-gray-300 text-green-600 focus:ring-green-500">
+          Join each Windows VM to Microsoft Entra ID
+        </label>
 
         <!-- When to run. bulk_deploy_vms has resolved a booking since the picker
              shipped; this control is what lets anyone send one. Shares the page's
@@ -2263,6 +2290,8 @@ function azureDashboard() {
         workgroup: this._defaultWorkgroup(),
         register_in_entitle: false,
         register_in_passwordsafe: false,
+        entra_join: {{ 'true' if entra_join_default else 'false' }},
+        entra_intune_enroll: {{ 'true' if entra_intune_default else 'false' }},
         ssh_key_secret_override: '', sshKeySecrets: [],
         jump_group: '', jumpoint_name: '',
       };
@@ -2375,6 +2404,8 @@ function azureDashboard() {
           docker_deploy_key_ref: m.docker_deploy_key_ref || null,
           register_in_entitle: !!m.register_in_entitle,
           register_in_passwordsafe: !!m.register_in_passwordsafe,
+          entra_join: m.osType === 'Windows' ? !!m.entra_join : null,
+          entra_intune_enroll: m.osType === 'Windows' ? !!(m.entra_join && m.entra_intune_enroll) : null,
           ssh_key_secret_override: m.ssh_key_secret_override || null,
           ...this.schedulePayload(),
         });
@@ -2420,6 +2451,7 @@ function azureDashboard() {
         sshUsername: 'azureuser',
         register_in_entitle: false,
         register_in_passwordsafe: false,
+        entra_join: {{ 'true' if entra_join_default else 'false' }},
         ssh_key_secret_override: '',
         sshKeySecrets: [],
       };
@@ -2501,6 +2533,7 @@ function azureDashboard() {
           workgroup: m.workgroup,
           register_in_entitle: !!m.register_in_entitle,
           register_in_passwordsafe: !!m.register_in_passwordsafe,
+          entra_join: this.bulkHasWindows() ? !!m.entra_join : null,
           ssh_key_secret_override: m.ssh_key_secret_override || null,
           // Marketplace image metadata (optional)
           image_publisher: firstImage?.publisher || null,

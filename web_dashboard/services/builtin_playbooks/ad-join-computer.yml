@@ -1,0 +1,36 @@
+# Join a Windows server to an on-prem Active Directory domain
+# Target: the Windows server itself, over WinRM (HTTPS, 5986), from the on-prem
+# remote agent. The dashboard runs this automatically after a GCE Windows deploy that
+# chose a "GCP DNS link" directory; you can also run it yourself.
+#
+# Through the dashboard: WinRM logs on as the server's local administrator (from its
+# secret store), and dir_domain / dir_bind_dn / dir_bind_password are the directory's
+# Password Safe account, checked out for this run only.
+# Optional:
+#   ad_join_ou: OU=Servers,DC=corp,DC=example,DC=com   # blank = the default Computers container
+#
+# The VPC must resolve the domain (the DNS link's forwarding zone) and reach the domain
+# controllers over the VPN. The server reboots to finish joining.
+- name: Join an Active Directory domain
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: winrm
+    ad_join_ou: ""
+  tasks:
+    - name: Fail early if required vars are missing
+      ansible.builtin.assert:
+        that:
+          - dir_domain is defined and dir_domain | length > 0
+          - dir_bind_dn is defined and dir_bind_dn | length > 0
+        fail_msg: Set dir_domain, dir_bind_dn and dir_bind_password (the join account).
+
+    - name: Join the domain and reboot
+      microsoft.ad.membership:
+        dns_domain_name: "{{ dir_domain }}"
+        domain_admin_user: "{{ dir_bind_dn }}"
+        domain_admin_password: "{{ dir_bind_password }}"
+        domain_ou_path: "{{ ad_join_ou if ad_join_ou | length > 0 else omit }}"
+        state: domain
+        reboot: true
+      no_log: true              # carries the join account's password

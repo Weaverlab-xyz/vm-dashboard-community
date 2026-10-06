@@ -1704,6 +1704,39 @@
                          placeholder="name or id">
                 </div>
               </div>
+              <div class="border border-gray-200 rounded-lg p-3 space-y-2">
+                <p class="text-sm font-medium text-gray-700">Windows VMs <span class="text-gray-400 font-normal">(Azure + AWS)</span></p>
+                <p class="text-xs text-gray-400">
+                  The local administrator is onboarded as a <strong>password-managed</strong> account,
+                  seeded with the generated password. Needs a functional account on a Windows
+                  platform — not the SSH-rotation accounts above. Password Safe rotates over
+                  SMB/WinRM, so private VMs need a Resource Broker.
+                </p>
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Functional account — Windows</label>
+                    <input type="text" x-model="panelCfg.passwordsafe_vm_functional_account_windows"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="name or id">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Override — Azure</label>
+                    <input type="text" x-model="panelCfg.passwordsafe_vm_functional_account_windows_azure"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="blank → Windows account">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Override — AWS</label>
+                    <input type="text" x-model="panelCfg.passwordsafe_vm_functional_account_windows_aws"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="blank → Windows account">
+                  </div>
+                </div>
+                <label class="flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" x-model="panelCfg.passwordsafe_windows_change_password_on_register" class="rounded text-blue-600">
+                  Rotate the password on onboard, so only Password Safe knows it
+                </label>
+              </div>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Managed account name</label>
@@ -2991,6 +3024,17 @@
                 the same <span class="font-mono">/jpt</span> share, so they contend over one
                 Gateway identity. A deploy that supplies its own Gateway deploy key always
                 gets ACI, since the shared host uses the configured key.
+              </p>
+            </div>
+            <div class="mb-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Vault account group — Windows server RDP jumps</label>
+              <input type="text" x-model="panelCfg.pra_windows_vault_account_group_id"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="numeric id (optional)">
+              <p class="text-xs text-gray-400 mt-1">
+                Where a Windows server build's administrator credential is vaulted for RDP
+                injection (Azure + AWS). Not used when Password Safe manages the account —
+                PRA then injects it through its Password Safe integration.
               </p>
             </div>
             <div class="mb-3">
@@ -6751,6 +6795,56 @@
 
       <!-- Cloud Functions (config panel; enable/disable via the feature toggle):
            package stores + optional VPC/VNet attachment -->
+      <template x-if="panel?.key === 'directories' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Defaults for building directories and for joining Windows servers to them. Enable
+            or disable the feature with its toggle in the integrations list above.
+            <a href="/docs/cloud/directories" target="_blank"
+               class="text-blue-600 hover:text-blue-800 underline">Guide</a>.
+          </p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">AWS default edition</label>
+              <select x-model="panelCfg.directory_aws_default_edition"
+                      x-init="panelCfg.directory_aws_default_edition = panelCfg.directory_aws_default_edition || 'Standard'"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="Standard">Standard</option>
+                <option value="Enterprise">Enterprise</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">GCP reserved range for domain controllers</label>
+              <input type="text" x-model="panelCfg.directory_gcp_reserved_ip_range"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="10.250.0.0/24">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Default OU for joined servers</label>
+              <input type="text" x-model="panelCfg.directory_join_default_ou"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="OU=Servers,DC=corp,DC=example,DC=com (blank = Computers)">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">GCP domain-join service account</label>
+              <input type="text" x-model="panelCfg.gcp_domain_join_service_account"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="ad-join@project.iam.gserviceaccount.com">
+              <p class="text-[11px] text-gray-400 mt-1">Attached to GCE Windows servers that join a
+                domain; it needs <code>roles/managedidentities.domainJoin</code>.</p>
+            </div>
+          </div>
+          <div class="border border-gray-200 rounded-lg p-3 space-y-2">
+            <p class="text-sm font-medium text-gray-700">Directory administrator in Password Safe</p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Functional account (Active Directory platform)</label>
+              <input type="text" x-model="panelCfg.passwordsafe_directory_functional_account"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="name or id">
+            </div>
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="panelCfg.passwordsafe_directory_change_password_on_register" class="rounded text-blue-600">
+              Rotate the administrator password on onboard, so only Password Safe knows it
+            </label>
+          </div>
+        </div>
+      </template>
       <template x-if="panel?.key === 'cloud_functions' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
@@ -7643,6 +7737,8 @@ function settingsPage() {
         desc: 'Provision private managed databases (PostgreSQL, MySQL, SQL Server) on AWS, Azure and GCP, or register ones you already run — on-premises or in a cloud. PRA tunnel for the private ones.' },
       { key: 'k8s_management', label: 'Kubernetes',             hasConfig: true,  enabled: false,
         desc: 'Provision (EKS/AKS/GKE), register, and broker Kubernetes clusters — PRA tunnels + Entitle real-identity JIT.' },
+      { key: 'directories', label: 'Managed Active Directory', hasConfig: true,  enabled: false,
+        desc: 'Build AWS Managed Microsoft AD or GCP Managed AD, or register a directory that already exists, and join Windows servers on AWS and GCP to it at deploy. Directories bill around the clock and carry no auto-delete timer; one with joined servers cannot be destroyed.' },
       { key: 'cloud_functions', label: 'Cloud Functions',        hasConfig: true,  enabled: false,
         desc: 'Deploy a dashboard-authored handler as an AWS Lambda, an Azure Function App, or a GCP Cloud Run function — optionally attached to a VPC/VNet so it can reach private resources. Each gets a stable HTTPS endpoint protected by a shared bearer secret.' },
       { key: 'remote_agents', label: 'Remote Agents',           hasConfig: true,  enabled: false,
@@ -8286,6 +8382,7 @@ function settingsPage() {
           cloud_database: features.cloud_database,
           k8s_management: features.k8s_management,
           cloud_functions: features.cloud_functions,
+          directories: features.directories,
           // Miss an entry here and the toggle renders permanently OFF however the flag
           // is really set — silent, because nothing errors. Notifications was missing
           // one until now. Pinned by tests/test_settings_integrations.py.

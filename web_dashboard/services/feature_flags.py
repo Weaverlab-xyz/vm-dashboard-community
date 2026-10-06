@@ -48,6 +48,9 @@ _DEMO_ONLY = (
     "cloud_database_enabled",
     "k8s_management_enabled",
     "cloud_functions_enabled",
+    # Builds billing domain controllers, and onboards their administrator through the
+    # global pscli_* singletons — the cloud-database argument exactly.
+    "directories_enabled",
     # Demo-only for the tenancy reason above, not by taste: the Certificate plugin's
     # managed system and functional account are written through the global pscli_*
     # singletons, so on a POV instance this would onboard certificate identities into
@@ -234,6 +237,7 @@ def flags() -> dict:
         "entitle_registration_enabled": enabled("entitle_registration_enabled", settings.entitle_registration_enabled),
         "k8s_management_enabled": enabled("k8s_management_enabled", settings.k8s_management_enabled),
         "cloud_functions_enabled": enabled("cloud_functions_enabled", settings.cloud_functions_enabled),
+        "directories_enabled":  enabled("directories_enabled",   settings.directories_enabled),
         "cert_lab_enabled":     enabled("cert_lab_enabled",      settings.cert_lab_enabled),
         "spire_lab_enabled":    enabled("spire_lab_enabled",     settings.spire_lab_enabled),
         "netcell_enabled":      enabled("netcell_enabled",       settings.netcell_enabled),
@@ -384,6 +388,7 @@ def feature_map() -> dict:
         "cloud_database": raw["cloud_database_enabled"],
         "k8s_management": raw["k8s_management_enabled"],
         "cloud_functions": raw["cloud_functions_enabled"],
+        "directories":    raw["directories_enabled"],
         "cert_lab":       raw["cert_lab_enabled"],
         "spire_lab":      raw["spire_lab_enabled"],
         "netcell":        raw["netcell_enabled"],

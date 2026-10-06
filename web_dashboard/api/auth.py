@@ -321,6 +321,9 @@ PERMISSION_SCOPE_LEVELS = {
     # api/pov_gates.py.
     "pov_own": ["read", "write", "delete"],
     "pov_templates": _RWD,
+    # Managed Active Directory: build/register (write), destroy/unregister (delete).
+    # Reading the stored admin password is write, as on the cloud pages.
+    "directories": _RWD,
     # Proxmox and Nutanix have real deploy / image-import / delete-VM routes. vSphere,
     # Hyper-V and XCP-ng are read-plus-power only in this dashboard -- there is no route
     # that destroys anything on them -- so they offer no `delete`. Advertising one would
@@ -400,7 +403,7 @@ PERMISSION_SCOPE_GROUPS = {
     "Clouds": ["aws", "azure", "gcp", "oci", "costs"],
     "Hypervisors": ["proxmox", "vsphere", "hyperv", "nutanix", "xcpng", "connections"],
     "Platform": ["images", "containers", "k8s", "cloud_function", "cloud_database",
-                 "storage", "secrets", "config_mgmt"],
+                 "directories", "storage", "secrets", "config_mgmt"],
     "POV": ["pov", "pov_own", "pov_templates"],
     "Operations": ["gateways", "agents", "notifications", "epml", "ot",
                    "change_windows"],

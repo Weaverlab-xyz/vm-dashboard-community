@@ -1077,11 +1077,17 @@ def _annotate_findings(db: Session, result: dict) -> dict:
     DNS — it is not on that network, which is the whole reason the agent exists. The
     prefill writes the IP the probe used, so a second scan matches.
     """
-    from ..database import HypervisorConnection
+    from ..database import HypervisorConnection, ManagedDirectory
 
     findings = result.get("findings")
     if not isinstance(findings, list):
         return result
+
+    # Directory findings are matched against registered directories by host:port.
+    dirs = {((row[0] or "").strip().lower(), int(row[1] or 0))
+            for row in db.query(ManagedDirectory.host, ManagedDirectory.port)
+            .filter(ManagedDirectory.cloud == "local",
+                    ManagedDirectory.status != "deleted").all()}
 
     known = {((row[0] or "").lower(), (row[1] or "").strip().lower(), int(row[2] or 0))
              for row in db.query(HypervisorConnection.kind, HypervisorConnection.host,
@@ -1090,11 +1096,15 @@ def _annotate_findings(db: Session, result: dict) -> dict:
     for finding in findings:
         if not isinstance(finding, dict):
             continue
-        kind = _PRODUCT_TO_KIND.get((finding.get("product") or "").lower(), "")
         try:
             port = int(finding.get("port") or 0)
         except (TypeError, ValueError):
             port = 0
+        if finding.get("kind") == "directory":
+            finding["already_registered"] = (
+                (finding.get("host") or "").strip().lower(), port) in dirs
+            continue
+        kind = _PRODUCT_TO_KIND.get((finding.get("product") or "").lower(), "")
         finding["already_registered"] = (
             kind, (finding.get("host") or "").strip().lower(), port) in known
     return result
@@ -1569,6 +1579,12 @@ def queue_discovery(agent_id: str, body: DiscoverRequest, request: Request,
                     f"later — pull chrweav/dashboard-agent:latest and restart the "
                     f"container. Re-enrolment is not needed; the agent keeps its "
                     f"identity across an image update."))
+    # A directory scan is a 2.8 family: an older 2.x agent does not know it and would
+    # fall back to probing hypervisors, reporting a clean network for the wrong reason.
+    if getattr(body, "scan_kind", "") == "directory" and \
+            not agent_service.supports_directory(agent):
+        raise HTTPException(status_code=409,
+                            detail=agent_service.directory_upgrade_hint(agent))
     reported = agent.reported_job_types_list
     if reported and "agent_discover" not in reported:
         # Covers what a version number cannot: a current agent whose policy.yaml omits

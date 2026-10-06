@@ -121,11 +121,15 @@ class AzureDeployRequest(ScheduleRequestMixin, BaseModel):
     pra_credential_ref: Optional[str] = None     # secret ref → bt_client_secret override for the shell jump
     docker_deploy_key_ref: Optional[str] = None  # secret ref → ACI Jumpoint deploy key (else azure_aci_docker_deploy_key)
     register_in_entitle: bool = False            # opt in to registering this VM as an Entitle SSH integration (Linux only)
-    register_in_passwordsafe: bool = False       # opt in to onboarding this VM into Password Safe (managed system + account, Linux only)
+    register_in_passwordsafe: bool = False       # opt in to onboarding this VM into Password Safe (Linux: SSH-key plugin; Windows: password-managed, seeded + rotated)
     # Password Safe onboarding method for THIS deploy, overriding the cloud default
     # (services/ps_vm_hook._resolve_method). Blank everywhere but a network cell,
     # whose VyOS guest runs none of the agents the cloud-native plugins drive.
     passwordsafe_method: str = ""
+    # Windows only: Entra ID join (system identity + AADLoginForWindows) and optional
+    # Intune enrolment. None = the azure_windows_entra_join / _intune_enroll defaults.
+    entra_join: Optional[bool] = None
+    entra_intune_enroll: Optional[bool] = None
     ssh_key_secret_override: Optional[str] = None  # optional Key Vault keypair secret to use for the SSH key (must be JSON with a public_key)
     count: int = Field(
         default=1, ge=1, le=MAX_DEPLOY_COUNT,
@@ -171,7 +175,11 @@ class AzureBulkDeployRequest(ScheduleRequestMixin, BaseModel):
     ssh_public_key: str = ""   # required for Linux (endpoint enforces)
     workgroup: str             # written as `workgroup` resource tag on all VMs
     register_in_entitle: bool = False  # opt in to registering each VM as an Entitle SSH integration (Linux only)
-    register_in_passwordsafe: bool = False  # opt in to onboarding each VM into Password Safe (managed system + account, Linux only)
+    register_in_passwordsafe: bool = False  # opt in to onboarding each VM into Password Safe (Linux: SSH-key plugin; Windows: password-managed, seeded + rotated)
+    # Windows only: Entra ID join (system identity + AADLoginForWindows) and optional
+    # Intune enrolment. None = the azure_windows_entra_join / _intune_enroll defaults.
+    entra_join: Optional[bool] = None
+    entra_intune_enroll: Optional[bool] = None
     ssh_key_secret_override: Optional[str] = None  # optional Key Vault keypair secret to use for the SSH key (must be JSON with a public_key)
     # Marketplace image metadata (optional, used if present)
     image_publisher: Optional[str] = None

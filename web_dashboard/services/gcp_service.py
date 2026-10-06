@@ -11,6 +11,7 @@ GCP cannot starve the other providers. See services/cloud_executor.py.
 """
 import hashlib
 import json
+import re
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -924,19 +925,31 @@ def _launch_instance_sync(
     disk_size_gb: int = 20,
     network_tags: Optional[list[str]] = None,
     labels: Optional[dict] = None,
+    windows: bool = False,
+    extra_metadata: Optional[dict] = None,
+    service_account_email: str = "",
 ) -> dict:
     _require_compute()
     from google.cloud import compute_v1
 
-    # Sanitize the public key — GCE's "ssh-keys" metadata is line-delimited,
-    # so any embedded CR/LF in this value silently corrupts the entry.
-    ssh_public_key = _clean_public_key(ssh_public_key)
-    crumbs = _ssh_key_breadcrumbs(ssh_public_key)
-    logger.info(
-        "GCP deploy %s: injecting SSH key algo=%s len=%d sha256_12=%s comment=%r as user=%s",
-        instance_name, crumbs["algo"], crumbs["len"], crumbs["sha256_12"], crumbs["comment"],
-        ssh_username,
-    )
+    if windows:
+        # No SSH key on Windows; the administrator password comes from the windows-keys
+        # exchange after boot (reset_windows_password). Windows images will not boot
+        # from a disk smaller than the image itself, which is 50 GB on every
+        # windows-cloud family.
+        disk_size_gb = max(int(disk_size_gb or 0), WINDOWS_MIN_DISK_GB)
+        logger.info("GCP deploy %s: Windows image, %d GB boot disk, no SSH key",
+                    instance_name, disk_size_gb)
+    else:
+        # Sanitize the public key — GCE's "ssh-keys" metadata is line-delimited,
+        # so any embedded CR/LF in this value silently corrupts the entry.
+        ssh_public_key = _clean_public_key(ssh_public_key)
+        crumbs = _ssh_key_breadcrumbs(ssh_public_key)
+        logger.info(
+            "GCP deploy %s: injecting SSH key algo=%s len=%d sha256_12=%s comment=%r as user=%s",
+            instance_name, crumbs["algo"], crumbs["len"], crumbs["sha256_12"], crumbs["comment"],
+            ssh_username,
+        )
 
     creds = _gcp_creds()
     client = compute_v1.InstancesClient(credentials=creds)
@@ -969,10 +982,17 @@ def _launch_instance_sync(
         )]
     instance.network_interfaces = [nic]
 
-    # SSH key in instance metadata
-    instance.metadata = compute_v1.Metadata(
-        items=[compute_v1.Items(key="ssh-keys", value=f"{ssh_username}:{ssh_public_key}")]
-    )
+    # SSH key (Linux) plus any caller metadata — e.g. managed-ad-domain for a domain join.
+    items = [] if windows else [
+        compute_v1.Items(key="ssh-keys", value=f"{ssh_username}:{ssh_public_key}")]
+    for k, v in (extra_metadata or {}).items():
+        items.append(compute_v1.Items(key=k, value=str(v)))
+    instance.metadata = compute_v1.Metadata(items=items)
+
+    if service_account_email:
+        instance.service_accounts = [compute_v1.ServiceAccount(
+            email=service_account_email,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"])]
 
     # Labels
     merged_labels = {"managed-by": "vm-dashboard"}
@@ -1020,13 +1040,199 @@ async def launch_instance(
     disk_size_gb: int = 20,
     network_tags: Optional[list[str]] = None,
     labels: Optional[dict] = None,
+    windows: bool = False,
+    extra_metadata: Optional[dict] = None,
+    service_account_email: str = "",
 ) -> dict:
     return await _to_thread(
         _launch_instance_sync,
         project_id, zone, instance_name, machine_type, image_self_link,
         subnetwork, create_external_ip, ssh_username, ssh_public_key,
-        disk_size_gb, network_tags, labels,
+        disk_size_gb, network_tags, labels, windows, extra_metadata,
+        service_account_email,
     )
+
+
+# ── Windows: image detection and the windows-keys password exchange ───────────
+#
+# GCE has no "get password" call. The google-guest-agent on a Windows instance watches
+# the `windows-keys` metadata entry; when a new key appears it creates (or resets) the
+# named local account with a random password, RSA-OAEP-encrypts that password to the
+# key's public half, and writes the result as JSON to serial port 4. This is exactly
+# what `gcloud compute reset-windows-password` does. The private half never leaves
+# process memory, and the entry is removed again once the password is read.
+
+WINDOWS_MIN_DISK_GB = 50
+_WINDOWS_KEYS = "windows-keys"
+
+
+def _image_is_windows_sync(image_self_link: str) -> bool:
+    link = (image_self_link or "").lower()
+    if "windows-cloud" in link or "/windows-" in link:
+        return True
+    _require_compute()
+    from google.cloud import compute_v1
+    m = re.search(r"projects/([^/]+)/global/images/(?:family/)?([^/]+)", image_self_link or "")
+    if not m:
+        return False
+    client = compute_v1.ImagesClient(credentials=_gcp_creds())
+    try:
+        if "/family/" in image_self_link:
+            img = client.get_from_family(project=m.group(1), family=m.group(2))
+        else:
+            img = client.get(project=m.group(1), image=m.group(2))
+    except Exception as e:  # noqa: BLE001 — an unreadable image is not a Windows one
+        logger.info("GCP: could not read image %s to detect its OS: %s", image_self_link, e)
+        return False
+    if any("windows-cloud" in (lic or "").lower() for lic in (img.licenses or [])):
+        return True
+    return any((f.type_ or "").upper() == "WINDOWS" for f in (img.guest_os_features or []))
+
+
+async def image_is_windows(image_self_link: str) -> bool:
+    """Whether an image is Windows: by name for the public windows-cloud images, else
+    by its licences / guest OS features (a custom image built from one)."""
+    return await _to_thread(_image_is_windows_sync, image_self_link)
+
+
+def windows_key_entry(username: str, public_key, *, email: str = "vm-dashboard",
+                      ttl_s: int = 600) -> dict:
+    """The JSON object the guest agent expects in ``windows-keys`` for one key."""
+    import base64
+    from datetime import timedelta
+    nums = public_key.public_numbers()
+    n = nums.n.to_bytes((nums.n.bit_length() + 7) // 8, "big")
+    e = nums.e.to_bytes((nums.e.bit_length() + 7) // 8, "big")
+    expire = (datetime.now(timezone.utc) + timedelta(seconds=ttl_s)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    return {"userName": username, "modulus": base64.b64encode(n).decode(),
+            "exponent": base64.b64encode(e).decode(), "email": email, "expireOn": expire}
+
+
+def _metadata_without(items, key: str, drop_modulus: str = "") -> list:
+    """Metadata items with ``key`` filtered. For windows-keys, drops only the entry
+    carrying ``drop_modulus`` (other users' keys stay); for any other key, drops it."""
+    out = []
+    for it in items or []:
+        if it.key != key:
+            out.append((it.key, it.value))
+            continue
+        if not drop_modulus:
+            continue
+        kept = [ln for ln in (it.value or "").splitlines()
+                if ln.strip() and drop_modulus not in ln]
+        if kept:
+            out.append((it.key, "\n".join(kept)))
+    return out
+
+
+def _set_windows_key_sync(project_id: str, zone: str, instance_name: str,
+                          entry: Optional[dict], remove_modulus: str = "") -> None:
+    """Add ``entry`` to ``windows-keys`` (or, with ``entry=None``, remove the line for
+    ``remove_modulus``), preserving every other metadata item and the fingerprint."""
+    _require_compute()
+    from google.cloud import compute_v1
+    client = compute_v1.InstancesClient(credentials=_gcp_creds())
+    inst = client.get(project=project_id, zone=zone, instance=instance_name)
+    md = inst.metadata
+    pairs = _metadata_without(md.items, _WINDOWS_KEYS,
+                              drop_modulus=remove_modulus or "\x00")
+    if entry is not None:
+        existing = next((v for k, v in pairs if k == _WINDOWS_KEYS), "")
+        pairs = [(k, v) for k, v in pairs if k != _WINDOWS_KEYS]
+        value = "\n".join(x for x in (existing, json.dumps(entry)) if x)
+        pairs.append((_WINDOWS_KEYS, value))
+    body = compute_v1.Metadata(
+        fingerprint=md.fingerprint,
+        items=[compute_v1.Items(key=k, value=v) for k, v in pairs])
+    op = client.set_metadata(project=project_id, zone=zone, instance=instance_name,
+                             metadata_resource=body)
+    op.result(timeout=120)
+
+
+def _serial_port_4_sync(project_id: str, zone: str, instance_name: str) -> str:
+    _require_compute()
+    from google.cloud import compute_v1
+    client = compute_v1.InstancesClient(credentials=_gcp_creds())
+    out = client.get_serial_port_output(project=project_id, zone=zone,
+                                        instance=instance_name, port=4)
+    return out.contents or ""
+
+
+def parse_windows_password_reply(serial: str, modulus_b64: str) -> Optional[dict]:
+    """The guest agent's JSON reply for OUR key, from serial port 4 output, or None.
+    Port 4 carries every reply ever written, so match on the modulus."""
+    for line in reversed((serial or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{") or modulus_b64 not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if obj.get("modulus") == modulus_b64:
+            return obj
+    return None
+
+
+def decrypt_windows_password(encrypted_b64: str, private_key) -> str:
+    import base64
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    blob = base64.b64decode(encrypted_b64)
+    return private_key.decrypt(blob, padding.OAEP(
+        mgf=padding.MGF1(algorithm=hashes.SHA1()), algorithm=hashes.SHA1(),
+        label=None)).decode("utf-8")
+
+
+async def reset_windows_password(project_id: str, zone: str, instance_name: str,
+                                 username: str, *, timeout_s: int = 1200,
+                                 interval_s: int = 15, on_wait=None) -> str:
+    """Create/reset ``username`` on a Windows instance; return its password.
+
+    Waits for the guest agent (it only answers once Windows has finished first boot,
+    which is several minutes after the instance is RUNNING), then removes our key from
+    metadata whatever happened."""
+    import asyncio
+    import time as _time
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    entry = windows_key_entry(username, key.public_key(), ttl_s=timeout_s + 300)
+    modulus = entry["modulus"]
+    try:
+        try:
+            await _to_thread(_set_windows_key_sync, project_id, zone, instance_name, entry)
+        except Exception as e:  # noqa: BLE001
+            raise GCPError(f"Could not write windows-keys on {instance_name}: {e}") from e
+        start = _time.monotonic()
+        while True:
+            try:
+                serial = await _to_thread(_serial_port_4_sync, project_id, zone, instance_name)
+            except Exception as e:  # noqa: BLE001 — not readable until the VM is up
+                serial = ""
+                logger.debug("serial port 4 of %s not readable yet: %s", instance_name, e)
+            reply = parse_windows_password_reply(serial, modulus)
+            if reply:
+                if reply.get("errorMessage"):
+                    raise GCPError(f"The guest agent on {instance_name} refused the "
+                                   f"password reset: {reply['errorMessage']}")
+                if reply.get("encryptedPassword"):
+                    return decrypt_windows_password(reply["encryptedPassword"], key)
+            elapsed = _time.monotonic() - start
+            if elapsed >= timeout_s:
+                raise GCPError(
+                    f"The guest agent on {instance_name} did not answer the password reset "
+                    f"within {int(elapsed // 60)} min. The image may not run "
+                    f"google-guest-agent, or Windows has not finished first boot.")
+            if on_wait:
+                on_wait(int(elapsed))
+            await asyncio.sleep(interval_s)
+    finally:
+        try:
+            await _to_thread(_set_windows_key_sync, project_id, zone, instance_name,
+                             None, modulus)
+        except Exception as e:  # noqa: BLE001 — the key has expireOn as a backstop
+            logger.warning("could not remove windows-keys entry from %s: %s", instance_name, e)
 
 
 

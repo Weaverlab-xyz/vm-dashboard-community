@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     xcpng_enabled: bool = False         # XCP-ng/XenServer router + /xcpng page (XAPI XML-RPC)
     vdesktops_enabled: bool = False     # Virtual desktops router + /desktops page (Azure pools + PRA brokering)
     cloud_database_enabled: bool = False  # /api/databases router — private managed DBs brokered via a PRA tunnel
+    directories_enabled: bool = False     # /directories — managed Active Directory (AWS + GCP) and AD join for Windows servers
     k8s_management_enabled: bool = False  # /api/k8s router — provision/register/manage Kubernetes clusters
     cloud_functions_enabled: bool = False  # /api/functions router — Lambda / Function App / Cloud Run function lifecycle
     # /api/agent router + /agents page — containerised agents inside private networks
@@ -530,6 +531,15 @@ class Settings(BaseSettings):
     # GCP VM SSH Rotation (cloud-native) onboarding — GCP counterpart (writes the key into GCE ssh-keys metadata).
     passwordsafe_gcp_registration_method: str = "gcpvm"  # "gcpvm" (GCP VM SSH Rotation plugin, default) | "ssh"
     passwordsafe_gcp_change_password_on_register: bool = True  # mint first key via GCE metadata on onboard (adminuser has none baked in)
+    # Windows VM onboarding (Azure + AWS) — services/ps_vm_hook.register_windows. A
+    # PASSWORD-managed system (method="password"), seeded with the build-time
+    # administrator password, so it needs its own functional account on a Windows
+    # platform: the per-cloud keys above sit on SSH-rotation plugins. Password Safe
+    # rotates over SMB/WinRM, so a private VM needs a Resource Broker / resource zone.
+    passwordsafe_vm_functional_account_windows: str = ""        # generic Windows functional account (name or id)
+    passwordsafe_vm_functional_account_windows_azure: str = ""  # per-cloud overrides
+    passwordsafe_vm_functional_account_windows_aws: str = ""
+    passwordsafe_windows_change_password_on_register: bool = True  # rotate at once, so only Password Safe knows it
     # OT demo cell → PRA checkout. When the cell's adminuser is onboarded into Password
     # Safe, the wiring also creates a PRA Vault username/password account (associated to
     # the cell's Jump Group) plus a managed-account mirror on the "PRA Vault Username
@@ -1221,6 +1231,36 @@ class Settings(BaseSettings):
     # to corrupt. "aci" starts a dedicated ACI container group per deploy (Shell Jump
     # only; ACI cannot protocol-tunnel). Batches always share one ACI group.
     azure_vm_jumpoint_mode: str = "shared"        # "shared" | "aci"
+    # PRA Vault account group for the RDP jump's vaulted administrator credential on
+    # Windows server builds (Azure + AWS). Unused when Password Safe owns the account.
+    pra_windows_vault_account_group_id: str = ""
+    # Windows server builds: Entra ID join (Azure only — services/windows_server_hook).
+    # The per-deploy checkbox defaults to these; the group lists are Entra group OBJECT
+    # ids (comma-separated) granted Virtual Machine Administrator / User Login on each
+    # joined VM. Granting needs roleAssignments/write for the dashboard's principal.
+    azure_windows_entra_join: bool = False
+    azure_windows_entra_intune_enroll: bool = False
+    azure_entra_vm_admin_group_ids: str = ""
+    azure_entra_vm_user_group_ids: str = ""
+    # Where a Windows VM's administrator password is written (services/windows_admin_secret).
+    # Blank = automatic: Password Safe, else the global external secrets backend, else the
+    # cloud's own vault. "database" is refused — it is never kept in the dashboard DB.
+    windows_admin_secret_backend: str = ""
+    # GCP Windows servers: the local account the windows-keys exchange creates at deploy.
+    gcp_windows_admin_username: str = "gcpadmin"
+    # Managed Active Directory (services/directory_service). No timer by default: servers
+    # joined to a directory break when it goes.
+    directory_aws_default_edition: str = "Standard"   # Standard | Enterprise
+    directory_gcp_reserved_ip_range: str = ""          # an unused /24 for GCP domain controllers
+    directory_join_default_ou: str = ""                # OU distinguished name for joined servers ("" = Computers)
+    # GCE domain join runs as the VM's service account, which needs
+    # roles/managedidentities.domainJoin. Blank = no service account → no GCP join.
+    gcp_domain_join_service_account: str = ""
+    # Directory administrator in Password Safe: a functional account on an Active Directory
+    # platform, and the managed system's entity type (0 = passwordsafe_entity_type_id).
+    passwordsafe_directory_functional_account: str = ""
+    passwordsafe_directory_entity_type_id: int = 0
+    passwordsafe_directory_change_password_on_register: bool = True
     # ACR credentials (leave empty to pull from Docker Hub without auth).
     # Direct fields are preferred; values are stored encrypted in the DB and
     # transparently resolved through the chosen secrets backend (PS / AWS SM /

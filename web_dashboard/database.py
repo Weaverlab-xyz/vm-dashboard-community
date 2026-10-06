@@ -2446,6 +2446,90 @@ class CertLab(Base):
     expires_at = Column(DateTime, nullable=True, index=True)
     expiry_warned_at = Column(DateTime, nullable=True)
 
+class ManagedDirectory(Base):
+    """A Microsoft Active Directory that Windows servers can be domain-joined to.
+
+    AWS (Directory Service: Managed Microsoft AD, AD Connector, Simple AD) and GCP
+    (Managed Service for Microsoft Active Directory). Azure is absent on purpose: Windows
+    VMs there join Entra ID directly (windows_server_hook.entra_join_azure).
+
+    ``source`` follows the CloudDatabase / K8sCluster convention. A ``provisioned`` row
+    was built here from ``terraform/directory/<module>`` and can be destroyed here; a
+    ``registered`` row is a directory that already existed, found by discovery, and
+    deleting it only forgets it.
+
+    No secret is stored on this row. The administrator password of a provisioned
+    directory lives in Password Safe / an external secret manager (never the dashboard
+    database); only its (backend, ref) pair is kept here. A registered directory carries
+    none at all — joining a server needs no domain credential on either cloud.
+    """
+    __tablename__ = "managed_directories"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(255), nullable=False)                 # FQDN, e.g. corp.example.com
+    netbios = Column(String(15), nullable=True)
+    cloud = Column(String(20), nullable=False)                 # aws | gcp | local (on-prem)
+    # aws_managed_ad | aws_ad_connector | aws_simple_ad | gcp_managed_ad
+    # | onprem_ad | ldap  (the last two: on-prem, reached through a remote agent)
+    provider = Column(String(32), nullable=False)
+    source = Column(String(16), nullable=False, default="provisioned")  # provisioned | registered
+    status = Column(String(32), nullable=False, default="provisioning", index=True)
+    edition = Column(String(32), nullable=True)                # AWS Standard | Enterprise
+
+    region = Column(String(64), nullable=True)                 # AWS region
+    locations = Column(Text, nullable=True)                    # GCP: JSON array of regions
+    project = Column(String(120), nullable=True)               # GCP project
+    directory_id = Column(String(64), nullable=True)           # AWS d-xxxxxxxxxx
+    resource_name = Column(String(255), nullable=True)         # GCP projects/…/domains/…
+    vpc_id = Column(String(64), nullable=True)                 # AWS
+    subnet_ids = Column(Text, nullable=True)                   # AWS: JSON array
+    networks = Column(Text, nullable=True)                     # GCP: JSON array (authorized)
+    reserved_ip_range = Column(String(32), nullable=True)      # GCP
+    dns_ips = Column(Text, nullable=True)                      # JSON array
+    security_group_id = Column(String(64), nullable=True)      # AWS
+
+    # ── on-prem (cloud="local") ─────────────────────────────────────────────────
+    # The remote agent that can reach this directory. Only meaningful on a local row —
+    # mirrors CloudDatabase.agent_id. SET NULL, so retiring an agent leaves the row
+    # visibly unreachable rather than deleting an inventory record.
+    agent_id = Column(String(36), ForeignKey("remote_agents.id", ondelete="SET NULL"),
+                      index=True, nullable=True)
+    host = Column(String(255), nullable=True)                  # a domain controller / LDAP server
+    port = Column(Integer, nullable=True)                      # 389 | 636
+    use_ldaps = Column(Boolean, nullable=True)
+    base_dn = Column(String(255), nullable=True)               # e.g. DC=corp,DC=example,DC=com
+    # "psmanaged:{system_id, account_id, account_name}" — the Password Safe account the
+    # playbooks bind as, checked out per run. Never a secret.
+    credentials_ref = Column(Text, nullable=True)
+    # A cloud-side extension of an on-prem directory (an AWS AD Connector, a GCP DNS
+    # link) points at the on-prem row it extends. Not a FK: unregistering the on-prem
+    # row is refused while a link exists, and a dangling id reads as "on-prem row gone".
+    linked_directory_id = Column(String(36), nullable=True, index=True)
+
+    admin_username = Column(String(64), nullable=True)
+    admin_password_backend = Column(String(32), nullable=True)
+    admin_password_ref = Column(String(255), nullable=True)
+    admin_password_custody = Column(String(32), nullable=True)  # secret_manager | passwordsafe_managed
+
+    ps_system_id = Column(String(36), nullable=True)
+    ps_account_id = Column(String(36), nullable=True)
+    ps_tf_state = Column(Text, nullable=True)                  # scrubbed
+    ps_error = Column(Text, nullable=True)
+
+    # Terraform state lives in the storage backend under terraform-state/<job id>.
+    deploy_job_id = Column(String(36), nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    workgroup = Column(String(100), nullable=True, index=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+    # NULL by default: a directory is long-lived infrastructure that joined servers
+    # depend on. An operator may set one through /api/expiry/set.
+    expires_at = Column(DateTime, nullable=True, index=True)
+    expiry_warned_at = Column(DateTime, nullable=True)
+
+
 class SpireLab(Base):
     """Inventory of dashboard-provisioned SPIRE trust domains for the Password Safe
     SPIFFE SVID plugin's lab.
@@ -4101,6 +4185,10 @@ _BACKFILL_V1_DELIBERATELY_EMPTY = (
     # of its routes, which is what test_the_form_of_every_gate_agrees_with_the_backfill
     # checks this decision against.
     "change_windows",
+    # Brand-new for the same reason as change_windows: managed Active Directory is a new
+    # page over new routes, every one behind require_explicit_permission. Nobody had
+    # access yesterday, so a backfill would grant, not preserve.
+    "directories",
     # Same reason: a brand-new authority (create, and run/destroy your own POVs), so no
     # prior access to preserve. The one place it IS added on upgrade is the built-in POV
     # Presenter role, which is the point of it -- `_grant_presenter_own_pov`.
@@ -4625,6 +4713,17 @@ def init_db():
             # what they get. No FK in the raw DDL, matching every entry here.
             "ALTER TABLE cloud_databases ADD COLUMN agent_id VARCHAR(36)",
             "CREATE INDEX ix_cloud_databases_agent_id ON cloud_databases(agent_id)",
+            # On-prem directories reached through a remote agent (directory_service.
+            # register_onprem). No-ops on a table create_all made with them already.
+            "ALTER TABLE managed_directories ADD COLUMN agent_id VARCHAR(36)",
+            "CREATE INDEX ix_managed_directories_agent_id ON managed_directories(agent_id)",
+            "ALTER TABLE managed_directories ADD COLUMN host VARCHAR(255)",
+            "ALTER TABLE managed_directories ADD COLUMN port INTEGER",
+            "ALTER TABLE managed_directories ADD COLUMN use_ldaps BOOLEAN",
+            "ALTER TABLE managed_directories ADD COLUMN base_dn VARCHAR(255)",
+            "ALTER TABLE managed_directories ADD COLUMN credentials_ref TEXT",
+            "ALTER TABLE managed_directories ADD COLUMN linked_directory_id VARCHAR(36)",
+            "CREATE INDEX ix_managed_directories_linked_directory_id ON managed_directories(linked_directory_id)",
             "CREATE INDEX ix_cloud_databases_expires_at ON cloud_databases(expires_at)",
             "ALTER TABLE k8s_clusters ADD COLUMN expires_at TIMESTAMP",
             "ALTER TABLE k8s_clusters ADD COLUMN expiry_warned_at TIMESTAMP",

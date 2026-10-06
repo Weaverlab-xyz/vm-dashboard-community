@@ -13,6 +13,7 @@ you deploy, then the bill.
 | [Cloud VMs](cloud/vms.md) | you are deploying cloud VMs, or want the dashboard to see and power ones it did not deploy |
 | [Cloud Containers](cloud/containers.md) | you want a containerised app on a cloud runtime without standing up Portainer |
 | [Virtual Desktops](cloud/virtual-desktops.md) | you need a pool of private desktop VMs that reps reach through the PRA Gateway rather than over the internet |
+| [Managed Active Directory](cloud/directories.md) | you want Windows servers on AWS or GCP joined to an Active Directory domain, built here or one you already run |
 | [Image Management](cloud/image-management.md) | you are about to build a custom image and need to know how it will reach the other clouds |
 | [Cloud Costs](cloud/costs.md) | you want month-to-date cloud spend, a budget alert, or a budget in the cloud that alerts while the dashboard is down |
 

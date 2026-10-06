@@ -88,8 +88,14 @@ _DESTROY_FOR = {
 # has already signed — so what the reap ends is the IDENTITY'S ABILITY TO MINT ANOTHER. An
 # identity left behind keeps drawing a fresh credential every time its consumer asks, each
 # issuance billed, indefinitely. The teardown revokes what it can and retires the row.
+#
+# "directory" is a managed Active Directory (directory_service). It is the one kind here
+# that NEVER gets a default timer — servers joined to a directory break when it goes —
+# but an operator may set one, and a timer that exists must be honoured. Its teardown is
+# the same `directory_decommission` the Destroy button runs, which refuses while any
+# dashboard VM is still joined; a registered directory is never reaped (source rule).
 REAPABLE_KINDS = ("vm", "database", "k8s", "pov", "certlab", "spirelab", "workloadk8s",
-                  "workloadcloud")
+                  "workloadcloud", "directory")
 
 # Clouds whose VM teardown is a claimable job (the keys of _DESTROY_FOR, as inventory
 # `cloud` values).
@@ -118,6 +124,8 @@ _REAPABLE_STATES = {
     # left a CA mid-creation, and a destroy racing that is how a pool ends up
     # undeletable. A human looks at a failed CA.
     "certlab":  frozenset({"available"}),
+    # directory_service marks a finished build "available"; "failed" needs a human.
+    "directory": frozenset({"available"}),
     # spire_lab_service marks a finished standup "available". "failed" is excluded
     # for the same reason as certlab: a half-built lab may have an ACL open and a
     # server part-configured, and a human should decide which.

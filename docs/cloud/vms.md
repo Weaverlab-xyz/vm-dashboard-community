@@ -19,17 +19,17 @@ as [Databases](../databases.md) and [Kubernetes](../kubernetes.md):
 
 | Cloud | Provisioning | L1 PRA (Shell Jump) | L2 Password Safe | L3 Entitle |
 |---|---|---|---|---|
-| **AWS** | EC2 (Linux + Windows) | ✅ | ✅ `ssm` plugin (or `ssh`) | ✅ SSH ephemeral |
-| **Azure** | VM (Linux + Windows) | ✅ (Linux; Windows → RDP jump) | ✅ `azurevm` plugin (or `ssh`) | ✅ SSH ephemeral |
-| **GCP** | GCE (Linux) | ✅ | ✅ `gcpvm` plugin (or `ssh`) | ✅ SSH ephemeral |
+| **AWS** | EC2 (Linux + Windows) | ✅ (Linux: Shell Jump; Windows: RDP jump) | ✅ `ssm` plugin (or `ssh`); Windows: password-managed | ✅ SSH ephemeral (Linux) |
+| **Azure** | VM (Linux + Windows) | ✅ (Linux: Shell Jump; Windows: RDP jump) | ✅ `azurevm` plugin (or `ssh`); Windows: password-managed | ✅ SSH ephemeral (Linux) |
+| **GCP** | GCE (Linux + Windows) | ✅ (Linux: Shell Jump; Windows: RDP jump) | ✅ `gcpvm` plugin (or `ssh`); Windows: password-managed | ✅ SSH ephemeral (Linux) |
 | **OCI** | Compute (Linux) | ✅ (shared gateway, or bring your own¹) | ⚠️ `ssh` method only | ✅ SSH ephemeral |
 
 ¹ OCI has no dashboard-provisioned gateway — you supply your own (see the OCI section).
 
 Unlike the other features, **cloud VM deploy has no feature toggle** — it's core
 functionality available whenever a cloud's credentials are configured, gated only by RBAC
-(`require_permission("aws"|"azure"|"gcp"|"oci", …)`). **Windows** is supported on **AWS and
-Azure** only.
+(`require_permission("aws"|"azure"|"gcp"|"oci", …)`). **Windows** is supported on **AWS,
+Azure and GCP** — see [Windows servers](#windows-servers).
 
 ---
 
@@ -443,8 +443,9 @@ for the SSM instance profile, and `ssm:SendCommand`/`GetCommandInvocation` for P
 | `aws_ecs_docker_deploy_key` + `bt_ecs_*` | — | shared gateway host (Layer 1) |
 
 Deploy VMs into the **private** subnet. Enable the NAT instance if the VM needs outbound
-internet (e.g. `apt`/`yum`). Windows AMIs are auto-detected (key injection skipped;
-retrieve the password via `GET /api/aws/instances/{id}/ssh-key` / the console).
+internet (e.g. `apt`/`yum`). Windows AMIs are auto-detected: the Administrator password is
+recovered with a one-time key pair and stored outside the dashboard — see
+[Windows servers](#windows-servers).
 
 ### Azure (VM)
 
@@ -489,9 +490,10 @@ Which shape a VM used is recorded as `jumpoint_mode` on its deploy job; destroy 
 shared reference and lets `jumpoint_host_service` decide, or stops the ACI group when no
 sibling VM still references it.
 
-Windows is supported: the dashboard generates + vaults a local-admin password, retrievable
-via `GET /api/azure/vms/{name}/admin-password`. Windows VMs use an **RDP jump**, not the
-SSH Shell Jump.
+Windows is supported: the dashboard generates a local-admin password and stores it in
+Password Safe or a secret manager (never the dashboard database), and Windows VMs get an
+**RDP jump** rather than the SSH Shell Jump. They can also be joined to Entra ID — see
+[Windows servers](#windows-servers).
 
 ### GCP (GCE)
 
@@ -610,7 +612,8 @@ Jump Group / Gateway resolution: per-deploy form `jump_group` / `jumpoint_name` 
 per-cloud override (`azure_bt_jump_group_name`/`azure_jumpoint_name`,
 `gcp_bt_jump_group_name`/`gcp_jumpoint_name`, `oci_bt_jump_group_name`/`oci_jumpoint_name`) →
 the `bt_*` defaults. AWS + Azure also accept a per-deploy `pra_credential_ref` (overrides
-`bt_client_secret`). **Windows Azure VMs** skip the SSH jump — use an RDP jump.
+`bt_client_secret`). **Windows VMs** (AWS and Azure) get a PRA **Remote RDP** jump item
+instead of a Shell Jump — see [Windows servers](#windows-servers).
 
 The shared gateway host, deploy keys, and PRA OAuth setup are described in the
 [Privileged Remote Access](../integrations/beyondtrust/privileged-remote-access.md) doc.
@@ -655,6 +658,152 @@ build keypair and `sudo` as the image's cloud-default user (`ubuntu`/`ec2-user`/
 Requires `entitle_owner_id` + `entitle_workflow_id`. See the [Entitle integration](../integrations/beyondtrust/entitle.md)
 doc. A separate **machine-identity JIT** track (the AWS `elevate()` wrapping of
 `ec2_deploy`/`ec2_terminate`) is covered in [design/cloud-identity-jit.md](../design/cloud-identity-jit.md).
+
+---
+
+## Windows servers
+
+Windows builds on **AWS, Azure and GCP** follow a different path from Linux after the VM
+exists: no SSH key, no Shell Jump, no Entitle SSH integration. In their place is the local
+administrator password, a PRA RDP jump, and a domain identity: an Entra ID join on Azure,
+or an [Active Directory join](directories.md) on AWS and GCP.
+
+### Where the administrator password goes
+
+The password is **never stored in the dashboard database**. Each Windows build writes it to
+the first of these that is configured (`services/windows_admin_secret.py`):
+
+1. `windows_admin_secret_backend`, if set on **Secrets → Windows VM administrator passwords**.
+   `database` is refused.
+2. **BeyondTrust Password Safe** (Secrets Safe), when the ps-cli client
+   (`pscli_api_url` / `pscli_client_id` / `pscli_client_secret`) and a numeric **Secret
+   Owner** (`secrets_bt_owner`) are configured. The secret lands in `secrets_bt_folder`.
+3. The global secrets backend, if it is an external one.
+4. The cloud's own vault: Azure Key Vault (`secrets_azure_kv_url`) for Azure, AWS Secrets
+   Manager (the AWS region) for EC2, GCP Secret Manager (the GCP project) for GCE.
+
+If none of these is configured, **the build is refused** before anything is created.
+Job metadata keeps only the backend and the reference, never the password.
+
+How the password comes into existence differs per cloud:
+
+- **Azure** generates it and writes it to the store *before* the VM is created, so a VM is
+  never created with a password nobody can read.
+- **AWS** lets EC2 generate it. The launch creates a one-time RSA key pair
+  (`vmdash-win-<job>`), waits for `GetPasswordData` (usually 4–15 minutes; the job shows
+  progress), decrypts the password in memory, stores it, and **deletes the key pair**. No
+  password or key material goes into UserData or SSM command history. An AMI that never
+  publishes a password (a custom image built without EC2Launch's random password) fails the
+  deploy with that reason after 25 minutes.
+- **GCP** has no "get password" call. After the instance boots, the deploy writes a
+  one-time RSA public key to the `windows-keys` instance metadata. The guest agent creates
+  the local account (`gcp_windows_admin_username`, default `gcpadmin`) with a random
+  password and writes it, encrypted to that key, to serial port 4. The deploy decrypts it
+  in memory, stores it, and removes the key from metadata. This is what
+  `gcloud compute reset-windows-password` does. Windows images get a boot disk of at
+  least 50 GB. A Windows image is recognised by the public `windows-cloud` project or by
+  its Windows licence.
+
+Retrieve it with **Password** on the cloud's VM list, or
+`GET /api/azure/vms/{name}/admin-password` / `GET /api/aws/instances/{id}/admin-password` /
+`GET /api/gcp/instances/{name}/admin-password`.
+Both need the cloud's **write** permission, because they hand out a working
+administrator credential, and both are audited. Destroying the VM deletes the stored
+password.
+
+### Password Safe managed account
+
+With **Onboard into Password Safe** ticked (and `passwordsafe_registration_enabled`), the
+local administrator is onboarded as a **password-managed** account (`method="password"`):
+
+- The functional account comes from `passwordsafe_vm_functional_account_windows_<cloud>`,
+  else `passwordsafe_vm_functional_account_windows`. It must be on a **Windows platform**.
+  The Linux functional accounts sit on SSH-rotation plugins and are deliberately not
+  reused.
+- The account is seeded with the build-time password and then rotated straight away
+  (`passwordsafe_windows_change_password_on_register`, default on), so afterwards only
+  Password Safe knows it.
+- Once Password Safe holds a working credential, the build-time copy in the secret manager
+  is **deleted**: after a rotation it would be wrong. **VMs → Password** then answers 409
+  and points at Password Safe check-out. If onboarding fails, the copy stays as the
+  break-glass credential and the job records `ps_error`.
+- Password Safe rotates over SMB/WinRM from the appliance or a Resource Broker, so a VM in a
+  private subnet needs a route: a resource zone covering the subnet, or
+  `passwordsafe_application_host_id`.
+- Off-boarding is automatic on destroy.
+
+Do not also enable **Windows LAPS** for the built-in administrator. Two rotators for one
+account will fight; pick one owner.
+
+### PRA RDP jump
+
+With PRA enabled, each Windows VM gets a **Remote RDP** jump item in the cloud's Jump
+Group, through its Gateway, resolved the same way as the Linux Shell Jump.
+
+- When Password Safe manages the account, **no PRA Vault copy** is made. PRA injects the
+  current credential through its Password Safe integration, and a copy would go stale at
+  the first rotation.
+- Otherwise the build-time password is vaulted in PRA for injection, in
+  `pra_windows_vault_account_group_id` if set.
+
+The jump and its Vault account are removed on destroy.
+
+### Entra ID join (Azure only)
+
+Tick **Join to Microsoft Entra ID** on a Windows deploy. The default comes from
+`azure_windows_entra_join`, set in the setup wizard's Azure advanced section. The deploy:
+
+1. Gives the VM a **system-assigned managed identity**.
+2. Installs the **AADLoginForWindows** extension. With **Also enrol in Intune**
+   (`azure_windows_entra_intune_enroll`), it passes Intune's `mdmId` so the device enrols.
+3. Grants **Virtual Machine Administrator Login** to the groups in
+   `azure_entra_vm_admin_group_ids`, and **Virtual Machine User Login** to
+   `azure_entra_vm_user_group_ids`, scoped to that one VM. Both are comma-separated Entra
+   group **object ids**.
+
+Requirements:
+
+- Windows Server 2019 or later (or Windows 10 20H2+ / 11).
+- Outbound HTTPS from the VM to `login.microsoftonline.com`,
+  `enterpriseregistration.windows.net` and `pas.windows.net`.
+- For step 3, the dashboard's service principal needs
+  `Microsoft.Authorization/roleAssignments/write` (Role Based Access Control Administrator
+  or User Access Administrator) on the VM's resource group.
+
+A failure in any step is a **warning on the job** (`entra_error` / `entra_role_errors`),
+not a failed deploy. The vaulted or Password Safe-managed local administrator still reaches
+the VM. Destroy removes the role assignments the deploy created, before deleting the VM.
+
+Entra sign-in over RDP needs a client that supports Entra authentication for RDP. Keep the
+local administrator as break-glass. For just-in-time access, an Entitle Azure integration
+can grant *Virtual Machine Administrator Login* on the VM for a limited time. That is the
+Windows counterpart of the Linux SSH ephemeral accounts.
+
+### Active Directory join (AWS and GCP)
+
+Microsoft supports Entra join and Entra RDP sign-in for Windows Server only on Azure VMs.
+On AWS and GCP, a Windows server can instead join a managed Active Directory at deploy:
+pick one under **Join Active Directory** on the deploy form. Directories are built or
+registered on the [Managed Active Directory](directories.md) page, which also covers
+what each cloud requires.
+
+- **AWS:** after the password is captured, the instance runs AWS's
+  `AWS-JoinDirectoryServiceDomain` document through Systems Manager, then reboots.
+- **GCP:** the instance is created with `managed-ad-domain` metadata, and the guest agent
+  joins during first boot.
+
+A failed join is a warning on the job, not a failed deploy. To have users sign in with
+Entra identities as well, synchronise that AD with Entra ID (Entra Connect or Cloud Sync).
+
+### Not yet supported
+
+- **OCI Windows.** OCI returns a Windows password through its initial-credentials API, with
+  a forced change at first logon. That is not implemented, so Windows images on OCI are
+  not usable from the dashboard.
+- **Windows desktop pools on AWS and GCP.** Virtual desktop seats there are still
+  Linux-only; see [Virtual Desktops](virtual-desktops.md).
+- **Removing a joined server's computer object from AD on destroy.** Neither cloud does
+  it, and it needs domain credentials on a host that can reach a domain controller.
 
 ---
 

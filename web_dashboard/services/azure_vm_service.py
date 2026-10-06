@@ -481,6 +481,12 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
             result["admin_password_backend"] = backend
             result["admin_password_ref"] = ref
 
+        # Windows only: Entra ID join (decided now — the VM's identity is set at create).
+        entra_join = entra_intune = False
+        if is_windows:
+            from ..services import windows_server_hook
+            entra_join, entra_intune = windows_server_hook.entra_requested(req)
+
         # Step 3: Deploy Azure VM (3-step: PIP → NIC → VM)
         job_service.update_progress(db, job_id, 35, f"Creating Azure VM '{req.vm_name}'…")
         if ssh_public_key is None:
@@ -505,6 +511,7 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
                 os_type=req.os_type,
                 admin_password=admin_password,
                 trusted_launch=getattr(req, "trusted_launch", False),
+                entra_join=entra_join,
             )
             result.update(vm_result)
         except AzureError as e:
@@ -529,12 +536,14 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
         )
 
         # Step 3: BeyondTrust PRA — Shell Jump (optional; SSH, so Linux only)
-        if settings.pra_enabled and is_windows:
-            job_service.update_progress(
-                db, job_id, 90,
-                "Windows VM deployed — Shell Jump (SSH) skipped; broker access with an "
-                "RDP jump item on the Gateway. Password: Azure → VMs → Password."
-            )
+        if is_windows:
+            # Windows gets an RDP jump instead, after Password Safe has had its say
+            # over who holds the credential — see windows_server_hook.wire below.
+            job_service.update_progress(db, job_id, 90, "Windows VM deployed.")
+            if entra_join:
+                await windows_server_hook.entra_join_azure(
+                    db, job_id, rg=rg, vm_name=req.vm_name, location=loc,
+                    vm_id=result.get("vm_id") or "", intune=entra_intune, result=result)
         elif settings.pra_enabled:
             from ..services import terraform_pra_service
             # Resolve from config_service (wizard/DB) first, then env-var defaults.
@@ -606,6 +615,23 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
                                       # "ssh" for a network cell, whose VyOS guest runs no
                                       # waagent for Run Command to reach.
                                       method=getattr(req, "passwordsafe_method", "") or "")
+
+        # Windows: Password Safe managed account + PRA Remote RDP jump.
+        if is_windows:
+            from ..services import windows_server_hook
+            _cred = getattr(req, "pra_credential_ref", None)
+            await windows_server_hook.wire(
+                db, job_id, vm_name=req.vm_name, hostname=hostname,
+                username=req.ssh_username, password=admin_password, result=result,
+                tag="Azure",
+                register_in_passwordsafe=bool(getattr(req, "register_in_passwordsafe", False)),
+                pra_enabled=bool(settings.pra_enabled),
+                jump_group=((getattr(req, "jump_group", None) or "").strip()
+                            or _cfg("azure_bt_jump_group_name") or _cfg("bt_jump_group_name")),
+                jumpoint_name=((getattr(req, "jumpoint_name", None) or "").strip()
+                               or _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name")),
+                client_secret=config_service.resolve_reference(_cred.strip()) if _cred else "",
+            )
 
         job_service.set_completed(db, job_id, result)
         await cache_service.invalidate(cache_service.key_global("azure_vms"))
@@ -684,12 +710,21 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg
     db = _get_db_session()
     try:
         job_service.set_running(db, destroy_job_id)
+        result = {"vm_name": vm_name}
+        deploy_job = job_service.get_job(db, deploy_job_id)
+        # Entra login role assignments are scoped to the VM: remove them while the
+        # scope still exists.
+        if deploy_job and deploy_job.metadata_dict.get("entra_role_assignments"):
+            from ..services import windows_server_hook
+            job_service.update_progress(db, destroy_job_id, 15,
+                                        "Removing Entra ID login role assignments…")
+            await windows_server_hook.teardown_entra(deploy_job.metadata_dict, result)
+
         job_service.update_progress(db, destroy_job_id, 20, f"Terminating Azure VM '{vm_name}'…")
 
         await azure_service.terminate_vm(rg, vm_name)
 
-        result = {"vm_name": vm_name, "terminated": True}
-        deploy_job = job_service.get_job(db, deploy_job_id)
+        result["terminated"] = True
         if deploy_job:
             meta = deploy_job.metadata_dict
 
@@ -900,6 +935,10 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg
             if meta.get("entitle_registration_tf_state"):
                 from ..services import entitle_vm_hook
                 await entitle_vm_hook.deregister(meta, result)
+
+            # Windows: the RDP jump and the stored admin password.
+            from ..services import windows_server_hook
+            await windows_server_hook.teardown(meta, result)
 
             # Off-board the Password Safe managed system if this deploy registered one.
             if meta.get("ps_registration_tf_state"):

@@ -57,7 +57,7 @@ grant on the Agents tab that decide whether the run happens.
 |---|---|---|
 | this agent may run `agent_ansible` | the dashboard operator | Agents page |
 | `agent_ansible` in `job_types` | **you** | `policy.yaml` |
-| `ansible: {enabled, vm_image, db_image, targets}` + the Docker socket | **you** | `policy.yaml` + `docker-compose.sibling.yml` |
+| `ansible: {enabled, vm_image, db_image, directory_image, targets}` + the Docker socket | **you** | `policy.yaml` + `docker-compose.sibling.yml` |
 | the run's credential | the dashboard operator | the run form's secret / managed-account picker |
 
 **`ansible.targets` is a separate list from `targets`, and that is the point.** The top-level
@@ -150,6 +150,36 @@ Register the database with `cloud = local` and bind it to an agent. The run is t
 agent's host instead of an in-cloud task. Its admin credential is checked out of Password
 Safe just-in-time by the dashboard and sealed into the bundle, so nothing durable sits on
 the agent.
+
+### On-premises directories
+
+An Active Directory or LDAP directory registered on the Directories page with an agent
+(see [On-premises directories](../cloud/directories.md#on-premises-directories-through-a-remote-agent))
+is a third kind of run, `directory`, with two transports:
+
+- **LDAP** (`local`): the same `hosts: localhost` shape as a database run, using
+  `community.general.ldap_*` against the directory's host and port.
+- **WinRM** (`winrm`): `microsoft.ad` modules on a domain controller, or on a
+  domain-joined management host named on the run form, over HTTPS (5986). WinRM logs on as
+  the directory's own account.
+
+Both use the directory's **Password Safe managed account**, checked out by the dashboard for
+that run and sealed into the bundle as `dir_host`, `dir_port`, `dir_use_ldaps`,
+`dir_base_dn`, `dir_domain`, `dir_bind_dn` and `dir_bind_password`. The agent passes only
+`dir_*` keys to the play and redacts the password from the output.
+
+A directory run also needs **`directories:write`**, granted explicitly, on top of
+`config_mgmt:write`, because it changes a directory with a domain credential.
+
+The image is `ansible.directory_image`, falling back to `ansible.db_image`.
+`chrweav/ansible-cloud` carries `python-ldap`, `pywinrm` and `microsoft.ad`, so one image
+serves both transports. Add the directory's LDAP port, and 5986 for WinRM, to
+`ansible.targets`. Directory runs need agent 2.8.0 or later.
+
+The same run kind joins a new GCE Windows server to an on-prem domain through a
+[GCP DNS link](../cloud/directories.md#extending-to-gcp-a-dns-link). The dashboard queues
+it after the deploy, against the server's private address on 5986, so that address must be
+in `ansible.targets` too.
 
 ### What the run looks like
 

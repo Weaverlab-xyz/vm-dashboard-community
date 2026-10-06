@@ -1,0 +1,53 @@
+# Search an LDAP directory and print the results (read-only)
+# Target: an on-prem directory, run through its remote agent with transport "LDAP".
+#
+# Optional:
+#   ldap_search_base: ou=People,dc=example,dc=com   # blank = the directory's base DN
+#   ldap_filter: (objectClass=person)
+#   ldap_attrs: [cn, mail]
+#   ldap_scope: subordinate                 # base | onelevel | subordinate | children
+#   ldap_page_size: 500                    # page through large result sets
+#   ldap_validate_certs: true
+- name: Search an LDAP directory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ldap_search_base: ""
+    ldap_filter: "(objectClass=*)"
+    ldap_attrs: [cn]
+    ldap_scope: subordinate
+    ldap_page_size: 500
+    ldap_validate_certs: true
+    ldap_server_uri: "{{ ('ldaps' if dir_use_ldaps | default(true) | bool else 'ldap') ~ '://' ~ dir_host ~ ':' ~ dir_port }}"
+  tasks:
+    - name: Fail early if required vars are missing
+      ansible.builtin.assert:
+        that:
+          - dir_host is defined and dir_host | length > 0
+          - (ldap_search_base | length > 0) or (dir_base_dn | default('') | length > 0)
+          - ldap_scope in ['base', 'onelevel', 'subordinate', 'children']
+        fail_msg: Set ldap_search_base (or register the directory with a base DN).
+
+    - name: Search
+      community.general.ldap_search:
+        dn: "{{ ldap_search_base if ldap_search_base | length > 0 else dir_base_dn }}"
+        filter: "{{ ldap_filter }}"
+        attrs: "{{ ldap_attrs }}"
+        scope: "{{ ldap_scope }}"
+        page_size: "{{ ldap_page_size }}"
+        server_uri: "{{ ldap_server_uri }}"
+        bind_dn: "{{ dir_bind_dn }}"
+        bind_pw: "{{ dir_bind_password }}"
+        validate_certs: "{{ ldap_validate_certs }}"
+      register: _ldap_results
+      no_log: true              # the module's invocation echo carries the bind password
+
+    - name: Print the results
+      ansible.builtin.debug:
+        msg: "{{ _ldap_results.results }}"
+
+    - name: Record the result count
+      ansible.builtin.set_stats:
+        data:
+          ldap_search_count: "{{ _ldap_results.results | length }}"

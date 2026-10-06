@@ -1,0 +1,38 @@
+# Create an Active Directory organizational unit
+# Target: an on-prem AD directory, run through its remote agent over WinRM.
+#
+# Required:
+#   ad_ou_name: Servers
+# Optional:
+#   ad_ou_path: OU=Corp,DC=corp,DC=example,DC=com   # parent; blank = the domain root
+#   ad_ou_description: Member servers
+#   ad_ou_protect: true                    # protect from accidental deletion
+# Removing an OU is deliberately not offered here: it deletes everything under it.
+# Supports --check.
+- name: Create an Active Directory OU
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: winrm
+    ad_ou_name: ""
+    ad_ou_path: ""
+    ad_ou_description: ""
+    ad_ou_protect: true
+  tasks:
+    - name: Fail early if required vars are missing
+      ansible.builtin.assert:
+        that:
+          - ad_ou_name | length > 0
+        fail_msg: Set ad_ou_name.
+
+    - name: Create the OU
+      microsoft.ad.ou:
+        name: "{{ ad_ou_name }}"
+        state: present
+        path: "{{ ad_ou_path if ad_ou_path | length > 0 else omit }}"
+        description: "{{ ad_ou_description if ad_ou_description | length > 0 else omit }}"
+        protect_from_deletion: "{{ ad_ou_protect }}"
+        domain_server: "{{ dir_host | default(omit) }}"
+        domain_username: "{{ dir_bind_dn | default(omit) }}"
+        domain_password: "{{ dir_bind_password | default(omit) }}"
+      no_log: true              # carries the bind password

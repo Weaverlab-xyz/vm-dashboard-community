@@ -382,6 +382,7 @@ async def _build_gcp_instances(db, project_id: str) -> list:
             inst["deployed_by"] = meta.get("deployed_by")
             inst["workgroup"] = meta.get("workgroup") or inst.get("workgroup")
             inst["suspend_warning"] = meta.get("suspend_warning")
+            inst["os_type"] = (meta.get("extra") or {}).get("os_type") or ""
             inst["region"] = inst.get("region") or region
             # GCE calls them labels. The service hands over the raw dict; the page
             # binds to the classified chip list.
@@ -517,6 +518,56 @@ async def list_instances(
                 continue
         filtered.append(inst)
     return GCPInstanceListResponse(instances=filtered, project_id=project_id, zone=_gcp_zone())
+
+
+@router.get("/instances/{instance_name}/admin-password")
+async def get_instance_admin_password(
+    instance_name: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("gcp", "write")),
+):
+    """The Windows administrator password of an instance deployed via this dashboard.
+
+    Set through the windows-keys exchange at deploy and kept in Password Safe / a secret
+    manager (never the dashboard database). ``gcp:write`` because it hands out a working
+    administrator credential; 409 when Password Safe manages the account."""
+    import asyncio
+    from ..services import windows_admin_secret
+    meta = None
+    for job in db.query(Job).filter(Job.job_type == "gce_deploy").all():
+        m = job.metadata_dict
+        if m.get("instance_name") == instance_name and not m.get("destroyed"):
+            meta = m
+            break
+    if meta is None:
+        raise HTTPException(status_code=404,
+                            detail=f"No active deployment record for instance {instance_name}.")
+    if meta.get("admin_password_custody") == "passwordsafe_managed":
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Password Safe manages the administrator account on {instance_name} "
+                    f"(managed account {meta.get('ps_managed_account_id')}). Check the "
+                    "credential out from Password Safe, or connect through the PRA RDP "
+                    "jump item, which injects it."))
+    backend, ref = meta.get("admin_password_backend"), meta.get("admin_password_ref")
+    if not (backend and ref):
+        raise HTTPException(status_code=404,
+                            detail=f"No stored administrator password for {instance_name} "
+                                   "— Linux, or deployed before GCP Windows support.")
+    try:
+        password = await asyncio.to_thread(windows_admin_secret.read, backend, ref)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Secrets backend read failed: {e}")
+    if not password:
+        raise HTTPException(status_code=404,
+                            detail=f"Secret '{ref}' is empty or missing in backend '{backend}'.")
+    job_service.log_audit(db, current_user.username, "gce_instance_admin_password_read",
+                          details={"instance_name": instance_name, "backend": backend})
+    return {"instance_name": instance_name,
+            "username": meta.get("admin_username") or "gcpadmin",
+            "password": password,
+            "ip": meta.get("private_ip") or meta.get("public_ip"),
+            "backend": backend, "secret_ref": ref}
 
 
 @router.get("/secrets/ssh-key", response_model=GCPSSHKeyDetail)
@@ -747,6 +798,8 @@ async def bulk_deploy_instances(
             workgroup=workgroup,
             register_in_entitle=req.register_in_entitle,
             register_in_passwordsafe=req.register_in_passwordsafe,
+            ad_directory_id=req.ad_directory_id,
+            ad_ou=req.ad_ou,
             ssh_key_secret_override=req.ssh_key_secret_override,
             jump_group=req.jump_group,
             jumpoint_name=req.jumpoint_name,

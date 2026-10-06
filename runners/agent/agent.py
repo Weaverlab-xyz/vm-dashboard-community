@@ -114,7 +114,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 # broker running the earlier one failed identically while reporting the same string as the
 # build that fixed it. A behaviour change the fleet cannot see is a behaviour change nobody
 # can confirm arrived, so bump this whenever the agent's behaviour moves.
-AGENT_VERSION = "2.7.0"
+AGENT_VERSION = "2.8.0"
 
 log = logging.getLogger("agent")
 
@@ -145,7 +145,11 @@ MODE = (os.environ.get("AGENT_MODE") or "normal").strip().lower()
 # _DEFAULTS["ports"] server-side; both sides clamp, for the two different reasons
 # that module documents.
 _PORT_DEFAULTS = {"vmware": [443], "proxmox": [8006], "nutanix": [9440],
-                  "xcpng": [443], "winrm": [5985, 5986]}
+                  "xcpng": [443], "winrm": [5985, 5986],
+                  # Directories (2.8): LDAP and LDAPS. Never part of an "all" sweep, which
+                  # stays the hypervisor sweep it has always been — see run_discovery.
+                  "directory": [389, 636]}
+_HYPERVISOR_FAMILIES = ("vmware", "proxmox", "nutanix", "xcpng", "winrm")
 
 _IDENTITY_FILE = os.path.join(STATE_DIR, "identity.json")
 _HTTP_TIMEOUT = 30
@@ -1010,6 +1014,10 @@ class Policy:
         self.ansible_enabled = bool(ansible.get("enabled"))
         self.ansible_vm_image = str(ansible.get("vm_image") or "")
         self.ansible_db_image = str(ansible.get("db_image") or "")
+        # A directory run needs python-ldap and the microsoft.ad collection. Blank falls
+        # back to db_image: the shipped localhost image carries both, so an operator who
+        # already runs database plays has nothing new to pull.
+        self.ansible_directory_image = str(ansible.get("directory_image") or "")
         # Defaults to the sibling network so an operator who already configured one does not
         # have to say it twice; `none` is refused before create because it makes every run
         # fail with an unreachable host and no explanation.
@@ -1149,7 +1157,10 @@ class Policy:
                 "grant from `targets:` and `sibling:` on purpose: it allows a playbook to "
                 "be applied to a host, not merely a port to be probed.")
         images = {"vm": ("vm_image", self.ansible_vm_image),
-                  "database": ("db_image", self.ansible_db_image)}
+                  "database": ("db_image", self.ansible_db_image),
+                  "directory": (("directory_image" if self.ansible_directory_image
+                                 else "directory_image (or db_image)"),
+                                self.ansible_directory_image or self.ansible_db_image)}
         if run_kind not in images:
             raise PolicyRefusal(
                 f"{run_kind!r} is not a kind of Config-Management run this agent build "
@@ -1924,6 +1935,10 @@ class Dashboard:
         for value in (bundle.get("env") or {}).values():
             if isinstance(value, str) and len(value) >= 4:
                 self.hold_secret(value)
+        # Only the password: holding the whole dict as the db loop does would redact the
+        # domain and base DN out of every line an LDAP play prints, which is the output.
+        if (bundle.get("directory") or {}).get("dir_bind_password"):
+            self.hold_secret(str(bundle["directory"]["dir_bind_password"]))
         return bundle, scrub
 
 
@@ -2107,6 +2122,184 @@ def probe_hypervisor(ip: str, port: int, timeout: float) -> Optional[dict]:
     return _identify(got[0], got[1], ip, port)
 
 
+# ── Directory probe: an anonymous LDAP rootDSE read ───────────────────────────
+#
+# The rootDSE is the one object every LDAPv3 server will describe to an anonymous client:
+# what naming contexts it serves, and — for Active Directory — its domain, its DNS name and
+# its functional level. Reading it needs no bind and no credential, so like the hypervisor
+# probe this never authenticates. The BER is built by hand (a SearchRequest is ~60 bytes)
+# rather than adding an LDAP library to the agent image for one read.
+
+_ROOTDSE_ATTRS = ("defaultNamingContext", "rootDomainNamingContext", "dnsHostName",
+                  "ldapServiceName", "domainControllerFunctionality",
+                  "forestFunctionality", "namingContexts", "vendorName", "vendorVersion",
+                  "supportedLDAPVersion")
+_AD_LEVELS = {"0": "2000", "1": "2003 interim", "2": "2003", "3": "2008", "4": "2008 R2",
+              "5": "2012", "6": "2012 R2", "7": "2016", "10": "2025"}
+
+
+def _ber_len(n: int) -> bytes:
+    if n < 0x80:
+        return bytes([n])
+    body = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(body)]) + body
+
+
+def _ber(tag: int, content: bytes) -> bytes:
+    return bytes([tag]) + _ber_len(len(content)) + content
+
+
+def _ber_int(value: int, tag: int = 0x02) -> bytes:
+    return _ber(tag, value.to_bytes(max(1, (value.bit_length() + 8) // 8), "big", signed=True))
+
+
+def rootdse_request(message_id: int = 1) -> bytes:
+    """An LDAPMessage carrying a base-scope SearchRequest for "" (the rootDSE)."""
+    attrs = b"".join(_ber(0x04, a.encode()) for a in _ROOTDSE_ATTRS)
+    search = _ber(0x63, b"".join([
+        _ber(0x04, b""),                 # baseObject: the rootDSE
+        _ber_int(0, 0x0A),               # scope: baseObject
+        _ber_int(0, 0x0A),               # derefAliases: never
+        _ber_int(0),                     # sizeLimit
+        _ber_int(5),                     # timeLimit (s)
+        _ber(0x01, b"\x00"),             # typesOnly: FALSE
+        _ber(0x87, b"objectClass"),      # filter: (objectClass=*)
+        _ber(0x30, attrs),
+    ]))
+    return _ber(0x30, _ber_int(message_id) + search)
+
+
+def _ber_read(buf: bytes, pos: int):
+    """(tag, content, next_pos) for the TLV at ``pos``. Raises ValueError if short."""
+    if pos + 2 > len(buf):
+        raise ValueError("short")
+    tag = buf[pos]
+    first = buf[pos + 1]
+    pos += 2
+    if first & 0x80:
+        n = first & 0x7F
+        if n == 0 or n > 4 or pos + n > len(buf):
+            raise ValueError("bad length")
+        length = int.from_bytes(buf[pos:pos + n], "big")
+        pos += n
+    else:
+        length = first
+    if pos + length > len(buf):
+        raise ValueError("short")
+    return tag, buf[pos:pos + length], pos + length
+
+
+def parse_rootdse_response(buf: bytes) -> Optional[dict]:
+    """Attributes from the SearchResultEntry in ``buf``, or None if there is none yet.
+    Values are decoded as UTF-8 with replacement and capped, since the target chose them."""
+    pos = 0
+    while pos < len(buf):
+        try:
+            tag, msg, pos = _ber_read(buf, pos)
+        except ValueError:
+            return None
+        if tag != 0x30:
+            return None
+        _t, _id, inner = _ber_read(msg, 0)
+        op_tag, op, _ = _ber_read(msg, inner)
+        if op_tag == 0x65:                          # SearchResultDone with no entry
+            return {}
+        if op_tag != 0x64:                          # not a SearchResultEntry
+            continue
+        _t, _dn, apos = _ber_read(op, 0)
+        _t, attrs, _ = _ber_read(op, apos)
+        out = {}
+        p = 0
+        while p < len(attrs):
+            _t, pair, p = _ber_read(attrs, p)
+            _t, name, vpos = _ber_read(pair, 0)
+            _t, vals, _ = _ber_read(pair, vpos)
+            values, q = [], 0
+            while q < len(vals) and len(values) < 32:
+                _t, v, q = _ber_read(vals, q)
+                values.append(v.decode("utf-8", "replace")[:256])
+            out[name.decode("utf-8", "replace")] = values
+        return out
+    return None
+
+
+def _dn_to_domain(dn: str) -> str:
+    parts = [p.split("=", 1)[1] for p in (dn or "").split(",")
+             if p.strip().lower().startswith("dc=") and "=" in p]
+    return ".".join(parts).lower()
+
+
+def classify_rootdse(attrs: dict, ip: str, port: int) -> Optional[dict]:
+    """A finding from rootDSE attributes, or None if it does not look like a directory."""
+    if not attrs:
+        return None
+    first = lambda k: (attrs.get(k) or [""])[0]  # noqa: E731
+    base_dn = first("defaultNamingContext") or first("rootDomainNamingContext") \
+        or first("namingContexts")
+    if not base_dn and not attrs.get("supportedLDAPVersion"):
+        return None
+    is_ad = bool(first("domainControllerFunctionality") or first("ldapServiceName"))
+    domain = _dn_to_domain(base_dn)
+    level = first("domainControllerFunctionality")
+    vendor = (first("vendorName") + " " + first("vendorVersion")).strip()
+    product = "active_directory" if is_ad else (
+        "openldap" if "openldap" in vendor.lower() else "ldap")
+    return {
+        "kind": "directory", "product": product, "host": ip, "port": port,
+        "endpoint": f"{'ldaps' if port == 636 else 'ldap'}://{ip}:{port}",
+        "domain": domain, "base_dn": base_dn,
+        "dc_hostname": first("dnsHostName"),
+        "functional_level": (f"Windows Server {_AD_LEVELS.get(level, level)}"
+                             if is_ad and level else ""),
+        "vendor": "Microsoft Active Directory" if is_ad else vendor,
+        "server_version": "", "source": "probe",
+        "confidence": "confirmed" if (is_ad and domain) or base_dn else "possible",
+        "suggested_name": domain or f"ldap-{ip.replace('.', '-')}",
+    }
+
+
+def probe_directory(ip: str, port: int, timeout: float) -> Optional[dict]:
+    """Identify an AD domain controller or LDAP server. Never binds.
+
+    636 is LDAPS; certificate verification is off for the same reason the hypervisor
+    probe's is — this asks what a host IS, and a DC's certificate is usually issued by a
+    private CA the agent does not trust."""
+    import socket
+    import ssl
+    try:
+        sock = socket.create_connection((ip, port), timeout=timeout)
+    except OSError:
+        return None
+    try:
+        sock.settimeout(timeout)
+        if port == 636:
+            ctx = ssl.create_default_context()
+            # The same floor as every other TLS client in this agent. A DC that offers only
+            # TLS 1.0/1.1 is reported as "not a directory" on 636; 389 still finds it.
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            sock = ctx.wrap_socket(sock, server_hostname=ip)
+        sock.sendall(rootdse_request())
+        buf = b""
+        while len(buf) < 65536:
+            chunk = sock.recv(8192)
+            if not chunk:
+                break
+            buf += chunk
+            attrs = parse_rootdse_response(buf)
+            if attrs is not None:
+                return classify_rootdse(attrs, ip, port)
+        return None
+    except (OSError, ValueError):
+        return None
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 def _cert_cn(der: Optional[bytes]) -> str:
     return _cert_name(der, "subject")
 
@@ -2181,7 +2374,8 @@ def run_discovery(payload: dict, policy: Policy, emit, cancelled, job_id: str = 
     workers = max(1, min(int(payload.get("concurrency") or 32),
                          policy.limit("max_concurrency", 128)))
 
-    families = [scan_kind] if scan_kind in _PORT_DEFAULTS else list(_PORT_DEFAULTS)
+    families = [scan_kind] if scan_kind in _PORT_DEFAULTS else list(_HYPERVISOR_FAMILIES)
+    probe = probe_directory if scan_kind == "directory" else probe_hypervisor
     wanted = []
     for family in families:
         wanted += list(ports.get(family) or _PORT_DEFAULTS[family])
@@ -2215,7 +2409,7 @@ def run_discovery(payload: dict, policy: Policy, emit, cancelled, job_id: str = 
         if MODE == "audit":
             log.info("AUDIT would probe %s:%s", host, port)
             return None
-        return probe_hypervisor(host, port, timeout)
+        return probe(host, port, timeout)
 
     findings = []
     done = 0
@@ -4525,7 +4719,9 @@ def _ansible_argv(*, run_kind: str, transport: str, has_key: bool,
     The database shape is the ``hosts: localhost`` play instead, matching
     ``services/ansible_localhost_cmd.build_localhost_command``.
     """
-    if run_kind == "database":
+    # A directory run over LDAP is the same localhost play as a database run; over WinRM
+    # it is the VM shape against the domain controller, below.
+    if run_kind == "database" or (run_kind == "directory" and transport == "local"):
         argv = ["ansible-playbook", "-i", "localhost,", "-c", "local",
                 f"{_JOB_DIR}/playbook.yml"]
         if has_vars:
@@ -4619,8 +4815,14 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
         files[f"{_JOB_DIR.strip('/')}/assets/{bundle['asset_name']}"] = \
             base64.b64decode(bundle["asset_b64"])
 
+    if run_kind == "directory" and transport not in ("local", "winrm"):
+        # The dashboard refuses this at enqueue; refused again here because the envelope
+        # is the dashboard's word, and an ssh "directory" run would be a VM run in disguise.
+        raise PolicyRefusal(f"a directory run uses transport local or winrm, not "
+                            f"{transport!r}.")
+
     has_key = False
-    if run_kind == "vm":
+    if run_kind == "vm" or (run_kind == "directory" and transport == "winrm"):
         files[f"{_JOB_DIR.strip('/')}/inventory.json"] = _vm_inventory(
             ip=ip, port=port, transport=transport,
             login_user=str(bundle.get("login_user") or ""),
@@ -4637,6 +4839,10 @@ def run_ansible(payload: dict, policy: "Policy", emit, cancelled, job_id: str,
     # reason `_check_extra_vars` runs against the dashboard's dict and not against this one.
     play_vars = dict(extra_vars)
     play_vars.update(bundle.get("db") or {})
+    # dir_* bind vars for the LDAP / microsoft.ad modules. Only keys with that prefix: the
+    # dict is the dashboard's, and this is the agent choosing which names it accepts.
+    play_vars.update({k: v for k, v in (bundle.get("directory") or {}).items()
+                      if str(k).startswith("dir_")})
     if bundle.get("login_password"):
         play_vars["ansible_password"] = bundle["login_password"]     # WinRM
         play_vars["ansible_ssh_pass"] = bundle["login_password"]     # SSH

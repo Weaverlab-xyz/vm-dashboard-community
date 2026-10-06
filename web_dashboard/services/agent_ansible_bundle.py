@@ -246,6 +246,25 @@ def _remote_fetch_playbook(asset: str) -> str:
         raise BundleError(str(exc)) from exc
 
 
+# Playbooks the dashboard itself queues (not an operator's upload), shipped inside the
+# package so they need no storage backend. Named "builtin:<name>"; a closed set, so an
+# asset string can never reach the filesystem beyond it.
+_BUILTIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "builtin_playbooks")
+BUILTIN_PLAYBOOKS = ("ad-join-computer",)
+
+
+def builtin_playbook(asset: str) -> str:
+    """The YAML of a built-in playbook named ``builtin:<name>``, else ``""``."""
+    asset = str(asset or "")
+    if not asset.startswith("builtin:"):
+        return ""
+    name = asset.split(":", 1)[1]
+    if name not in BUILTIN_PLAYBOOKS:
+        raise BundleError(f"{asset!r} is not a built-in playbook.")
+    with open(os.path.join(_BUILTIN_DIR, name + ".yml"), encoding="utf-8") as fh:
+        return fh.read()
+
+
 async def build(db, *, job, agent) -> tuple:
     """``(bundle, scrub)`` for one ``agent_ansible`` job.
 
@@ -273,9 +292,13 @@ async def build(db, *, job, agent) -> tuple:
     # Read off the RAW metadata, not `meta`: run_kwargs normalises to the closed key set
     # the agent's envelope uses, and these bytes deliberately are not in it — they stay on
     # the dashboard side of the bundle.
-    asset_url = await _remote_fetch_url(meta["asset"], meta["asset_backend"],
-                                        prefetched_b64=str(raw_meta.get("asset_bytes_b64") or ""))
-    if asset_url:
+    builtin = builtin_playbook(meta["asset"])
+    asset_url = "" if builtin else await _remote_fetch_url(
+        meta["asset"], meta["asset_backend"],
+        prefetched_b64=str(raw_meta.get("asset_bytes_b64") or ""))
+    if builtin:
+        playbook, asset_name, asset_bytes = builtin, "", b""
+    elif asset_url:
         playbook, asset_name, asset_bytes = _remote_fetch_playbook(meta["asset"]), "", b""
     else:
         playbook, asset_name, asset_bytes = await _playbook_and_asset(
@@ -381,6 +404,51 @@ async def build(db, *, job, agent) -> tuple:
         bundle["db"] = conn
         if conn.get("db_login_password"):
             scrub.append(conn["db_login_password"])
+
+    if run_kind == "directory":
+        from ..database import ManagedDirectory
+        from . import directory_service
+        row = (db.query(ManagedDirectory)
+               .filter(ManagedDirectory.id == meta["target_id"]).first())
+        if not row or row.cloud != "local":
+            raise BundleError("That on-premises directory is no longer registered.")
+        try:
+            conn = await directory_service.directory_connection_vars(row)
+        except directory_service.DirectoryError as exc:
+            raise BundleError(str(exc)) from exc
+        # dir_* keys, not ansible_* — play data for the LDAP modules' bind arguments, the
+        # same reason db_* is allowed through.
+        bundle["directory"] = conn
+        if conn.get("dir_bind_password"):
+            scrub.append(conn["dir_bind_password"])
+        join_job_id = str(meta.get("join_deploy_job_id") or "")
+        if join_job_id:
+            # Joining a new server: WinRM logs on as THAT server's local administrator,
+            # read from where its deploy stored it. The directory account is only the
+            # join identity, passed to microsoft.ad.membership as dir_*.
+            from . import job_service, windows_admin_secret
+            deploy = job_service.get_job(db, join_job_id)
+            # A completed job's result is merged into its metadata (job_service.set_completed).
+            result = (deploy.metadata_dict or {}) if deploy else {}
+            backend, ref = result.get("admin_password_backend"), result.get("admin_password_ref")
+            if not (backend and ref and result.get("admin_username")):
+                raise BundleError("the server to join has no stored administrator password, "
+                                  "so the agent cannot log on to it.")
+            try:
+                local_pw = windows_admin_secret.read(backend, ref)
+            except Exception as exc:  # noqa: BLE001 — the backend's own error class varies
+                raise BundleError(f"could not read the server's administrator password "
+                                  f"from {backend}: {exc}") from None
+            bundle["login_user"] = result["admin_username"]
+            bundle["login_password"] = local_pw
+            scrub.append(local_pw)
+        elif transport == "winrm":
+            # One credential for both halves: WinRM logs on as the directory's Password
+            # Safe account (a UPN, which NTLM accepts), and the microsoft.ad modules then
+            # act as that same identity. An operator-chosen managed account would be a
+            # second checkout of a domain credential for no gain.
+            bundle["login_user"] = conn.get("dir_bind_dn") or ""
+            bundle["login_password"] = conn.get("dir_bind_password") or ""
 
     # In-playbook BeyondTrust / Portainer lookups, the same auto-injected env the other
     # runners get. Non-`ansible_*` by construction, and carried as env rather than vars.

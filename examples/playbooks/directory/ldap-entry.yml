@@ -1,0 +1,51 @@
+# Add or remove an LDAP entry (OpenLDAP, 389-DS, FreeIPA, or AD over LDAP)
+# Target: an on-prem directory, run through its remote agent with transport "LDAP".
+# The play runs on the runner (hosts: localhost) and connects to the directory.
+#
+# HOW TO RUN — through the dashboard the connection is injected: dir_host, dir_port,
+# dir_use_ldaps, dir_base_dn, dir_bind_dn and dir_bind_password (the directory's
+# Password Safe account, checked out for this run only).
+# Required:
+#   ldap_dn: uid=jdoe,ou=People,dc=example,dc=com
+#   ldap_object_class: [inetOrgPerson]
+# Optional:
+#   ldap_attributes: {cn: Jane Doe, sn: Doe, mail: jdoe@example.com}
+#   ldap_state: present                     # present | absent (absent needs confirm: true)
+#   ldap_validate_certs: true               # false only for a self-signed LDAPS cert
+# Outside the dashboard, set the dir_* vars yourself. Supports --check.
+- name: Manage an LDAP entry
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ldap_dn: ""
+    ldap_object_class: []
+    ldap_attributes: {}
+    ldap_state: present
+    ldap_validate_certs: true
+    confirm: false
+    ldap_server_uri: "{{ ('ldaps' if dir_use_ldaps | default(true) | bool else 'ldap') ~ '://' ~ dir_host ~ ':' ~ dir_port }}"
+  tasks:
+    - name: Fail early if required vars are missing
+      ansible.builtin.assert:
+        that:
+          - dir_host is defined and dir_host | length > 0
+          - ldap_dn | length > 0
+          - ldap_state in ['present', 'absent']
+          - ldap_state == 'absent' or ldap_object_class | length > 0
+          - ldap_state == 'present' or confirm | bool
+        fail_msg: >-
+          Set ldap_dn and ldap_object_class (and the dir_* connection vars outside the
+          dashboard). Removing an entry also needs confirm: true.
+
+    - name: Add or remove the entry
+      community.general.ldap_entry:
+        dn: "{{ ldap_dn }}"
+        objectClass: "{{ ldap_object_class if ldap_state == 'present' else omit }}"
+        attributes: "{{ ldap_attributes if ldap_state == 'present' else omit }}"
+        state: "{{ ldap_state }}"
+        server_uri: "{{ ldap_server_uri }}"
+        bind_dn: "{{ dir_bind_dn }}"
+        bind_pw: "{{ dir_bind_password }}"
+        validate_certs: "{{ ldap_validate_certs }}"
+      no_log: true              # carries the bind password

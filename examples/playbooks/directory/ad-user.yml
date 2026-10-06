@@ -1,0 +1,95 @@
+# Create, update, disable or remove an Active Directory user
+# Target: an on-prem AD directory, run through its remote agent over WinRM
+# (Config Management → On-Prem Directories → transport "WinRM").
+#
+# HOW TO RUN — through the dashboard, nothing secret is supplied: the agent logs on to
+# the WinRM host as the directory's Password Safe account and injects dir_bind_dn /
+# dir_bind_password for the domain calls, checked out for this run only.
+# Required:
+#   ad_user_name: jdoe                       # sAMAccountName
+# Optional:
+#   ad_user_state: present                   # present | absent
+#   ad_user_path: OU=Staff,DC=corp,DC=example,DC=com
+#   ad_user_firstname / ad_user_surname / ad_user_upn / ad_user_description
+#   ad_user_enabled: true
+#   ad_user_groups_add: [VPN Users]          # groups to add the user to
+#   ad_user_groups_remove: []                # groups to take the user out of
+#   ad_user_password_secret: app-secrets/jdoe-initial   # Password Safe SECRET path,
+#   ad_user_password: <or bind via Use a secret>        # used only when the user is created
+#   ad_user_change_at_logon: true
+#
+# Outside the dashboard: supply ansible_user / ansible_password for WinRM and
+# dir_bind_dn / dir_bind_password (or leave them unset to act as the WinRM login).
+# Supports --check.
+- name: Manage an Active Directory user
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: winrm
+    ad_user_name: ""
+    ad_user_state: present
+    ad_user_path: ""
+    ad_user_firstname: ""
+    ad_user_surname: ""
+    ad_user_upn: ""
+    ad_user_description: ""
+    ad_user_enabled: true
+    ad_user_groups_add: []
+    ad_user_groups_remove: []
+    ad_user_password: ""
+    ad_user_password_secret: ""
+    ad_user_change_at_logon: true
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true
+  tasks:
+    - name: Fail early if required vars are missing
+      ansible.builtin.assert:
+        that:
+          - ad_user_name | length > 0
+          - ad_user_state in ['present', 'absent']
+        fail_msg: Set ad_user_name, and ad_user_state to present or absent.
+
+    - name: Fetch the initial password from Password Safe
+      ansible.builtin.set_fact:
+        _ps_ad_user_password: "{{ lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
+          api_url=ps_api_url,
+          api_version='3.1',
+          retrieval_type='SECRET',
+          client_id=ps_client_id,
+          client_secret=ps_client_secret,
+          secret_list=ad_user_password_secret,
+          decrypt=True,
+          verify_ca=ps_verify_ca,
+          wantlist=False) }}"
+      no_log: true
+      when: ad_user_password_secret | length > 0
+
+    - name: Resolve the initial password (Password Safe wins when a path was given)
+      ansible.builtin.set_fact:
+        _ad_user_password: "{{ _ps_ad_user_password | default(ad_user_password, true) }}"
+      no_log: true
+
+    - name: Create or update the user
+      microsoft.ad.user:
+        name: "{{ ad_user_name }}"
+        sam_account_name: "{{ ad_user_name }}"
+        state: "{{ ad_user_state }}"
+        path: "{{ ad_user_path if ad_user_path | length > 0 else omit }}"
+        firstname: "{{ ad_user_firstname if ad_user_firstname | length > 0 else omit }}"
+        surname: "{{ ad_user_surname if ad_user_surname | length > 0 else omit }}"
+        upn: "{{ ad_user_upn if ad_user_upn | length > 0 else omit }}"
+        description: "{{ ad_user_description if ad_user_description | length > 0 else omit }}"
+        enabled: "{{ ad_user_enabled if ad_user_state == 'present' else omit }}"
+        password: "{{ _ad_user_password if _ad_user_password | length > 0 else omit }}"
+        # Set on create only: re-running this play must not reset a user's password.
+        update_password: on_create
+        password_expired: "{{ ad_user_change_at_logon if _ad_user_password | length > 0 else omit }}"
+        groups:
+          add: "{{ ad_user_groups_add }}"
+          remove: "{{ ad_user_groups_remove }}"
+        domain_server: "{{ dir_host | default(omit) }}"
+        domain_username: "{{ dir_bind_dn | default(omit) }}"
+        domain_password: "{{ dir_bind_password | default(omit) }}"
+      no_log: true              # carries the bind and initial passwords

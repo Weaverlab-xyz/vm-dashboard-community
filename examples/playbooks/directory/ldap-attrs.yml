@@ -1,0 +1,40 @@
+# Set, add or remove attribute values on an LDAP entry
+# Target: an on-prem directory, run through its remote agent with transport "LDAP".
+#
+# Required:
+#   ldap_dn: uid=jdoe,ou=People,dc=example,dc=com
+#   ldap_attributes: {mail: jane.doe@example.com, telephoneNumber: "+1 555 0100"}
+# Optional:
+#   ldap_attrs_state: exact                 # exact = replace | present = add | absent = remove
+#   ldap_validate_certs: true
+# Supports --check.
+- name: Change attributes on an LDAP entry
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ldap_dn: ""
+    ldap_attributes: {}
+    ldap_attrs_state: exact
+    ldap_validate_certs: true
+    ldap_server_uri: "{{ ('ldaps' if dir_use_ldaps | default(true) | bool else 'ldap') ~ '://' ~ dir_host ~ ':' ~ dir_port }}"
+  tasks:
+    - name: Fail early if required vars are missing
+      ansible.builtin.assert:
+        that:
+          - dir_host is defined and dir_host | length > 0
+          - ldap_dn | length > 0
+          - ldap_attributes | length > 0
+          - ldap_attrs_state in ['exact', 'present', 'absent']
+        fail_msg: Set ldap_dn and ldap_attributes; ldap_attrs_state is exact, present or absent.
+
+    - name: Apply the attribute change
+      community.general.ldap_attrs:
+        dn: "{{ ldap_dn }}"
+        attributes: "{{ ldap_attributes }}"
+        state: "{{ ldap_attrs_state }}"
+        server_uri: "{{ ldap_server_uri }}"
+        bind_dn: "{{ dir_bind_dn }}"
+        bind_pw: "{{ dir_bind_password }}"
+        validate_certs: "{{ ldap_validate_certs }}"
+      no_log: true              # carries the bind password

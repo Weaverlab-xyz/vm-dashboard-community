@@ -73,6 +73,11 @@ class AzureSetup(BaseModel):
     # Packer template archive (optional)
     packer_azure_storage_account: str = ""
     packer_azure_archive_container: str = "packer-templates"
+    # Windows server builds: Entra ID join defaults + login groups (object ids, comma-separated)
+    azure_windows_entra_join: bool = False
+    azure_windows_entra_intune_enroll: bool = False
+    azure_entra_vm_admin_group_ids: str = ""
+    azure_entra_vm_user_group_ids: str = ""
 
 
 class AzureRegionConfig(BaseModel):
@@ -242,6 +247,7 @@ class FeaturesSetup(BaseModel):
     cost_explorer_enabled: bool = False
     admission_control_enabled: bool = False
     cloud_database_enabled: bool = False
+    directories_enabled: bool = False
     k8s_management_enabled: bool = False
     cloud_functions_enabled: bool = False
     remote_agents_enabled: bool = False
@@ -547,7 +553,8 @@ def _apply_config(payload: SetupPayload) -> None:
                 # blanked.
                 if field in _WIZARD_SECRET_FIELDS and not value:
                     continue
-                pairs[field] = value
+                # get_bool's canonical form, as _write_feature stores it.
+                pairs[field] = ("1" if value else "0") if isinstance(value, bool) else value
     else:
         # A POV writes cloud credentials for ONE purpose: a bucket to stage assets in, so
         # that Config Management has somewhere to read from that is not capped at the
@@ -572,6 +579,7 @@ def _apply_config(payload: SetupPayload) -> None:
         "cost_explorer_enabled":    "1" if payload.features.cost_explorer_enabled else "0",
         "admission_control_enabled": "1" if payload.features.admission_control_enabled else "0",
         "cloud_database_enabled":   "1" if payload.features.cloud_database_enabled else "0",
+        "directories_enabled":      "1" if payload.features.directories_enabled else "0",
         "k8s_management_enabled":   "1" if payload.features.k8s_management_enabled else "0",
         "cloud_functions_enabled":  "1" if payload.features.cloud_functions_enabled else "0",
         "remote_agents_enabled":    "1" if payload.features.remote_agents_enabled else "0",
@@ -970,6 +978,11 @@ class PasswordSafeFeatureConfig(BaseModel):
     # GCP VM SSH Rotation (cloud-native) onboarding — GCP counterpart (writes the key into GCE ssh-keys metadata).
     passwordsafe_gcp_registration_method: str = "gcpvm"   # "gcpvm" (GCP VM SSH Rotation plugin) | "ssh"
     passwordsafe_gcp_change_password_on_register: bool = True  # mint first key on onboard (adminuser has none baked in)
+    # Windows VM onboarding (Azure + AWS): password-managed, its own Windows-platform FA.
+    passwordsafe_vm_functional_account_windows: str = ""
+    passwordsafe_vm_functional_account_windows_azure: str = ""
+    passwordsafe_vm_functional_account_windows_aws: str = ""
+    passwordsafe_windows_change_password_on_register: bool = True  # rotate at once after seeding
     # OT demo cell → PRA checkout: a synced PRA Vault account per cell (docs/profiles/demo/ot-demo-cell.md).
     # Blank platform/FA fall back to the clouddb_ps_pravault_* pair below at read time.
     ot_ps_pra_checkout_enabled: bool = True
@@ -1161,6 +1174,7 @@ class PRAFeatureConfig(BaseModel):
     # ref-counted clouddb-jumpoint VM or starts its own ACI container group. Editable
     # here so the choice is reversible without a redeploy. Batches always share one ACI.
     azure_vm_jumpoint_mode: str = "shared"
+    pra_windows_vault_account_group_id: str = ""   # Vault group for Windows server RDP jump credentials
     # VM size for the managed shared Azure Gateway VM — same Web-Jump OOM story as
     # gcp_jumpoint_machine_type below: Standard_B1ms minimum, Standard_B2s preferred.
     # Blank keeps the config.py default (Standard_B2s). Changing it never resizes a
@@ -1901,6 +1915,20 @@ class OidcFeatureConfig(BaseModel):
     workload_idp_extra_issuers: str = ""
 
 
+class DirectoriesFeatureConfig(BaseModel):
+    """Config panel for managed Active Directory (services/directory_service). The toggle
+    owns `directories_enabled` via `enabled`. The Password Safe keys for the directory
+    administrator live here rather than on the Password Safe panel because they only
+    mean anything when this feature is on."""
+    enabled: bool = False
+    directory_aws_default_edition: str = "Standard"
+    directory_gcp_reserved_ip_range: str = ""
+    directory_join_default_ou: str = ""
+    gcp_domain_join_service_account: str = ""
+    passwordsafe_directory_functional_account: str = ""
+    passwordsafe_directory_change_password_on_register: bool = True
+
+
 class CloudFunctionsFeatureConfig(BaseModel):
     """Config panel for the Cloud Functions feature. Graduated from preview to GA once
     a dashboard-authored handler was deployed and invoked end-to-end against both a
@@ -2166,6 +2194,7 @@ _FEATURE_MODELS = {
     "nutanix":      NutanixFeatureConfig,
     "xcpng":        XcpNgFeatureConfig,
     "cloud_database": CloudDatabaseFeatureConfig,
+    "directories":    DirectoriesFeatureConfig,
     "k8s_management": K8sManagementFeatureConfig,
     "vdesktops":      VirtualDesktopsFeatureConfig,
     "cost_explorer":  CostExplorerFeatureConfig,

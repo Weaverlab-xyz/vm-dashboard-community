@@ -1,0 +1,646 @@
+{% extends "base.html" %}
+{% block title %}Directories{% endblock %}
+
+{# Managed Active Directory for Windows servers on AWS and GCP (Azure VMs join Entra ID
+   instead). Two ways a row gets here: BUILT — AWS Managed Microsoft AD or GCP Managed AD
+   from terraform/directory/<module> — or REGISTERED, an existing directory found by
+   Discover. Backed by /api/directories (gated by directories_enabled). The delete verb
+   follows source: a registered row is forgotten, a built one destroyed, and the server
+   refuses a destroy while any dashboard VM is still joined. #}
+
+{% block content %}
+<div class="max-w-6xl mx-auto py-8 px-4" x-data="directoriesPage()" x-init="init()">
+
+  <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3 sm:mb-1">
+    <h1 class="text-2xl font-bold text-gray-800">Directories</h1>
+    <div class="flex items-center gap-2">
+      <button @click="openPsImport()"
+              class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
+        Import from Password Safe
+      </button>
+      <button @click="openOnprem()"
+              class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
+        Register on-prem
+      </button>
+      <button @click="openDiscover()"
+              class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
+        Discover existing
+      </button>
+      <button @click="openBuild()"
+              class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
+        Build directory
+      </button>
+    </div>
+  </div>
+  <p class="text-sm text-gray-500 mb-6">
+    Active Directory domains that Windows servers on <strong>AWS</strong> and <strong>GCP</strong>
+    can join at deploy. <strong>Build</strong> AWS Managed Microsoft AD or GCP Managed AD, or
+    <strong>discover</strong> one that already exists (including AWS AD Connector and Simple AD)
+    and register it. Directories bill around the clock and have no auto-delete timer.
+    <strong>Register on-prem</strong> records an on-premises AD or LDAP directory reached through a
+    remote agent, so Config Management playbooks can change it; <strong>Import from Password
+    Safe</strong> does the same for directories Password Safe already manages.
+  </p>
+
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
+    <table class="min-w-full text-sm">
+      <thead class="bg-gray-50 text-xs text-gray-500 uppercase">
+        <tr>
+          <th class="px-4 py-2 text-left">Domain</th>
+          <th class="px-4 py-2 text-left">Type</th>
+          <th class="px-4 py-2 text-left">Where</th>
+          <th class="px-4 py-2 text-left">Status</th>
+          <th class="px-4 py-2 text-left">Admin credential</th>
+          <th class="px-4 py-2"></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr x-show="!loading && directories.length === 0">
+          <td colspan="6" class="px-4 py-6 text-center text-gray-400">No directories yet.</td>
+        </tr>
+        <template x-for="d in directories" :key="d.id">
+          <tr class="border-t border-gray-100 align-top">
+            <td class="px-4 py-3">
+              <div class="font-mono text-gray-800" x-text="d.name"></div>
+              <div class="text-xs text-gray-400" x-text="d.source === 'registered' ? 'registered' : 'built here'"></div>
+            </td>
+            <td class="px-4 py-3 text-gray-600" x-text="d.provider_label + (d.edition ? ' · ' + d.edition : '')"></td>
+            <td class="px-4 py-3 text-xs text-gray-600">
+              <div x-text="d.cloud.toUpperCase() + ' · ' + (d.region || (d.locations || []).join(', ') || '—')"></div>
+              <div class="font-mono text-gray-400" x-text="d.directory_id || d.resource_name || (d.host ? d.host + ':' + d.port : '')"></div>
+              <div x-show="d.cloud === 'local'" class="text-gray-400" x-text="'via agent ' + (agentName(d.agent_id) || d.agent_id || '— none')"></div>
+              <div x-show="(d.dns_ips || []).length" class="text-gray-400" x-text="'DNS ' + (d.dns_ips || []).join(', ')"></div>
+            </td>
+            <td class="px-4 py-3">
+              <span class="text-xs px-2 py-0.5 rounded-full"
+                    :class="d.status === 'available' ? 'bg-green-100 text-green-700' : (d.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700')"
+                    x-text="d.status"></span>
+              <div x-show="d.error_message" class="text-xs text-red-600 mt-1 max-w-xs" x-text="d.error_message"></div>
+              <a x-show="d.deploy_job_id" :href="'/jobs/' + d.deploy_job_id" class="text-xs text-blue-600 hover:underline">Job</a>
+            </td>
+            <td class="px-4 py-3 text-xs text-gray-600">
+              <template x-if="d.source === 'registered' && d.cloud === 'local'"><span x-text="'Password Safe: ' + (d.bind_account || 'managed account')"></span></template>
+              <template x-if="d.source === 'registered' && d.cloud !== 'local'"><span class="text-gray-400">not held — joins need none</span></template>
+              <template x-if="d.source !== 'registered'">
+                <span x-text="d.admin_password_custody === 'passwordsafe_managed'
+                              ? 'Password Safe (account ' + d.ps_account_id + ')'
+                              : (d.admin_password_backend ? d.admin_username + ' in ' + d.admin_password_backend : 'not stored')"></span>
+              </template>
+            </td>
+            <td class="px-4 py-3 text-right whitespace-nowrap space-x-1">
+              <button x-show="d.source !== 'registered' && d.admin_password_backend && d.admin_password_custody !== 'passwordsafe_managed'"
+                      @click="showPassword(d)"
+                      class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Password</button>
+              <button x-show="d.cloud === 'local' && d.provider === 'onprem_ad' && d.status === 'available'"
+                      @click="openExtend(d, 'aws')"
+                      class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Extend to AWS</button>
+              <button x-show="d.cloud === 'local' && d.provider === 'onprem_ad' && d.status === 'available'"
+                      @click="openExtend(d, 'gcp')"
+                      class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Extend to GCP</button>
+              <button x-show="d.source !== 'registered' && d.status === 'available' && d.admin_password_custody !== 'passwordsafe_managed' && d.provider !== 'aws_ad_connector'"
+                      @click="resetPassword(d)"
+                      class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Reset admin password</button>
+              <button @click="remove(d)"
+                      class="text-xs border border-red-200 text-red-600 hover:bg-red-50 px-2.5 py-1.5 rounded-lg"
+                      x-text="d.source === 'registered' ? 'Unregister' : 'Destroy'"></button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Build -->
+  <div x-show="build.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="build.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-3 max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-semibold text-gray-800">Build a directory</h3>
+      <div x-show="(opts.missing || []).length" class="p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-xs text-yellow-800">
+        <template x-for="m in opts.missing" :key="m"><div x-text="m"></div></template>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Cloud</label>
+          <select x-model="build.cloud" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="aws">AWS</option>
+            <option value="gcp">GCP</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">NetBIOS (optional)</label>
+          <input x-model="build.netbios" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="CORP">
+        </div>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Domain name</label>
+        <input x-model="build.name" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="corp.example.com">
+      </div>
+      <template x-if="build.cloud === 'aws'">
+        <div class="space-y-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Edition</label>
+              <select x-model="build.edition" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <template x-for="e in opts.aws_editions || []" :key="e"><option :value="e" x-text="e"></option></template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Region</label>
+              <input x-model="build.region" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            </div>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">VPC id</label>
+            <input x-model="build.vpc_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="vpc-…">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Two subnet ids, different AZs</label>
+            <input x-model="build.subnets" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="subnet-aaa, subnet-bbb">
+          </div>
+        </div>
+      </template>
+      <template x-if="build.cloud === 'gcp'">
+        <div class="space-y-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Project</label>
+              <input x-model="build.project" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Regions</label>
+              <input x-model="build.locations" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="us-central1">
+            </div>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Reserved /24 for domain controllers</label>
+            <input x-model="build.reserved_ip_range" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="10.250.0.0/24">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Authorized VPC networks</label>
+            <input x-model="build.networks" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="vpc-main">
+          </div>
+        </div>
+      </template>
+      {% if password_safe_enabled %}
+      <label class="flex items-center gap-2 text-sm text-gray-700">
+        <input type="checkbox" x-model="build.register_in_passwordsafe" class="rounded text-blue-600">
+        Onboard the administrator into Password Safe (rotated straight away)
+      </label>
+      {% endif %}
+      <label class="flex items-start gap-2 text-sm text-gray-700 p-3 bg-gray-50 rounded-lg">
+        <input type="checkbox" x-model="build.acknowledge_cost" class="rounded text-blue-600 mt-0.5">
+        <span>I understand this runs two domain controllers around the clock
+          (<span x-text="costText()"></span>), has no auto-delete timer, and takes
+          <span x-text="build.cloud === 'aws' ? '20–45 minutes' : 'up to an hour'"></span> to build.</span>
+      </label>
+      <div x-show="build.error" class="text-sm text-red-600" x-text="build.error"></div>
+      <div class="flex justify-end gap-2">
+        <button @click="build.open = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+        <button @click="submitBuild()" :disabled="build.saving || !build.acknowledge_cost"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg">Build</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Discover -->
+  <div x-show="disc.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="disc.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6 space-y-3 max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-semibold text-gray-800">Discover existing directories</h3>
+      <div class="flex items-end gap-2">
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">Cloud</label>
+          <select x-model="disc.cloud" class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="aws">AWS</option>
+            <option value="gcp">GCP</option>
+          </select>
+        </div>
+        <div x-show="disc.cloud === 'aws'">
+          <label class="block text-xs text-gray-500 mb-1">Region</label>
+          <input x-model="disc.region" class="border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono w-40">
+        </div>
+        <div x-show="disc.cloud === 'gcp'">
+          <label class="block text-xs text-gray-500 mb-1">Project</label>
+          <input x-model="disc.project" class="border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono w-48">
+        </div>
+        <button @click="runDiscover()" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg">Search</button>
+      </div>
+      <div x-show="disc.loading" class="text-sm text-gray-400">Searching…</div>
+      <div x-show="disc.error" class="text-sm text-red-600" x-text="disc.error"></div>
+      <template x-for="c in disc.results" :key="c.identifier">
+        <div class="flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2">
+          <div>
+            <div class="font-mono text-sm" x-text="c.name"></div>
+            <div class="text-xs text-gray-400" x-text="c.provider + ' · ' + c.stage + ' · ' + c.identifier"></div>
+          </div>
+          <button x-show="!c.registered && c.joinable" @click="registerOne(c)"
+                  class="text-xs border border-gray-300 px-2.5 py-1.5 rounded-lg">Register</button>
+          <span x-show="c.registered" class="text-xs text-gray-400">registered</span>
+          <span x-show="!c.registered && !c.joinable" class="text-xs text-gray-400">not ready</span>
+        </div>
+      </template>
+      <div class="flex justify-end">
+        <button @click="disc.open = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Register on-prem -->
+  <div x-show="op.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="op.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-3 max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-semibold text-gray-800">Register an on-premises directory</h3>
+      <p class="text-xs text-gray-500">Reached through a remote agent (2.8 or later). Its
+        <code>policy.yaml</code> must allow the host on the LDAP port, and on 5986 for WinRM playbooks.
+        The bind account is a Password Safe managed account, checked out for each run.</p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Type</label>
+          <select x-model="op.provider" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="onprem_ad">Active Directory</option>
+            <option value="ldap">Other LDAP</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Remote agent</label>
+          <select x-model="op.agent_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">— select —</option>
+            <template x-for="a in agents" :key="a.id"><option :value="a.id" x-text="a.name + ' (' + (a.agent_version || '?') + ')'"></option></template>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" x-text="op.provider === 'onprem_ad' ? 'Domain' : 'Name'"></label>
+        <input x-model="op.name" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" :placeholder="op.provider === 'onprem_ad' ? 'corp.example.com' : 'ldap.example.com'">
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Host</label>
+          <input x-model="op.host" @change="loadAccounts()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="dc01.corp.example.com">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Port</label>
+          <input x-model.number="op.port" type="number" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" :placeholder="op.use_ldaps ? '636' : '389'">
+        </div>
+      </div>
+      <label class="flex items-center gap-2 text-sm text-gray-700">
+        <input type="checkbox" x-model="op.use_ldaps" class="rounded text-blue-600"> LDAPS (TLS)
+      </label>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Base DN <span class="text-gray-400 font-normal" x-show="op.provider === 'onprem_ad'">(blank = from the domain)</span></label>
+        <input x-model="op.base_dn" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="DC=corp,DC=example,DC=com">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Bind account (Password Safe)</label>
+        <div x-show="op.accountsLoading" class="text-xs text-gray-400">Looking up managed accounts…</div>
+        <div x-show="op.accountsError" class="text-xs text-red-600" x-text="op.accountsError"></div>
+        <select x-show="op.systems.length" x-model="op.accountKey" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <option value="">— select an account —</option>
+          <template x-for="s in op.systems" :key="s.system_id">
+            <optgroup :label="`${s.name} (${s.ip})`">
+              <template x-for="a in s.accounts" :key="a.account_id">
+                <option :value="`${s.system_id}:${a.account_id}:${a.name}`" x-text="a.name"></option>
+              </template>
+            </optgroup>
+          </template>
+        </select>
+        <p x-show="!op.accountsLoading && op.host && !op.systems.length" class="text-xs text-gray-400">
+          No managed system matches this host in Password Safe.</p>
+      </div>
+      <div x-show="op.error" class="text-sm text-red-600" x-text="op.error"></div>
+      <div class="flex justify-end gap-2">
+        <button @click="op.open = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+        <button @click="submitOnprem()" :disabled="op.saving || !op.agent_id || !op.host || !op.accountKey"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg">Register</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Extend an on-prem domain to a cloud -->
+  <div x-show="ext.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="ext.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-3 max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-semibold text-gray-800" x-text="'Extend ' + (ext.dir?.name || '') + ' to ' + (ext.cloud === 'aws' ? 'AWS' : 'GCP')"></h3>
+      <template x-if="ext.cloud === 'aws'">
+        <div class="space-y-3">
+          <p class="text-xs text-gray-500">Builds an <strong>AWS AD Connector</strong>: a proxy to your domain controllers, so
+            AWS Windows servers join this domain at deploy. It needs a VPN or Direct Connect from the VPC to the DCs.
+            The connector's service account is a Password Safe managed account, used once at build.
+            <strong>Turn off its automatic rotation</strong>: AWS offers no API to update the connector's copy.</p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <input x-model="ext.region" placeholder="Region, e.g. us-east-2" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <input x-model="ext.vpc_id" placeholder="vpc-…" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <input x-model="ext.subnets" placeholder="Two subnets: subnet-a, subnet-b" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono sm:col-span-2">
+            <input x-model="ext.dns_ips" placeholder="On-prem DNS / DC IPs: 10.0.0.10, 10.0.0.11" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono sm:col-span-2">
+            <select x-model="ext.size" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="Small">Small (about $36/month)</option>
+              <option value="Large">Large (about $110/month)</option>
+            </select>
+            <input x-model="ext.netbios" placeholder="NetBIOS name (optional)" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+          </div>
+          <p class="text-xs text-gray-500">Service account: the directory's own Password Safe account
+            (<span x-text="ext.dir?.bind_account || 'managed account'"></span>). It needs only read and join rights.</p>
+        </div>
+      </template>
+      <template x-if="ext.cloud === 'gcp'">
+        <div class="space-y-3">
+          <p class="text-xs text-gray-500">Builds a <strong>DNS link</strong>: a Cloud DNS private forwarding zone (about
+            $0.20/month) that sends this domain's queries to your domain controllers over the VPN. Windows servers
+            deployed on GCP with this directory are then joined by this domain's remote agent over WinRM.
+            On-prem DNS must accept queries from 35.199.192.0/19.</p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <input x-model="ext.project" placeholder="Project (blank = default)" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <input x-model="ext.network" placeholder="VPC networks: default, prod-vpc" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <input x-model="ext.dns_ips" placeholder="On-prem DNS / DC IPs: 10.0.0.10, 10.0.0.11" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono sm:col-span-2">
+          </div>
+        </div>
+      </template>
+      <label x-show="ext.cloud === 'aws'" class="flex items-center gap-2 text-sm text-gray-700">
+        <input type="checkbox" x-model="ext.ack" class="rounded text-blue-600"> I understand this bills monthly and has no auto-delete timer
+      </label>
+      <div x-show="ext.error" class="text-sm text-red-600" x-text="ext.error"></div>
+      <div class="flex justify-end gap-2">
+        <button @click="ext.open = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+        <button @click="submitExtend()" :disabled="ext.saving || (ext.cloud === 'aws' && !ext.ack)"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg">Build</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Import from Password Safe -->
+  <div x-show="psi.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="psi.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-3xl p-6 space-y-3 max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-semibold text-gray-800">Import directories from Password Safe</h3>
+      <p class="text-xs text-gray-500">Directories Password Safe already manages. Each one is registered
+        against the account you pick, checked out per run, and reached through the agent you choose.
+        Nothing in Password Safe changes.</p>
+      <div x-show="psi.loading" class="text-sm text-gray-400">Reading Password Safe…</div>
+      <div x-show="psi.reason || psi.error" class="text-sm text-red-600" x-text="psi.reason || psi.error"></div>
+      <template x-for="w in (psi.warnings || [])" :key="w"><div class="text-xs text-amber-700" x-text="w"></div></template>
+      <div x-show="!psi.loading && psi.configured && !psi.systems.length && !psi.error" class="text-sm text-gray-400">
+        Password Safe manages no directories this API identity can see.</div>
+      <div class="space-y-2">
+        <template x-for="c in psi.systems" :key="c.system_id">
+          <div class="border border-gray-200 rounded-lg p-3 text-sm"
+               :class="(!c.eligible || c.already_registered) ? 'opacity-60' : ''">
+            <label class="flex items-start gap-2">
+              <input type="checkbox" class="mt-1 rounded text-blue-600"
+                     :disabled="!c.eligible || c.already_registered" x-model="c._pick">
+              <span class="flex-1">
+                <span class="font-medium" x-text="c.name"></span>
+                <span class="text-gray-500" x-text="' · ' + (c.provider === 'ldap' ? 'LDAP' : 'Active Directory') + ' · ' + c.host + ':' + c.port"></span>
+                <span x-show="c.already_registered" class="text-xs text-gray-500"> (already registered)</span>
+                <span x-show="!c.eligible" class="block text-xs text-red-600" x-text="c.reason"></span>
+              </span>
+            </label>
+            <div x-show="c._pick" class="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
+              <select x-model="c._account" class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <template x-for="a in c.accounts" :key="a.account_id">
+                  <option :value="a.account_id" x-text="a.name"></option>
+                </template>
+              </select>
+              <select x-model="c._agent" class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <option value="">Agent that reaches it…</option>
+                <template x-for="a in agents" :key="a.id"><option :value="a.id" x-text="a.name + ' (' + (a.agent_version || '?') + ')'"></option></template>
+              </select>
+              <input x-show="c.provider === 'ldap'" x-model="c._base_dn" placeholder="Base DN, e.g. dc=example,dc=com"
+                     class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono sm:col-span-2">
+            </div>
+          </div>
+        </template>
+      </div>
+      <div x-show="psi.truncated" class="text-xs text-gray-500">Showing the first entries only.</div>
+      <template x-for="f in (psi.failed || [])" :key="f.system_id">
+        <div class="text-xs text-red-600" x-text="f.name + ': ' + f.error"></div>
+      </template>
+      <div class="flex justify-end gap-2">
+        <button @click="psi.open = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Close</button>
+        <button @click="submitPsImport()" :disabled="psi.saving || !psiPicked().length"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg"
+                x-text="'Import ' + psiPicked().length"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Admin password -->
+  <div x-show="pw.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="pw.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-2 text-sm">
+      <h3 class="text-lg font-semibold text-gray-800">Directory administrator</h3>
+      <div x-show="pw.error" class="text-red-600" x-text="pw.error"></div>
+      <div x-show="pw.data">
+        <div>Username: <code class="bg-gray-100 px-1 rounded" x-text="pw.data?.username"></code></div>
+        <div>Password: <code class="bg-gray-100 px-1 rounded break-all" x-text="pw.data?.password"></code></div>
+      </div>
+      <div class="flex justify-end">
+        <button @click="pw.open = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function directoriesPage() {
+  return {
+    directories: [], loading: true, opts: {},
+    toast: '', toastType: 'success',
+    build: { open: false },
+    disc: { open: false, cloud: 'aws', region: '', project: '', results: [], loading: false, error: '' },
+    pw: { open: false, data: null, error: '' },
+    op: { open: false, systems: [] },
+    psi: { open: false, systems: [] },
+    ext: { open: false },
+    agents: [],
+
+    async init() {
+      await this.load();
+      try { this.agents = (await API.get('/api/agents')).agents || []; } catch (e) { this.agents = []; }
+      // Arriving from a discovery finding: open Register on-prem with what the probe saw.
+      const q = new URLSearchParams(window.location.search);
+      if (q.get('register') === '1') {
+        const port = Number(q.get('port') || 0);
+        this.openOnprem({provider: q.get('provider') || 'onprem_ad', host: q.get('host') || '',
+                         port: port || null, use_ldaps: port !== 389, name: q.get('name') || '',
+                         base_dn: q.get('base_dn') || '', agent_id: q.get('agent') || ''});
+      }
+    },
+    agentName(id) { const a = this.agents.find(x => x.id === id); return a ? a.name : ''; },
+
+    openOnprem(prefill = {}) {
+      this.op = { open: true, provider: 'onprem_ad', agent_id: '', name: '', host: '', port: null,
+                  use_ldaps: true, base_dn: '', accountKey: '', systems: [], accountsLoading: false,
+                  accountsError: '', saving: false, error: '', ...prefill };
+      if (this.op.host) this.loadAccounts();
+    },
+    async loadAccounts() {
+      const o = this.op;
+      o.systems = []; o.accountsError = '';
+      if (!(o.host || '').trim()) return;
+      o.accountsLoading = true;
+      try { o.systems = (await API.get('/api/config-mgmt/managed-accounts?host=' + encodeURIComponent(o.host.trim()))).systems || []; }
+      catch (e) { o.accountsError = e.message; }
+      finally { o.accountsLoading = false; }
+    },
+    async submitOnprem() {
+      const o = this.op;
+      o.saving = true; o.error = '';
+      try {
+        const [systemId, accountId, ...nameParts] = (o.accountKey || '').split(':');
+        await API.post('/api/directories/register-onprem', {
+          provider: o.provider, name: o.name, host: o.host.trim(), port: o.port || 0,
+          use_ldaps: !!o.use_ldaps, base_dn: o.base_dn, agent_id: o.agent_id,
+          managed_account: { system_id: Number(systemId), account_id: Number(accountId),
+                             account_name: nameParts.join(':') },
+        });
+        o.open = false;
+        this.note(o.name + ' registered');
+        await this.load();
+      } catch (e) { o.error = e.message; }
+      finally { o.saving = false; }
+    },
+    openExtend(d, cloud) {
+      const ip = /^\d+\.\d+\.\d+\.\d+$/.test(d.host || '') ? d.host : '';
+      this.ext = { open: true, dir: d, cloud, region: (this.opts.defaults || {}).aws_region || '',
+                   vpc_id: '', subnets: '', dns_ips: ip, size: 'Small', netbios: '',
+                   network: '', project: '', ack: false, saving: false, error: '' };
+    },
+    async submitExtend() {
+      const e = this.ext;
+      e.saving = true; e.error = '';
+      try {
+        if (e.cloud === 'gcp') {
+          const r = await API.post('/api/directories/dns-link', {
+            onprem_directory_id: e.dir.id, project: e.project.trim(),
+            networks: this.split(e.network), dns_ips: this.split(e.dns_ips) });
+          e.open = false;
+          this.note('DNS link queued — job ' + r.job_id.slice(0, 8));
+          await this.load();
+          return;
+        }
+        const r = await API.post('/api/directories/ad-connector', {
+          onprem_directory_id: e.dir.id, region: e.region.trim(), vpc_id: e.vpc_id.trim(),
+          subnet_ids: this.split(e.subnets), dns_ips: this.split(e.dns_ips), size: e.size,
+          netbios: e.netbios.trim(), acknowledge_cost: !!e.ack });
+        e.open = false;
+        this.note('AD Connector queued — job ' + r.job_id.slice(0, 8));
+        await this.load();
+      } catch (err) { e.error = err.message; }
+      finally { e.saving = false; }
+    },
+    async openPsImport() {
+      this.psi = { open: true, loading: true, systems: [], warnings: [], failed: [], error: '',
+                   reason: '', configured: false, truncated: false, saving: false };
+      try {
+        const r = await API.get('/api/directories/ps-candidates');
+        const agent = this.agents.length === 1 ? this.agents[0].id : '';
+        r.systems = (r.systems || []).map(c => ({ ...c, _pick: false, _agent: agent, _base_dn: '',
+                                                 _account: c.accounts.length ? c.accounts[0].account_id : '' }));
+        Object.assign(this.psi, r);
+      } catch (e) { this.psi.error = e.message; }
+      finally { this.psi.loading = false; }
+    },
+    psiPicked() { return (this.psi.systems || []).filter(c => c._pick && c._agent && c._account); },
+    async submitPsImport() {
+      const p = this.psi;
+      p.saving = true; p.error = ''; p.failed = [];
+      try {
+        const r = await API.post('/api/directories/ps-import', { items: this.psiPicked().map(c => ({
+          system_id: c.system_id, account_id: Number(c._account), agent_id: c._agent,
+          base_dn: c._base_dn || '' })) });
+        p.failed = r.failed || [];
+        this.note(r.count + ' director' + (r.count === 1 ? 'y' : 'ies') + ' imported',
+                  r.count ? 'success' : 'error');
+        if (!p.failed.length) p.open = false;
+        await this.load();
+      } catch (e) { p.error = e.message; }
+      finally { p.saving = false; }
+    },
+    note(msg, type = 'success') { this.toast = msg; this.toastType = type; setTimeout(() => this.toast = '', 6000); },
+    split(s) { return (s || '').split(',').map(x => x.trim()).filter(Boolean); },
+
+    async load() {
+      this.loading = true;
+      try { this.directories = (await API.get('/api/directories')).directories || []; }
+      catch (e) { this.note(e.message, 'error'); }
+      finally { this.loading = false; }
+    },
+
+    async openBuild() {
+      try { this.opts = await API.get('/api/directories/options'); } catch (e) { this.opts = {}; }
+      const d = this.opts.defaults || {};
+      this.build = { open: true, cloud: 'aws', name: '', netbios: '', edition: d.aws_edition || 'Standard',
+        region: d.aws_region || '', vpc_id: '', subnets: '', project: d.gcp_project || '',
+        locations: d.gcp_region || '', reserved_ip_range: d.gcp_reserved_ip_range || '',
+        networks: d.gcp_network || '', register_in_passwordsafe: false, acknowledge_cost: false,
+        saving: false, error: '' };
+    },
+    costText() {
+      const c = this.opts.costs || {};
+      return this.build.cloud === 'aws' ? (c['aws:' + this.build.edition] || 'a standing monthly cost') : (c['gcp'] || 'a standing monthly cost');
+    },
+    async submitBuild() {
+      const b = this.build;
+      b.saving = true; b.error = '';
+      try {
+        const out = await API.post('/api/directories', {
+          cloud: b.cloud, name: b.name, netbios: b.netbios, acknowledge_cost: b.acknowledge_cost,
+          register_in_passwordsafe: !!b.register_in_passwordsafe,
+          edition: b.edition, region: b.region, vpc_id: b.vpc_id, subnet_ids: this.split(b.subnets),
+          project: b.project, locations: this.split(b.locations),
+          reserved_ip_range: b.reserved_ip_range, networks: this.split(b.networks),
+        });
+        b.open = false;
+        this.note('Build queued — job ' + out.job_id);
+        await this.load();
+      } catch (e) { b.error = e.message; }
+      finally { b.saving = false; }
+    },
+
+    openDiscover() { this.disc = { ...this.disc, open: true, results: [], error: '' }; },
+    async runDiscover() {
+      const d = this.disc;
+      d.loading = true; d.error = ''; d.results = [];
+      const q = d.cloud === 'aws' ? 'region=' + encodeURIComponent(d.region) : 'project=' + encodeURIComponent(d.project);
+      try { d.results = (await API.get(`/api/directories/discover?cloud=${d.cloud}&${q}`)).directories || []; }
+      catch (e) { d.error = e.message; }
+      finally { d.loading = false; }
+    },
+    async registerOne(c) {
+      try {
+        await API.post('/api/directories/register', { cloud: c.cloud, identifier: c.identifier,
+          region: c.region || '', project: c.project || '' });
+        c.registered = true;
+        this.note(c.name + ' registered');
+        await this.load();
+      } catch (e) { this.disc.error = e.message; }
+    },
+
+    async showPassword(d) {
+      this.pw = { open: true, data: null, error: '' };
+      try { this.pw.data = await API.get(`/api/directories/${d.id}/admin-password`); }
+      catch (e) { this.pw.error = e.message; }
+    },
+    async resetPassword(d) {
+      if (!confirm(`Set a new administrator password on ${d.name}? The old one stops working.`)) return;
+      try { await API.post(`/api/directories/${d.id}/reset-admin-password`, {}); this.note('Password reset and stored'); await this.load(); }
+      catch (e) { this.note(e.message, 'error'); }
+    },
+    async remove(d) {
+      const verb = d.source === 'registered' ? 'Unregister' : 'Destroy';
+      const warn = d.source === 'registered' ? 'The directory itself is not touched.'
+        : 'This deletes the domain controllers and everything in the directory.';
+      if (!confirm(`${verb} ${d.name}? ${warn}`)) return;
+      try { await API.del(`/api/directories/${d.id}`); this.note(verb + ' started'); await this.load(); }
+      catch (e) { this.note(e.message, 'error'); }
+    },
+  };
+}
+</script>
+{% endblock %}

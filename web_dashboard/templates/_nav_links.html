@@ -112,6 +112,11 @@
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/databases') %}{{ nav_active }}{% endif %}">Databases</a>
 {% endif %}
+{% if directories_enabled %}
+<a data-nav="directories" href="/directories"
+   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+   {% if request.url.path.startswith('/directories') %}{{ nav_active }}{% endif %}">Directories</a>
+{% endif %}
 {% if cloud_functions_enabled %}
 <a data-nav="functions" href="/functions"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}

@@ -304,6 +304,18 @@ SSH private key into the managed account and `passwordsafe_ssh_key_enforcement_m
 key-only auth. This requires SSH line-of-sight from a Resource Broker / Gateway. Select it per
 cloud via the `*_registration_method` key (set to `ssh`).
 
+### Windows VMs (AWS, Azure and GCP) — password-managed
+
+A Windows VM's local administrator is onboarded as a **password-managed** account on a
+traditional managed system (`method="password"`), seeded with the password the build
+generated (Azure) or recovered (AWS), then rotated straight away. It uses its **own**
+functional account on a Windows platform (`passwordsafe_vm_functional_account_windows*`),
+never the SSH-rotation accounts above. Password Safe rotates over SMB/WinRM, so a private VM
+needs a Resource Broker whose resource zone covers its subnet. Once Password Safe holds the
+credential, the dashboard deletes its build-time copy. See
+[Windows servers](../../cloud/vms.md#windows-servers) for the full flow, including where the
+password is kept when Password Safe is not in use.
+
 ### Configuration keys — VM onboarding
 
 | Key | Default | Notes |
@@ -312,6 +324,10 @@ cloud via the `*_registration_method` key (set to `ssh`).
 | `passwordsafe_workgroup` | — | Workgroup name or id the managed system lands in |
 | `passwordsafe_vm_functional_account_aws` / `passwordsafe_vm_functional_account_azure` / `passwordsafe_vm_functional_account_gcp` / `passwordsafe_vm_functional_account_oci` | — | Functional account per cloud (for AWS+SSM, the custom-plugin account) |
 | `passwordsafe_managed_account_name` | `adminuser` | The onboarded account (the `{name}` part for SSM) |
+| `passwordsafe_vm_functional_account_windows` / `passwordsafe_vm_functional_account_windows_azure` / `passwordsafe_vm_functional_account_windows_aws` | — | Windows VMs: functional account on a **Windows** platform (generic, then per-cloud override) |
+| `passwordsafe_windows_change_password_on_register` | `true` | Windows VMs: rotate the seeded administrator password right after onboarding |
+| `passwordsafe_directory_functional_account` | — | Managed Active Directory: functional account on an **Active Directory** platform for the directory administrator (set on the Managed Active Directory panel; see [Managed Active Directory](../../cloud/directories.md)) |
+| `passwordsafe_directory_change_password_on_register` | `true` | Managed Active Directory: rotate the seeded administrator password right after onboarding |
 | `passwordsafe_aws_registration_method` | `ssm` | AWS method: `ssm` (AWS Systems Manager plugin) or `ssh` |
 | `passwordsafe_ssm_account_suffix` | `local` | SSM account-name suffix; an AssumeRole ARN for EC2 cross-account mode |
 | `passwordsafe_ssm_change_password_on_register` | `false` | Trigger an initial Change Password after onboarding (mints the key now) |

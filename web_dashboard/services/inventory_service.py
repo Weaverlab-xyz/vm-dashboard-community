@@ -19,7 +19,7 @@ from typing import Optional, Set
 
 from sqlalchemy.orm import Session
 
-from ..database import (CertLab, CloudDatabase, CloudFunction,
+from ..database import (CertLab, CloudDatabase, CloudFunction, ManagedDirectory,
                         HypervisorConnection, HypervisorVMCache, Job, K8sCluster,
                         PovEnvironment, SpireLab, VirtualDesktop, WorkloadCloudCredential,
                         WorkloadK8sToken)
@@ -253,6 +253,32 @@ def _certlab_item(row) -> dict:
         "job_id": row.deploy_job_id,
         "detail_href": "/workload-lab#certificates",
     }
+
+def _directory_item(row) -> dict:
+    """A managed Active Directory as one inventory row. ``source`` is the row's own:
+    a registered directory is listed but never reaped (expiry_policy.ttl_capable)."""
+    return {
+        "id": f"directory:{row.id}",
+        "cloud": row.cloud,
+        "kind": "directory",
+        "source": row.source or "provisioned",
+        "name": row.name,
+        "region": row.region or "",
+        "state": row.status,
+        "workgroup": row.workgroup,
+        "deployed_by": row.created_by,
+        "created_at": _iso(row.created_at),
+        "expires_at": _iso(row.expires_at),
+        "job_id": row.deploy_job_id,
+        "detail_href": "/directories",
+        # On-prem directories only: the agent that reaches it, and where. _target_spec
+        # aims a Config-Management run with these.
+        "provider": row.provider or "",
+        "agent_id": getattr(row, "agent_id", None) or "",
+        "host": getattr(row, "host", None) or "",
+        "port": getattr(row, "port", None) or 0,
+    }
+
 
 def _spirelab_item(row) -> dict:
     """A SPIRE trust domain as one inventory row.
@@ -663,6 +689,11 @@ def collect(db: Session) -> list:
     for row in db.query(CertLab).filter(CertLab.status != "deleted").all():
         items.append(_certlab_item(row))
 
+    # Queried unconditionally for the same reason: hiding the Directories page does not
+    # stop two domain controllers billing.
+    for row in db.query(ManagedDirectory).filter(ManagedDirectory.status != "deleted").all():
+        items.append(_directory_item(row))
+
     # Queried unconditionally for the same reason, with a different cost: turning the
     # SPIRE Lab feature off hides its page, it does not close tcp/8081 — and a trust
     # domain nobody can see is still minting identities for anyone who can reach it.
@@ -894,6 +925,21 @@ def _target_spec(item: dict):
                     "agent_id": item["agent_id"], "target": item["private_host"],
                     "port": item.get("port") or 0, "transport": "local"}
         return {"target_kind": "database", "target_id": item["id"].split(":", 1)[1]}
+
+    if kind == "directory":
+        # Only an on-premises directory has a run path: it is changed through the agent
+        # that reaches it, with its own Password Safe account. A cloud-managed directory
+        # has no host this dashboard can aim a play at.
+        if cloud != "local" or not item.get("agent_id"):
+            return ("only an on-premises directory registered through a remote agent can "
+                    "be configured here.")
+        if not item.get("host"):
+            return "this directory has no host recorded. Re-register it with its host."
+        # LDAP by default: it works for both AD and other directories. The run form
+        # switches an AD directory to WinRM for the microsoft.ad playbooks.
+        return {"target_kind": "directory", "target_id": item["id"].split(":", 1)[1],
+                "agent_id": item["agent_id"], "target": item["host"],
+                "port": item.get("port") or 0, "transport": "local"}
 
     return f"{kind!r} resources have no Config-Management path."
 

@@ -1,0 +1,67 @@
+# Audit: who is in Active Directory's privileged groups (read-only)
+# Target: an on-prem AD directory, run through its remote agent over WinRM.
+# Changes nothing. Membership is resolved recursively, so a user who is privileged
+# through a nested group is listed too. Enterprise Admins and Schema Admins exist only
+# in the forest root domain; in a child domain they are reported as not found.
+# Optional:
+#   ad_privileged_groups: [...]            # override the list below
+- name: Audit AD privileged group membership
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: winrm
+    ad_privileged_groups:
+      - Domain Admins
+      - Enterprise Admins
+      - Schema Admins
+      - Administrators
+      - Account Operators
+      - Backup Operators
+      - Server Operators
+      - Print Operators
+      - DnsAdmins
+      - Group Policy Creator Owners
+  tasks:
+    - name: Find each privileged group
+      microsoft.ad.object_info:
+        ldap_filter: "(&(objectClass=group)(cn={{ item }}))"
+        domain_server: "{{ dir_host | default(omit) }}"
+        domain_username: "{{ dir_bind_dn | default(omit) }}"
+        domain_password: "{{ dir_bind_password | default(omit) }}"
+      loop: "{{ ad_privileged_groups }}"
+      register: _groups
+      no_log: true              # carries the bind password
+
+    - name: List each group's members, recursively
+      microsoft.ad.object_info:
+        # LDAP_MATCHING_RULE_IN_CHAIN: transitive membership through nested groups.
+        ldap_filter: "(memberOf:1.2.840.113556.1.4.1941:={{ item.objects[0].DistinguishedName }})"
+        properties: [sAMAccountName]
+        domain_server: "{{ dir_host | default(omit) }}"
+        domain_username: "{{ dir_bind_dn | default(omit) }}"
+        domain_password: "{{ dir_bind_password | default(omit) }}"
+      loop: "{{ _groups.results | selectattr('objects', 'defined') | selectattr('objects') | list }}"
+      register: _members
+      no_log: true              # carries the bind password
+
+    - name: Build the report
+      ansible.builtin.set_fact:
+        _report: >-
+          {{ _report | default({}) | combine({item.item.item:
+               item.objects | rejectattr('ObjectClass', 'equalto', 'group')
+               | map(attribute='sAMAccountName') | list | sort}) }}
+      loop: "{{ _members.results }}"
+      loop_control:
+        label: "{{ item.item.item }}"
+
+    - name: Print the report
+      ansible.builtin.debug:
+        msg:
+          - "{% for k, v in (_report | default({})).items() %}{{ k }}: {{ v | length }}{% if not loop.last %}, {% endif %}{% endfor %}"
+          - "Not found in this domain: {{ ad_privileged_groups | reject('in', (_report | default({})).keys() | list) | join(', ') or 'none' }}"
+          - "{{ _report | default({}) }}"
+
+    - name: Record the report as job stats
+      ansible.builtin.set_stats:
+        data:
+          ad_audit_privileged_groups: "{{ _report | default({}) }}"

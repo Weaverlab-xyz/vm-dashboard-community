@@ -9,6 +9,7 @@ instance.
 Lives in ``services/`` because the job runner has to import it, and a worker reaching
 into the API package is backwards (see services/aws_vm_service for the AWS counterpart).
 """
+import asyncio
 import logging
 from typing import Optional
 
@@ -16,6 +17,7 @@ from ..config import settings
 from ..database import Job
 from ..models.gcp import GCPDeployRequest
 from . import cache_service, gcp_service, job_service, region_catalog, tunnel_pool
+from .gcp_service import GCPError
 
 logger = logging.getLogger(__name__)
 
@@ -306,6 +308,13 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
     # the dict they are normally recorded into — is not built until after the launch
     # returns, so a failure before that point had nothing to write them onto.
     nat_name = None
+    # What this deploy records about an AD join, and whether the instance exists. Hoisted
+    # for the same reason as nat_name: a join requested at create is real once the VM is,
+    # and the directory's destroy guard must see it even if a later step fails.
+    ad_meta: dict = {}
+    launched = False
+    # A DNS-link directory is joined AFTER the deploy completes, by the on-prem agent.
+    agent_join_row = None
     try:
         job_service.set_running(db, job_id)
 
@@ -336,11 +345,54 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                     f"Shared Gateway unavailable ({jp.error}) — continuing with VM launch…"
                 )
 
+        # Windows images take a different path from here: no SSH key, a password from
+        # the windows-keys exchange, and an RDP jump instead of a Shell Jump.
+        is_windows = await gcp_service.image_is_windows(payload.image_self_link)
+        join_md: dict = {}          # instance metadata that performs the AD join
+        join_sa = ""
+        if is_windows:
+            from ..services import windows_admin_secret
+            try:
+                # Fail before launching if there is nowhere acceptable to keep the password.
+                windows_admin_secret.resolve_backend("gcp")
+            except windows_admin_secret.WindowsSecretError as e:
+                raise GCPError(str(e)) from e
+            # AD join is set at CREATE: the guest agent joins during first boot. A join that
+            # cannot be attempted is a warning, never a reason to stop the deploy.
+            if getattr(payload, "ad_directory_id", None):
+                from ..services import domain_join_service
+                try:
+                    ad_row = domain_join_service.resolve(db, payload.ad_directory_id, "gcp")
+                    if ad_row.provider == "dns_link":
+                        # An on-prem domain reached over a VPN: the guest agent cannot join it.
+                        # Open WinRM at first boot; the on-prem agent joins after the deploy.
+                        domain_join_service.onprem_for_link(db, ad_row)
+                        join_md = domain_join_service.agent_join_metadata()
+                        agent_join_row = ad_row
+                        ad_meta = {"ad_directory_id": ad_row.id, "ad_domain": ad_row.name,
+                                   "ad_joined": True, "ad_join_method": "agent"}
+                    else:
+                        join_sa = domain_join_service.gcp_join_service_account()
+                        join_md = domain_join_service.gcp_join_metadata(ad_row, payload.ad_ou or "")
+                        ad_meta = {"ad_directory_id": ad_row.id, "ad_domain": ad_row.name,
+                                   # Requested at create and performed by the guest agent;
+                                   # counted as joined so the directory cannot be destroyed
+                                   # from under it. Verify membership in AD.
+                                   "ad_joined": True, "ad_join_method": "gce-metadata"}
+                        if join_md.get("managed-ad-ou-name"):
+                            ad_meta["ad_ou"] = join_md["managed-ad-ou-name"]
+                except domain_join_service.DomainJoinError as e:
+                    ad_meta = {"ad_join_error": str(e)}
+                    agent_join_row = None
+                    join_md, join_sa = {}, ""
+        elif getattr(payload, "ad_directory_id", None):
+            ad_meta = {"ad_join_error": "AD join applies to Windows images only; skipped"}
+
         # Retrieve SSH public key (per-launch override wins over the region default)
         secret_name = getattr(payload, "ssh_key_secret_override", None) or _rc["ssh_key_secret"]
         ssh_username = _cfg_svc.get("gcp_ssh_username") or payload.ssh_username or "gcp-user"
         ssh_public_key = ""
-        if secret_name:
+        if secret_name and not is_windows:
             job_service.update_progress(db, job_id, 18, "Retrieving SSH public key from Secret Manager…")
             try:
                 ssh_public_key = await gcp_service.get_ssh_public_key(
@@ -388,7 +440,11 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             disk_size_gb=payload.disk_size_gb,
             network_tags=merged_tags,
             labels={"workgroup": wg} if wg else None,
+            windows=is_windows,
+            extra_metadata=join_md or None,
+            service_account_email=join_sa,
         )
+        launched = True
 
         hostname = result.get("private_ip") or result.get("public_ip") or payload.instance_name
 
@@ -412,9 +468,35 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             final_meta["nat_name"] = nat_name
         if jp:
             jp.record(final_meta)
+        final_meta.update(ad_meta)
 
-        # ── BeyondTrust PRA — Shell Jump (optional) ───────────────────────────
-        if _cfg_svc.get_bool("pra_enabled"):
+        # ── Windows: the administrator password → secret manager ──────────────
+        admin_password = ""
+        win_user = ""
+        if is_windows:
+            from ..services import windows_admin_secret
+            final_meta["os_type"] = "windows"
+            win_user = _cfg_svc.get("gcp_windows_admin_username") or "gcpadmin"
+            job_service.update_progress(
+                db, job_id, 60, "Waiting for Windows to finish first boot and set the password…")
+            admin_password = await gcp_service.reset_windows_password(
+                project_id, result["zone"], payload.instance_name, win_user,
+                on_wait=lambda s: job_service.update_progress(
+                    db, job_id, 60,
+                    f"Waiting for Windows to finish first boot ({s // 60} min)…"))
+            try:
+                backend, ref = await asyncio.to_thread(
+                    windows_admin_secret.store, "gcp", payload.instance_name, job_id[:8],
+                    admin_password)
+            except windows_admin_secret.WindowsSecretError as e:
+                raise GCPError(str(e)) from e
+            final_meta["admin_username"] = win_user
+            final_meta["admin_password_backend"] = backend
+            final_meta["admin_password_ref"] = ref
+            job_service.update_progress(db, job_id, 80, f"Administrator password stored in {backend}.")
+
+        # ── BeyondTrust PRA — Shell Jump (optional; SSH, so Linux only) ───────
+        if _cfg_svc.get_bool("pra_enabled") and not is_windows:
             from ..services import terraform_pra_service
             jump_group = ((payload.jump_group or "").strip() or _cfg_svc.get("gcp_bt_jump_group_name")
                           or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name)
@@ -445,12 +527,13 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                     db, job_id, 95,
                     f"Instance deployed but Shell Jump provisioning failed: {bt_exc}"
                 )
-        else:
+        elif not is_windows:
             job_service.update_progress(db, job_id, 95, "Instance launched.")
 
         # Entitle — register as SSH ephemeral-accounts integration (per-build opt-in).
         from ..services import entitle_vm_hook
-        if getattr(payload, "register_in_entitle", False) and entitle_vm_hook.registration_enabled():
+        if (getattr(payload, "register_in_entitle", False) and not is_windows
+                and entitle_vm_hook.registration_enabled()):
             # An OT cell is brokered by the agent running in its own plant (on the
             # cell's DMZ broker), whose token name the cell orchestrator stamped on
             # this job before it ran. Blank everywhere else = the install-wide agent,
@@ -473,7 +556,8 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         # GCP defaults to the cloud-native "GCP VM SSH Rotation" plugin (managed system
         # address = projectId/zone/instanceName), so pass the project + zone.
         from ..services import ps_vm_hook
-        if getattr(payload, "register_in_passwordsafe", False) and ps_vm_hook.registration_enabled():
+        if (getattr(payload, "register_in_passwordsafe", False) and not is_windows
+                and ps_vm_hook.registration_enabled()):
             await ps_vm_hook.register(db, job_id, payload.instance_name, hostname,
                                       result=final_meta, tag="GCP", ssh_key_secret=secret_name,
                                       # The job's project, not _gcp_project() — see this
@@ -489,7 +573,26 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                                       # on the guest would ever read.
                                       method=getattr(payload, "passwordsafe_method", "") or "")
 
+        # Windows: Password Safe managed account + PRA Remote RDP jump.
+        if is_windows:
+            from ..services import windows_server_hook
+            await windows_server_hook.wire(
+                db, job_id, vm_name=payload.instance_name, hostname=hostname,
+                username=win_user, password=admin_password, result=final_meta, tag="GCP",
+                register_in_passwordsafe=bool(getattr(payload, "register_in_passwordsafe", False)),
+                pra_enabled=_cfg_svc.get_bool("pra_enabled"),
+                jump_group=((payload.jump_group or "").strip()
+                            or _cfg_svc.get("gcp_bt_jump_group_name")
+                            or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name),
+                jumpoint_name=((payload.jumpoint_name or "").strip()
+                               or _cfg_svc.get("gcp_jumpoint_name")
+                               or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name),
+            )
+            admin_password = ""
+
         job_service.set_completed(db, job_id, final_meta)
+        if agent_join_row is not None:
+            _queue_agent_join(db, job_id, agent_join_row, payload, final_meta)
         await cache_service.invalidate_prefix("gcp_instances")
 
     except Exception as exc:
@@ -506,11 +609,35 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         partial: dict = {}
         if nat_name:
             partial["nat_name"] = nat_name
+        if launched:
+            partial.update(ad_meta)
         if jp:
             jp.record(partial)
         job_service.set_failed(db, job_id, str(exc), partial or None)
     finally:
         db.close()
+
+
+def _queue_agent_join(db, job_id: str, link_row, payload, final_meta: dict) -> None:
+    """Queue the on-prem agent's join of a just-deployed server and record the outcome
+    on the (already completed) deploy job. Queued AFTER completion because the join's
+    bundle reads the server's administrator password from this job's metadata."""
+    from ..services import domain_join_service
+    row = job_service.get_job(db, job_id)
+    update: dict = {}
+    try:
+        update["ad_join_job_id"] = domain_join_service.queue_agent_join(
+            db, deploy_job_id=job_id, link_row=link_row, vm_name=payload.instance_name,
+            private_ip=final_meta.get("private_ip") or "", ou=payload.ad_ou or "",
+            created_by=(row.created_by if row is not None else "") or "system",
+            workgroup=getattr(payload, "workgroup", "") or None)
+    except domain_join_service.DomainJoinError as e:
+        update = {"ad_join_error": str(e), "ad_joined": False}
+    if row is not None:
+        md = row.metadata_dict
+        md.update(update)
+        row.metadata_dict = md
+        db.commit()
 
 
 async def _run_bulk_deploy(job_items: list, project_id: str, zone: str) -> None:
@@ -731,6 +858,10 @@ async def _run_destroy(
                 result["ot_agent_token_error"] = note
             else:
                 result["ot_agent_token_destroyed"] = deploy_meta.get("ot_agent_token_name")
+
+        # Windows: the RDP jump and the stored administrator password.
+        from ..services import windows_server_hook
+        await windows_server_hook.teardown(deploy_meta, result)
 
         # Off-board the Password Safe managed system if this deploy registered one.
         if deploy_meta.get("ps_registration_tf_state"):

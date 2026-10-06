@@ -39,6 +39,7 @@ class GCPInstanceInfo(BaseModel):
     # on the page: the rule turns on WHICH address was wired, which the row's other
     # fields do not reveal. A warning, never a refusal.
     suspend_warning: Optional[str] = None
+    os_type: str = ""        # "windows" for a Windows instance this dashboard deployed
     # Tags as the page renders them, already classified and coloured by
     # services/tag_policy.normalise. The raw provider dict stays in the service
     # layer, where unmanaged-VM discovery and the workgroup lookup read it.
@@ -75,6 +76,10 @@ class GCPDeployRequest(ScheduleRequestMixin, BaseModel):
     workgroup: str              # written as `workgroup` GCE label
     register_in_entitle: bool = False  # opt in to registering this VM as an Entitle SSH integration
     register_in_passwordsafe: bool = False  # opt in to onboarding this VM into Password Safe (managed system + account)
+    # Windows only: join this managed directory (a /api/directories id) at first boot,
+    # with the computer object in ad_ou (blank = directory_join_default_ou).
+    ad_directory_id: Optional[str] = None
+    ad_ou: str = ""
     # Password Safe onboarding method for THIS deploy, overriding the cloud default
     # (services/ps_vm_hook._resolve_method). Blank everywhere but a network cell,
     # whose VyOS guest runs none of the agents the cloud-native plugins drive.
@@ -115,6 +120,8 @@ class GCPBulkDeployRequest(ScheduleRequestMixin, BaseModel):
     workgroup: str
     register_in_entitle: bool = False
     register_in_passwordsafe: bool = False
+    ad_directory_id: Optional[str] = None   # Windows only — see GCPDeployRequest
+    ad_ou: str = ""
     ssh_key_secret_override: Optional[str] = None
     jump_group: Optional[str] = None
     jumpoint_name: Optional[str] = None

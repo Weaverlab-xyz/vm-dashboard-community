@@ -79,6 +79,13 @@ key is derived from the JWT root key (`.jwt_secret_key`).
 - Rotating a credential requires updating it in the dashboard Settings panel —
   there is no automated rotation.
 
+**One exception: Windows VM administrator passwords never use Tier 1.** They are
+credentials for machines the dashboard built, not credentials the dashboard itself uses,
+so a Windows build writes its administrator password to Password Safe, an external
+backend or the cloud's own vault, and refuses to build when none is configured. The
+**Windows VM administrator passwords** setting on the Secrets page picks the store
+explicitly. See [Windows servers](../cloud/vms.md#windows-servers).
+
 ---
 
 ## Tier 2 — External vault (migration)

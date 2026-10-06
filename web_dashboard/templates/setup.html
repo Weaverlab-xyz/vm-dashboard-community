@@ -404,6 +404,33 @@
           </div>
 
           <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-3">Windows servers — Microsoft Entra ID join (optional)</p>
+            <p class="text-xs text-gray-400 mb-3">Defaults for the Entra ID checkbox on Windows VM deploys. A joined VM gets a system identity and the AADLoginForWindows extension; the groups below get Virtual Machine Administrator / User Login on it, which needs <code>roleAssignments/write</code> for the dashboard's service principal.</p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" x-model="form.azure.azure_windows_entra_join" class="rounded text-blue-600">
+                Join Windows VMs to Entra ID by default
+              </label>
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" x-model="form.azure.azure_windows_entra_intune_enroll" class="rounded text-blue-600">
+                Also enrol them in Intune
+              </label>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Admin login groups</label>
+                <input type="text" x-model="form.azure.azure_entra_vm_admin_group_ids"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="Entra group object ids, comma-separated">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">User login groups</label>
+                <input type="text" x-model="form.azure.azure_entra_vm_user_group_ids"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="Entra group object ids, comma-separated">
+              </div>
+            </div>
+          </div>
+
+          <div class="border-t border-gray-100 pt-4">
             <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-3">Container Registry — ACI Ansible / Gateway pulls (optional)</p>
             <p class="text-xs text-gray-400 mb-3">Configure if you mirror the Ansible runner or BeyondTrust Gateway images in your own registry (e.g. to bypass Docker Hub rate limits). Credentials are stored encrypted in the dashboard DB and resolved through whichever secrets backend you select on the <code>/secrets</code> page.</p>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1042,6 +1069,8 @@ function wizard() {
                   azure_aci_jumpoint_image: 'beyondtrust/sra-jumpoint:latest',
                   azure_acr_username: '', azure_acr_password: '',
                   azure_aci_docker_deploy_key: '',
+                  azure_windows_entra_join: false, azure_windows_entra_intune_enroll: false,
+                  azure_entra_vm_admin_group_ids: '', azure_entra_vm_user_group_ids: '',
                   azure_oauth_client_id: '', azure_oauth_client_secret: '', azure_oauth_tenant_id: '' },
       gcp:      { gcp_project_id: '', gcp_region: 'us-central1', gcp_zone: 'us-central1-a',
                   gcp_service_account_json: '', gcp_network: 'default', gcp_subnetwork: '',
@@ -1390,7 +1419,8 @@ function wizard() {
                                     'azure_acr_server', 'azure_ansible_aci_image',
                                     'azure_aci_jumpoint_image',
                                     'azure_acr_username', 'azure_acr_password',
-                                    'azure_aci_docker_deploy_key'];
+                                    'azure_aci_docker_deploy_key',
+                                    'azure_entra_vm_admin_group_ids', 'azure_entra_vm_user_group_ids'];
             for (const f of advancedFields) {
               if (cfg[f]) { this.form.azure[f] = cfg[f]; this.showAzureAdvanced = true; }
             }
@@ -1399,6 +1429,9 @@ function wizard() {
               this.form.azure.azure_oauth_client_id  = cfg.azure_oauth_client_id;
               this.form.azure.azure_oauth_tenant_id  = cfg.azure_oauth_tenant_id || '';
               this.showOAuth = true;
+            }
+            for (const f of ['azure_windows_entra_join', 'azure_windows_entra_intune_enroll']) {
+              if (cfg[f] === '1' || cfg[f] === 'true' || cfg[f] === true) { this.form.azure[f] = true; this.showAzureAdvanced = true; }
             }
             // GCP non-secret fields
             if (cfg.gcp_project_id)         this.form.gcp.gcp_project_id         = cfg.gcp_project_id;
