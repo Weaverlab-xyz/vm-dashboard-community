@@ -406,6 +406,28 @@ async def _effective_ssh_public_key(req) -> str:
         return await azure_service.resolve_azure_ssh_public_key(_cfg("azure_key_vault_url"), override, "")
     except AzureError:
         return req.ssh_public_key
+async def _windows_public_key(req, resolved: str, result: dict) -> str:
+    """The Linux workflow's public key, for a Windows build: the per-launch override or
+    the key the form resolved, else the unified Key Vault keypair a Linux deploy reads.
+    Never fatal: without one the server still takes the password over SSH."""
+    from ..services import windows_server_hook
+    key = resolved or ""
+    secret = getattr(req, "ssh_key_secret_override", None) or _cfg("azure_ssh_keypair_secret_name")
+    if not windows_server_hook.clean_public_key(key):
+        try:
+            key = await azure_service.resolve_azure_ssh_public_key(
+                _cfg("azure_key_vault_url"), secret, _cfg("azure_ssh_key_secret_name"))
+        except Exception as e:  # noqa: BLE001
+            result["windows_ssh_key_error"] = f"could not read {secret} from Key Vault: {e}"
+            return ""
+    if not windows_server_hook.clean_public_key(key):
+        result["windows_ssh_key_error"] = f"{secret} holds no OpenSSH public key"
+        return ""
+    result["ssh_key_secret"] = secret
+    result["ssh_user"] = req.ssh_username
+    return key
+
+
 def _get_db_session():
     from ..database import SessionLocal
     return SessionLocal()
@@ -546,8 +568,10 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
             if win_ssh:
                 job_service.update_progress(
                     db, job_id, 75, "Switching on OpenSSH Server (Run Command)…")
+                win_pub = await _windows_public_key(req, ssh_public_key, result)
                 win_ssh_status, win_ssh_detail = (
-                    await windows_server_hook.run_ssh_bootstrap_azure(rg, req.vm_name))
+                    await windows_server_hook.run_ssh_bootstrap_azure(rg, req.vm_name,
+                                                                      win_pub))
             job_service.update_progress(db, job_id, 90, "Windows VM deployed.")
             if entra_join:
                 await windows_server_hook.entra_join_azure(

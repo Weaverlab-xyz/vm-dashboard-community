@@ -356,8 +356,6 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         if is_windows:
             from ..services import windows_server_hook
             win_ssh, win_rdp = windows_server_hook.access_modes(payload)
-            if win_ssh:
-                ssh_md = windows_server_hook.ssh_bootstrap_metadata()
             from ..services import windows_admin_secret
             try:
                 # Fail before launching if there is nowhere acceptable to keep the password.
@@ -407,6 +405,26 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                 )
             except Exception as exc:
                 logger.warning("Could not fetch SSH key from Secret Manager: %s", exc)
+        win_key_meta: dict = {}
+        if win_ssh:
+            # The same key a Linux build gets, from the same secret, authorized for the
+            # administrator by the bootstrap -- not as ssh-keys metadata, which nothing
+            # on a Windows guest reads.
+            win_pub = ""
+            if secret_name:
+                try:
+                    win_pub = await gcp_service.get_ssh_public_key(
+                        project_id=project_id, secret_name=secret_name)
+                except Exception as exc:  # noqa: BLE001
+                    win_key_meta["windows_ssh_key_error"] = f"could not read {secret_name}: {exc}"
+            else:
+                win_key_meta["windows_ssh_key_error"] = "no SSH key secret configured"
+            if win_pub and not windows_server_hook.clean_public_key(win_pub):
+                win_key_meta["windows_ssh_key_error"] = f"{secret_name} holds no OpenSSH public key"
+                win_pub = ""
+            if win_pub:
+                win_key_meta["ssh_key_secret"] = secret_name
+            ssh_md = windows_server_hook.ssh_bootstrap_metadata(win_pub)
 
         # On-demand Cloud NAT + egress allow (independent of BeyondTrust) so the VM's
         # subnet gets outbound internet. Opened BEFORE the launch so the instance has
@@ -476,6 +494,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         if jp:
             jp.record(final_meta)
         final_meta.update(ad_meta)
+        final_meta.update(win_key_meta)
 
         # ── Windows: the administrator password → secret manager ──────────────
         admin_password = ""

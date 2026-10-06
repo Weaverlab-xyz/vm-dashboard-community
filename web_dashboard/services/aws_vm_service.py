@@ -339,6 +339,27 @@ async def _register_vm_in_passwordsafe(db, job_id: str, vm_name: str, hostname: 
                               method=method)
 
 
+async def _windows_public_key(region: str, secret_name: str, result: dict) -> str:
+    """The Linux workflow's public key, for a Windows build. Never fatal: without one the
+    server still takes the password over SSH, and the job says why it got no key."""
+    if not secret_name:
+        result["windows_ssh_key_error"] = "no SSH key secret configured for this region"
+        return ""
+    try:
+        key = (await aws_service.get_ssh_public_key_from_secret(region, secret_name))[
+            "public_key"]
+    except Exception as e:  # noqa: BLE001
+        result["windows_ssh_key_error"] = f"could not read {secret_name}: {e}"
+        return ""
+    from ..services import windows_server_hook
+    if not windows_server_hook.clean_public_key(key):
+        result["windows_ssh_key_error"] = f"{secret_name} holds no OpenSSH public key"
+        return ""
+    result["ssh_secret_name"] = secret_name
+    result["ssh_user"] = "Administrator"
+    return key
+
+
 async def _drop_windows_key_pair(region: str, name: str, result: dict) -> None:
     """Best-effort removal of the one-time Windows key pair when the launch never got
     as far as reading the password with it."""
@@ -418,8 +439,11 @@ async def _run_deploy(
                 SimpleNamespace(enable_rdp=_meta.get("enable_rdp")))
             if win_ssh:
                 # OpenSSH is switched on by EC2Launch at first boot; its verdict is read
-                # back over SSM once the password is in hand (step 3w).
-                win_user_data = windows_server_hook.ssh_bootstrap_user_data()
+                # back over SSM once the password is in hand (step 3w). The same public
+                # key a Linux build gets, from the same secret, is authorized for the
+                # Administrator -- so the Ansible runner logs on exactly as for Linux.
+                win_pub = await _windows_public_key(_aws_region, ssh_secret_name, result)
+                win_user_data = windows_server_hook.ssh_bootstrap_user_data(win_pub)
             # Fail before launching if there is nowhere acceptable to keep the password —
             # never the dashboard database (windows_admin_secret).
             from ..services import windows_admin_secret

@@ -131,6 +131,49 @@ def test_bootstrap_script_never_touches_rdp_and_reports_both_ways():
     # would wipe its values.
     assert "Test-Path 'HKLM:\\SOFTWARE\\OpenSSH'" in ps
     assert "__SENTINEL__" not in ps and "__STATUS_FILE__" not in ps
+    # The key placeholder is filled by ssh_bootstrap_script, never delivered raw.
+    assert "__PUBKEY__" in ps
+
+
+_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKexample+key/0= ansible@dashboard"
+
+
+def test_public_key_is_validated_before_it_reaches_powershell():
+    assert wsh.clean_public_key(_KEY) == _KEY
+    assert wsh.clean_public_key("  " + _KEY + "\n") == _KEY
+    assert wsh.clean_public_key("ssh-rsa AAAAB3NzaC1yc2E=") == "ssh-rsa AAAAB3NzaC1yc2E="
+    for bad in ("", "not a key", "ssh-ed25519 AAAA' ; Remove-Item C:/ -Recurse #",
+                "ssh-ed25519 AAAA $(whoami)", "-----BEGIN OPENSSH PRIVATE KEY-----",
+                "ssh-dss AAAAB3NzaC1kc3M="):
+        assert wsh.clean_public_key(bad) == "", bad
+
+
+def test_bootstrap_authorizes_the_linux_key_for_administrators():
+    with_key = wsh.ssh_bootstrap_script(_KEY)
+    assert f"$authKey = '{_KEY}'" in with_key
+    assert "administrators_authorized_keys" in with_key
+    assert "/inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F'" in with_key
+    # Written after sshd's first start, which is what creates the ProgramData ssh folder.
+    assert with_key.index("Start-Service sshd") < with_key.index("$authKey")
+    assert with_key.index("$authKey") < with_key.index("VMDASH-SSHD:OK")
+    without = wsh.ssh_bootstrap_script("")
+    assert "$authKey = ''" in without and "__PUBKEY__" not in without
+    # An unsafe "key" never reaches the script.
+    assert "whoami" not in wsh.ssh_bootstrap_script("ssh-ed25519 AAAA $(whoami)")
+    assert _KEY in wsh.ssh_bootstrap_user_data(_KEY)
+    assert _KEY in wsh.ssh_bootstrap_metadata(_KEY)["windows-startup-script-ps1"]
+
+
+def test_each_cloud_feeds_it_the_linux_secret():
+    aws = _read("web_dashboard", "services", "aws_vm_service.py")
+    assert "_windows_public_key(_aws_region, ssh_secret_name, result)" in aws
+    assert "ssh_bootstrap_user_data(win_pub)" in aws
+    az = _read("web_dashboard", "services", "azure_vm_service.py")
+    assert "_windows_public_key(req, ssh_public_key, result)" in az
+    assert 'azure_ssh_keypair_secret_name' in az
+    gcp = _read("web_dashboard", "services", "gcp_vm_service.py")
+    assert "ssh_bootstrap_metadata(win_pub)" in gcp
+    assert "final_meta.update(win_key_meta)" in gcp
 
 
 def test_delivery_shapes():

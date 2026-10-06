@@ -772,6 +772,17 @@ What happens next depends on the verdict:
 - **No verdict** (SSM never came online, say): both jumps, with a warning. The Shell Jump
   may work; the RDP jump is the way in if it does not.
 
+**The SSH key is the Linux one.** The bootstrap also authorizes, for administrators, the
+same public key a Linux build of that cloud gets, read from the same secret: the AWS
+Secrets Manager key (`ssh_key_secret_override`, else the region's key secret), the Azure
+Key Vault keypair (`ssh_key_secret_override`, else `azure_ssh_keypair_secret_name`), or
+the GCP Secret Manager key (`ssh_key_secret_override`, else `gcp_ssh_key_secret_name`). It
+lands in `C:\ProgramData\ssh\administrators_authorized_keys`, restricted to Administrators
+and SYSTEM, which is the only file OpenSSH reads for an administrator. The deploy records
+the secret it used, so anything that holds that key's private half reaches the server
+exactly as it reaches a Linux VM. A missing or unreadable secret is a warning on the job
+(`windows_ssh_key_error`), and SSH still accepts the password.
+
 Windows Server 2025 ships with OpenSSH installed. **Server 2019 and 2022 download it from
 Windows Update, so the VM needs outbound internet** (on GCP, `gcp_vm_nat_enabled`). The
 cloud firewall must allow 22 from the Gateway, as it already does for Linux VMs.

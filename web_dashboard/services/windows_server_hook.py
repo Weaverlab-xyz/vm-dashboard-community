@@ -42,6 +42,7 @@ path already removes it), ``bt_ssh_vault_account_id``, ``bt_ssh_vault_error``,
 from __future__ import annotations
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -117,28 +118,63 @@ try {
   if (-not (Test-Path 'HKLM:\SOFTWARE\OpenSSH')) { New-Item -Path 'HKLM:\SOFTWARE\OpenSSH' | Out-Null }
   New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -Value "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -PropertyType String -Force | Out-Null
   if ((Get-Service sshd).Status -ne 'Running') { throw 'sshd is installed but did not start' }
+  $authKey = '__PUBKEY__'
+  if ($authKey) {
+    # An administrator's key is read from HERE, not ~/.ssh, and sshd ignores the file
+    # unless only Administrators and SYSTEM can write it. ASCII, no BOM. sshd created
+    # the directory on its first start, above.
+    $akFile = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
+    $have = if (Test-Path $akFile) { @(Get-Content $akFile) } else { @() }
+    if ($have -notcontains $authKey) {
+      [IO.File]::AppendAllText($akFile, $authKey + "`n", (New-Object Text.ASCIIEncoding))
+    }
+    icacls $akFile /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls could not restrict $akFile (exit $LASTEXITCODE)" }
+  }
   Report '__SENTINEL__OK'
 } catch {
   Report ('__SENTINEL__FAIL ' + ($_.Exception.Message -replace '\s+', ' '))
 }
 """.strip().replace("__STATUS_FILE__", SSHD_STATUS_FILE).replace("__SENTINEL__", SSHD_SENTINEL)
 
+_PUBKEY_RE = re.compile(r"^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/=]+( [\w.@+-]*)?$")
+
+
+def clean_public_key(key: str) -> str:
+    """``key`` as one OpenSSH public-key line, or ``""`` when it is not one.
+
+    It is written into a single-quoted PowerShell string, so anything but the plain
+    ``type base64 [comment]`` shape is refused rather than escaped: a public key has
+    no business containing a quote, a newline or a ``$``."""
+    k = " ".join((key or "").split())
+    return k if _PUBKEY_RE.match(k) else ""
+
+
+def ssh_bootstrap_script(public_key: str = "") -> str:
+    """The bootstrap, authorizing ``public_key`` for administrators when it is a valid
+    OpenSSH public key -- the same key a Linux build of this cloud gets, from the same
+    secret, so the cloud's Ansible runner and anyone holding that key's private half can
+    log on. Without one, SSH is password-only."""
+    return WINDOWS_SSH_BOOTSTRAP_PS1.replace("__PUBKEY__", clean_public_key(public_key))
+
 # What the AWS check runs over SSM: the bootstrap's verdict, or nothing while it runs.
+# (WINDOWS_SSH_BOOTSTRAP_PS1 itself still carries the __PUBKEY__ placeholder: always
+# deliver it through ssh_bootstrap_script.)
 SSHD_STATUS_READ_PS1 = (f"if (Test-Path '{SSHD_STATUS_FILE}') "
                         f"{{ Get-Content '{SSHD_STATUS_FILE}' }}")
 
 
-def ssh_bootstrap_user_data() -> str:
+def ssh_bootstrap_user_data(public_key: str = "") -> str:
     """EC2 user data that runs the bootstrap once, at first boot (EC2Launch)."""
-    return f"<powershell>\n{WINDOWS_SSH_BOOTSTRAP_PS1}\n</powershell>\n"
+    return f"<powershell>\n{ssh_bootstrap_script(public_key)}\n</powershell>\n"
 
 
-def ssh_bootstrap_metadata() -> dict:
+def ssh_bootstrap_metadata(public_key: str = "") -> dict:
     """GCE instance metadata that runs the bootstrap. A STARTUP script rather than the
     sysprep-specialize one, which the on-prem AD join already owns
     (``domain_join_service.agent_join_metadata``) and which runs before Windows Update
     is usable."""
-    return {"windows-startup-script-ps1": WINDOWS_SSH_BOOTSTRAP_PS1}
+    return {"windows-startup-script-ps1": ssh_bootstrap_script(public_key)}
 
 
 def parse_sshd_status(text: str) -> tuple[str, str]:
@@ -195,11 +231,13 @@ async def confirm_ssh_aws(region: str, instance_id: str, *, timeout_s: int = 900
     return await _poll_status(read, timeout_s=timeout_s, interval_s=interval_s)
 
 
-async def run_ssh_bootstrap_azure(rg: str, vm_name: str) -> tuple[str, str]:
+async def run_ssh_bootstrap_azure(rg: str, vm_name: str,
+                                  public_key: str = "") -> tuple[str, str]:
     """Run the bootstrap through Azure Run Command and read its verdict directly."""
     from . import azure_service
     try:
-        res = await azure_service.vm_run_powershell(rg, vm_name, WINDOWS_SSH_BOOTSTRAP_PS1,
+        res = await azure_service.vm_run_powershell(rg, vm_name,
+                                                    ssh_bootstrap_script(public_key),
                                                     timeout=1200)
     except Exception as e:  # noqa: BLE001
         return SSH_UNVERIFIED, f"Azure Run Command could not run the OpenSSH bootstrap: {e}"
