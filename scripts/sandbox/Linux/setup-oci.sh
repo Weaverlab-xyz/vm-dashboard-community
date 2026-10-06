@@ -334,14 +334,17 @@ SL="$(_find "network security-list" "$SL_NAME")"
 if [[ -z "$SL" || "$SL" == "null" ]]; then
   INGRESS='[
     {"source":"10.98.0.0/16","protocol":"all","isStateless":false},
-    {"source":"10.98.1.0/24","protocol":"6","isStateless":false,"tcpOptions":{"destinationPortRange":{"min":22,"max":22}}}
+    {"source":"10.98.1.0/24","protocol":"6","isStateless":false,"tcpOptions":{"destinationPortRange":{"min":22,"max":22}}},
+    {"source":"10.98.1.0/24","protocol":"6","isStateless":false,"tcpOptions":{"destinationPortRange":{"min":3389,"max":3389}}}
   ]'
+  # The 22 and 3389 rules (Shell Jump; a Windows server's RDP jump) restate what the
+  # intra-VCN rule already allows, so the intent survives that rule being narrowed.
   EGRESS='[{"destination":"0.0.0.0/0","protocol":"all","isStateless":false}]'
   SL="$("${OCI[@]}" network security-list create --compartment-id "$COMPARTMENT" \
     --vcn-id "$VCN" --display-name "$SL_NAME" --freeform-tags "$FREEFORM" \
     --ingress-security-rules "$INGRESS" --egress-security-rules "$EGRESS" \
     --wait-for-state AVAILABLE --query 'data.id' --raw-output)"
-  ok "Created security list (intra-VCN + SSH from public subnet)"
+  ok "Created security list (intra-VCN + SSH and RDP from public subnet)"
 else
   ok "Reusing security list"
 fi

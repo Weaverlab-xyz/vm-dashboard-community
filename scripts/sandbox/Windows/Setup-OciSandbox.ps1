@@ -329,14 +329,16 @@ try {
     $SlName = "$Name-sl"
     $Sl = Find-OciResource 'network security-list' $SlName
     if (-not $Sl) {
-        $ingress = '[{"source":"10.98.0.0/16","protocol":"all","isStateless":false},{"source":"10.98.1.0/24","protocol":"6","isStateless":false,"tcpOptions":{"destinationPortRange":{"min":22,"max":22}}}]'
+        # The 22 and 3389 rules (Shell Jump; a Windows server's RDP jump) restate what the
+        # intra-VCN rule already allows, so the intent survives that rule being narrowed.
+        $ingress = '[{"source":"10.98.0.0/16","protocol":"all","isStateless":false},{"source":"10.98.1.0/24","protocol":"6","isStateless":false,"tcpOptions":{"destinationPortRange":{"min":22,"max":22}}},{"source":"10.98.1.0/24","protocol":"6","isStateless":false,"tcpOptions":{"destinationPortRange":{"min":3389,"max":3389}}}]'
         $egress  = '[{"destination":"0.0.0.0/0","protocol":"all","isStateless":false}]'
         $Sl = Get-OciId @('network','security-list','create','--compartment-id',$Compartment,
             '--vcn-id',$Vcn,'--display-name',$SlName,'--freeform-tags',(New-OciJsonArg $Freeform),
             '--ingress-security-rules',(New-OciJsonArg $ingress),
             '--egress-security-rules',(New-OciJsonArg $egress),
             '--wait-for-state','AVAILABLE','--query','data.id','--raw-output')
-        Write-Ok 'Created security list (intra-VCN + SSH from public subnet)'
+        Write-Ok 'Created security list (intra-VCN + SSH and RDP from public subnet)'
     } else { Write-Ok 'Reusing security list' }
 
     # ── 5. Subnets ───────────────────────────────────────────────────────────────
