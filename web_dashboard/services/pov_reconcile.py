@@ -576,9 +576,28 @@ async def run_reconcile(job_id: str, meta: dict) -> None:
                 db, job_id, f"spend: acted on {capped} POV(s) at or near their cap")
         result["spend_actions"] = capped
 
+        # A row per pass whether or not anything changed — 144 a day at the default — so
+        # it prunes its own history like the change-window sweep, on the same shared
+        # retention setting. Hidden on /jobs by ROUTINE_JOB_TYPES; the two must agree.
+        result["pruned"] = _prune_history(db)
+
         job_service.set_completed(db, job_id, result)
     finally:
         db.close()
+
+
+def _prune_history(db: Session) -> int:
+    """Drop this pass's own completed rows past the shared sweep retention window.
+
+    Imported inside the function for the reason ``schedule_sweeper._prune_history`` gives:
+    ``expiry_reaper`` pulls in the cloud adapters, which a POV instance need not have.
+    """
+    try:
+        from . import expiry_reaper
+        return expiry_reaper.prune_sweep_history(db, job_type=RECONCILE_JOB_TYPE)
+    except Exception:  # noqa: BLE001 — losing a prune must not fail the pass
+        logger.warning("could not prune POV reconcile history", exc_info=True)
+        return 0
 
 
 def describe(env: PovEnvironment) -> dict:

@@ -36,7 +36,7 @@
            rows/day whether or not it found anything. Only *completed* ones are hidden, so
            a failed pass shows up here without the box being ticked. -->
       <label class="flex items-center gap-2 text-sm text-gray-600 cursor-pointer"
-             title="Timer-driven maintenance passes, e.g. the auto-delete sweep. Failed ones are always shown.">
+             title="Timer-driven maintenance passes, e.g. the auto-delete sweep and the POV reconcile. Failed ones are always shown.">
         <input type="checkbox" x-model="includeRoutine" @change="page=1; loadJobs()"
                class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
         Show routine sweeps
