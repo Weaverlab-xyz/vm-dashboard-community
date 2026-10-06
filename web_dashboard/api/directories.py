@@ -11,6 +11,9 @@ Managed Active Directory API (gated by ``directories_enabled``).
   POST   /api/directories/ps-import             — register the chosen ones via an agent
   POST   /api/directories/ad-connector          — build an AWS AD Connector to an on-prem AD
   POST   /api/directories/dns-link              — build a GCP DNS link to an on-prem AD
+  POST   /api/directories/vyos-link             — build a GCP VyOS WireGuard site link
+  POST   /api/directories/{id}/check-link       — re-apply a site link's config and probe it
+  GET    /api/directories/{id}/onprem-commands  — the VyOS lines for the on-prem router
   GET    /api/directories/joinable?cloud=…      — what a Windows deploy can join
   GET    /api/directories/{id}                  — one directory
   GET    /api/directories/{id}/admin-password   — the stored admin credential (audited)
@@ -212,6 +215,52 @@ def build_dns_link(req: DNSLinkRequest, db: Session = Depends(get_db),
     job_service.log_audit(db, user.username, "directory_dns_link",
                           details={"name": row.name, "project": req.project,
                                    "onprem_directory_id": row.id})
+    return out
+
+
+class VyosLinkRequest(BaseModel):
+    onprem_directory_id: str
+    project: str = ""
+    zone: str = ""
+    network: str = ""
+    subnetwork: str = ""
+    image_name: str = ""
+    image_self_link: str = ""
+    vyos_release: str = "1.4"
+    onprem_public_key: str
+    onprem_subnets: List[str]
+    cloud_networks: List[str]
+    dns_ips: List[str]
+    machine_type: str = ""
+    wireguard_source_ranges: List[str] = []
+    ssh_user: str = ""
+    workgroup: Optional[str] = None
+
+
+@router.post("/vyos-link")
+def build_vyos_link(req: VyosLinkRequest, db: Session = Depends(get_db),
+                    user: User = Depends(require_explicit_permission("directories", "write"))):
+    """A VyOS peer on GCP, WireGuard to the on-prem router: the network path a DNS link
+    and an agent join need, for the price of one small VM."""
+    from ..services import vyos_link_service
+    row = directory_service.get_directory(db, req.onprem_directory_id)
+    if not row or not _visible(row, user):
+        raise HTTPException(status_code=404, detail="directory not found")
+    try:
+        out = vyos_link_service.provision(
+            db, onprem_directory_id=row.id, project=req.project, zone=req.zone,
+            network=req.network, subnetwork=req.subnetwork, image_name=req.image_name,
+            image_self_link=req.image_self_link, release=req.vyos_release,
+            onprem_public_key=req.onprem_public_key, onprem_subnets=req.onprem_subnets,
+            cloud_networks=req.cloud_networks, dns_ips=req.dns_ips,
+            machine_type=req.machine_type,
+            wireguard_source_ranges=req.wireguard_source_ranges or None,
+            ssh_user=req.ssh_user, created_by=user.username, workgroup=req.workgroup)
+    except vyos_link_service.VyosLinkError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    job_service.log_audit(db, user.username, "directory_vyos_link",
+                          details={"name": row.name, "project": req.project,
+                                   "zone": req.zone, "onprem_directory_id": row.id})
     return out
 
 
@@ -455,6 +504,32 @@ def get_directory(directory_id: str, db: Session = Depends(get_db),
     out = directory_service.to_dict(row)
     out["joined_vms"] = directory_service.joined_vms(db, row.id)
     return out
+
+
+@router.post("/{directory_id}/check-link")
+def check_link(directory_id: str, db: Session = Depends(get_db),
+               user: User = Depends(require_explicit_permission("directories", "write"))):
+    from ..services import vyos_link_service
+    row = _row_or_404(db, directory_id, user)
+    try:
+        out = vyos_link_service.start_check(db, directory_id=row.id,
+                                            created_by=user.username)
+    except vyos_link_service.VyosLinkError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    job_service.log_audit(db, user.username, "directory_vyos_link_check",
+                          details={"name": row.name, "directory_id": row.id})
+    return out
+
+
+@router.get("/{directory_id}/onprem-commands")
+def onprem_commands(directory_id: str, db: Session = Depends(get_db),
+                    user: User = Depends(require_explicit_permission("directories", "read"))):
+    """Public material only: the peer's public key and address, and the routes."""
+    from ..services import vyos_link_service
+    row = _row_or_404(db, directory_id, user)
+    if row.provider != vyos_link_service.PROVIDER:
+        raise HTTPException(status_code=404, detail="not a site link")
+    return {"commands": vyos_link_service.onprem_commands(row)}
 
 
 @router.get("/{directory_id}/admin-password")

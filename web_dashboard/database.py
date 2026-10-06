@@ -2505,6 +2505,10 @@ class ManagedDirectory(Base):
     # link) points at the on-prem row it extends. Not a FK: unregistering the on-prem
     # row is refused while a link exists, and a dangling id reads as "on-prem row gone".
     linked_directory_id = Column(String(36), nullable=True, index=True)
+    # A VyOS site link's non-secret settings as JSON (services/vyos_link_service): zone,
+    # subnets, both WireGuard PUBLIC keys, the peer's addresses, and the Secret Manager
+    # id that holds the peer's private key. Never a secret.
+    link_config = Column(Text, nullable=True)
 
     admin_username = Column(String(64), nullable=True)
     admin_password_backend = Column(String(32), nullable=True)
@@ -4724,6 +4728,8 @@ def init_db():
             "ALTER TABLE managed_directories ADD COLUMN credentials_ref TEXT",
             "ALTER TABLE managed_directories ADD COLUMN linked_directory_id VARCHAR(36)",
             "CREATE INDEX ix_managed_directories_linked_directory_id ON managed_directories(linked_directory_id)",
+            # VyOS site links (vyos_link_service). NULL on every other row.
+            "ALTER TABLE managed_directories ADD COLUMN link_config TEXT",
             "CREATE INDEX ix_cloud_databases_expires_at ON cloud_databases(expires_at)",
             "ALTER TABLE k8s_clusters ADD COLUMN expires_at TIMESTAMP",
             "ALTER TABLE k8s_clusters ADD COLUMN expiry_warned_at TIMESTAMP",
