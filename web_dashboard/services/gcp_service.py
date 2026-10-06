@@ -3947,6 +3947,11 @@ def _fetch_cloud_run_job_logs(project_id: str, job_name: str, execution_name: st
     return "\n".join(lines)
 
 
+def _windows_ssh_args(windows: bool) -> str:
+    from . import ansible_vm_cmd
+    return ansible_vm_cmd.windows_ssh_args() if windows else ""
+
+
 def _run_cloud_run_ansible_sync(
     project_id: str, region: str, image: str,
     target_ip: str, ansible_user: str,
@@ -3957,6 +3962,7 @@ def _run_cloud_run_ansible_sync(
     service_account: str = "",
     ps_env: dict | None = None,
     runner_fetch: dict | None = None,
+    windows: bool = False,
 ) -> tuple:
     """
     Create a Cloud Run Job that runs a single Ansible playbook, wait for it to
@@ -3996,7 +4002,7 @@ def _run_cloud_run_ansible_sync(
         "--forks 1 "
         f"-u {ansible_user} "
         "--private-key /tmp/ssh_key "
-        + _secret_ev +
+        + _windows_ssh_args(windows) + _secret_ev +
         "--ssh-extra-args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' "
         "/tmp/playbook.yml"
     )
@@ -4116,6 +4122,7 @@ async def run_cloud_run_ansible_task(
     secret_entries: list | None = None, manifest_b64: str = "",
     ps_env: dict | None = None,
     runner_fetch: dict | None = None,
+    windows: bool = False,
 ) -> tuple:
     """
     Run an Ansible playbook via a GCP Cloud Run Job.
@@ -4134,6 +4141,7 @@ async def run_cloud_run_ansible_task(
             service_account,
             ps_env,
             runner_fetch,
+            windows,
         )
     except GCPError:
         raise

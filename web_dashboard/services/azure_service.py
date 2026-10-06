@@ -3755,13 +3755,18 @@ async def list_aci_tasks(rg: str) -> list:
 _ANSIBLE_RUNNER_PREFIX = "ansible-runner"
 
 
+def _windows_ssh_args() -> str:
+    from . import ansible_vm_cmd
+    return ansible_vm_cmd.windows_ssh_args()
+
+
 def _run_aci_ansible_sync(
     cred, sub_id: str, rg: str, location: str, subnet_id: str,
     image: str, target_ip: str, ansible_user: str,
     playbook_b64: str, ssh_key_b64: str, job_id: str,
     acr_server: str = "", acr_username: str = "", acr_password: str = "",
     secret_entries: list | None = None, manifest_b64: str = "",
-    ps_env: dict | None = None,
+    ps_env: dict | None = None, windows: bool = False,
 ) -> tuple:
     """
     Create an ACI container group that runs a single Ansible playbook, wait for
@@ -3789,7 +3794,7 @@ def _run_aci_ansible_sync(
         "--forks 1 "
         f"-u {ansible_user} "
         "--private-key /tmp/ssh_key "
-        + _secret_ev +
+        + (_windows_ssh_args() if windows else "") + _secret_ev +
         "--ssh-extra-args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' "
         "/tmp/playbook.yml"
     )
@@ -3888,7 +3893,7 @@ async def run_aci_ansible_task(
     playbook_b64: str, ssh_key_b64: str, job_id: str,
     acr_server: str = "", acr_username: str = "", acr_password: str = "",
     secret_entries: list | None = None, manifest_b64: str = "",
-    ps_env: dict | None = None,
+    ps_env: dict | None = None, windows: bool = False,
 ) -> tuple:
     """
     Run an Ansible playbook inside the Azure VNet via ACI.
@@ -3901,7 +3906,7 @@ async def run_aci_ansible_task(
             cred, sub_id, rg, location, subnet_id, image,
             target_ip, ansible_user, playbook_b64, ssh_key_b64, job_id,
             acr_server, acr_username, acr_password,
-            secret_entries, manifest_b64, ps_env,
+            secret_entries, manifest_b64, ps_env, windows,
         )
     except AzureError:
         raise

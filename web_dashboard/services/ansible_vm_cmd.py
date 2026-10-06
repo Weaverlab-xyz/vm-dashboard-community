@@ -30,6 +30,18 @@ import shlex
 # no known_hosts, so a check would refuse every first connection rather than detect a change.
 SSH_COMMON_ARGS = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
+# A Windows server reached over OpenSSH (services/windows_server_hook): plain SSH, but
+# every module wrapped for PowerShell. As extra vars because they must outrank the
+# PLAY: the sample Windows playbooks set `ansible_connection: winrm` at play level, and
+# the cloud runners carry an SSH key and nothing WinRM could use. Without the shell type
+# Ansible sends `/bin/sh -c ...`, which the server's PowerShell login shell rejects.
+WINDOWS_SSH_VARS = {"ansible_connection": "ssh", "ansible_shell_type": "powershell"}
+
+
+def windows_ssh_args() -> str:
+    """WINDOWS_SSH_VARS as ``-e`` flags (trailing space) for a runner's shell command."""
+    return "".join(f"-e {k}={v} " for k, v in WINDOWS_SSH_VARS.items())
+
 
 def build_vm_argv(*, job_dir: str, inventory: str, limit: str = "",
                   private_key: bool = False, extra_vars=None,

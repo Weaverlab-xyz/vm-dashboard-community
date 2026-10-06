@@ -783,6 +783,14 @@ the secret it used, so anything that holds that key's private half reaches the s
 exactly as it reaches a Linux VM. A missing or unreadable secret is a warning on the job
 (`windows_ssh_key_error`), and SSH still accepts the password.
 
+**Config Management reaches it the same way.** A run against a Windows cloud VM, on the
+local runner or on ECS, ACI or Cloud Run, connects over SSH with that key, as the
+administrator the deploy recorded (`Administrator`, the Azure admin user, or `gcpadmin`),
+and adds `-e ansible_connection=ssh -e ansible_shell_type=powershell`. Extra vars outrank a
+play's own `ansible_connection: winrm`, so the sample Windows playbooks run unchanged. The
+dashboard recognises a Windows VM from its deploy job; a VM it did not build is treated as
+Linux. On-prem Windows hosts behind a remote agent still use WinRM.
+
 Windows Server 2025 ships with OpenSSH installed. **Server 2019 and 2022 download it from
 Windows Update, so the VM needs outbound internet** (on GCP, `gcp_vm_nat_enabled`). The
 cloud firewall must allow 22 from the Gateway, as it already does for Linux VMs.

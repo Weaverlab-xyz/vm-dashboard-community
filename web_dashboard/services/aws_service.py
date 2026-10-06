@@ -3273,6 +3273,11 @@ async def list_ecs_tasks(region: str, cluster: str, include_stopped: bool = Fals
 
 # ── ECS Ansible runner ────────────────────────────────────────────────────────
 
+def _windows_args(windows: bool) -> str:
+    from . import ansible_vm_cmd
+    return ansible_vm_cmd.windows_ssh_args() if windows else ""
+
+
 def _run_ecs_ansible_sync(
     region: str,
     cluster: str,
@@ -3293,9 +3298,11 @@ def _run_ecs_ansible_sync(
     ps_env: dict | None = None,
     task_role_arn: str = "",
     runner_fetch: dict | None = None,
+    windows: bool = False,
 ) -> tuple:
     """Create an ECS Fargate task that runs one Ansible playbook, wait for it to
-    finish, retrieve CloudWatch logs, and return (exit_code, output)."""
+    finish, retrieve CloudWatch logs, and return (exit_code, output). ``windows``: the
+    target is a Windows server over OpenSSH (ansible_vm_cmd.WINDOWS_SSH_VARS)."""
     import time
     ecs = _get_ecs(region)
     logs_client = boto3.client("logs", **_aws_kwargs(region))
@@ -3320,7 +3327,7 @@ def _run_ecs_ansible_sync(
         + _secret_prefix +
         f"ansible-playbook -i '{target_ip},' --forks 1 "
         f"-u {ansible_user} --private-key /tmp/ssh_key "
-        + _secret_ev +
+        + _windows_args(windows) + _secret_ev +
         "--ssh-extra-args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' "
         "/tmp/playbook.yml"
     )
@@ -3462,6 +3469,7 @@ async def run_ecs_ansible_task(
     ps_env: dict | None = None,
     task_role_arn: str = "",
     runner_fetch: dict | None = None,
+    windows: bool = False,
 ) -> tuple:
     """Run an Ansible playbook via ECS Fargate. Returns (exit_code, output)."""
     try:
@@ -3470,7 +3478,7 @@ async def run_ecs_ansible_task(
             region, cluster, task_family, image, cpu, memory,
             subnet_id, security_group_ids, execution_role_arn,
             target_ip, ansible_user, playbook_b64, ssh_key_b64, job_id,
-            secret_entries, manifest_b64, ps_env, task_role_arn, runner_fetch,
+            secret_entries, manifest_b64, ps_env, task_role_arn, runner_fetch, windows,
         )
     except AWSError:
         raise
