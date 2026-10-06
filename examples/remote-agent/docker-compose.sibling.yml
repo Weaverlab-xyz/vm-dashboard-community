@@ -111,6 +111,7 @@ services:
 #     enabled: true
 #     vm_image: chrweav/ansible-winrm:latest     # VM targets — SSH and WinRM
 #     db_image: chrweav/ansible-cloud:latest     # database targets — the localhost play
+#     # directory_image: falls back to db_image  # on-prem AD / LDAP directories (2.8.0+)
 #     targets:
 #       - cidr: 10.20.10.0/24
 #         ports: [22, 5985, 5986]
@@ -125,4 +126,4 @@ services:
 #
 #   docker pull chrweav/hypervisor-runner:latest    # only for `sibling:`
 #   docker pull chrweav/ansible-winrm:latest        # only for `ansible.vm_image`
-#   docker pull chrweav/ansible-cloud:latest        # only for `ansible.db_image`
+#   docker pull chrweav/ansible-cloud:latest        # for `ansible.db_image` / `directory_image`
