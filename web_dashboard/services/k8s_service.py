@@ -1296,6 +1296,7 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
         await broadcast_progress(job_id, _p["pct"], _p["msg"], log_line=line)
 
     errors: list = []
+    token_kept = ""
 
     # 1. PRA tunnels + Entra wiring (best-effort; clears the k8s tunnel's pra_jump_id /
     #    state on the row and the config_service keys). disable_entra_federation matters
@@ -1354,9 +1355,19 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
                 logger.info("k8s decommission: destroyed minted Entitle agent token '%s' "
                             "(host cluster %s is going away)", destroyed, cluster_id)
         except Exception as exc:
-            errors.append(f"Entitle agent token destroy: {exc} — the token stash was kept, "
-                          "so a decommission retry will destroy it")
-            logger.warning("k8s decommission: agent-token destroy for %s failed: %s", cluster_id, exc)
+            if entitle_registration_service.agent_token_in_use(exc):
+                # Other integrations still reference the shared token, so a retry can
+                # never converge and would wedge this row at "failed" forever. Keep the
+                # token + stash (the next install recovers it) and drop the host marker:
+                # this cluster no longer hosts anything.
+                config_service.set("entitle_agent_cluster_id", "")
+                token_kept = str(exc)
+                logger.warning("k8s decommission: kept the Entitle agent token for %s — "
+                               "integrations still use it: %s", cluster_id, exc)
+            else:
+                errors.append(f"Entitle agent token destroy: {exc} — the token stash was kept, "
+                              "so a decommission retry will destroy it")
+                logger.warning("k8s decommission: agent-token destroy for %s failed: %s", cluster_id, exc)
 
     # 2. terraform destroy (the long step). State lives in the active storage
     #    backend, so destroy recovers a deploy dir lost to a container recreate —
@@ -1423,7 +1434,13 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
         await rancher_node_service.refresh_rancher_firewall(db)
     except Exception as exc:
         logger.warning("k8s decommission: rancher firewall refresh failed (non-fatal): %s", exc)
-    job_service.set_completed(db, job_id, {"cluster_id": cluster_id, "deregistered": name})
+    result = {"cluster_id": cluster_id, "deregistered": name}
+    if token_kept:
+        result["entitle_agent_token_kept"] = (
+            "Entitle refused to delete the shared agent token because integrations still "
+            "use it, so it was kept for the next agent install. If any of them are orphans "
+            f"of this cluster, delete them in the Entitle console. ({token_kept})")
+    job_service.set_completed(db, job_id, result)
     logger.info("k8s decommissioned cluster_id=%s", cluster_id)
 
 
@@ -2180,6 +2197,13 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install",
                 try:
                     destroyed = await entitle_registration_service.destroy_agent_token()
                 except entitle_registration_service.EntitleRegistrationError as exc:
+                    if entitle_registration_service.agent_token_in_use(exc):
+                        # Integrations still reference the shared token: keep it (the
+                        # stash lets the next install reuse it) and release the host.
+                        config_service.set("entitle_agent_cluster_id", "")
+                        logger.warning("entitle-agent remove: kept the agent token for %s — "
+                                       "integrations still use it: %s", cluster_id, exc)
+                        return
                     raise K8sError(
                         f"Entitle agent uninstalled, but destroying its minted agent token "
                         f"failed: {exc} — the token stash was kept; retry the remove to "

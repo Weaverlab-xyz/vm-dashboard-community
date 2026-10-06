@@ -1285,6 +1285,17 @@ async def ensure_agent_token(name: str = "") -> str:
     return minted["token"]
 
 
+def agent_token_in_use(exc: BaseException) -> bool:
+    """True when Entitle refused a token destroy because integrations still reference it.
+
+    The token is SHARED — every private VM/DB target registered via
+    :func:`_common_attrs_hcl` attaches it — so this refusal is usually correct, not a
+    failure to retry: those integrations need the token for whichever agent runs next.
+    A retry can never converge, and the kept stash already lets the next install
+    recover the value instead of hitting "already exists"."""
+    return "used by integrations" in str(exc)
+
+
 async def destroy_agent_token() -> str:
     """Destroy the auto-minted Entitle Agent token and clear its stash. Returns the
     destroyed token's name ("" when there was nothing of ours to destroy).
