@@ -511,6 +511,23 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
             entra_join, entra_intune = windows_server_hook.entra_requested(req)
             win_ssh, win_rdp = windows_server_hook.access_modes(req)
 
+        # Managed AD (Entra Domain Services) join, resolved before anything is created so
+        # a bad pick is a warning on a working VM rather than a surprise after it. Never
+        # fatal: the local administrator still reaches the server.
+        ad_row = None
+        if getattr(req, "ad_directory_id", None):
+            from ..services import domain_join_service
+            if not is_windows:
+                result["ad_join_error"] = "AD join applies to Windows images only"
+            elif entra_join:
+                result["ad_join_error"] = ("a VM joins Entra ID or a managed AD domain, not "
+                                           "both; the AD join was skipped")
+            else:
+                try:
+                    ad_row = domain_join_service.resolve(db, req.ad_directory_id, "azure", loc)
+                except domain_join_service.DomainJoinError as e:
+                    result["ad_join_error"] = str(e)
+
         # Step 3: Deploy Azure VM (3-step: PIP → NIC → VM)
         job_service.update_progress(db, job_id, 35, f"Creating Azure VM '{req.vm_name}'…")
         if ssh_public_key is None:
@@ -577,6 +594,11 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
                 await windows_server_hook.entra_join_azure(
                     db, job_id, rg=rg, vm_name=req.vm_name, location=loc,
                     vm_id=result.get("vm_id") or "", intune=entra_intune, result=result)
+            if ad_row is not None:
+                from ..services import domain_join_service
+                await domain_join_service.join_azure(
+                    db, job_id, row=ad_row, ou=getattr(req, "ad_ou", "") or "", rg=rg,
+                    vm_name=req.vm_name, location=loc, result=result)
         elif settings.pra_enabled:
             from ..services import terraform_pra_service
             # Resolve from config_service (wizard/DB) first, then env-var defaults.

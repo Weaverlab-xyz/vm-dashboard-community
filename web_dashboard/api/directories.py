@@ -19,6 +19,7 @@ Managed Active Directory API (gated by ``directories_enabled``).
   GET    /api/directories/{id}/admin-password   — the stored admin credential (audited)
   POST   /api/directories/{id}/reset-admin-password
   DELETE /api/directories/{id}                  — destroy (built here) or unregister
+  PUT    /api/directories/{id}/join-account     — Azure: pin the Entra DS join account
 
 Cloud identity providers (Entra ID, Okta, PingOne):
 
@@ -90,6 +91,13 @@ class BuildRequest(BaseModel):
     locations: List[str] = []
     reserved_ip_range: str = ""
     networks: List[str] = []
+    # Azure (Entra Domain Services). `edition` is the SKU, `region` the location.
+    resource_group: str = ""
+    vnet_resource_group: str = ""
+    vnet_name: str = ""
+    subnet_cidr: str = ""
+    manage_vnet_dns: bool = False
+    join_account: Optional["ManagedAccountRef"] = None
 
 
 class ManagedAccountRef(BaseModel):
@@ -117,6 +125,11 @@ class RegisterRequest(BaseModel):
     region: str = ""
     project: str = ""
     workgroup: Optional[str] = None
+    join_account: Optional[ManagedAccountRef] = None   # Azure only
+
+
+class JoinAccountRequest(BaseModel):
+    join_account: Optional[ManagedAccountRef] = None    # None clears it
 
 
 @router.get("")
@@ -131,6 +144,8 @@ def build_options(user: User = Depends(require_explicit_permission("directories"
     from ..services import windows_admin_secret
     missing = []
     for cloud in directory_service.PROVISIONING_CLOUDS:
+        if cloud == "azure":
+            continue    # Entra DS stores no administrator password
         try:
             windows_admin_secret.resolve_backend(cloud)
         except windows_admin_secret.WindowsSecretError:
@@ -142,6 +157,7 @@ def build_options(user: User = Depends(require_explicit_permission("directories"
     return {
         "clouds": list(directory_service.PROVISIONING_CLOUDS),
         "aws_editions": list(directory_service.AWS_EDITIONS),
+        "azure_skus": list(directory_service.AZURE_SKUS),
         "costs": {f"{c}:{e}" if e else c: v
                   for (c, e), v in directory_service.APPROX_MONTHLY_COST.items()},
         "defaults": {
@@ -152,14 +168,32 @@ def build_options(user: User = Depends(require_explicit_permission("directories"
             "gcp_region": directory_service._cfg("gcp_region", ""),
             "gcp_reserved_ip_range": directory_service._cfg("directory_gcp_reserved_ip_range"),
             "gcp_network": directory_service._cfg("gcp_network"),
+            "azure_resource_group": directory_service._cfg("azure_resource_group"),
+            "azure_location": directory_service._cfg("azure_location"),
+            "azure_vnet_resource_group": directory_service._cfg("azure_vnet_resource_group"),
+            "azure_vnet_name": directory_service._cfg("azure_vnet_name"),
         },
         "missing": missing,
     }
 
 
 @router.post("")
-def build_directory(req: BuildRequest, db: Session = Depends(get_db),
-                    user: User = Depends(require_explicit_permission("directories", "write"))):
+async def build_directory(req: BuildRequest, db: Session = Depends(get_db),
+                          user: User = Depends(require_explicit_permission("directories", "write"))):
+    if req.join_account:
+        _require_secrets_use(user)
+    if (req.cloud or "").lower() == "azure" and req.acknowledge_cost:
+        # Checked before anything is recorded: each of these fails 45 minutes into a
+        # build that bills from its first minute.
+        try:
+            await directory_service.azure_preflight(db)
+        except DirectoryError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception:  # noqa: BLE001
+            logger.warning("directory: Azure preflight failed", exc_info=True)
+            raise HTTPException(status_code=502, detail=(
+                "Could not check the Azure subscription before building — see the "
+                "dashboard log and Settings → Azure."))
     try:
         out = directory_service.provision(
             db, cloud=req.cloud, name=req.name, created_by=user.username,
@@ -167,7 +201,11 @@ def build_directory(req: BuildRequest, db: Session = Depends(get_db),
             region=req.region, vpc_id=req.vpc_id, subnet_ids=req.subnet_ids,
             project=req.project, locations=req.locations,
             reserved_ip_range=req.reserved_ip_range, networks=req.networks,
-            register_in_passwordsafe=req.register_in_passwordsafe, workgroup=req.workgroup)
+            register_in_passwordsafe=req.register_in_passwordsafe, workgroup=req.workgroup,
+            resource_group=req.resource_group, vnet_resource_group=req.vnet_resource_group,
+            vnet_name=req.vnet_name, subnet_cidr=req.subnet_cidr,
+            manage_vnet_dns=req.manage_vnet_dns,
+            managed_account=req.join_account.model_dump() if req.join_account else None)
     except DirectoryError as e:
         raise HTTPException(status_code=400, detail=str(e))
     job_service.log_audit(db, user.username, "directory_provision",
@@ -300,10 +338,13 @@ async def discover(cloud: str = Query(...), region: str = "", project: str = "",
 @router.post("/register")
 async def register(req: RegisterRequest, db: Session = Depends(get_db),
                    user: User = Depends(require_explicit_permission("directories", "write"))):
+    if req.join_account:
+        _require_secrets_use(user)
     try:
         row = await directory_service.register(
             db, cloud=req.cloud, identifier=req.identifier, created_by=user.username,
-            region=req.region, project=req.project, workgroup=req.workgroup)
+            region=req.region, project=req.project, workgroup=req.workgroup,
+            managed_account=req.join_account.model_dump() if req.join_account else None)
     except DirectoryError as e:
         raise HTTPException(status_code=400, detail=str(e))
     job_service.log_audit(db, user.username, "directory_register",
@@ -506,15 +547,18 @@ async def ps_import(req: PSDirectoryImportRequest, db: Session = Depends(get_db)
 def joinable(cloud: str = Query(...), region: str = "", db: Session = Depends(get_db),
              user: User = Depends(get_current_user)):
     cloud = (cloud or "").lower()
-    if cloud not in ("aws", "gcp"):
-        raise HTTPException(status_code=400, detail="joinable covers aws and gcp")
+    if cloud not in ("aws", "gcp", "azure"):
+        raise HTTPException(status_code=400, detail="joinable covers aws, gcp and azure")
     if not has_permission(user, cloud, "write"):
         raise HTTPException(status_code=403, detail=f"{cloud}:write is required")
     rows = directory_service.joinable_for(db, cloud, region)
     return {"directories": [{"id": r.id, "name": r.name, "provider": r.provider,
                              "provider_label": directory_service.PROVIDER_LABELS.get(r.provider),
                              "region": r.region, "vpc_id": r.vpc_id,
-                             "networks": directory_service._jl(r.networks)} for r in rows]}
+                             "networks": directory_service._jl(r.networks),
+                             # Azure joins need a pinned account; the others need none.
+                             "join_ready": r.cloud != "azure" or bool(r.credentials_ref)}
+                            for r in rows]}
 
 
 @router.get("/{directory_id}")
@@ -828,4 +872,24 @@ async def pin_entitle_integration(directory_id: str, req: EntitleLinkRequest,
     db.refresh(row)
     job_service.log_audit(db, user.username, "directory_entitle_pin", details={
         "directory": row.name, "integration_id": wanted, "integration_name": name})
+    return directory_service.to_dict(row)
+
+
+@router.put("/{directory_id}/join-account")
+def set_join_account(directory_id: str, req: JoinAccountRequest, db: Session = Depends(get_db),
+                     user: User = Depends(require_explicit_permission("directories", "write"))):
+    """Pin (or clear) the AAD DC Administrators account Azure VMs join Entra Domain
+    Services as. Only its Password Safe ids and name are stored; the password is checked
+    out per join."""
+    row = _row_or_404(db, directory_id, user)
+    if req.join_account:
+        _require_secrets_use(user)
+    try:
+        row = directory_service.set_join_account(
+            db, row, req.join_account.model_dump() if req.join_account else None)
+    except DirectoryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    job_service.log_audit(db, user.username, "directory_join_account", details={
+        "directory": row.name, "account_name": row.admin_username or "",
+        "cleared": not req.join_account})
     return directory_service.to_dict(row)

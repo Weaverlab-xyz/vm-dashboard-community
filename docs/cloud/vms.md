@@ -668,7 +668,8 @@ Windows builds on **AWS, Azure and GCP** follow a different path from Linux afte
 exists: no SSH key and no Entitle SSH integration. In their place is the local
 administrator password, a PRA **Shell Jump over OpenSSH** (with an RDP jump only if you ask
 for one), and a domain identity: an Entra ID join on Azure, or an
-[Active Directory join](directories.md) on AWS and GCP.
+[Active Directory join](directories.md) on AWS, GCP and Azure (Entra Domain Services). An
+Azure VM gets one or the other, not both.
 
 ### Where the administrator password goes
 
