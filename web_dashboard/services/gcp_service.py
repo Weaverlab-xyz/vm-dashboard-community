@@ -1150,13 +1150,24 @@ def _set_windows_key_sync(project_id: str, zone: str, instance_name: str,
     op.result(timeout=120)
 
 
-def _serial_port_4_sync(project_id: str, zone: str, instance_name: str) -> str:
+def _serial_port_sync(project_id: str, zone: str, instance_name: str, port: int) -> str:
     _require_compute()
     from google.cloud import compute_v1
     client = compute_v1.InstancesClient(credentials=_gcp_creds())
     out = client.get_serial_port_output(project=project_id, zone=zone,
-                                        instance=instance_name, port=4)
+                                        instance=instance_name, port=port)
     return out.contents or ""
+
+
+def _serial_port_4_sync(project_id: str, zone: str, instance_name: str) -> str:
+    return _serial_port_sync(project_id, zone, instance_name, 4)
+
+
+async def serial_port_output(project_id: str, zone: str, instance_name: str, *,
+                             port: int = 1) -> str:
+    """The retained output of one serial port. Port 1 is where GCE's metadata-script
+    runner logs what a startup script prints; raises until the instance is up."""
+    return await _to_thread(_serial_port_sync, project_id, zone, instance_name, port)
 
 
 def parse_windows_password_reply(serial: str, modulus_b64: str) -> Optional[dict]:

@@ -565,7 +565,7 @@
           <p x-show="deployModal.osType === 'Windows'" x-cloak class="mt-1 text-xs text-gray-400 ml-6">
             Onboards the local administrator as a password-managed account (needs a Windows
             functional account). Password Safe rotates it immediately, then owns it — check it
-            out there or connect through the PRA RDP jump.
+            out there or connect through the PRA Shell Jump (or RDP jump).
           </p>
         </div>
         {% endif %}
@@ -585,6 +585,22 @@
             outbound HTTPS to Entra.
           </p>
         </div>
+        {% if windows_ssh_enabled %}
+        <!-- Windows: a Shell Jump over OpenSSH always; an RDP jump only on request -->
+        <div x-show="deployModal.osType === 'Windows'" x-cloak>
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" x-model="deployModal.enable_rdp" class="rounded text-blue-600">
+            Also create an RDP jump for this VM <span class="text-gray-400 font-normal">(Windows only)</span>
+          </label>
+          <p class="mt-1 text-xs text-gray-400 ml-6">
+            Windows servers get a PRA Shell Jump over OpenSSH (port 22, PowerShell), switched
+            on at first boot. Tick this for a Remote RDP jump as well. If OpenSSH does not
+            come up, the server gets an RDP jump anyway and the job says why.
+          </p>
+        </div>
+        {% else %}
+        <p x-show="deployModal.osType === 'Windows'" x-cloak class="text-xs text-gray-400">Windows servers get a PRA Remote RDP jump (SSH for Windows is off in Settings).</p>
+        {% endif %}
         <div x-show="deployModal.osType === 'Windows'" x-cloak
              class="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-800">
           A strong local-admin password is generated automatically and stored in Password
@@ -811,6 +827,22 @@
                  class="rounded border-gray-300 text-green-600 focus:ring-green-500">
           Join each Windows VM to Microsoft Entra ID
         </label>
+        {% if windows_ssh_enabled %}
+        <!-- Windows: a Shell Jump over OpenSSH always; an RDP jump only on request -->
+        <div x-show="bulkHasWindows()" x-cloak>
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" x-model="bulkModal.enable_rdp" class="rounded text-blue-600">
+            Also create an RDP jump for each Windows VM <span class="text-gray-400 font-normal">(Windows only)</span>
+          </label>
+          <p class="mt-1 text-xs text-gray-400 ml-6">
+            Windows servers get a PRA Shell Jump over OpenSSH (port 22, PowerShell), switched
+            on at first boot. Tick this for a Remote RDP jump as well. If OpenSSH does not
+            come up, the server gets an RDP jump anyway and the job says why.
+          </p>
+        </div>
+        {% else %}
+        <p x-show="bulkHasWindows()" x-cloak class="text-xs text-gray-400">Windows servers get a PRA Remote RDP jump (SSH for Windows is off in Settings).</p>
+        {% endif %}
 
         <!-- When to run. bulk_deploy_vms has resolved a booking since the picker
              shipped; this control is what lets anyone send one. Shares the page's
@@ -2291,6 +2323,7 @@ function azureDashboard() {
         register_in_entitle: false,
         register_in_passwordsafe: false,
         entra_join: {{ 'true' if entra_join_default else 'false' }},
+        enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
         entra_intune_enroll: {{ 'true' if entra_intune_default else 'false' }},
         ssh_key_secret_override: '', sshKeySecrets: [],
         jump_group: '', jumpoint_name: '',
@@ -2405,6 +2438,7 @@ function azureDashboard() {
           register_in_entitle: !!m.register_in_entitle,
           register_in_passwordsafe: !!m.register_in_passwordsafe,
           entra_join: m.osType === 'Windows' ? !!m.entra_join : null,
+          enable_rdp: m.osType === 'Windows' ? !!m.enable_rdp : null,
           entra_intune_enroll: m.osType === 'Windows' ? !!(m.entra_join && m.entra_intune_enroll) : null,
           ssh_key_secret_override: m.ssh_key_secret_override || null,
           ...this.schedulePayload(),
@@ -2452,6 +2486,7 @@ function azureDashboard() {
         register_in_entitle: false,
         register_in_passwordsafe: false,
         entra_join: {{ 'true' if entra_join_default else 'false' }},
+        enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
         ssh_key_secret_override: '',
         sshKeySecrets: [],
       };
@@ -2534,6 +2569,7 @@ function azureDashboard() {
           register_in_entitle: !!m.register_in_entitle,
           register_in_passwordsafe: !!m.register_in_passwordsafe,
           entra_join: this.bulkHasWindows() ? !!m.entra_join : null,
+          enable_rdp: this.bulkHasWindows() ? !!m.enable_rdp : null,
           ssh_key_secret_override: m.ssh_key_secret_override || null,
           // Marketplace image metadata (optional)
           image_publisher: firstImage?.publisher || null,

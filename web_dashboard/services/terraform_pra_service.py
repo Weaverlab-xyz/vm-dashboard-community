@@ -118,6 +118,50 @@ def _tf_env(tenant: Optional[dict] = None) -> dict:
     return env
 
 
+def _vault_password_account_hcl(*, label: str, password_var: str, account_name: str,
+                                username: str, description: str,
+                                group_id: Optional[int], jump_name: str,
+                                jump_resource: str, jump_label: str) -> str:
+    """One ``sra_vault_username_password_account`` injected into ONE jump item.
+
+    Shared by the Remote RDP jump and the Windows Shell Jump. The password is never in
+    the HCL: it is ``var.<password_var>``, supplied as a sensitive TF_VAR.
+
+    Schema (provider v1.3.0): jump_item_association is a SINGLE nested attribute.
+    `criteria` and every sub-field are optional+COMPUTED — force them to empty [] and the
+    provider recomputes a different value → "Provider produced inconsistent result after
+    apply", which left a VDI seat with a credential-less jump and NLA "Unknown connection
+    error (10001)". So set ONLY the matcher we need: the jump item's unique name scopes
+    the account to exactly this jump; leave the other criteria fields computed.
+    `jump_items` pins it by id too. The association `type` is the resource name minus the
+    sra_ prefix (→ "remote_rdp", "shell_jump").
+    """
+    group_line = f"  account_group_id = {int(group_id)}\n" if group_id else ""
+    jump_type = jump_resource.removeprefix("sra_")
+    return f"""
+resource "sra_vault_username_password_account" "{label}" {{
+  name        = {json.dumps(account_name)}
+  username    = {json.dumps(username)}
+  password    = var.{password_var}
+  description = "Auto-provisioned by Infrastructure Management Dashboard ({description})"
+{group_line}  jump_item_association = {{
+    filter_type = "criteria"
+    criteria = {{
+      name = [{json.dumps(jump_name)}]
+    }}
+    jump_items = [{{
+      id   = tonumber({jump_resource}.{jump_label}.id)
+      type = "{jump_type}"
+    }}]
+  }}
+}}
+
+output "vault_account_id" {{
+  value = sra_vault_username_password_account.{label}.id
+}}
+"""
+
+
 def _generate_hcl(
     vm_name: str,
     hostname: str,
@@ -125,15 +169,33 @@ def _generate_hcl(
     jumpoint_name: str,
     port: int,
     tag: str,
+    vault_account_name: str = "",
+    vault_username: str = "",
+    vault_account_group_id: Optional[int] = None,
 ) -> str:
     """Return the Terraform HCL for one Shell Jump resource.
 
     Both Jump Group and Jumpoint are looked up with data sources — they must
     already exist in PRA. Only the Shell Jump itself is managed (created/destroyed)
     by this Terraform workspace.
+
+    ``vault_account_name`` (a Windows server reached over OpenSSH) adds a PRA Vault
+    username/password account injected into this jump, password as
+    ``TF_VAR_ssh_password``. A Linux jump passes none of the vault arguments, and its
+    output is then exactly the no-vault template.
     """
     # Derive a stable resource name that is safe for Terraform identifiers
     safe_name = re.sub(r"[^a-z0-9_]", "_", vm_name.lower())
+
+    var_block = ""
+    vault_block = ""
+    if vault_account_name:
+        var_block = 'variable "ssh_password"     { sensitive = true }\n'
+        vault_block = _vault_password_account_hcl(
+            label="ssh_admin", password_var="ssh_password",
+            account_name=vault_account_name, username=vault_username,
+            description="Windows server", group_id=vault_account_group_id,
+            jump_name=vm_name, jump_resource="sra_shell_jump", jump_label=safe_name)
 
     return f"""\
 terraform {{
@@ -148,7 +210,7 @@ terraform {{
 variable "bt_host"          {{ sensitive = false }}
 variable "bt_client_id"     {{ sensitive = true }}
 variable "bt_client_secret" {{ sensitive = true }}
-
+{var_block}
 provider "sra" {{
   host          = var.bt_host
   client_id     = var.bt_client_id
@@ -177,7 +239,7 @@ resource "sra_shell_jump" {json.dumps(safe_name)} {{
 output "shell_jump_id" {{
   value = sra_shell_jump.{safe_name}.id
 }}
-"""
+{vault_block}"""
 
 
 def _run_tf(args: list, work_dir: str, timeout: int = 120,
@@ -325,16 +387,35 @@ def _provision_sync(
     tag: str,
     client_secret: str = "",
     tenant: Optional[dict] = None,
+    admin_password: str = "",
+    vault_account_name: str = "",
+    vault_username: str = "",
+    vault_account_group_id: Optional[int] = None,
 ) -> dict:
-    """Synchronous worker — run in asyncio.to_thread."""
+    """Synchronous worker — run in asyncio.to_thread.
+
+    With ``vault_account_name`` + ``admin_password`` (a Windows server over OpenSSH) a
+    PRA Vault account is injected into the jump, exactly as ``_provision_rdp_jump_sync``
+    does for RDP: a failed vault account is retried jump-only rather than costing the VM
+    its jump, and the stashed state is scrubbed because it then holds the password.
+    """
     # A per-deploy PRA credential overrides the configured bt_client_secret for
     # this apply only (the sensitive TF_VAR the provider block reads).
-    extra_env = {"TF_VAR_bt_client_secret": client_secret} if client_secret else None
+    cred_env = {"TF_VAR_bt_client_secret": client_secret} if client_secret else {}
+    want_vault = bool(vault_account_name and admin_password)
+    vaulted = want_vault
+
+    def hcl(with_vault: bool) -> str:
+        if not with_vault:
+            return _generate_hcl(vm_name, hostname, jump_group_name, jumpoint_name, port, tag)
+        return _generate_hcl(vm_name, hostname, jump_group_name, jumpoint_name, port, tag,
+                             vault_account_name=vault_account_name,
+                             vault_username=vault_username,
+                             vault_account_group_id=vault_account_group_id)
+
     with tempfile.TemporaryDirectory(prefix="pra_tf_") as work_dir:
         # Write HCL
-        Path(work_dir, "main.tf").write_text(
-            _generate_hcl(vm_name, hostname, jump_group_name, jumpoint_name, port, tag)
-        )
+        Path(work_dir, "main.tf").write_text(hcl(want_vault))
 
         # terraform init (uses pre-cached provider — should be fast)
         init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60, tenant=tenant)
@@ -344,8 +425,26 @@ def _provision_sync(
             )
 
         # terraform apply
+        extra_env = dict(cred_env)
+        if want_vault:
+            extra_env["TF_VAR_ssh_password"] = admin_password
         apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120,
-                        extra_env=extra_env, tenant=tenant)
+                        extra_env=extra_env or None, tenant=tenant)
+        if apply.returncode != 0 and want_vault:
+            first_err = (apply.stderr.strip() or apply.stdout.strip())[:400]
+            logger.warning(
+                "PRA vault account apply failed — retrying Shell-Jump-only; if it was "
+                "partially created it may need manual cleanup in PRA (check the PRA OAuth "
+                "client's Vault account-management permission): %s", first_err)
+            vaulted = False
+            _run_tf(["state", "rm", "sra_vault_username_password_account.ssh_admin"],
+                    work_dir, timeout=30, tenant=tenant)
+            Path(work_dir, "main.tf").write_text(hcl(False))
+            apply = _run_tf(["apply", "-auto-approve", "-refresh=false"], work_dir,
+                            timeout=120, extra_env=cred_env or None, tenant=tenant)
+            if apply.returncode != 0:
+                _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir,
+                        timeout=120, tenant=tenant)
         if apply.returncode != 0:
             raise TerraformPRAError(
                 f"terraform apply failed: {apply.stderr.strip() or apply.stdout.strip()}"
@@ -354,10 +453,13 @@ def _provision_sync(
         # Parse shell_jump_id from outputs
         out = _run_tf(["output", "-json"], work_dir, timeout=30, tenant=tenant)
         shell_jump_id: Optional[str] = None
+        vault_account_id: Optional[str] = None
         if out.returncode == 0 and out.stdout.strip():
             try:
                 outputs = json.loads(out.stdout)
                 shell_jump_id = str(outputs.get("shell_jump_id", {}).get("value", ""))
+                vault_raw = outputs.get("vault_account_id", {}).get("value", "")
+                vault_account_id = str(vault_raw) if vault_raw else None
             except (json.JSONDecodeError, AttributeError):
                 pass
 
@@ -367,12 +469,20 @@ def _provision_sync(
         tf_state_json: Optional[str] = None
         if state_path.exists():
             tf_state_json = state_path.read_text()
+            if want_vault:
+                # Even after a jump-only retry the state may have held the password.
+                tf_state_json = _scrub_tf_state(tf_state_json)
 
-        return {
+        result = {
             "shell_jump_id": shell_jump_id,
             "jump_group_name": jump_group_name,
             "tf_state_json": tf_state_json,
         }
+        if want_vault:
+            result["vault_account_id"] = vault_account_id
+            if not vaulted:
+                result["vault_error"] = first_err
+        return result
 
 
 # ── Public async API ──────────────────────────────────────────────────────────
@@ -390,20 +500,31 @@ async def provision_jump(
     tag: str = "AWS",
     client_secret: str = "",
     tenant: Optional[dict] = None,
+    *,
+    admin_password: str = "",
+    vault_account_name: str = "",
+    vault_username: str = "",
+    vault_account_group_id: Optional[int] = None,
 ) -> dict:
     """Provision a BeyondTrust PRA Shell Jump via Terraform.
 
     The Jump Group and Jumpoint must already exist in PRA — this function
-    only creates the Shell Jump resource itself.
+    only creates the Shell Jump resource itself, plus, when ``admin_password`` and
+    ``vault_account_name`` are both given (a Windows server reached over OpenSSH), a
+    PRA Vault username/password account injected into it. A failed vault account
+    keeps the jump and reports ``vault_error``.
 
     Returns a dict with:
       shell_jump_id  - PRA numeric ID of the new Shell Jump (str)
       jump_group_name - name of the Jump Group used
-      tf_state_json  - full Terraform state JSON (store in job extra_data for destroy)
+      tf_state_json  - full Terraform state JSON (store in job extra_data for destroy);
+                       scrubbed of the password when a vault account was requested
+      vault_account_id, vault_error - only when a vault account was requested
     """
     return await asyncio.to_thread(
         _provision_sync, vm_name, hostname, jump_group_name, jumpoint_name, port, tag,
-        client_secret, tenant
+        client_secret, tenant, admin_password, vault_account_name, vault_username,
+        vault_account_group_id,
     )
 
 
@@ -1226,39 +1347,11 @@ def _generate_rdp_hcl(
     vault_block = ""
     if vault_account_name:
         var_block = 'variable "rdp_password"     { sensitive = true }\n'
-        group_line = (f"  account_group_id = {int(vault_account_group_id)}\n"
-                      if vault_account_group_id else "")
-        # Schema (provider v1.3.0): jump_item_association is a SINGLE nested
-        # attribute. `criteria` and every sub-field are optional+COMPUTED — force
-        # them to empty [] and the provider recomputes a different value →
-        # "Provider produced inconsistent result after apply", which left the seat
-        # with a credential-less jump and NLA "Unknown connection error (10001)".
-        # So set ONLY the matcher we need: the jump item's unique name (== this
-        # VM's name) scopes the account to exactly this RDP jump; leave the other
-        # criteria fields computed. `jump_items` pins it by id too. The association
-        # `type` is the resource name minus the sra_ prefix (→ "remote_rdp").
-        vault_block = f"""
-resource "sra_vault_username_password_account" "rdp_admin" {{
-  name        = {json.dumps(vault_account_name)}
-  username    = {json.dumps(q_user)}
-  password    = var.rdp_password
-  description = "Auto-provisioned by Infrastructure Management Dashboard (VDI desktop)"
-{group_line}  jump_item_association = {{
-    filter_type = "criteria"
-    criteria = {{
-      name = [{json.dumps(name)}]
-    }}
-    jump_items = [{{
-      id   = tonumber(sra_remote_rdp.{safe_name}.id)
-      type = "remote_rdp"
-    }}]
-  }}
-}}
-
-output "vault_account_id" {{
-  value = sra_vault_username_password_account.rdp_admin.id
-}}
-"""
+        vault_block = _vault_password_account_hcl(
+            label="rdp_admin", password_var="rdp_password",
+            account_name=vault_account_name, username=q_user,
+            description="VDI desktop", group_id=vault_account_group_id,
+            jump_name=name, jump_resource="sra_remote_rdp", jump_label=safe_name)
 
     return f"""\
 terraform {{

@@ -613,6 +613,7 @@ def _launch_instance_sync(
     workgroup: str = "",
     correlation_tag: str = "",
     key_name: str = "",
+    user_data: str = "",
 ) -> dict:
     ec2 = _get_ec2(region)
     tags = [
@@ -647,6 +648,9 @@ def _launch_instance_sync(
     if public_key:
         userdata = _build_userdata(public_key, os_type, region)
         kwargs["UserData"] = userdata  # boto3 base64-encodes blob types automatically
+    elif user_data:
+        # Windows: a caller-built <powershell> block (the OpenSSH bootstrap).
+        kwargs["UserData"] = user_data
     if iam_instance_profile:
         kwargs["IamInstanceProfile"] = _iam_instance_profile_ref(iam_instance_profile)
     if key_name:
@@ -777,6 +781,7 @@ async def launch_instance(
     workgroup: str = "",
     correlation_tag: str = "",
     key_name: str = "",
+    user_data: str = "",
 ) -> dict:
     """Launch a new EC2 instance and return its ID and initial state.
 
@@ -791,6 +796,8 @@ async def launch_instance(
     (cloud-identity JIT Phase 2).
     *key_name* attaches an EC2 key pair — used for Windows, where it is what
     makes the Administrator password retrievable (see get_windows_password).
+    *user_data* is Windows-only UserData (a ``<powershell>`` block), used when
+    there is no *public_key* to build the Linux cloud-init from.
     """
     try:
         return await _to_thread(
@@ -798,7 +805,7 @@ async def launch_instance(
             region, ami_id, instance_name, instance_type,
             public_key, subnet_id, security_group_ids,
             iam_instance_profile, os_type, workgroup,
-            correlation_tag, key_name,
+            correlation_tag, key_name, user_data,
         )
     except (ClientError, BotoCoreError) as e:
         msg = str(e)

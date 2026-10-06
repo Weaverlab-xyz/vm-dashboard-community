@@ -327,8 +327,12 @@ def _windows_functional_account_name(tag: str) -> str:
 
 
 async def register_windows(db, job_id: str, vm_name: str, hostname: str, *,
-                           result: dict, tag: str, username: str, password: str) -> None:
+                           result: dict, tag: str, username: str, password: str,
+                           port: int = 3389) -> None:
     """Onboard a Windows VM as a PASSWORD-managed system + account. Non-fatal.
+
+    ``port`` is the managed system's connection port: 22 for a server reached only over
+    OpenSSH, 3389 when it has an RDP jump. Rotation does not use it.
 
     The build-time administrator password is seeded as the account's credential, then —
     unless ``passwordsafe_windows_change_password_on_register`` is off — Password Safe is
@@ -345,7 +349,7 @@ async def register_windows(db, job_id: str, vm_name: str, hostname: str, *,
     or a resource zone covering its subnet."""
     fa_name = _windows_functional_account_name(tag)
     await register_password_managed(
-        db, job_id, name=vm_name, host_name=vm_name, address=hostname, port=3389,
+        db, job_id, name=vm_name, host_name=vm_name, address=hostname, port=port,
         username=username, password=password, result=result, fa_name=fa_name,
         fa_missing=("no Password Safe functional account configured for Windows guests "
                     f"(set passwordsafe_vm_functional_account_windows or "

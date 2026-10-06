@@ -1174,7 +1174,10 @@ class PRAFeatureConfig(BaseModel):
     # ref-counted clouddb-jumpoint VM or starts its own ACI container group. Editable
     # here so the choice is reversible without a redeploy. Batches always share one ACI.
     azure_vm_jumpoint_mode: str = "shared"
-    pra_windows_vault_account_group_id: str = ""   # Vault group for Windows server RDP jump credentials
+    pra_windows_vault_account_group_id: str = ""   # Vault group for Windows server jump credentials
+    # Windows server builds: Shell Jump over OpenSSH by default, RDP jump opt-in.
+    windows_ssh_enabled: bool = True
+    windows_rdp_default: bool = False
     # VM size for the managed shared Azure Gateway VM — same Web-Jump OOM story as
     # gcp_jumpoint_machine_type below: Standard_B1ms minimum, Standard_B2s preferred.
     # Blank keeps the config.py default (Standard_B2s). Changing it never resizes a

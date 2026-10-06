@@ -642,6 +642,22 @@
           </p>
         </div>
         {% endif %}
+        {% if windows_ssh_enabled %}
+        <!-- Windows: a Shell Jump over OpenSSH always; an RDP jump only on request -->
+        <div>
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" x-model="deployForm.enable_rdp" class="rounded text-blue-600">
+            Also create an RDP jump for this VM <span class="text-gray-400 font-normal">(Windows only)</span>
+          </label>
+          <p class="mt-1 text-xs text-gray-400 ml-6">
+            Windows servers get a PRA Shell Jump over OpenSSH (port 22, PowerShell), switched
+            on at first boot. Tick this for a Remote RDP jump as well. If OpenSSH does not
+            come up, the server gets an RDP jump anyway and the job says why.
+          </p>
+        </div>
+        {% else %}
+        <p class="text-xs text-gray-400">Windows servers get a PRA Remote RDP jump (SSH for Windows is off in Settings).</p>
+        {% endif %}
 
         {{ schedule_picker() }}
 
@@ -878,6 +894,22 @@
             WinRM (5986) once it is up, as the directory's Password Safe account.
           </p>
         </div>
+        {% endif %}
+        {% if windows_ssh_enabled %}
+        <!-- Windows: a Shell Jump over OpenSSH always; an RDP jump only on request -->
+        <div>
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" x-model="bulkModal.enable_rdp" class="rounded text-blue-600">
+            Also create an RDP jump for each Windows VM <span class="text-gray-400 font-normal">(Windows only)</span>
+          </label>
+          <p class="mt-1 text-xs text-gray-400 ml-6">
+            Windows servers get a PRA Shell Jump over OpenSSH (port 22, PowerShell), switched
+            on at first boot. Tick this for a Remote RDP jump as well. If OpenSSH does not
+            come up, the server gets an RDP jump anyway and the job says why.
+          </p>
+        </div>
+        {% else %}
+        <p class="text-xs text-gray-400">Windows servers get a PRA Remote RDP jump (SSH for Windows is off in Settings).</p>
         {% endif %}
 
         <!-- When to run. bulk_deploy_instances has resolved a booking since the
@@ -1772,7 +1804,7 @@ function gcpDashboard() {
       machine_type: 'e2-medium', zone: '', subnetwork: '', disk_size_gb: 20,
       create_external_ip: false,
       register_in_entitle: false, register_in_passwordsafe: false,
-      ad_directory_id: '', ad_ou: '',
+      ad_directory_id: '', ad_ou: '', enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
       submitting: false, error: '',
     },
     adDirs: [],
@@ -1825,7 +1857,7 @@ function gcpDashboard() {
       docker_deploy_key_ref: '',
       register_in_entitle: false,
       register_in_passwordsafe: false,
-      ad_directory_id: '', ad_ou: '',
+      ad_directory_id: '', ad_ou: '', enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
       ssh_key_secret_override: '',
       sshKeySecrets: [],
     },
@@ -2426,7 +2458,7 @@ function gcpDashboard() {
         jump_group: '', jumpoint_name: '',
         register_in_entitle: false,
         register_in_passwordsafe: false,
-        ad_directory_id: '', ad_ou: '',
+        ad_directory_id: '', ad_ou: '', enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
         ssh_key_secret_override: '',
         sshKeySecrets: [],
       };
@@ -2481,7 +2513,7 @@ function gcpDashboard() {
           ? 'e2-medium' : (this.networkOpts.machine_types?.[0] || 'e2-medium'),
         zone: '', subnetwork: '', disk_size_gb: 20, create_external_ip: false,
         register_in_entitle: false, register_in_passwordsafe: false,
-        ad_directory_id: '', ad_ou: '',
+        ad_directory_id: '', ad_ou: '', enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
         submitting: false, error: '',
       };
       this.loadAdDirs();
@@ -2515,6 +2547,7 @@ function gcpDashboard() {
           register_in_passwordsafe: m.register_in_passwordsafe,
           ad_directory_id: m.ad_directory_id || null,
           ad_ou: m.ad_ou || '',
+          enable_rdp: !!m.enable_rdp,
           ...this.schedulePayload(),
         });
         m.open = false;
@@ -2574,6 +2607,7 @@ function gcpDashboard() {
           register_in_passwordsafe: this.deployForm.register_in_passwordsafe,
           ad_directory_id: this.deployForm.ad_directory_id || null,
           ad_ou: this.deployForm.ad_ou || '',
+          enable_rdp: !!this.deployForm.enable_rdp,
           ssh_key_secret_override: this.deployForm.ssh_key_secret_override || null,
           ...this.schedulePayload(),
         };

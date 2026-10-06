@@ -346,11 +346,18 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                 )
 
         # Windows images take a different path from here: no SSH key, a password from
-        # the windows-keys exchange, and an RDP jump instead of a Shell Jump.
+        # the windows-keys exchange, and OpenSSH switched on at boot for a Shell Jump
+        # (plus an RDP jump when asked for) -- windows_server_hook.
         is_windows = await gcp_service.image_is_windows(payload.image_self_link)
         join_md: dict = {}          # instance metadata that performs the AD join
         join_sa = ""
+        ssh_md: dict = {}           # instance metadata that switches on OpenSSH
+        win_ssh = win_rdp = False
         if is_windows:
+            from ..services import windows_server_hook
+            win_ssh, win_rdp = windows_server_hook.access_modes(payload)
+            if win_ssh:
+                ssh_md = windows_server_hook.ssh_bootstrap_metadata()
             from ..services import windows_admin_secret
             try:
                 # Fail before launching if there is nowhere acceptable to keep the password.
@@ -441,7 +448,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             network_tags=merged_tags,
             labels={"workgroup": wg} if wg else None,
             windows=is_windows,
-            extra_metadata=join_md or None,
+            extra_metadata={**join_md, **ssh_md} or None,
             service_account_email=join_sa,
         )
         launched = True
@@ -494,6 +501,12 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             final_meta["admin_password_backend"] = backend
             final_meta["admin_password_ref"] = ref
             job_service.update_progress(db, job_id, 80, f"Administrator password stored in {backend}.")
+            win_ssh_status = win_ssh_detail = ""
+            if win_ssh:
+                job_service.update_progress(
+                    db, job_id, 82, "Waiting for OpenSSH Server to come up on the instance…")
+                win_ssh_status, win_ssh_detail = await windows_server_hook.confirm_ssh_gcp(
+                    project_id, result["zone"], payload.instance_name)
 
         # ── BeyondTrust PRA — Shell Jump (optional; SSH, so Linux only) ───────
         if _cfg_svc.get_bool("pra_enabled") and not is_windows:
@@ -573,7 +586,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                                       # on the guest would ever read.
                                       method=getattr(payload, "passwordsafe_method", "") or "")
 
-        # Windows: Password Safe managed account + PRA Remote RDP jump.
+        # Windows: Password Safe managed account + PRA Shell Jump and/or RDP jump.
         if is_windows:
             from ..services import windows_server_hook
             await windows_server_hook.wire(
@@ -587,6 +600,8 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                 jumpoint_name=((payload.jumpoint_name or "").strip()
                                or _cfg_svc.get("gcp_jumpoint_name")
                                or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name),
+                ssh=win_ssh, rdp=win_rdp,
+                ssh_status=win_ssh_status, ssh_detail=win_ssh_detail,
             )
             admin_password = ""
 

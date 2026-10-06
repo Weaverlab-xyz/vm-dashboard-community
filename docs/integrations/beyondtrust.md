@@ -161,7 +161,7 @@ Set these as Packer build env on the build page. Full detail and a smoke-test re
 
 **Linux** — upload the script to your active storage backend via `/storage`, then on the AWS / Azure / GCP build page pick it from the **Load from storage** dropdown above the Provisioner Script textarea.
 
-**Windows** — `bt-ready-windows.ps1` runs on the Azure Windows build (`os_type=Windows`) before the template's windows-restart + Sysprep finisher. It bakes OpenSSH + RDP into the *output* image so VMs deployed from it are reachable by SSH like Linux ones, plus agentless RDP through the Gateway.
+**Windows** — `bt-ready-windows.ps1` runs on the Azure Windows build (`os_type=Windows`) before the template's windows-restart + Sysprep finisher. It bakes OpenSSH + RDP into the *output* image so VMs deployed from it are reachable by SSH like Linux ones, plus agentless RDP through the Gateway. A plain marketplace Windows image does not need it for SSH: every Windows deploy switches on OpenSSH at first boot and gets a Shell Jump, with an RDP jump only on request (see [Windows servers](../cloud/vms.md#pra-jumps-ssh-by-default-rdp-on-request)). Bake it when you want an authorized key or key-only SSH in the image.
 
 > **Azure cannot inject SSH public keys into Windows VMs** — that is a Linux-only deploy feature. So the key is authorized *in the image*. Use the public half of the keypair the dashboard holds in Key Vault (`azure_ssh_keypair_secret_name`) so the private half stays retrievable from the VMs tab exactly as it is for Linux. With no key set, password SSH still works using the admin password the deploy generates and vaults.
 

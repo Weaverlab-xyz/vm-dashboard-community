@@ -483,9 +483,11 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
 
         # Windows only: Entra ID join (decided now — the VM's identity is set at create).
         entra_join = entra_intune = False
+        win_ssh = win_rdp = False
         if is_windows:
             from ..services import windows_server_hook
             entra_join, entra_intune = windows_server_hook.entra_requested(req)
+            win_ssh, win_rdp = windows_server_hook.access_modes(req)
 
         # Step 3: Deploy Azure VM (3-step: PIP → NIC → VM)
         job_service.update_progress(db, job_id, 35, f"Creating Azure VM '{req.vm_name}'…")
@@ -536,9 +538,16 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
         )
 
         # Step 3: BeyondTrust PRA — Shell Jump (optional; SSH, so Linux only)
+        win_ssh_status = win_ssh_detail = ""
         if is_windows:
-            # Windows gets an RDP jump instead, after Password Safe has had its say
-            # over who holds the credential — see windows_server_hook.wire below.
+            # Windows gets its jumps after Password Safe has had its say over who holds
+            # the credential — see windows_server_hook.wire below. OpenSSH first: Run
+            # Command and the Entra extension are serialised per VM anyway.
+            if win_ssh:
+                job_service.update_progress(
+                    db, job_id, 75, "Switching on OpenSSH Server (Run Command)…")
+                win_ssh_status, win_ssh_detail = (
+                    await windows_server_hook.run_ssh_bootstrap_azure(rg, req.vm_name))
             job_service.update_progress(db, job_id, 90, "Windows VM deployed.")
             if entra_join:
                 await windows_server_hook.entra_join_azure(
@@ -616,7 +625,7 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
                                       # waagent for Run Command to reach.
                                       method=getattr(req, "passwordsafe_method", "") or "")
 
-        # Windows: Password Safe managed account + PRA Remote RDP jump.
+        # Windows: Password Safe managed account + PRA Shell Jump and/or RDP jump.
         if is_windows:
             from ..services import windows_server_hook
             _cred = getattr(req, "pra_credential_ref", None)
@@ -631,6 +640,8 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
                 jumpoint_name=((getattr(req, "jumpoint_name", None) or "").strip()
                                or _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name")),
                 client_secret=config_service.resolve_reference(_cred.strip()) if _cred else "",
+                ssh=win_ssh, rdp=win_rdp,
+                ssh_status=win_ssh_status, ssh_detail=win_ssh_detail,
             )
 
         job_service.set_completed(db, job_id, result)
