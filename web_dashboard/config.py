@@ -83,7 +83,9 @@ class Settings(BaseSettings):
     xcpng_enabled: bool = False         # XCP-ng/XenServer router + /xcpng page (XAPI XML-RPC)
     vdesktops_enabled: bool = False     # Virtual desktops router + /desktops page (Azure pools + PRA brokering)
     cloud_database_enabled: bool = False  # /api/databases router — private managed DBs brokered via a PRA tunnel
-    directories_enabled: bool = False     # /directories — managed Active Directory (AWS + GCP) and AD join for Windows servers
+    # PREVIEW flag (setup._PREVIEW_FLAGS): AD domains for Windows servers, on-prem AD/LDAP
+    # via an agent, and Entra ID / Okta / PingOne identity providers.
+    directories_enabled: bool = False     # /directories
     k8s_management_enabled: bool = False  # /api/k8s router — provision/register/manage Kubernetes clusters
     cloud_functions_enabled: bool = False  # /api/functions router — Lambda / Function App / Cloud Run function lifecycle
     # /api/agent router + /agents page — containerised agents inside private networks
@@ -1231,9 +1233,15 @@ class Settings(BaseSettings):
     # to corrupt. "aci" starts a dedicated ACI container group per deploy (Shell Jump
     # only; ACI cannot protocol-tunnel). Batches always share one ACI group.
     azure_vm_jumpoint_mode: str = "shared"        # "shared" | "aci"
-    # PRA Vault account group for the RDP jump's vaulted administrator credential on
-    # Windows server builds (Azure + AWS). Unused when Password Safe owns the account.
+    # PRA Vault account group for the vaulted administrator credential on Windows server
+    # builds (Azure, AWS, GCP) -- injected into the Shell Jump and/or the RDP jump.
+    # Unused when Password Safe owns the account.
     pra_windows_vault_account_group_id: str = ""
+    # How Windows server builds are reached through PRA (services/windows_server_hook).
+    # SSH: OpenSSH Server is switched on at first boot and the VM gets a Shell Jump.
+    # RDP is opt-in per deploy; this is the checkbox's default. SSH off forces RDP on.
+    windows_ssh_enabled: bool = True
+    windows_rdp_default: bool = False
     # Windows server builds: Entra ID join (Azure only — services/windows_server_hook).
     # The per-deploy checkbox defaults to these; the group lists are Entra group OBJECT
     # ids (comma-separated) granted Virtual Machine Administrator / User Login on each
@@ -1253,6 +1261,7 @@ class Settings(BaseSettings):
     directory_aws_default_edition: str = "Standard"   # Standard | Enterprise
     directory_gcp_reserved_ip_range: str = ""          # an unused /24 for GCP domain controllers
     directory_join_default_ou: str = ""                # OU distinguished name for joined servers ("" = Computers)
+    directory_idp_page_size: int = 50                  # Entra ID / Okta / PingOne browse page (1-200)
     # GCE domain join runs as the VM's service account, which needs
     # roles/managedidentities.domainJoin. Blank = no service account → no GCP join.
     gcp_domain_join_service_account: str = ""

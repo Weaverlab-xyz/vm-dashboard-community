@@ -130,6 +130,9 @@ class AzureDeployRequest(ScheduleRequestMixin, BaseModel):
     # Intune enrolment. None = the azure_windows_entra_join / _intune_enroll defaults.
     entra_join: Optional[bool] = None
     entra_intune_enroll: Optional[bool] = None
+    # Windows only: also create a PRA Remote RDP jump. Every Windows build gets a Shell
+    # Jump over OpenSSH; None = the windows_rdp_default setting.
+    enable_rdp: Optional[bool] = None
     ssh_key_secret_override: Optional[str] = None  # optional Key Vault keypair secret to use for the SSH key (must be JSON with a public_key)
     count: int = Field(
         default=1, ge=1, le=MAX_DEPLOY_COUNT,
@@ -180,6 +183,9 @@ class AzureBulkDeployRequest(ScheduleRequestMixin, BaseModel):
     # Intune enrolment. None = the azure_windows_entra_join / _intune_enroll defaults.
     entra_join: Optional[bool] = None
     entra_intune_enroll: Optional[bool] = None
+    # Windows only: also create a PRA Remote RDP jump. Every Windows build gets a Shell
+    # Jump over OpenSSH; None = the windows_rdp_default setting.
+    enable_rdp: Optional[bool] = None
     ssh_key_secret_override: Optional[str] = None  # optional Key Vault keypair secret to use for the SSH key (must be JSON with a public_key)
     # Marketplace image metadata (optional, used if present)
     image_publisher: Optional[str] = None

@@ -14,12 +14,21 @@ from . import ps_database_catalog as _db
 
 MAX_CANDIDATES = 500
 
-# Platform name fragments → dashboard provider. Checked in order; "active directory"
-# first so "Active Directory (LDAP)"-style names land on AD.
+# Platform name fragments → (dashboard provider, LDAP vendor). Checked in order:
+# * Entra before AD, because "Azure Active Directory" contains "active directory";
+# * AD before LDAP, so "Active Directory (LDAP)"-style names land on AD;
+# * PingDirectory before the generic LDAP rule, so it keeps its vendor.
 _PROVIDER_RULES = (
-    ("onprem_ad", ("active directory", "microsoft ad")),
-    ("ldap", ("openldap", "ldap", "389", "directory server", "freeipa", "red hat idm")),
+    ("entra_id", "", ("entra", "azure active directory", "azure ad")),
+    ("onprem_ad", "", ("active directory", "microsoft ad")),
+    ("okta", "", ("okta",)),
+    ("pingone", "", ("pingone", "ping one")),
+    ("ldap", "pingdirectory", ("pingdirectory", "ping directory")),
+    ("ldap", "", ("openldap", "ldap", "389", "directory server", "freeipa", "red hat idm")),
 )
+# Cloud identity providers: Password Safe can hold their API credential, but it has no
+# tenant id or app registration for them, so they are completed in the IdP dialog.
+IDP_PROVIDERS = ("entra_id", "okta", "pingone")
 
 REASON_NO_PROVIDER = ("Platform {platform!r} is not a directory kind the dashboard knows "
                       "(Active Directory or LDAP).")
@@ -28,16 +37,23 @@ REASON_NO_ACCOUNT = ("No account on this directory is requestable by the dashboa
                      "identity. Grant it the Requestor role on a Smart Rule containing the "
                      "account you want the dashboard to use.")
 REASON_NOT_FQDN = "An Active Directory domain must be a DNS name such as corp.example.com."
+REASON_NEEDS_IDP_DETAILS = ("A cloud identity provider also needs its tenant and app "
+                            "details — use Complete registration.")
+
+
+def classify_platform(name: str, short_name: str = "") -> tuple:
+    """``(provider, vendor)`` for a Password Safe platform, or ``("", "")``."""
+    haystack = f"{name or ''} {short_name or ''}".strip().lower()
+    if not haystack:
+        return "", ""
+    for provider, vendor, needles in _PROVIDER_RULES:
+        if any(n in haystack for n in needles):
+            return provider, vendor
+    return "", ""
 
 
 def provider_for_platform(name: str, short_name: str = "") -> str:
-    haystack = f"{name or ''} {short_name or ''}".strip().lower()
-    if not haystack:
-        return ""
-    for provider, needles in _PROVIDER_RULES:
-        if any(n in haystack for n in needles):
-            return provider
-    return ""
+    return classify_platform(name, short_name)[0]
 
 
 def _index_directories(directories) -> dict:
@@ -78,8 +94,8 @@ def build_candidates(*, platforms, systems, directories, accounts,
         platform_id = (_db._id_of(system, "PlatformID", "PlatformId")
                        or directory.get("platform_id"))
         platform = platform_index.get(platform_id) or {}
-        provider = provider_for_platform(platform.get("name") or "",
-                                         platform.get("short_name") or "")
+        provider, vendor = classify_platform(platform.get("name") or "",
+                                             platform.get("short_name") or "")
         if directory_id is None and not provider:
             continue
 
@@ -99,6 +115,11 @@ def build_candidates(*, platforms, systems, directories, accounts,
         if not provider:
             eligible, reason = False, REASON_NO_PROVIDER.format(
                 platform=platform.get("name") or "(unknown)")
+        elif provider in IDP_PROVIDERS:
+            # Never importable as-is, whatever else is true: the dialog offers Complete
+            # registration instead, which goes through register_idp and its sign-in test.
+            eligible, reason = False, (REASON_NEEDS_IDP_DETAILS if row_accounts
+                                       else REASON_NO_ACCOUNT)
         elif not host:
             eligible, reason = False, REASON_NO_HOST
         elif provider == "onprem_ad" and "." not in (name or ""):
@@ -112,6 +133,8 @@ def build_candidates(*, platforms, systems, directories, accounts,
             "system_id": system_id,
             "name": name,
             "provider": provider,
+            "vendor": vendor,
+            "idp": provider in IDP_PROVIDERS,
             "platform": _db._clean_text(platform.get("name") or ""),
             "host": host,
             "port": port,

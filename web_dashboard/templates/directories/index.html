@@ -13,7 +13,11 @@
 
   <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3 sm:mb-1">
     <h1 class="text-2xl font-bold text-gray-800">Directories</h1>
-    <div class="flex items-center gap-2">
+    <div class="flex flex-wrap items-center gap-2">
+      <button @click="openIdp()"
+              class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
+        Register identity provider
+      </button>
       <button @click="openPsImport()"
               class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
         Import from Password Safe
@@ -40,6 +44,9 @@
     <strong>Register on-prem</strong> records an on-premises AD or LDAP directory reached through a
     remote agent, so Config Management playbooks can change it; <strong>Import from Password
     Safe</strong> does the same for directories Password Safe already manages.
+    <strong>Register identity provider</strong> adds an Entra ID tenant, Okta org or PingOne
+    environment: browse its users and groups, and, once you turn writes on for it, change
+    group membership.
   </p>
 
   <div x-show="toast" x-cloak x-transition
@@ -70,8 +77,10 @@
             </td>
             <td class="px-4 py-3 text-gray-600" x-text="d.provider_label + (d.edition ? ' · ' + d.edition : '')"></td>
             <td class="px-4 py-3 text-xs text-gray-600">
-              <div x-text="d.cloud.toUpperCase() + ' · ' + (d.region || (d.locations || []).join(', ') || '—')"></div>
-              <div class="font-mono text-gray-400" x-text="d.directory_id || d.resource_name || (d.host ? d.host + ':' + d.port : '')"></div>
+              <div x-show="!d.is_idp" x-text="d.cloud.toUpperCase() + ' · ' + (d.region || (d.locations || []).join(', ') || '—')"></div>
+              <div x-show="!d.is_idp" class="font-mono text-gray-400" x-text="d.directory_id || d.resource_name || (d.host ? d.host + ':' + d.port : '')"></div>
+              <div x-show="d.is_idp" x-text="'Cloud · ' + (d.provider === 'okta' ? d.endpoint : (d.provider === 'pingone' ? 'pingone.' + d.endpoint : 'Microsoft Graph'))"></div>
+              <div x-show="d.is_idp && d.tenant_id" class="font-mono text-gray-400" x-text="d.tenant_id"></div>
               <div x-show="d.cloud === 'local'" class="text-gray-400" x-text="'via agent ' + (agentName(d.agent_id) || d.agent_id || '— none')"></div>
               <div x-show="(d.dns_ips || []).length" class="text-gray-400" x-text="'DNS ' + (d.dns_ips || []).join(', ')"></div>
               <template x-if="d.site_link">
@@ -90,7 +99,16 @@
             </td>
             <td class="px-4 py-3 text-xs text-gray-600">
               <template x-if="d.source === 'registered' && d.cloud === 'local'"><span x-text="'Password Safe: ' + (d.bind_account || 'managed account')"></span></template>
-              <template x-if="d.source === 'registered' && d.cloud !== 'local'"><span class="text-gray-400">not held — joins need none</span></template>
+              <template x-if="d.source === 'registered' && d.cloud !== 'local' && !d.is_idp"><span class="text-gray-400">not held — joins need none</span></template>
+              <template x-if="d.is_idp">
+                <div>
+                  <div x-text="credentialText(d)"></div>
+                  <div :class="d.writes_enabled ? 'text-amber-700' : 'text-gray-400'"
+                       x-text="d.writes_enabled ? 'membership writes ON' : 'read-only'"></div>
+                </div>
+              </template>
+              <div x-show="d.entitle_integration_id" class="text-gray-500 mt-1"
+                   x-text="'Entitle: ' + (d.entitle_integration_name || d.entitle_integration_id)"></div>
               <template x-if="d.source !== 'registered'">
                 <span x-text="d.admin_password_custody === 'passwordsafe_managed'
                               ? 'Password Safe (account ' + d.ps_account_id + ')'
@@ -98,6 +116,13 @@
               </template>
             </td>
             <td class="px-4 py-3 text-right whitespace-nowrap space-x-1">
+              <button x-show="d.is_idp" @click="openBrowse(d)"
+                      class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Browse</button>
+              <button x-show="d.is_idp" @click="testIdp(d)"
+                      class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Test</button>
+              <button x-show="d.is_idp" @click="toggleWrites(d)"
+                      class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg"
+                      x-text="d.writes_enabled ? 'Make read-only' : 'Allow writes'"></button>
               <button x-show="d.source !== 'registered' && d.admin_password_backend && d.admin_password_custody !== 'passwordsafe_managed'"
                       @click="showPassword(d)"
                       class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Password</button>
@@ -119,6 +144,8 @@
               <button x-show="d.source !== 'registered' && d.status === 'available' && d.admin_password_custody !== 'passwordsafe_managed' && d.provider !== 'aws_ad_connector'"
                       @click="resetPassword(d)"
                       class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Reset admin password</button>
+              <button x-show="d.status === 'available'" @click="openEntitle(d)"
+                      class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Entitle</button>
               <button @click="remove(d)"
                       class="text-xs border border-red-200 text-red-600 hover:bg-red-50 px-2.5 py-1.5 rounded-lg"
                       x-text="d.source === 'registered' ? 'Unregister' : 'Destroy'"></button>
@@ -288,9 +315,25 @@
           </select>
         </div>
       </div>
+      <div x-show="op.provider === 'ldap'">
+        <label class="block text-sm font-medium text-gray-700 mb-1">LDAP server</label>
+        <select x-model="op.vendor" @change="opVendorChanged()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <option value="">Generic / unknown</option>
+          <option value="openldap">OpenLDAP</option>
+          <option value="pingdirectory">PingDirectory</option>
+          <option value="okta_ldap">Okta LDAP Interface</option>
+          <option value="389ds">389 Directory Server</option>
+          <option value="freeipa">FreeIPA</option>
+        </select>
+        <p x-show="op.vendor === 'okta_ldap'" class="text-xs text-gray-500 mt-1">
+          Enter the org name (<code>acme</code> or <code>acme.okta.com</code>): the host
+          (<code>acme.ldap.okta.com</code>), LDAPS on 636 and base DN are filled in. The Okta
+          LDAP Interface is search-only, so only <code>ldap-search.yml</code> runs against it;
+          change users and groups through the Okta identity provider instead.</p>
+      </div>
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1" x-text="op.provider === 'onprem_ad' ? 'Domain' : 'Name'"></label>
-        <input x-model="op.name" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" :placeholder="op.provider === 'onprem_ad' ? 'corp.example.com' : 'ldap.example.com'">
+        <input x-model="op.name" @change="opVendorChanged()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" :placeholder="op.provider === 'onprem_ad' ? 'corp.example.com' : 'ldap.example.com'">
       </div>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
@@ -468,9 +511,11 @@
                      :disabled="!c.eligible || c.already_registered" x-model="c._pick">
               <span class="flex-1">
                 <span class="font-medium" x-text="c.name"></span>
-                <span class="text-gray-500" x-text="' · ' + (c.provider === 'ldap' ? 'LDAP' : 'Active Directory') + ' · ' + c.host + ':' + c.port"></span>
+                <span class="text-gray-500" x-text="' · ' + psiKind(c) + (c.idp ? '' : ' · ' + c.host + ':' + c.port)"></span>
                 <span x-show="c.already_registered" class="text-xs text-gray-500"> (already registered)</span>
-                <span x-show="!c.eligible" class="block text-xs text-red-600" x-text="c.reason"></span>
+                <span x-show="!c.eligible" class="block text-xs" :class="c.idp ? 'text-gray-500' : 'text-red-600'" x-text="c.reason"></span>
+                <button x-show="c.idp && (c.accounts || []).length" @click.prevent="completeIdp(c)"
+                        class="mt-1 text-xs border border-gray-300 px-2 py-1 rounded-lg">Complete registration</button>
               </span>
             </label>
             <div x-show="c._pick" class="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
@@ -498,6 +543,246 @@
         <button @click="submitPsImport()" :disabled="psi.saving || !psiPicked().length"
                 class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg"
                 x-text="'Import ' + psiPicked().length"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Register a cloud identity provider -->
+  <div x-show="idp.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="idp.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-3 max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-semibold text-gray-800">Register an identity provider</h3>
+      <p class="text-xs text-gray-500">The dashboard signs in and reads one user and one group before
+        saving, so a wrong secret or a missing permission fails here. The secret is never stored: point
+        at a vault entry or a Password Safe managed account. Membership writes stay off unless you tick
+        the box. See <a href="/docs/cloud/directories#cloud-identity-providers" target="_blank" class="underline">the
+        guide</a> for the app registration each provider needs.</p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Provider</label>
+          <select x-model="idp.provider" @change="idpProviderChanged()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="entra_id">Microsoft Entra ID</option>
+            <option value="okta">Okta</option>
+            <option value="pingone">PingOne</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Sign-in</label>
+          <select x-model="idp.auth_mode" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <template x-for="m in idpModes()" :key="m"><option :value="m" x-text="authModeLabel(m)"></option></template>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Display name <span class="text-gray-400 font-normal">(optional)</span></label>
+        <input x-model="idp.name" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="Contoso Entra">
+      </div>
+      <div x-show="idp.provider === 'okta'">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Org URL</label>
+        <input x-model="idp.endpoint" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="https://contoso.okta.com">
+      </div>
+      <div x-show="idp.provider === 'pingone'">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Region</label>
+        <select x-model="idp.endpoint" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <template x-for="t in (idpOpts.pingone_regions || ['com'])" :key="t"><option :value="t" x-text="'pingone.' + t"></option></template>
+        </select>
+      </div>
+      <div x-show="idp.provider !== 'okta' && idp.auth_mode !== 'dashboard_azure'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" x-text="idp.provider === 'pingone' ? 'Environment id' : 'Tenant id'"></label>
+          <input x-model="idp.tenant_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="00000000-0000-…">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Client id</label>
+          <input x-model="idp.client_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+        </div>
+      </div>
+      <div x-show="idp.provider === 'okta' && idp.auth_mode === 'private_key_jwt'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Client id</label>
+          <input x-model="idp.client_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Key id (kid)</label>
+          <input x-model="idp.key_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+        </div>
+      </div>
+      <div x-show="idp.provider === 'entra_id' && idp.auth_mode === 'dashboard_azure'" class="text-xs text-gray-500 p-3 bg-gray-50 rounded-lg">
+        Uses the dashboard's own Azure identity; the tenant is read from its token. That app needs the
+        Graph <em>application</em> permissions User.Read.All and Group.Read.All (plus
+        GroupMember.ReadWrite.All for writes), admin-consented.
+      </div>
+      <div x-show="idp.auth_mode !== 'dashboard_azure'" class="space-y-2">
+        <label class="block text-sm font-medium text-gray-700" x-text="secretLabel()"></label>
+        <div class="flex gap-4 text-sm text-gray-700">
+          <label class="flex items-center gap-1"><input type="radio" value="vault" x-model="idp.cred"> Vault reference</label>
+          <label class="flex items-center gap-1"><input type="radio" value="ps" x-model="idp.cred"> Password Safe account</label>
+        </div>
+        <input x-show="idp.cred === 'vault'" x-model="idp.credentials_ref"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="bt_safe://Dashboard/okta-api-token">
+        <div x-show="idp.cred === 'ps'" class="space-y-1">
+          <div class="flex gap-2">
+            <input x-model="idp.ps_host" class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="Managed system host or name">
+            <button @click="idpLoadAccounts()" class="px-3 py-2 text-sm border border-gray-300 rounded-lg">Find</button>
+          </div>
+          <div x-show="idp.accountsLoading" class="text-xs text-gray-400">Looking up managed accounts…</div>
+          <div x-show="idp.accountsError" class="text-xs text-red-600" x-text="idp.accountsError"></div>
+          <select x-show="idp.systems.length" x-model="idp.accountKey" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">— select an account —</option>
+            <template x-for="s in idp.systems" :key="s.system_id">
+              <optgroup :label="`${s.name} (${s.ip})`">
+                <template x-for="a in s.accounts" :key="a.account_id">
+                  <option :value="`${s.system_id}:${a.account_id}:${a.name}`" x-text="a.name"></option>
+                </template>
+              </optgroup>
+            </template>
+          </select>
+        </div>
+      </div>
+      <label class="flex items-start gap-2 text-sm text-gray-700 p-3 bg-amber-50 rounded-lg">
+        <input type="checkbox" x-model="idp.writes_enabled" class="rounded text-blue-600 mt-0.5">
+        <span>Allow group-membership changes from the dashboard. Each add or remove is confirmed and
+          audited, and dynamic, synced and role-assignable groups are always refused.</span>
+      </label>
+      <div x-show="idp.error" class="text-sm text-red-600" x-text="idp.error"></div>
+      <div class="flex justify-end gap-2">
+        <button @click="idp.open = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+        <button @click="submitIdp()" :disabled="idp.saving"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg"
+                x-text="idp.saving ? 'Testing…' : 'Test and register'"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Browse a cloud identity provider -->
+  <div x-show="br.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="br.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-5xl p-6 space-y-3 max-h-[90vh] overflow-y-auto">
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <h3 class="text-lg font-semibold text-gray-800" x-text="br.dir?.name"></h3>
+          <div class="text-xs text-gray-500" x-text="(br.dir?.provider_label || '') + (br.dir?.writes_enabled ? ' · membership writes ON' : ' · read-only')"></div>
+        </div>
+        <button @click="br.open = false" class="px-3 py-1.5 text-sm border border-gray-300 rounded-lg">Close</button>
+      </div>
+      <div x-show="br.error" class="text-sm text-red-600" x-text="br.error"></div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="space-y-2">
+          <div class="flex gap-2">
+            <button @click="br.tab = 'groups'; brSearch()" class="text-xs px-3 py-1.5 rounded-lg border"
+                    :class="br.tab === 'groups' ? 'bg-blue-600 text-white border-blue-600' : 'border-gray-300 text-gray-600'">Groups</button>
+            <button @click="br.tab = 'users'; brSearch()" class="text-xs px-3 py-1.5 rounded-lg border"
+                    :class="br.tab === 'users' ? 'bg-blue-600 text-white border-blue-600' : 'border-gray-300 text-gray-600'">Users</button>
+            <input x-model="br.q" @keydown.enter="brSearch()" placeholder="Starts with…"
+                   class="flex-1 border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+            <button @click="brSearch()" class="text-xs px-3 py-1.5 rounded-lg border border-gray-300">Search</button>
+          </div>
+          <div x-show="br.loading" class="text-xs text-gray-400">Loading…</div>
+          <div class="border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-[55vh] overflow-y-auto">
+            <template x-for="it in br.items" :key="it.id">
+              <button @click="br.tab === 'groups' ? brOpenGroup(it) : brOpenUser(it)"
+                      class="w-full text-left px-3 py-2 hover:bg-gray-50"
+                      :class="(br.group?.id === it.id || br.user?.id === it.id) ? 'bg-blue-50' : ''">
+                <div class="text-sm text-gray-800" x-text="it.display_name || it.name || it.login"></div>
+                <div class="text-xs text-gray-400" x-text="br.tab === 'groups' ? (it.kind + (it.editable ? '' : ' · ' + it.editable_reason)) : (it.login + (it.enabled === false ? ' · disabled' : ''))"></div>
+              </button>
+            </template>
+            <div x-show="!br.loading && !br.items.length" class="px-3 py-4 text-xs text-gray-400 text-center">Nothing found.</div>
+          </div>
+          <button x-show="br.next" @click="brSearch(true)" class="text-xs text-blue-600 hover:underline">Load more</button>
+        </div>
+
+        <div class="space-y-2">
+          <template x-if="br.group">
+            <div class="space-y-2">
+              <div>
+                <div class="font-medium text-gray-800" x-text="br.group.name"></div>
+                <div class="text-xs" :class="br.group.editable ? 'text-gray-400' : 'text-amber-700'"
+                     x-text="br.group.editable ? br.group.kind + ' group' : 'Not editable here: ' + br.group.editable_reason"></div>
+              </div>
+              <div x-show="br.dir?.writes_enabled && br.group.editable" class="flex gap-2">
+                <input x-model="br.addQ" @keydown.enter="brAddSearch()" placeholder="Find a user to add…"
+                       class="flex-1 border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                <button @click="brAddSearch()" class="text-xs px-3 py-1.5 rounded-lg border border-gray-300">Find</button>
+              </div>
+              <template x-for="u in br.addResults" :key="u.id">
+                <div class="flex items-center justify-between text-sm px-3 py-1.5 bg-gray-50 rounded-lg">
+                  <span x-text="(u.display_name || u.login) + ' · ' + u.login"></span>
+                  <button @click="brAdd(u)" class="text-xs border border-gray-300 px-2 py-1 rounded-lg">Add</button>
+                </div>
+              </template>
+              <div class="text-xs font-medium text-gray-500 uppercase">Members</div>
+              <div class="border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-[45vh] overflow-y-auto">
+                <template x-for="m in br.members" :key="m.id">
+                  <div class="flex items-center justify-between px-3 py-2">
+                    <div>
+                      <div class="text-sm text-gray-800" x-text="m.display_name || m.login"></div>
+                      <div class="text-xs text-gray-400" x-text="(m.kind && m.kind !== 'user' ? m.kind + ' · ' : '') + (m.login || m.email || '')"></div>
+                    </div>
+                    <button x-show="br.dir?.writes_enabled && br.group.editable && (!m.kind || m.kind === 'user')"
+                            @click="brRemove(m)" class="text-xs border border-red-200 text-red-600 px-2 py-1 rounded-lg">Remove</button>
+                  </div>
+                </template>
+                <div x-show="!br.members.length" class="px-3 py-4 text-xs text-gray-400 text-center">No members.</div>
+              </div>
+              <button x-show="br.membersNext" @click="brMoreMembers()" class="text-xs text-blue-600 hover:underline">More members</button>
+            </div>
+          </template>
+          <template x-if="br.user">
+            <div class="space-y-2">
+              <div>
+                <div class="font-medium text-gray-800" x-text="br.user.display_name || br.user.login"></div>
+                <div class="text-xs text-gray-400" x-text="br.user.login + (br.user.email ? ' · ' + br.user.email : '')"></div>
+              </div>
+              <div class="text-xs font-medium text-gray-500 uppercase">Groups</div>
+              <div class="border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-[45vh] overflow-y-auto">
+                <template x-for="g in br.userGroups" :key="g.id">
+                  <div class="px-3 py-2">
+                    <div class="text-sm text-gray-800" x-text="g.name"></div>
+                    <div class="text-xs text-gray-400" x-text="g.kind"></div>
+                  </div>
+                </template>
+                <div x-show="!br.userGroups.length" class="px-3 py-4 text-xs text-gray-400 text-center">No groups.</div>
+              </div>
+            </div>
+          </template>
+          <div x-show="!br.group && !br.user" class="text-sm text-gray-400 p-4">Pick a group or a user.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pin the Entitle integration that governs a directory -->
+  <div x-show="ent.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="ent.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-3 max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-semibold text-gray-800" x-text="'Entitle integration for ' + (ent.dir?.name || '')"></h3>
+      <p class="text-xs text-gray-500">Records which Entitle integration grants access to this directory, so
+        the page can say so. Nothing is created or changed in Entitle, and nothing is matched for you:
+        integrations whose application looks like this directory's kind are listed first.</p>
+      <div x-show="ent.loading" class="text-sm text-gray-400">Reading Entitle…</div>
+      <div x-show="ent.reason || ent.error" class="text-sm text-red-600" x-text="ent.reason || ent.error"></div>
+      <div class="border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-[50vh] overflow-y-auto" x-show="ent.items.length">
+        <template x-for="i in ent.items" :key="i.id">
+          <label class="flex items-start gap-2 px-3 py-2 text-sm">
+            <input type="radio" name="ent-pin" :value="i.id" x-model="ent.pick" class="mt-1">
+            <span>
+              <span class="text-gray-800" x-text="i.name || i.id"></span>
+              <span class="text-xs text-gray-400" x-text="' · ' + (i.application || 'unknown application')"></span>
+              <span x-show="i.suggested" class="text-xs text-blue-600"> · likely</span>
+            </span>
+          </label>
+        </template>
+      </div>
+      <div class="flex justify-between gap-2">
+        <button x-show="ent.dir?.entitle_integration_id" @click="pinEntitle('')" :disabled="ent.saving"
+                class="px-4 py-2 text-sm border border-red-200 text-red-600 rounded-lg">Unpin</button>
+        <span x-show="!ent.dir?.entitle_integration_id"></span>
+        <div class="flex gap-2">
+          <button @click="ent.open = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+          <button @click="pinEntitle(ent.pick)" :disabled="ent.saving || !ent.pick"
+                  class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg">Pin</button>
+        </div>
       </div>
     </div>
   </div>
@@ -534,6 +819,9 @@ function directoriesPage() {
     ext: { open: false },
     link: { open: false },
     cmds: { open: false, text: '', error: '' },
+    idp: { open: false, systems: [] }, idpOpts: {},
+    br: { open: false, items: [], members: [], userGroups: [], addResults: [] },
+    ent: { open: false, items: [] },
     agents: [],
 
     async init() {
@@ -543,7 +831,8 @@ function directoriesPage() {
       const q = new URLSearchParams(window.location.search);
       if (q.get('register') === '1') {
         const port = Number(q.get('port') || 0);
-        this.openOnprem({provider: q.get('provider') || 'onprem_ad', host: q.get('host') || '',
+        this.openOnprem({provider: q.get('provider') || 'onprem_ad', vendor: q.get('vendor') || '',
+                         host: q.get('host') || '',
                          port: port || null, use_ldaps: port !== 389, name: q.get('name') || '',
                          base_dn: q.get('base_dn') || '', agent_id: q.get('agent') || ''});
       }
@@ -551,10 +840,29 @@ function directoriesPage() {
     agentName(id) { const a = this.agents.find(x => x.id === id); return a ? a.name : ''; },
 
     openOnprem(prefill = {}) {
-      this.op = { open: true, provider: 'onprem_ad', agent_id: '', name: '', host: '', port: null,
+      this.op = { open: true, provider: 'onprem_ad', vendor: '', agent_id: '', name: '', host: '', port: null,
                   use_ldaps: true, base_dn: '', accountKey: '', systems: [], accountsLoading: false,
                   accountsError: '', saving: false, error: '', ...prefill };
       if (this.op.host) this.loadAccounts();
+    },
+    opVendorChanged() {
+      const o = this.op;
+      if (o.provider !== 'ldap' || o.vendor !== 'okta_ldap') return;
+      // Plain string handling rather than regex literals: the template lexer in
+      // tests/test_template_scripts.py reads a '//' inside a regex as a comment.
+      let org = (o.name || '').trim().toLowerCase();
+      const scheme = org.indexOf('://');
+      if (scheme >= 0) org = org.slice(scheme + 3);
+      org = org.split('/')[0];
+      for (const suffix of ['.ldap.okta.com', '.okta.com']) {
+        if (org.endsWith(suffix)) { org = org.slice(0, -suffix.length); break; }
+      }
+      const ok = org.length > 0 && org.length < 64 && org[0] !== '-' &&
+        [...org].every(ch => 'abcdefghijklmnopqrstuvwxyz0123456789-'.includes(ch));
+      if (!ok) return;
+      o.host = org + '.ldap.okta.com'; o.port = 636; o.use_ldaps = true;
+      o.base_dn = 'dc=' + org + ',dc=okta,dc=com';
+      this.loadAccounts();     // the host changed without a change event
     },
     async loadAccounts() {
       const o = this.op;
@@ -573,6 +881,7 @@ function directoriesPage() {
         await API.post('/api/directories/register-onprem', {
           provider: o.provider, name: o.name, host: o.host.trim(), port: o.port || 0,
           use_ldaps: !!o.use_ldaps, base_dn: o.base_dn, agent_id: o.agent_id,
+          vendor: o.provider === 'ldap' ? (o.vendor || '') : '',
           managed_account: { system_id: Number(systemId), account_id: Number(accountId),
                              account_name: nameParts.join(':') },
         });
@@ -663,6 +972,50 @@ function directoriesPage() {
       } catch (e) { this.psi.error = e.message; }
       finally { this.psi.loading = false; }
     },
+    psiKind(c) {
+      if (c.idp) return ({ entra_id: 'Entra ID', okta: 'Okta', pingone: 'PingOne' })[c.provider] || c.provider;
+      if (c.provider === 'ldap') return c.vendor === 'pingdirectory' ? 'PingDirectory' : 'LDAP';
+      return 'Active Directory';
+    },
+    async completeIdp(c) {
+      await this.openIdp();
+      const i = this.idp;
+      i.provider = c.provider;
+      this.idpProviderChanged();
+      const host = (c.host || '').toLowerCase();
+      if (c.provider === 'okta' && ['.okta.com', '.oktapreview.com', '.okta-emea.com', '.okta-gov.com']
+            .some(sfx => host.endsWith(sfx))) i.endpoint = 'https://' + host;
+      i.name = c.name || '';
+      i.cred = 'ps';
+      i.ps_host = c.host || c.name || '';
+      i.systems = [{ system_id: c.system_id, name: c.name, ip: c.host || '—',
+                     accounts: (c.accounts || []).map(a => ({ account_id: a.account_id, name: a.name })) }];
+      const a = (c.accounts || [])[0];
+      i.accountKey = a ? `${c.system_id}:${a.account_id}:${a.name}` : '';
+      this.psi.open = false;
+    },
+    async openEntitle(d) {
+      this.ent = { open: true, dir: d, items: [], loading: true, error: '', reason: '',
+                   pick: d.entitle_integration_id || '', saving: false };
+      try {
+        const r = await API.get(`/api/directories/${d.id}/entitle-candidates`);
+        this.ent.items = r.integrations || [];
+        this.ent.reason = r.reason || '';
+        this.ent.error = r.error || '';
+      } catch (e) { this.ent.error = e.message; }
+      finally { this.ent.loading = false; }
+    },
+    async pinEntitle(id) {
+      const e = this.ent;
+      e.saving = true; e.error = '';
+      try {
+        await API.put(`/api/directories/${e.dir.id}/entitle-integration`, { integration_id: id || '' });
+        e.open = false;
+        this.note(id ? 'Entitle integration pinned' : 'Entitle integration unpinned');
+        await this.load();
+      } catch (err) { e.error = err.message; }
+      finally { e.saving = false; }
+    },
     psiPicked() { return (this.psi.systems || []).filter(c => c._pick && c._agent && c._account); },
     async submitPsImport() {
       const p = this.psi;
@@ -679,6 +1032,164 @@ function directoriesPage() {
       } catch (e) { p.error = e.message; }
       finally { p.saving = false; }
     },
+    // ── Cloud identity providers ───────────────────────────────────────────
+    async openIdp() {
+      if (!this.idpOpts.providers) {
+        try { this.idpOpts = await API.get('/api/directories/idp/options'); } catch (e) { this.idpOpts = {}; }
+      }
+      this.idp = { open: true, provider: 'entra_id', auth_mode: 'client_secret', name: '',
+                   endpoint: '', tenant_id: '', client_id: '', key_id: '', cred: 'vault',
+                   credentials_ref: '', ps_host: '', accountKey: '', systems: [],
+                   accountsLoading: false, accountsError: '', writes_enabled: false,
+                   saving: false, error: '' };
+    },
+    idpModes() {
+      const p = (this.idpOpts.providers || []).find(x => x.id === this.idp.provider);
+      return p ? p.auth_modes : ({ entra_id: ['client_secret', 'dashboard_azure'],
+                                   okta: ['ssws', 'private_key_jwt'],
+                                   pingone: ['client_secret'] })[this.idp.provider] || [];
+    },
+    idpProviderChanged() {
+      const i = this.idp;
+      i.auth_mode = this.idpModes()[0] || '';
+      i.endpoint = i.provider === 'pingone' ? 'com' : '';
+    },
+    authModeLabel(m) {
+      return ({ client_secret: 'Client secret', dashboard_azure: "Dashboard's Azure identity",
+                ssws: 'API token', private_key_jwt: 'API Services app (private key)' })[m] || m;
+    },
+    secretLabel() {
+      return ({ ssws: 'API token', private_key_jwt: 'Private key (PEM)' })[this.idp.auth_mode] || 'Client secret';
+    },
+    credentialText(d) {
+      if (d.credential_kind === 'dashboard_azure') return "dashboard's Azure identity";
+      if (d.credential_kind === 'psmanaged') return 'Password Safe: ' + (d.bind_account || 'managed account');
+      if (d.credential_kind === 'vault') return 'vault reference';
+      return 'no credential';
+    },
+    async idpLoadAccounts() {
+      const i = this.idp;
+      i.systems = []; i.accountsError = '';
+      const h = (i.ps_host || '').trim();
+      if (!h) return;
+      i.accountsLoading = true;
+      try {
+        const r = await API.get('/api/config-mgmt/managed-accounts?host=' + encodeURIComponent(h) + '&name=' + encodeURIComponent(h));
+        i.systems = r.systems || [];
+        if (r.error) i.accountsError = r.error;
+      } catch (e) { i.accountsError = e.message; }
+      finally { i.accountsLoading = false; }
+    },
+    async submitIdp() {
+      const i = this.idp;
+      i.saving = true; i.error = '';
+      const body = { provider: i.provider, name: i.name.trim(), endpoint: (i.endpoint || '').trim(),
+                     tenant_id: i.tenant_id.trim(), client_id: i.client_id.trim(),
+                     auth_mode: i.auth_mode, writes_enabled: !!i.writes_enabled, options: {} };
+      if (i.provider === 'okta' && i.key_id.trim()) body.options.key_id = i.key_id.trim();
+      if (i.auth_mode !== 'dashboard_azure') {
+        if (i.cred === 'ps') {
+          const [systemId, accountId, ...nameParts] = (i.accountKey || '').split(':');
+          if (systemId && accountId) {
+            body.managed_account = { system_id: Number(systemId), account_id: Number(accountId),
+                                     account_name: nameParts.join(':') };
+          }
+        } else {
+          body.credentials_ref = i.credentials_ref.trim();
+        }
+      }
+      try {
+        const r = await API.post('/api/directories/register-idp', body);
+        i.open = false;
+        const warn = (r.test && (r.test.writes_missing || []).length && r.writes_enabled)
+          ? ' — note: writes need ' + r.test.writes_missing.join(', ') : '';
+        this.note(r.name + ' registered' + warn, warn ? 'error' : 'success');
+        await this.load();
+      } catch (e) { i.error = e.message; }
+      finally { i.saving = false; }
+    },
+    async testIdp(d) {
+      try {
+        const r = await API.post(`/api/directories/${d.id}/test`, {});
+        const extra = (r.writes_missing || []).length ? ' Writes would need: ' + r.writes_missing.join(', ') + '.' : '';
+        this.note(d.name + ': ' + r.detail + extra, r.ok ? 'success' : 'error');
+      } catch (e) { this.note(e.message, 'error'); }
+    },
+    async toggleWrites(d) {
+      const on = !d.writes_enabled;
+      if (on && !confirm(`Allow the dashboard to change group membership in ${d.name}? Each change is still confirmed and audited.`)) return;
+      try {
+        await API.patch(`/api/directories/${d.id}`, { writes_enabled: on });
+        this.note(d.name + (on ? ': membership writes allowed' : ': now read-only'));
+        await this.load();
+      } catch (e) { this.note(e.message, 'error'); }
+    },
+    openBrowse(d) {
+      this.br = { open: true, dir: d, tab: 'groups', q: '', items: [], next: '', loading: false,
+                  error: '', group: null, members: [], membersNext: '', user: null,
+                  userGroups: [], addQ: '', addResults: [] };
+      this.brSearch();
+    },
+    async brSearch(more = false) {
+      const b = this.br;
+      b.loading = true; b.error = '';
+      if (!more) { b.items = []; b.next = ''; }
+      const qs = new URLSearchParams({ q: b.q || '', cursor: more ? b.next : '' });
+      try {
+        const r = await API.get(`/api/directories/${b.dir.id}/${b.tab}?${qs}`);
+        b.items = more ? b.items.concat(r.items || []) : (r.items || []);
+        b.next = r.next || '';
+      } catch (e) { b.error = e.message; }
+      finally { b.loading = false; }
+    },
+    async brOpenGroup(g) {
+      const b = this.br;
+      b.user = null; b.group = g; b.members = []; b.membersNext = ''; b.addResults = []; b.error = '';
+      try {
+        const r = await API.get(`/api/directories/${b.dir.id}/groups/${encodeURIComponent(g.id)}/members`);
+        b.members = r.items || []; b.membersNext = r.next || '';
+      } catch (e) { b.error = e.message; }
+    },
+    async brMoreMembers() {
+      const b = this.br;
+      try {
+        const r = await API.get(`/api/directories/${b.dir.id}/groups/${encodeURIComponent(b.group.id)}/members?cursor=` + encodeURIComponent(b.membersNext));
+        b.members = b.members.concat(r.items || []); b.membersNext = r.next || '';
+      } catch (e) { b.error = e.message; }
+    },
+    async brOpenUser(u) {
+      const b = this.br;
+      b.group = null; b.user = u; b.userGroups = []; b.error = '';
+      try { b.userGroups = (await API.get(`/api/directories/${b.dir.id}/users/${encodeURIComponent(u.id)}/groups`)).items || []; }
+      catch (e) { b.error = e.message; }
+    },
+    async brAddSearch() {
+      const b = this.br;
+      b.addResults = [];
+      if (!(b.addQ || '').trim()) return;
+      try { b.addResults = ((await API.get(`/api/directories/${b.dir.id}/users?q=` + encodeURIComponent(b.addQ.trim()))).items || []).slice(0, 10); }
+      catch (e) { b.error = e.message; }
+    },
+    async brAdd(u) {
+      const b = this.br;
+      if (!confirm(`Add ${u.display_name || u.login} to ${b.group.name} in ${b.dir.name}? This changes the live directory.`)) return;
+      try {
+        await API.post(`/api/directories/${b.dir.id}/groups/${encodeURIComponent(b.group.id)}/members/${encodeURIComponent(u.id)}`, {});
+        this.note(`${u.display_name || u.login} added to ${b.group.name}`);
+        b.addResults = []; b.addQ = '';
+        await this.brOpenGroup(b.group);
+      } catch (e) { b.error = e.message; }
+    },
+    async brRemove(m) {
+      const b = this.br;
+      if (!confirm(`Remove ${m.display_name || m.login} from ${b.group.name} in ${b.dir.name}? This changes the live directory.`)) return;
+      try {
+        await API.del(`/api/directories/${b.dir.id}/groups/${encodeURIComponent(b.group.id)}/members/${encodeURIComponent(m.id)}`);
+        this.note(`${m.display_name || m.login} removed from ${b.group.name}`);
+        await this.brOpenGroup(b.group);
+      } catch (e) { b.error = e.message; }
+    },
+
     note(msg, type = 'success') { this.toast = msg; this.toastType = type; setTimeout(() => this.toast = '', 6000); },
     split(s) { return (s || '').split(',').map(x => x.trim()).filter(Boolean); },
 

@@ -3027,14 +3027,38 @@
               </p>
             </div>
             <div class="mb-3">
-              <label class="block text-sm font-medium text-gray-700 mb-1">Vault account group — Windows server RDP jumps</label>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Vault account group — Windows server jumps</label>
               <input type="text" x-model="panelCfg.pra_windows_vault_account_group_id"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                      placeholder="numeric id (optional)">
               <p class="text-xs text-gray-400 mt-1">
-                Where a Windows server build's administrator credential is vaulted for RDP
-                injection (Azure + AWS). Not used when Password Safe manages the account —
-                PRA then injects it through its Password Safe integration.
+                Where a Windows server build's administrator credential is vaulted for
+                injection into its Shell Jump and RDP jump (Azure, AWS, GCP). Not used when
+                Password Safe manages the account — PRA then injects it through its Password
+                Safe integration.
+              </p>
+            </div>
+            <div class="mb-3">
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" x-model="panelCfg.windows_ssh_enabled" class="rounded text-blue-600">
+                Windows servers: reach them over SSH (Shell Jump)
+              </label>
+              <p class="text-xs text-gray-400 mt-1">
+                A Windows build switches on OpenSSH Server at first boot and gets a Shell Jump
+                on port 22 that opens in PowerShell. Server 2019 and 2022 download OpenSSH from
+                Windows Update, so the VM needs outbound access. If OpenSSH does not come up,
+                the build gets an RDP jump instead, with a warning on the job. Unchecked, every
+                Windows build gets an RDP jump.
+              </p>
+            </div>
+            <div class="mb-3">
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" x-model="panelCfg.windows_rdp_default" class="rounded text-blue-600">
+                Windows servers: also create an RDP jump by default
+              </label>
+              <p class="text-xs text-gray-400 mt-1">
+                The default for the deploy form's <em>Also enable RDP</em> checkbox. Each deploy
+                can still change it.
               </p>
             </div>
             <div class="mb-3">
@@ -6799,7 +6823,7 @@
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
             Defaults for building directories and for joining Windows servers to them. Enable
-            or disable the feature with its toggle in the integrations list above.
+            or disable the feature with the Preview toggle.
             <a href="/docs/cloud/directories" target="_blank"
                class="text-blue-600 hover:text-blue-800 underline">Guide</a>.
           </p>
@@ -6822,6 +6846,13 @@
               <label class="block text-sm font-medium text-gray-700 mb-1">Default OU for joined servers</label>
               <input type="text" x-model="panelCfg.directory_join_default_ou"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="OU=Servers,DC=corp,DC=example,DC=com (blank = Computers)">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Identity provider page size</label>
+              <input type="number" min="1" max="200" x-model.number="panelCfg.directory_idp_page_size"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="50">
+              <p class="text-[11px] text-gray-400 mt-1">Users or groups per page when browsing an
+                Entra ID, Okta or PingOne directory.</p>
             </div>
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">GCP domain-join service account</label>
@@ -7737,8 +7768,6 @@ function settingsPage() {
         desc: 'Provision private managed databases (PostgreSQL, MySQL, SQL Server) on AWS, Azure and GCP, or register ones you already run — on-premises or in a cloud. PRA tunnel for the private ones.' },
       { key: 'k8s_management', label: 'Kubernetes',             hasConfig: true,  enabled: false,
         desc: 'Provision (EKS/AKS/GKE), register, and broker Kubernetes clusters — PRA tunnels + Entitle real-identity JIT.' },
-      { key: 'directories', label: 'Managed Active Directory', hasConfig: true,  enabled: false,
-        desc: 'Build AWS Managed Microsoft AD or GCP Managed AD, or register a directory that already exists, and join Windows servers on AWS and GCP to it at deploy. Directories bill around the clock and carry no auto-delete timer; one with joined servers cannot be destroyed.' },
       { key: 'cloud_functions', label: 'Cloud Functions',        hasConfig: true,  enabled: false,
         desc: 'Deploy a dashboard-authored handler as an AWS Lambda, an Azure Function App, or a GCP Cloud Run function — optionally attached to a VPC/VNet so it can reach private resources. Each gets a stable HTTPS endpoint protected by a shared bearer secret.' },
       { key: 'remote_agents', label: 'Remote Agents',           hasConfig: true,  enabled: false,
@@ -8382,7 +8411,6 @@ function settingsPage() {
           cloud_database: features.cloud_database,
           k8s_management: features.k8s_management,
           cloud_functions: features.cloud_functions,
-          directories: features.directories,
           // Miss an entry here and the toggle renders permanently OFF however the flag
           // is really set — silent, because nothing errors. Notifications was missing
           // one until now. Pinned by tests/test_settings_integrations.py.

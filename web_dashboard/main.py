@@ -1715,10 +1715,19 @@ async def job_detail_page(request: Request, job_id: str):
     return templates.TemplateResponse("jobs/detail.html", {"request": request, "job_id": job_id})
 
 
+def _windows_access_ctx() -> dict:
+    """Initial state of a deploy form's Windows RDP checkbox (services/windows_server_hook)."""
+    return {
+        "windows_ssh_enabled": config_service.get_bool("windows_ssh_enabled", True),
+        "windows_rdp_default": config_service.get_bool("windows_rdp_default", False),
+    }
+
+
 @app.get("/aws", response_class=HTMLResponse, include_in_schema=False,
          dependencies=[_profile_page_gate("cloud_pages")])
 async def aws_page(request: Request):
-    return templates.TemplateResponse("aws/index.html", {"request": request})
+    return templates.TemplateResponse("aws/index.html", {"request": request,
+                                                         **_windows_access_ctx()})
 
 
 @app.get("/azure", response_class=HTMLResponse, include_in_schema=False,
@@ -1730,13 +1739,15 @@ async def azure_page(request: Request):
         # Initial state of the Windows deploy form's Entra ID checkboxes.
         "entra_join_default": config_service.get_bool("azure_windows_entra_join", False),
         "entra_intune_default": config_service.get_bool("azure_windows_entra_intune_enroll", False),
+        **_windows_access_ctx(),
     })
 
 
 @app.get("/gcp", response_class=HTMLResponse, include_in_schema=False,
          dependencies=[_profile_page_gate("cloud_pages")])
 async def gcp_page(request: Request):
-    return templates.TemplateResponse("gcp/index.html", {"request": request})
+    return templates.TemplateResponse("gcp/index.html", {"request": request,
+                                                         **_windows_access_ctx()})
 
 
 @app.get("/oci", response_class=HTMLResponse, include_in_schema=False,

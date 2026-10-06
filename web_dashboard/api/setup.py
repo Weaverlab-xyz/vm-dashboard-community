@@ -247,7 +247,6 @@ class FeaturesSetup(BaseModel):
     cost_explorer_enabled: bool = False
     admission_control_enabled: bool = False
     cloud_database_enabled: bool = False
-    directories_enabled: bool = False
     k8s_management_enabled: bool = False
     cloud_functions_enabled: bool = False
     remote_agents_enabled: bool = False
@@ -579,7 +578,6 @@ def _apply_config(payload: SetupPayload) -> None:
         "cost_explorer_enabled":    "1" if payload.features.cost_explorer_enabled else "0",
         "admission_control_enabled": "1" if payload.features.admission_control_enabled else "0",
         "cloud_database_enabled":   "1" if payload.features.cloud_database_enabled else "0",
-        "directories_enabled":      "1" if payload.features.directories_enabled else "0",
         "k8s_management_enabled":   "1" if payload.features.k8s_management_enabled else "0",
         "cloud_functions_enabled":  "1" if payload.features.cloud_functions_enabled else "0",
         "remote_agents_enabled":    "1" if payload.features.remote_agents_enabled else "0",
@@ -1174,7 +1172,10 @@ class PRAFeatureConfig(BaseModel):
     # ref-counted clouddb-jumpoint VM or starts its own ACI container group. Editable
     # here so the choice is reversible without a redeploy. Batches always share one ACI.
     azure_vm_jumpoint_mode: str = "shared"
-    pra_windows_vault_account_group_id: str = ""   # Vault group for Windows server RDP jump credentials
+    pra_windows_vault_account_group_id: str = ""   # Vault group for Windows server jump credentials
+    # Windows server builds: Shell Jump over OpenSSH by default, RDP jump opt-in.
+    windows_ssh_enabled: bool = True
+    windows_rdp_default: bool = False
     # VM size for the managed shared Azure Gateway VM — same Web-Jump OOM story as
     # gcp_jumpoint_machine_type below: Standard_B1ms minimum, Standard_B2s preferred.
     # Blank keeps the config.py default (Standard_B2s). Changing it never resizes a
@@ -1916,14 +1917,16 @@ class OidcFeatureConfig(BaseModel):
 
 
 class DirectoriesFeatureConfig(BaseModel):
-    """Config panel for managed Active Directory (services/directory_service). The toggle
-    owns `directories_enabled` via `enabled`. The Password Safe keys for the directory
+    """Config panel for managed directories (services/directory_service). Config-only:
+    the PREVIEW toggle (_PREVIEW_FLAGS) owns `directories_enabled`, so `enabled` here is
+    carried only because every panel model has it. The Password Safe keys for the directory
     administrator live here rather than on the Password Safe panel because they only
     mean anything when this feature is on."""
     enabled: bool = False
     directory_aws_default_edition: str = "Standard"
     directory_gcp_reserved_ip_range: str = ""
     directory_join_default_ou: str = ""
+    directory_idp_page_size: int = 50
     gcp_domain_join_service_account: str = ""
     passwordsafe_directory_functional_account: str = ""
     passwordsafe_directory_change_password_on_register: bool = True
@@ -2221,7 +2224,7 @@ _FEATURE_MODELS = {
 # present, a job with no schedule behaves exactly as it always did, and an enable toggle
 # would be a switch with one position.
 _CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc", "worker",
-                         "cert_lab", "spire_lab",
+                         "cert_lab", "spire_lab", "directories",
                          "workload_credentials", "change_windows"}
 
 _SECRET_FEATURE_KEYS = frozenset({
@@ -2751,6 +2754,17 @@ _PREVIEW_FLAGS = {
     # but ADCS, AWS Private CA, GCP CAS and the Entra publishers can only be exercised
     # against a real authority, account or tenant. Off means the dashboard behaves exactly
     # as it did before, and no CA pool can be created to bill for.
+    # Preview because most of it has not run end to end against a live tenant: the AWS AD
+    # Connector, the GCP DNS link and the on-prem agent paths are covered by tests with
+    # stubbed clouds, and the Entra ID / Okta / PingOne providers by mocked HTTP only. Off
+    # means no page, no router and nothing that can bill.
+    "directories_enabled": (
+        "Directories",
+        "Preview. Build or register Active Directory domains for Windows servers on AWS "
+        "and GCP, register on-prem AD and LDAP directories reached through a remote "
+        "agent, and browse Entra ID, Okta and PingOne users and groups, with opt-in "
+        "group-membership changes. Managed AD bills around the clock and has no "
+        "auto-delete timer."),
     "cert_lab_enabled": (
         "Certificate Lab",
         "Preview. Build a private CA (GCP CAS or AWS Private CA) that can be destroyed "
@@ -2811,6 +2825,7 @@ _PREVIEW_FLAG_CONFIG = {
     "vdesktops_enabled": "vdesktops",
     "workload_credentials_enabled": "workload_credentials",
     "cert_lab_enabled": "cert_lab",
+    "directories_enabled": "directories",
     "spire_lab_enabled": "spire_lab",
 }
 

@@ -19,9 +19,9 @@ as [Databases](../databases.md) and [Kubernetes](../kubernetes.md):
 
 | Cloud | Provisioning | L1 PRA (Shell Jump) | L2 Password Safe | L3 Entitle |
 |---|---|---|---|---|
-| **AWS** | EC2 (Linux + Windows) | ✅ (Linux: Shell Jump; Windows: RDP jump) | ✅ `ssm` plugin (or `ssh`); Windows: password-managed | ✅ SSH ephemeral (Linux) |
-| **Azure** | VM (Linux + Windows) | ✅ (Linux: Shell Jump; Windows: RDP jump) | ✅ `azurevm` plugin (or `ssh`); Windows: password-managed | ✅ SSH ephemeral (Linux) |
-| **GCP** | GCE (Linux + Windows) | ✅ (Linux: Shell Jump; Windows: RDP jump) | ✅ `gcpvm` plugin (or `ssh`); Windows: password-managed | ✅ SSH ephemeral (Linux) |
+| **AWS** | EC2 (Linux + Windows) | ✅ (Shell Jump; Windows: RDP jump opt-in) | ✅ `ssm` plugin (or `ssh`); Windows: password-managed | ✅ SSH ephemeral (Linux) |
+| **Azure** | VM (Linux + Windows) | ✅ (Shell Jump; Windows: RDP jump opt-in) | ✅ `azurevm` plugin (or `ssh`); Windows: password-managed | ✅ SSH ephemeral (Linux) |
+| **GCP** | GCE (Linux + Windows) | ✅ (Shell Jump; Windows: RDP jump opt-in) | ✅ `gcpvm` plugin (or `ssh`); Windows: password-managed | ✅ SSH ephemeral (Linux) |
 | **OCI** | Compute (Linux) | ✅ (shared gateway, or bring your own¹) | ⚠️ `ssh` method only | ✅ SSH ephemeral |
 
 ¹ OCI has no dashboard-provisioned gateway — you supply your own (see the OCI section).
@@ -491,8 +491,8 @@ shared reference and lets `jumpoint_host_service` decide, or stops the ACI group
 sibling VM still references it.
 
 Windows is supported: the dashboard generates a local-admin password and stores it in
-Password Safe or a secret manager (never the dashboard database), and Windows VMs get an
-**RDP jump** rather than the SSH Shell Jump. They can also be joined to Entra ID — see
+Password Safe or a secret manager (never the dashboard database), and Windows VMs get a
+**Shell Jump over OpenSSH**, with an RDP jump on request. They can also be joined to Entra ID — see
 [Windows servers](#windows-servers).
 
 ### GCP (GCE)
@@ -612,8 +612,9 @@ Jump Group / Gateway resolution: per-deploy form `jump_group` / `jumpoint_name` 
 per-cloud override (`azure_bt_jump_group_name`/`azure_jumpoint_name`,
 `gcp_bt_jump_group_name`/`gcp_jumpoint_name`, `oci_bt_jump_group_name`/`oci_jumpoint_name`) →
 the `bt_*` defaults. AWS + Azure also accept a per-deploy `pra_credential_ref` (overrides
-`bt_client_secret`). **Windows VMs** (AWS and Azure) get a PRA **Remote RDP** jump item
-instead of a Shell Jump — see [Windows servers](#windows-servers).
+`bt_client_secret`). **Windows VMs** (AWS, Azure and GCP) get a Shell Jump over OpenSSH
+too, and a PRA **Remote RDP** jump item only on request — see
+[Windows servers](#windows-servers).
 
 The shared gateway host, deploy keys, and PRA OAuth setup are described in the
 [Privileged Remote Access](../integrations/beyondtrust/privileged-remote-access.md) doc.
@@ -664,9 +665,10 @@ doc. A separate **machine-identity JIT** track (the AWS `elevate()` wrapping of
 ## Windows servers
 
 Windows builds on **AWS, Azure and GCP** follow a different path from Linux after the VM
-exists: no SSH key, no Shell Jump, no Entitle SSH integration. In their place is the local
-administrator password, a PRA RDP jump, and a domain identity: an Entra ID join on Azure,
-or an [Active Directory join](directories.md) on AWS and GCP.
+exists: no SSH key and no Entitle SSH integration. In their place is the local
+administrator password, a PRA **Shell Jump over OpenSSH** (with an RDP jump only if you ask
+for one), and a domain identity: an Entra ID join on Azure, or an
+[Active Directory join](directories.md) on AWS and GCP.
 
 ### Where the administrator password goes
 
@@ -692,7 +694,9 @@ How the password comes into existence differs per cloud:
 - **AWS** lets EC2 generate it. The launch creates a one-time RSA key pair
   (`vmdash-win-<job>`), waits for `GetPasswordData` (usually 4–15 minutes; the job shows
   progress), decrypts the password in memory, stores it, and **deletes the key pair**. No
-  password or key material goes into UserData or SSM command history. An AMI that never
+  password or key material goes into UserData or SSM command history. (UserData does
+  carry the [OpenSSH bootstrap](#pra-jumps-ssh-by-default-rdp-on-request), which holds no
+  secret.) An AMI that never
   publishes a password (a custom image built without EC2Launch's random password) fails the
   deploy with that reason after 25 minutes.
 - **GCP** has no "get password" call. After the instance boots, the deploy writes a
@@ -735,18 +739,76 @@ local administrator is onboarded as a **password-managed** account (`method="pas
 Do not also enable **Windows LAPS** for the built-in administrator. Two rotators for one
 account will fight; pick one owner.
 
-### PRA RDP jump
+### PRA jumps: SSH by default, RDP on request
 
-With PRA enabled, each Windows VM gets a **Remote RDP** jump item in the cloud's Jump
-Group, through its Gateway, resolved the same way as the Linux Shell Jump.
+With PRA enabled, each Windows VM gets a **Shell Jump** on port 22 in the cloud's Jump
+Group, through its Gateway, resolved the same way as the Linux Shell Jump. The session
+opens in PowerShell. Tick **Also create an RDP jump** on the deploy form for a **Remote
+RDP** jump item as well. The checkbox defaults to `windows_rdp_default` (off).
+
+Every session goes through PRA, and neither jump needs Active Directory. Both log on as the
+VM's **local** administrator: OpenSSH resolves a bare username to the local account, and
+the RDP jump qualifies it as `.\user` so NLA falls back to NTLM. An Entra or AD sign-in is
+not required for either.
+
+**How OpenSSH is switched on.** The build runs a first-boot PowerShell script
+(`windows_server_hook.WINDOWS_SSH_BOOTSTRAP_PS1`). It installs the OpenSSH Server
+Feature-on-Demand, starts `sshd`, opens TCP 22 in Windows Firewall and makes PowerShell the
+login shell. It does **not** change RDP: not creating an RDP jump is what makes RDP
+optional. Each cloud delivers the script and reads back its one-line verdict
+(`VMDASH-SSHD:OK` or `VMDASH-SSHD:FAIL <reason>`) differently:
+
+| Cloud | Delivery | Result read from |
+|---|---|---|
+| AWS | EC2 UserData (`<powershell>`), run by EC2Launch | a status file, over Systems Manager. Needs `ssm_instance_profile` |
+| Azure | Run Command (`RunPowerShellScript`), after the VM is created | the Run Command output |
+| GCP | `windows-startup-script-ps1` metadata | serial port 1 |
+
+What happens next depends on the verdict:
+
+- **OK:** a Shell Jump, plus an RDP jump only if one was asked for.
+- **FAIL:** an RDP jump **instead** (`bt_rdp_fallback`), with the reason in
+  `windows_ssh_error` on the job.
+- **No verdict** (SSM never came online, say): both jumps, with a warning. The Shell Jump
+  may work; the RDP jump is the way in if it does not.
+
+**The SSH key is the Linux one.** The bootstrap also authorizes, for administrators, the
+same public key a Linux build of that cloud gets, read from the same secret: the AWS
+Secrets Manager key (`ssh_key_secret_override`, else the region's key secret), the Azure
+Key Vault keypair (`ssh_key_secret_override`, else `azure_ssh_keypair_secret_name`), or
+the GCP Secret Manager key (`ssh_key_secret_override`, else `gcp_ssh_key_secret_name`). It
+lands in `C:\ProgramData\ssh\administrators_authorized_keys`, restricted to Administrators
+and SYSTEM, which is the only file OpenSSH reads for an administrator. The deploy records
+the secret it used, so anything that holds that key's private half reaches the server
+exactly as it reaches a Linux VM. A missing or unreadable secret is a warning on the job
+(`windows_ssh_key_error`), and SSH still accepts the password.
+
+**Config Management reaches it the same way.** A run against a Windows cloud VM, on the
+local runner or on ECS, ACI or Cloud Run, connects over SSH with that key, as the
+administrator the deploy recorded (`Administrator`, the Azure admin user, or `gcpadmin`),
+and adds `-e ansible_connection=ssh -e ansible_shell_type=powershell`. Extra vars outrank a
+play's own `ansible_connection: winrm`, so the sample Windows playbooks run unchanged. The
+dashboard recognises a Windows VM from its deploy job; a VM it did not build is treated as
+Linux. On-prem Windows hosts behind a remote agent still use WinRM.
+
+Windows Server 2025 ships with OpenSSH installed. **Server 2019 and 2022 download it from
+Windows Update, so the VM needs outbound internet** (on GCP, `gcp_vm_nat_enabled`). The
+cloud firewall must allow 22 from the Gateway, as it already does for Linux VMs.
+
+Credential injection:
 
 - When Password Safe manages the account, **no PRA Vault copy** is made. PRA injects the
   current credential through its Password Safe integration, and a copy would go stale at
-  the first rotation.
+  the first rotation. The managed system's port is 22 when the Shell Jump is the only
+  jump, and 3389 when there is an RDP jump.
 - Otherwise the build-time password is vaulted in PRA for injection, in
-  `pra_windows_vault_account_group_id` if set.
+  `pra_windows_vault_account_group_id` if set: `<vm>-ssh-admin` for the Shell Jump and
+  `<vm>-admin` for the RDP jump. The Shell Jump's Terraform state is stored scrubbed of the
+  password.
 
-The jump and its Vault account are removed on destroy.
+Turn off **Windows servers: reach them over SSH** (`windows_ssh_enabled`) in Settings → PRA
+to go back to an RDP jump on every Windows build. The jumps and their Vault accounts are
+removed on destroy.
 
 ### Entra ID join (Azure only)
 

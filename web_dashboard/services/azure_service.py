@@ -2662,12 +2662,16 @@ def _is_run_command_busy(exc: Exception) -> bool:
 
 
 def _run_vm_command_sync(cred, sub_id: str, rg: str, vm_name: str,
-                         commands: list, timeout: int) -> dict:
+                         commands: list, timeout: int, powershell: bool = False) -> dict:
     compute = _get_compute(cred, sub_id)
+    # A Windows guest runs the lines as one PowerShell script, unwrapped: the exit-code
+    # trap is bash. Its caller reads its own sentinel off stdout instead.
+    run_input = (RunCommandInput(command_id="RunPowerShellScript", script=list(commands))
+                 if powershell else
+                 RunCommandInput(command_id="RunShellScript",
+                                 script=_run_command_script(commands)))
     try:
-        poller = compute.virtual_machines.begin_run_command(
-            rg, vm_name, RunCommandInput(command_id="RunShellScript",
-                                         script=_run_command_script(commands)))
+        poller = compute.virtual_machines.begin_run_command(rg, vm_name, run_input)
     except Exception as e:
         if _is_run_command_busy(e):
             raise _RunCommandBusy(str(e)) from e
@@ -2687,9 +2691,21 @@ def _run_vm_command_sync(cred, sub_id: str, rg: str, vm_name: str,
     return _finalize_run_result(stdout, stderr)
 
 
+async def vm_run_powershell(rg: str, vm_name: str, script: str, *,
+                            timeout: int = 600) -> dict:
+    """Run a PowerShell ``script`` in a Windows VM's guest via Run Command and wait.
+
+    Returns ``{status, response_code, stdout, stderr}`` like :func:`vm_run_command`, but
+    ``status`` / ``response_code`` carry no in-guest exit code (there is no bash trap on
+    Windows), so a caller decides success from what the script prints."""
+    return await vm_run_command(rg, vm_name, script.splitlines(), timeout=timeout,
+                                powershell=True)
+
+
 async def vm_run_command(rg: str, vm_name: str, commands: list, *,
                          timeout: int = 300,
-                         busy_timeout: int = _RUN_CMD_BUSY_WAIT) -> dict:
+                         busy_timeout: int = _RUN_CMD_BUSY_WAIT,
+                         powershell: bool = False) -> dict:
     """Run shell ``commands`` in a VM's guest via Azure VM Run Command and wait for
     the result. Returns ``{status, response_code, stdout, stderr}`` — the same shape
     as :func:`aws_service.ssm_send_command`: a non-Success status (or non-zero
@@ -2707,7 +2723,8 @@ async def vm_run_command(rg: str, vm_name: str, commands: list, *,
         try:
             cred, sub_id = await _ensure_creds()
             result = await _to_thread(
-                _run_vm_command_sync, cred, sub_id, rg, vm_name, commands, timeout)
+                _run_vm_command_sync, cred, sub_id, rg, vm_name, commands, timeout,
+                powershell)
             if waited:
                 logger.info("Azure Run Command on %s started after waiting out another "
                             "run command", vm_name)
@@ -3738,13 +3755,18 @@ async def list_aci_tasks(rg: str) -> list:
 _ANSIBLE_RUNNER_PREFIX = "ansible-runner"
 
 
+def _windows_ssh_args() -> str:
+    from . import ansible_vm_cmd
+    return ansible_vm_cmd.windows_ssh_args()
+
+
 def _run_aci_ansible_sync(
     cred, sub_id: str, rg: str, location: str, subnet_id: str,
     image: str, target_ip: str, ansible_user: str,
     playbook_b64: str, ssh_key_b64: str, job_id: str,
     acr_server: str = "", acr_username: str = "", acr_password: str = "",
     secret_entries: list | None = None, manifest_b64: str = "",
-    ps_env: dict | None = None,
+    ps_env: dict | None = None, windows: bool = False,
 ) -> tuple:
     """
     Create an ACI container group that runs a single Ansible playbook, wait for
@@ -3772,7 +3794,7 @@ def _run_aci_ansible_sync(
         "--forks 1 "
         f"-u {ansible_user} "
         "--private-key /tmp/ssh_key "
-        + _secret_ev +
+        + (_windows_ssh_args() if windows else "") + _secret_ev +
         "--ssh-extra-args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' "
         "/tmp/playbook.yml"
     )
@@ -3871,7 +3893,7 @@ async def run_aci_ansible_task(
     playbook_b64: str, ssh_key_b64: str, job_id: str,
     acr_server: str = "", acr_username: str = "", acr_password: str = "",
     secret_entries: list | None = None, manifest_b64: str = "",
-    ps_env: dict | None = None,
+    ps_env: dict | None = None, windows: bool = False,
 ) -> tuple:
     """
     Run an Ansible playbook inside the Azure VNet via ACI.
@@ -3884,7 +3906,7 @@ async def run_aci_ansible_task(
             cred, sub_id, rg, location, subnet_id, image,
             target_ip, ansible_user, playbook_b64, ssh_key_b64, job_id,
             acr_server, acr_username, acr_password,
-            secret_entries, manifest_b64, ps_env,
+            secret_entries, manifest_b64, ps_env, windows,
         )
     except AzureError:
         raise

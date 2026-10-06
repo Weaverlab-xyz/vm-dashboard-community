@@ -613,6 +613,7 @@ def _launch_instance_sync(
     workgroup: str = "",
     correlation_tag: str = "",
     key_name: str = "",
+    user_data: str = "",
 ) -> dict:
     ec2 = _get_ec2(region)
     tags = [
@@ -647,6 +648,9 @@ def _launch_instance_sync(
     if public_key:
         userdata = _build_userdata(public_key, os_type, region)
         kwargs["UserData"] = userdata  # boto3 base64-encodes blob types automatically
+    elif user_data:
+        # Windows: a caller-built <powershell> block (the OpenSSH bootstrap).
+        kwargs["UserData"] = user_data
     if iam_instance_profile:
         kwargs["IamInstanceProfile"] = _iam_instance_profile_ref(iam_instance_profile)
     if key_name:
@@ -777,6 +781,7 @@ async def launch_instance(
     workgroup: str = "",
     correlation_tag: str = "",
     key_name: str = "",
+    user_data: str = "",
 ) -> dict:
     """Launch a new EC2 instance and return its ID and initial state.
 
@@ -791,6 +796,8 @@ async def launch_instance(
     (cloud-identity JIT Phase 2).
     *key_name* attaches an EC2 key pair — used for Windows, where it is what
     makes the Administrator password retrievable (see get_windows_password).
+    *user_data* is Windows-only UserData (a ``<powershell>`` block), used when
+    there is no *public_key* to build the Linux cloud-init from.
     """
     try:
         return await _to_thread(
@@ -798,7 +805,7 @@ async def launch_instance(
             region, ami_id, instance_name, instance_type,
             public_key, subnet_id, security_group_ids,
             iam_instance_profile, os_type, workgroup,
-            correlation_tag, key_name,
+            correlation_tag, key_name, user_data,
         )
     except (ClientError, BotoCoreError) as e:
         msg = str(e)
@@ -3266,6 +3273,11 @@ async def list_ecs_tasks(region: str, cluster: str, include_stopped: bool = Fals
 
 # ── ECS Ansible runner ────────────────────────────────────────────────────────
 
+def _windows_args(windows: bool) -> str:
+    from . import ansible_vm_cmd
+    return ansible_vm_cmd.windows_ssh_args() if windows else ""
+
+
 def _run_ecs_ansible_sync(
     region: str,
     cluster: str,
@@ -3286,9 +3298,11 @@ def _run_ecs_ansible_sync(
     ps_env: dict | None = None,
     task_role_arn: str = "",
     runner_fetch: dict | None = None,
+    windows: bool = False,
 ) -> tuple:
     """Create an ECS Fargate task that runs one Ansible playbook, wait for it to
-    finish, retrieve CloudWatch logs, and return (exit_code, output)."""
+    finish, retrieve CloudWatch logs, and return (exit_code, output). ``windows``: the
+    target is a Windows server over OpenSSH (ansible_vm_cmd.WINDOWS_SSH_VARS)."""
     import time
     ecs = _get_ecs(region)
     logs_client = boto3.client("logs", **_aws_kwargs(region))
@@ -3313,7 +3327,7 @@ def _run_ecs_ansible_sync(
         + _secret_prefix +
         f"ansible-playbook -i '{target_ip},' --forks 1 "
         f"-u {ansible_user} --private-key /tmp/ssh_key "
-        + _secret_ev +
+        + _windows_args(windows) + _secret_ev +
         "--ssh-extra-args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' "
         "/tmp/playbook.yml"
     )
@@ -3455,6 +3469,7 @@ async def run_ecs_ansible_task(
     ps_env: dict | None = None,
     task_role_arn: str = "",
     runner_fetch: dict | None = None,
+    windows: bool = False,
 ) -> tuple:
     """Run an Ansible playbook via ECS Fargate. Returns (exit_code, output)."""
     try:
@@ -3463,7 +3478,7 @@ async def run_ecs_ansible_task(
             region, cluster, task_family, image, cpu, memory,
             subnet_id, security_group_ids, execution_role_arn,
             target_ip, ansible_user, playbook_b64, ssh_key_b64, job_id,
-            secret_entries, manifest_b64, ps_env, task_role_arn, runner_fetch,
+            secret_entries, manifest_b64, ps_env, task_role_arn, runner_fetch, windows,
         )
     except AWSError:
         raise

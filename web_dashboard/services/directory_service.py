@@ -19,6 +19,12 @@ Two ways a directory reaches the dashboard, the CloudDatabase / K8sCluster split
   one. No credential is stored or needed: joining a server authenticates through the
   cloud on both sides (SSM seamless join, GCE metadata join). Deleting it only forgets it.
 
+A third family has no domain controllers at all: **cloud identity providers** (Entra ID,
+Okta, PingOne), ``cloud="saas"``. :func:`register_idp` records one, and the browse and
+membership functions below hand the work to ``services/directory_idp``. They hold no
+credential either, only a vault ref or a Password Safe pointer, and group-membership
+writes stay off until an operator turns them on for that directory.
+
 Directories carry NO auto-delete timer by default: servers joined to one break when it
 goes. And :func:`start_decommission` refuses while any dashboard VM is still joined.
 """
@@ -68,8 +74,30 @@ PROVIDER_LABELS = {
     "gcp_vyos_link": "GCP VyOS site link (WireGuard)",
     "onprem_ad": "On-premises Active Directory",
     "ldap": "On-premises LDAP",
+    "entra_id": "Microsoft Entra ID",
+    "okta": "Okta",
+    "pingone": "PingOne",
 }
 ONPREM_PROVIDERS = ("onprem_ad", "ldap")
+IDP_PROVIDERS = ("entra_id", "okta", "pingone")    # == tuple(directory_idp.PROVIDERS)
+# LDAP servers a provider="ldap" row can name as its vendor.
+LDAP_VENDORS = {
+    "openldap": "OpenLDAP",
+    "pingdirectory": "PingDirectory",
+    "okta_ldap": "Okta LDAP Interface",
+    "389ds": "389 Directory Server",
+    "freeipa": "FreeIPA",
+}
+# rootDSE vendorName / Password Safe platform fragments → vendor. Checked in order.
+_VENDOR_RULES = (
+    ("pingdirectory", ("ping identity", "pingdirectory", "ping directory", "unboundid")),
+    ("okta_ldap", ("okta",)),
+    ("freeipa", ("freeipa", "red hat idm")),
+    ("389ds", ("389", "fedora project", "red hat directory server")),
+    ("openldap", ("openldap",)),
+)
+OKTA_LDAP_READONLY_PLAYBOOKS = ("ldap-search.yml",)
+IDP_CLOUD = "saas"
 _MANAGED_REF_PREFIX = "psmanaged:"
 _AWS_TYPES = {"MicrosoftAD": "aws_managed_ad", "ADConnector": "aws_ad_connector",
               "SimpleAD": "aws_simple_ad"}
@@ -139,7 +167,9 @@ def to_dict(row: ManagedDirectory) -> dict:
     """What the API returns. Never a credential — only where it lives."""
     return {
         "id": row.id, "name": row.name, "netbios": row.netbios, "cloud": row.cloud,
-        "provider": row.provider, "provider_label": PROVIDER_LABELS.get(row.provider, row.provider),
+        "provider": row.provider, "provider_label": _provider_label(row),
+        "vendor": row.vendor, "entitle_integration_id": row.entitle_integration_id,
+        "entitle_integration_name": row.entitle_integration_name,
         "source": row.source, "status": row.status, "edition": row.edition,
         "region": row.region, "locations": _jl(row.locations), "project": row.project,
         "directory_id": row.directory_id, "resource_name": row.resource_name,
@@ -159,6 +189,11 @@ def to_dict(row: ManagedDirectory) -> dict:
         # The account NAME only, so the page can say who the playbooks bind as.
         "bind_account": (_managed_ref_or_none(row) or {}).get("account_name"),
         "linked_directory_id": row.linked_directory_id,
+        # Cloud identity providers. The credential's KIND only, never the ref itself.
+        "endpoint": row.endpoint, "tenant_id": row.tenant_id, "client_id": row.client_id,
+        "auth_mode": row.auth_mode, "writes_enabled": bool(row.writes_enabled),
+        "credential_kind": _credential_kind(row),
+        "is_idp": row.provider in IDP_PROVIDERS,
         **({"site_link": _vyos().to_dict_extra(row)} if row.provider == "gcp_vyos_link" else {}),
     }
 
@@ -166,6 +201,19 @@ def to_dict(row: ManagedDirectory) -> dict:
 def _vyos():
     from . import vyos_link_service
     return vyos_link_service
+
+
+def _provider_label(row) -> str:
+    if row.provider == "ldap" and row.vendor in LDAP_VENDORS:
+        return LDAP_VENDORS[row.vendor]
+    return PROVIDER_LABELS.get(row.provider, row.provider)
+
+
+def _credential_kind(row) -> str:
+    if row.provider not in IDP_PROVIDERS:
+        return ""
+    from . import directory_idp
+    return directory_idp.credential_kind(row.credentials_ref or "", row.auth_mode or "")
 
 
 def list_directories(db: Session, workgroup: Optional[str] = None) -> list:
@@ -1053,32 +1101,64 @@ def _managed_ref_or_none(row) -> Optional[dict]:
         return None
 
 
+def okta_org(value: str) -> str:
+    """The Okta org name in ``acme``, ``acme.okta.com`` or ``acme.ldap.okta.com``."""
+    value = (value or "").strip().lower().rstrip(".")
+    value = re.sub(r"^[a-z]+://", "", value).split("/", 1)[0]
+    for suffix in (".ldap.okta.com", ".okta.com"):
+        if value.endswith(suffix):
+            value = value[:-len(suffix)]
+            break
+    return value if re.match(r"^[a-z0-9][a-z0-9-]{0,62}$", value) else ""
+
+
 def _normalize_onprem(*, name: str, provider: str, base_dn: str, host: str, port: int,
-                      use_ldaps: bool) -> tuple:
+                      use_ldaps: bool, vendor: str = "") -> dict:
     provider = (provider or "").strip().lower()
+    vendor = (vendor or "").strip().lower()
     name = (name or "").strip().lower().rstrip(".")
     base_dn = (base_dn or "").strip()
+    host = (host or "").strip()
     if provider == "onprem_ad" and _FQDN_RE.match(name):
         base_dn = base_dn or base_dn_for(name)
-    host = (host or "").strip()
+    if provider == "ldap" and vendor == "okta_ldap":
+        # Okta's LDAP Interface has one shape per org: LDAPS on 636 at
+        # <org>.ldap.okta.com, base DN dc=<org>,dc=okta,dc=com. Fill what was left blank.
+        org = okta_org(name) or okta_org(host)
+        if org:
+            host = host or f"{org}.ldap.okta.com"
+            base_dn = base_dn or f"dc={org},dc=okta,dc=com"
+            name = name or f"{org}.okta.com"
+        use_ldaps = True
+        port = port or 636
     port = int(port or (636 if use_ldaps else 389))
-    return provider, name, base_dn, host, port
+    return {"provider": provider, "name": name, "base_dn": base_dn, "host": host,
+            "port": port, "use_ldaps": bool(use_ldaps), "vendor": vendor}
 
 
 def onprem_problem(db: Session, *, name: str, provider: str, host: str, port: int = 0,
                    use_ldaps: bool = True, base_dn: str = "", agent_id: str,
-                   managed_account: dict) -> str:
+                   managed_account: dict, vendor: str = "") -> str:
     """Why an on-prem directory cannot be registered, or "" when it can.
 
     Returns rather than raises so a batch caller (the Password Safe import) can report
     each reason without turning an exception into response text."""
     from ..database import RemoteAgent
     from . import agent_service
-    provider, name, base_dn, host, port = _normalize_onprem(
-        name=name, provider=provider, base_dn=base_dn, host=host, port=port,
-        use_ldaps=use_ldaps)
+    n = _normalize_onprem(name=name, provider=provider, base_dn=base_dn, host=host,
+                          port=port, use_ldaps=use_ldaps, vendor=vendor)
+    provider, name, base_dn, host, port = (n["provider"], n["name"], n["base_dn"],
+                                           n["host"], n["port"])
     if provider not in ONPREM_PROVIDERS:
         return f"provider must be one of {', '.join(ONPREM_PROVIDERS)}"
+    if n["vendor"] and (provider != "ldap" or n["vendor"] not in LDAP_VENDORS):
+        return (f"vendor must be one of {', '.join(LDAP_VENDORS)}, and only for an LDAP "
+                f"directory")
+    if n["vendor"] == "okta_ldap":
+        if not (okta_org(name) or okta_org(host)):
+            return "an Okta LDAP Interface needs the org name, e.g. acme or acme.okta.com"
+        if port != 636 or not n["use_ldaps"]:
+            return "Okta's LDAP Interface is LDAPS on port 636 only"
     if provider == "onprem_ad" and not _FQDN_RE.match(name):
         return f"{name!r} is not a usable AD domain name (e.g. corp.example.com)"
     if provider == "ldap" and not (name and base_dn):
@@ -1105,7 +1185,7 @@ def onprem_problem(db: Session, *, name: str, provider: str, host: str, port: in
 def register_onprem(db: Session, *, name: str, provider: str, host: str, port: int = 0,
                     use_ldaps: bool = True, base_dn: str = "", agent_id: str,
                     managed_account: dict, created_by: str,
-                    workgroup: Optional[str] = None) -> ManagedDirectory:
+                    workgroup: Optional[str] = None, vendor: str = "") -> ManagedDirectory:
     """Record an on-prem AD or LDAP directory reached through a remote agent.
 
     The sibling of ``cloud_database_service.register_database`` with ``cloud='local'``:
@@ -1115,16 +1195,15 @@ def register_onprem(db: Session, *, name: str, provider: str, host: str, port: i
     and never stored here. Every refusal is :func:`onprem_problem`'s."""
     problem = onprem_problem(db, name=name, provider=provider, host=host, port=port,
                              use_ldaps=use_ldaps, base_dn=base_dn, agent_id=agent_id,
-                             managed_account=managed_account)
+                             managed_account=managed_account, vendor=vendor)
     if problem:
         raise DirectoryError(problem)
-    provider, name, base_dn, host, port = _normalize_onprem(
-        name=name, provider=provider, base_dn=base_dn, host=host, port=port,
-        use_ldaps=use_ldaps)
+    n = _normalize_onprem(name=name, provider=provider, base_dn=base_dn, host=host,
+                          port=port, use_ldaps=use_ldaps, vendor=vendor)
     row = ManagedDirectory(
-        name=name, cloud="local", provider=provider, source="registered",
-        status="available", agent_id=agent_id, host=host, port=port,
-        use_ldaps=bool(use_ldaps), base_dn=base_dn,
+        name=n["name"], cloud="local", provider=n["provider"], source="registered",
+        status="available", agent_id=agent_id, host=n["host"], port=n["port"],
+        use_ldaps=n["use_ldaps"], base_dn=n["base_dn"], vendor=n["vendor"] or None,
         credentials_ref=_MANAGED_REF_PREFIX + json.dumps({
             "system_id": managed_account["system_id"],
             "account_id": managed_account["account_id"],
@@ -1135,8 +1214,35 @@ def register_onprem(db: Session, *, name: str, provider: str, host: str, port: i
     db.commit()
     db.refresh(row)
     logger.info("directory: registered on-prem %s %s at %s:%s via agent %s",
-                provider, name, host, port, agent_id)
+                row.provider, row.name, row.host, row.port, agent_id)
     return row
+
+
+def vendor_for(vendor_name: str) -> str:
+    """An LDAP vendor key from a rootDSE ``vendorName`` (or a Password Safe platform
+    name), or "" when it is not one this dashboard treats differently."""
+    text = (vendor_name or "").lower()
+    for vendor, needles in _VENDOR_RULES:
+        if any(n in text for n in needles):
+            return vendor
+    return ""
+
+
+def run_refusal(row: ManagedDirectory, asset: str) -> str:
+    """Why this playbook may not run against this directory, or "".
+
+    Okta's LDAP Interface answers binds and searches only, so a write play would fail
+    halfway through its first task. Refusing it up front is a usability guard rather
+    than a security boundary: playbook filenames are operator-chosen, and Okta itself
+    rejects the write."""
+    if (row.vendor or "") == "okta_ldap":
+        base = os.path.basename((asset or "").replace("\\", "/"))
+        if base not in OKTA_LDAP_READONLY_PLAYBOOKS:
+            return (f"Okta's LDAP Interface is search-only, so {base or 'that playbook'} "
+                    f"cannot run against {row.name}. Use "
+                    f"{' or '.join(OKTA_LDAP_READONLY_PLAYBOOKS)}, or change users and "
+                    f"groups through the Okta identity provider instead.")
+    return ""
 
 
 def bind_identity(row: ManagedDirectory, account_name: str) -> str:
@@ -1200,5 +1306,251 @@ def unregister(db: Session, *, directory_id: str) -> None:
     if joined:
         raise DirectoryError(f"{row.name} still has joined server(s): "
                              f"{', '.join(sorted(joined)[:10])}")
+    if row.provider in IDP_PROVIDERS:
+        from . import directory_idp
+        directory_idp.forget(row.id)
     db.delete(row)
     db.commit()
+
+
+# ── Cloud identity providers (Entra ID, Okta, PingOne) ────────────────────────
+#
+# Registered, never built: the tenant already exists and the dashboard only reads it and,
+# when an operator opts in per directory, changes group membership. The provider calls
+# live in services/directory_idp; this section owns the row and the rules around it.
+
+_IDP_REQUIRED = {
+    "entra_id": ("tenant_id", "client_id"),
+    "okta": ("endpoint",),
+    "pingone": ("endpoint", "tenant_id", "client_id"),
+}
+
+
+def _idp_credentials_ref(credentials_ref: str, managed_account: Optional[dict]) -> str:
+    """The pointer to store: a vault ref as given, or a Password Safe pin in the same
+    ``psmanaged:`` shape the on-prem directories use."""
+    if managed_account and managed_account.get("system_id") and managed_account.get("account_id"):
+        return _MANAGED_REF_PREFIX + json.dumps({
+            "system_id": managed_account["system_id"],
+            "account_id": managed_account["account_id"],
+            "account_name": managed_account.get("account_name") or "",
+        }, sort_keys=True)
+    return (credentials_ref or "").strip()
+
+
+def _normalize_idp(provider: str, endpoint: str, tenant_id: str, client_id: str,
+                   auth_mode: str) -> tuple:
+    from .directory_idp import AUTH_MODES, okta
+    provider = (provider or "").strip().lower()
+    endpoint = (endpoint or "").strip()
+    if provider == "okta":
+        endpoint = okta.normalize_endpoint(endpoint) or endpoint
+    elif provider == "pingone":
+        endpoint = endpoint.lower().lstrip(".")
+    tenant_id = (tenant_id or "").strip().lower()
+    client_id = (client_id or "").strip()
+    modes = AUTH_MODES.get(provider, ())
+    auth_mode = (auth_mode or "").strip().lower() or (modes[0] if modes else "")
+    return provider, endpoint, tenant_id, client_id, auth_mode
+
+
+def _idp_duplicate(db: Session, provider: str, endpoint: str, tenant_id: str,
+                   exclude_id: str = "") -> str:
+    q = db.query(ManagedDirectory).filter(ManagedDirectory.provider == provider,
+                                          ManagedDirectory.status != "deleted")
+    if exclude_id:
+        q = q.filter(ManagedDirectory.id != exclude_id)
+    for other in q.all():
+        if provider == "okta":
+            same = (other.endpoint or "") == endpoint
+        else:
+            same = bool(tenant_id) and (other.tenant_id or "") == tenant_id and (
+                provider != "pingone" or (other.endpoint or "") == endpoint)
+        if same:
+            what = "org" if provider == "okta" else "tenant"
+            return (f"that {PROVIDER_LABELS[provider]} {what} is already registered as "
+                    f"{other.name}")
+    return ""
+
+
+def idp_problem(db: Session, *, provider: str, endpoint: str = "", tenant_id: str = "",
+                client_id: str = "", auth_mode: str = "", credentials_ref: str = "",
+                managed_account: Optional[dict] = None, options: Optional[dict] = None,
+                exclude_id: str = "") -> str:
+    """Why this identity provider cannot be registered, or "" when it can. Returns rather
+    than raises, like :func:`onprem_problem`, so a batch caller can report each reason."""
+    from .directory_idp import (AUTH_MODES, NO_SECRET_MODES, OPTION_KEYS, entra, okta,
+                                pingone, vault_prefixes)
+    provider, endpoint, tenant_id, client_id, auth_mode = _normalize_idp(
+        provider, endpoint, tenant_id, client_id, auth_mode)
+    if provider not in IDP_PROVIDERS:
+        return f"provider must be one of {', '.join(IDP_PROVIDERS)}"
+    label = PROVIDER_LABELS[provider]
+    if auth_mode not in AUTH_MODES[provider]:
+        return f"{label} signs in with {' or '.join(AUTH_MODES[provider])}"
+    required = list(_IDP_REQUIRED[provider])
+    if provider == "entra_id" and auth_mode == "dashboard_azure":
+        required = []          # both come from the dashboard's own Azure identity
+    if provider == "okta" and auth_mode == "private_key_jwt":
+        required.append("client_id")
+    given = {"endpoint": endpoint, "tenant_id": tenant_id, "client_id": client_id}
+    missing = [k for k in required if not given[k]]
+    if missing:
+        return f"{label} needs {', '.join(m.replace('_', ' ') for m in missing)}"
+    if provider == "entra_id" and tenant_id and not entra.valid_tenant(tenant_id):
+        return "the Entra tenant id must be a GUID (Entra admin center → Overview)"
+    if provider == "okta" and not okta.normalize_endpoint(endpoint):
+        return ("the Okta endpoint must be the org URL, https://<org>.okta.com (or "
+                "oktapreview.com / okta-emea.com / okta-gov.com) — the management API is "
+                "served there even with a custom sign-in domain")
+    if provider == "pingone":
+        if endpoint not in pingone.TLDS:
+            return f"the PingOne region must be one of {', '.join(pingone.TLDS)}"
+        if not pingone.valid_environment(tenant_id):
+            return "the PingOne environment id must be a UUID"
+    bad_opts = sorted(set(options or {}) - set(OPTION_KEYS[provider]))
+    if bad_opts:
+        return f"unknown {label} option(s): {', '.join(bad_opts)}"
+    if auth_mode not in NO_SECRET_MODES:
+        ref = _idp_credentials_ref(credentials_ref, managed_account)
+        prefixes = " ".join(vault_prefixes())
+        if not ref:
+            return (f"a credential is required: a Password Safe managed account, or a "
+                    f"vault reference ({prefixes}) — the dashboard never stores the "
+                    f"secret itself")
+        if not (ref.startswith(_MANAGED_REF_PREFIX) or ref.startswith(vault_prefixes())):
+            return f"the credential must be a vault reference ({prefixes}), not the secret itself"
+    return _idp_duplicate(db, provider, endpoint, tenant_id, exclude_id)
+
+
+async def register_idp(db: Session, *, provider: str, name: str = "", endpoint: str = "",
+                       tenant_id: str = "", client_id: str = "", auth_mode: str = "",
+                       credentials_ref: str = "", managed_account: Optional[dict] = None,
+                       options: Optional[dict] = None, writes_enabled: bool = False,
+                       created_by: str, workgroup: Optional[str] = None) -> tuple:
+    """Record a cloud identity provider after one successful sign-in and read.
+
+    The test runs BEFORE the commit, so a wrong secret or a missing consent fails here,
+    loudly, rather than leaving a row that errors on every browse. Returns
+    ``(row, test_result)``."""
+    import uuid
+    from urllib.parse import urlsplit
+    from . import directory_idp
+    problem = idp_problem(db, provider=provider, endpoint=endpoint, tenant_id=tenant_id,
+                          client_id=client_id, auth_mode=auth_mode,
+                          credentials_ref=credentials_ref, managed_account=managed_account,
+                          options=options)
+    if problem:
+        raise DirectoryError(problem)
+    provider, endpoint, tenant_id, client_id, auth_mode = _normalize_idp(
+        provider, endpoint, tenant_id, client_id, auth_mode)
+    row = ManagedDirectory(
+        id=str(uuid.uuid4()), name="", cloud=IDP_CLOUD, provider=provider,
+        source="registered", status="available", endpoint=endpoint,
+        tenant_id=tenant_id or None, client_id=client_id or None, auth_mode=auth_mode,
+        credentials_ref=(None if auth_mode in directory_idp.NO_SECRET_MODES
+                         else _idp_credentials_ref(credentials_ref, managed_account)),
+        options=json.dumps(options or {}, sort_keys=True),
+        writes_enabled=bool(writes_enabled),
+        workgroup=workgroup, created_by=created_by, expires_at=None)
+    try:
+        module, conn, header = await directory_idp.authorize(row, fresh=True)
+        if provider == "entra_id" and auth_mode == "dashboard_azure":
+            # The tenant is whichever one the dashboard's identity lives in; read it off
+            # the token rather than trusting a typed value.
+            from .azure_service import _jwt_claims
+            tid = str(_jwt_claims(header.split(" ", 1)[-1]).get("tid") or "").lower()
+            if tenant_id and tid and tid != tenant_id:
+                raise DirectoryError(
+                    f"the dashboard's Azure identity signs in to tenant {tid}, not "
+                    f"{tenant_id} — use a client secret from an app in that tenant")
+            row.tenant_id = tid or tenant_id or None
+            dup = _idp_duplicate(db, provider, "", row.tenant_id or "")
+            if dup:
+                raise DirectoryError(dup)
+        result = await module.test(conn, header)
+    except directory_idp.IdPError as exc:
+        raise DirectoryError(str(exc)) from exc
+    finally:
+        directory_idp.forget(row.id)
+    if not result.get("ok"):
+        raise DirectoryError(result.get("detail") or "the connection test failed")
+    default_name = ((urlsplit(endpoint).hostname or "") if provider == "okta"
+                    else f"{PROVIDER_LABELS[provider]} {(row.tenant_id or '')[:8]}")
+    row.name = ((name or "").strip() or default_name).strip()[:255]
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    logger.info("directory: registered %s %s (%s)", provider, row.name, row.id)
+    return row, result
+
+
+def update_idp(db: Session, row: ManagedDirectory, *, name: Optional[str] = None,
+               writes_enabled: Optional[bool] = None, credentials_ref: Optional[str] = None,
+               managed_account: Optional[dict] = None) -> ManagedDirectory:
+    """Rename, toggle membership writes, or repoint the credential. Repointing is
+    validated by :func:`idp_problem` like a registration."""
+    from . import directory_idp
+    _require_idp(row)
+    if credentials_ref is not None or managed_account:
+        problem = idp_problem(db, provider=row.provider, endpoint=row.endpoint or "",
+                              tenant_id=row.tenant_id or "", client_id=row.client_id or "",
+                              auth_mode=row.auth_mode or "",
+                              credentials_ref=credentials_ref or "",
+                              managed_account=managed_account, exclude_id=row.id)
+        if problem:
+            raise DirectoryError(problem)
+        if row.auth_mode not in directory_idp.NO_SECRET_MODES:
+            row.credentials_ref = _idp_credentials_ref(credentials_ref or "", managed_account)
+    if name is not None and name.strip():
+        row.name = name.strip()[:255]
+    if writes_enabled is not None:
+        row.writes_enabled = bool(writes_enabled)
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(row)
+    directory_idp.forget(row.id)
+    return row
+
+
+def _require_idp(row: ManagedDirectory) -> None:
+    if row.provider not in IDP_PROVIDERS:
+        raise DirectoryError(f"{row.name} is {PROVIDER_LABELS.get(row.provider, row.provider)},"
+                             f" not a cloud identity provider")
+
+
+async def idp_call(row: ManagedDirectory, fn: str, *args, **kwargs):
+    """A call to the provider, its errors as :class:`DirectoryError`."""
+    from . import directory_idp
+    _require_idp(row)
+    try:
+        return await directory_idp.call(row, fn, *args, **kwargs)
+    except directory_idp.IdPError as exc:
+        raise DirectoryError(str(exc)) from exc
+
+
+async def idp_test(row: ManagedDirectory) -> dict:
+    """Sign in afresh and read one user and one group."""
+    from . import directory_idp
+    _require_idp(row)
+    directory_idp.forget(row.id)
+    return await idp_call(row, "test")
+
+
+async def change_membership(row: ManagedDirectory, *, group_id: str, user_id: str,
+                            action: str) -> dict:
+    """Add a user to, or remove one from, a group. Refused unless the directory has
+    writes enabled and the provider says the group's members are its to change."""
+    if action not in ("add", "remove"):
+        raise DirectoryError("action must be add or remove")
+    _require_idp(row)
+    if not row.writes_enabled:
+        raise DirectoryError(f"group-membership writes are off for {row.name} — turn them "
+                             f"on for this directory first")
+    group = await idp_call(row, "get_group", group_id)
+    if not group.get("editable"):
+        raise DirectoryError(f"{group.get('name') or group_id} is {group['editable_reason']}")
+    fn = "add_member" if action == "add" else "remove_member"
+    out = await idp_call(row, fn, group["id"], user_id)
+    return {"group_id": group["id"], "group_name": group.get("name") or "",
+            "user_id": user_id, "action": action, "changed": bool(out.get("changed"))}

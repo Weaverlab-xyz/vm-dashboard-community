@@ -20,6 +20,24 @@ Managed Active Directory API (gated by ``directories_enabled``).
   POST   /api/directories/{id}/reset-admin-password
   DELETE /api/directories/{id}                  — destroy (built here) or unregister
 
+Cloud identity providers (Entra ID, Okta, PingOne):
+
+  GET    /api/directories/idp/options            — providers, auth modes, regions
+  POST   /api/directories/register-idp           — record one (signs in and reads first)
+  PATCH  /api/directories/{id}                   — rename, toggle writes, repoint credential
+  POST   /api/directories/{id}/test              — sign in afresh, read a user and a group
+  GET    /api/directories/{id}/users?q=&cursor=
+  GET    /api/directories/{id}/groups?q=&cursor=
+  GET    /api/directories/{id}/groups/{gid}/members
+  GET    /api/directories/{id}/users/{uid}/groups
+  POST   /api/directories/{id}/groups/{gid}/members/{uid}   — add (writes on, audited)
+  DELETE /api/directories/{id}/groups/{gid}/members/{uid}   — remove (writes on, audited)
+
+Entitle (any directory):
+
+  GET    /api/directories/{id}/entitle-candidates   — the tenant's integrations, likely first
+  PUT    /api/directories/{id}/entitle-integration  — pin one ({"integration_id": ""} unpins)
+
 The admin password route is ``directories:write`` and refuses (409) when Password Safe
 manages the account — the dashboard then holds no valid copy.
 
@@ -90,6 +108,7 @@ class RegisterOnpremRequest(BaseModel):
     agent_id: str
     managed_account: ManagedAccountRef
     workgroup: Optional[str] = None
+    vendor: str = ""                # LDAP only: openldap | pingdirectory | okta_ldap | …
 
 
 class RegisterRequest(BaseModel):
@@ -300,7 +319,7 @@ def register_onprem(req: RegisterOnpremRequest, db: Session = Depends(get_db),
             db, name=req.name, provider=req.provider, host=req.host, port=req.port,
             use_ldaps=req.use_ldaps, base_dn=req.base_dn, agent_id=req.agent_id,
             managed_account=req.managed_account.model_dump(), created_by=user.username,
-            workgroup=req.workgroup)
+            workgroup=req.workgroup, vendor=req.vendor)
     except DirectoryError as e:
         raise HTTPException(status_code=400, detail=str(e))
     job_service.log_audit(db, user.username, "directory_register_onprem",
@@ -451,7 +470,8 @@ async def ps_import(req: PSDirectoryImportRequest, db: Session = Depends(get_db)
             continue
         spec = dict(name=cand["name"], provider=cand["provider"], host=cand["host"],
                     port=cand["port"], use_ldaps=cand["use_ldaps"], base_dn=item.base_dn,
-                    agent_id=item.agent_id, managed_account=ref)
+                    agent_id=item.agent_id, managed_account=ref,
+                    vendor=cand.get("vendor") or "")
         # The reason comes from onprem_problem's return, never from an exception's text
         # (CodeQL py/stack-trace-exposure): the same checks register_onprem enforces.
         problem = directory_service.onprem_problem(db, **spec)
@@ -589,3 +609,223 @@ def delete_directory(directory_id: str, db: Session = Depends(get_db),
     job_service.log_audit(db, user.username, "directory_delete",
                           details={"directory": row.name, "source": row.source})
     return out
+
+
+# ── Cloud identity providers (Entra ID, Okta, PingOne) ────────────────────────
+#
+# Reads are directories:read; membership changes and editing the row are
+# directories:write, and the row must also have writes turned on (change_membership
+# refuses otherwise). Every change is audited with the tenant, group and user ids.
+
+class RegisterIdPRequest(BaseModel):
+    provider: str                   # entra_id | okta | pingone
+    name: str = ""
+    endpoint: str = ""              # Okta org URL | PingOne region TLD
+    tenant_id: str = ""             # Entra tenant | PingOne environment
+    client_id: str = ""
+    auth_mode: str = ""             # blank = the provider's first mode
+    credentials_ref: str = ""       # a vault ref, never the secret
+    managed_account: Optional[ManagedAccountRef] = None
+    options: dict = {}
+    writes_enabled: bool = False
+    workgroup: Optional[str] = None
+
+
+class UpdateIdPRequest(BaseModel):
+    name: Optional[str] = None
+    writes_enabled: Optional[bool] = None
+    credentials_ref: Optional[str] = None
+    managed_account: Optional[ManagedAccountRef] = None
+
+
+def _idp_or_404(db: Session, directory_id: str, user: User):
+    row = _row_or_404(db, directory_id, user)
+    if row.provider not in directory_service.IDP_PROVIDERS:
+        raise HTTPException(status_code=404, detail="not a cloud identity provider")
+    return row
+
+
+@router.get("/idp/options")
+def idp_options(user: User = Depends(require_explicit_permission("directories", "read"))):
+    from ..services import directory_idp
+    from ..services.directory_idp import pingone
+    return {
+        "providers": [{"id": p, "label": directory_service.PROVIDER_LABELS[p],
+                       "auth_modes": list(directory_idp.AUTH_MODES[p]),
+                       "options": list(directory_idp.OPTION_KEYS[p])}
+                      for p in directory_service.IDP_PROVIDERS],
+        "pingone_regions": list(pingone.TLDS),
+        "vault_prefixes": list(directory_idp.vault_prefixes()),
+    }
+
+
+@router.post("/register-idp")
+async def register_idp(req: RegisterIdPRequest, db: Session = Depends(get_db),
+                       user: User = Depends(require_explicit_permission("directories", "write"))):
+    if req.managed_account:
+        _require_secrets_use(user)
+    try:
+        row, result = await directory_service.register_idp(
+            db, provider=req.provider, name=req.name, endpoint=req.endpoint,
+            tenant_id=req.tenant_id, client_id=req.client_id, auth_mode=req.auth_mode,
+            credentials_ref=req.credentials_ref,
+            managed_account=req.managed_account.model_dump() if req.managed_account else None,
+            options=req.options, writes_enabled=req.writes_enabled,
+            created_by=user.username, workgroup=req.workgroup)
+    except DirectoryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    job_service.log_audit(db, user.username, "directory_register_idp",
+                          details={"provider": row.provider, "name": row.name,
+                                   "tenant_id": row.tenant_id, "endpoint": row.endpoint,
+                                   "writes_enabled": bool(row.writes_enabled)})
+    return {**directory_service.to_dict(row), "test": result}
+
+
+@router.patch("/{directory_id}")
+def update_idp(directory_id: str, req: UpdateIdPRequest, db: Session = Depends(get_db),
+               user: User = Depends(require_explicit_permission("directories", "write"))):
+    row = _idp_or_404(db, directory_id, user)
+    if req.managed_account:
+        _require_secrets_use(user)
+    try:
+        row = directory_service.update_idp(
+            db, row, name=req.name, writes_enabled=req.writes_enabled,
+            credentials_ref=req.credentials_ref,
+            managed_account=req.managed_account.model_dump() if req.managed_account else None)
+    except DirectoryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    job_service.log_audit(db, user.username, "directory_update_idp", details={
+        "directory": row.name, "provider": row.provider,
+        "writes_enabled": bool(row.writes_enabled),
+        "credential_changed": req.credentials_ref is not None or bool(req.managed_account)})
+    return directory_service.to_dict(row)
+
+
+@router.post("/{directory_id}/test")
+async def test_idp(directory_id: str, db: Session = Depends(get_db),
+                   user: User = Depends(require_explicit_permission("directories", "read"))):
+    row = _idp_or_404(db, directory_id, user)
+    try:
+        return await directory_service.idp_test(row)
+    except DirectoryError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+async def _idp_read(row, fn: str, *args):
+    try:
+        return await directory_service.idp_call(row, fn, *args)
+    except DirectoryError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/{directory_id}/users")
+async def idp_users(directory_id: str, q: str = "", cursor: str = "",
+                    db: Session = Depends(get_db),
+                    user: User = Depends(require_explicit_permission("directories", "read"))):
+    return await _idp_read(_idp_or_404(db, directory_id, user), "list_users", q, cursor)
+
+
+@router.get("/{directory_id}/groups")
+async def idp_groups(directory_id: str, q: str = "", cursor: str = "",
+                     db: Session = Depends(get_db),
+                     user: User = Depends(require_explicit_permission("directories", "read"))):
+    return await _idp_read(_idp_or_404(db, directory_id, user), "list_groups", q, cursor)
+
+
+@router.get("/{directory_id}/groups/{group_id}/members")
+async def idp_group_members(directory_id: str, group_id: str, cursor: str = "",
+                            db: Session = Depends(get_db),
+                            user: User = Depends(require_explicit_permission("directories", "read"))):
+    return await _idp_read(_idp_or_404(db, directory_id, user), "group_members",
+                           group_id, cursor)
+
+
+@router.get("/{directory_id}/users/{user_id}/groups")
+async def idp_user_groups(directory_id: str, user_id: str, db: Session = Depends(get_db),
+                          user: User = Depends(require_explicit_permission("directories", "read"))):
+    return await _idp_read(_idp_or_404(db, directory_id, user), "user_groups", user_id)
+
+
+async def _change_membership(directory_id, group_id, user_id, action, db, user):
+    row = _idp_or_404(db, directory_id, user)
+    try:
+        out = await directory_service.change_membership(row, group_id=group_id,
+                                                        user_id=user_id, action=action)
+    except DirectoryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    job_service.log_audit(db, user.username, f"directory_member_{action}", details={
+        "directory": row.name, "provider": row.provider, "tenant_id": row.tenant_id,
+        "endpoint": row.endpoint, "group_id": out["group_id"],
+        "group_name": out["group_name"], "user_id": user_id, "changed": out["changed"]})
+    return out
+
+
+@router.post("/{directory_id}/groups/{group_id}/members/{user_id}")
+async def idp_add_member(directory_id: str, group_id: str, user_id: str,
+                         db: Session = Depends(get_db),
+                         user: User = Depends(require_explicit_permission("directories", "write"))):
+    return await _change_membership(directory_id, group_id, user_id, "add", db, user)
+
+
+@router.delete("/{directory_id}/groups/{group_id}/members/{user_id}")
+async def idp_remove_member(directory_id: str, group_id: str, user_id: str,
+                            db: Session = Depends(get_db),
+                            user: User = Depends(require_explicit_permission("directories", "write"))):
+    return await _change_membership(directory_id, group_id, user_id, "remove", db, user)
+
+
+# ── Entitle: which integration governs this directory ─────────────────────────
+#
+# Pinned by an operator, never inferred. Read-only against Entitle: nothing is created
+# there, and the pin is only a label on this row.
+
+class EntitleLinkRequest(BaseModel):
+    integration_id: str = ""        # "" unpins
+
+
+@router.get("/{directory_id}/entitle-candidates")
+async def entitle_candidates(directory_id: str, db: Session = Depends(get_db),
+                             user: User = Depends(require_explicit_permission("directories", "write"))):
+    from ..services import entitle_directory_link as link
+    row = _row_or_404(db, directory_id, user)
+    if not link.configured():
+        return {"configured": False, "integrations": [],
+                "reason": "Entitle is not configured — set its API URL and token in "
+                          "Settings → Integrations → Entitle."}
+    try:
+        items = await link.list_integrations(row.provider)
+    except link.EntitleLinkError as e:
+        return {"configured": True, "integrations": [], "error": str(e)}
+    return {"configured": True, "integrations": items,
+            "pinned": row.entitle_integration_id or ""}
+
+
+@router.put("/{directory_id}/entitle-integration")
+async def pin_entitle_integration(directory_id: str, req: EntitleLinkRequest,
+                                  db: Session = Depends(get_db),
+                                  user: User = Depends(require_explicit_permission("directories", "write"))):
+    """Pin (or with "" unpin) the Entitle integration that governs this directory. The id
+    is checked against Entitle's own list, and the NAME recorded is Entitle's."""
+    from datetime import datetime
+    from ..services import entitle_directory_link as link
+    row = _row_or_404(db, directory_id, user)
+    wanted = (req.integration_id or "").strip()
+    name = ""
+    if wanted:
+        try:
+            items = await link.list_integrations(row.provider)
+        except link.EntitleLinkError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        found = next((i for i in items if i["id"] == wanted), None)
+        if not found:
+            raise HTTPException(status_code=400,
+                                detail="That integration is not in this Entitle tenant.")
+        name = found["name"]
+    row.entitle_integration_id = wanted or None
+    row.entitle_integration_name = name or None
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(row)
+    job_service.log_audit(db, user.username, "directory_entitle_pin", details={
+        "directory": row.name, "integration_id": wanted, "integration_name": name})
+    return directory_service.to_dict(row)

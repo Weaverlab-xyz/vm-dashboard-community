@@ -1064,6 +1064,22 @@
             </p>
           </div>
           {% endif %}
+          {% if windows_ssh_enabled %}
+          <!-- Windows: a Shell Jump over OpenSSH always; an RDP jump only on request -->
+          <div>
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="deployForm.enable_rdp" class="rounded text-blue-600">
+              Also create an RDP jump for this VM <span class="text-gray-400 font-normal">(Windows only)</span>
+            </label>
+            <p class="mt-1 text-xs text-gray-400 ml-6">
+              Windows servers get a PRA Shell Jump over OpenSSH (port 22, PowerShell), switched
+              on at first boot. Tick this for a Remote RDP jump as well. If OpenSSH does not
+              come up, the server gets an RDP jump anyway and the job says why.
+            </p>
+          </div>
+          {% else %}
+          <p class="text-xs text-gray-400">Windows servers get a PRA Remote RDP jump (SSH for Windows is off in Settings).</p>
+          {% endif %}
 
           <!-- BeyondTrust PRA options (optional per-deploy overrides) -->
           <div class="mb-4 space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
@@ -1400,6 +1416,22 @@
               directories in this region are listed.
             </p>
           </div>
+          {% endif %}
+          {% if windows_ssh_enabled %}
+          <!-- Windows: a Shell Jump over OpenSSH always; an RDP jump only on request -->
+          <div>
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="deployForm.enable_rdp" class="rounded text-blue-600">
+              Also create an RDP jump for this VM <span class="text-gray-400 font-normal">(Windows only)</span>
+            </label>
+            <p class="mt-1 text-xs text-gray-400 ml-6">
+              Windows servers get a PRA Shell Jump over OpenSSH (port 22, PowerShell), switched
+              on at first boot. Tick this for a Remote RDP jump as well. If OpenSSH does not
+              come up, the server gets an RDP jump anyway and the job says why.
+            </p>
+          </div>
+          {% else %}
+          <p class="text-xs text-gray-400">Windows servers get a PRA Remote RDP jump (SSH for Windows is off in Settings).</p>
           {% endif %}
 
           <!-- When to run. The bulk route has resolved a booking since the picker
@@ -2161,7 +2193,7 @@
         praCredBackend: '', pra_credential_ref: '',
         register_in_entitle: false,
         register_in_passwordsafe: false,
-        ad_directory_id: '', ad_ou: '',
+        ad_directory_id: '', ad_ou: '', enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
         ssh_key_secret_override: '',
         sshKeySecrets: [],
       },
@@ -2820,7 +2852,7 @@
           praCredBackend: '', pra_credential_ref: '',
           register_in_entitle: false,
           register_in_passwordsafe: false,
-          ad_directory_id: '', ad_ou: '',
+          ad_directory_id: '', ad_ou: '', enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
           ssh_key_secret_override: '',
           sshKeySecrets: [],
         };
@@ -2948,6 +2980,7 @@
             register_in_passwordsafe: this.deployForm.register_in_passwordsafe,
             ad_directory_id: this.deployForm.ad_directory_id || null,
             ad_ou: this.deployForm.ad_ou || '',
+            enable_rdp: !!this.deployForm.enable_rdp,
             ssh_key_secret_override: this.deployForm.ssh_key_secret_override || null,
             ...this.schedulePayload(),
           };
@@ -3125,6 +3158,7 @@
         this.deployForm.pra_credential_ref = '';
         this.deployForm.ad_directory_id = '';
         this.deployForm.ad_ou = '';
+        this.deployForm.enable_rdp = {{ 'true' if windows_rdp_default else 'false' }};
         this.loadAdDirs();
         this.deployForm.ssh_key_secret_override = '';
         this.showBulkDeployModal = true;
@@ -3194,6 +3228,7 @@
             register_in_passwordsafe: this.deployForm.register_in_passwordsafe,
             ad_directory_id: this.deployForm.ad_directory_id || null,
             ad_ou: this.deployForm.ad_ou || '',
+            enable_rdp: !!this.deployForm.enable_rdp,
             ssh_key_secret_override: this.deployForm.ssh_key_secret_override || null,
             ...this.schedulePayload(),
           });
