@@ -1,12 +1,18 @@
 """
-Managed Active Directory for Windows servers on AWS and GCP.
+Managed Active Directory for Windows servers on AWS, GCP and Azure.
 
-Entra ID join only exists for Windows on Azure VMs, so a Windows server on AWS or GCP
-gets its domain identity from Active Directory instead. Both clouds sell one:
+A Windows server gets its domain identity from Active Directory. All three clouds sell
+a managed one:
 
 * **AWS Directory Service** — Managed Microsoft AD (built here), plus AD Connector and
   Simple AD (discovered and registered, never built).
 * **GCP Managed Service for Microsoft Active Directory** — built or discovered.
+* **Microsoft Entra Domain Services** — built or discovered. Azure VMs can also join
+  Entra ID directly (windows_server_hook.entra_join_azure); Entra DS is for servers that
+  need Kerberos, LDAP or Group Policy. It has NO administrator of its own — admins are
+  Entra users in "AAD DC Administrators" — so instead of setting a password after the
+  build, an operator pins an existing such account (a Password Safe managed account) as
+  the domain-join account, and the dashboard never creates or changes a user.
 
 Two ways a directory reaches the dashboard, the CloudDatabase / K8sCluster split:
 
@@ -51,6 +57,7 @@ _REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."
 _TEMPLATE_DIRS = {
     "aws": os.path.join(_REPO_ROOT, "terraform", "directory", "aws_managed_ad"),
     "gcp": os.path.join(_REPO_ROOT, "terraform", "directory", "gcp_managed_ad"),
+    "azure": os.path.join(_REPO_ROOT, "terraform", "directory", "azure_managed_ad"),
 }
 # Modules chosen by provider rather than cloud: a cloud-side extension of an on-prem
 # directory, which runs no domain controllers of its own.
@@ -70,6 +77,7 @@ PROVIDER_LABELS = {
     "aws_ad_connector": "AWS AD Connector",
     "aws_simple_ad": "AWS Simple AD",
     "gcp_managed_ad": "GCP Managed Microsoft AD",
+    "azure_managed_ad": "Microsoft Entra Domain Services",
     "dns_link": "GCP DNS link to on-prem AD",
     "gcp_vyos_link": "GCP VyOS site link (WireGuard)",
     "onprem_ad": "On-premises Active Directory",
@@ -102,6 +110,7 @@ _MANAGED_REF_PREFIX = "psmanaged:"
 _AWS_TYPES = {"MicrosoftAD": "aws_managed_ad", "ADConnector": "aws_ad_connector",
               "SimpleAD": "aws_simple_ad"}
 AWS_EDITIONS = ("Standard", "Enterprise")
+AZURE_SKUS = ("Standard", "Enterprise", "Premium")
 
 # Shown on the build form so nobody builds one by accident. Approximate list prices for
 # the two domain controllers each option runs; the console is authoritative.
@@ -109,6 +118,9 @@ APPROX_MONTHLY_COST = {
     ("aws", "Standard"): "about $150–200/month",
     ("aws", "Enterprise"): "about $600/month",
     ("gcp", ""): "about $300/month per region",
+    ("azure", "Standard"): "about $110/month",
+    ("azure", "Enterprise"): "about $290/month",
+    ("azure", "Premium"): "about $1,170/month",
 }
 
 # An AD Connector proxies to on-prem domain controllers instead of running its own.
@@ -123,6 +135,7 @@ GCP_ADMIN_USER = "setupadmin"
 _FQDN_RE = re.compile(r"^(?=.{1,64}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 _NETBIOS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,14}$")
 _CIDR24_RE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.0/24$")
+_AZ_NAME_RE = re.compile(r"^[A-Za-z0-9._()-]{1,90}$")
 
 
 class DirectoryError(Exception):
@@ -140,6 +153,14 @@ def _cfg(key: str, default: str = "") -> str:
     from ..config import settings
     val = getattr(settings, key, None)
     return default if val in (None, "") else str(val)
+
+
+def _options(row) -> dict:
+    try:
+        out = json.loads(row.options or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return out if isinstance(out, dict) else {}
 
 
 def template_dir(cloud: str, provider: str = "") -> str:
@@ -242,7 +263,7 @@ def generate_admin_password(length: int = 24) -> str:
 
 # ── which VMs are joined ──────────────────────────────────────────────────────
 
-_DEPLOY_JOB_TYPES = ("ec2_deploy", "gce_deploy")
+_DEPLOY_JOB_TYPES = ("ec2_deploy", "gce_deploy", "azure_deploy")
 
 
 def joined_vms(db: Session, directory_id: str) -> list:
@@ -277,7 +298,10 @@ def provision(db: Session, *, cloud: str, name: str, created_by: str,
               subnet_ids: Optional[list] = None, project: str = "",
               locations: Optional[list] = None, reserved_ip_range: str = "",
               networks: Optional[list] = None, register_in_passwordsafe: bool = False,
-              workgroup: Optional[str] = None) -> dict:
+              workgroup: Optional[str] = None, resource_group: str = "",
+              vnet_resource_group: str = "", vnet_name: str = "", subnet_cidr: str = "",
+              manage_vnet_dns: bool = False,
+              managed_account: Optional[dict] = None) -> dict:
     """Validate, record the directory and enqueue its build. Returns ``{directory_id, job_id}``.
 
     Everything that can be refused is refused here, before anything bills: an unknown
@@ -298,12 +322,19 @@ def provision(db: Session, *, cloud: str, name: str, created_by: str,
     if not acknowledge_cost:
         raise DirectoryError(
             "A managed directory runs two domain controllers around the clock "
-            f"({APPROX_MONTHLY_COST.get((cloud, edition or ('Standard' if cloud == 'aws' else '')), 'a standing monthly cost')}) "
+            f"({APPROX_MONTHLY_COST.get((cloud, edition or ('' if cloud == 'gcp' else 'Standard')), 'a standing monthly cost')}) "
             "and has no auto-delete timer. Confirm the cost to build it.")
-    try:
-        windows_admin_secret.resolve_backend(cloud)
-    except windows_admin_secret.WindowsSecretError as e:
-        raise DirectoryError(str(e)) from e
+    if cloud == "azure":
+        # No administrator password to store: Entra DS has no administrator of its own.
+        if register_in_passwordsafe:
+            raise DirectoryError(
+                "Entra Domain Services creates no administrator to onboard. Pin an existing "
+                "AAD DC Administrators account from Password Safe as its join account.")
+    else:
+        try:
+            windows_admin_secret.resolve_backend(cloud)
+        except windows_admin_secret.WindowsSecretError as e:
+            raise DirectoryError(str(e)) from e
 
     fields: dict = {}
     if cloud == "aws":
@@ -318,6 +349,12 @@ def provision(db: Session, *, cloud: str, name: str, created_by: str,
                 "Availability Zones — one domain controller goes in each.")
         fields = dict(edition=edition, region=region, vpc_id=vpc_id,
                       subnet_ids=json.dumps(subnet_ids), admin_username=AWS_ADMIN_USER)
+    elif cloud == "azure":
+        fields = _azure_build_fields(
+            edition=edition, region=region, resource_group=resource_group,
+            vnet_resource_group=vnet_resource_group, vnet_name=vnet_name,
+            subnet_cidr=subnet_cidr, manage_vnet_dns=manage_vnet_dns,
+            managed_account=managed_account)
     else:
         project = (project or "").strip() or _cfg("gcp_project") or _cfg("gcp_project_id")
         if not project:
@@ -344,7 +381,7 @@ def provision(db: Session, *, cloud: str, name: str, created_by: str,
 
     row = ManagedDirectory(
         name=name, netbios=netbios or None, cloud=cloud,
-        provider="aws_managed_ad" if cloud == "aws" else "gcp_managed_ad",
+        provider=f"{cloud}_managed_ad",
         source="provisioned", status="provisioning", workgroup=workgroup,
         created_by=created_by, expires_at=None, **fields)
     db.add(row)
@@ -623,6 +660,16 @@ def _tf_variables(row: ManagedDirectory, admin_password: str = "") -> dict:
         return {"project": row.project, "domain_name": row.name,
                 "dns_ips": _jl(row.dns_ips), "networks": _jl(row.networks),
                 "directory_row_id": row.id}
+    if row.cloud == "azure":
+        vnet_rg, _, vnet_name = (_jl(row.networks) or ["/"])[0].partition("/")
+        return {
+            "resource_group_name": row.project, "location": row.region,
+            "domain_name": row.name, "sku": row.edition or "Standard",
+            "vnet_resource_group": vnet_rg, "vnet_name": vnet_name,
+            "subnet_cidr": row.reserved_ip_range,
+            "manage_vnet_dns": bool(_options(row).get("manage_vnet_dns")),
+            "directory_row_id": row.id,
+        }
     if row.cloud == "aws":
         return {
             "region": row.region, "domain_name": row.name, "short_name": row.netbios or "",
@@ -646,6 +693,9 @@ def _read_outputs(row: ManagedDirectory, outputs: dict) -> None:
         return v.get("value") if isinstance(v, dict) and "value" in v else v
     if row.provider == "dns_link":
         row.resource_name = val("zone_name")
+    elif row.cloud == "azure":
+        row.resource_name = val("resource_name")
+        row.dns_ips = json.dumps(list(val("dns_ip_addresses") or []))
     elif row.cloud == "aws":
         row.directory_id = val("directory_id")
         row.dns_ips = json.dumps(list(val("dns_ip_addresses") or []))
@@ -683,6 +733,10 @@ async def set_admin_password(row: ManagedDirectory) -> str:
     import asyncio
     if row.source != "provisioned":
         raise DirectoryError("only a directory built here has its administrator managed here")
+    if row.cloud == "azure":
+        raise DirectoryError(
+            "Entra Domain Services has no administrator of its own: admins are Entra users "
+            "in AAD DC Administrators. Pin one from Password Safe as the join account.")
     if row.cloud == "aws":
         pw = generate_admin_password()
         await asyncio.to_thread(_aws_reset_admin_sync, row.region, row.directory_id, pw)
@@ -745,6 +799,10 @@ _BUILD_MILESTONES = {
              "Creating the domain controllers (20–45 min)…"),
             ("aws_directory_service_directory.ad: still creating", 40,
              "Creating the domain controllers (20–45 min)…")),
+    "azure": (("azurerm_active_directory_domain_service.ds: creating", 20,
+               "Creating the managed domain (45–60 min)…"),
+              ("azurerm_active_directory_domain_service.ds: still creating", 40,
+               "Creating the managed domain (45–60 min)…")),
     "gcp": (("google_active_directory_domain.ad: creating", 20,
              "Creating the managed domain (up to an hour)…"),
             ("google_active_directory_domain.ad: still creating", 40,
@@ -820,6 +878,15 @@ async def run_provision_apply(db: Session, *, directory_id: str, job_id: str) ->
     # credential is fixable with Reset admin password; a destroyed directory is not.
     notes = []
     password = ""
+    if row.cloud == "azure":
+        notes = azure_build_notes(row)
+        row.error_message = "; ".join(notes)[:2000]
+        row.updated_at = datetime.utcnow()
+        db.commit()
+        job_service.set_completed(db, job_id, result={
+            "directory_id": row.id, "name": row.name, "built": True,
+            "dns_ips": _jl(row.dns_ips), "warnings": notes})
+        return
     try:
         await broadcast_progress(job_id, 85, "Setting the administrator password…")
         password = await set_admin_password(row)
@@ -952,6 +1019,11 @@ async def reset_admin_password(db: Session, *, directory_id: str) -> dict:
     if row.provider in ("aws_ad_connector", "dns_link", "gcp_vyos_link"):
         raise DirectoryError(f"a {PROVIDER_LABELS[row.provider]} has no administrator of "
                              f"its own — its domain's administrators are on-premises")
+    if row.cloud == "azure":
+        raise DirectoryError(
+            "Entra Domain Services has no administrator password to reset: its admins are "
+            "Entra users, so reset theirs in Entra, or rotate the pinned join account in "
+            "Password Safe.")
     if row.status != "available":
         raise DirectoryError(f"{row.name} is {row.status}, not available")
     password = await set_admin_password(row)
@@ -1037,8 +1109,15 @@ async def discover(db: Session, *, cloud: str, region: str = "", project: str = 
         raw = await asyncio.to_thread(_gcp_list_sync, project)
         found = [_gcp_candidate(d, project) for d in raw]
         known = {r.resource_name for r in list_directories(db) if r.cloud == "gcp"}
+    elif cloud == "azure":
+        found = [_azure_candidate(d) for d in await _azure_list()]
+        known = {(r.resource_name or "").lower() for r in list_directories(db)
+                 if r.cloud == "azure"}
+        for c in found:
+            c["registered"] = c["identifier"].lower() in known
+        return found
     else:
-        raise DirectoryError(f"discovery covers aws and gcp, not {cloud!r}")
+        raise DirectoryError(f"discovery covers aws, gcp and azure, not {cloud!r}")
     for c in found:
         c["registered"] = c["identifier"] in known
     return found
@@ -1046,7 +1125,8 @@ async def discover(db: Session, *, cloud: str, region: str = "", project: str = 
 
 async def register(db: Session, *, cloud: str, identifier: str, created_by: str,
                    region: str = "", project: str = "",
-                   workgroup: Optional[str] = None) -> ManagedDirectory:
+                   workgroup: Optional[str] = None,
+                   managed_account: Optional[dict] = None) -> ManagedDirectory:
     """Record an existing directory. Re-reads it from the cloud rather than trusting the
     client's copy, and refuses one that is not usable yet. Writes nothing to the cloud."""
     found = await discover(db, cloud=cloud, region=region, project=project)
@@ -1058,6 +1138,9 @@ async def register(db: Session, *, cloud: str, identifier: str, created_by: str,
         raise DirectoryError(f"{match['name']} is already registered")
     if not match["joinable"]:
         raise DirectoryError(f"{match['name']} is {match['stage']}, not ready for joins")
+    if cloud == "azure":
+        return _register_azure(db, match, created_by=created_by, workgroup=workgroup,
+                               managed_account=managed_account)
     row = ManagedDirectory(
         name=match["name"], netbios=match.get("netbios"), cloud=cloud,
         provider=match["provider"], source="registered", status="available",
@@ -1072,6 +1155,24 @@ async def register(db: Session, *, cloud: str, identifier: str, created_by: str,
         dns_ips=json.dumps(match.get("dns_ips") or []),
         security_group_id=match.get("security_group_id"),
         admin_username=match.get("admin_username"),
+        workgroup=workgroup, created_by=created_by, expires_at=None)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def _register_azure(db: Session, match: dict, *, created_by: str,
+                    workgroup: Optional[str], managed_account: Optional[dict]):
+    m = re.search(r"/resourceGroups/([^/]+)/", match["identifier"], re.IGNORECASE)
+    row = ManagedDirectory(
+        name=match["name"], cloud="azure", provider="azure_managed_ad",
+        source="registered", status="available", edition=match.get("edition") or None,
+        region=match.get("region"), project=m.group(1) if m else None,
+        resource_name=match["identifier"], dns_ips=json.dumps(match.get("dns_ips") or []),
+        subnet_ids=json.dumps(match.get("subnet_ids") or []),
+        credentials_ref=_join_account_ref(managed_account) if managed_account else None,
+        admin_username=(managed_account or {}).get("account_name") or None,
         workgroup=workgroup, created_by=created_by, expires_at=None)
     db.add(row)
     db.commit()
@@ -1554,3 +1655,209 @@ async def change_membership(row: ManagedDirectory, *, group_id: str, user_id: st
     out = await idp_call(row, fn, group["id"], user_id)
     return {"group_id": group["id"], "group_name": group.get("name") or "",
             "user_id": user_id, "action": action, "changed": bool(out.get("changed"))}
+
+
+# ── Microsoft Entra Domain Services (Azure) ───────────────────────────────────
+#
+# Built from terraform/directory/azure_managed_ad or discovered through ARM. What makes it
+# different from AWS and GCP is the credential: there is no administrator to create or
+# reset. Admins are Entra users in the tenant's "AAD DC Administrators" group, so the
+# dashboard pins one existing account (a Password Safe managed account) as the JOIN
+# account, checks it out per join, and never creates a user or changes a group.
+
+ENTRA_DS_APP_ID = "2565bd9d-da50-47d4-8b85-4c97f669dc36"
+_AZURE_DS_API = "2021-05-01"
+_ARM = "https://management.azure.com"
+_GRAPH = "https://graph.microsoft.com"
+
+
+def _join_account_ref(managed_account: dict) -> str:
+    for key in ("system_id", "account_id"):
+        if not (managed_account or {}).get(key):
+            raise DirectoryError("the join account must be a Password Safe managed account "
+                                 "(system and account)")
+    return _MANAGED_REF_PREFIX + json.dumps({
+        "system_id": managed_account["system_id"],
+        "account_id": managed_account["account_id"],
+        "account_name": managed_account.get("account_name") or "",
+    }, sort_keys=True)
+
+
+def _azure_build_fields(*, edition: str, region: str, resource_group: str,
+                        vnet_resource_group: str, vnet_name: str, subnet_cidr: str,
+                        manage_vnet_dns: bool, managed_account: Optional[dict]) -> dict:
+    edition = edition or "Standard"
+    if edition not in AZURE_SKUS:
+        raise DirectoryError(f"SKU must be one of {', '.join(AZURE_SKUS)}")
+    resource_group = (resource_group or "").strip() or _cfg("azure_resource_group")
+    region = (region or "").strip() or _cfg("azure_location", "eastus")
+    vnet_resource_group = ((vnet_resource_group or "").strip()
+                           or _cfg("azure_vnet_resource_group") or resource_group)
+    vnet_name = (vnet_name or "").strip() or _cfg("azure_vnet_name")
+    subnet_cidr = (subnet_cidr or "").strip()
+    if not resource_group:
+        raise DirectoryError("a resource group is required (form or azure_resource_group)")
+    if not vnet_name:
+        raise DirectoryError(
+            "Entra Domain Services needs the VNet your Windows servers are on (or one "
+            "peered with it); it adds a dedicated subnet there.")
+    if not _CIDR24_RE.match(subnet_cidr):
+        raise DirectoryError(
+            "Entra Domain Services needs an unused /24 in that VNet for its dedicated "
+            "subnet, e.g. 10.0.250.0/24.")
+    for value in (resource_group, vnet_resource_group, vnet_name):
+        if not _AZ_NAME_RE.match(value):
+            raise DirectoryError(f"{value!r} is not a valid Azure resource group or VNet name")
+    return dict(
+        edition=edition, region=region, project=resource_group,
+        networks=json.dumps([f"{vnet_resource_group}/{vnet_name}"]),
+        reserved_ip_range=subnet_cidr,
+        credentials_ref=_join_account_ref(managed_account) if managed_account else None,
+        admin_username=(managed_account or {}).get("account_name") or None,
+        options=json.dumps({"manage_vnet_dns": bool(manage_vnet_dns)}))
+
+
+def azure_build_notes(row: ManagedDirectory) -> list:
+    """What an operator still has to do once a managed domain exists."""
+    notes = []
+    if not row.credentials_ref:
+        notes.append("no domain-join account is pinned yet — pick an AAD DC Administrators "
+                     "account from Password Safe before joining servers")
+    if not _options(row).get("manage_vnet_dns"):
+        notes.append("the VNet's DNS was left alone — point it (or a forwarder) at "
+                     + (", ".join(_jl(row.dns_ips)) or "the domain controllers")
+                     + " before joining servers")
+    notes.append("a cloud-only Entra user must change their password once before they can "
+                 "sign in to the managed domain")
+    return notes
+
+
+async def _arm_get(path: str, params: Optional[dict] = None) -> tuple:
+    """``(status, body)`` for a GET on ARM with the dashboard's Azure identity."""
+    import httpx
+    from . import azure_service
+    credential, _sub = await azure_service._ensure_creds()
+    token = await azure_service._arm_token(credential)
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(f"{_ARM}{path}", params=params or {},
+                                headers={"Authorization": f"Bearer {token}"})
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    return resp.status_code, body
+
+
+async def _graph_get(path: str) -> int:
+    """The HTTP status of a Graph GET with the dashboard's Azure identity."""
+    import httpx
+    from . import azure_service
+    credential, _sub = await azure_service._ensure_creds()
+    token = (await azure_service._to_thread(credential.get_token,
+                                            f"{_GRAPH}/.default")).token
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(f"{_GRAPH}{path}",
+                                headers={"Authorization": f"Bearer {token}"})
+    return resp.status_code
+
+
+async def _azure_subscription() -> str:
+    from . import azure_service
+    return await azure_service.subscription_id()
+
+
+async def _azure_list() -> list:
+    sub = await _azure_subscription()
+    status, body = await _arm_get(
+        f"/subscriptions/{sub}/providers/Microsoft.AAD/domainServices",
+        {"api-version": _AZURE_DS_API})
+    if status != 200:
+        raise DirectoryError(f"listing Entra Domain Services failed (HTTP {status})")
+    return list(body.get("value") or [])
+
+
+def _azure_candidate(d: dict) -> dict:
+    props = d.get("properties") or {}
+    replicas = props.get("replicaSets") or []
+    dns = [ip for rs in replicas for ip in (rs.get("domainControllerIpAddress") or [])]
+    stage = props.get("provisioningState") or ""
+    return {"cloud": "azure", "identifier": d.get("id") or "",
+            "name": (props.get("domainName") or "").lower(),
+            "provider": "azure_managed_ad", "stage": stage,
+            "joinable": stage == "Succeeded" and bool(dns),
+            "region": d.get("location") or "", "edition": props.get("sku") or "",
+            "dns_ips": dns,
+            "subnet_ids": [rs.get("subnetId") for rs in replicas if rs.get("subnetId")]}
+
+
+async def azure_preflight(db: Session) -> None:
+    """Refuse a build that would fail 45 minutes in, naming the fix. Nothing is changed:
+    registering the resource provider or creating the service principal is the
+    operator's call, so each refusal prints the command instead of running it."""
+    sub = await _azure_subscription()
+    status, body = await _arm_get(f"/subscriptions/{sub}/providers/Microsoft.AAD",
+                                  {"api-version": "2021-04-01"})
+    if status == 200 and (body.get("registrationState") or "") != "Registered":
+        raise DirectoryError(
+            "the Microsoft.AAD resource provider is not registered in this subscription — "
+            "run: az provider register --namespace Microsoft.AAD")
+    sp = await _graph_get(f"/v1.0/servicePrincipals(appId='{ENTRA_DS_APP_ID}')?$select=id")
+    if sp == 404:
+        raise DirectoryError(
+            "the Domain Services service principal is missing from the tenant — a Global "
+            f"Administrator runs: az ad sp create --id {ENTRA_DS_APP_ID}")
+    if sp != 200:
+        # 401/403: the dashboard's app has no Graph read permission, which is common and
+        # not an answer. Terraform reports the real error if the principal is missing.
+        logger.info("directory: could not check the Entra DS service principal (HTTP %s)", sp)
+    existing = await _azure_list()
+    if existing:
+        c = _azure_candidate(existing[0])
+        raise DirectoryError(
+            f"this subscription already has Entra Domain Services ({c['name'] or c['identifier']}) "
+            f"and a tenant may have only one — register it with Discover instead")
+
+
+def set_join_account(db: Session, row: ManagedDirectory,
+                     managed_account: Optional[dict]) -> ManagedDirectory:
+    """Pin (or with None clear) the account Azure VMs join an Entra DS domain as."""
+    if row.cloud != "azure":
+        raise DirectoryError(f"{row.name} needs no join account — joins on "
+                             f"{row.cloud} authenticate through the cloud")
+    if managed_account:
+        row.credentials_ref = _join_account_ref(managed_account)
+        row.admin_username = managed_account.get("account_name") or None
+    else:
+        row.credentials_ref = None
+        row.admin_username = None
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def join_identity(row: ManagedDirectory, account_name: str) -> str:
+    """Entra DS users sign in by their Entra UPN; a bare name gets the managed domain."""
+    name = (account_name or "").strip()
+    if name and "@" not in name and "\\" not in name:
+        return f"{name}@{row.name}"
+    return name
+
+
+async def azure_join_credential(row: ManagedDirectory) -> tuple:
+    """``(user, password)`` for one join, checked out of Password Safe just in time."""
+    from . import btapi_service
+    ref = _managed_ref_or_none(row)
+    if not ref:
+        raise DirectoryError(f"{row.name} has no domain-join account pinned — pick an AAD "
+                             f"DC Administrators account on the Directories page")
+    duration = int(_cfg("ansible_managed_request_duration_min", "60") or 60)
+    try:
+        _req, password = await btapi_service.get_ps_credential_with_request(
+            ref["system_id"], ref["account_id"], duration_min=duration)
+    except btapi_service.BTAPIError as exc:
+        raise DirectoryError(f"Password Safe checkout failed for {row.name}'s join "
+                             f"account") from exc
+    if not password:
+        raise DirectoryError(f"Password Safe returned an empty credential for {row.name}")
+    return join_identity(row, ref.get("account_name") or ""), password

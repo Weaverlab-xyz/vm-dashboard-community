@@ -1722,6 +1722,66 @@ async def enable_entra_login(rg: str, vm_name: str, location: str, *,
         raise AzureError(f"Entra ID join of {vm_name} failed: {e}") from e
 
 
+# Joins a Windows VM to an Active Directory domain (Entra Domain Services here) from
+# inside the guest, then reboots it. The password rides protectedSettings only, which
+# Azure encrypts to the VM and never returns on a GET.
+DOMAIN_JOIN_EXTENSION = "JsonADDomainExtension"
+
+
+def domain_join_settings(domain: str, user: str, ou: str = "") -> dict:
+    """The extension's public settings. Options 3 = join + create the computer account."""
+    settings = {"Name": domain, "User": user, "Restart": "true", "Options": "3"}
+    if ou:
+        settings["OUPath"] = ou
+    return settings
+
+
+def _join_domain_sync(cred, sub_id: str, rg: str, vm_name: str, location: str,
+                      settings: dict, password: str) -> dict:
+    from azure.mgmt.compute.models import VirtualMachineExtension
+    compute = _get_compute(cred, sub_id)
+    flattened = getattr(VirtualMachineExtension,
+                        "_VirtualMachineExtension__flattened_items", None)
+    type_kw = "type" if flattened and "type" in flattened else "type_properties_type"
+    ext = VirtualMachineExtension(
+        location=location,
+        publisher="Microsoft.Compute",
+        type_handler_version="1.3",
+        auto_upgrade_minor_version=True,
+        settings=settings,
+        protected_settings={"Password": password},
+        **{type_kw: DOMAIN_JOIN_EXTENSION},
+    )
+    poller = compute.virtual_machine_extensions.begin_create_or_update(
+        rg, vm_name, DOMAIN_JOIN_EXTENSION, ext)
+    deadline = time.monotonic() + _EXTENSION_TIMEOUT_S
+    while not poller.done():
+        if time.monotonic() > deadline:
+            raise AzureError(
+                f"{DOMAIN_JOIN_EXTENSION} on {vm_name} did not finish within "
+                f"{_EXTENSION_TIMEOUT_S // 60} min. The usual cause is the VNet's DNS not "
+                "resolving the domain, so the guest cannot find a domain controller.")
+        poller.wait(15)
+    res = poller.result()
+    return {"extension": DOMAIN_JOIN_EXTENSION,
+            "provisioning_state": getattr(res, "provisioning_state", None)}
+
+
+async def join_domain(rg: str, vm_name: str, location: str, *, domain: str, user: str,
+                      password: str, ou: str = "") -> dict:
+    """Install JsonADDomainExtension so the VM joins ``domain`` as ``user``."""
+    settings = domain_join_settings(domain, user, ou)
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await _to_thread(_join_domain_sync, cred, sub_id, rg, vm_name, location,
+                                settings, password)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"joining {vm_name} to {domain} failed: {type(e).__name__}: "
+                         f"{getattr(e, 'message', '') or str(e)}"[:800]) from e
+
+
 async def delete_role_assignment(scope: str, name: str) -> None:
     """Remove a role assignment made by :func:`ensure_role_assignment`. A 404 (already
     gone, or removed with its scope) is success."""

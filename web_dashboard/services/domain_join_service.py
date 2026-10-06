@@ -1,6 +1,6 @@
-"""Joining a Windows server to a managed Active Directory at deploy (AWS and GCP).
+"""Joining a Windows server to a managed Active Directory at deploy (AWS, GCP, Azure).
 
-Neither cloud needs a domain credential from the dashboard:
+AWS and GCP need no domain credential from the dashboard; Azure does:
 
 * **AWS** — Systems Manager's ``AWS-JoinDirectoryServiceDomain`` document runs on the
   instance and joins it through Directory Service (seamless domain join). It works for
@@ -12,6 +12,9 @@ Neither cloud needs a domain credential from the dashboard:
   first boot. The VM must run as a service account holding
   ``roles/managedidentities.domainJoin`` (``gcp_domain_join_service_account``) and sit in
   one of the domain's authorized networks.
+* **Azure** (Entra Domain Services) — the JsonADDomainExtension VM extension joins from
+  the guest, as the directory's pinned AAD DC Administrators account (checked out of
+  Password Safe per join). The VM's VNet DNS must resolve the domain.
 
 A failed join is a WARNING on the deploy job (``ad_join_error``), never a failed deploy:
 the local administrator still reaches the server. A server recorded as joined
@@ -108,6 +111,45 @@ async def join_aws(db: Session, job_id: str, *, row, ou: str, region: str,
         + (f": {detail}" if detail else "")
         + ". Check that the instance profile has AmazonSSMDirectoryServiceAccess and that "
           "the instance's VPC can reach the directory's DNS addresses.")
+
+
+async def join_azure(db: Session, job_id: str, *, row, ou: str, rg: str, vm_name: str,
+                     location: str, result: dict) -> None:
+    """Join an Azure VM to an Entra Domain Services domain with JsonADDomainExtension.
+
+    The one join here that needs a domain credential: Entra DS has no cloud-side join
+    API. The directory's pinned AAD DC Administrators account is checked out of Password
+    Safe for this join only, handed to the extension's protectedSettings, and dropped.
+    It is never written to ``result`` (the job's metadata) or logged."""
+    from . import azure_service, directory_service, job_service
+    result["ad_directory_id"] = row.id
+    result["ad_domain"] = row.name
+    if not directory_service._jl(row.dns_ips):
+        result["ad_join_error"] = (f"{row.name} has no domain controller addresses "
+                                   "recorded, so the VM cannot find them")
+        return
+    try:
+        user, password = await directory_service.azure_join_credential(row)
+    except directory_service.DirectoryError as e:
+        result["ad_join_error"] = str(e)
+        return
+    ou = _ou(ou)
+    try:
+        job_service.update_progress(db, job_id, 92, f"Joining {row.name}…")
+        await azure_service.join_domain(rg, vm_name, location, domain=row.name, user=user,
+                                        password=password, ou=ou)
+    except Exception as e:  # noqa: BLE001
+        result["ad_join_error"] = (
+            f"{e} — check that the VNet's DNS resolves {row.name} (its domain controllers "
+            f"are {', '.join(directory_service._jl(row.dns_ips))}) and that the join account "
+            f"is in AAD DC Administrators")
+        return
+    finally:
+        password = ""
+    result["ad_joined"] = True
+    if ou:
+        result["ad_ou"] = ou
+    job_service.update_progress(db, job_id, 94, f"Joined {row.name}; the VM is rebooting.")
 
 
 def gcp_join_metadata(row, ou: str = "") -> dict:

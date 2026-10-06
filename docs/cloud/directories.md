@@ -1,6 +1,6 @@
 # Managed Active Directory
 
-> **Audience:** operator · **Profile:** `demo` · **Read this when:** you want Windows servers on AWS or GCP joined to an Active Directory domain (built here, one you already run, or your on-premises domain), you want to manage an on-premises AD or LDAP directory through a remote agent, or you want to browse and change group membership in Entra ID, Okta or PingOne.
+> **Audience:** operator · **Profile:** `demo` · **Read this when:** you want Windows servers on AWS, GCP or Azure joined to an Active Directory domain (built here, one you already run, or your on-premises domain), you want to manage an on-premises AD or LDAP directory through a remote agent, or you want to browse and change group membership in Entra ID, Okta or PingOne.
 
 Part of [Cloud](../cloud.md).
 
@@ -8,15 +8,19 @@ Part of [Cloud](../cloud.md).
 features** in Settings (`directories_enabled`); its **Configure** link opens the settings
 panel. The page is `/directories`, under **Directories** in the nav.
 
-Entra ID join exists for Windows only on Azure VMs, and the dashboard does that directly
-(see [Windows servers](vms.md#windows-servers)). On AWS and GCP a Windows server gets its
-domain identity from Active Directory instead. Both clouds sell a managed one, and this
-feature can:
+A Windows server gets its domain identity from Active Directory. All three clouds sell a
+managed one, and this feature can:
 
-- **build** AWS Managed Microsoft AD or GCP Managed Service for Microsoft Active Directory;
+- **build** AWS Managed Microsoft AD, GCP Managed Service for Microsoft Active Directory,
+  or Microsoft Entra Domain Services on Azure;
 - **discover** a directory that already exists and **register** it. On AWS that includes
   AD Connector (a proxy to your on-premises AD) and Simple AD;
-- **join** a Windows server to one of them when it is deployed from the AWS or GCP page.
+- **join** a Windows server to one of them when it is deployed from the AWS, GCP or Azure
+  page.
+
+Azure VMs can also join **Entra ID** directly, without a domain
+(see [Windows servers](vms.md#windows-servers)). Entra Domain Services is for servers that
+need Kerberos, LDAP or Group Policy. A VM joins one or the other, not both.
 
 It also handles **on-premises** directories reached through a [remote agent](../remote-agents/enrolment.md):
 
@@ -39,6 +43,9 @@ A managed directory runs two domain controllers around the clock:
 | AWS Managed Microsoft AD, Standard | about $150–200/month |
 | AWS Managed Microsoft AD, Enterprise | about $600/month |
 | GCP Managed Microsoft AD | about $300/month per region |
+| Entra Domain Services, Standard | about $110/month |
+| Entra Domain Services, Enterprise | about $290/month |
+| Entra Domain Services, Premium | about $1,170/month |
 
 Check the cloud's pricing page for current figures. The build form makes you confirm the
 cost.
@@ -62,6 +69,8 @@ destroyed: deleting it on this page only forgets it.
 - **GCP:** domain name, project, region(s), an unused **/24** for the domain controllers
   (`directory_gcp_reserved_ip_range` is the default), and the **authorized VPC networks**
   your Windows servers are on. Building can take up to an hour.
+- **Azure:** see [Entra Domain Services](#entra-domain-services). Building takes 45–60
+  minutes.
 
 The build runs Terraform from `terraform/directory/aws_managed_ad` or
 `terraform/directory/gcp_managed_ad`, and records its state like every other dashboard
@@ -447,6 +456,64 @@ It reads `GET /public/v1/integrations` with the **Entitle** settings' API URL an
 The URL must be your tenant's region (for example `api.us.entitle.io`); a wrong region
 answers too, but with nobody's integrations. Pinning needs `directories:write` and is
 audited as `directory_entitle_pin`.
+
+## Entra Domain Services
+
+Azure's managed Active Directory. It differs from the AWS and GCP ones in one way that
+shapes everything else: **it has no administrator of its own.** Its admins are Entra users
+in the tenant's **AAD DC Administrators** group, and their passwords sync from Entra. The
+dashboard creates no user and changes no group, so there is no administrator password to
+store or reset.
+
+Instead, you pin a **join account**: an existing member of AAD DC Administrators, held in
+Password Safe as a managed account. Azure VMs join the domain as that account. Its password
+is checked out of Password Safe for each join, passed only to the VM extension's protected
+settings, and never stored by the dashboard or written to the job. Pin it on the build form,
+or later with **Join account** on the directory's row. Use the account's UPN
+(`joiner@contoso.com`) as the account name; a bare name gets the managed domain appended.
+
+**Before you build.** The build is refused, before anything is created, when:
+
+- the **Microsoft.AAD** resource provider is not registered in the subscription. Fix it
+  with `az provider register --namespace Microsoft.AAD`;
+- the **Domain Services service principal** is missing from the tenant. A Global
+  Administrator creates it with `az ad sp create --id 2565bd9d-da50-47d4-8b85-4c97f669dc36`.
+  The dashboard can only check this when its Azure app can read Graph; when it cannot, the
+  build goes ahead and Terraform reports a missing principal;
+- the subscription already has Entra Domain Services. A tenant may have only one, so
+  register the existing one with **Discover** instead. One in *another* subscription of the
+  same tenant cannot be seen from here, and the build then fails in Terraform.
+
+The dashboard runs none of those commands itself.
+
+**The build form** asks for:
+
+- the domain name, the SKU, the location and the resource group;
+- the VNet your Windows servers are on, with its resource group;
+- an **unused /24** in that VNet. The module adds a dedicated subnet there, with the
+  network security group Microsoft documents (5986 from the service's management plane,
+  3389 from Microsoft's support hosts, nothing else);
+- whether to **point the VNet's DNS at the domain controllers**. Joining needs the VNet to
+  resolve the domain, but this changes name resolution for every VM on that VNet, so it is
+  off unless you tick it. With it off, point the VNet's DNS (or a forwarder) at the domain
+  controller addresses shown on the row after the build.
+
+It runs Terraform from `terraform/directory/azure_managed_ad`.
+
+**After the build**, a cloud-only Entra user must change their password once before they
+can sign in to the managed domain: Entra only syncs the password hashes the domain needs
+when a password is set. Synced users need password-hash sync on in Entra Connect. The build
+job lists what is still to do.
+
+**Joining a VM.** On the Azure deploy form, a Windows image offers **Join Active
+Directory**. A directory with no join account is listed but cannot be picked. After the VM
+is created, the `JsonADDomainExtension` VM extension joins it, optionally into an OU, and
+the VM reboots. A failed join is a warning on the deploy job and the VM keeps its local
+administrator. A VM joins Entra ID or a managed AD domain, not both: picking a directory
+turns off **Join to Microsoft Entra ID**.
+
+**Reset admin password** is not offered: reset an admin's password in Entra, or rotate the
+join account in Password Safe.
 
 ## Settings
 

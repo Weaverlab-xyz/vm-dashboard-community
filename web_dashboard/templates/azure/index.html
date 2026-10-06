@@ -572,7 +572,8 @@
         <!-- Entra ID join (Windows only) -->
         <div x-show="deployModal.osType === 'Windows'" x-cloak>
           <label class="flex items-center gap-2 text-sm text-gray-700">
-            <input type="checkbox" x-model="deployModal.entra_join" class="rounded text-blue-600">
+            <input type="checkbox" x-model="deployModal.entra_join" class="rounded text-blue-600"
+                   :disabled="!!deployModal.ad_directory_id">
             Join to Microsoft Entra ID
           </label>
           <label x-show="deployModal.entra_join" class="mt-1 ml-6 flex items-center gap-2 text-xs text-gray-700">
@@ -585,6 +586,28 @@
             outbound HTTPS to Entra.
           </p>
         </div>
+        {% if directories_enabled %}
+        <!-- Managed AD join (Entra Domain Services; Windows only, not with Entra ID join) -->
+        <div x-show="deployModal.osType === 'Windows'" x-cloak>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Join Active Directory</label>
+          <select x-model="deployModal.ad_directory_id" @change="if (deployModal.ad_directory_id) deployModal.entra_join = false"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">Don't join</option>
+            <template x-for="d in adDirs" :key="d.id">
+              <option :value="d.id" :disabled="!d.join_ready"
+                      x-text="d.name + ' (' + d.provider_label + ')' + (d.join_ready ? '' : ' — no join account pinned')"></option>
+            </template>
+          </select>
+          <input x-show="deployModal.ad_directory_id" x-model="deployModal.ad_ou"
+                 class="mt-2 w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono"
+                 placeholder="OU (optional) — OU=AADDC Computers,DC=aadds,DC=contoso,DC=com">
+          <p class="mt-1 text-xs text-gray-400">
+            Joined after the VM is created by the JsonADDomainExtension, as the directory's pinned
+            join account (checked out of Password Safe for this join only); the VM reboots. Its VNet
+            must resolve the domain. A VM joins Entra ID or a managed AD domain, not both.
+          </p>
+        </div>
+        {% endif %}
         {% if windows_ssh_enabled %}
         <!-- Windows: a Shell Jump over OpenSSH always; an RDP jump only on request -->
         <div x-show="deployModal.osType === 'Windows'" x-cloak>
@@ -2325,9 +2348,11 @@ function azureDashboard() {
         entra_join: {{ 'true' if entra_join_default else 'false' }},
         enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
         entra_intune_enroll: {{ 'true' if entra_intune_default else 'false' }},
+        ad_directory_id: '', ad_ou: '',
         ssh_key_secret_override: '', sshKeySecrets: [],
         jump_group: '', jumpoint_name: '',
       };
+      this.loadAdDirs();
       await this.loadNetworkOpts();
       this.loadPraPickers();
       API.get('/api/azure/secrets/ssh-keys')
@@ -2380,6 +2405,13 @@ function azureDashboard() {
 
     // Bulk means one VM per selected image, so a batch can span both OS types.
     bulkHasLinux()   { return (this.bulkModal.osTypes || []).some(t => t !== 'Windows'); },
+    adDirs: [],
+    async loadAdDirs() {
+      {% if directories_enabled %}
+      try { this.adDirs = (await API.get('/api/directories/joinable?cloud=azure')).directories || []; }
+      catch (e) { this.adDirs = []; }
+      {% endif %}
+    },
     bulkHasWindows() { return (this.bulkModal.osTypes || []).some(t => t === 'Windows'); },
 
     async submitDeploy() {
@@ -2440,6 +2472,8 @@ function azureDashboard() {
           entra_join: m.osType === 'Windows' ? !!m.entra_join : null,
           enable_rdp: m.osType === 'Windows' ? !!m.enable_rdp : null,
           entra_intune_enroll: m.osType === 'Windows' ? !!(m.entra_join && m.entra_intune_enroll) : null,
+          ad_directory_id: m.osType === 'Windows' ? (m.ad_directory_id || null) : null,
+          ad_ou: m.osType === 'Windows' ? (m.ad_ou || '') : '',
           ssh_key_secret_override: m.ssh_key_secret_override || null,
           ...this.schedulePayload(),
         });
