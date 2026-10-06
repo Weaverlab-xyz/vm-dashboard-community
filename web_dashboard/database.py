@@ -2509,6 +2509,10 @@ class ManagedDirectory(Base):
     # link) points at the on-prem row it extends. Not a FK: unregistering the on-prem
     # row is refused while a link exists, and a dangling id reads as "on-prem row gone".
     linked_directory_id = Column(String(36), nullable=True, index=True)
+    # A VyOS site link's non-secret settings as JSON (services/vyos_link_service): zone,
+    # subnets, both WireGuard PUBLIC keys, the peer's addresses, and the Secret Manager
+    # id that holds the peer's private key. Never a secret.
+    link_config = Column(Text, nullable=True)
 
     # ── cloud identity providers (cloud="saas": entra_id | okta | pingone) ──────────
     # Reached over the provider's REST API from the dashboard itself, no agent. The
@@ -4761,6 +4765,8 @@ def init_db():
             "ALTER TABLE managed_directories ADD COLUMN vendor VARCHAR(32)",
             "ALTER TABLE managed_directories ADD COLUMN entitle_integration_id VARCHAR(64)",
             "ALTER TABLE managed_directories ADD COLUMN entitle_integration_name VARCHAR(255)",
+            # VyOS site links (vyos_link_service). NULL on every other row.
+            "ALTER TABLE managed_directories ADD COLUMN link_config TEXT",
             "CREATE INDEX ix_cloud_databases_expires_at ON cloud_databases(expires_at)",
             "ALTER TABLE k8s_clusters ADD COLUMN expires_at TIMESTAMP",
             "ALTER TABLE k8s_clusters ADD COLUMN expiry_warned_at TIMESTAMP",

@@ -43,6 +43,14 @@ RUN pip install --no-cache-dir \
         "requests-ntlm>=1.2.0" \
  && python -c "import winrm, requests_ntlm; print('pywinrm', winrm.__version__, 'OK')"
 
+# paramiko is the SSH backend ansible.netcommon.network_cli needs for network devices --
+# the VyOS plays (examples/playbooks/network/, and the VyOS site link's builtin peer
+# play). The upstream image ships vyos.vyos and ansible.netcommon but neither paramiko
+# nor ansible-pylibssh, so every network_cli play failed to connect. Pure Python, and
+# its dependencies publish musllinux wheels.
+RUN pip install --no-cache-dir "paramiko>=3.4" \
+ && python -c "import paramiko; print('paramiko', paramiko.__version__, 'OK')"
+
 # BeyondTrust Password Safe Ansible collections — back the in-playbook secret/managed-account
 # lookup + management examples (examples/playbooks/password-safe/). The lookup plugin runs on
 # the Ansible controller (this runner), so it lives here even for SSH/WinRM VM plays. The

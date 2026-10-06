@@ -151,6 +151,7 @@ egress:
 |---|---|---|---|
 | VPN + **AWS AD Connector** (built here) | A proxy to your DCs, with no DCs of its own | Small about $36, plus the VPN | No |
 | VPN + **GCP DNS link** (built here) | A DNS forwarding zone | about $0.20, plus the VPN | No |
+| **VyOS site link** + DNS link (built here, GCP) | One small VyOS VM; WireGuard to your VyOS | about $4–16, no managed VPN | No |
 | VPN only; servers join your DCs directly | Nothing | The VPN only | No |
 | VPN + one **read-only DC** (RODC) in the cloud | One small Windows VM | about $60, plus the VPN | Yes; changes still need the WAN |
 | VPN + your own writable DCs in the cloud | Two Windows VMs | about $150–250 with the VPN | Yes |
@@ -176,10 +177,52 @@ configures it:
 - A forward firewall lets the cloud networks reach the DCs on the AD ports only, and drops
   everything else.
 
-**VyOS at both ends** (a small cloud VM, about $8–13/month; the
+**VyOS at both ends** (a small cloud VM, about $4–16/month; the
 [network demo cell](../profiles/demo/net-demo-cell.md) image can serve) is the cheapest option. It is also a
 single point of failure in the cloud, so use it for labs and POVs, not for a domain that
-production servers depend on.
+production servers depend on. On GCP the dashboard builds that end for you:
+
+### A VyOS site link, built for you (GCP)
+
+Use **Connect GCP network (VyOS)** on a registered on-prem AD. It builds one small VyOS VM
+on GCP and a **WireGuard** tunnel to your on-prem VyOS 1.4 router:
+
+- **The cloud end, built and configured here.** `terraform/directory/gcp_vyos_peer` creates
+  the VM (`e2-small` about $12/month, or `e2-micro` for a lab), a static external IP (about
+  $3.65/month), a VPC route to the peer for each on-prem subnet, and firewall rules for
+  WireGuard (UDP 51820), SSH from the VPC, DNS, and WinRM from on-prem. The dashboard's GCP
+  Ansible runner then configures WireGuard, the routes and **DNS forwarding** for the domain
+  over SSH to the peer's internal address
+  ([`vyos-wireguard-peer.yml`](../../web_dashboard/services/builtin_playbooks/vyos-wireguard-peer.yml)).
+- **The on-prem end, done by you.** On your router run
+  `generate pki wireguard key-pair install interface wg0` and paste the **public** key into
+  the form. After the build, **On-prem commands** gives you the lines to paste back: the
+  tunnel address, the peer's public key and address, `persistent-keepalive 25`, and the
+  routes to the VPC. Your router dials out, so it needs no static IP and no inbound port.
+- **Keys.** Your router's private key never leaves it. The peer's key pair is generated
+  here; its private key is written to **GCP Secret Manager** and reaches the runner through
+  its secret-env channel only. It is never in instance metadata, Terraform state, the job
+  or the directory row. Destroy deletes it.
+- **Status means the tunnel works.** The link is `available` only after the peer pings a
+  domain controller through the tunnel. Until your end is up it is `awaiting_onprem`; paste
+  the commands, then use **Check link**, which re-applies the configuration and probes again.
+
+Then use **Extend to GCP** for a DNS link. It pre-fills the peer's internal address as the
+DNS server: the peer answers for the domain from inside the VPC, so Cloud DNS never has to
+reach on-prem itself. Joins then run as described below. Destroying the site link is refused
+while a DNS link resolves through it.
+
+What it needs:
+
+- the `vyos-cell` image baked from VyOS **1.4** with `VYOS_RUNNER_PUBKEY` set to the public
+  half of the GCP Ansible key (`gcp_ssh_key_secret_name`). See
+  [provisioners/net/README.md](../../provisioners/net/README.md);
+- the GCP Ansible runner with direct VPC egress into the peer's network, and Secret Manager
+  in the runner's project;
+- the runner image with paramiko (`chrweav/ansible-winrm` from this release), which
+  `network_cli` needs;
+- your on-prem firewall to allow the tunnel (`10.255.255.0/30`) and the VPC ranges to reach
+  the DCs on the AD ports below.
 
 The AD ports to allow from the cloud networks to the DCs:
 

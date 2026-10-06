@@ -40,6 +40,11 @@
 #                     password is an account nothing can log into — including the
 #                     Shell Jump. Bake the public half of the key pair your PRA
 #                     Gateway presents, or set VYOS_ADMIN_PASSWORD instead.
+#   VYOS_RUNNER_PUBKEY a SECOND public key for the same account, stored in its own slot
+#                     ('runner'). For the VyOS site link (docs/cloud/directories.md): the
+#                     public half of the GCP Ansible key (gcp_ssh_key_secret_name), so the
+#                     dashboard's Cloud Run runner can configure the peer while the PRA
+#                     Gateway's key stays in the 'default' slot. Default: unset.
 #   VYOS_ADMIN_PASSWORD  initial password for that account. Default: unset. Use it
 #                     when your Password Safe functional account rotates passwords
 #                     rather than keys; see README.md, "How the credential is managed".
@@ -69,6 +74,7 @@ set -eu
 
 VYOS_ADMIN_USER="${VYOS_ADMIN_USER:-adminuser}"
 VYOS_ADMIN_PUBKEY="${VYOS_ADMIN_PUBKEY:-}"
+VYOS_RUNNER_PUBKEY="${VYOS_RUNNER_PUBKEY:-}"
 VYOS_ADMIN_PASSWORD="${VYOS_ADMIN_PASSWORD:-}"
 VYOS_HOSTNAME="${VYOS_HOSTNAME:-vyos-cell}"
 VYOS_RULESET="${VYOS_RULESET:-BLOCKLIST}"
@@ -122,6 +128,24 @@ if [ -n "$VYOS_ADMIN_PUBKEY" ]; then
   esac
 fi
 
+RUNNER_TYPE=""
+RUNNER_BODY=""
+if [ -n "$VYOS_RUNNER_PUBKEY" ]; then
+  RUNNER_TYPE=$(echo "$VYOS_RUNNER_PUBKEY" | awk '{print $1}')
+  RUNNER_BODY=$(echo "$VYOS_RUNNER_PUBKEY" | awk '{print $2}')
+  case "$RUNNER_TYPE" in
+    ssh-rsa|ssh-dss|ssh-ed25519|ecdsa-sha2-*) ;;
+    *)
+      echo "[vyos-cell] FATAL: VYOS_RUNNER_PUBKEY is not an 'ssh-... AAAA... [comment]' line." >&2
+      exit 1
+      ;;
+  esac
+  if [ -z "$RUNNER_BODY" ]; then
+    echo "[vyos-cell] FATAL: VYOS_RUNNER_PUBKEY has no key body." >&2
+    exit 1
+  fi
+fi
+
 if [ -z "$VYOS_ADMIN_PUBKEY" ] && [ -z "$VYOS_ADMIN_PASSWORD" ]; then
   echo "[vyos-cell] WARNING: '$VYOS_ADMIN_USER' is being baked with NO key and NO password." >&2
   echo "[vyos-cell] Nothing will be able to log in as it -- the Shell Jump included." >&2
@@ -152,6 +176,10 @@ CFG=/tmp/vyos-cell-configure.sh
     # to go in as config or not at all.
     echo "set system login user '$VYOS_ADMIN_USER' authentication public-keys 'default' type '$PUBKEY_TYPE'"
     echo "set system login user '$VYOS_ADMIN_USER' authentication public-keys 'default' key '$PUBKEY_BODY'"
+  fi
+  if [ -n "$VYOS_RUNNER_PUBKEY" ]; then
+    echo "set system login user '$VYOS_ADMIN_USER' authentication public-keys 'runner' type '$RUNNER_TYPE'"
+    echo "set system login user '$VYOS_ADMIN_USER' authentication public-keys 'runner' key '$RUNNER_BODY'"
   fi
 
   # The baseline ruleset. Default-accept and empty on purpose: the cell is a demo

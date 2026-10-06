@@ -83,6 +83,12 @@
               <div x-show="d.is_idp && d.tenant_id" class="font-mono text-gray-400" x-text="d.tenant_id"></div>
               <div x-show="d.cloud === 'local'" class="text-gray-400" x-text="'via agent ' + (agentName(d.agent_id) || d.agent_id || '— none')"></div>
               <div x-show="(d.dns_ips || []).length" class="text-gray-400" x-text="'DNS ' + (d.dns_ips || []).join(', ')"></div>
+              <template x-if="d.site_link">
+                <div class="text-gray-400">
+                  <div x-show="d.site_link.peer_public_ip" x-text="'Peer ' + d.site_link.peer_public_ip + ' / ' + (d.site_link.peer_internal_ip || '')"></div>
+                  <div x-text="'Tunnel: ' + (d.site_link.tunnel || 'not checked') + (d.site_link.last_check ? ' · ' + d.site_link.last_check.slice(0, 16).replace('T', ' ') : '')"></div>
+                </div>
+              </template>
             </td>
             <td class="px-4 py-3">
               <span class="text-xs px-2 py-0.5 rounded-full"
@@ -126,6 +132,15 @@
               <button x-show="d.cloud === 'local' && d.provider === 'onprem_ad' && d.status === 'available'"
                       @click="openExtend(d, 'gcp')"
                       class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Extend to GCP</button>
+              <button x-show="d.cloud === 'local' && d.provider === 'onprem_ad' && d.status === 'available'"
+                      @click="openLink(d)"
+                      class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Connect GCP network (VyOS)</button>
+              <button x-show="d.provider === 'gcp_vyos_link' && d.site_link && d.site_link.peer_public_ip"
+                      @click="showCommands(d)"
+                      class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">On-prem commands</button>
+              <button x-show="d.provider === 'gcp_vyos_link' && ['awaiting_onprem', 'available', 'failed'].includes(d.status) && d.site_link && d.site_link.peer_internal_ip"
+                      @click="checkLink(d)"
+                      class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Check link</button>
               <button x-show="d.source !== 'registered' && d.status === 'available' && d.admin_password_custody !== 'passwordsafe_managed' && d.provider !== 'aws_ad_connector'"
                       @click="resetPassword(d)"
                       class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Reset admin password</button>
@@ -410,6 +425,66 @@
         <button @click="ext.open = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
         <button @click="submitExtend()" :disabled="ext.saving || (ext.cloud === 'aws' && !ext.ack)"
                 class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg">Build</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- VyOS site link to GCP -->
+  <div x-show="link.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="link.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6 space-y-3 max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-semibold text-gray-800">Connect <span class="font-mono" x-text="link.dir?.name"></span> to a GCP network</h3>
+      <p class="text-xs text-gray-500">Builds one small <strong>VyOS VM</strong> on GCP (e2-small about $12/month,
+        plus a static IP about $3.65/month) and a <strong>WireGuard</strong> tunnel to your on-prem VyOS router. Your
+        router dials out to it, so it needs no static IP and no inbound port. The VPC routes your on-prem subnets to the
+        peer, and the peer answers DNS for the domain, so a DNS link can point at it. It is a single VM: use it for
+        labs and POVs, not for a domain production servers depend on.</p>
+      <div class="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-800">
+        On your on-prem VyOS 1.4 router, in configure mode, run
+        <code>generate pki wireguard key-pair install interface wg0</code> and paste the <strong>public</strong> key it
+        prints below. Its private key stays on the router. After the build, <strong>On-prem commands</strong> gives you
+        the rest to paste.
+      </div>
+      <input x-model="link.onprem_public_key" placeholder="On-prem WireGuard public key (44 characters)" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <input x-model="link.project" placeholder="Project (blank = default)" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+        <input x-model="link.zone" placeholder="Zone, e.g. us-central1-a" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+        <input x-model="link.network" placeholder="VPC network (blank = default)" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+        <input x-model="link.subnetwork" placeholder="Subnetwork (blank = default)" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+        <input x-model="link.image_self_link" placeholder="vyos-cell image (self-link or name)" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono sm:col-span-2">
+        <input x-model="link.onprem_subnets" placeholder="On-prem subnets: 10.0.0.0/24" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+        <input x-model="link.cloud_networks" placeholder="VPC ranges: 10.99.0.0/16" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+        <input x-model="link.dns_ips" placeholder="Domain controllers: 10.0.0.10, 10.0.0.11" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono sm:col-span-2">
+        <select x-model="link.machine_type" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <option value="e2-small">e2-small (about $12/month)</option>
+          <option value="e2-micro">e2-micro (lab; may be free-tier in us-central1, us-east1, us-west1)</option>
+        </select>
+        <input x-model="link.wireguard_source" placeholder="On-prem egress IP (optional): 203.0.113.10/32" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+      </div>
+      <p class="text-xs text-gray-500">The image is the <code>vyos-cell</code> bake (VyOS 1.4) with the GCP Ansible key's
+        public half as <code>VYOS_RUNNER_PUBKEY</code>: the dashboard's Cloud Run runner configures the peer with it. The
+        peer's WireGuard private key is generated here and kept in GCP Secret Manager only.</p>
+      <div x-show="link.error" class="text-sm text-red-600" x-text="link.error"></div>
+      <div class="flex justify-end gap-2">
+        <button @click="link.open = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+        <button @click="submitLink()" :disabled="link.saving"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg">Build</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- On-prem commands for a site link -->
+  <div x-show="cmds.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="cmds.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6 space-y-3 max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-semibold text-gray-800">On-prem VyOS commands</h3>
+      <p class="text-xs text-gray-500">Paste these into configure mode on your on-prem router. They hold no secret.
+        Allow the tunnel and the VPC ranges through your firewall on the AD ports, then use <strong>Check link</strong>.</p>
+      <div x-show="cmds.error" class="text-sm text-red-600" x-text="cmds.error"></div>
+      <pre class="bg-gray-900 text-gray-100 text-xs rounded-lg p-3 overflow-x-auto whitespace-pre" x-text="cmds.text"></pre>
+      <div class="flex justify-end gap-2">
+        <button @click="navigator.clipboard && navigator.clipboard.writeText(cmds.text)" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Copy</button>
+        <button @click="cmds.open = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Close</button>
       </div>
     </div>
   </div>
@@ -742,6 +817,8 @@ function directoriesPage() {
     op: { open: false, systems: [] },
     psi: { open: false, systems: [] },
     ext: { open: false },
+    link: { open: false },
+    cmds: { open: false, text: '', error: '' },
     idp: { open: false, systems: [] }, idpOpts: {},
     br: { open: false, items: [], members: [], userGroups: [], addResults: [] },
     ent: { open: false, items: [] },
@@ -815,7 +892,11 @@ function directoriesPage() {
       finally { o.saving = false; }
     },
     openExtend(d, cloud) {
-      const ip = /^\d+\.\d+\.\d+\.\d+$/.test(d.host || '') ? d.host : '';
+      // A built site link answers DNS for this domain from inside the VPC: point at it.
+      const peer = this.directories.find(x => x.provider === 'gcp_vyos_link' && x.linked_directory_id === d.id
+                                               && x.site_link && x.site_link.peer_internal_ip);
+      const ip = (cloud === 'gcp' && peer) ? peer.site_link.peer_internal_ip
+               : (/^\d+\.\d+\.\d+\.\d+$/.test(d.host || '') ? d.host : '');
       this.ext = { open: true, dir: d, cloud, region: (this.opts.defaults || {}).aws_region || '',
                    vpc_id: '', subnets: '', dns_ips: ip, size: 'Small', netbios: '',
                    network: '', project: '', ack: false, saving: false, error: '' };
@@ -842,6 +923,42 @@ function directoriesPage() {
         await this.load();
       } catch (err) { e.error = err.message; }
       finally { e.saving = false; }
+    },
+    openLink(d) {
+      const ip = /^\d+\.\d+\.\d+\.\d+$/.test(d.host || '') ? d.host : '';
+      this.link = { open: true, dir: d, onprem_public_key: '', project: '', zone: '', network: '',
+                    subnetwork: '', image_self_link: '', onprem_subnets: '', cloud_networks: '',
+                    dns_ips: ip, machine_type: 'e2-small', wireguard_source: '', saving: false, error: '' };
+    },
+    async submitLink() {
+      const l = this.link;
+      l.saving = true; l.error = '';
+      try {
+        const r = await API.post('/api/directories/vyos-link', {
+          onprem_directory_id: l.dir.id, project: l.project.trim(), zone: l.zone.trim(),
+          network: l.network.trim(), subnetwork: l.subnetwork.trim(),
+          image_self_link: l.image_self_link.trim(), image_name: l.image_self_link.trim().split('/').pop(),
+          vyos_release: '1.4', onprem_public_key: l.onprem_public_key.trim(),
+          onprem_subnets: this.split(l.onprem_subnets), cloud_networks: this.split(l.cloud_networks),
+          dns_ips: this.split(l.dns_ips), machine_type: l.machine_type,
+          wireguard_source_ranges: this.split(l.wireguard_source) });
+        l.open = false;
+        this.note('Site link queued — job ' + r.job_id.slice(0, 8));
+        await this.load();
+      } catch (e) { l.error = e.message; }
+      finally { l.saving = false; }
+    },
+    async showCommands(d) {
+      this.cmds = { open: true, text: '', error: '' };
+      try { this.cmds.text = (await API.get(`/api/directories/${d.id}/onprem-commands`)).commands; }
+      catch (e) { this.cmds.error = e.message; }
+    },
+    async checkLink(d) {
+      try {
+        const r = await API.post(`/api/directories/${d.id}/check-link`, {});
+        this.note('Checking the link — job ' + r.job_id.slice(0, 8));
+        await this.load();
+      } catch (e) { this.note(e.message, 'error'); }
     },
     async openPsImport() {
       this.psi = { open: true, loading: true, systems: [], warnings: [], failed: [], error: '',
@@ -1146,6 +1263,7 @@ function directoriesPage() {
     async remove(d) {
       const verb = d.source === 'registered' ? 'Unregister' : 'Destroy';
       const warn = d.source === 'registered' ? 'The directory itself is not touched.'
+        : d.provider === 'gcp_vyos_link' ? 'This deletes the VyOS peer, its routes and its WireGuard key; the tunnel goes down.'
         : 'This deletes the domain controllers and everything in the directory.';
       if (!confirm(`${verb} ${d.name}? ${warn}`)) return;
       try { await API.del(`/api/directories/${d.id}`); this.note(verb + ' started'); await this.load(); }

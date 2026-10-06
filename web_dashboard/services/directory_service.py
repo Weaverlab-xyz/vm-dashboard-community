@@ -56,6 +56,7 @@ _TEMPLATE_DIRS = {
 # directory, which runs no domain controllers of its own.
 _PROVIDER_TEMPLATE_DIRS = {
     "dns_link": os.path.join(_REPO_ROOT, "terraform", "directory", "gcp_dns_forward"),
+    "gcp_vyos_link": os.path.join(_REPO_ROOT, "terraform", "directory", "gcp_vyos_peer"),
 }
 _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
 
@@ -70,6 +71,7 @@ PROVIDER_LABELS = {
     "aws_simple_ad": "AWS Simple AD",
     "gcp_managed_ad": "GCP Managed Microsoft AD",
     "dns_link": "GCP DNS link to on-prem AD",
+    "gcp_vyos_link": "GCP VyOS site link (WireGuard)",
     "onprem_ad": "On-premises Active Directory",
     "ldap": "On-premises LDAP",
     "entra_id": "Microsoft Entra ID",
@@ -192,7 +194,13 @@ def to_dict(row: ManagedDirectory) -> dict:
         "auth_mode": row.auth_mode, "writes_enabled": bool(row.writes_enabled),
         "credential_kind": _credential_kind(row),
         "is_idp": row.provider in IDP_PROVIDERS,
+        **({"site_link": _vyos().to_dict_extra(row)} if row.provider == "gcp_vyos_link" else {}),
     }
+
+
+def _vyos():
+    from . import vyos_link_service
+    return vyos_link_service
 
 
 def _provider_label(row) -> str:
@@ -253,7 +261,9 @@ def joined_vms(db: Session, directory_id: str) -> list:
 
 def joinable_for(db: Session, cloud: str, region: str = "") -> list:
     """Directories a Windows deploy on ``cloud`` (in ``region``, for AWS) can join."""
-    rows = [r for r in list_directories(db) if r.cloud == cloud and r.status == "available"]
+    # A site link is a network path, not something a server can join.
+    rows = [r for r in list_directories(db) if r.cloud == cloud and r.status == "available"
+            and r.provider != "gcp_vyos_link"]
     if cloud == "aws" and region:
         rows = [r for r in rows if (r.region or "") == region]
     return rows
@@ -607,6 +617,8 @@ def _qualify_network(network: str, project: str) -> str:
 
 
 def _tf_variables(row: ManagedDirectory, admin_password: str = "") -> dict:
+    if row.provider == "gcp_vyos_link":
+        return _vyos().tf_variables(row)
     if row.provider == "dns_link":
         return {"project": row.project, "domain_name": row.name,
                 "dns_ips": _jl(row.dns_ips), "networks": _jl(row.networks),
@@ -770,6 +782,9 @@ async def run_provision_apply(db: Session, *, directory_id: str, job_id: str) ->
     if row.provider == "aws_ad_connector":
         return await _run_connector_apply(db, row, job_id)
     job = job_service.get_job(db, job_id)
+    if row.provider == "gcp_vyos_link":
+        return await _vyos().run(db, row, job_id, check_only=bool(
+            (job.metadata_dict if job else {}).get("check_only")))
     want_ps = bool((job.metadata_dict if job else {}).get("register_in_passwordsafe"))
     job_service.set_running(db, job_id)
     built = False
@@ -843,6 +858,10 @@ def start_decommission(db: Session, *, directory_id: str, created_by: str) -> di
                              f"this dashboard never destroys a directory it did not build.")
     if row.status == "decommissioning":
         raise DirectoryError(f"{row.name} is already being destroyed")
+    if row.provider == "gcp_vyos_link":
+        problem = _vyos().destroy_problem(db, row)
+        if problem:
+            raise DirectoryError(problem)
     joined = joined_vms(db, row.id)
     if joined:
         raise DirectoryError(
@@ -900,9 +919,15 @@ async def run_decommission(db: Session, *, directory_id: str, job_id: str) -> No
             env=terraform_provider_env.provider_env(row.cloud),
             on_line=_job_stream(job_id, 20, "Destroying the directory…", row.cloud))
         err = windows_admin_secret.delete(row.admin_password_backend, row.admin_password_ref)
+        cleanup = f"stored admin password not deleted: {err}" if err else None
+        if row.provider == "gcp_vyos_link":
+            # After the VM is gone, so a failed delete leaves a key to nothing.
+            key_err = _vyos().delete_secret(row)
+            if key_err:
+                cleanup = f"WireGuard key not deleted from Secret Manager: {key_err}"
         row.admin_password_backend = row.admin_password_ref = None
         row.status = "deleted"
-        row.error_message = f"stored admin password not deleted: {err}" if err else None
+        row.error_message = cleanup
         row.updated_at = datetime.utcnow()
         db.commit()
         job_service.set_completed(db, job_id, result={"directory_id": row.id,
@@ -924,7 +949,7 @@ async def reset_admin_password(db: Session, *, directory_id: str) -> dict:
     if row.admin_password_custody == "passwordsafe_managed":
         raise DirectoryError("Password Safe manages this administrator account — rotate "
                              "it in Password Safe.")
-    if row.provider in ("aws_ad_connector", "dns_link"):
+    if row.provider in ("aws_ad_connector", "dns_link", "gcp_vyos_link"):
         raise DirectoryError(f"a {PROVIDER_LABELS[row.provider]} has no administrator of "
                              f"its own — its domain's administrators are on-premises")
     if row.status != "available":

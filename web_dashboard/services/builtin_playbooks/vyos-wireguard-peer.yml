@@ -1,0 +1,100 @@
+# Configure the CLOUD end of a VyOS WireGuard site link to an on-prem VyOS router
+# Target: the GCP VyOS peer built by terraform/directory/gcp_vyos_peer, over SSH
+# (network_cli) to its internal address, from the dashboard's GCP Ansible runner.
+# The dashboard runs this after it builds the peer, and again for "Check link".
+#
+# Through the dashboard every non-secret var below is written into this play, and
+# wg_private_key arrives through the runner's Secret Manager vars file -- never in
+# instance metadata, Terraform state or the job record. The on-prem router's PRIVATE
+# key never leaves it: only its public key is given here.
+#
+# Requires VyOS 1.4 or later (a raw WireGuard private key; `name-server` in DNS
+# forwarding). The image is the vyos-cell bake with the runner's public key in it.
+#
+# Prints one sentinel the dashboard reads:
+#   VMDASH-VYOS-LINK:CONFIGURED   the configuration committed
+#   VMDASH-VYOS-LINK:UP           and a domain controller answered through the tunnel
+#   VMDASH-VYOS-LINK:WAITING      configured, but the on-prem end is not up yet
+- name: Configure the cloud end of a VyOS WireGuard site link
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: vyos.vyos.vyos
+    # Every runner is a fresh container with no known_hosts; network_cli does not read
+    # the ssh plugin's StrictHostKeyChecking argument.
+    ansible_host_key_checking: false
+    # The runner image ships paramiko, not ansible-pylibssh (runners/ansible-winrm).
+    ansible_network_cli_ssh_type: paramiko
+    wg_interface: wg0
+    wg_port: 51820
+    wg_address: 10.255.255.1/30
+    onprem_tunnel_ip: 10.255.255.2
+    onprem_public_key: ""
+    onprem_subnets: []
+    cloud_networks: []
+    ad_domain: ""
+    dns_servers: []
+    listen_address: ""
+    probe_address: ""
+  tasks:
+    - name: Check the required vars
+      ansible.builtin.assert:
+        that:
+          - wg_private_key is defined and wg_private_key | length == 44
+          - onprem_public_key | length == 44
+          - onprem_subnets | length > 0
+          - cloud_networks | length > 0
+          - ad_domain | length > 0
+          - dns_servers | length > 0
+          - listen_address | length > 0
+        fail_msg: >-
+          Set wg_private_key, onprem_public_key (44-character WireGuard keys),
+          onprem_subnets, cloud_networks, ad_domain, dns_servers and listen_address.
+      no_log: true
+
+    - name: Build the configuration (no secrets)
+      ansible.builtin.set_fact:
+        _config: |
+          set interfaces wireguard {{ wg_interface }} address '{{ wg_address }}'
+          set interfaces wireguard {{ wg_interface }} port '{{ wg_port }}'
+          set interfaces wireguard {{ wg_interface }} description 'Site link to on-prem (vm-dashboard)'
+          set interfaces wireguard {{ wg_interface }} peer onprem public-key '{{ onprem_public_key }}'
+          set interfaces wireguard {{ wg_interface }} peer onprem allowed-ips '{{ onprem_tunnel_ip }}/32'
+          {% for net in onprem_subnets %}
+          set interfaces wireguard {{ wg_interface }} peer onprem allowed-ips '{{ net }}'
+          set protocols static route {{ net }} interface {{ wg_interface }}
+          {% endfor %}
+          set service dns forwarding listen-address '{{ listen_address }}'
+          set service dns forwarding allow-from '35.199.192.0/19'
+          {% for net in cloud_networks %}
+          set service dns forwarding allow-from '{{ net }}'
+          {% endfor %}
+          {% for server in dns_servers %}
+          set service dns forwarding domain {{ ad_domain }} name-server '{{ server }}'
+          {% endfor %}
+
+    - name: Apply it, with the private key, and save
+      vyos.vyos.vyos_config:
+        lines: >-
+          {{ (_config.splitlines() | map('trim') | select | list)
+             + ["set interfaces wireguard " ~ wg_interface ~ " private-key '" ~ wg_private_key ~ "'"] }}
+        save: true
+      no_log: true
+
+    - name: Report the configuration
+      ansible.builtin.debug:
+        msg: VMDASH-VYOS-LINK:CONFIGURED
+
+    - name: Ask a domain controller through the tunnel
+      vyos.vyos.vyos_command:
+        commands:
+          - "ping {{ probe_address or dns_servers[0] }} count 3"
+      register: _probe
+      ignore_errors: true
+
+    - name: Report the tunnel
+      ansible.builtin.debug:
+        msg: >-
+          VMDASH-VYOS-LINK:{{ 'UP' if (_probe.stdout | default([''])) | join(' ')
+                                        is search(' 0% packet loss') else 'WAITING' }}

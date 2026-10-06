@@ -52,6 +52,7 @@ OT side.
 | Variable | Default | What it does |
 |---|---|---|
 | `VYOS_ADMIN_USER` | `adminuser` | The Password-Safe-managed demo account. Matches the OT image's `OT_ADMIN_USER` so both cells onboard under one name. |
+| `VYOS_RUNNER_PUBKEY` | *(unset)* | A second public key for the same account, in its own `'runner'` slot. For the [VyOS site link](../../docs/cloud/directories.md#a-vyos-site-link-built-for-you-gcp): the public half of the GCP Ansible key (`gcp_ssh_key_secret_name`), so the dashboard's Cloud Run runner can configure the peer while the Gateway's key stays in `'default'`. |
 | `VYOS_ADMIN_PUBKEY` | *(unset)* | The whole `ssh-ed25519 AAAA… comment` line. Bake the public half of the key pair your PRA Gateway presents. VyOS keeps authorized keys **in configuration** and regenerates `~/.ssh/authorized_keys` from it on commit, so the key has to go in as config or not at all. |
 | `VYOS_ADMIN_PASSWORD` | *(unset)* | Initial password, for a Password Safe functional account that rotates passwords rather than keys. |
 | `VYOS_HOSTNAME` | `vyos-cell` | Device hostname. |
