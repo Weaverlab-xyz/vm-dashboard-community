@@ -155,6 +155,18 @@ def test_failed_destroy_keeps_the_stash():
         assert STORE[key] == val, key
 
 
+def test_token_in_use_refusal_is_recognised():
+    """Entitle's 400 when integrations still reference the shared token, as the worker
+    logged it on a live decommission."""
+    exc = ers.EntitleRegistrationError(
+        "terraform destroy failed: Error: API Response Error Failed to delete the Agent by "
+        "the id (tok-1), status code: 400 ... This token is used by integrations, in order "
+        "to delete it please remove all integrations first")
+    assert ers.agent_token_in_use(exc)
+    assert not ers.agent_token_in_use(
+        ers.EntitleRegistrationError("terraform destroy failed: 401 unauthorized"))
+
+
 def test_destroy_without_a_recorded_name_still_reports_success():
     _reset(entitle_agent_token_tf_state=_state(with_resource=False))
     assert _run_destroy(_DestroyRecorder()) == "unknown"
@@ -236,6 +248,17 @@ def test_decommission_records_a_failed_token_destroy_and_keeps_the_marker():
     clear = 'config_service.set("entitle_agent_cluster_id", "")'
     assert code.index("destroy_agent_token") < code.index(clear), \
         "the host marker must only clear after a successful destroy so a retry converges"
+
+
+def test_token_in_use_does_not_wedge_the_decommission_or_the_remove():
+    """A token other integrations still use can never be destroyed by a retry, so
+    failing on it left an already-destroyed cluster's row at "failed" forever."""
+    for fn in ("run_decommission", "setup_entitle_agent"):
+        code = _fn_code(fn)
+        assert "agent_token_in_use(exc)" in code, f"{fn} no longer tolerates an in-use token"
+        branch = code[code.index("agent_token_in_use(exc)"):]
+        assert 'config_service.set("entitle_agent_cluster_id", "")' in branch, \
+            f"{fn} must release the host marker when it keeps an in-use token"
 
 
 def test_integration_deregister_no_longer_swallows_a_failed_destroy():
