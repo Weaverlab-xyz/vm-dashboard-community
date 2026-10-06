@@ -1103,6 +1103,11 @@ def _annotate_findings(db: Session, result: dict) -> dict:
         if finding.get("kind") == "directory":
             finding["already_registered"] = (
                 (finding.get("host") or "").strip().lower(), port) in dirs
+            # Classified here rather than on the agent, from the vendorName it already
+            # reports, so a 2.8 agent finds PingDirectory without a new release.
+            if finding.get("product") != "active_directory":
+                from ..services.directory_service import vendor_for
+                finding["ldap_vendor"] = vendor_for(finding.get("vendor") or "")
             continue
         kind = _PRODUCT_TO_KIND.get((finding.get("product") or "").lower(), "")
         finding["already_registered"] = (

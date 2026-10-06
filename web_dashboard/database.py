@@ -2522,6 +2522,14 @@ class ManagedDirectory(Base):
     # Group-membership writes are opt-in per directory: registering one grants nothing.
     writes_enabled = Column(Boolean, nullable=True, default=False)
     options = Column(Text, nullable=True)                      # JSON, closed key set per provider
+    # Which LDAP server a provider="ldap" row is (openldap | pingdirectory | okta_ldap |
+    # 389ds | freeipa). NULL = unknown/generic. Decides defaults and, for okta_ldap, that
+    # only read-only playbooks run (directory_service.run_refusal).
+    vendor = Column(String(32), nullable=True)
+    # The Entitle integration an operator PINNED as governing this directory. Never
+    # matched automatically: a name match is a guess, and a wrong link reads as truth.
+    entitle_integration_id = Column(String(64), nullable=True)
+    entitle_integration_name = Column(String(255), nullable=True)   # as Entitle named it when pinned
 
     admin_username = Column(String(64), nullable=True)
     admin_password_backend = Column(String(32), nullable=True)
@@ -4749,6 +4757,10 @@ def init_db():
             "ALTER TABLE managed_directories ADD COLUMN auth_mode VARCHAR(32)",
             "ALTER TABLE managed_directories ADD COLUMN writes_enabled BOOLEAN",
             "ALTER TABLE managed_directories ADD COLUMN options TEXT",
+            # LDAP vendor and the pinned Entitle integration. NULL on existing rows.
+            "ALTER TABLE managed_directories ADD COLUMN vendor VARCHAR(32)",
+            "ALTER TABLE managed_directories ADD COLUMN entitle_integration_id VARCHAR(64)",
+            "ALTER TABLE managed_directories ADD COLUMN entitle_integration_name VARCHAR(255)",
             "CREATE INDEX ix_cloud_databases_expires_at ON cloud_databases(expires_at)",
             "ALTER TABLE k8s_clusters ADD COLUMN expires_at TIMESTAMP",
             "ALTER TABLE k8s_clusters ADD COLUMN expiry_warned_at TIMESTAMP",

@@ -883,6 +883,7 @@
           if (f.port) d.set('port', String(f.port));
           if (f.domain || f.suggested_name) d.set('name', f.domain || f.suggested_name);
           if (f.base_dn) d.set('base_dn', f.base_dn);
+          if (f.ldap_vendor) d.set('vendor', f.ldap_vendor);
           if (this.job && this.job.agent_id) d.set('agent', this.job.agent_id);
           return '/directories?' + d.toString();
         }

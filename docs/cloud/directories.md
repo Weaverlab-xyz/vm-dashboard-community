@@ -206,15 +206,44 @@ finding has a **Register directory** link that opens the form below, pre-filled.
 - host and port, with LDAPS on by default;
 - base DN (derived from the domain for AD);
 - the agent that reaches the directory;
-- a **Password Safe managed account** to bind as.
+- a **Password Safe managed account** to bind as;
+- for LDAP, which **LDAP server** it is: OpenLDAP, PingDirectory, the Okta LDAP
+  Interface, 389 Directory Server or FreeIPA, or left generic. A discovery finding fills
+  this in from the server's `vendorName` (PingDirectory reports Ping Identity).
 
 The dashboard stores only the account's ids and name. The credential is checked out per
 run, for that run only, and never written here.
+
+**Okta's LDAP Interface.** Pick **Okta LDAP Interface** and enter the org name (`acme` or
+`acme.okta.com`). The rest is fixed by Okta and filled in for you:
+
+- host `acme.ldap.okta.com`;
+- LDAPS on 636;
+- base DN `dc=acme,dc=okta,dc=com`.
+
+The Password Safe account's name is used as the bind DN as given, so store it in the
+form Okta's LDAP Interface documentation gives for a bind (a `uid=<login>,…` DN under
+your org's base DN). Users are under `ou=users` and groups under `ou=groups`. Turn the LDAP Interface on in the Okta admin
+console first. It is **search-only**, so only `ldap-search.yml` runs against it; any
+other playbook is refused before the run starts. To change group membership, register
+the org as an [Okta identity provider](#cloud-identity-providers) instead.
+
+**PingDirectory** is an ordinary LDAP server here: every LDAP playbook works against it.
+Its password policy lives in `ds-pwp-*` attributes, which `ldap-attrs.yml` can set like any
+other.
 
 **Import from Password Safe.** **Directories → Import from Password Safe** lists the AD and
 LDAP directories Password Safe already manages, with their domain, port, SSL setting and
 the accounts the dashboard can request. Pick each row's account and agent. A row that cannot
 be imported says why: no requestable account, no host, or a domain that is not a DNS name.
+A PingDirectory platform imports with its vendor set.
+
+Platforms for **Entra ID, Okta and PingOne** are listed too, but cannot be imported as-is:
+Password Safe holds their API credential but not the tenant id or app registration.
+**Complete registration** opens the
+[identity provider dialog](#cloud-identity-providers) with that system's account already
+chosen as the credential.
+
 Importing changes nothing in Password Safe. It needs `secrets:use` as well as
 `directories:write`.
 
@@ -355,6 +384,26 @@ provider API's to change:
 
 The dashboard does **not** create, disable or delete users, reset passwords, create
 groups, or create anything in Entitle. Unregistering a provider only forgets it.
+
+## Linking a directory to its Entitle integration
+
+**Entitle** on any directory's row lists the integrations in your Entitle tenant and lets
+you **pin** the one that grants access to that directory. The row then shows it. The
+integrations whose application looks like the directory's kind are listed first:
+
+- Azure AD / Entra for Entra ID;
+- Okta for Okta;
+- PingOne for PingOne;
+- Active Directory for AD.
+
+That ordering is only a hint. Nothing is matched for you, and nothing is created or
+changed in Entitle: the pin is a label on the dashboard's row. The integration id is checked
+against Entitle's own list when you pin it, and the name shown is the one Entitle had then.
+
+It reads `GET /public/v1/integrations` with the **Entitle** settings' API URL and token.
+The URL must be your tenant's region (for example `api.us.entitle.io`); a wrong region
+answers too, but with nobody's integrations. Pinning needs `directories:write` and is
+audited as `directory_entitle_pin`.
 
 ## Settings
 

@@ -101,6 +101,8 @@
                        x-text="d.writes_enabled ? 'membership writes ON' : 'read-only'"></div>
                 </div>
               </template>
+              <div x-show="d.entitle_integration_id" class="text-gray-500 mt-1"
+                   x-text="'Entitle: ' + (d.entitle_integration_name || d.entitle_integration_id)"></div>
               <template x-if="d.source !== 'registered'">
                 <span x-text="d.admin_password_custody === 'passwordsafe_managed'
                               ? 'Password Safe (account ' + d.ps_account_id + ')'
@@ -127,6 +129,8 @@
               <button x-show="d.source !== 'registered' && d.status === 'available' && d.admin_password_custody !== 'passwordsafe_managed' && d.provider !== 'aws_ad_connector'"
                       @click="resetPassword(d)"
                       class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Reset admin password</button>
+              <button x-show="d.status === 'available'" @click="openEntitle(d)"
+                      class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg">Entitle</button>
               <button @click="remove(d)"
                       class="text-xs border border-red-200 text-red-600 hover:bg-red-50 px-2.5 py-1.5 rounded-lg"
                       x-text="d.source === 'registered' ? 'Unregister' : 'Destroy'"></button>
@@ -296,9 +300,25 @@
           </select>
         </div>
       </div>
+      <div x-show="op.provider === 'ldap'">
+        <label class="block text-sm font-medium text-gray-700 mb-1">LDAP server</label>
+        <select x-model="op.vendor" @change="opVendorChanged()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <option value="">Generic / unknown</option>
+          <option value="openldap">OpenLDAP</option>
+          <option value="pingdirectory">PingDirectory</option>
+          <option value="okta_ldap">Okta LDAP Interface</option>
+          <option value="389ds">389 Directory Server</option>
+          <option value="freeipa">FreeIPA</option>
+        </select>
+        <p x-show="op.vendor === 'okta_ldap'" class="text-xs text-gray-500 mt-1">
+          Enter the org name (<code>acme</code> or <code>acme.okta.com</code>): the host
+          (<code>acme.ldap.okta.com</code>), LDAPS on 636 and base DN are filled in. The Okta
+          LDAP Interface is search-only, so only <code>ldap-search.yml</code> runs against it;
+          change users and groups through the Okta identity provider instead.</p>
+      </div>
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1" x-text="op.provider === 'onprem_ad' ? 'Domain' : 'Name'"></label>
-        <input x-model="op.name" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" :placeholder="op.provider === 'onprem_ad' ? 'corp.example.com' : 'ldap.example.com'">
+        <input x-model="op.name" @change="opVendorChanged()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" :placeholder="op.provider === 'onprem_ad' ? 'corp.example.com' : 'ldap.example.com'">
       </div>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
@@ -416,9 +436,11 @@
                      :disabled="!c.eligible || c.already_registered" x-model="c._pick">
               <span class="flex-1">
                 <span class="font-medium" x-text="c.name"></span>
-                <span class="text-gray-500" x-text="' · ' + (c.provider === 'ldap' ? 'LDAP' : 'Active Directory') + ' · ' + c.host + ':' + c.port"></span>
+                <span class="text-gray-500" x-text="' · ' + psiKind(c) + (c.idp ? '' : ' · ' + c.host + ':' + c.port)"></span>
                 <span x-show="c.already_registered" class="text-xs text-gray-500"> (already registered)</span>
-                <span x-show="!c.eligible" class="block text-xs text-red-600" x-text="c.reason"></span>
+                <span x-show="!c.eligible" class="block text-xs" :class="c.idp ? 'text-gray-500' : 'text-red-600'" x-text="c.reason"></span>
+                <button x-show="c.idp && (c.accounts || []).length" @click.prevent="completeIdp(c)"
+                        class="mt-1 text-xs border border-gray-300 px-2 py-1 rounded-lg">Complete registration</button>
               </span>
             </label>
             <div x-show="c._pick" class="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
@@ -655,6 +677,41 @@
     </div>
   </div>
 
+  <!-- Pin the Entitle integration that governs a directory -->
+  <div x-show="ent.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="ent.open = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-3 max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-semibold text-gray-800" x-text="'Entitle integration for ' + (ent.dir?.name || '')"></h3>
+      <p class="text-xs text-gray-500">Records which Entitle integration grants access to this directory, so
+        the page can say so. Nothing is created or changed in Entitle, and nothing is matched for you:
+        integrations whose application looks like this directory's kind are listed first.</p>
+      <div x-show="ent.loading" class="text-sm text-gray-400">Reading Entitle…</div>
+      <div x-show="ent.reason || ent.error" class="text-sm text-red-600" x-text="ent.reason || ent.error"></div>
+      <div class="border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-[50vh] overflow-y-auto" x-show="ent.items.length">
+        <template x-for="i in ent.items" :key="i.id">
+          <label class="flex items-start gap-2 px-3 py-2 text-sm">
+            <input type="radio" name="ent-pin" :value="i.id" x-model="ent.pick" class="mt-1">
+            <span>
+              <span class="text-gray-800" x-text="i.name || i.id"></span>
+              <span class="text-xs text-gray-400" x-text="' · ' + (i.application || 'unknown application')"></span>
+              <span x-show="i.suggested" class="text-xs text-blue-600"> · likely</span>
+            </span>
+          </label>
+        </template>
+      </div>
+      <div class="flex justify-between gap-2">
+        <button x-show="ent.dir?.entitle_integration_id" @click="pinEntitle('')" :disabled="ent.saving"
+                class="px-4 py-2 text-sm border border-red-200 text-red-600 rounded-lg">Unpin</button>
+        <span x-show="!ent.dir?.entitle_integration_id"></span>
+        <div class="flex gap-2">
+          <button @click="ent.open = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+          <button @click="pinEntitle(ent.pick)" :disabled="ent.saving || !ent.pick"
+                  class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg">Pin</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Admin password -->
   <div x-show="pw.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
        @click.self="pw.open = false">
@@ -687,6 +744,7 @@ function directoriesPage() {
     ext: { open: false },
     idp: { open: false, systems: [] }, idpOpts: {},
     br: { open: false, items: [], members: [], userGroups: [], addResults: [] },
+    ent: { open: false, items: [] },
     agents: [],
 
     async init() {
@@ -696,7 +754,8 @@ function directoriesPage() {
       const q = new URLSearchParams(window.location.search);
       if (q.get('register') === '1') {
         const port = Number(q.get('port') || 0);
-        this.openOnprem({provider: q.get('provider') || 'onprem_ad', host: q.get('host') || '',
+        this.openOnprem({provider: q.get('provider') || 'onprem_ad', vendor: q.get('vendor') || '',
+                         host: q.get('host') || '',
                          port: port || null, use_ldaps: port !== 389, name: q.get('name') || '',
                          base_dn: q.get('base_dn') || '', agent_id: q.get('agent') || ''});
       }
@@ -704,10 +763,29 @@ function directoriesPage() {
     agentName(id) { const a = this.agents.find(x => x.id === id); return a ? a.name : ''; },
 
     openOnprem(prefill = {}) {
-      this.op = { open: true, provider: 'onprem_ad', agent_id: '', name: '', host: '', port: null,
+      this.op = { open: true, provider: 'onprem_ad', vendor: '', agent_id: '', name: '', host: '', port: null,
                   use_ldaps: true, base_dn: '', accountKey: '', systems: [], accountsLoading: false,
                   accountsError: '', saving: false, error: '', ...prefill };
       if (this.op.host) this.loadAccounts();
+    },
+    opVendorChanged() {
+      const o = this.op;
+      if (o.provider !== 'ldap' || o.vendor !== 'okta_ldap') return;
+      // Plain string handling rather than regex literals: the template lexer in
+      // tests/test_template_scripts.py reads a '//' inside a regex as a comment.
+      let org = (o.name || '').trim().toLowerCase();
+      const scheme = org.indexOf('://');
+      if (scheme >= 0) org = org.slice(scheme + 3);
+      org = org.split('/')[0];
+      for (const suffix of ['.ldap.okta.com', '.okta.com']) {
+        if (org.endsWith(suffix)) { org = org.slice(0, -suffix.length); break; }
+      }
+      const ok = org.length > 0 && org.length < 64 && org[0] !== '-' &&
+        [...org].every(ch => 'abcdefghijklmnopqrstuvwxyz0123456789-'.includes(ch));
+      if (!ok) return;
+      o.host = org + '.ldap.okta.com'; o.port = 636; o.use_ldaps = true;
+      o.base_dn = 'dc=' + org + ',dc=okta,dc=com';
+      this.loadAccounts();     // the host changed without a change event
     },
     async loadAccounts() {
       const o = this.op;
@@ -726,6 +804,7 @@ function directoriesPage() {
         await API.post('/api/directories/register-onprem', {
           provider: o.provider, name: o.name, host: o.host.trim(), port: o.port || 0,
           use_ldaps: !!o.use_ldaps, base_dn: o.base_dn, agent_id: o.agent_id,
+          vendor: o.provider === 'ldap' ? (o.vendor || '') : '',
           managed_account: { system_id: Number(systemId), account_id: Number(accountId),
                              account_name: nameParts.join(':') },
         });
@@ -775,6 +854,50 @@ function directoriesPage() {
         Object.assign(this.psi, r);
       } catch (e) { this.psi.error = e.message; }
       finally { this.psi.loading = false; }
+    },
+    psiKind(c) {
+      if (c.idp) return ({ entra_id: 'Entra ID', okta: 'Okta', pingone: 'PingOne' })[c.provider] || c.provider;
+      if (c.provider === 'ldap') return c.vendor === 'pingdirectory' ? 'PingDirectory' : 'LDAP';
+      return 'Active Directory';
+    },
+    async completeIdp(c) {
+      await this.openIdp();
+      const i = this.idp;
+      i.provider = c.provider;
+      this.idpProviderChanged();
+      const host = (c.host || '').toLowerCase();
+      if (c.provider === 'okta' && ['.okta.com', '.oktapreview.com', '.okta-emea.com', '.okta-gov.com']
+            .some(sfx => host.endsWith(sfx))) i.endpoint = 'https://' + host;
+      i.name = c.name || '';
+      i.cred = 'ps';
+      i.ps_host = c.host || c.name || '';
+      i.systems = [{ system_id: c.system_id, name: c.name, ip: c.host || '—',
+                     accounts: (c.accounts || []).map(a => ({ account_id: a.account_id, name: a.name })) }];
+      const a = (c.accounts || [])[0];
+      i.accountKey = a ? `${c.system_id}:${a.account_id}:${a.name}` : '';
+      this.psi.open = false;
+    },
+    async openEntitle(d) {
+      this.ent = { open: true, dir: d, items: [], loading: true, error: '', reason: '',
+                   pick: d.entitle_integration_id || '', saving: false };
+      try {
+        const r = await API.get(`/api/directories/${d.id}/entitle-candidates`);
+        this.ent.items = r.integrations || [];
+        this.ent.reason = r.reason || '';
+        this.ent.error = r.error || '';
+      } catch (e) { this.ent.error = e.message; }
+      finally { this.ent.loading = false; }
+    },
+    async pinEntitle(id) {
+      const e = this.ent;
+      e.saving = true; e.error = '';
+      try {
+        await API.put(`/api/directories/${e.dir.id}/entitle-integration`, { integration_id: id || '' });
+        e.open = false;
+        this.note(id ? 'Entitle integration pinned' : 'Entitle integration unpinned');
+        await this.load();
+      } catch (err) { e.error = err.message; }
+      finally { e.saving = false; }
     },
     psiPicked() { return (this.psi.systems || []).filter(c => c._pick && c._agent && c._account); },
     async submitPsImport() {
