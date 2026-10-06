@@ -2453,6 +2453,10 @@ class ManagedDirectory(Base):
     (Managed Service for Microsoft Active Directory). Azure is absent on purpose: Windows
     VMs there join Entra ID directly (windows_server_hook.entra_join_azure).
 
+    Cloud identity providers (Entra ID, Okta, PingOne) are rows too, with
+    ``cloud="saas"``: not joinable, but browsable and with opt-in group-membership
+    writes through ``services/directory_idp``.
+
     ``source`` follows the CloudDatabase / K8sCluster convention. A ``provisioned`` row
     was built here from ``terraform/directory/<module>`` and can be destroyed here; a
     ``registered`` row is a directory that already existed, found by discovery, and
@@ -2468,7 +2472,7 @@ class ManagedDirectory(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String(255), nullable=False)                 # FQDN, e.g. corp.example.com
     netbios = Column(String(15), nullable=True)
-    cloud = Column(String(20), nullable=False)                 # aws | gcp | local (on-prem)
+    cloud = Column(String(20), nullable=False)                 # aws | gcp | local (on-prem) | saas
     # aws_managed_ad | aws_ad_connector | aws_simple_ad | gcp_managed_ad
     # | onprem_ad | ldap  (the last two: on-prem, reached through a remote agent)
     provider = Column(String(32), nullable=False)
@@ -2505,6 +2509,19 @@ class ManagedDirectory(Base):
     # link) points at the on-prem row it extends. Not a FK: unregistering the on-prem
     # row is refused while a link exists, and a dangling id reads as "on-prem row gone".
     linked_directory_id = Column(String(36), nullable=True, index=True)
+
+    # ── cloud identity providers (cloud="saas": entra_id | okta | pingone) ──────────
+    # Reached over the provider's REST API from the dashboard itself, no agent. The
+    # credential is still never on the row: ``credentials_ref`` holds a vault ref
+    # (bt_safe:// aws_sm:// azure_kv:// gcp_sm://) or the psmanaged: pointer, or nothing
+    # for auth_mode="dashboard_azure" (the dashboard's own Azure identity).
+    endpoint = Column(String(255), nullable=True)              # Okta org URL | PingOne TLD
+    tenant_id = Column(String(64), nullable=True)              # Entra tenant | PingOne env
+    client_id = Column(String(255), nullable=True)
+    auth_mode = Column(String(32), nullable=True)              # client_secret | private_key_jwt | ssws | dashboard_azure
+    # Group-membership writes are opt-in per directory: registering one grants nothing.
+    writes_enabled = Column(Boolean, nullable=True, default=False)
+    options = Column(Text, nullable=True)                      # JSON, closed key set per provider
 
     admin_username = Column(String(64), nullable=True)
     admin_password_backend = Column(String(32), nullable=True)
@@ -4724,6 +4741,14 @@ def init_db():
             "ALTER TABLE managed_directories ADD COLUMN credentials_ref TEXT",
             "ALTER TABLE managed_directories ADD COLUMN linked_directory_id VARCHAR(36)",
             "CREATE INDEX ix_managed_directories_linked_directory_id ON managed_directories(linked_directory_id)",
+            # Cloud identity providers (directory_service.register_idp). NULL on every
+            # existing row, and writes_enabled NULL reads as False.
+            "ALTER TABLE managed_directories ADD COLUMN endpoint VARCHAR(255)",
+            "ALTER TABLE managed_directories ADD COLUMN tenant_id VARCHAR(64)",
+            "ALTER TABLE managed_directories ADD COLUMN client_id VARCHAR(255)",
+            "ALTER TABLE managed_directories ADD COLUMN auth_mode VARCHAR(32)",
+            "ALTER TABLE managed_directories ADD COLUMN writes_enabled BOOLEAN",
+            "ALTER TABLE managed_directories ADD COLUMN options TEXT",
             "CREATE INDEX ix_cloud_databases_expires_at ON cloud_databases(expires_at)",
             "ALTER TABLE k8s_clusters ADD COLUMN expires_at TIMESTAMP",
             "ALTER TABLE k8s_clusters ADD COLUMN expiry_warned_at TIMESTAMP",
