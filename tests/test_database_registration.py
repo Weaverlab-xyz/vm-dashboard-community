@@ -285,7 +285,7 @@ def test_registration_requires_a_managed_account():
 
 def test_registration_rejects_an_unknown_cloud_and_engine():
     db = _FakeDB()
-    for kw in ({"cloud": "digitalocean"}, {"engine": "mongodb"}):
+    for kw in ({"cloud": "digitalocean"}, {"engine": "cassandra"}):
         args = dict(engine="postgres", cloud="local", host="h", port=None, db_name="",
                     managed_account=_ACCOUNT, created_by="alice")
         args.update(kw)

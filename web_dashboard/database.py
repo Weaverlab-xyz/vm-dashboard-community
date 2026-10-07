@@ -2249,11 +2249,12 @@ class CloudDatabase(Base):
     """Inventory of dashboard-provisioned managed databases — cloud-database
     infrastructure, Phase 1.
 
-    One row per provisioned database (Postgres / MySQL / SQL Server), always
-    **private** and reached only through a BeyondTrust PRA tunnel. In the
-    community edition the PRA tunnel (Phase 2) is brokered with the
+    One row per provisioned or registered database (Postgres / MySQL / SQL Server /
+    Oracle / MongoDB), always **private** and reached only through a BeyondTrust PRA
+    tunnel. In the community edition the PRA tunnel (Phase 2) is brokered with the
     ``beyondtrust/sra`` Terraform provider (``terraform_pra_service``) — never
-    ``btapi`` — so MongoDB is not offered until the provider ships a resource.
+    ``btapi``. Oracle and MongoDB ride the provider's generic tcp tunnel until it
+    ships their dedicated PRA 26.3 tunnel resources.
     The PRA / Password-Safe fields are populated by later phases:
     ``jump_item_id`` by the tunnel brokering (Phase 2); ``ps_*`` are unused in
     community (Password-Safe onboarding is a prod-only path).
@@ -2261,7 +2262,7 @@ class CloudDatabase(Base):
     __tablename__ = "cloud_databases"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    engine = Column(String(20), nullable=False)            # postgres | mysql | sqlserver
+    engine = Column(String(20), nullable=False)            # postgres | mysql | sqlserver | oracle | mongodb
     provider = Column(String(40), nullable=True)           # e.g. rds | azure_flexible | cloud_sql
     cloud = Column(String(20), nullable=False)             # aws | azure | gcp | local
     region = Column(String(64), nullable=True)

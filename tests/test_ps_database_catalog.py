@@ -411,6 +411,16 @@ def _service_literal(name):
     return ast.literal_eval(match.group(1))
 
 
+def test_mongodb_platforms_resolve_and_steal_nothing_from_sql():
+    assert cat.engine_for_platform("MongoDB") == "mongodb"
+    assert cat.engine_for_platform("MongoDB Atlas") == "mongodb"
+    assert cat._DEFAULT_PORTS["mongodb"] == 27017
+    # The new needle must not reorder the SQL engines' resolution.
+    assert cat.engine_for_platform("Oracle MySQL") == "mysql"
+    assert cat.engine_for_platform("Oracle") == "oracle"
+    assert cat.engine_for_platform("PostgreSQL") == "postgres"
+
+
 def test_engines_and_default_ports_match_cloud_database_service():
     # ps_database_catalog copies these because it may not import the service. A copy
     # that drifts sends an import to the wrong port, or offers an engine the

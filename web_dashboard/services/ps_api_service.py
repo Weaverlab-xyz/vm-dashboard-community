@@ -27,12 +27,16 @@ class PSApiError(Exception):
     """Raised when a Password Safe API call fails."""
 
 
-# Password Safe platform name per dashboard engine. mysql / sqlserver fan out
-# with the other engines later.
+# Password Safe built-in platform name per dashboard engine, matched case-insensitively
+# against GET Platforms. An engine missing here fails with "no Password Safe platform
+# mapping" — which the legacy credential staging swallows as non-fatal, so a gap is
+# silent: that is how every Oracle provision lost its functional account.
 _PLATFORM_BY_ENGINE = {
     "postgres": "PostgreSQL",
     "mysql": "MySQL",
     "sqlserver": "SQL Server",
+    "oracle": "Oracle",
+    "mongodb": "MongoDB",
 }
 
 

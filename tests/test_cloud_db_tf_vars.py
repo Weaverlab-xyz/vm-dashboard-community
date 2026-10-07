@@ -510,14 +510,14 @@ def test_regional_ids_empty_for_clouds_with_no_regional_network():
 def test_regional_ids_returns_empty_for_an_unimplemented_combo():
     # Validating a NETWORK is not the place to reject an engine/cloud pair — provision()
     # already does that, with a better message.
-    assert svc.regional_network_ids(engine="mongodb", cloud="aws", region="us-west-2") == {}
+    assert svc.regional_network_ids(engine="cassandra", cloud="aws", region="us-west-2") == {}
 
 
 # ── guard ────────────────────────────────────────────────────────────────────
 
 def test_unsupported_combo_raises_not_implemented():
     try:
-        _build("mongodb", "aws")
+        _build("cassandra", "aws")
     except NotImplementedError:
         return
     raise AssertionError("expected NotImplementedError for an unimplemented combo")

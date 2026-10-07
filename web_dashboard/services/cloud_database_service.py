@@ -1,8 +1,8 @@
 """
 Database infrastructure — the engine/cloud-agnostic service seam (community).
 
-Provisions **private** managed databases (Postgres / MySQL / SQL Server) reached
-only through a BeyondTrust PRA tunnel, and records each in the ``cloud_databases``
+Provisions **private** managed databases (Postgres / MySQL / SQL Server / Oracle /
+MongoDB) reached only through a BeyondTrust PRA tunnel, and records each in the ``cloud_databases``
 inventory table. Shaped like the other cloud services; drives Terraform via a
 per-job deploy dir (``terraform/deployments/{job_id}``).
 
@@ -11,13 +11,14 @@ Also **registers** databases it did not provision (``source='registered'``) — 
 needs a Terraform module and is therefore cloud-only; registering needs only somewhere to
 reach, which is why ``VALID_REGISTER_CLOUDS`` is wider than ``VALID_CLOUDS``.
 
-Implements **postgres / mysql / sqlserver across aws / azure / gcp**
-end-to-end on the dashboard side (record + Terraform variables + apply/destroy
+Implements **postgres / mysql / sqlserver across aws / azure / gcp** plus Oracle on
+OCI end-to-end on the dashboard side (record + Terraform variables + apply/destroy
 plumbing); see ``_IMPLEMENTED`` for the supported engine/cloud matrix —
-anything outside it raises ``NotImplementedError``. The PRA tunnel is brokered
+anything outside it raises ``NotImplementedError``. Every engine in
+``VALID_ENGINES`` can be *registered*, MongoDB included. The PRA tunnel is brokered
 with the ``beyondtrust/sra`` Terraform provider (``terraform_pra_service``) —
-**never ``btapi``** — so MongoDB is not offered in community until the provider
-ships a resource. Credentials are stored encrypted in the DB via ``config_service``
+**never ``btapi``** — so Oracle and MongoDB ride its generic tcp tunnel until the
+provider ships the dedicated PRA 26.3 tunnel resources. Credentials are stored encrypted in the DB via ``config_service``
 (community has no Password Safe dependency).
 
 ``provision`` does the synchronous record-keeping and returns; the actual
@@ -46,9 +47,12 @@ from .region_config import resolve_region
 
 logger = logging.getLogger(__name__)
 
-# Community supports the three engines the beyondtrust/sra provider can tunnel
-# (no MongoDB resource yet). All engine × cloud combos are wired — see _IMPLEMENTED.
-VALID_ENGINES = {"postgres", "mysql", "sqlserver", "oracle"}
+# Every engine here can be registered and tunnelled; which (engine, cloud) pairs can
+# also be PROVISIONED is _IMPLEMENTED. Oracle and MongoDB tunnel over the sra
+# provider's generic tcp type (terraform_pra_service._DB_TUNNEL_TYPE).
+# ps_database_catalog keeps a literal copy of this set and _DEFAULT_PORTS, pinned to
+# these by test_ps_database_catalog — change both together.
+VALID_ENGINES = {"postgres", "mysql", "sqlserver", "oracle", "mongodb"}
 VALID_CLOUDS = {"aws", "azure", "gcp", "oci"}
 # Clouds a database may be REGISTERED from. Wider than VALID_CLOUDS because
 # provisioning needs a Terraform module and registering needs only somewhere to reach:
@@ -96,14 +100,16 @@ def _entitle_ineligible_reason(engine: str, provider: Optional[str], *,
     :func:`_serialize`'s ``entitle_viable``), the API pre-flight, and
     :func:`_entitle_register_core` — so they can't disagree about what is offerable.
 
-    Two independent blockers, each with its own message:
+    Three independent blockers, each with its own message:
 
     * a **registered** database (``source="registered"``) was never provisioned here, so
       there is no provisioning job, no ``tf_variables`` and no ``config://clouddb/<id>/
       admin`` entry for :func:`_entitle_register_core` to build the connector's admin
       credential from. Its Password Safe managed account is checked out at run time and
       never stored on the row, so registration can only ever fail. Checked first: it
-      holds for every engine, and it is the more fundamental of the two.
+      holds for every engine, and it is the most fundamental.
+    * **MongoDB** has no database-login connector at all — Entitle's Atlas MongoDB
+      integration is API-key based and lands with Atlas provisioning, not here.
     * **SQL Server**'s connector needs sysadmin/CONTROL SERVER, which the managed
       flavors this dashboard provisions can't grant (see
       ``_ENTITLE_VIABLE_SQLSERVER_PROVIDERS``).
@@ -116,12 +122,23 @@ def _entitle_ineligible_reason(engine: str, provider: Optional[str], *,
                 "databases. This database was registered, so there is no provisioning "
                 "credential to give the Entitle connector — its Password Safe managed "
                 "account is checked out at run time and never stored.")
+    if engine == "mongodb":
+        return ("Entitle has no database-login connector for MongoDB. Its only Mongo "
+                "integration is Atlas MongoDB, which is configured with an Atlas Admin "
+                "API key rather than a database account.")
     if engine == "sqlserver" and (provider or "") not in _ENTITLE_VIABLE_SQLSERVER_PROVIDERS:
         return (f"Entitle's Microsoft SQL Server connector requires sysadmin/CONTROL "
                 f"SERVER, which managed {provider or cloud or 'cloud'} SQL Server does "
                 f"not grant. Register is only supported on Entitle-compatible SQL Server "
                 f"(Azure SQL Managed Instance / AWS RDS Custom).")
     return None
+
+
+def _entitle_connector_mints(engine: str) -> bool:
+    """Whether Entitle's DB connector for ``engine`` mints ephemeral accounts. The
+    table lives with the HCL that sets ``allow_creating_accounts`` from it."""
+    from .entitle_registration_service import db_connector_mints
+    return db_connector_mints(engine or "")
 
 
 def _entitle_viable(engine: str, provider: Optional[str],
@@ -148,7 +165,8 @@ _TEMPLATE_DIRS = {
 _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
 
 # oracle = the ADB TLS (no-wallet) listener port. mTLS would be 1522.
-_DEFAULT_PORTS = {"postgres": 5432, "mysql": 3306, "sqlserver": 1433, "oracle": 1521}
+_DEFAULT_PORTS = {"postgres": 5432, "mysql": 3306, "sqlserver": 1433, "oracle": 1521,
+                  "mongodb": 27017}
 
 # tf_variables keys that hold the admin secret — stripped before the -var set is
 # persisted to the job metadata (a secret is never written to jobs.extra_data).
@@ -251,6 +269,11 @@ def connection_db_name(row, tf_variables: Optional[dict] = None) -> str:
     # row the backfill could not reach. Never invent one for a registered Oracle row.
     if engine == "oracle" and not row.db_name and not registered:
         return _oracle_db_name(row.id)
+    # A MongoDB session authenticates against an auth database (authSource), not a
+    # catalog it opens; "admin" is the server default for both a self-hosted mongod
+    # and Atlas, so it is a safe fallback even for a registered row.
+    if engine == "mongodb":
+        return row.db_name or "admin"
     return row.db_name or (tf_variables or {}).get("db_name", "") or ""
 
 
@@ -918,6 +941,9 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
             admin_password=admin_password,
             vault_account_name=vault_account_name,
             vault_account_group_id=vault_group_id,
+            # A tcp tunnel (oracle / mongodb) forwards this port; the
+            # protocol-aware tunnels ignore it.
+            port=row.port or _DEFAULT_PORTS.get(engine, 0),
         )
         row.jump_item_id = tun.get("tunnel_jump_id") or None
         db.commit()
@@ -1018,6 +1044,10 @@ async def _entitle_register_core(db: Session, *, row: CloudDatabase, engine: str
     version = ""
     if engine == "sqlserver":
         version = _cfg("entitle_sqlserver_version") or "2019"
+    elif engine == "oracle" and (row.provider or "") == "autonomous":
+        # The Oracle connector's `protocol` rides the same slot. OCI Autonomous DB's
+        # no-wallet 1521 listener is TLS-only, so plain tcp would never handshake.
+        version = "tcps"
 
     # GCP Cloud SQL's private IP is unreachable from the Entitle agent's own GKE VPC
     # (non-transitive peering). Stand up an on-demand socat forwarder in the sandbox
@@ -4901,6 +4931,9 @@ def _serialize(r: CloudDatabase) -> dict:
         "connect_db_name": connection_db_name(r),
         "entitle_integration_id": r.entitle_integration_id,
         "entitle_viable": _entitle_viable(r.engine, r.provider, r.source),
+        # Whether that connector mints ephemeral accounts (vs. assigning standing
+        # roles) — the page words the Register button and its confirm from this.
+        "entitle_mints": _entitle_connector_mints(r.engine),
         # Password Safe DB onboarding. The ids are not secrets — they are what an
         # operator reads back in the Password Safe UI — and ps_viable is the STRUCTURAL
         # half of the button's gate (see _ps_ineligible_reason); whether the feature is

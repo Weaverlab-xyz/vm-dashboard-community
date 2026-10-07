@@ -22,6 +22,7 @@ reachable by path, and from here.
 | [SPIRE for agents, Dex for people](agent-and-human-identity.md) | you are giving the remote agent a SPIFFE identity, putting Dex in front of SSO or an on-prem cluster's API server, or wondering why the Ed25519 agent path was kept. Dex for managed clusters is paused. |
 | [The dashboard as a SPIFFE workload](dashboard-workload-identity.md) | you are retiring one of the dashboard's stored cloud keys, moving a Workload Lab demo off the lab's SPIRE server, or deciding whether something else should use a SPIFFE token. Built except L3, which waits on the lab's attribute probe; nothing has run against a live cloud. |
 | [PRA's session-issuing CA](pra-session-ca.md) | you are making Password Safe the issuer and rotator of the CA that PRA Vault uses to mint session certificates. The plugin half is built; the delivery into PRA is not. |
+| [Oracle and MongoDB engines](oracle-mongodb-engines.md) | you are adding Oracle or MongoDB to a database layer, or swapping their tcp tunnels for PRA 26.3's dedicated ones. Slice 1 is built; RDS Oracle, Atlas, PS native and Ansible are not. |
 | [The dashboard deploys `bt-dbops`](ps-dbops-cloud-run.md) | you are working on the in-VPC service the Cloud SQL rotation plugin calls. |
 | [The demo cells we do not have](next-demo-cells.md) | you are deciding what to build after the network cell, or wondering why a role you expected to find has no page. Nothing in it is built. |
 

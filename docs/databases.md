@@ -42,7 +42,11 @@ differs by cloud/engine:
 | **AWS** | postgres / mysql / sqlserver (RDS) | ✅ tunnel | ✅ `dbssm` | ✅ register + JIT |
 | **Azure** | postgres / mysql (Flexible Server) + sqlserver (SQL DB + Private Endpoint) | ✅ tunnel | ✅ `dbazure` | ✅ register + JIT |
 | **GCP** | postgres / mysql / sqlserver (Cloud SQL, private IP) | ✅ tunnel | ⚠️ `dbgcp` — sqlserver via Cloud Run; postgres / mysql inert until the Data API channel ships | ✅ postgres / mysql (via forwarder) |
-| **OCI** | ⚠️ **oracle only** (Autonomous DB) — read the caveats² | ✅ tunnel¹ | ❌ | ❌ |
+| **OCI** | ⚠️ **oracle only** (Autonomous DB) — read the caveats² | ✅ tunnel¹ | ❌ | ⚠️ register (Oracle connector, unverified live) |
+
+**MongoDB** is a registered-only engine today: it can be [registered](#registering-an-existing-database)
+and tunnelled, but nothing provisions it yet (MongoDB Atlas is planned). Entitle has no
+database-login connector for it — see [Layer 3](#layer-3--entitle-just-in-time-access).
 
 ¹ OCI has no dashboard-provisioned gateway — you supply your own (see the OCI section).
 ² The OCI module only started shipping in the image recently and has **never completed a live
@@ -92,12 +96,24 @@ Per-engine tunnel resource (`beyondtrust/sra` provider, in
 | postgres | `sra_postgresql_tunnel_jump` | proxies cleartext wire protocol |
 | mysql | `sra_my_sql_tunnel_jump` | proxies cleartext wire protocol |
 | sqlserver | `sra_protocol_tunnel_jump` (`tunnel_type=mssql`) | TDS-aware; does its own backend TLS |
-| oracle | `sra_protocol_tunnel_jump` (`tunnel_type=tcp`) | generic TCP to the ADB TLS listener |
+| oracle | `sra_protocol_tunnel_jump` (`tunnel_type=tcp`) | raw TCP port forward to the SQL*Net listener |
+| mongodb | `sra_protocol_tunnel_jump` (`tunnel_type=tcp`) | raw TCP port forward to one `mongod` |
+
+A `tcp` tunnel is a **port forward**, not a protocol-aware tunnel: the dashboard sends
+`tunnel_definitions = "<port>;<port>"` and `tunnel_listen_address = "127.0.0.1"`, so the
+client connects to `127.0.0.1` on the database's own port, and no username or database is
+attached to the jump. PRA 26.3 adds dedicated Oracle and MongoDB tunnels (PRA already has a
+MongoDB tunnel with an **Auth Source** field); the dashboard moves to them once the
+`beyondtrust/sra` provider ships resources — its `tunnel_type` validator accepts only `tcp`
+and `mssql` today. For MongoDB, connect with `directConnection=true` (the tunnel reaches one
+server, not the replica set's SRV name) and `tlsAllowInvalidHostnames=true` (127.0.0.1 is
+never the name on the server's certificate).
 
 Because the Postgres/MySQL tunnels proxy **cleartext**, the DB is provisioned with TLS
 made optional on the server side (`rds.force_ssl=0` / `require_secure_transport=OFF` /
 Cloud SQL `ssl_mode=ALLOW_UNENCRYPTED_AND_ENCRYPTED`). SQL Server and Oracle keep TLS on
-because their tunnels terminate/forward TLS themselves.
+because their tunnels terminate/forward TLS themselves. Oracle and MongoDB tunnels forward
+bytes, so the database's own TLS passes straight through to the client.
 
 ### The database name
 
@@ -153,7 +169,7 @@ row **now** rather than as a failed playbook run later. See the blockquote below
 **Platform → engine.** Matched on substrings of the Password Safe platform name and short
 name, first hit wins: `sqlserver` (`ms sql`, `mssql`, `sql server`), `postgres`
 (`postgresql`, `postgres`, `psql`, `greenplum`), `mysql` (`mysql`, `mariadb` — MariaDB
-registers as mysql), `oracle` (`oracle`, `oradb`). `mysql` is matched before `oracle` so
+registers as mysql), `oracle` (`oracle`, `oradb`), `mongodb` (`mongo`). `mysql` is matched before `oracle` so
 "Oracle MySQL" resolves correctly. A platform that maps to nothing is **shown and greyed
 out**, never silently dropped — otherwise "my database isn't in the list" is
 undiagnosable. Add your own with `clouddb_ps_import_platform_map`.
@@ -215,8 +231,8 @@ the on-premises case.
 The registerable set is deliberately wider than the provisionable one — **provisioning
 needs a Terraform module, registering needs only somewhere to reach.** Any of `local`,
 `aws`, `azure`, `gcp` or `oci` may be registered, and engines are **postgres / mysql /
-sqlserver / oracle**. Configuration Management runs cover postgres / mysql / sqlserver;
-the `ansible-cloud` runner image ships no Oracle client, and no Ansible runner resolves
+sqlserver / oracle / mongodb**. Configuration Management runs cover postgres / mysql / sqlserver;
+the `ansible-cloud` runner image ships no Oracle or MongoDB client yet, and no Ansible runner resolves
 for `oci` at all, so an OCI row registers and lists but can't be a run target.
 
 **How to register.** **Databases** page → **Register existing**, or
@@ -528,7 +544,8 @@ The account model is **per engine**:
 | **PostgreSQL** | **Ephemeral (JIT) accounts** — *proven* | Entitle mints a short-lived role per grant. The connector config uses `user` (not `username`) + a required `options{}` block, no top-level `database`. |
 | **SQL Server** | Ephemeral accounts | **Only on Entitle-viable providers** — Azure SQL Managed Instance / AWS RDS Custom. Managed Cloud SQL / RDS-standard / Azure SQL Database are refused (`_entitle_viable`) because the connector needs sysadmin/CONTROL SERVER they can't grant. Requires a `version` field (default `2019`, `entitle_sqlserver_version`). |
 | **MySQL** | **Persistent roles** (not ephemeral) | Entitle's MySQL connector assigns persistent roles rather than minting accounts. |
-| **Oracle (OCI)** | — | Not supported by the Entitle DB connector. |
+| **Oracle** | Ephemeral accounts — *not yet proven live* | Entitle's "Oracle Database" connector. Its config says `username` (not `user`) and needs `service_name`, which must name a **PDB** — Entitle manages pluggable databases only. Autonomous DB sends `protocol = "tcps"` (its no-wallet listener is TLS-only). The connector wants a SYSDBA or DBA-role account. |
+| **MongoDB** | — | Refused: Entitle has no database-login MongoDB connector. Its only Mongo integration is **Atlas MongoDB**, configured with an Atlas Admin API key, which arrives with Atlas provisioning. |
 
 **Reachability.** Because dashboard DBs are private, Entitle reaches them through the
 **shared Entitle agent** (`entitle_agent_token_name`; provisioned on Kubernetes, one per

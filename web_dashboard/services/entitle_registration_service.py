@@ -90,7 +90,11 @@ _APP_SLUG = {
     "postgres":   "postgres",
     "mysql":      "mysql",
     "sqlserver":  "microsoft sql server",
-    "oracle":     "oracle database",   # OCI Autonomous DB; confirm against the tenant catalog (name varies)
+    # Catalog display name "Oracle Database" (docs.beyondtrust.com/entitle/docs/
+    # entitle-integration-oracle_database). MongoDB has NO entry on purpose: Entitle's
+    # only Mongo integration is "Atlas MongoDB", an Atlas Admin API-key integration with
+    # a different connection shape — never a database-login connector.
+    "oracle":     "oracle database",
     "kubernetes": "kubernetes",
 }
 
@@ -374,9 +378,26 @@ def _db_connection_json_hcl(*, engine: str, host: str, port: int,
       - postgresql: host, port, user,     password, options{}   (NO top-level database)
       - mysql:      host, port, user,     password, [mysql_version]
       - mssql:      server (host[,port]), user, password, [database], [version]
+      - oracle:     host, port, username, password, service_name, [protocol]
+
+    An engine with no branch here RAISES — it used to fall through to the postgres
+    shape, which is how Oracle shipped a payload Entitle could never match.
     """
     lines: list[str] = []
-    if engine == "sqlserver":
+    if engine == "oracle":
+        # Oracle's connector says `username` (not `user`, unlike every other DB
+        # connector here) and needs `service_name` — which must name a PDB, never the
+        # CDB: Entitle manages pluggable databases only. `protocol` is "tcps" for a
+        # TLS listener (OCI Autonomous DB's no-wallet 1521), omitted for plain tcp.
+        # docs.beyondtrust.com/entitle/docs/entitle-integration-oracle_database
+        lines.append(f"    host         = {json.dumps(host)}")
+        lines.append(f"    port         = {json.dumps(str(port))}")
+        lines.append(f"    username     = {json.dumps(username)}")
+        lines.append("    password     = var.db_password")
+        lines.append(f"    service_name = {json.dumps(database)}")
+        if version:
+            lines.append(f"    protocol     = {json.dumps(version)}")
+    elif engine == "sqlserver":
         # The mssql connector takes `server` (host[,port]) + `user`; no separate `port`.
         server = f"{host},{port}" if port else host
         lines.append(f"    server   = {json.dumps(server)}")
@@ -393,7 +414,7 @@ def _db_connection_json_hcl(*, engine: str, host: str, port: int,
         lines.append("    password = var.db_password")
         if version:
             lines.append(f"    mysql_version = {json.dumps(version)}")
-    else:  # postgres
+    elif engine == "postgres":
         # Entitle's Postgres connector schema is {user, password, host, port,
         # options{resource_types_constraints, databases_constraints}}. It expects
         # `user` — NOT `username` — and has NO top-level `database` field; sending
@@ -415,24 +436,43 @@ def _db_connection_json_hcl(*, engine: str, host: str, port: int,
         lines.append("      resource_types_constraints = []")
         lines.append("      databases_constraints      = []")
         lines.append("    }")
+    else:
+        raise EntitleRegistrationError(
+            f"no Entitle connection schema for engine {engine!r}")
     body = "\n".join(lines)
     return f"  connection_json = jsonencode({{\n{body}\n  }})\n"
+
+
+# The DB engines Entitle has a database-login connector for, and whether that
+# connector mints ephemeral (JIT) accounts. MySQL's connector assigns persistent
+# roles to existing accounts instead. Also the registration engine allow-list — and
+# the UI's "mints accounts" hint via db_connector_mints().
+_DB_ALLOW_CREATING_ACCOUNTS = {
+    "postgres": True,
+    "sqlserver": True,
+    "mysql": False,
+    "oracle": True,
+}
+
+
+def db_connector_mints(engine: str) -> bool:
+    """Whether Entitle's connector for ``engine`` creates ephemeral accounts."""
+    return bool(_DB_ALLOW_CREATING_ACCOUNTS.get(engine))
 
 
 def _generate_db_hcl(*, engine: str, name: str, host: str, port: int,
                      username: str, database: str, version: str, private: bool) -> str:
     slug = _APP_SLUG.get(engine)
-    if not slug or engine == "ssh":
+    if not slug or engine not in _DB_ALLOW_CREATING_ACCOUNTS:
         raise EntitleRegistrationError(
             f"DB registration for engine {engine!r} not supported "
-            f"(supported: postgres, mysql, sqlserver)"
+            f"(supported: {', '.join(sorted(_DB_ALLOW_CREATING_ACCOUNTS))})"
         )
     label = _safe_name(name)
     header = _provider_header('variable "db_password" { sensitive = true }\n')
     conn = _db_connection_json_hcl(engine=engine, host=host, port=port,
                                    username=username, database=database, version=version)
-    # Ephemeral (JIT) accounts for postgres/sqlserver; mysql assigns persistent roles.
-    allow_creating = engine != "mysql"
+    allow_creating = _DB_ALLOW_CREATING_ACCOUNTS[engine]
     return header + f"""
 resource "entitle_integration" {json.dumps(label)} {{
   name        = {json.dumps(name[:50])}
@@ -804,13 +844,14 @@ async def register_database(
     private: bool = True, tag: str = "vm-dashboard",
 ) -> dict:
     """Register a managed database as an Entitle DB integration
-    (PostgreSQL / MySQL / Microsoft SQL Server). ``private`` controls whether an
+    (PostgreSQL / MySQL / Microsoft SQL Server / Oracle Database). ``private`` controls whether an
     ``agent_token`` is attached (``False`` = publicly reachable, no agent).
 
-    ``version`` is the engine version the connector wants (mysql ``mysql_version`` /
-    mssql ``version``); optional and omitted from the connection_json when empty
-    (postgres needs none). postgres/sqlserver register with ephemeral-account
-    creation enabled; mysql uses persistent role assignment."""
+    ``version`` is the engine-specific extra the connector wants (mysql
+    ``mysql_version`` / mssql ``version`` / oracle ``protocol``); optional and omitted
+    from the connection_json when empty (postgres needs none). For oracle
+    ``database`` is the PDB service name. postgres/sqlserver/oracle register with
+    ephemeral-account creation enabled; mysql uses persistent role assignment."""
     if not password:
         raise EntitleRegistrationError("DB service-account password is empty")
     hcl = _generate_db_hcl(engine=engine, name=name, host=host, port=port,

@@ -295,16 +295,22 @@ def test_the_button_says_which_access_model_mysql_gets():
 
 
 def test_the_ui_and_the_service_cannot_disagree_about_which_engine_is_ephemeral():
-    """entitleIsEphemeral mirrors `allow_creating = engine != "mysql"`. If the
-    service ever gains or loses an ephemeral engine, this fails rather than leaving
-    the page quietly promising the wrong thing."""
+    """entitleIsEphemeral used to MIRROR the service's rule as its own engine literal,
+    which drifts the moment an engine is added. It now reads d.entitle_mints, which
+    _serialize projects from the same table that sets allow_creating_accounts — so
+    the page may not carry an engine name of its own here."""
     page = _read(_PAGE)
     helper = page.split("entitleIsEphemeral(d) {")[1].split("}")[0]
-    assert "d.engine !== 'mysql'" in helper, helper
+    assert "d.entitle_mints" in helper, helper
+    assert "d.engine" not in helper, helper
 
     svc = _read(os.path.join(_ROOT, "web_dashboard", "services",
                              "entitle_registration_service.py"))
-    assert 'allow_creating = engine != "mysql"' in svc,         "the service changed which engines mint accounts; update entitleIsEphemeral"
+    assert "allow_creating = _DB_ALLOW_CREATING_ACCOUNTS[engine]" in svc
+    assert '"mysql": False' in svc, "MySQL's connector assigns standing roles"
+    clouddb = _read(os.path.join(_ROOT, "web_dashboard", "services",
+                                 "cloud_database_service.py"))
+    assert '"entitle_mints": _entitle_connector_mints(r.engine)' in clouddb
 
 
 def test_the_confirm_does_not_promise_jit_for_a_standing_connector():
