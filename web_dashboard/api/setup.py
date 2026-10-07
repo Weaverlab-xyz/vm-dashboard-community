@@ -1464,6 +1464,11 @@ class EntitleFeatureConfig(BaseModel):
     entitle_rancher_app_slug: str = "rancher"
     entitle_rancher_url_key: str = "url"
     entitle_rancher_token_key: str = "api_token"
+    # Atlas MongoDB connector — an Atlas programmatic API key (Organization Owner, per
+    # Entitle's docs), distinct from the provisioning service account.
+    entitle_atlas_public_key: str = ""
+    entitle_atlas_private_key: str = ""   # encrypted at rest
+    entitle_atlas_app_slug: str = ""      # catalog slug; blank → "atlas mongodb"
 
 class ProxmoxFeatureConfig(BaseModel):
     enabled: bool = False
@@ -1608,6 +1613,13 @@ class CloudDatabaseFeatureConfig(BaseModel):
     azure_db_sqlserver_private_dns_zone_id: str = ""  # sqlserver privatelink.database.windows.net zone
     # GCP Cloud SQL
     gcp_db_network: str = ""
+    # MongoDB Atlas — one Atlas project per cluster, created in this organization by a
+    # service account (OAuth client credentials) holding Organization Project Creator.
+    atlas_org_id: str = ""
+    atlas_client_id: str = ""
+    atlas_client_secret: str = ""                     # SECRET — see _SECRET_FEATURE_KEYS
+    atlas_default_tier: str = ""                      # blank → FLEX; or M10, M20, ...
+    atlas_extra_access_cidrs: str = ""                # CSV added to every cluster's access list (e.g. Entitle's IPs)
 
 
 class K8sManagementFeatureConfig(BaseModel):
@@ -2240,6 +2252,7 @@ _SECRET_FEATURE_KEYS = frozenset({
     "clouddb_ps_gcp_sa_key",
     "portainer_pat", "portainer_admin_password",
     "entitle_api_token", "entitle_api_key", "entitle_rest_secret",
+    "entitle_atlas_private_key", "atlas_client_secret",
     "pov_accessor_rest_secret",
     "proxmox_token_secret", "proxmox_password",
     "skytap_api_token",

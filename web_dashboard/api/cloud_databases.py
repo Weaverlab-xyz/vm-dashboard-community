@@ -123,6 +123,12 @@ class ProvisionRequest(BaseModel):
     oci_cpu_core_count: Optional[int] = None
     oci_data_storage_tbs: Optional[int] = None
     oci_subnet_ocid: Optional[str] = None
+    # AWS RDS for Oracle — oracle-se2-cdb (default; Entitle-compatible) or oracle-se2.
+    oracle_engine: Optional[str] = None
+    # MongoDB Atlas — FLEX (default) or a dedicated size (M10, ...); atlas_region is
+    # Atlas's own region name, needed only where the cloud region has no known mapping.
+    atlas_tier: Optional[str] = None
+    atlas_region: Optional[str] = None
     # PRA Vault account group the injected credential lands in — an unassigned
     # vault account is injectable by nobody, so the form offers a picker.
     vault_account_group_id: Optional[int] = None
@@ -369,6 +375,9 @@ async def provision_database(
         "oci_cpu_core_count": payload.oci_cpu_core_count,
         "oci_data_storage_tbs": payload.oci_data_storage_tbs,
         "oci_subnet_ocid": payload.oci_subnet_ocid,
+        "oracle_engine": payload.oracle_engine,
+        "atlas_tier": payload.atlas_tier,
+        "atlas_region": payload.atlas_region,
     }.items() if v is not None}
 
     # Canonical region from here on (the row, the job and the tf `location`/`region`

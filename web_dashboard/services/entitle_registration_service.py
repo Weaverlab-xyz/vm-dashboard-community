@@ -485,6 +485,63 @@ output "integration_id" {{
 """
 
 
+# ── Atlas MongoDB (an API-key integration, not a database login) ─────────────
+#
+# Entitle's only MongoDB integration. It talks to the Atlas Admin API with a
+# programmatic key and, with connect_to_clusters, to the clusters themselves — so the
+# cluster's project access list must admit Entitle's IPs (atlas_extra_access_cidrs).
+# Atlas is SaaS reachable from Entitle's cloud, so no agent: private=False.
+# docs.beyondtrust.com/entitle/docs/configuring-mongodb-atlas-api-key
+
+def _atlas_app_slug() -> str:
+    return (_cfg("entitle_atlas_app_slug") or "atlas mongodb").strip().lower()
+
+
+def _generate_atlas_hcl(*, name: str, project_id: str, public_key: str) -> str:
+    """``project_id`` scopes the integration to the cluster's own Atlas project (the
+    dashboard creates one per cluster). The private key is a sensitive variable,
+    interpolated by jsonencode at apply time — never written into the HCL."""
+    label = _safe_name(name)
+    header = _provider_header('variable "atlas_private_key" { sensitive = true }\n')
+    return header + f"""
+resource "entitle_integration" {json.dumps(label)} {{
+  name        = {json.dumps(name[:50])}
+  application = {{ name = {json.dumps(_atlas_app_slug())} }}
+  connection_json = jsonencode({{
+    public_key  = {json.dumps(public_key)}
+    private_key = var.atlas_private_key
+    project_id  = {json.dumps(project_id)}
+    options = {{
+      connect_to_clusters      = true
+      read_only                = false
+      use_privatelink_endpoint = false
+    }}
+  }})
+{_common_attrs_hcl(False, allow_creating_accounts=True)}}}
+
+output "integration_id" {{
+  value = entitle_integration.{label}.id
+}}
+"""
+
+
+async def register_atlas(*, name: str, project_id: str) -> dict:
+    """Register one Atlas cluster's project as an Entitle "Atlas MongoDB" integration,
+    using the Entitle-only Atlas API key from Settings. Returns ``{integration_id,
+    tf_state_json}``, the same shape :func:`register_database` returns, so
+    :func:`deregister` tears it down the same way."""
+    public_key = _cfg("entitle_atlas_public_key")
+    private_key = _cfg("entitle_atlas_private_key")
+    if not (public_key and private_key):
+        raise EntitleRegistrationError(
+            "the Entitle Atlas MongoDB connector needs an Atlas API key — set the public "
+            "and private key under Settings → Entitle → Atlas MongoDB connector")
+    if not project_id:
+        raise EntitleRegistrationError("no Atlas project id recorded for this cluster")
+    hcl = _generate_atlas_hcl(name=name, project_id=project_id, public_key=public_key)
+    return await asyncio.to_thread(_apply_hcl_sync, hcl, {"atlas_private_key": private_key})
+
+
 def _generate_k8s_hcl(*, name: str, host: str, user_prefix: str, private: bool) -> str:
     """The generic Entitle **Kubernetes** integration (covers EKS/AKS/GKE via the K8s
     API). ``private`` = the API server isn't reachable from Entitle's cloud, so use

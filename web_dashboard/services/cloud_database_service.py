@@ -70,6 +70,11 @@ _IMPLEMENTED = {
     # AWS RDS for Oracle — SE2 license-included, single-tenant CDB (one PDB), so
     # Entitle's PDB-only Oracle connector can manage it.
     ("oracle", "aws"),
+    # MongoDB Atlas. `cloud` is the BACKING provider the cluster runs on — and the
+    # cloud whose PRA gateway reaches it — not "atlas": that keeps the per-region
+    # config, the gateway host and its egress IP (the Atlas access list's /32) on the
+    # machinery every other row uses. provider="atlas" is what marks the row.
+    ("mongodb", "aws"), ("mongodb", "azure"), ("mongodb", "gcp"),
 }
 _PROVIDER = {
     ("postgres", "aws"): "rds",
@@ -83,6 +88,9 @@ _PROVIDER = {
     ("sqlserver", "azure"): "sql_database",
     ("oracle", "oci"): "autonomous",
     ("oracle", "aws"): "rds",
+    ("mongodb", "aws"): "atlas",
+    ("mongodb", "azure"): "atlas",
+    ("mongodb", "gcp"): "atlas",
 }
 
 # SQL Server managed offerings that CAN satisfy Entitle's Microsoft SQL Server
@@ -112,8 +120,9 @@ def _entitle_ineligible_reason(engine: str, provider: Optional[str], *,
       credential from. Its Password Safe managed account is checked out at run time and
       never stored on the row, so registration can only ever fail. Checked first: it
       holds for every engine, and it is the most fundamental.
-    * **MongoDB** has no database-login connector at all — Entitle's Atlas MongoDB
-      integration is API-key based and lands with Atlas provisioning, not here.
+    * **MongoDB** has no database-login connector at all. Only an Atlas cluster
+      (``provider="atlas"``) qualifies, through Entitle's API-key based Atlas MongoDB
+      integration — see the Atlas branch of :func:`_entitle_register_core`.
     * **SQL Server**'s connector needs sysadmin/CONTROL SERVER, which the managed
       flavors this dashboard provisions can't grant (see
       ``_ENTITLE_VIABLE_SQLSERVER_PROVIDERS``).
@@ -126,10 +135,10 @@ def _entitle_ineligible_reason(engine: str, provider: Optional[str], *,
                 "databases. This database was registered, so there is no provisioning "
                 "credential to give the Entitle connector — its Password Safe managed "
                 "account is checked out at run time and never stored.")
-    if engine == "mongodb":
-        return ("Entitle has no database-login connector for MongoDB. Its only Mongo "
-                "integration is Atlas MongoDB, which is configured with an Atlas Admin "
-                "API key rather than a database account.")
+    if engine == "mongodb" and (provider or "") != "atlas":
+        return ("Entitle has no database-login connector for self-hosted MongoDB. Its "
+                "only Mongo integration is Atlas MongoDB, so only dashboard-provisioned "
+                "Atlas clusters can be registered.")
     if engine == "sqlserver" and (provider or "") not in _ENTITLE_VIABLE_SQLSERVER_PROVIDERS:
         return (f"Entitle's Microsoft SQL Server connector requires sysadmin/CONTROL "
                 f"SERVER, which managed {provider or cloud or 'cloud'} SQL Server does "
@@ -138,9 +147,12 @@ def _entitle_ineligible_reason(engine: str, provider: Optional[str], *,
     return None
 
 
-def _entitle_connector_mints(engine: str) -> bool:
-    """Whether Entitle's DB connector for ``engine`` mints ephemeral accounts. The
-    table lives with the HCL that sets ``allow_creating_accounts`` from it."""
+def _entitle_connector_mints(engine: str, provider: Optional[str] = None) -> bool:
+    """Whether Entitle's connector for this row mints ephemeral accounts. The DB table
+    lives with the HCL that sets ``allow_creating_accounts`` from it; Atlas MongoDB is
+    its own integration, which does."""
+    if (provider or "") == "atlas":
+        return True
     from .entitle_registration_service import db_connector_mints
     return db_connector_mints(engine or "")
 
@@ -166,6 +178,9 @@ _TEMPLATE_DIRS = {
     ("sqlserver", "azure"): os.path.join(_REPO_ROOT, "terraform", "db_azure_sqlserver"),
     ("oracle", "oci"): os.path.join(_REPO_ROOT, "terraform", "db_oci_autonomous"),
     ("oracle", "aws"): os.path.join(_REPO_ROOT, "terraform", "db_aws_oracle"),
+    ("mongodb", "aws"): os.path.join(_REPO_ROOT, "terraform", "db_atlas_mongodb"),
+    ("mongodb", "azure"): os.path.join(_REPO_ROOT, "terraform", "db_atlas_mongodb"),
+    ("mongodb", "gcp"): os.path.join(_REPO_ROOT, "terraform", "db_atlas_mongodb"),
 }
 _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
 
@@ -247,6 +262,89 @@ def _oracle_rds_db_name(db_id: str) -> str:
     id (``ORA`` + 5 hex) rather than the operator's name, which rarely fits 8 chars;
     the module upper-cases it, so the row holds the same spelling."""
     return ("ORA" + re.sub(r"[^a-z0-9]", "", db_id.lower()))[:8].upper()
+
+
+# ── MongoDB Atlas helpers ─────────────────────────────────────────────────────
+
+_ATLAS_BACKING_PROVIDER = {"aws": "AWS", "azure": "AZURE", "gcp": "GCP"}
+
+# Atlas names Azure and GCP regions its own way (AWS is the region id upper-cased with
+# underscores). Only regions a dashboard gateway plausibly runs in are listed; anything
+# else needs the provision form's explicit atlas_region rather than a guess, because a
+# wrong name fails the apply minutes in. Atlas's region tables:
+# mongodb.com/docs/atlas/reference/microsoft-azure/ and .../google-gcp/
+_ATLAS_REGION_NAMES = {
+    "azure": {
+        "eastus": "US_EAST", "eastus2": "US_EAST_2", "centralus": "US_CENTRAL",
+        "northcentralus": "US_NORTH_CENTRAL", "southcentralus": "US_SOUTH_CENTRAL",
+        "westus": "US_WEST", "westus2": "US_WEST_2", "westus3": "US_WEST_3",
+        "westcentralus": "US_WEST_CENTRAL", "canadacentral": "CANADA_CENTRAL",
+        "northeurope": "EUROPE_NORTH", "westeurope": "EUROPE_WEST",
+        "uksouth": "UK_SOUTH", "australiaeast": "AUSTRALIA_EAST",
+    },
+    "gcp": {
+        "us-central1": "CENTRAL_US", "us-east1": "EASTERN_US", "us-east4": "US_EAST_4",
+        "us-west1": "WESTERN_US", "us-west2": "US_WEST_2", "us-west3": "US_WEST_3",
+        "us-west4": "US_WEST_4", "europe-west1": "WESTERN_EUROPE",
+        "europe-west2": "EUROPE_WEST_2", "europe-west3": "EUROPE_WEST_3",
+        "northamerica-northeast1": "NORTH_AMERICA_NORTHEAST_1",
+        "asia-east1": "EASTERN_ASIA_PACIFIC",
+    },
+}
+
+
+def atlas_region_name(cloud: str, region: str) -> str:
+    """The Atlas region name for a cloud region id (``us-east-1`` -> ``US_EAST_1``)."""
+    region = (region or "").strip().lower()
+    if cloud == "aws" and region:
+        return region.upper().replace("-", "_")
+    name = _ATLAS_REGION_NAMES.get(cloud, {}).get(region)
+    if not name:
+        raise CloudDatabaseError(
+            f"no Atlas region name is known for {cloud} region {region!r} — pass "
+            f"atlas_region explicitly (Atlas's own name, e.g. US_EAST_2)")
+    return name
+
+
+def _atlas_tier(requested: Optional[str]) -> str:
+    """FLEX unless the form or the configured default asks for a dedicated size."""
+    return ((requested or _cfg("atlas_default_tier") or "FLEX").strip().upper()) or "FLEX"
+
+
+def _is_atlas(row) -> bool:
+    return (getattr(row, "provider", None) or "") == "atlas"
+
+
+def _atlas_env() -> dict:
+    """The mongodbatlas provider's service-account credentials, as the environment
+    variables it reads. Fresh reads: the secret may have been saved from the app process
+    seconds ago, inside config_service's cache TTL."""
+    client_id = config_service.get_fresh("atlas_client_id") or _cfg("atlas_client_id")
+    secret = config_service.get_fresh("atlas_client_secret") or _cfg("atlas_client_secret")
+    if not (client_id and secret):
+        raise CloudDatabaseError(
+            "MongoDB Atlas is not configured: set the service account client ID and "
+            "secret under Settings → Databases → MongoDB Atlas")
+    return {"MONGODB_ATLAS_CLIENT_ID": client_id, "MONGODB_ATLAS_CLIENT_SECRET": secret}
+
+
+def _tf_env(row) -> Optional[dict]:
+    """Terraform subprocess environment for this row's module: the Atlas service
+    account for an Atlas cluster (its module touches no cloud API), the cloud's own
+    credentials for everything else."""
+    if _is_atlas(row):
+        return _atlas_env()
+    return terraform_provider_env.provider_env(row.cloud)
+
+
+def _atlas_access_cidrs(egress_ip: Optional[str]) -> list[str]:
+    """The access list for a new cluster: the gateway's /32 plus configured extras."""
+    cidrs = [f"{egress_ip}/32"] if egress_ip else []
+    for extra in (_cfg("atlas_extra_access_cidrs") or "").split(","):
+        extra = extra.strip()
+        if extra and extra not in cidrs:
+            cidrs.append(extra if "/" in extra else f"{extra}/32")
+    return cidrs
 
 
 def connection_db_name(row, tf_variables: Optional[dict] = None) -> str:
@@ -435,6 +533,23 @@ def _build_tf_variables(
             "db_subnet_group_name": opts.get("db_subnet_group_name")
                 or _aws["db_subnet_group_name"],
             "vpc_security_group_ids": _aws_db_security_groups(_aws, opts),
+            "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
+        }
+
+    if engine == "mongodb" and cloud in _ATLAS_BACKING_PROVIDER:
+        # MongoDB Atlas, in its own per-cluster project (see the module). The cluster
+        # runs on the row's cloud in the row's region, beside the PRA gateway that
+        # reaches it. access_cidrs is filled in run_provision_apply from the gateway's
+        # egress IP — it cannot be known here, before the gateway is ensured.
+        return {
+            "org_id": opts.get("atlas_org_id") or _cfg("atlas_org_id"),
+            "identifier": f"clouddb-{db_id[:8]}",
+            "tier": _atlas_tier(opts.get("atlas_tier")),
+            "backing_provider": _ATLAS_BACKING_PROVIDER[cloud],
+            "atlas_region": opts.get("atlas_region") or atlas_region_name(cloud, region),
+            "master_username": master_username,
+            "master_password": master_password,
+            "access_cidrs": list(opts.get("access_cidrs") or []),
             "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
         }
 
@@ -698,6 +813,16 @@ def provision(
         raise NotImplementedError(
             f"{engine} on {cloud} is not available yet"
         )
+    if _PROVIDER.get((engine, cloud)) == "atlas":
+        # Everything the Atlas apply needs that can be checked now, BEFORE the row
+        # exists: a failure past this point leaves a row stuck in "provisioning".
+        if not (opts.get("atlas_org_id") or _cfg("atlas_org_id")):
+            raise CloudDatabaseError(
+                "MongoDB Atlas is not configured: set the organization ID under "
+                "Settings → Databases → MongoDB Atlas")
+        _atlas_env()
+        if not opts.get("atlas_region"):
+            atlas_region_name(cloud, region)
 
     wg = _canonical_workgroup(workgroup)
 
@@ -1054,6 +1179,15 @@ async def _entitle_register_core(db: Session, *, row: CloudDatabase, engine: str
         raise CloudDatabaseError(reason)
     from . import entitle_registration_service as ent
     prov_job = _provision_job_for(db, row.id)
+    if _is_atlas(row):
+        # Atlas MongoDB is an API-key integration scoped to the cluster's own project:
+        # no admin credential, no forwarder, no agent.
+        meta = (prov_job.metadata_dict or {}) if prov_job else {}
+        result = await ent.register_atlas(
+            name=(meta.get("tf_variables") or {}).get("identifier") or f"clouddb-{row.id[:8]}",
+            project_id=meta.get("atlas_project_id") or "")
+        _record_entitle_registration(db, row, prov_job, result)
+        return
     tfv = tf_variables if tf_variables is not None else \
         ((prov_job.metadata_dict or {}).get("tf_variables") if prov_job else None) or {}
 
@@ -1122,6 +1256,12 @@ async def _entitle_register_core(db: Session, *, row: CloudDatabase, engine: str
         private=True,   # dashboard-built DBs are private (publicly_accessible=false)
         tag="clouddb",
     )
+    _record_entitle_registration(db, row, prov_job, result)
+
+
+def _record_entitle_registration(db: Session, row: CloudDatabase, prov_job, result: dict) -> None:
+    """Record a registration on the row, and its Terraform state on the PROVISIONING
+    job — where run_decommission reads ``entitle_registration_tf_state`` for teardown."""
     row.entitle_integration_id = result.get("integration_id") or None
     db.commit()
     if prov_job is not None:
@@ -3797,7 +3937,7 @@ async def _reclaim_gcp_sql_instance(
     the database + user, read outputs). Returns the outputs dict on success, or ``None``
     when this is not a reclaimable failure or the instance cannot be reclaimed — the
     caller then fails the job as before."""
-    if row.cloud != "gcp":
+    if row.cloud != "gcp" or _is_atlas(row):
         return None
     low = str(exc).lower()
     if not any(m in low for m in _GCP_RECLAIMABLE_APPLY_MARKERS):
@@ -3911,7 +4051,8 @@ async def run_provision_apply(
         # "No value for required variable" pointing at the module's variable block —
         # a missing-secret bug wearing a Terraform bug's clothes, and one that looked
         # like it belonged to whichever engine/region happened to draw the short straw.
-        _pw_key = {"azure": "administrator_password", "oci": "admin_password"}.get(row.cloud, "master_password")
+        _pw_key = ("master_password" if _is_atlas(row) else
+                   {"azure": "administrator_password", "oci": "admin_password"}.get(row.cloud, "master_password"))
         _pw = config_service.get_fresh(f"clouddb/{db_id}/admin")
         if not _pw:
             raise CloudDatabaseError(
@@ -3922,9 +4063,32 @@ async def run_provision_apply(
             )
         tf_variables[_pw_key] = _pw
 
+        # An Atlas cluster's endpoint is public and admits only its access list, so the
+        # gateway must be up BEFORE the apply: its egress IP is the list's /32. With no
+        # gateway (PRA unconfigured) or no knowable IP, refuse now — before a billable
+        # cluster exists that nothing could ever reach.
+        if _is_atlas(row):
+            if not _pra_configured():
+                raise CloudDatabaseError(
+                    "a MongoDB Atlas cluster is reachable only through the PRA gateway, "
+                    "and PRA is not configured")
+            from . import jumpoint_host_service
+            placement: dict = {}
+            await jumpoint_host_service.ensure_jumpoint_host(
+                row.cloud, _row_region(row), placement=placement)
+            egress_ip = placement.get("egress_ip")
+            if not egress_ip:
+                raise CloudDatabaseError(
+                    f"the {row.cloud} gateway in {_row_region(row)} reported no egress IP, "
+                    f"so the Atlas access list would admit nothing — check the gateway "
+                    f"host has a public IP")
+            tf_variables["access_cidrs"] = _atlas_access_cidrs(egress_ip)
+            job_service.append_job_log(
+                db, job_id, f"Atlas access list: {', '.join(tf_variables['access_cidrs'])}")
+
         # Kick the shared Gateway host EARLY (only when PRA is configured) so its
         # ~2-min boot overlaps the 5-10-min RDS apply instead of stacking after it.
-        if _pra_configured():
+        if _pra_configured() and not _is_atlas(row):
             try:
                 from . import jumpoint_host_service
                 await jumpoint_host_service.ensure_jumpoint_host(row.cloud, _row_region(row))
@@ -3934,7 +4098,7 @@ async def run_provision_apply(
         # On-demand SSM interface endpoints for the AWS dbssm onboarding path so a
         # private-subnet target reaches the SSM control plane. Ref-counted; torn
         # down with the last EC2/DB. Independent of PRA. Best-effort.
-        if row.cloud == "aws":
+        if row.cloud == "aws" and not _is_atlas(row):
             try:
                 from . import ssm_endpoint_service
                 await ssm_endpoint_service.ensure_ssm_endpoints(_row_region(row))
@@ -3944,7 +4108,7 @@ async def run_provision_apply(
         try:
             outputs = await terraform.apply(
                 _deploy_dir(job_id), tf_variables, template_dir=template_dir(engine, row.cloud),
-                env=terraform_provider_env.provider_env(row.cloud),
+                env=_tf_env(row),
                 on_line=_job_stream(job_id, 5, "Provisioning the database…"),
             )
         except terraform.TerraformError as exc:
@@ -3958,6 +4122,14 @@ async def run_provision_apply(
                 raise
         row.instance_id = str(outputs.get("instance_id") or "")
         row.private_host = str(outputs.get("private_host") or "")
+        if outputs.get("project_id"):
+            # The Atlas cluster's own project — what Entitle's Atlas integration is
+            # scoped to, and which a post-hoc Register reads back from here.
+            _pj = db.query(Job).filter(Job.id == job_id).first()
+            if _pj is not None:
+                _pm = _pj.metadata_dict or {}
+                _pm["atlas_project_id"] = str(outputs.get("project_id"))
+                _pj.metadata_dict = _pm
         if outputs.get("port"):
             row.port = int(outputs["port"])
         row.status = "available"
@@ -4442,7 +4614,7 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
             # so terraform.destroy rebuilds the module from it + the remote state.
             destroy_kwargs = dict(
                 variables=destroy_vars,
-                env=terraform_provider_env.provider_env(row.cloud),
+                env=_tf_env(row),
                 template_dir=template_dir(row.engine, row.cloud),
             )
             await terraform.destroy(
@@ -4475,7 +4647,7 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
     #     every later decommission fails on that 403 forever (job d2b06e68). So once
     #     the instance is PROVEN gone, forget the children and destroy again — the
     #     re-run is what confirms state is really empty, rather than assuming it.
-    if row.cloud == "gcp":
+    if row.cloud == "gcp" and not _is_atlas(row):
         job_service.update_progress(db, job_id, 80, "Checking for an orphaned instance…")
         try:
             from . import gcp_service
@@ -4992,7 +5164,7 @@ def _serialize(r: CloudDatabase) -> dict:
         "entitle_viable": _entitle_viable(r.engine, r.provider, r.source),
         # Whether that connector mints ephemeral accounts (vs. assigning standing
         # roles) — the page words the Register button and its confirm from this.
-        "entitle_mints": _entitle_connector_mints(r.engine),
+        "entitle_mints": _entitle_connector_mints(r.engine, r.provider),
         # Password Safe DB onboarding. The ids are not secrets — they are what an
         # operator reads back in the Password Safe UI — and ps_viable is the STRUCTURAL
         # half of the button's gate (see _ps_ineligible_reason); whether the feature is
