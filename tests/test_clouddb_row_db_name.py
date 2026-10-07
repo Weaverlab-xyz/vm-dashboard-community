@@ -202,6 +202,15 @@ def test_oracle_stays_resolvable_without_the_provisioning_job():
     assert svc.connection_db_name(reg) == ""
 
 
+def test_an_rds_oracle_row_falls_back_to_its_pdb_not_an_adb_name():
+    # Same derivation-from-id idea, but the RDS module's name is the PDB (<=8 chars),
+    # not ADB's adb<id>; the two must not be confused by cloud.
+    row = _CloudDatabase(id="db-rds-or", engine="oracle", cloud="aws", db_name=None)
+    assert svc.connection_db_name(row) == svc._oracle_rds_db_name("db-rds-or")
+    named = _CloudDatabase(id="db-rds-or", engine="oracle", cloud="aws", db_name="ORADBRDS")
+    assert svc.connection_db_name(named) == "ORADBRDS"
+
+
 def test_an_unresolvable_row_reports_nothing_rather_than_guessing():
     row = _CloudDatabase(id="db-old", engine="postgres", db_name=None)
     assert svc.connection_db_name(row) == ""

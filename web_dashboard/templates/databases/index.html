@@ -575,6 +575,10 @@
                 <option :value="e.value" x-text="e.label"></option>
               </template>
             </select>
+            <p x-show="form.cloud === 'aws' && form.engine === 'oracle'" x-cloak class="mt-1 text-xs text-gray-500">
+              License-included SE2 (the Oracle licence is in the hourly price) on at least
+              db.t3.small. Creation takes 20&ndash;40 minutes.
+            </p>
           </div>
         </div>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1302,20 +1306,23 @@ function databasesPage() {
     // offer the Postgres/MySQL/SQL-Server matrix.
     engineOptions() {
       if (this.form.cloud === 'oci') return [{ value: 'oracle', label: 'Oracle (Autonomous DB)' }];
-      return [
+      const sql = [
         { value: 'postgres', label: 'PostgreSQL' },
         { value: 'mysql', label: 'MySQL' },
         { value: 'sqlserver', label: 'SQL Server' },
       ];
+      // RDS for Oracle (SE2, license-included). Mirrors _IMPLEMENTED's ("oracle", "aws").
+      if (this.form.cloud === 'aws') sql.push({ value: 'oracle', label: 'Oracle (RDS SE2)' });
+      return sql;
     },
 
     onCloudChange() {
       // Switching cloud in the modal: reset region + cloud-specific fields and reload
       // that cloud's options (instance sizes, subnet/SG pickers, PRA jump groups).
-      // Keep the engine valid for the chosen cloud (oracle ⇄ oci).
-      this.form.engine = this.form.cloud === 'oci'
-        ? 'oracle'
-        : (this.form.engine === 'oracle' ? 'postgres' : this.form.engine);
+      // Keep the engine valid for the chosen cloud: OCI is Oracle-only, and a cloud
+      // that does not offer the current engine falls back to the first it does.
+      const offered = this.engineOptions().map(e => e.value);
+      if (!offered.includes(this.form.engine)) this.form.engine = offered[0];
       this.form.region = '';
       this.form.db_subnet_group_name = '';
       this.form.vpc_security_group_ids = [];

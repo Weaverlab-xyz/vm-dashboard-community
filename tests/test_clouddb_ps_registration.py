@@ -398,6 +398,21 @@ def test_gcp_sql_server_is_eligible_now_that_cloud_run_exists():
         assert svc._ps_ineligible_reason(_row(cloud="gcp", engine=engine)) is None, engine
 
 
+def test_engines_no_plugin_covers_are_refused_on_every_cloud():
+    """No dbssm / dbazure / dbgcp plugin and no managed-user SQL builder exists for
+    Oracle or MongoDB, so an RDS Oracle row used to sail through the cloud gate and fail
+    inside the managed-user step on every provision. Refused structurally instead —
+    and the apply path consults this function, not only the button."""
+    _reset()
+    for cloud in ("aws", "azure", "gcp"):
+        for engine in ("oracle", "mongodb"):
+            reason = svc._ps_ineligible_reason(_row(cloud=cloud, engine=engine))
+            assert reason and "plugin" in reason, (cloud, engine, reason)
+    src = open(os.path.join(_ROOT, "web_dashboard", "services",
+                            "cloud_database_service.py"), encoding="utf-8").read()
+    assert "_ps_choice and _ps_ineligible_reason(row) is None" in src
+
+
 def test_the_row_the_page_reads_carries_the_same_verdict():
     _reset()
     assert svc._serialize(_row())["ps_viable"] is True

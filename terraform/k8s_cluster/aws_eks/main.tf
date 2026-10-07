@@ -158,8 +158,8 @@ variable "vm_security_group_id" {
 
 variable "db_ports" {
   type        = list(number)
-  default     = [5432, 3306, 1433]
-  description = "DB engine ports opened from the cluster SG to db_security_group_id (Postgres / MySQL / SQL Server)."
+  default     = [5432, 3306, 1433, 1521]
+  description = "DB engine ports opened from the cluster SG to db_security_group_id (Postgres / MySQL / SQL Server / Oracle)."
 }
 
 variable "vm_ports" {

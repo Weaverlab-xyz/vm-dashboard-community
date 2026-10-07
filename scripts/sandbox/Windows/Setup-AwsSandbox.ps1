@@ -299,7 +299,7 @@ aws ec2 authorize-security-group-ingress --region $Region --group-id $VmSg `
 $DbSg = _MakeSG "$Name-db-sg" 'Managed databases — ingress DB ports from Jumpoint SG only, no egress'
 aws ec2 revoke-security-group-egress --region $Region --group-id $DbSg `
     --ip-permissions '[{"IpProtocol":"-1","IpRanges":[{"CidrIp":"0.0.0.0/0"}]}]' 2>$null | Out-Null
-foreach ($dbPort in 5432, 3306, 1433) {   # postgres, mysql, sqlserver
+foreach ($dbPort in 5432, 3306, 1433, 1521) {   # postgres, mysql, sqlserver, oracle (RDS)
     $dbIngressJson = "[{`"IpProtocol`":`"tcp`",`"FromPort`":$dbPort,`"ToPort`":$dbPort,`"UserIdGroupPairs`":[{`"GroupId`":`"$JumpointSg`"}]}]"
     aws ec2 authorize-security-group-ingress --region $Region --group-id $DbSg `
         --ip-permissions $dbIngressJson 2>$null | Out-Null
@@ -312,7 +312,7 @@ aws ec2 authorize-security-group-ingress --region $Region --group-id $NatSg `
 
 Write-Ok "Jumpoint SG $JumpointSg (default egress 0.0.0.0/0)"
 Write-Ok "VM SG       $VmSg (egress: VPC + internet 80/443/53; ingress 22+3389/tcp from Jumpoint SG)"
-Write-Ok "DB SG       $DbSg (ingress 5432/3306/1433 from Jumpoint SG; no egress)"
+Write-Ok "DB SG       $DbSg (ingress 5432/3306/1433/1521 from Jumpoint SG; no egress)"
 Write-Ok "NAT SG      $NatSg (ingress all from VPC; egress all — for the on-demand NAT instance)"
 Set-StateValue aws jumpoint_sg $JumpointSg
 Set-StateValue aws vm_sg       $VmSg

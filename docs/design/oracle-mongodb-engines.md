@@ -2,9 +2,10 @@
 
 > **Audience:** contributor · **Profile:** `both` · **Read this when:** you are adding Oracle or MongoDB support to a database layer (PRA tunnel, Entitle, Password Safe, Ansible), or swapping their tcp tunnels for PRA 26.3's dedicated ones.
 
-Status: **slice 1 landed** (engine plumbing, the raw-TCP tunnel, Entitle payloads).
-Later slices: AWS RDS for Oracle, MongoDB Atlas, Password Safe native onboarding,
-Configuration Management (Ansible). Oracle on Azure / GCP (Oracle Database@Azure,
+Status: **slice 1** (engine plumbing, the raw-TCP tunnel, Entitle payloads) and **slice 2**
+(AWS RDS for Oracle — `terraform/db_aws_oracle`, SE2 license-included, single-tenant CDB so
+the one PDB is what Entitle manages) landed. Later slices: MongoDB Atlas, Password Safe
+native onboarding, Configuration Management (Ansible). Oracle on Azure / GCP (Oracle Database@Azure,
 Oracle Database@Google Cloud, Autonomous tier) is deferred.
 
 ## Why

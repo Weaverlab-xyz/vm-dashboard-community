@@ -330,12 +330,12 @@ aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$VM_SG" 
 
 # DB SG: attached to dashboard-managed RDS instances (the /databases feature).
 # The PRA protocol tunnel terminates on the Jumpoint, which then dials the
-# private DB endpoint — so ingress is the three engine ports from the Jumpoint
+# private DB endpoint — so ingress is the RDS engine ports from the Jumpoint
 # SG only. Default egress wiped: RDS initiates no outbound connections.
 DB_SG="$(make_sg "${NAME}-db-sg" "Managed databases - ingress DB ports from Jumpoint SG only, no egress")"
 aws ec2 revoke-security-group-egress --region "$REGION" --group-id "$DB_SG" \
   --ip-permissions '[{"IpProtocol":"-1","IpRanges":[{"CidrIp":"0.0.0.0/0"}]}]' >/dev/null 2>&1 || true
-for _db_port in 5432 3306 1433; do   # postgres (live), mysql / sqlserver (Phase 3)
+for _db_port in 5432 3306 1433 1521; do   # postgres, mysql, sqlserver, oracle (RDS)
   aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$DB_SG" \
     --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":$_db_port,\"ToPort\":$_db_port,\"UserIdGroupPairs\":[{\"GroupId\":\"$JUMPOINT_SG\"}]}]" >/dev/null 2>&1 || true
 done
@@ -351,7 +351,7 @@ aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$NAT_SG"
 
 ok "Jumpoint SG $JUMPOINT_SG (default egress 0.0.0.0/0)"
 ok "VM SG       $VM_SG (egress: VPC + internet 80/443/53; ingress 22+3389/tcp from Jumpoint SG)"
-ok "DB SG       $DB_SG (ingress 5432/3306/1433 from Jumpoint SG; no egress)"
+ok "DB SG       $DB_SG (ingress 5432/3306/1433/1521 from Jumpoint SG; no egress)"
 ok "NAT SG      $NAT_SG (ingress all from VPC; egress all — for the on-demand NAT instance)"
 state_write aws jumpoint_sg "$JUMPOINT_SG"
 state_write aws vm_sg "$VM_SG"
