@@ -360,6 +360,22 @@ async def _windows_public_key(region: str, secret_name: str, result: dict) -> st
     return key
 
 
+def _queue_arc_join(db, job_id: str, vm_name: str, target: str) -> None:
+    """Queue the Arc Entra join of a just-deployed Windows server. AFTER completion: the
+    onboarding play finds the server's SSH key and administrator on this completed job.
+    A queueing failure is recorded on the deploy, never raised — the server is up."""
+    from ..services import windows_arc_service
+    row = db.query(Job).filter(Job.id == job_id).first()
+    try:
+        windows_arc_service.queue(
+            db, deploy_job_id=job_id, cloud="aws", vm_name=vm_name, target=target,
+            created_by=(row.created_by if row is not None else "") or "system",
+            workgroup=getattr(row, "workgroup", None))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("arc join not queued for %s: %s", job_id, e)
+        job_service.update_metadata(db, job_id, {"entra_error": f"Arc join not queued: {e}"})
+
+
 async def _drop_windows_key_pair(region: str, name: str, result: dict) -> None:
     """Best-effort removal of the one-time Windows key pair when the launch never got
     as far as reading the password with it."""
@@ -430,6 +446,7 @@ async def _run_deploy(
         win_key_name = win_private_key = ""
         win_ssh = win_rdp = False
         win_user_data = ""
+        arc_join = False
         if is_windows:
             public_key = ""
             os_type = "windows"
@@ -462,6 +479,18 @@ async def _run_deploy(
                         db, _meta["ad_directory_id"], "aws", _aws_region)
                 except domain_join_service.DomainJoinError as e:
                     result["ad_join_error"] = str(e)
+            # Entra join through Azure Arc: decided now so a choice that cannot work is a
+            # warning on a working server; performed by a follow-up job once this one has
+            # completed (windows_arc_service).
+            from ..services import windows_arc_service
+            if windows_arc_service.requested(_meta):
+                arc_problem = windows_arc_service.deploy_problem(
+                    is_windows=True, ad_directory_id=_meta.get("ad_directory_id") or "",
+                    ssh=win_ssh)
+                if arc_problem:
+                    result["entra_error"] = arc_problem
+                else:
+                    arc_join = True
             win_key_name = aws_service.windows_key_pair_name(job_id)
             job_service.update_progress(db, job_id, 38, "Creating a one-time key pair for the Windows password…")
             win_private_key = await aws_service.create_windows_key_pair(_aws_region, win_key_name)
@@ -469,6 +498,8 @@ async def _run_deploy(
         else:
             if _meta.get("ad_directory_id"):
                 result["ad_join_error"] = "AD join applies to Windows images only; skipped"
+            if _meta.get("entra_join_mode"):
+                result["entra_error"] = "Entra join applies to Windows images only; skipped"
             from ..services.os_detection import detect_os_type
             os_type, ssh_user = detect_os_type(ami_info.get("name", ""))
             if resources.ssh_key_error:
@@ -667,6 +698,9 @@ async def _run_deploy(
             admin_password = ""
 
         job_service.set_completed(db, job_id, result)
+        if arc_join:
+            _queue_arc_join(db, job_id, instance_name,
+                            result.get("private_ip") or result.get("public_ip") or hostname)
         await cache_service.invalidate(cache_service.key_global("aws_instances"))
 
     # `result` is passed on the failure paths too, not just to set_completed. Step 1
@@ -962,6 +996,9 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
             # Windows: the RDP jump and the stored Administrator password.
             from ..services import windows_server_hook
             await windows_server_hook.teardown(meta, result)
+            # Entra join through Arc: its login roles, then the Arc machine. Azure-side only.
+            from ..services import windows_arc_service
+            await windows_arc_service.teardown(meta, result)
 
             # Off-board the Password Safe managed system if this deploy registered one.
             if meta.get("ps_registration_tf_state"):

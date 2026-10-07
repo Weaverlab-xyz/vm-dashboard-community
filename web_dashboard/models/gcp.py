@@ -80,6 +80,10 @@ class GCPDeployRequest(ScheduleRequestMixin, BaseModel):
     # with the computer object in ad_ou (blank = directory_join_default_ou).
     ad_directory_id: Optional[str] = None
     ad_ou: str = ""
+    # Windows only: Entra ID identity. "arc" = Entra join through Azure Arc (Server 2025+,
+    # not with ad_directory_id); "hybrid" = joined to ad_directory_id's on-prem domain and
+    # synced by Entra Connect. "" = neither; None = the windows_arc_entra_default setting.
+    entra_join_mode: Optional[str] = Field(default=None, pattern=r"^(|arc|hybrid)$")
     # Windows only: also create a PRA Remote RDP jump beside the SSH Shell Jump.
     # None = the windows_rdp_default setting.
     enable_rdp: Optional[bool] = None
@@ -125,6 +129,10 @@ class GCPBulkDeployRequest(ScheduleRequestMixin, BaseModel):
     register_in_passwordsafe: bool = False
     ad_directory_id: Optional[str] = None   # Windows only — see GCPDeployRequest
     ad_ou: str = ""
+    # Windows only: Entra ID identity. "arc" = Entra join through Azure Arc (Server 2025+,
+    # not with ad_directory_id); "hybrid" = joined to ad_directory_id's on-prem domain and
+    # synced by Entra Connect. "" = neither; None = the windows_arc_entra_default setting.
+    entra_join_mode: Optional[str] = Field(default=None, pattern=r"^(|arc|hybrid)$")
     enable_rdp: Optional[bool] = None       # Windows only — see GCPDeployRequest
     ssh_key_secret_override: Optional[str] = None
     jump_group: Optional[str] = None

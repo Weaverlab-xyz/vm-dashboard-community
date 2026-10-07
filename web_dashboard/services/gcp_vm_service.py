@@ -315,6 +315,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
     launched = False
     # A DNS-link directory is joined AFTER the deploy completes, by the on-prem agent.
     agent_join_row = None
+    arc_join = False
     try:
         job_service.set_running(db, job_id)
 
@@ -392,6 +393,19 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                     join_md, join_sa = {}, ""
         elif getattr(payload, "ad_directory_id", None):
             ad_meta = {"ad_join_error": "AD join applies to Windows images only; skipped"}
+        # Entra join through Azure Arc: decided now, performed by a follow-up job once this
+        # deploy has completed (windows_arc_service). Never stops the deploy.
+        from ..services import windows_arc_service
+        if is_windows and windows_arc_service.requested(payload):
+            arc_problem = windows_arc_service.deploy_problem(
+                is_windows=True, ad_directory_id=getattr(payload, "ad_directory_id", "") or "",
+                ssh=win_ssh)
+            if arc_problem:
+                ad_meta = {**ad_meta, "entra_error": arc_problem}
+            else:
+                arc_join = True
+        elif not is_windows and getattr(payload, "entra_join_mode", None):
+            ad_meta = {**ad_meta, "entra_error": "Entra join applies to Windows images only; skipped"}
 
         # Retrieve SSH public key (per-launch override wins over the region default)
         secret_name = getattr(payload, "ssh_key_secret_override", None) or _rc["ssh_key_secret"]
@@ -627,6 +641,9 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         job_service.set_completed(db, job_id, final_meta)
         if agent_join_row is not None:
             _queue_agent_join(db, job_id, agent_join_row, payload, final_meta)
+        if arc_join:
+            _queue_arc_join(db, job_id, payload,
+                            final_meta.get("private_ip") or final_meta.get("public_ip") or "")
         await cache_service.invalidate_prefix("gcp_instances")
 
     except Exception as exc:
@@ -672,6 +689,22 @@ def _queue_agent_join(db, job_id: str, link_row, payload, final_meta: dict) -> N
         md.update(update)
         row.metadata_dict = md
         db.commit()
+
+
+def _queue_arc_join(db, job_id: str, payload, target: str) -> None:
+    """Queue the Arc Entra join of a just-deployed Windows server (windows_arc_service).
+    AFTER completion, like the agent join: the onboarding play finds the server's SSH key
+    and administrator on this completed job. A queueing failure is a warning here."""
+    from ..services import windows_arc_service
+    row = job_service.get_job(db, job_id)
+    try:
+        windows_arc_service.queue(
+            db, deploy_job_id=job_id, cloud="gcp", vm_name=payload.instance_name,
+            target=target, created_by=(row.created_by if row is not None else "") or "system",
+            workgroup=getattr(payload, "workgroup", "") or None)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("arc join not queued for %s: %s", job_id, e)
+        job_service.update_metadata(db, job_id, {"entra_error": f"Arc join not queued: {e}"})
 
 
 async def _run_bulk_deploy(job_items: list, project_id: str, zone: str) -> None:
@@ -896,6 +929,9 @@ async def _run_destroy(
         # Windows: the RDP jump and the stored administrator password.
         from ..services import windows_server_hook
         await windows_server_hook.teardown(deploy_meta, result)
+        # Entra join through Arc: its login roles, then the Arc machine. Azure-side only.
+        from ..services import windows_arc_service
+        await windows_arc_service.teardown(deploy_meta, result)
 
         # Off-board the Password Safe managed system if this deploy registered one.
         if deploy_meta.get("ps_registration_tf_state"):

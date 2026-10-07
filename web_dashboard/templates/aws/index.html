@@ -1048,6 +1048,7 @@
           <div class="mb-4">
             <label class="block text-sm font-medium text-gray-700 mb-1">Join Active Directory <span class="text-gray-400 font-normal">(Windows only)</span></label>
             <select x-model="deployForm.ad_directory_id"
+                    @change="if (deployForm.ad_directory_id && deployForm.entra_join_mode === 'arc') deployForm.entra_join_mode = ''"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="">Don't join</option>
               <template x-for="d in adDirs" :key="d.id">
@@ -1061,6 +1062,24 @@
               Joined through Systems Manager after the password is captured; the instance
               reboots. The SSM instance profile needs AmazonSSMDirectoryServiceAccess. Only
               directories in this region are listed.
+            </p>
+          </div>
+          {% endif %}
+          {% if windows_ssh_enabled %}
+          <!-- Entra ID join through Azure Arc (Windows Server 2025+; not with an AD join) -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Microsoft Entra ID <span class="text-gray-400 font-normal">(Windows only)</span></label>
+            <select x-model="deployForm.entra_join_mode"
+                    @change="if (deployForm.entra_join_mode === 'arc') deployForm.ad_directory_id = ''"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="">Don't join</option>
+              <option value="arc">Entra join through Azure Arc (Windows Server 2025+)</option>
+            </select>
+            <p class="mt-1 text-xs text-gray-400">
+              After the deploy, a follow-up job onboards the server to Azure Arc over OpenSSH and
+              installs AADLoginForWindows, so Entra users with Virtual Machine Administrator/User
+              Login can RDP in. Needs Windows Server 2025 or later with Desktop Experience and
+              outbound 443 to Azure. A server joins Entra ID or an AD domain, not both.
             </p>
           </div>
           {% endif %}
@@ -1401,6 +1420,7 @@
           <div class="mb-4">
             <label class="block text-sm font-medium text-gray-700 mb-1">Join Active Directory <span class="text-gray-400 font-normal">(Windows only)</span></label>
             <select x-model="deployForm.ad_directory_id"
+                    @change="if (deployForm.ad_directory_id && deployForm.entra_join_mode === 'arc') deployForm.entra_join_mode = ''"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="">Don't join</option>
               <template x-for="d in adDirs" :key="d.id">
@@ -1414,6 +1434,24 @@
               Joined through Systems Manager after the password is captured; the instance
               reboots. The SSM instance profile needs AmazonSSMDirectoryServiceAccess. Only
               directories in this region are listed.
+            </p>
+          </div>
+          {% endif %}
+          {% if windows_ssh_enabled %}
+          <!-- Entra ID join through Azure Arc (Windows Server 2025+; not with an AD join) -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Microsoft Entra ID <span class="text-gray-400 font-normal">(Windows only)</span></label>
+            <select x-model="deployForm.entra_join_mode"
+                    @change="if (deployForm.entra_join_mode === 'arc') deployForm.ad_directory_id = ''"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="">Don't join</option>
+              <option value="arc">Entra join through Azure Arc (Windows Server 2025+)</option>
+            </select>
+            <p class="mt-1 text-xs text-gray-400">
+              After the deploy, a follow-up job onboards the server to Azure Arc over OpenSSH and
+              installs AADLoginForWindows, so Entra users with Virtual Machine Administrator/User
+              Login can RDP in. Needs Windows Server 2025 or later with Desktop Experience and
+              outbound 443 to Azure. A server joins Entra ID or an AD domain, not both.
             </p>
           </div>
           {% endif %}
@@ -2193,7 +2231,7 @@
         praCredBackend: '', pra_credential_ref: '',
         register_in_entitle: false,
         register_in_passwordsafe: false,
-        ad_directory_id: '', ad_ou: '', enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
+        ad_directory_id: '', ad_ou: '', entra_join_mode: {{ "'arc'" if windows_arc_entra_default else "''" }}, enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
         ssh_key_secret_override: '',
         sshKeySecrets: [],
       },
@@ -2852,7 +2890,7 @@
           praCredBackend: '', pra_credential_ref: '',
           register_in_entitle: false,
           register_in_passwordsafe: false,
-          ad_directory_id: '', ad_ou: '', enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
+          ad_directory_id: '', ad_ou: '', entra_join_mode: {{ "'arc'" if windows_arc_entra_default else "''" }}, enable_rdp: {{ 'true' if windows_rdp_default else 'false' }},
           ssh_key_secret_override: '',
           sshKeySecrets: [],
         };
@@ -2980,6 +3018,7 @@
             register_in_passwordsafe: this.deployForm.register_in_passwordsafe,
             ad_directory_id: this.deployForm.ad_directory_id || null,
             ad_ou: this.deployForm.ad_ou || '',
+            entra_join_mode: this.deployForm.entra_join_mode || '',
             enable_rdp: !!this.deployForm.enable_rdp,
             ssh_key_secret_override: this.deployForm.ssh_key_secret_override || null,
             ...this.schedulePayload(),
@@ -3228,6 +3267,7 @@
             register_in_passwordsafe: this.deployForm.register_in_passwordsafe,
             ad_directory_id: this.deployForm.ad_directory_id || null,
             ad_ou: this.deployForm.ad_ou || '',
+            entra_join_mode: this.deployForm.entra_join_mode || '',
             enable_rdp: !!this.deployForm.enable_rdp,
             ssh_key_secret_override: this.deployForm.ssh_key_secret_override || null,
             ...this.schedulePayload(),

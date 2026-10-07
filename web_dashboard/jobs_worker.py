@@ -75,6 +75,7 @@ HANDLED_TYPES = (
     "spirelab_attr_probe",
     "workload_k8s_token", "workload_cloud_credential",
     "ansible_cloud_run", "ansible_local", "epml_sync",
+    "windows_arc_join",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     "packer_aws_build", "packer_azure_build", "packer_gcp_build", "packer_oci_build",
     "aws_export_image", "gcp_export_image", "azure_export_image", "oci_export_image",
@@ -198,6 +199,9 @@ MEDIUM_TYPES = (
     # reads the container's output line by line. MEDIUM is the tier that admits a local
     # process without granting it light-tier concurrency.
     "ansible_cloud_run",
+    # The same runner shape (one play over OpenSSH), then ARM calls and a poll for the
+    # AADLoginForWindows extension (windows_arc_service).
+    "windows_arc_join",
 )
 
 # LIGHT — start a cloud operation, then sleep and check its API. No local process, no
@@ -694,6 +698,9 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             from .services import clouddb_dbops_service
             await clouddb_dbops_service.run_deploy(
                 db, region=meta["region"], job_id=job_id)
+        elif job_type == "windows_arc_join":
+            from .services import windows_arc_service
+            await windows_arc_service.run(db, job_id=job_id, meta=meta)
         elif job_type == "ansible_cloud_run":
             # Config-Management localhost Ansible run against a Kubernetes cluster or
             # cloud database — always executes on a transient in-cloud runner.

@@ -800,6 +800,7 @@ async def bulk_deploy_instances(
             register_in_passwordsafe=req.register_in_passwordsafe,
             ad_directory_id=req.ad_directory_id,
             ad_ou=req.ad_ou,
+            entra_join_mode=req.entra_join_mode,
             enable_rdp=req.enable_rdp,
             ssh_key_secret_override=req.ssh_key_secret_override,
             jump_group=req.jump_group,

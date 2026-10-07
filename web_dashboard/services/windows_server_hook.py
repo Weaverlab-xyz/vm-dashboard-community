@@ -421,20 +421,29 @@ async def entra_join_azure(db, job_id: str, *, rg: str, vm_name: str, location: 
         result["entra_error"] = str(e)
         return
 
+    await assign_login_roles(vm_id, result)
+
+
+async def assign_login_roles(scope: str, result: dict) -> None:
+    """Grant the configured Entra groups login on ``scope`` — an Azure VM, or an Arc
+    machine (windows_arc_service): ``azure_entra_vm_admin_group_ids`` → Virtual Machine
+    Administrator Login, ``azure_entra_vm_user_group_ids`` → Virtual Machine User Login.
+    Recorded in ``entra_role_assignments`` so :func:`teardown_entra` can remove them."""
+    from . import azure_service
     assignments, errors = [], []
     for key, role in (("azure_entra_vm_admin_group_ids", "admin"),
                       ("azure_entra_vm_user_group_ids", "user")):
         for gid in _group_ids(key):
             try:
                 r = await azure_service.ensure_role_assignment(
-                    scope=vm_id, role=azure_service.ENTRA_VM_LOGIN_ROLES[role],
+                    scope=scope, role=azure_service.ENTRA_VM_LOGIN_ROLES[role],
                     principal_id=gid, principal_type="Group")
-                assignments.append({"scope": vm_id, "name": r["name"], "role": role,
+                assignments.append({"scope": scope, "name": r["name"], "role": role,
                                     "group": gid, "created": r.get("created", True)})
             except Exception as e:  # noqa: BLE001
                 hint = (" — the dashboard's service principal needs "
                         "Microsoft.Authorization/roleAssignments/write (Role Based Access "
-                        "Control Administrator or User Access Administrator) on the VM's "
+                        "Control Administrator or User Access Administrator) on the "
                         "resource group" if "403" in str(e) else "")
                 errors.append(f"{role} login for group {gid}: {e}{hint}")
     if assignments:

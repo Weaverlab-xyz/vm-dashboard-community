@@ -98,6 +98,10 @@ class DeployRequest(ScheduleRequestMixin, BaseModel):
     register_in_passwordsafe: bool = Field(default=False, description="Opt in to onboarding this VM into Password Safe as a managed system + account (requires passwordsafe_registration_enabled)")
     ad_directory_id: Optional[str] = Field(default=None, description="Windows only: join this managed directory (a /api/directories id) at deploy")
     ad_ou: str = Field(default="", description="Windows only: OU distinguished name for the computer object (blank = directory_join_default_ou)")
+    # Windows only: Entra ID identity. "arc" = Entra join through Azure Arc (Server 2025+,
+    # not with ad_directory_id); "hybrid" = joined to ad_directory_id's on-prem domain and
+    # synced by Entra Connect. "" = neither; None = the windows_arc_entra_default setting.
+    entra_join_mode: Optional[str] = Field(default=None, pattern=r"^(|arc|hybrid)$")
     enable_rdp: Optional[bool] = Field(default=None, description="Windows only: also create a PRA Remote RDP jump beside the SSH Shell Jump (blank = windows_rdp_default)")
     # Password Safe onboarding method for THIS deploy, overriding the cloud default
     # (services/ps_vm_hook._resolve_method). Blank everywhere but a network cell,
@@ -180,6 +184,10 @@ class BulkDeployRequest(ScheduleRequestMixin, BaseModel):
     register_in_passwordsafe: bool = Field(default=False, description="Opt in to onboarding each VM into Password Safe as a managed system + account (requires passwordsafe_registration_enabled)")
     ad_directory_id: Optional[str] = Field(default=None, description="Windows only: join this managed directory (a /api/directories id) at deploy")
     ad_ou: str = Field(default="", description="Windows only: OU distinguished name for the computer object (blank = directory_join_default_ou)")
+    # Windows only: Entra ID identity. "arc" = Entra join through Azure Arc (Server 2025+,
+    # not with ad_directory_id); "hybrid" = joined to ad_directory_id's on-prem domain and
+    # synced by Entra Connect. "" = neither; None = the windows_arc_entra_default setting.
+    entra_join_mode: Optional[str] = Field(default=None, pattern=r"^(|arc|hybrid)$")
     enable_rdp: Optional[bool] = Field(default=None, description="Windows only: also create a PRA Remote RDP jump beside the SSH Shell Jump (blank = windows_rdp_default)")
     ssh_key_secret_override: Optional[str] = Field(default=None, description="Optional Secrets Manager secret name to use for the SSH key instead of the configured default (must be JSON with a public_key)")
     # PRA/jumpoint overrides, mirroring DeployRequest. The bulk runner resolved these
